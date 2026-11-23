@@ -606,6 +606,7 @@ impl RTCRtpReceiverInternal {
         fec_format: Option<&FecFormat>,
         rtp_codec: &RTCRtpCodec,
         header_extensions: &[RTCRtpHeaderExtensionParameters],
+        section_codecs: &[RTCRtpCodecParameters],
     ) {
         let stream_info = create_stream_info(
             ssrc,
@@ -616,6 +617,7 @@ impl RTCRtpReceiverInternal {
             fec_format,
             rtp_codec,
             header_extensions,
+            section_codecs,
         );
 
         if is_binding {
@@ -662,6 +664,7 @@ impl RTCRtpReceiverInternal {
                     fec.as_ref().map(|(_, fec_format)| fec_format),
                     &codec.rtp_codec,
                     &parameters.rtp_parameters.header_extensions,
+                    &parameters.rtp_parameters.codecs,
                 );
 
                 // Each repair flow is also bound in its own right, as it has been: it is a real
@@ -680,6 +683,7 @@ impl RTCRtpReceiverInternal {
                         None,
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
+                        &[],
                     );
                 }
 
@@ -695,6 +699,7 @@ impl RTCRtpReceiverInternal {
                         None,
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
+                        &[],
                     );
                 }
             }
@@ -883,6 +888,29 @@ mod repair_association_test {
         let recorded = if is_binding { bound } else { unbound };
         let recorded = recorded.lock().unwrap().clone();
         recorded
+    }
+
+    /// RFC 7160 section 4.3 and RFC 8834 section 4.3: a remote stream is bound with the clock
+    /// rate of every other media format its m= section negotiated, so a source that switches
+    /// payload type is timed with each one's rate; the repair formats (RTX, FEC) are not media
+    /// formats of the stream and stay out.
+    #[test]
+    fn a_remote_stream_carries_the_clock_rates_of_the_sections_other_formats() {
+        let mut media_engine = media_engine();
+        let mut other = codec(100, "video/H264", "");
+        other.rtp_codec.clock_rate = 45_000;
+        media_engine
+            .register_codec(other, RtpCodecKind::Video)
+            .expect("h264");
+        let streams = run(
+            &media_engine,
+            vec![encoding("", 1000, Some(2000), None)],
+            true,
+        );
+        assert_eq!(
+            vec![(100, 45_000)],
+            primary(&streams, 1000).payload_clock_rates
+        );
     }
 
     fn primary(streams: &[StreamInfo], ssrc: SSRC) -> &StreamInfo {

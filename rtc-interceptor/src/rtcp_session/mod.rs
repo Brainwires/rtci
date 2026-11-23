@@ -1632,7 +1632,7 @@ impl RtcpSessionInterceptor {
         {
             let wall_clock = *self
                 .wall_clock
-                .get_or_insert_with(|| SystemInstant::now(now));
+                .get_or_insert_with(|| SystemInstant::shared(now));
             blocks.push(Box::new(ReceiverReferenceTimeReportBlock {
                 ntp_timestamp: wall_clock.ntp(now),
             }));

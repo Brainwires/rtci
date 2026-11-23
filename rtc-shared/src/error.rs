@@ -2318,6 +2318,11 @@ pub enum Error {
     /// Sender cannot encoding due to RID collision.
     #[error("Sender cannot encoding due to RID collision")]
     ErrRTPSenderRIDCollision,
+    /// Two streams of a sender's encodings (a media, RTX or FEC SSRC) name the same SSRC: RFC
+    /// 4588 section 4, "the original and retransmission streams ... MUST use two different
+    /// SSRC values"; RFC 3550 section 8, one SSRC per source.
+    #[error("sender encodings name SSRC {0} for more than one stream")]
+    ErrRTPSenderSsrcCollision(u32),
     /// An encoding's rid is not 1 to 255 alphanumeric characters (RFC 8852 section 3.1, the
     /// RtpStreamId the rid is sent as; RFC 8851 section 10).
     #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]

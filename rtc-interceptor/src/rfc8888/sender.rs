@@ -209,7 +209,7 @@ impl Rfc8888Interceptor {
 
     /// The middle 32 bits of the NTP timestamp for `now`, which is what a report carries.
     fn report_timestamp(&mut self, now: Instant) -> u32 {
-        let epoch = self.epoch.get_or_insert_with(|| SystemInstant::now(now));
+        let epoch = self.epoch.get_or_insert_with(|| SystemInstant::shared(now));
         (epoch.ntp(now) >> 16) as u32
     }
 
@@ -349,5 +349,39 @@ impl Interceptor for Rfc8888Interceptor {
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
+    }
+}
+
+#[cfg(test)]
+mod report_timestamp_test {
+    use super::*;
+    use crate::report::sender_stream::SenderStream;
+    use std::time::Duration;
+
+    /// RFC 8888 section 3.1: the report timestamp is "the middle 32 bits of an NTP format
+    /// timestamp ... derived from the same clock used to generate the NTP timestamp field in
+    /// RTCP SR packets". A stream that started sending well before the first feedback report
+    /// (thirty seconds of a clock the caller drives) and the report agree on the time.
+    #[test]
+    fn the_report_timestamp_is_on_the_clock_of_the_sender_reports() {
+        let start = Instant::now();
+        let mut stream = SenderStream::new(0x1234, 90_000, false);
+        stream.process_rtp(
+            start,
+            &rtp::packet::Packet {
+                header: rtp::header::Header {
+                    ssrc: 0x1234,
+                    timestamp: 1,
+                    ..Default::default()
+                },
+                payload: bytes::Bytes::from_static(b"media"),
+            },
+        );
+
+        let later = start + Duration::from_secs(30);
+        let mut feedback = Rfc8888Builder::new().build();
+        let rts = feedback.report_timestamp(later);
+        let sr = stream.generate_report(later).expect("a sender report");
+        assert_eq!((sr.ntp_time >> 16) as u32, rts);
     }
 }

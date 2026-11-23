@@ -281,6 +281,18 @@ impl<'a> EndpointHandler<'a> {
 
         let ssrc = rtp_packet.header.ssrc;
 
+        // RFC 3550 section 5.1: "A receiver MUST ignore packets with payload types that it
+        // does not understand." The first packet of a stream binds it only with a negotiated
+        // payload type (`InterceptorHandler::bind_declared_ssrc`); a later one is held to the
+        // same set here.
+        if !self.payload_type_negotiated(ssrc, rtp_packet.header.payload_type) {
+            debug!(
+                "drop rtp packet ssrc = {} with payload type {} not negotiated for it",
+                ssrc, rtp_packet.header.payload_type
+            );
+            return Ok(());
+        }
+
         // The packet was counted on its stream when it arrived, before the interceptor chain
         // (`InterceptorHandler::handle_read`).
         if let Some(track_id) = self.find_track_id(ssrc, Some(&rtp_packet.header)) {
@@ -433,6 +445,27 @@ impl<'a> EndpointHandler<'a> {
     // `StreamEstablisher`, driven by the interceptor handler *before* the chain sees the packet.
     // By the time a packet reaches here the SSRC is registered on the receiver's track, so all
     // that is left is to name the track it belongs to.
+    /// Whether `payload_type` is one the receiver that owns `ssrc` negotiated: the payload
+    /// types of its receive codecs, the negotiated set of its m= section. An SSRC no receiver
+    /// owns, or a receiver with no codecs yet, is left to [`Self::find_track_id`].
+    fn payload_type_negotiated(&mut self, ssrc: SSRC, payload_type: PayloadType) -> bool {
+        let Some(id) =
+            self.ctx
+                .ssrc_owners
+                .find(ssrc, self.rtp_transceivers, receiver_track_has_ssrc)
+        else {
+            return true;
+        };
+        let Some(receiver) = self.rtp_transceivers[id].receiver() else {
+            return true;
+        };
+        let codecs = receiver.get_codec_preferences();
+        codecs.is_empty()
+            || codecs
+                .iter()
+                .any(|codec| codec.payload_type == payload_type)
+    }
+
     fn find_track_id(
         &mut self,
         ssrc: SSRC,
@@ -853,6 +886,18 @@ mod rtx_test {
             })) => Some((track_id, packet)),
             _ => panic!("expected an RTP TrackPacket"),
         }
+    }
+
+    /// RFC 3550 section 5.1: a packet on a bound stream with a payload type its m= section
+    /// did not negotiate is ignored; one with a negotiated payload type is delivered.
+    #[test]
+    fn a_packet_with_a_payload_type_not_negotiated_for_its_stream_is_ignored() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 111, b"other").is_none());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
     }
 
     #[test]

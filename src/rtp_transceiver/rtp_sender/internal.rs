@@ -701,6 +701,7 @@ impl RTCRtpSenderInternal {
                     fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
+                    codecs,
                 ));
             }
         }
