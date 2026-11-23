@@ -249,6 +249,7 @@ impl RTCPeerConnection {
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
         media_engine
             .set_multi_codec_negotiation(!setting_engine.disable_media_engine_multiple_codecs);
+        media_engine.own_payload_types_in_answers = setting_engine.own_payload_types_in_answers;
 
         // The one place in `rtc` that resolves a default crypto provider. The application
         // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how

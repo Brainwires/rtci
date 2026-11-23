@@ -2037,7 +2037,20 @@ impl RTCPeerConnection {
         let negotiated_media_engine = match &remote_description.parsed {
             Some(parsed) => {
                 let mut media_engine = self.media_engine.clone();
-                media_engine.update_from_remote_description_merging(parsed, answers)?;
+                // An answer's formats are entered under the payload types of the local
+                // offer it answers (the numbers this endpoint receives with).
+                let local_offer = answers
+                    .then(|| {
+                        self.pending_local_description
+                            .as_ref()
+                            .and_then(|offer| offer.parsed.as_ref())
+                    })
+                    .flatten();
+                media_engine.update_from_remote_description_merging(
+                    parsed,
+                    answers,
+                    local_offer,
+                )?;
                 Some(media_engine)
             }
             None => None,
