@@ -1339,6 +1339,12 @@ impl SettingEngineBuilder {
     /// are then written for a local address with no socket behind it and silently go nowhere, so
     /// the restarted generation exchanges credentials successfully and never leaves `Checking`.
     ///
+    /// Only the previous generation's candidates are discarded. Those added while the restart
+    /// is staged (an answerer's between `set_remote_description` of the restart offer and
+    /// `set_local_description` of its answer, an offerer's between `create_offer` and its
+    /// `set_local_description`) are the new generation's: the restart keeps them and the
+    /// answer lists them (see [`RTCPeerConnection::add_local_candidate`](crate::peer_connection::RTCPeerConnection::add_local_candidate)).
+    ///
     /// # Parameters
     ///
     /// * `discard` - `true` to drop local candidates on restart, `false` (default) to keep them

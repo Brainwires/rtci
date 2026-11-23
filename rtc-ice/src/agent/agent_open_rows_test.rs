@@ -681,6 +681,48 @@ fn test_local_candidates_are_refused_after_the_nomination() {
     assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
 }
 
+/// The same rule binds the session the nomination was made in, not the one a staged restart
+/// begins: a candidate gathered while the restart is staged is taken, but not paired with the
+/// current session's remote candidates, and the restart keeps it even when it discards the
+/// previous generation's local candidates. A candidate held already that is gathered again in
+/// that window is kept too; one that is not is discarded.
+#[test]
+fn test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    assert!(a.add_local_candidate(udp("192.168.0.22", 1000, 0)).unwrap());
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert!(a.get_selected_candidate_pair().is_some());
+    let pairs = a.get_candidate_pairs().len();
+
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
+    assert!(!a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    assert_eq!(
+        a.get_candidate_pairs().len(),
+        pairs,
+        "not paired in the session that nominated"
+    );
+    let staged: Vec<String> = a
+        .get_restart_generation_local_candidates()
+        .iter()
+        .map(|c| c.address().to_owned())
+        .collect();
+    assert_eq!(staged, ["192.168.0.20", "192.168.0.21"]);
+
+    a.apply_restart(now + Duration::from_secs(2), false)
+        .unwrap();
+    let kept: Vec<String> = a
+        .get_local_candidates()
+        .iter()
+        .map(|c| c.address().to_owned())
+        .collect();
+    assert_eq!(kept, ["192.168.0.20", "192.168.0.21"]);
+    assert!(a.get_restart_generation_local_candidates().is_empty());
+}
+
 // --- RFC 7675 Section 5.1 ---
 
 /// "Consent checks run over every transport": on a TCP pair they are Binding requests on the

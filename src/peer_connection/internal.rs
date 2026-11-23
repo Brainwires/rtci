@@ -491,21 +491,27 @@ impl RTCPeerConnection {
         if self.ice_transport().has_pending_restart() {
             // An answer to a restart offer: the restart is applied with the answer
             // (`defer_remote_transport`), and keeps the local candidates unless they are to
-            // be discarded; they are the new generation's, so the answer lists them.
+            // be discarded; they are the new generation's, so the answer lists them. Those
+            // gathered since the offer was applied are the new generation's in any case (the
+            // restart keeps them), and the answer lists them too (RFC 9429 section 5.3.1).
             let answers_restart = !offer
                 && self
                     .pending_remote_transport
                     .as_ref()
                     .is_some_and(|pending| pending.ice_restart);
-            if answers_restart
-                && !self
-                    .setting_engine
-                    .candidates
-                    .discard_local_candidates_during_ice_restart
+            if !answers_restart {
+                return Ok(Vec::new());
+            }
+            if !self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart
             {
                 return self.ice_transport().get_local_candidates();
             }
-            return Ok(Vec::new());
+            return Ok(self
+                .ice_transport()
+                .get_restart_generation_local_candidates());
         }
         let candidates = self.ice_transport().get_local_candidates()?;
         // Two lite agents (RFC 8445 section 8.2, RFC 8839 sections 4.4.1.3 and 4.4.2.2): the

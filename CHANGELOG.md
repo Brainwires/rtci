@@ -21,6 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
+### Bug Fixes
+
+- **ICE restart**: an answerer's local candidates added between `set_remote_description` of a
+  restart offer and `set_local_description` of its answer are the new generation's. The engine
+  announced them with the new ufrag, but with
+  `with_discard_local_candidates_during_ice_restart(true)` the restart dropped them and the
+  answer listed none, so the new generation had no local candidate unless the application added
+  each one again; and with or without that setting a candidate the agent did not hold yet was
+  refused without an event, because the ending session had nominated a pair. Now the agent takes
+  them (not paired in the ending session, RFC 8838 section 13), the restart keeps them, and the
+  answer lists them (RFC 9429 section 5.3.1). The same holds for an offerer's candidates added
+  between `create_offer` of a restart offer and its `set_local_description`. New
+  `ice::Agent::get_restart_generation_local_candidates`. Tests:
+  `tests/ice_restart_answerer_candidates.rs`,
+  `agent_open_rows_test.rs::test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it`.
+
+### Notes for integrators
+
+- **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the
+  restart offer is applied (`set_remote_description`); they need not be added again after
+  `set_local_description(answer)`, whether or not
+  `with_discard_local_candidates_during_ice_restart` is set. Only the previous generation's
+  candidates are discarded by that setting. `RTCIceCandidateInit::username_fragment` is not
+  read by `add_local_candidate`: a candidate added while a restart is staged is the staged
+  generation's, otherwise the current one's.
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
