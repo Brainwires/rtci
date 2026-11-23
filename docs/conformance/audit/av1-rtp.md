@@ -8,7 +8,7 @@ Appendix A (Dependency Descriptor header extension, A.3 to A.9). Sections 1 to 3
 and A.10 carry no normative keyword. MUST NOT / SHALL / REQUIRED count as MUST, RECOMMENDED / SHOULD NOT
 as SHOULD, OPTIONAL as MAY.
 
-- MUST: tested 56 / untested 1 / partial 1 / missing 1 / violated 0 / n-a 12
+- MUST: tested 57 / untested 1 / partial 1 / missing 0 / violated 0 / n-a 12
 - SHOULD: tested 13 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 3
 
@@ -95,7 +95,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-7.2.4-1 | 7.2.4 | MUST | Declarative SDP (RTSP, SAP): a receiver that cannot support the declared values rejects or stays out | n-a | | | RTSP and SAP, not WebRTC |
 | AV1RTP-8.1-1 | 8.1 | MUST | On FIR the sender starts a new coded video sequence for each SSRC named, as soon as possible | partial | `rtc-interceptor/src/keyframe.rs:58-64` | `keyframe.rs::pli_and_fir_reach_the_application` | The engine's part, handing the FIR to the application that owns the encoder, is done and tested. It does not filter by the FCI's SSRC or drop repeats (see `rfc5104.md`, RFC5104-4.3.1.2-3). `ccm fir` is offered for AV1 (`media_engine.rs:407`) |
 | AV1RTP-8.1-2 | 8.1 | MAY | Sender also starts new coded video sequences on the other simulcast encodings | n-a | | | Application drives the encoders |
-| AV1RTP-8.2-1 | 8.2 | MUST | Layer Refresh Requests use the VP9 LRR format with the SID high bit 0 | missing | | | No LRR packet type in `rtc-rtcp` (the only `LRR` in the tree is the DLRR "last RR" field), no `ccm lrr` feedback |
+| AV1RTP-8.2-1 | 8.2 | MUST | Layer Refresh Requests use the VP9 LRR format with the SID high bit 0 | tested | `rtc-rtcp/src/payload_feedbacks/layer_refresh_request.rs` (`LrrEntry::av1`, `LrrEntry::vp9`) | `an_av1_layer_refresh_request_uses_the_vp9_format_with_a_two_bit_sid` | The VP9 layout with the SID's high bit 0. `ccm lrr` is not offered by default (JSEP) |
 | AV1RTP-10-1 | 10 | SHOULD | Data origin authentication and integrity protection of the RTP packet (for example SRTP) | tested | `rtc-srtp/src/context/srtp.rs` | `rtc-srtp/src/context/srtp_test.rs::test_rtp_invalid_auth` | Always SRTP in WebRTC; clause detail in `rfc3711.md` |
 | AV1RTP-10-2 | 10 | SHOULD | Header extensions such as the Dependency Descriptor are encrypted (RFC 6904 or a successor) | partial | `src/peer_connection/cryptex.rs` | | RFC 6904 is not implemented (`rfc6904.md`); Cryptex (RFC 9335) is, and covers any header extension when negotiated (`rfc9335.md` for its tested status). No Dependency Descriptor exists to protect |
 | AV1RTP-10-3 | 10 | MUST | Decoders discard reserved OBU types and reserved metadata OBU types | n-a | | | Decoder's job. The depacketizer passes reserved types through (`depacketizer.rs:159-168`) |

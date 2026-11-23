@@ -75,6 +75,12 @@ pub(crate) struct Recorder {
     media_ssrc: u32,
     fb_pkt_cnt: u8,
     packets_held: usize,
+    /// Whether a packet already reported as received is reported received again when the
+    /// base moves back over it (libwebrtc), rather than "not received" (the draft).
+    rereport_received: bool,
+    /// The packets reported as received in an earlier feedback message, while they are in
+    /// the arrival window.
+    reported: std::collections::BTreeSet<i64>,
 }
 
 impl Recorder {
@@ -88,7 +94,18 @@ impl Recorder {
             media_ssrc: 0,
             fb_pkt_cnt: 0,
             packets_held: 0,
+            rereport_received: false,
+            reported: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Report a packet that an earlier feedback message reported as received as received
+    /// again when the window moves back over it, as libwebrtc does. Off by default:
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1.1 has it reported "not
+    /// received", with no delta.
+    pub(crate) fn with_rereport_received(mut self, rereport_received: bool) -> Self {
+        self.rereport_received = rereport_received;
+        self
     }
 
     /// Record a packet arrival.
@@ -179,6 +196,15 @@ impl Recorder {
             if seq >= end_sn_exclusive {
                 break;
             }
+            // Draft section 3.1.1: "In the case the base sequence number is decreased,
+            // creating a window overlapping the previous feedback messages, the status for
+            // any packets previously reported as received must be marked as 'Packet not
+            // received' and thus no delta included for that symbol."
+            if !self.rereport_received && self.reported.contains(&seq) {
+                next_sequence_number = seq + 1;
+                seq += 1;
+                continue;
+            }
 
             if let Some(feedback) = fb.as_mut() {
                 if !feedback.add_received(seq as u16, arrival_time) {
@@ -203,10 +229,14 @@ impl Recorder {
                 fb = Some(new_fb);
             }
 
+            self.reported.insert(seq);
             next_sequence_number = seq + 1;
             seq += 1;
         }
 
+        // What has left the arrival window can no longer be reported again.
+        let begin = self.arrival_time_map.begin_sequence_number();
+        self.reported = self.reported.split_off(&begin);
         self.start_sequence_number = Some(next_sequence_number);
         fb
     }
@@ -460,6 +490,65 @@ mod tests {
 
         let packets = recorder.build_feedback_packet();
         assert_eq!(packets.len(), 1);
+    }
+
+    /// The received sequence numbers of a feedback message, by its own reading.
+    fn received(packet: &dyn rtcp::Packet) -> Vec<u16> {
+        let feedback = packet
+            .as_any()
+            .downcast_ref::<TransportLayerCc>()
+            .expect("transport-wide feedback");
+        let mut seq = feedback.base_sequence_number;
+        let mut out = vec![];
+        for chunk in &feedback.packet_chunks {
+            let symbols: Vec<SymbolTypeTcc> = match chunk {
+                PacketStatusChunk::RunLengthChunk(run) => {
+                    vec![run.packet_status_symbol; run.run_length as usize]
+                }
+                PacketStatusChunk::StatusVectorChunk(vector) => vector.symbol_list.clone(),
+            };
+            for symbol in symbols {
+                if seq
+                    == feedback
+                        .base_sequence_number
+                        .wrapping_add(feedback.packet_status_count)
+                {
+                    break;
+                }
+                if symbol != SymbolTypeTcc::PacketNotReceived {
+                    out.push(seq);
+                }
+                seq = seq.wrapping_add(1);
+            }
+        }
+        out
+    }
+
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1.1: when a late packet
+    /// moves the base sequence number back over packets an earlier feedback message reported
+    /// as received, those are now "not received", with no delta; the late one is received.
+    /// `with_rereport_received(true)` reports them received again, as libwebrtc does.
+    #[test]
+    fn packets_reported_before_are_not_received_when_the_base_moves_back() {
+        for rereport in [false, true] {
+            let mut recorder = Recorder::new(5000).with_rereport_received(rereport);
+            recorder.record(1234, 0, 64_000);
+            recorder.record(1234, 2, 64_500);
+            recorder.record(1234, 3, 64_750);
+            let first = recorder.build_feedback_packet();
+            assert_eq!(vec![0, 2, 3], received(first[0].as_ref()));
+
+            // 1 arrives late, then 4.
+            recorder.record(1234, 1, 65_000);
+            recorder.record(1234, 4, 65_250);
+            let second = recorder.build_feedback_packet();
+            let got = received(second[0].as_ref());
+            if rereport {
+                assert_eq!(vec![1, 2, 3, 4], got);
+            } else {
+                assert_eq!(vec![1, 4], got);
+            }
+        }
     }
 
     #[test]

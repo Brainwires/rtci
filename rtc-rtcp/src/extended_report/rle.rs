@@ -183,6 +183,101 @@ impl RLEReportBlock {
     }
 }
 
+/// The longest run a run-length chunk holds (RFC 3611 section 4.1.1: 14 bits, 1 to 16,383).
+pub const MAX_RUN_LENGTH: usize = 16_383;
+/// The packets one bit-vector chunk describes (RFC 3611 section 4.1.2).
+pub const BIT_VECTOR_LENGTH: usize = 15;
+
+/// The sequence numbers of `begin_seq..end_seq` (modulo 2^16) a block with thinning `t`
+/// reports on: those that are a multiple of 2^t (RFC 3611 section 4.1).
+pub fn reported_sequence_numbers(begin_seq: u16, end_seq: u16, t: u8) -> Vec<u16> {
+    let step = 1u32 << (t & 0x0F);
+    let span = u32::from(end_seq.wrapping_sub(begin_seq));
+    (0..span)
+        .map(|offset| begin_seq.wrapping_add(offset as u16))
+        .filter(|seq| u32::from(*seq) % step == 0)
+        .collect()
+}
+
+impl RLEReportBlock {
+    /// A block reporting `flags`, one per sequence number [`reported_sequence_numbers`] gives
+    /// for `begin_seq..end_seq` and `t`: for a Loss RLE block `true` is "received", for a
+    /// Duplicate RLE block `true` is "duplicated" (RFC 3611 sections 4.1, 4.2).
+    ///
+    /// A run of 15 equal values or more is a run-length chunk, anything shorter goes into
+    /// bit vectors. The bits of a last bit vector past the end of the flags are zero (RFC 3611
+    /// section 4.1: "the remaining bits ... MUST be set to zero").
+    pub fn from_flags(
+        is_loss_rle: bool,
+        ssrc: u32,
+        begin_seq: u16,
+        end_seq: u16,
+        t: u8,
+        flags: &[bool],
+    ) -> Self {
+        let mut chunks = vec![];
+        let mut i = 0;
+        while i < flags.len() {
+            let value = flags[i];
+            let run = flags[i..].iter().take_while(|f| **f == value).count();
+            if run >= BIT_VECTOR_LENGTH {
+                let run = run.min(MAX_RUN_LENGTH);
+                chunks.push(Chunk(((value as u16) << 14) | run as u16));
+                i += run;
+            } else {
+                let mut vector = 0x8000u16;
+                for (bit, flag) in flags[i..].iter().take(BIT_VECTOR_LENGTH).enumerate() {
+                    if *flag {
+                        vector |= 1 << (BIT_VECTOR_LENGTH - 1 - bit);
+                    }
+                }
+                chunks.push(Chunk(vector));
+                i += BIT_VECTOR_LENGTH;
+            }
+        }
+        RLEReportBlock {
+            is_loss_rle,
+            t: t & 0x0F,
+            ssrc,
+            begin_seq,
+            end_seq,
+            chunks,
+        }
+    }
+
+    /// The flag of each sequence number the block reports on, in order
+    /// ([`reported_sequence_numbers`]): what the chunks say, cut to that many. Bits of a bit
+    /// vector past the end of the range, and a terminating null chunk, are ignored (RFC 3611
+    /// section 4.1). A block whose chunks say less than the range has `false` for the rest.
+    pub fn flags(&self) -> Vec<bool> {
+        let count = reported_sequence_numbers(self.begin_seq, self.end_seq, self.t).len();
+        let mut flags = Vec::with_capacity(count);
+        for chunk in &self.chunks {
+            if flags.len() >= count {
+                break;
+            }
+            match chunk.chunk_type() {
+                ChunkType::RunLength => {
+                    let value = chunk.run_type().unwrap_or(0) == 1;
+                    let run = usize::from(chunk.value()).min(count - flags.len());
+                    flags.extend(std::iter::repeat_n(value, run));
+                }
+                ChunkType::BitVector => {
+                    for bit in 0..BIT_VECTOR_LENGTH {
+                        if flags.len() >= count {
+                            break;
+                        }
+                        flags.push(chunk.value() & (1 << (BIT_VECTOR_LENGTH - 1 - bit)) != 0);
+                    }
+                }
+                ChunkType::TerminatingNull => break,
+            }
+        }
+        flags.resize(count, false);
+        flags
+    }
+}
+
 impl fmt::Display for RLEReportBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")

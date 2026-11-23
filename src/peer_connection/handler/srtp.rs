@@ -578,6 +578,36 @@ mod tests {
         );
     }
 
+    /// RFC 4588 section 12: the RTX stream gets at least the protection of the stream it
+    /// repairs. A retransmission (its own SSRC and payload type) is protected under the same
+    /// SRTP session as the media: it leaves encrypted and authenticated, and the receiving
+    /// context opens it.
+    #[test]
+    fn a_retransmission_is_protected_like_the_media() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let mut rtx = rtp_packet();
+        rtx.header.ssrc = 0x0BAD_F00D;
+        rtx.header.payload_type = 97;
+        rtx.payload = bytes::Bytes::from_static(b"\x00\x2amedia");
+        let plain = rtx.marshal().unwrap();
+        write(&mut ctx, RTPMessage::Packet(Packet::Rtp(rtx))).unwrap();
+        let protected = match SrtpHandler::new(&mut ctx).poll_write().unwrap().message {
+            RTCMessageInternal::Rtp(RTPMessage::Raw(protected)) => protected,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_ne!(
+            &plain[12..],
+            &protected[12..plain.len()],
+            "the payload is encrypted"
+        );
+        assert!(
+            protected.len() > plain.len(),
+            "an authentication tag is added"
+        );
+        assert_eq!(&plain[..], &context(1).decrypt_rtp(&protected).unwrap()[..]);
+    }
+
     /// RFC 8834 section 4.1, RFC 3550 section 6.1: a packet of a type this endpoint does not
     /// know (here 210) between known ones is skipped by its length; the known ones are read.
     #[test]

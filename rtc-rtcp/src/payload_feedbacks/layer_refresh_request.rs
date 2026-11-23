@@ -56,6 +56,90 @@ pub struct LrrEntry {
     pub current: Option<LrrCurrentLayer>,
 }
 
+/// The VP9 layer index of an LRR (RFC 9628 section 5.3): the TID in the low three bits of the
+/// temporal field and the SID in the low three bits of the layer field, the reserved bits 0.
+const VP9_SID_MAX: u8 = 0x07;
+/// AV1 uses the VP9 format "with the high order bit of its three-bit SID field set to 0" (AV1
+/// RTP specification section 8.2): a two-bit spatial ID.
+const AV1_SPATIAL_ID_MAX: u8 = 0x03;
+
+impl LrrEntry {
+    /// An entry for a VP9 stream (RFC 9628 section 5.3): target and, when the receiver says,
+    /// current temporal and spatial layer IDs. A TID or SID over 7 is refused.
+    pub fn vp9(
+        ssrc: u32,
+        sequence_number: u8,
+        payload_type: u8,
+        target: (u8, u8),
+        current: Option<(u8, u8)>,
+    ) -> Result<Self> {
+        Self::layered(
+            ssrc,
+            sequence_number,
+            payload_type,
+            target,
+            current,
+            VP9_SID_MAX,
+        )
+    }
+
+    /// An entry for an AV1 stream (AV1 RTP specification section 8.2): `temporal_id` and
+    /// `spatial_id` as the bitstream has them, in the VP9 format with the high bit of the SID
+    /// 0. A spatial ID over 3 or a temporal ID over 7 is refused.
+    pub fn av1(
+        ssrc: u32,
+        sequence_number: u8,
+        payload_type: u8,
+        target: (u8, u8),
+        current: Option<(u8, u8)>,
+    ) -> Result<Self> {
+        Self::layered(
+            ssrc,
+            sequence_number,
+            payload_type,
+            target,
+            current,
+            AV1_SPATIAL_ID_MAX,
+        )
+    }
+
+    fn layered(
+        ssrc: u32,
+        sequence_number: u8,
+        payload_type: u8,
+        (target_temporal, target_spatial): (u8, u8),
+        current: Option<(u8, u8)>,
+        spatial_max: u8,
+    ) -> Result<Self> {
+        let layers = std::iter::once((target_temporal, target_spatial)).chain(current);
+        for (temporal, spatial) in layers {
+            if temporal > LRR_TEMPORAL_ID_MAX || spatial > spatial_max {
+                return Err(Error::InvalidHeader);
+            }
+        }
+        if payload_type > LRR_PAYLOAD_TYPE_MAX {
+            return Err(Error::WrongPayloadType);
+        }
+        Ok(LrrEntry {
+            ssrc,
+            sequence_number,
+            payload_type,
+            target_temporal_layer_id: target_temporal,
+            target_layer_id: target_spatial,
+            current: current.map(|(temporal, spatial)| LrrCurrentLayer {
+                temporal_layer_id: temporal,
+                layer_id: spatial,
+            }),
+        })
+    }
+
+    /// The target spatial ID of a VP9 or AV1 entry: the SID bits of the layer field, the
+    /// reserved bits ignored (RFC 9628 section 5.3).
+    pub fn target_spatial_id(&self) -> u8 {
+        self.target_layer_id & VP9_SID_MAX
+    }
+}
+
 /// Layer Refresh Request (LRR, PSFB FMT=10).
 #[derive(Debug, PartialEq, Eq, Default, Clone)]
 pub struct LayerRefreshRequest {
@@ -204,6 +288,41 @@ impl Unmarshal for LayerRefreshRequest {
 mod test {
     use super::*;
     use bytes::Bytes;
+
+    /// AV1 RTP specification section 8.2: "AV1 streams MUST use the Layer Refresh Request
+    /// format defined for VP9 in Section 5.3 of [VP9], with the high order bit of its
+    /// three-bit SID field set to 0": TID in the low three bits of the temporal octet, SID in
+    /// the low two of the layer octet, the rest zero; a spatial ID that needs the high bit is
+    /// refused for AV1 and allowed for VP9.
+    #[test]
+    fn an_av1_layer_refresh_request_uses_the_vp9_format_with_a_two_bit_sid() {
+        let entry = LrrEntry::av1(0x0a0b_0c0d, 7, 45, (2, 3), Some((1, 1))).unwrap();
+        let lrr = LayerRefreshRequest {
+            sender_ssrc: 0x0102_0304,
+            entries: vec![entry],
+        };
+        let raw = lrr.marshal().unwrap();
+        // The FCI after the 12 octets of the feedback header: SSRC, seq, C|PT, reserved, then
+        // RES|TTID, TLID, RES|CTID, CLID.
+        assert_eq!(
+            &raw[12..24],
+            &[0x0a, 0x0b, 0x0c, 0x0d, 7, 0x80 | 45, 0, 0, 2, 3, 1, 1]
+        );
+        let read = LayerRefreshRequest::unmarshal(&mut raw.freeze()).unwrap();
+        assert_eq!(3, read.entries[0].target_spatial_id());
+        assert_eq!(2, read.entries[0].target_temporal_layer_id);
+
+        assert!(
+            LrrEntry::av1(1, 0, 45, (0, 4), None).is_err(),
+            "SID high bit set"
+        );
+        assert!(LrrEntry::av1(1, 0, 45, (8, 0), None).is_err());
+        assert!(
+            LrrEntry::vp9(1, 0, 98, (0, 4), None).is_ok(),
+            "VP9 has three SID bits"
+        );
+        assert!(LrrEntry::vp9(1, 0, 98, (0, 8), None).is_err());
+    }
 
     #[test]
     fn lrr_round_trips_with_and_without_the_current_layer() {
