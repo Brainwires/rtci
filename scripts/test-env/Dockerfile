@@ -16,12 +16,35 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config cmake clang ca-certificates curl git python3 jq procps psmisc \
         iproute2 iptables ipset iputils-ping tcpdump conntrack dnsutils netcat-openbsd \
-        coturn openssl \
+        openssl libssl-dev libevent-dev \
         gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/* \
-    # coturn's package starts nothing in a container; the environment runs it per namespace.
     && update-alternatives --set iptables /usr/sbin/iptables-nft
+
+# coturn (BSD-3-Clause) built from its release tag, the source archive checked by SHA-256: the
+# base's distribution package is 4.6.1 (Ubuntu 24.04 and Debian 13 ship it), whose TLS listener
+# picks its SSL context by the ClientHello's legacy_version (0x0303 for TLS 1.3 too), so a
+# client offering only TLS 1.3 gets handshake_failure and one offering 1.3 and 1.2 gets 1.2.
+# Fixed in 4.6.2 (https://github.com/coturn/coturn/pull/989, one SSL context). 4.6.3 is the
+# last release of that line: 4.18 removed the no-cli and no-dtls options coturn/*.conf use and
+# moved the session id in its log lines, so moving further is a change of its own. No database
+# backends (the configurations list their users); the environment runs turnserver per
+# namespace (coturn/start.sh).
+ARG COTURN_VERSION=4.6.3
+ARG COTURN_SHA256=dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704
+RUN set -eu; \
+    curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/coturn.tgz \
+      "https://github.com/coturn/coturn/archive/refs/tags/${COTURN_VERSION}.tar.gz"; \
+    echo "${COTURN_SHA256}  /tmp/coturn.tgz" | sha256sum -c -; \
+    mkdir /tmp/coturn; tar -C /tmp/coturn --strip-components=1 -xzf /tmp/coturn.tgz; \
+    cd /tmp/coturn; \
+    TURN_NO_SQLITE=1 TURN_NO_PQ=1 TURN_NO_MYSQL=1 TURN_NO_MONGO=1 TURN_NO_HIREDIS=1 \
+      TURN_NO_PROMETHEUS=1 TURN_NO_SYSTEMD=1 ./configure --prefix=/usr/local; \
+    make -j"$(nproc)" bin/turnserver; \
+    install -m 0755 bin/turnserver /usr/local/bin/turnserver; \
+    cd /; rm -rf /tmp/coturn /tmp/coturn.tgz; \
+    turnserver --version 2>&1 | grep -F "${COTURN_VERSION}"
 
 # rustup-init by version and SHA-256 (the checksums static.rust-lang.org publishes beside each
 # binary), not the moving sh.rustup.rs script.
