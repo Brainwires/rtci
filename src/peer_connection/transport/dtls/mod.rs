@@ -138,6 +138,9 @@ pub(crate) struct DtlsTransport {
     /// The application asked for a new association (`RTCPeerConnection::renew_dtls_association`):
     /// the next offer carries a new `tls-id` (RFC 8842 section 5.5).
     pub(crate) renewal_requested: bool,
+    /// The renewal was asked for by the connection itself, for SRTP re-keying (an SRTP master
+    /// key neared its lifetime): what `OnLocalCandidatesNeeded` reports as its reason.
+    pub(crate) renewal_for_srtp_rekeying: bool,
 
     /// Whether the session has an RTP media section, which needs SRTP keys from the
     /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
@@ -288,6 +291,7 @@ impl DtlsTransport {
             local_tls_id: generate_tls_id(&crypto_provider)?,
             staged_local_tls_id: None,
             renewal_requested: false,
+            renewal_for_srtp_rekeying: false,
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
@@ -682,6 +686,7 @@ impl DtlsTransport {
         self.srtp_negotiated = None;
         self.srtp_configured = self.offers_use_srtp();
         self.renewal_requested = false;
+        self.renewal_for_srtp_rekeying = false;
         Ok(DtlsAssociationUpdate::New)
     }
 

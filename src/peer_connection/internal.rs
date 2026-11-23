@@ -1,7 +1,9 @@
 use super::*;
 use crate::peer_connection::configuration::remote_bitrate_limit::RemoteBitrateLimit;
 use crate::peer_connection::configuration::{RTCBundlePolicy, RTCRtcpMuxPolicy};
-use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
+use crate::peer_connection::event::{
+    RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent, RTCPeerConnectionIceEvent,
+};
 use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
 use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
 use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
@@ -3777,7 +3779,10 @@ impl RTCPeerConnection {
         self.ice_transport_mut()
             .previous_association_addresses_before_local_restart
             .get_or_insert(before);
+        self.ice_transport_mut().candidates_needed =
+            self.candidates_needed_reason(new_association, keep_local_candidates);
         if new_association {
+            self.forget_srflx_of_refused_bases();
             self.reallocate_turn_links_of_active_transport(now);
         }
         if self
@@ -3857,6 +3862,7 @@ impl RTCPeerConnection {
             .ice_transport_mut()
             .gathering_before_local_restart
             .take();
+        self.ice_transport_mut().candidates_needed = None;
         if let Some(before) = self
             .ice_transport_mut()
             .previous_association_addresses_before_local_restart
@@ -3885,11 +3891,39 @@ impl RTCPeerConnection {
                 .discard_local_candidates_during_ice_restart;
         self.ice_transport_mut()
             .retire_local_addresses(new_association);
+        self.ice_transport_mut().candidates_needed =
+            self.candidates_needed_reason(new_association, keep_local_candidates);
         if new_association {
+            self.forget_srflx_of_refused_bases();
             self.reallocate_turn_links_of_active_transport(now);
         }
         self.ice_transport_mut()
             .apply_restart(now, keep_local_candidates)
+    }
+
+    /// Why the active transport needs new local candidates after the ICE restart about to be
+    /// applied, if it does (`OnLocalCandidatesNeeded`): it is for a new DTLS association
+    /// (`new_association`, so the candidates are dropped and their addresses refused), or the
+    /// restart drops the candidates without keeping any (`keep_local_candidates` false).
+    fn candidates_needed_reason(
+        &self,
+        new_association: bool,
+        keep_local_candidates: bool,
+    ) -> Option<RTCLocalCandidatesNeededReason> {
+        if new_association {
+            let dtls = self.dtls_transport();
+            Some(
+                if dtls.renewal_requested && dtls.renewal_for_srtp_rekeying {
+                    RTCLocalCandidatesNeededReason::SrtpRekeying
+                } else {
+                    RTCLocalCandidatesNeededReason::NewDtlsAssociation
+                },
+            )
+        } else if !keep_local_candidates {
+            Some(RTCLocalCandidatesNeededReason::DiscardedBySetting)
+        } else {
+            None
+        }
     }
 
     pub(super) fn start_transports(

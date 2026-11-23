@@ -20,7 +20,8 @@ use rtc::peer_connection::configuration::interceptor_registry::{
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
-    RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTransportEventKind,
+    RTCDataChannelEvent, RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason,
+    RTCPeerConnectionEvent, RTCTransportEventKind,
 };
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -36,6 +37,7 @@ use rtc::rtp::header::Header;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
@@ -248,6 +250,46 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// The application's gathering driven by `OnLocalCandidatesNeeded` alone: each event a
+    /// peer raised (since the last step) gets a host candidate on a new port (`base` plus its
+    /// position) for the event's first mid, trickled to the other peer. Before that, the
+    /// event's first refused address is offered for the same mid and must be refused with
+    /// `ErrICECandidateAddressOfPreviousDtlsAssociation` (the per-transport route of
+    /// `add_local_candidate`). Returns each peer's events.
+    fn regather_on_events(&mut self, base: u16) -> Result<[Vec<RTCLocalCandidatesNeededEvent>; 2]> {
+        let marks = [self.peers[0].events.len(), self.peers[1].events.len()];
+        self.step()?;
+        let mut all: [Vec<RTCLocalCandidatesNeededEvent>; 2] = [vec![], vec![]];
+        for i in 0..2 {
+            let needed: Vec<RTCLocalCandidatesNeededEvent> = self.peers[i].events[marks[i]..]
+                .iter()
+                .filter_map(|event| match event {
+                    RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => Some(needed.clone()),
+                    _ => None,
+                })
+                .collect();
+            for (k, event) in needed.iter().enumerate() {
+                let mid = event.mids.first().context("the event names a section")?;
+                let index = event.sdp_mline_index.context("and its index")?;
+                if let Some(old) = event.refused_addresses.first() {
+                    let refused = Peer::host_candidate(*old, mid, index)?;
+                    match self.peers[i].pc.add_local_candidate(refused) {
+                        Err(Error::ErrICECandidateAddressOfPreviousDtlsAssociation(addr))
+                            if addr == *old => {}
+                        other => bail!("peer {i}: {old} is refused for {mid}, got {other:?}"),
+                    }
+                }
+                let addr = SocketAddr::new(self.peers[i].ip, base + k as u16);
+                self.peers[i].addrs.push(addr);
+                let candidate = Peer::host_candidate(addr, mid, index)?;
+                self.peers[i].pc.add_local_candidate(candidate.clone())?;
+                self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+            }
+            all[i] = needed;
+        }
+        Ok(all)
     }
 
     /// `run`, and on failure the state of every transport of both peers
@@ -2408,8 +2450,10 @@ fn a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbund
 /// any BUNDLE group), with the default settings, so each new association runs on a new 3-tuple
 /// (RFC 8842 section 5.1). Peer 0's SRTP keys have a lifetime of 320 packets: before one
 /// runs out the engine raises negotiation-needed by itself, the application only answers it
-/// (a new offer, and gathering on new ports for the transports that dropped their
-/// candidates), and every transport gets a new association with new ICE credentials. Every
+/// (a new offer, and gathering on new ports for each transport an `OnLocalCandidatesNeeded`
+/// names: reason `SrtpRekeying` on peer 0, `NewDtlsAssociation` on peer 1, the previous
+/// address refused through the section's mid), and every transport gets a new association
+/// with new ICE credentials. Every
 /// packet of both senders arrives across the renewals, every transport ends on a pair of the
 /// latest ports, and the data channel opened at the start still carries messages.
 #[test]
@@ -2497,7 +2541,22 @@ fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<
         {
             world.renegotiate_with(without_bundle_group)?;
             renegotiations += 1;
-            world.regather(7000 + 100 * renegotiations)?;
+            // The application gathers from the events alone: every transport of both peers
+            // asks, peer 0 for the re-keying it started, peer 1 for the new association the
+            // offer asked for.
+            let needed = world.regather_on_events(7000 + 100 * renegotiations)?;
+            for (i, reason) in [
+                RTCLocalCandidatesNeededReason::SrtpRekeying,
+                RTCLocalCandidatesNeededReason::NewDtlsAssociation,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let reasons: Vec<_> = needed[i].iter().map(|e| e.reason).collect();
+                assert_eq!(reasons, vec![reason; 3], "peer {i}: every transport");
+                let mids: HashSet<&String> = needed[i].iter().map(|e| &e.mids[0]).collect();
+                assert_eq!(mids.len(), 3, "peer {i}: a transport each: {needed:?}");
+            }
         }
     }
     world.advance(Duration::from_secs(1))?;

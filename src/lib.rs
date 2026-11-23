@@ -395,6 +395,103 @@
 //!
 //! See the `examples/` directory for complete, runnable code.
 //!
+//! ## Gathering
+//!
+//! The engine has no sockets, so the application gathers: it binds its UDP sockets, gives
+//! each host candidate to [`RTCPeerConnection::add_local_candidate`] (with the `sdp_mid` of
+//! the transport's first section when sections are not bundled, see
+//! [`RTCPeerConnection::ice_transport_sections`]), signals each candidate the engine surfaces
+//! (`OnIceCandidateEvent`) to the peer, and ends a generation with an empty candidate. From a
+//! host candidate the engine gathers the rest by itself when it is configured to: the
+//! server-reflexive candidates of the STUN servers, the TURN allocations, the ICE-TCP
+//! candidates (through the stream interface).
+//!
+//! ### A transport that needs new candidates
+//!
+//! A new DTLS association over UDP runs on a new 3-tuple (RFC 8842 section 5.1: "a new
+//! 3-tuple (transport/source address/source port) MUST be allocated by at least one of the
+//! endpoints"). So when one is set up on a transport that had one, the engine drops the
+//! transport's local candidates and refuses their UDP addresses
+//! (`Error::ErrICECandidateAddressOfPreviousDtlsAssociation`), and the application must gather
+//! again on new ports. It is told with
+//! [`RTCPeerConnectionEvent::OnLocalCandidatesNeeded`](peer_connection::event::RTCPeerConnectionEvent::OnLocalCandidatesNeeded),
+//! which names the transport (its ids, the mids of its sections, the first one's index), the
+//! reason ([`RTCLocalCandidatesNeededReason`](peer_connection::event::RTCLocalCandidatesNeededReason))
+//! and the refused addresses. It fires when the description that starts the transport's new
+//! gathering is set locally (W3C webrtc-pc 5.6 begins gathering a generation at
+//! `setLocalDescription`), right before the transport's `gatheringstatechange` to
+//! "gathering":
+//!
+//! - an ICE restart made for a new DTLS association: `renew_dtls_association`, automatic SRTP
+//!   re-keying (`SrtpRekeying`, on the side that asked), an offer that replaces a data-only
+//!   association to key SRTP, or a peer's offer with a new `a=tls-id` (the answer, when it is
+//!   set); per transport, each with its own event;
+//! - the transport that replaced one an answer closed by rejecting every m= section
+//!   (`TransportReplaced`): when the next description, which gives it a section, is set;
+//! - every ICE restart with `with_discard_local_candidates_during_ice_restart(true)`
+//!   (`DiscardedBySetting`; no address is refused then).
+//!
+//! What to do: bind new UDP sockets, add a host candidate for each with `sdp_mid` set to the
+//! event's first mid, signal the candidates the engine surfaces, end the generation with an
+//! empty candidate for that mid. Keep the previous sockets open and reading: the selected
+//! pair keeps carrying the transport's packets until a pair on a new socket is selected
+//! (`SelectedCandidatePairChange` on that transport), or until the transport closes; close
+//! them then. The engine's own gathering follows the new host candidates by itself: it asks
+//! the STUN servers from each new base (the probes from a refused base end, so no mapped
+//! address of the previous socket is announced), allocates TURN again from a base that is not
+//! refused, and gives the ICE-TCP candidates of the address again (RFC 8842 section 5.1 asks a
+//! new 3-tuple of unordered transports only; their listener is kept).
+//!
+//! ```no_run
+//! use rtc::peer_connection::RTCPeerConnection;
+//! use rtc::peer_connection::event::{RTCLocalCandidatesNeededEvent, RTCPeerConnectionEvent};
+//! use rtc::peer_connection::transport::RTCIceCandidateInit;
+//! use std::net::UdpSocket;
+//!
+//! fn on_event(
+//!     pc: &mut RTCPeerConnection,
+//!     sockets: &mut Vec<UdpSocket>,
+//!     event: RTCPeerConnectionEvent,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     if let RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) = event {
+//!         let RTCLocalCandidatesNeededEvent { mids, sdp_mline_index, .. } = needed;
+//!         // A new port on the same interface (port 0: the system picks a free one).
+//!         let socket = UdpSocket::bind("192.0.2.1:0")?;
+//!         let local = socket.local_addr()?;
+//!         pc.add_local_candidate(RTCIceCandidateInit {
+//!             candidate: format!(
+//!                 "candidate:1 1 udp 2130706431 {} {} typ host",
+//!                 local.ip(),
+//!                 local.port()
+//!             ),
+//!             sdp_mid: mids.first().cloned(),
+//!             sdp_mline_index,
+//!             ..Default::default()
+//!         })?;
+//!         // The end of this transport's generation.
+//!         pc.add_local_candidate(RTCIceCandidateInit {
+//!             sdp_mid: mids.first().cloned(),
+//!             ..Default::default()
+//!         })?;
+//!         // The previous sockets stay open until a pair on the new one is selected.
+//!         sockets.push(socket);
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! The reference driver, `rtc-stream-driver`, does all of this by itself (its `peer`
+//! module).
+//!
+//! An application with one fixed socket, which cannot move to a new port, turns it off with
+//! [`SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`](peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_new_association_on_previous_addresses):
+//! the candidates are kept, their addresses accepted, and no event fires; the new association
+//! then shares the previous one's 3-tuple, which RFC 8842 section 5.1 allows only when the
+//! peer allocates a new one.
+//!
+//! [`RTCPeerConnection::add_local_candidate`]: peer_connection::RTCPeerConnection::add_local_candidate
+//! [`RTCPeerConnection::ice_transport_sections`]: peer_connection::RTCPeerConnection::ice_transport_sections
+//!
 //! ## Common Patterns
 //!
 //! ### Configuring Interceptors (NACK, TWCC, RTCP Reports)

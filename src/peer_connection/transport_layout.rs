@@ -19,6 +19,7 @@
 
 use super::*;
 use crate::peer_connection::configuration::RTCBundlePolicy;
+use crate::peer_connection::event::RTCLocalCandidatesNeededReason;
 use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
@@ -226,11 +227,27 @@ impl RTCPeerConnection {
                 }
             }
             ice.ice_transport.previous_association_addresses = retired;
+            // The next description that sets the transport up tells the application to
+            // gather for it (`OnLocalCandidatesNeeded`), unless it keeps the candidates.
+            ice.ice_transport.candidates_needed = if on_new_addresses {
+                Some(RTCLocalCandidatesNeededReason::TransportReplaced)
+            } else if self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart
+            {
+                Some(RTCLocalCandidatesNeededReason::DiscardedBySetting)
+            } else {
+                None
+            };
             let closed = self.pipeline_context.transports.renew(id, ice, dtls, srtp);
             self.pipeline_context.sync_transport_stats();
             if on_new_addresses {
                 let now = self.pipeline_context.now;
-                self.with_transport(id, |pc| pc.reallocate_turn_links_of_active_transport(now));
+                self.with_transport(id, |pc| {
+                    pc.forget_srflx_of_refused_bases();
+                    pc.reallocate_turn_links_of_active_transport(now)
+                });
             }
             closed
         };
