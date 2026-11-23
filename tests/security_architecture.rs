@@ -429,3 +429,73 @@ fn an_identity_that_does_not_cover_the_certificate_in_use_is_refused() -> Result
     assert_eq!(world.peers[1].pc.peer_identity(), None);
     Ok(())
 }
+
+/// The bytes of `needle` in the forms a `Debug` string could carry them: a byte list, and hex.
+fn debug_forms(needle: &[u8]) -> Vec<String> {
+    let list = format!("{needle:?}");
+    let hex: String = needle.iter().map(|b| format!("{b:02x}")).collect();
+    let hex_upper = hex.to_uppercase();
+    vec![list[1..list.len() - 1].to_owned(), hex, hex_upper]
+}
+
+/// RFC 8827 section 6.3 and RFC 8826 section 4.2.1: the ICE (STUN) transaction ids are not
+/// available to the application, diagnostics included. Two peers connect; the transaction id
+/// of every Binding request either wrote appears in none of the events either raised and in
+/// neither's statistics.
+#[test]
+fn stun_transaction_ids_reach_neither_events_nor_statistics() -> Result<()> {
+    let mut world = world()?;
+    world.connect()?;
+    world.run_for(Duration::from_secs(10), |_| false);
+    let now = world.now;
+    let mut ids = HashSet::new();
+    for peer in &world.peers {
+        for datagram in &peer.written {
+            // A STUN Binding request or response (RFC 8489 section 5): type 0x0001 / 0x0101,
+            // the magic cookie, then the 96-bit transaction id.
+            if datagram.len() >= 20 && datagram[0] < 2 && datagram[4..8] == [0x21, 0x12, 0xA4, 0x42]
+            {
+                ids.insert(datagram[8..20].to_vec());
+            }
+        }
+    }
+    assert!(!ids.is_empty(), "the peers ran connectivity checks");
+    for peer in world.peers.iter_mut() {
+        let stats = format!(
+            "{:?}",
+            peer.pc.get_stats(now, rtc::statistics::StatsSelector::None)
+        );
+        let events = peer.events.join("\n");
+        for id in &ids {
+            for form in debug_forms(id) {
+                assert!(!stats.contains(&form), "a transaction id in the statistics");
+                assert!(!events.contains(&form), "a transaction id in an event");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8827 section 5.1.4: when the fingerprints change, the next description carries a new
+/// identity assertion or none. A connection's certificates are fixed when it is built, so its
+/// fingerprints never change: not across renegotiations, and not when it asks for a new DTLS
+/// association (`renew_dtls_association`, which changes the `tls-id` only). The assertion
+/// set for the connection stays the one that covers them.
+#[test]
+fn a_new_dtls_association_keeps_the_fingerprints_the_identity_covers() -> Result<()> {
+    let mut world = world()?;
+    let (first_offer, _) = world.connect()?;
+    world.peers[0].pc.renew_dtls_association();
+    let (offer, _) = world.exchange(0)?;
+    assert_ne!(
+        attribute_values(&offer, "tls-id"),
+        attribute_values(&first_offer, "tls-id"),
+        "a new association is asked for"
+    );
+    assert_eq!(fingerprints_of(&offer), fingerprints_of(&first_offer));
+    world.run("the new association", |peers| {
+        peers.iter().all(|p| p.connected())
+    })?;
+    world.ping_pong("after the new association")?;
+    Ok(())
+}

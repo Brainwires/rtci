@@ -522,6 +522,45 @@ fn a_zero_window_probe_goes_only_with_nothing_in_flight() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9260 6.1 rule A: "The sender MUST also have an algorithm for sending new DATA chunks
+/// to avoid silly window syndrome (SWS) as described in [RFC1122]". The sender never cuts a
+/// chunk to fit a small window: a message is fragmented by the path's packet size alone, and a
+/// window smaller than the next fragment sends nothing while data is in flight (the one
+/// exception, the zero window probe with nothing in flight, is a whole fragment too). A
+/// window that opens a little at a time is never filled with scraps.
+#[test]
+fn a_small_window_is_not_filled_with_small_chunks() -> Result<()> {
+    let now = Instant::now();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    let mut a = timed_test_association();
+    a.cwnd = 8 * a.mtu;
+    let fragment = a.max_payload_size as usize;
+    a.rwnd = 300;
+    let mut stream = a.open_stream(1, ppi)?;
+    stream.write_sctp(now, &Bytes::from(vec![1; 3 * fragment]), ppi)?;
+    let probe = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(probe.len(), 1, "the zero window probe only");
+    assert_eq!(
+        probe[0].user_data.len(),
+        fragment,
+        "a whole fragment, not 300 bytes"
+    );
+    for window in [300, 600, fragment as u32 - 1] {
+        a.rwnd = window;
+        let sent = transmitted_data(&a.gather_outbound(now).0);
+        assert!(
+            sent.is_empty(),
+            "a window of {window}: {} chunks",
+            sent.len()
+        );
+    }
+    a.rwnd = fragment as u32;
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].user_data.len(), fragment);
+    Ok(())
+}
+
 /// RFC 9260 7.2.4: the growth of cwnd a SACK earns (7.2.1, 7.2.2) is applied before the
 /// adjustment for the loss the same SACK reports: the new ssthresh is half of the grown cwnd.
 #[test]

@@ -41,6 +41,8 @@ pub struct Peer {
     pub received: Vec<Vec<u8>>,
     /// Every datagram it wrote, in order.
     pub written: Vec<Vec<u8>>,
+    /// Every event it raised, as its `Debug` form.
+    pub events: Vec<String>,
 }
 
 impl Peer {
@@ -68,6 +70,7 @@ impl Peer {
             channel: None,
             received: Vec::new(),
             written: Vec::new(),
+            events: Vec::new(),
         })
     }
 
@@ -226,6 +229,7 @@ impl World {
             }
             for peer in self.peers.iter_mut() {
                 while let Some(event) = peer.pc.poll_event() {
+                    peer.events.push(format!("{event:?}"));
                     match event {
                         RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
                             peer.states.push(state);
