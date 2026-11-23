@@ -2403,6 +2403,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **browser matrix**: the media defaults no browser had seen (media-20). A codec of another
+  clock rate mid-stream (Rust streams Opus, then a PCMU tone, then Opus again) with the default
+  SSRC per clock rate and with `with_ssrc_per_clock_rate(false)`, checked by what the browser's
+  receiver counts and plays; and loss recovery from a browser whose offer reaches Rust without
+  its `a=ssrc` lines, so its RTX stream is associated only by payload type. `interop-peer`
+  takes `{"type":"switch-codec"}` and the WebSocket query `?ssrc_per_clock_rate=0`, and its
+  report names each track's SSRC on the wire.
+
 - **media conformance**: SHOULD and MAY rows of the media audit (media-19).
   - A FlexFEC SSRC's SDES chunk carries the MID only: it carried the protected simulcast
     layer's rid as RepairedRtpStreamId, which RFC 8627 section 7.2 says "SHOULD NOT" be used
