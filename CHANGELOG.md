@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **sctp**: RFC 9260 section 6.2: once a SACK advertised a closed window (a_rwnd 0), new DATA
+  above the largest TSN received is dropped, the in-sequence chunk included. Taking that chunk
+  when nothing is readable (the deadlock escape of webrtc-rs/webrtc#822, up to one message
+  past the buffer) is now `TransportConfig::with_zero_window_overcommit(true)`, off by
+  default. The peer connection turns it on only when the `max-message-size` it advertises is
+  larger than its SCTP receive buffer (not with the defaults).
+- **dtls**: RFC 5246 section 7.4.6: a client certificate that is not X.509v3 is not sent; the
+  client answers the CertificateRequest with an empty Certificate (a server that requires one
+  fails the handshake).
 - **sctp**: `TransportConfig::with_max_receive_buffer_size` raises a value below 1500 to 1500,
   and `with_max_num_outbound_streams` / `with_max_num_inbound_streams` raise 0 to 1 (RFC 9260
   3.3.2, 3.3.3: an INIT or INIT ACK may carry neither).
@@ -1170,6 +1179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **dtls**: DTLS 1.2 CBC records (not in the WebRTC default set) are unprotected in constant
+  time for every padding length (RFC 5246 section 6.2.3.2, Lucky Thirteen): the received MAC is
+  read through a mask from every offset it could have, and an equalizing HMAC makes the SHA-1
+  compression count independent of the padding.
 - **security**: the peer's identity (RFC 8827 sections 5.1.4, 7.4). New
   `RTCPeerConnection::set_peer_identity(RTCPeerIdentity)` takes what the application's identity
   provider verified of the remote assertion and refuses it unless it covers every fingerprint
@@ -1627,6 +1640,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
+  association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
+  new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
+  RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
+  the new association, browsers ignore a new `tls-id`.
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
