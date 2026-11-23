@@ -445,6 +445,47 @@ fn the_vad_of_an_audio_level_id_is_kept_through_the_session() -> TestResult {
     Ok(())
 }
 
+/// RFC 6464 section 4, the offerer's side: the engine offers the audio level (no `vad`, which
+/// is `vad=on`), the answer maps that id with `vad=off`; the engine's next offer keeps
+/// `vad=off` for the id, the semantics the negotiation gave it.
+#[test]
+fn an_answered_vad_is_kept_in_the_next_offer() -> TestResult {
+    let mut offerer = default_interceptor_peer()?;
+    let mut answerer = default_interceptor_peer()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    let id = extmaps(&offer.sdp)[0]
+        .iter()
+        .find_map(|l| {
+            l.strip_suffix(&format!(" {AUDIO_LEVEL}"))
+                .map(str::to_owned)
+        })
+        .expect("the audio level is offered in the clear");
+    // The answerer is given the clear form only (a peer without RFC 6904).
+    let clear_only: String = offer
+        .sdp
+        .split_inclusive("\r\n")
+        .filter(|l| !(l.contains(ENCRYPT) && l.contains(AUDIO_LEVEL)))
+        .collect();
+    answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(clear_only)?)?;
+    let answer = answerer.create_answer(None)?;
+    let edited = answer.sdp.replace(
+        &format!("a=extmap:{id} {AUDIO_LEVEL}\r\n"),
+        &format!("a=extmap:{id} {AUDIO_LEVEL} vad=off\r\n"),
+    );
+    assert_ne!(edited, answer.sdp, "the answer maps the clear form at {id}");
+    offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(edited)?)?;
+    let reoffer = offerer.create_offer(None)?;
+    let line = format!("{id} {AUDIO_LEVEL} vad=off");
+    assert!(
+        extmaps(&reoffer.sdp)[0].contains(&line),
+        "{:?}",
+        extmaps(&reoffer.sdp)[0]
+    );
+    Ok(())
+}
+
 /// RFC 8285 section 6: the attribute may be at media level; offered there, it is answered.
 #[test]
 fn extmap_allow_mixed_at_media_level_is_answered() -> TestResult {

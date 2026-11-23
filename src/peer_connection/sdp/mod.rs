@@ -1830,22 +1830,16 @@ impl RTCPeerConnection {
         // RFC 6464 section 4: "the semantics chosen for a header extension element (including
         // its vad setting) for a particular extension identifier value MUST NOT be changed
         // within an RTP session". The extension attributes an id was negotiated with go with it:
-        // an answer repeats the offer's, a later offer the ones negotiated for that id.
+        // an answer repeats the offer's, a later offer the ones the remote description gave it.
         let extension_attributes = |id: u16, uri: &str| -> Option<String> {
-            if is_offer {
-                media_engine
-                    .negotiated_header_extensions
-                    .get(&id)
-                    .filter(|negotiated| negotiated.uri == uri)
-                    .and_then(|negotiated| negotiated.attributes.clone())
-            } else {
-                media_section
-                    .match_extensions
-                    .get(uri)
-                    .filter(|offered| offered.id == id)
-                    .and_then(|offered| offered.attributes.clone())
-            }
-            .filter(|attributes| !attributes.is_empty())
+            // The mapping the remote description gave the id: the offer an answer answers, or
+            // for a later offer the current remote description.
+            media_section
+                .match_extensions
+                .get(uri)
+                .filter(|matched| matched.id == id)
+                .and_then(|matched| matched.attributes.clone())
+                .filter(|attributes| !attributes.is_empty())
         };
         let ext_attr_of = |id: u16, uri: &str, encrypted: bool| -> Option<String> {
             let attributes = extension_attributes(id, uri);
