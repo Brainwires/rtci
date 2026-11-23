@@ -4287,6 +4287,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
   `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
   lossy-link run takes another course now (no RTCP on its data-only connection).
+- **sctp**: in Fast Recovery, a SACK that advanced the Cumulative TSN Ack Point and brought a
+  chunk to its third miss indication sent it at once in a packet that ignored cwnd. RFC 9260
+  section 7.2.4 step 3 is "If not in Fast Recovery": during one the chunk is marked for
+  retransmission, is no Fast Retransmit candidate any more (step 5) and goes out as cwnd
+  allows, as it already did after a SACK that did not advance the Cumulative TSN Ack. Test:
+  `recovery_test.rs::a_third_miss_in_fast_recovery_waits_for_the_window_also_when_the_cumulative_ack_advances`
+  (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
+  and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
+  that had none.
 
 - **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
   HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are

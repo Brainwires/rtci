@@ -4236,13 +4236,14 @@ impl Association {
             htna
         };
         // A chunk that reaches three miss indications during a Fast Recovery that began
-        // before this SACK is not sent at once, ignoring cwnd (step 3 is for the SACK that
-        // starts Fast Recovery): it is marked for retransmission, goes out "as soon as cwnd
-        // allows" and is not fast retransmitted again (steps 5 and 6). A partially reliable
+        // before this SACK, whether or not the SACK advances the Cumulative TSN Ack Point, is
+        // not sent at once, ignoring cwnd: step 3 is "If not in Fast Recovery", for the SACK
+        // that starts it. The chunk is marked for retransmission (step 1), goes out "as soon as
+        // cwnd allows" and is not fast retransmitted again (step 5). A partially reliable
         // chunk whose retransmission budget is spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never
         // sent again: it takes the fast retransmit path, which abandons it and sends FORWARD
         // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
-        let recovering = self.in_fast_recovery && !cum_tsn_ack_point_advanced;
+        let recovering = self.in_fast_recovery;
 
         let mut tsn = cum_tsn_ack_point.wrapping_add(1);
         while sna32lt(tsn, max_tsn) {
@@ -4300,10 +4301,6 @@ impl Association {
             }
 
             tsn = tsn.wrapping_add(1);
-        }
-
-        if self.in_fast_recovery && cum_tsn_ack_point_advanced {
-            self.will_retransmit_fast = true;
         }
 
         Ok(())
