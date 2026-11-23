@@ -97,6 +97,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     received_frames: std::collections::VecDeque<Instant>,
     /// The SSRC and the CSRCs of the last packet received (webrtc-extensions 11).
     last_frame_sources: Option<(SSRC, Vec<SSRC>)>,
+    /// The arrival, capture time and Dependency Descriptor of the frames delivered lately
+    /// (webrtc-encoded-transform 4, `encoded_frame_metadata`).
+    frames: super::frame_metadata::FrameRecords,
+    /// The sequence number of the next Full Intra Request (RFC 5104 4.3.1.2).
+    fir_sequence_number: u8,
 }
 
 impl RTCRtpReceiverInternal {
@@ -121,6 +126,8 @@ impl RTCRtpReceiverInternal {
             end_unannounced: false,
             received_frames: Default::default(),
             last_frame_sources: None,
+            frames: Default::default(),
+            fir_sequence_number: 0,
         }
         .with_own_track()
     }
@@ -319,6 +326,7 @@ impl RTCRtpReceiverInternal {
         vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
+        dependency_descriptor: Option<&[u8]>,
     ) -> (bool, bool) {
         // webrtc-extensions 11: whether the SSRC, and the CSRCs, of the last frame changed.
         let changes = match &self.last_frame_sources {
@@ -351,6 +359,12 @@ impl RTCRtpReceiverInternal {
         };
         synchronization.capture_timestamp = capture_timestamp;
         synchronization.sender_capture_time_offset = sender_capture_time_offset;
+        self.frames.record(
+            now,
+            header,
+            (capture_timestamp, sender_capture_time_offset),
+            dependency_descriptor,
+        );
         self.synchronization_sources.push(synchronization);
         let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
@@ -420,6 +434,23 @@ impl RTCRtpReceiverInternal {
             reference.capture_ms + f64::from(elapsed) * 1000.0 / f64::from(rate)
         });
         (interpolated, reference.offset_ms)
+    }
+
+    /// The sequence number for a new Full Intra Request, one more than the last (RFC 5104
+    /// 4.3.1.2: "incremented by 1 modulo 256" for each new request).
+    pub(crate) fn next_fir_sequence_number(&mut self) -> u8 {
+        let number = self.fir_sequence_number;
+        self.fir_sequence_number = number.wrapping_add(1);
+        number
+    }
+
+    /// What the receiver recorded of the frames it delivered.
+    pub(crate) fn frame_records(&self) -> &super::frame_metadata::FrameRecords {
+        &self.frames
+    }
+
+    pub(crate) fn frame_records_mut(&mut self) -> &mut super::frame_metadata::FrameRecords {
+        &mut self.frames
     }
 
     /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.

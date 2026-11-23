@@ -26,16 +26,16 @@ MUST-level rows (algorithm steps, members, attributes and enum values count as M
 | webrtc-stats | 263 | 254 | 2 | 1 | 0 | 0 | 1 |
 | webrtc-extensions | 76 | 57 | 1 | 1 | 0 | 0 | 14 |
 | webrtc-priority | 15 | 13 | 0 | 0 | 1 | 0 | 0 |
-| webrtc-encoded-transform | 54 | 23 | 5 | 10 | 3 | 0 | 12 |
+| webrtc-encoded-transform | 54 | 40 | 0 | 1 | 0 | 0 | 12 |
 | RFC 9605 | 40 | 25 | 1 | 0 | 3 | 0 | 3 |
 | webrtc-svc | 56 | 51 | 0 | 0 | 0 | 0 | 1 |
 | mediacapture-main (section 4) | 28 | 25 | 1 | 1 | 0 | 0 | 1 |
 | draft-ietf-avtcore-rtp-sframe-03 | 36 | 24 | 3 | 1 | 1 | 1 | 0 |
-| **All** | **1525** | **1239** | **35** | **71** | **30** | **1** | **93** |
+| **All** | **1525** | **1256** | **30** | **62** | **27** | **1** | **93** |
 
-The Rows column counts all levels; the verdict columns count MUST rows. SHOULD rows, all specs: tested 11 / untested 0 / partial 1 / missing 1 / violated 0 / n-a 11. MAY rows: tested 10 / untested 2 / partial 2 / missing 2 / violated 0 / n-a 16. Recounted from the tables on branch `conf/pc-18-sframe-transform` (2026-11-22).
+The Rows column counts all levels; the verdict columns count MUST rows. SHOULD rows, all specs: tested 11 / untested 0 / partial 1 / missing 1 / violated 0 / n-a 11. MAY rows: tested 10 / untested 2 / partial 2 / missing 2 / violated 0 / n-a 16. Recounted from the tables on branch `conf/pc-20-frame-metadata`.
 
-Of the MUST rows that bind the engine (1376 after `n/a`), 1239 (90%) are implemented and tested, 35 (3%) implemented without a test that would catch a regression, 71 (5%) partial, 30 (2%) missing and 1 (0%) violated.
+Of the MUST rows that bind the engine (1376 after `n/a`), 1256 (91%) are implemented and tested, 30 (2%) implemented without a test that would catch a regression, 62 (5%) partial, 27 (2%) missing and 1 (0%) violated.
 
 Statistics members (webrtc-stats, 206 member rows): 126 measured by the engine, 69 present only from the application feed, 11 absent.
 

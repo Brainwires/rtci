@@ -578,6 +578,18 @@ pub enum RTCPeerConnectionEvent {
     /// frame it received changed (`RTCRtpReceiver::get_contributing_sources`).
     OnCsrcChange(crate::rtp_transceiver::RTCRtpReceiverId),
 
+    /// webrtc-encoded-transform 6.4 `keyframerequest`: a Picture Loss Indication or Full
+    /// Intra Request (RFC 4585 6.3.1, RFC 5104 4.3.1) arrived for an SSRC this sender sends;
+    /// the encoder (the application's) should generate a key frame for that layer. `rid` is
+    /// the layer's RID, `None` when the sender's encoding has none (not simulcast). The PLI /
+    /// FIR itself is delivered as well (`RTCMessage::RtcpPacket`).
+    OnKeyFrameRequest {
+        /// The sender whose stream the request names.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the requested layer.
+        rid: Option<String>,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),

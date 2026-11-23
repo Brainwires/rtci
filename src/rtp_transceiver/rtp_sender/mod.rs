@@ -522,6 +522,39 @@ impl RTCRtpSender<'_> {
         self.write_rtp(now, packet)
     }
 
+    /// [`Self::write_rtp`] of an audio frame with the level of its source
+    /// (webrtc-encoded-transform 4.4.1: a locally sourced frame's `audioLevel` "MUST be taken
+    /// directly from the source and used as input to generate the [RFC6464] header extension
+    /// if negotiated"). `audio_level` is linear, 0 (silence) to 1 (0 dBov), as
+    /// `audioLevel`; it is written as the RFC 6464 level, `-20 log10(audio_level)` dBov
+    /// rounded and clamped to 0..=127 (0 and below is 127), with the voice activity flag
+    /// from `voice_activity` (0 when unknown). The element goes in only on an audio sender
+    /// that negotiated the extension; the packet is sent either way.
+    pub fn write_rtp_with_audio_level(
+        &mut self,
+        now: Instant,
+        mut packet: rtp::Packet,
+        audio_level: f64,
+        voice_activity: Option<bool>,
+    ) -> Result<()> {
+        let id = (self.sender().kind() == RtpCodecKind::Audio)
+            .then(|| {
+                self.get_parameters()
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .find(|e| e.uri == ::sdp::extmap::AUDIO_LEVEL_URI)
+                    .map(|e| e.id)
+            })
+            .flatten();
+        if let Some(id) = id.and_then(|id| u8::try_from(id).ok()) {
+            packet
+                .header
+                .set_extension_upgrading(id, rfc6464_element(audio_level, voice_activity))?;
+        }
+        self.write_rtp(now, packet)
+    }
+
     /// W3C `RTCRtpSender.dtmf`: the DTMF sender of an audio sender, `None` for a video one.
     pub fn dtmf(&mut self) -> Option<dtmf::RTCDTMFSender<'_>> {
         if self.sender().kind() != RtpCodecKind::Audio {
@@ -807,4 +840,21 @@ impl RTCRtpSender<'_> {
             message: RTCMessage::RtcpPacket(track_id, packets),
         })
     }
+}
+
+/// The RFC 6464 element of a linear level (0..1): `V` and the level in -dBov.
+fn rfc6464_element(audio_level: f64, voice_activity: Option<bool>) -> bytes::Bytes {
+    let dbov = if audio_level.is_nan() || audio_level <= 0.0 {
+        127
+    } else {
+        (-20.0 * audio_level.min(1.0).log10())
+            .round()
+            .clamp(0.0, 127.0) as u8
+    };
+    let v = if voice_activity == Some(true) {
+        0x80
+    } else {
+        0
+    };
+    bytes::Bytes::from(vec![v | dbov])
 }

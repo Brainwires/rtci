@@ -1092,6 +1092,50 @@ impl<'a> InterceptorHandler<'a> {
         });
     }
 
+    /// webrtc-encoded-transform 6.4: a PLI or FIR for an SSRC a sender sends is a
+    /// `keyframerequest` for the encoding of that SSRC, with its RID.
+    fn announce_key_frame_requests(&mut self, now: Instant, packets: &[Box<dyn rtcp::Packet>]) {
+        use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+        use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        let mut requested: Vec<u32> = Vec::new();
+        for packet in packets {
+            let any = packet.as_any();
+            if let Some(pli) = any.downcast_ref::<PictureLossIndication>() {
+                requested.push(pli.media_ssrc);
+            } else if let Some(fir) = any.downcast_ref::<FullIntraRequest>() {
+                requested.extend(fir.fir.iter().map(|entry| entry.ssrc));
+            }
+        }
+        for ssrc in requested {
+            let found = self
+                .rtp_transceivers
+                .iter()
+                .enumerate()
+                .find_map(|(id, t)| {
+                    let sender = t.sender().as_ref()?;
+                    if t.stopped() {
+                        return None;
+                    }
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .find(|e| e.rtp_coding_parameters.ssrc == Some(ssrc))
+                        .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
+                });
+            if let Some((id, rid)) = found {
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnKeyFrameRequest {
+                            sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
+                            rid: (!rid.is_empty()).then_some(rid),
+                        },
+                    ),
+                });
+            }
+        }
+    }
+
     /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
     /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
     fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
@@ -1149,6 +1193,22 @@ impl<'a> InterceptorHandler<'a> {
                 )
                 .ok()
             });
+        // The AV1 RTP specification's Dependency Descriptor (appendix A), on video: what
+        // places the frame in the stream's frame numbering (webrtc-encoded-transform 4.2).
+        let dependency_descriptor = header
+            .extension
+            .then(|| {
+                let (extension_id, _, video) =
+                    self.media_engine
+                        .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                            uri: rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI
+                                .to_owned(),
+                        });
+                (video && extension_id != 0)
+                    .then(|| header.get_extension(extension_id as u8))
+                    .flatten()
+            })
+            .flatten();
         let clock_rate = self
             .media_engine
             .get_codec_by_payload(header.payload_type)
@@ -1180,6 +1240,7 @@ impl<'a> InterceptorHandler<'a> {
                 vad,
                 capture,
                 clock_rate,
+                dependency_descriptor.as_deref(),
             );
             // webrtc-extensions 11: `ssrcchange`, then `csrcchange`, once both lists are
             // updated.
@@ -1427,6 +1488,7 @@ impl<'a>
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packet) => {
                         trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
+                        self.announce_key_frame_requests(packet.now, rtcp_packet);
                     }
                     // Media on its way to the application: its sources are the receiver's
                     // synchronization and contributing sources from now on.

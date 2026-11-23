@@ -157,6 +157,7 @@
 #[cfg(test)]
 mod rtp_receiver_test;
 
+pub mod frame_metadata;
 pub(crate) mod internal;
 pub(crate) mod rtp_contributing_source;
 
@@ -172,6 +173,10 @@ use sansio::Protocol;
 use shared::error::Result;
 use std::time::Instant;
 
+pub use frame_metadata::{
+    RTCEncodedAudioFrameMetadata, RTCEncodedFrameMetadata, RTCEncodedFrameMetadataKind,
+    RTCEncodedVideoFrameMetadata, RTCEncodedVideoFrameType,
+};
 pub use rtp_contributing_source::{RTCRtpContributingSource, RTCRtpSynchronizationSource};
 
 /// Represents an RTP receiver for a media stream track.
@@ -459,6 +464,201 @@ impl RTCRtpReceiver<'_> {
             now,
             message: RTCMessage::RtcpPacket(track_id, packets),
         })
+    }
+
+    /// W3C webrtc-encoded-transform 4, `getMetadata()` of a received encoded frame: the
+    /// metadata of the frame the application reassembled from `packets`, the RTP packets
+    /// `poll_read` delivered for it (one SSRC and RTP timestamp, in sequence number order).
+    ///
+    /// From the packets: `synchronizationSource`, `payloadType`, `contributingSources`,
+    /// `rtpTimestamp`, `mimeType` (the codec negotiated for the payload type), an audio
+    /// frame's `sequenceNumber` and `audioLevel` (RFC 6464, linear), a video frame's type,
+    /// size and layer indices from the payload (see [`RTCEncodedVideoFrameMetadata`]). From
+    /// what the receiver recorded as the packets passed: `receiveTime`, `captureTime` and
+    /// `senderCaptureTimeOffset`, and the Dependency Descriptor's `frameId` and
+    /// `dependencies`.
+    ///
+    /// # Errors
+    ///
+    /// `TypeError` when `packets` is empty or its packets are not of one frame (different
+    /// SSRCs or RTP timestamps).
+    pub fn encoded_frame_metadata(
+        &mut self,
+        packets: &[rtp::Packet],
+    ) -> Result<RTCEncodedFrameMetadataKind> {
+        let Some(first) = packets.first() else {
+            return Err(shared::error::Error::TypeError(
+                "a frame has at least one packet".to_owned(),
+            ));
+        };
+        if packets.iter().any(|p| {
+            p.header.ssrc != first.header.ssrc || p.header.timestamp != first.header.timestamp
+        }) {
+            return Err(shared::error::Error::TypeError(
+                "the packets of a frame share their SSRC and RTP timestamp".to_owned(),
+            ));
+        }
+        let media_engine = &self.peer_connection.media_engine;
+        let (mime_type, kind) = match media_engine.get_codec_by_payload(first.header.payload_type) {
+            Ok((codec, kind)) => (codec.rtp_codec.mime_type.clone(), kind),
+            Err(_) => (String::new(), self.receiver().kind()),
+        };
+        let extension_payloads = |uri: &str| -> Vec<bytes::Bytes> {
+            let (id, audio, video) = media_engine.get_header_extension_id(
+                crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                    uri: uri.to_owned(),
+                },
+            );
+            if id == 0 || !(audio || video) {
+                return vec![];
+            }
+            packets
+                .iter()
+                .filter_map(|p| p.header.get_extension(id as u8))
+                .collect()
+        };
+        if kind == RtpCodecKind::Audio {
+            // RFC 6464: the level octet's low seven bits, -dBov; the frame's last level.
+            let audio_level = extension_payloads(::sdp::extmap::AUDIO_LEVEL_URI)
+                .last()
+                .and_then(|payload| payload.first().copied())
+                .map(internal::linear_audio_level);
+            let frame = self
+                .receiver()
+                .frame_records()
+                .common(&first.header, mime_type);
+            return Ok(RTCEncodedFrameMetadataKind::Audio(
+                RTCEncodedAudioFrameMetadata {
+                    frame,
+                    sequence_number: Some(first.header.sequence_number),
+                    audio_level,
+                },
+            ));
+        }
+
+        let descriptor =
+            extension_payloads(rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI)
+                .first()
+                .and_then(|payload| {
+                    rtp::codec::dependency_descriptor::DependencyDescriptor::unmarshal_mandatory(
+                        payload,
+                    )
+                    .ok()
+                });
+        let payloads: Vec<&bytes::Bytes> = packets.iter().map(|p| &p.payload).collect();
+        let info = frame_metadata::inspect_video_payloads(&mime_type, &payloads);
+        let ssrc = first.header.ssrc;
+        let receiver = self.receiver_mut();
+        let described = descriptor
+            .and_then(|(_, _, _, frame_number)| {
+                receiver.frame_records().described_frame(ssrc, frame_number)
+            })
+            .cloned();
+        let frame = receiver.frame_records().common(&first.header, mime_type);
+        let size = receiver.frame_records_mut().size(
+            ssrc,
+            described.as_ref().and_then(|d| d.resolution).or(info.size),
+        );
+        let frame_type = if packets.iter().all(|p| p.payload.is_empty()) {
+            RTCEncodedVideoFrameType::Empty
+        } else {
+            match info
+                .key_frame
+                .or(described.as_ref().map(|d| d.structure_attached))
+            {
+                Some(true) => RTCEncodedVideoFrameType::Key,
+                _ => RTCEncodedVideoFrameType::Delta,
+            }
+        };
+        Ok(RTCEncodedFrameMetadataKind::Video(
+            RTCEncodedVideoFrameMetadata {
+                frame,
+                frame_type,
+                frame_id: described.as_ref().map(|d| d.frame_id),
+                dependencies: described
+                    .as_ref()
+                    .map(|d| d.dependencies.clone())
+                    .unwrap_or_default(),
+                width: size.map(|s| s.0),
+                height: size.map(|s| s.1),
+                spatial_index: described
+                    .as_ref()
+                    .map(|d| d.spatial_id)
+                    .or(info.spatial_id)
+                    .map(u32::from),
+                temporal_index: described
+                    .as_ref()
+                    .map(|d| d.temporal_id)
+                    .or(info.temporal_id)
+                    .map(u32::from),
+            },
+        ))
+    }
+
+    /// webrtc-encoded-transform 6.5 "send request key frame" (`sendKeyFrameRequest()` of a
+    /// receiver's transform): sends a Full Intra Request (RFC 5104 4.3.1) for the streams
+    /// this receiver receives.
+    ///
+    /// Returns whether one was sent. Nothing is sent, and the request resolves, when a FIR is
+    /// not appropriate: the transceiver is stopped or does not receive by the current
+    /// description, no stream has arrived yet, or `ccm fir` was not negotiated for the
+    /// receiver's codecs (RFC 5104 section 7: a CCM message is sent only when negotiated).
+    ///
+    /// # Errors
+    ///
+    /// `InvalidStateError` for a receiver that is not a video receiver.
+    pub fn send_key_frame_request(&mut self, now: Instant) -> Result<bool> {
+        use rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
+        if self.receiver().kind() != RtpCodecKind::Video {
+            return Err(shared::error::Error::InvalidStateError);
+        }
+        let transceiver = &self.peer_connection.rtp_transceivers[self.id.0];
+        let receiving = !transceiver.stopped() && transceiver.current_direction().has_recv();
+        let fir_negotiated = self.receiver().get_codec_preferences().iter().any(|codec| {
+            codec
+                .rtp_codec
+                .rtcp_feedback
+                .iter()
+                .any(|fb| fb.typ == "ccm" && fb.parameter == "fir")
+        });
+        let ssrcs: Vec<u32> = self.receiver().track().ssrcs().collect();
+        if !receiving || !fir_negotiated || ssrcs.is_empty() {
+            return Ok(false);
+        }
+        let sender_ssrc = transceiver
+            .sender()
+            .as_ref()
+            .and_then(|s| s.send_encodings().first())
+            .and_then(|e| e.rtp_coding_parameters.ssrc)
+            .unwrap_or(0);
+        let sequence_number = self.receiver_mut().next_fir_sequence_number();
+        let fir = FullIntraRequest {
+            sender_ssrc,
+            media_ssrc: 0,
+            fir: ssrcs
+                .into_iter()
+                .map(|ssrc| FirEntry {
+                    ssrc,
+                    sequence_number,
+                })
+                .collect(),
+        };
+        self.write_rtcp(now, vec![Box::new(fir)])?;
+        Ok(true)
+    }
+
+    fn receiver(&self) -> &internal::RTCRtpReceiverInternal {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver()
+            .as_ref()
+            .expect("every transceiver has a receiver")
+    }
+
+    fn receiver_mut(&mut self) -> &mut internal::RTCRtpReceiverInternal {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver_mut()
+            .as_mut()
+            .expect("every transceiver has a receiver")
     }
 
     /// Asks the remote sender of this receiver's streams to keep its media under `bitrate`

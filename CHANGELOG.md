@@ -1548,6 +1548,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
+  webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
+  packets of one frame as `poll_read` delivered them and returns
+  `RTCEncodedFrameMetadataKind::{Video, Audio}`: SSRC, payload type, CSRCs, RTP timestamp,
+  MIME type, `receive_time` (the arrival of the frame's last packet, recorded by the
+  receiver), capture time and sender offset (abs-capture-time, or interpolated); for video the
+  frame type (key / delta / empty), `frame_id` and `dependencies` from the Dependency
+  Descriptor (read with the stream's structure as packets arrive, frame numbers unwrapped to
+  64 bits), width / height (descriptor resolution, VP8 key frame header, VP9 scalability
+  structure, H.264 SPS with cropping, AV1 sequence header; a delta frame keeps its stream's
+  last size) and the spatial / temporal indices; for audio the sequence number and the RFC 6464
+  level as linear `audioLevel`. `RTCRtpSender::write_rtp_with_audio_level` writes a locally
+  sourced frame's level as the RFC 6464 element. `RTCRtpReceiver::send_key_frame_request`
+  sends a FIR (RFC 5104 4.3.1, sequence number per request) when receiving with `ccm fir`
+  negotiated, an InvalidStateError on audio. `RTCPeerConnectionEvent::OnKeyFrameRequest {
+  sender, rid }` for each PLI / FIR naming a sender's SSRC (6.4 `keyframerequest`).
+
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
