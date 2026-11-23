@@ -518,6 +518,81 @@ pub(crate) fn check_bundled_packet_times(desc: &SessionDescription) -> Result<()
     Ok(())
 }
 
+/// RFC 8859 section 4.3: an attribute of the IDENTICAL category is "repeated across all the
+/// media descriptions under multiplexing" with the same value. RFC 9143 section 7.1.3 lets
+/// an answer or a subsequent offer carry it in the tagged section only, from where it applies
+/// to every bundled section (the note of section 4.3: such attributes "might not always be
+/// explicitly encoded across all media descriptions"), so an absence is not a disagreement.
+/// Two bundled sections that both carry one with different values are, and so is an RTP
+/// section stating one that an RTP tagged section does not (it would be in force for one
+/// section of the RTP session and not for another). The category is rtc-sdp's table
+/// (`sdp::attribute::mux`). The browser descriptions recorded by the interop harness never
+/// disagree (Firefox carries `a=rtcp-rsize` and `a=extmap-allow-mixed` in the tagged section
+/// only, and a tagged data section carries none of the RTP session's attributes: both are
+/// absences).
+pub(crate) fn check_bundled_identical_attributes(desc: &SessionDescription) -> Result<()> {
+    use ::sdp::attribute::mux::{MuxCategory, category};
+    let values = |media: &MediaDescription, key: &str| -> Option<Vec<String>> {
+        let mut found: Vec<String> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == key)
+            .map(|a| {
+                a.value
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        found.sort();
+        (!found.is_empty()).then_some(found)
+    };
+    for media in &desc.media_descriptions {
+        if is_rejected_media(media) {
+            continue;
+        }
+        let Some(tagged) = tagged_section(desc, media) else {
+            continue;
+        };
+        if std::ptr::eq(tagged, media) {
+            continue;
+        }
+        let rtp = |m: &MediaDescription| m.media_name.media != MEDIA_SECTION_APPLICATION;
+        let mut keys: Vec<&str> = media.attributes.iter().map(|a| a.key.as_str()).collect();
+        keys.dedup();
+        for key in keys {
+            if category(key) != Some(MuxCategory::Identical) {
+                continue;
+            }
+            let Some(own) = values(media, key) else {
+                continue;
+            };
+            let mid = get_mid_value(media).map(String::as_str).unwrap_or_default();
+            let tag = get_mid_value(tagged)
+                .map(String::as_str)
+                .unwrap_or_default();
+            match values(tagged, key) {
+                Some(theirs) if theirs != own => {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a={key} differs between the bundled sections {mid} and {tag} (RFC 8859 \
+                         section 4.3: IDENTICAL category)"
+                    )));
+                }
+                None if rtp(media) && rtp(tagged) => {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a={key} is in the bundled section {mid} and not in its tagged section \
+                         {tag} (RFC 8859 section 4.3: IDENTICAL category)"
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The Ta a description proposes (`a=ice-pacing`, RFC 8839 section 5.5: session level, a
 /// value in milliseconds of 1 to 10 digits); `None` when it proposes none or the value is not
 /// one (section 5.5: an agent that does not understand it uses the default).
@@ -3133,7 +3208,29 @@ pub(crate) fn validate_dtls_attributes(
 /// set that every section overrides applies to nothing and is not compared. A value that does
 /// not follow the attribute's syntax is [`Error::ErrSessionDescriptionInvalidFingerprint`],
 /// wherever it sits.
+///
+/// With BUNDLE, `a=fingerprint` is of the TRANSPORT category (RFC 8859 section 4.5 and
+/// appendix A): the group's transport is set up from its tagged section, so that section's
+/// fingerprints are the group's, and what the other bundled sections carry is not used (RFC
+/// 9143 section 7.1.3: their transport attributes are the offerer's proposal for transports
+/// BUNDLE replaces). They are therefore not compared, unless
+/// [`check_bundled_fingerprints_agree`] is asked for.
 pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCDtlsFingerprint>> {
+    fingerprints_in_force(desc, false)
+}
+
+/// The hardening of `SettingEngineBuilder::with_bundled_fingerprints_agreeing`: every bundled
+/// section's fingerprints must agree with the tagged section's, as those of sections outside
+/// the group already must ([`Error::ErrSessionDescriptionConflictingFingerprints`]). Stricter
+/// than RFC 8859 section 4.5, which takes the tagged section's and ignores the others.
+pub(crate) fn check_bundled_fingerprints_agree(desc: &SessionDescription) -> Result<()> {
+    fingerprints_in_force(desc, true).map(|_| ())
+}
+
+fn fingerprints_in_force(
+    desc: &SessionDescription,
+    every_bundled_section: bool,
+) -> Result<Vec<RTCDtlsFingerprint>> {
     let parse =
         |attributes: &[sdp::description::common::Attribute]| -> Result<Vec<RTCDtlsFingerprint>> {
             let mut fingerprints = vec![];
@@ -3172,8 +3269,14 @@ pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCD
     let mut rejected = vec![];
     for m in &desc.media_descriptions {
         let media_level = parse(&m.attributes)?;
+        // A bundled section other than its group's tagged one: its transport attributes are
+        // not the group's (RFC 8859 section 4.5). Still parsed, so a malformed value refuses
+        // the description wherever it sits.
+        let untagged = tagged_section(desc, m).is_some_and(|tagged| !std::ptr::eq(tagged, m));
         if is_rejected_media(m) {
             rejected.push(media_level);
+        } else if untagged && !every_bundled_section {
+            continue;
         } else if media_level.is_empty() {
             in_force.push(session_level.clone());
         } else {

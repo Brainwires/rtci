@@ -963,28 +963,43 @@ fn a_peer_that_states_no_ect_value_gets_ect0() -> Result<()> {
     Ok(())
 }
 
-/// RFC 6679 section 7.2: one RTP session initiates ECN one way. A BUNDLE group is one session:
-/// an offer whose bundled sections list different initiation methods is answered with the
-/// tagged section's method in every section.
+/// RFC 6679 section 7.2: one RTP session initiates ECN one way, and RFC 8859 section 7.4
+/// puts `a=ecn-capable-rtp` in the IDENTICAL category: a BUNDLE group (one RTP session) states
+/// one value, in every bundled RTP section or, in an answer or a subsequent offer, in the
+/// tagged one only (RFC 9143 section 7.1.3). An offer whose bundled sections list different
+/// methods breaks that and is refused (RFC 8859 section 4.3); one that states it in the
+/// tagged section only is answered with the same value in every bundled section.
 #[test]
 fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
-    let section = |mid: &str, methods: &str| {
+    let section = |mid: &str, methods: Option<&str>| {
         format!(
             "m=video 9 UDP/TLS/RTP/SAVPF 96\n{}a=mid:{mid}\na=sendrecv\n\
-             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: {methods}\n",
-            jsep_common::TRANSPORT
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\n{}",
+            jsep_common::TRANSPORT,
+            methods.map_or(String::new(), |m| format!("a=ecn-capable-rtp: {m}\n"))
         )
     };
-    let offer = jsep_common::crlf(&format!(
-        "{}a=group:BUNDLE 0 1\n{}{}",
-        jsep_common::SESSION,
-        section("0", "leap,rtp"),
-        section("1", "rtp")
-    ));
+    let offer = |second: Option<&str>| {
+        jsep_common::crlf(&format!(
+            "{}a=group:BUNDLE 0 1\n{}{}",
+            jsep_common::SESSION,
+            section("0", Some("leap,rtp")),
+            section("1", second)
+        ))
+    };
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    let refused = pc
+        .set_remote_description(
+            Instant::now(),
+            rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(Some("rtp")))?,
+        )
+        .expect_err("bundled sections with different a=ecn-capable-rtp values");
+    assert!(refused.to_string().contains("ecn-capable-rtp"), "{refused}");
+
     let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
     pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(None))?,
     )?;
     let answer = pc.create_answer(None)?.sdp;
     let methods: Vec<&str> = answer

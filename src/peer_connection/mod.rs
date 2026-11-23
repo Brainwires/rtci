@@ -1967,6 +1967,8 @@ impl RTCPeerConnection {
             // RFC 8859 section 4.7: packet times are the same for a payload type across a
             // BUNDLE group.
             crate::peer_connection::sdp::check_bundled_packet_times(&parsed)?;
+            // RFC 8859 section 4.3: IDENTICAL attributes agree across a BUNDLE group.
+            crate::peer_connection::sdp::check_bundled_identical_attributes(&parsed)?;
             // RFC 8839 section 4.4.2.1: an offer that is not an ICE restart keeps the ICE
             // attributes of the session.
             if remote_description.sdp_type == RTCSdpType::Offer
@@ -2523,6 +2525,9 @@ impl RTCPeerConnection {
         parsed: &::sdp::description::session::SessionDescription,
         answers: bool,
     ) -> Result<()> {
+        if self.setting_engine.bundled_fingerprints_agree {
+            sdp::check_bundled_fingerprints_agree(parsed)?;
+        }
         let mut mids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
             // RFC 8866 section 5.7: "A session description MUST contain either at least one

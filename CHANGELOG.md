@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: coordinator decisions on BUNDLE attributes (`conf/jsep-57-decisions`, jsep16).
+  - Remote fingerprints with BUNDLE (RFC 8859 sections 4.5 and appendix A, TRANSPORT
+    category): the tagged section's are the group's, and what the other bundled sections
+    carry is neither compared nor used. A description whose bundled sections disagree is no
+    longer refused; `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` is the
+    old refusal (`Error::ErrSessionDescriptionConflictingFingerprints`) as a hardening.
+  - IDENTICAL attributes (RFC 8859 section 4.3): a remote description is refused when two
+    bundled sections carry one with different values, or an RTP section carries one its RTP
+    tagged section lacks. Checked against the 183 recorded browser descriptions first: none
+    breaks it (Firefox's tagged-only `a=rtcp-rsize` and `a=extmap-allow-mixed` are absences,
+    which stay accepted). Breaking: an offer with different `a=ecn-capable-rtp` methods in
+    two bundled sections is refused; it was answered with the tagged section's.
+  - Merged `conf/early-1-receive-at-offer`, `conf/loss-3-followups` and
+    `conf/media-22-train-fixes`.
+
 - **jsep**: partly implemented JSEP rows (`conf/jsep-56-partial-rows`, jsep15).
   - Remote descriptions: a section without `c=` when the session has none is refused (RFC
     8866 section 5.7); bundled sections that give one payload type two `a=imageattr` sets

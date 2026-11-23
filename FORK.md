@@ -434,6 +434,12 @@ versions that support it. Raising it is a deliberate change of the manifest.
   when the nomination reached it, has its DTLS handshake answered. Upstream sends and
   receives data only on the selected pair.
 
+- BUNDLE fingerprints (jsep16): with a BUNDLE group only the tagged section's `a=fingerprint`
+  lines (or the session level's) are read, as RFC 8859 section 4.5 says for the TRANSPORT
+  category; the other bundled sections' are not compared. Upstream refused a description whose
+  sections disagreed. `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` keeps
+  that refusal as a hardening.
+
 ### Defaults the fork narrows on purpose
 
 - SDP (jsep15): remote descriptions without `c=` for a section, with an `a=imageattr` set
@@ -520,6 +526,13 @@ versions that support it. Raising it is a deliberate change of the manifest.
   `send` rids the offer did not ask for, and an applied answer prunes the sender's encodings
   to the ones it accepted (RFC 8853 section 5.3.2 / 5.3.3, W3C "set a session description").
   A local rid must be 1 to 255 alphanumerics (RFC 8852 section 3.1); no switch.
+- BUNDLE, IDENTICAL attributes (jsep16): a remote description whose bundled sections carry an
+  attribute of RFC 8859's IDENTICAL category (`a=rtcp-rsize`, `a=ecn-capable-rtp`,
+  `a=extmap-allow-mixed`, ...) with different values, or an RTP section carrying one its RTP
+  tagged section lacks, is refused (RFC 8859 section 4.3). An absence is not: the tagged
+  section speaks for the group. No browser description recorded by the interop harness breaks
+  the rule. An offer whose bundled sections list different ECN methods used to be answered
+  with the tagged section's; no switch.
 - SCTP: a peer connection's association schedules its streams by weighted fair queueing
   (RFC 8831 section 6.4) and announces user message interleaving (RFC 8260), the zero checksum
   (RFC 9653) and a State Cookie with a MAC, each of which upstream leaves off or lacks;

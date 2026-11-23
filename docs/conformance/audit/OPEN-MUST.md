@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting`): 4957 of 5087 (97.4 %).
-- Tested as the default (`tested`): 4945 of 5087 (97.2 %); `setting`: 12.
-- Open (not tested in any form): 130: 21 untested, 85 partial, 23 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting`): 4960 of 5087 (97.5 %).
+- Tested as the default (`tested`): 4948 of 5087 (97.3 %); `setting`: 12.
+- Open (not tested in any form): 127: 21 untested, 82 partial, 23 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 76 | 55 |
+| C | partly implemented | 73 | 52 |
 | D | not implemented | 23 | 19 |
 | E | cannot be met or observed inside this engine | 15 | 9 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 142 | 94 |
+| all | | 139 | 91 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 115 rows, 67 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 112 rows, 64 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 11 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 42 | 2 | 5 | 0 | 49 | 30 | 17 | 2 |
+| jsep (running) | 0 | 39 | 2 | 5 | 0 | 46 | 27 | 17 | 2 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -94,10 +94,7 @@ Sorted by class, then owner, size and ID.
 | RFC8830-2-4 | `rfc8830.md` | No two media descriptions share the same msid-id and appdata | untested | C | Check msid-id / appdata uniqueness | S | jsep (running) |
 | RFC8839-4.4.2.2-1 | `rfc8839.md` | Lite: remote-candidates in the offer forms the pair and completes the ... | partial | C | Pin the local side of the pair from `a=remote-candidates` (rtc-ice call) | S | jsep (running) |
 | RFC8851-6.3-6 | `rfc8851.md` | A recv rid the answerer cannot satisfy is discarded | partial | C | Ask the encoder whether it can meet the restrictions | S | jsep (running) |
-| RFC8859-4.3-1 | `rfc8859.md` | IDENTICAL attributes are repeated with the same value across all ... | partial | C | Refuse differing IDENTICAL values: reverses the ECN tagged-section rule (RFC 6679 7.2), owner decision; presence is decided by the fixtures (tagged speaks for the group) | S | jsep (running) |
-| RFC8859-4.5-1 | `rfc8859.md` | TRANSPORT attributes are taken from the m= line whose information ... | partial | C | Fingerprints: as RFC8859-A-19 (owner decision); setup now from the tagged section | S | jsep (running) |
 | RFC8859-4.8-1 | `rfc8859.md` | SPECIAL attributes follow their defining specification | partial | C | Umbrella of A-13, A-22, A-23 | S | jsep (running) |
-| RFC8859-A-19 | `rfc8859.md` | fingerprint: TRANSPORT | partial | C | Owner decision: read the tagged section's fingerprint and ignore the others, instead of refusing a disagreement (no browser writes one) | S | jsep (running) |
 | RFC8859-A-29 | `rfc8859.md` | bundle-only: NORMAL (RFC 9143) | partial | C | See rfc9143.md 6-1 | S | jsep (running) |
 | RFC8859-A-33 | `rfc8859.md` | c= line of a bundled section (RFC 9143 7.1.1) and the legacy a=sctpmap | partial | C | c= of a bundled section per RFC 9143 7.1.1 | S | jsep (running) |
 | RFC8859-A-7 | `rfc8859.md` | group: NORMAL (session level) | partial | C | Other group semantics (see rfc5888.md) | S | jsep (running) |

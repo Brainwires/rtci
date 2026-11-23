@@ -122,11 +122,8 @@ RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remo
 RFC8851-6.2.2-6	C	M	jsep (running)	Check restriction values against the codec (section 8)
 RFC8851-6.3-6	C	S	jsep (running)	Ask the encoder whether it can meet the restrictions
 RFC8851-6.4-1	C	M	jsep (running)	Codec compatibility of answered values (section 8)
-RFC8859-4.3-1	C	S	jsep (running)	Refuse differing IDENTICAL values: reverses the ECN tagged-section rule (RFC 6679 7.2), owner decision; presence is decided by the fixtures (tagged speaks for the group)
-RFC8859-4.5-1	C	S	jsep (running)	Fingerprints: as RFC8859-A-19 (owner decision); setup now from the tagged section
 RFC8859-4.8-1	C	S	jsep (running)	Umbrella of A-13, A-22, A-23
 RFC8859-A-7	C	S	jsep (running)	Other group semantics (see rfc5888.md)
-RFC8859-A-19	C	S	jsep (running)	Owner decision: read the tagged section's fingerprint and ignore the others, instead of refusing a disagreement (no browser writes one)
 RFC8859-A-29	C	S	jsep (running)	See rfc9143.md 6-1
 RFC8859-A-33	C	S	jsep (running)	c= of a bundled section per RFC 9143 7.1.1
 RFC8866-6.10-1	D	S	jsep (running)	`a=charset`

@@ -431,6 +431,9 @@ pub struct SettingEngine {
     /// inverted so that the derived `Default` is the browsers' form, the default.
     pub(crate) dtls_use_srtp_only_with_media: bool,
     pub(crate) accept_lowercase_fingerprints: bool,
+    /// [`SettingEngineBuilder::with_bundled_fingerprints_agreeing`]: a remote description whose
+    /// bundled sections carry fingerprints other than the tagged section's is refused.
+    pub(crate) bundled_fingerprints_agree: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
@@ -1758,6 +1761,24 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_lowercase_fingerprints_accepted(mut self, is_accepted: bool) -> Self {
         self.0.accept_lowercase_fingerprints = is_accepted;
+        self
+    }
+
+    /// Whether a remote description is refused when a bundled m= section carries
+    /// `a=fingerprint` values other than its BUNDLE group's tagged section. The default is
+    /// `false`.
+    ///
+    /// `a=fingerprint` is of the TRANSPORT multiplexing category (RFC 8859 section 4.5 and
+    /// appendix A): "the attribute value MUST be taken from the m= line whose information is
+    /// used to set up the underlying transport", the tagged section's (RFC 9143 section
+    /// 7.1.3). By default the tagged section's fingerprints are the group's and the other
+    /// bundled sections' are not used, whatever they say. `true` is a hardening beyond the
+    /// RFC: every bundled section must agree with the tagged one (in the sha-256 values when
+    /// there are any), as the sections outside a BUNDLE group, which share the transport,
+    /// always must; otherwise the description is
+    /// [`Error::ErrSessionDescriptionConflictingFingerprints`](shared::error::Error::ErrSessionDescriptionConflictingFingerprints).
+    pub fn with_bundled_fingerprints_agreeing(mut self, agreeing: bool) -> Self {
+        self.0.bundled_fingerprints_agree = agreeing;
         self
     }
 
