@@ -229,6 +229,7 @@ pub(crate) mod pass_through;
 pub(crate) mod registry;
 
 pub(crate) mod adaptive_jitter_buffer;
+pub(crate) mod audio_red;
 pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
 pub(crate) mod flexfec;
@@ -258,6 +259,10 @@ pub(crate) mod xr;
 pub use adaptive_jitter_buffer::{
     JitterBufferBuilder as AdaptiveJitterBufferBuilder, JitterBufferControl,
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
+};
+pub use audio_red::{
+    RED_AUDIO_DEFAULT_MAX_PAYLOAD_SIZE, RED_AUDIO_DEFAULT_REDUNDANCY, RedAudioBuilder,
+    RedAudioInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};

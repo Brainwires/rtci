@@ -166,6 +166,8 @@ struct World {
     now: Instant,
     /// The headers of the RTP packets the first peer put on the wire.
     wire: Vec<Header>,
+    /// Sequence numbers of the first peer's RTP packets the network loses.
+    lose: Vec<u16>,
 }
 
 impl World {
@@ -189,7 +191,11 @@ impl World {
                 if i == 0
                     && let Some(header) = wire_rtp_header(&data)
                 {
+                    let lost = self.lose.contains(&header.sequence_number);
                     self.wire.push(header);
+                    if lost {
+                        continue;
+                    }
                 }
                 let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) else {
                     continue;
@@ -252,6 +258,7 @@ impl World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             wire: Vec::new(),
+            lose: Vec::new(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             kind,
@@ -519,5 +526,85 @@ fn after_a_clock_rate_switch_the_sender_reports_lead_with_the_current_rate() -> 
         vec![pcmu, opus],
         "the current clock rate's sender report first, the other one's behind it"
     );
+    Ok(())
+}
+
+/// The answer of a peer without RED: the `red` format removed from `m=audio`.
+fn without_red(sdp: String) -> String {
+    let red = sdp
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("a=rtpmap:")
+                .filter(|rest| rest.contains(" red/"))
+                .and_then(|rest| rest.split(' ').next())
+        })
+        .map(str::to_owned);
+    let Some(red) = red else {
+        return sdp;
+    };
+    let lines: Vec<String> = sdp
+        .lines()
+        .filter(|l| {
+            !l.starts_with(&format!("a=rtpmap:{red} ")) && !l.starts_with(&format!("a=fmtp:{red} "))
+        })
+        .map(|l| {
+            if l.starts_with("m=audio ") {
+                l.split(' ')
+                    .filter(|part| *part != red)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    lines.join("\r\n") + "\r\n"
+}
+
+/// RFC 2198 with the default audio formats (RFC 8854 section 4.2): both peers offer and
+/// answer `red/48000/2` with Opus as primary and redundancy, so the sender's Opus packets go
+/// on the wire as RED packets (payload type 63) that also carry the packet before; the network
+/// loses one, and the receiving application still gets every Opus packet, the lost one
+/// recovered from the next packet's copy, with its sequence number and timestamp. A peer that
+/// does not answer RED gets plain Opus, and the loss stays a loss.
+#[test]
+fn opus_is_sent_in_red_and_a_lost_packet_is_recovered() -> Result<()> {
+    for red in [true, false] {
+        let (mut world, sender) = World::connected(
+            RtpCodecKind::Audio,
+            if red { |sdp| sdp } else { without_red },
+        )?;
+        let local = world.peers[0].pc.local_description().expect("offer").sdp;
+        assert!(local.contains("a=rtpmap:63 red/48000/2\r\n"), "{local}");
+        assert!(local.contains("a=fmtp:63 111/111\r\n"), "{local}");
+        world.lose = vec![4];
+        for seq in 1..=6u16 {
+            world.send(sender, seq, 111)?;
+        }
+        let on_wire: Vec<u8> = world.wire.iter().map(|h| h.payload_type).collect();
+        let received: Vec<(u16, u32, u8)> = world.peers[1]
+            .read_rtp
+            .iter()
+            .map(|h| (h.sequence_number, h.timestamp, h.payload_type))
+            .collect();
+        let expected: Vec<u16> = if red {
+            vec![1, 2, 3, 4, 5, 6]
+        } else {
+            vec![1, 2, 3, 5, 6]
+        };
+        assert_eq!(
+            on_wire,
+            vec![if red { 63 } else { 111 }; 6],
+            "red {red}: what the sender put on the wire"
+        );
+        assert_eq!(
+            received,
+            expected
+                .iter()
+                .map(|seq| (*seq, u32::from(*seq) * 960, 111))
+                .collect::<Vec<_>>(),
+            "red {red}: what the receiving application got"
+        );
+    }
     Ok(())
 }
