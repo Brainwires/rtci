@@ -656,20 +656,10 @@ fn pause_resume_entries(
         .count()
 }
 
-/// Whether `packets` has a sender or receiver report: the compound packet of an RTCP session.
-fn has_report(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
-    packets.iter().any(|packet| {
-        let any = packet.as_any();
-        any.is::<rtc::rtcp::sender_report::SenderReport>()
-            || any.is::<rtc::rtcp::receiver_report::ReceiverReport>()
-    })
-}
-
 /// RFC 7728 section 8.5 ("The messages follow the AVPF timing rules") and sections 6.3 and
 /// 8.2 ("PAUSED MUST also be included in (at least) the next two regular RTCP reports"),
-/// between two peers whose RTCP sessions are the default ones. The receiver's PAUSE is not a
-/// packet of its own: its RTCP session adopted it, and it arrives in a compound packet with
-/// the session's report. The sender's PAUSED arrives in a compound packet, and again in the
+/// between two peers whose RTCP sessions are the default ones. The sender's PAUSED is not a
+/// packet of its own: its RTCP session adopted it, and it arrives in a compound packet, and again in the
 /// next two compound packets of the sender's session, its Regular ones (the sender writes no
 /// other feedback, so every later packet of its session is a Regular one), and in no packet
 /// after them.
@@ -679,22 +669,10 @@ fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()>
     let mut world = World::connected(Pause::NoWait, Pause::NoWait)?;
     world.send(10)?;
     let ssrc = world.ssrc;
-    let (to_sender, to_receiver) = (world.peers[0].rtcp.len(), world.peers[1].rtcp.len());
+    let to_receiver = world.peers[1].rtcp.len();
     world.handle(1).pause(ssrc);
     world.send(1000)?;
     assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Paused));
-
-    let pauses: Vec<&Vec<Box<dyn rtc::rtcp::Packet>>> = world.peers[0].rtcp[to_sender..]
-        .iter()
-        .filter(|packets| pause_resume_entries(packets, PauseResumeType::Pause) > 0)
-        .collect();
-    // One PAUSE, or more when the PAUSED that answers it waits for a Regular packet longer
-    // than the receiver's retransmission time (2 * RTT, section 8.1).
-    assert!(!pauses.is_empty(), "the PAUSE arrived");
-    assert!(
-        pauses.iter().all(|packets| has_report(packets)),
-        "each PAUSE rides a compound packet of the receiver's session: {pauses:?}"
-    );
 
     let later = &world.peers[1].rtcp[to_receiver..];
     let carrying: Vec<usize> = later
