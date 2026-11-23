@@ -24,7 +24,7 @@ resolver = "2"
 opt-level = 0
 
 [workspace.package]
-version = "0.22.0+brainwires.5"
+version = "0.22.0+brainwires.6"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
 # The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).

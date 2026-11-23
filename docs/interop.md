@@ -43,11 +43,11 @@ RFC text.
 
 ## Matrix
 
-Train 10 round 1 (PR #47, head f5d9abb2): Pion 41 pass, 3 n/a, 5 failing; str0m 40 / 6 / 3;
-aiortc 26 / 12 / 11. Every failing cell has a verdict below; the round-1 "fail" cells marked
-harness or n/a are fixed or reclassified on `conf/peers-6-train-fixes`, and the next round's
-results replace this table. A cell named "(peer offers)" has the peer make the offer, "(Rust
-offers)" has Rust make it.
+Train 10 round 5 (PR #47, head 8945a520): Pion 42 pass, 6 n/a, 1 failing; str0m 43 / 6 / 0; aiortc
+35 / 13 / 1. The two failing cells have their verdicts in the cells; `conf/peers-6-train-fixes`
+6a937864 (round 6) fixes the RTCP cell's count and has the Pion peer write MID / RID, with the
+RID-less form kept as an expected failure. A cell named "(peer offers)" has the peer make the offer,
+"(Rust offers)" has Rust make it.
 
 | Cell | Pion | str0m | aiortc |
 |---|---|---|---|
@@ -68,39 +68,38 @@ offers)" has Rust make it.
 | renegotiation: the peer adds a channel | pass | pass | pass |
 | renegotiation: Rust offers a new channel | pass | pass | pass |
 | audio Opus both ways (peer offers, Rust reflects) | pass | pass | pass |
-| audio Opus both ways (Rust offers and streams its fixture) | pass | pass | fail (aiortc off-spec: extmap attributes; the image runs the fixed parser from round 3) |
-| video VP8 both ways (peer offers, Rust reflects) | pass | pass | fail (harness: aiortc getStats) |
+| audio Opus both ways (Rust offers and streams its fixture) | pass | pass | pass |
+| video VP8 both ways (peer offers, Rust reflects) | pass | pass | pass |
 | video VP8 both ways (Rust offers and streams its fixture) | pass | pass | pass |
 | video VP9 both ways (peer offers, Rust reflects) | pass | pass | n/a: aiortc has no VP9 codec |
 | video VP9 both ways (Rust offers and streams its fixture) | pass | pass | n/a: aiortc has no VP9 codec |
-| video H264 both ways (peer offers, Rust reflects) | pass | pass | fail (harness: aiortc getStats) |
-| video H264 both ways (Rust offers and streams its fixture) | pass | pass | fail (harness: aiortc getStats) |
-| RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedback from Rust | fail (harness: SR/RR are the engine's own; round 2 reads the report stats) | fail (harness, as Pion) | fail (harness: aiortc getStats; round 2 counts RTP itself) |
-| loss recovery: NACK and RTX repair the peer's video under netem (peer offers) | pass | pass | FAIL: 9 of 373 still missing; open |
+| video H264 both ways (peer offers, Rust reflects) | pass | pass | pass |
+| video H264 both ways (Rust offers and streams its fixture) | pass | pass | pass |
+| RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedback from Rust | pass | pass | FAIL: aiortc counted RR packets only, while Rust (a sender here) reports in its SRs; harness, round 6 counts reception report blocks |
+| loss recovery: NACK and RTX repair the peer's video under netem (peer offers) | pass | pass | pass |
 | loss recovery: Rust repairs its video to the peer under netem (Rust offers) | pass | pass | pass |
 | non-trickle: every candidate in the description (peer offers) | pass | pass | pass |
 | non-trickle: every candidate in the description (Rust offers) | pass | pass | pass |
-| trickle: candidates sent as they are gathered (peer offers) | pass | pass | n/a: aiortc gathers every candidate while it applies a local description and emits no icecandid |
+| trickle: candidates sent as they are gathered (peer offers) | pass | pass | na-peer (aiortc gathers every candidate while it applies a local description and emits no icecandidate events: its descriptions carry all its candidates, none i |
 | ICE restart by the peer keeps the data channel | pass | pass | n/a: aiortc has no ICE restart |
 | ICE restart by Rust keeps the data channel | pass | pass | n/a: aiortc has no ICE restart |
-| relay only through coturn over UDP (peer offers) | pass | n/a: str0m has no TURN client | pass |
-| relay only through coturn over TCP (peer offers) | pass | n/a: str0m has no TURN client | pass |
-| relay only through coturn over TLS (peer offers) | pass | n/a: str0m has no TURN client | pass |
-| ICE-TCP: the peer's active candidate reaches Rust's passive one | n/a: Pion's ICE agent gathers TCP candidates only through a TCPMux, as passive ones | fail (harness: no selected pair before str0m's first stats event) | n/a: aioice gathers UDP host, server-reflexive and relayed candidates only |
-| ICE-TCP: built into the engine with UDP blocked, the peer reaches an engine-gathered TCP candidate | pass | fail (harness: no selected pair before str0m's first stats event) | n/a: aioice gathers UDP host, server-reflexive and relayed candidates only |
-| mDNS-hidden peer candidates resolve on the Rust side | pass | n/a: str0m neither registers nor resolves mDNS (.local) candidate names | n/a: aioice resolves a remote .local candidate but never hides its own host candidates behind a |
+| relay only through coturn over UDP (peer offers) | pass | n/a: str0m has no TURN client: address discovery, STUN and TURN are left to the application | pass |
+| relay only through coturn over TCP (peer offers) | pass | n/a: str0m has no TURN client: address discovery, STUN and TURN are left to the application | pass |
+| relay only through coturn over TLS (peer offers) | pass | n/a: str0m has no TURN client: address discovery, STUN and TURN are left to the application | pass |
+| ICE-TCP: the peer's active candidate reaches Rust's passive one | n/a: Pion's ICE agent gathers TCP candidates only through a TCPMux, as passive ones: it has no active TCP candidate to reach a passive one | pass | n/a: aioice gathers UDP host, server-reflexive and relayed candidates only: TCP is only its way to a TURN server |
+| ICE-TCP: built into the engine with UDP blocked, the peer reaches an engine-gathered TCP candidate | pass | pass | n/a: aioice gathers UDP host, server-reflexive and relayed candidates only: TCP is only its way to a TURN server |
+| mDNS-hidden peer candidates resolve on the Rust side | pass | n/a: str0m neither registers nor resolves mDNS (.local) candidate names: candidates are addresses the application gives it | n/a: aioice resolves a remote .local candidate but never hides its own host candidates behind an mDNS name |
 | DTLS and SRTP: both sides agree on version, cipher suite and SRTP profile (peer offers) | pass | pass | pass |
-| DTLS and SRTP: both sides agree on version, cipher suite and SRTP profile (Rust offers) | pass | pass | fail (aiortc off-spec: extmap attributes; the image runs the fixed parser from round 3) |
+| DTLS and SRTP: both sides agree on version, cipher suite and SRTP profile (Rust offers) | pass | pass | pass |
 | DTLS 1.3: a peer that prefers it negotiates DTLS 1.3 with Rust (peer offers) | n/a: Pion's DTLS (pion/dtls v3) speaks DTLS 1.2 only | pass | n/a: aiortc's DTLS is OpenSSL's DTLS_METHOD, DTLS 1.2 at most |
 | DTLS 1.3: a peer that prefers it negotiates DTLS 1.3 with Rust (Rust offers) | n/a: Pion's DTLS (pion/dtls v3) speaks DTLS 1.2 only | pass | n/a: aiortc's DTLS is OpenSSL's DTLS_METHOD, DTLS 1.2 at most |
-| renegotiation: the peer adds a video track, then removes it, audio keeps flowing | pass | pass | fail (harness: replaceTrack is not awaitable) |
-| rollback: an abandoned local offer leaves the session usable | fail (Pion has no local rollback; na-peer from round 2) | pass | n/a: aiortc cannot roll back a description |
+| renegotiation: the peer adds a video track, then removes it, audio keeps flowing | pass | pass | pass |
+| rollback: an abandoned local offer leaves the session usable | n/a: Pion does not take a rollback description | pass | n/a: aiortc cannot roll back a description |
 | glare: Rust rolls its offer back, answers, and offers again | pass | pass | pass |
-| simulcast: three RIDs from the peer reach Rust | FAIL: Rust bound no stream; open | pass | n/a: aiortc sends one encoding per sender |
-| balanced: Rust's offer with a transport per media type, the peer bundles it | pass | pass | fail (aiortc off-spec: extmap attributes; the image runs the fixed parser from round 3) |
-| balanced, answered without BUNDLE: a transport per media type | fail (Pion limitation: rejects ungrouped sections; na-peer from round 2) | n/a: str0m runs one ICE transport per session | fail (aiortc off-spec: extmap attributes; the image runs the fixed parser from round 3) |
-| unbundled: the peer offers a transport per section, without a BUNDLE group | fail (Pion limitation: one transport; na-peer from round 2) | n/a: str0m runs one ICE transport per session | fail (harness: aiortc getStats) |
-
+| simulcast: three RIDs from the peer reach Rust | FAIL: Pion's layers carry no MID / RID header extension though Rust's answer negotiates both; peer-side, round 6 has the Pion peer write them | pass | n/a: aiortc sends one encoding per sender: no simulcast |
+| balanced: Rust's offer with a transport per media type, the peer bundles it | pass | pass | pass |
+| balanced, answered without BUNDLE: a transport per media type | na-peer (Pion runs one ICE and one DTLS transport per PeerConnection: in an answer it rejects (port 0) every section outside the offer's BUNDLE group, and with | n/a: str0m runs one ICE transport per session: every m-line must be bundled | na-peer (aiortc answers an offer without a BUNDLE group with one (a=group:BUNDLE 0 1), then still runs an ICE connection per section; the offerer bundles by tha |
+| unbundled: the peer offers a transport per section, without a BUNDLE group | na-peer (Pion runs one ICE and one DTLS transport per PeerConnection: in an answer it rejects (port 0) every section outside the offer's BUNDLE group, and with | n/a: str0m runs one ICE transport per session: every m-line must be bundled | pass |
 
 ## What each peer negotiates
 
