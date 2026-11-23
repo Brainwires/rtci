@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4086 | 269 | 343 | 192 | 29 | 611 | 5530 |
+| MUST | 4085 | 269 | 344 | 192 | 29 | 611 | 5530 |
 | SHOULD | 657 | 82 | 80 | 75 | 6 | 325 | 1225 |
 | MAY | 386 | 33 | 36 | 130 | 0 | 165 | 750 |
 | PROC | 57 | 3 | 4 | 3 | 0 | 0 | 67 |
-| all | 5186 | 387 | 463 | 400 | 35 | 1101 | 7572 |
+| all | 5185 | 387 | 464 | 400 | 35 | 1101 | 7572 |
 
 ## Per file
 
@@ -288,7 +288,7 @@ is a procedure step without a keyword.
 | `rfc9605.md` | MUST | 25 | 1 | 0 | 3 | 0 | 3 | 32 |
 | `rfc9605.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `rfc9605.md` | MAY | 4 | 0 | 2 | 0 | 0 | 0 | 6 |
-| `rfc9628.md` | MUST | 51 | 0 | 2 | 0 | 0 | 6 | 59 |
+| `rfc9628.md` | MUST | 50 | 0 | 3 | 0 | 0 | 6 | 59 |
 | `rfc9628.md` | SHOULD | 6 | 1 | 0 | 1 | 0 | 2 | 10 |
 | `rfc9628.md` | MAY | 2 | 1 | 0 | 3 | 0 | 0 | 6 |
 | `rfc9653.md` | MUST | 10 | 1 | 0 | 0 | 0 | 4 | 15 |
