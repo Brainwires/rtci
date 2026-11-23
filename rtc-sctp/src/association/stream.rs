@@ -3,7 +3,7 @@ use crate::association::state::AssociationState;
 use crate::chunk::chunk_payload_data::{
     ChunkPayloadData, MessageReliability, PayloadProtocolIdentifier,
 };
-use crate::queue::reassembly_queue::{Chunks, ReassemblyQueue};
+use crate::queue::reassembly_queue::{Chunks, MessagePart, ReassemblyQueue};
 use crate::{ErrorCauseCode, Event, Side};
 use shared::error::{Error, Result};
 
@@ -81,6 +81,19 @@ pub enum StreamEvent {
         /// transmission (RFC 3758 4.1 TR3) took no TSN and no stream sequence number.
         transmitted: bool,
     },
+    /// The message of this stream that was being read in parts ([`Stream::read_part`]) will
+    /// not be completed: the sender abandoned it (a FORWARD TSN or I-FORWARD-TSN skipped the
+    /// rest of it, RFC 3758 section 3.6, RFC 8260 section 2.3.1) or the stream's sequence
+    /// numbers were reset (RFC 6525). No part with `end_of_record` follows; the parts already
+    /// read are all there is of it. RFC 6458 section 6.1.7, `SCTP_PARTIAL_DELIVERY_ABORTED`.
+    PartialDeliveryAborted {
+        /// The stream the message was on
+        id: StreamId,
+        /// Whether it was an unordered message
+        unordered: bool,
+        /// Its Stream Sequence Number (DATA) or Message Identifier (I-DATA, RFC 8260)
+        sequence: u32,
+    },
 }
 
 /// Reliability type for stream
@@ -146,6 +159,8 @@ impl Stream<'_> {
                 .reindex_stream(self.stream_identifier, bytes_before);
             if chunks.is_some() {
                 self.association.on_receive_buffer_drained();
+                // What is left may be all incomplete, with the window still closed.
+                self.association.offer_partial_delivery();
             }
             if drained {
                 self.association
@@ -155,6 +170,60 @@ impl Stream<'_> {
         } else {
             Err(Error::ErrStreamClosed)
         }
+    }
+
+    /// Reads the next part of a message: the partial delivery API of RFC 9260 section 6.9
+    /// (the RECEIVE primitive with its "partial flag", 11.1.7; RFC 6458 `MSG_EOR`).
+    ///
+    /// A complete message comes whole, as one part with
+    /// [`end_of_record`](MessagePart::end_of_record) set, just as [`read_sctp`](Self::read_sctp)
+    /// gives it. A message that has not all arrived is given out in parts once the fragments
+    /// of it held from the first on come to the partial delivery point
+    /// ([`TransportConfig::with_partial_delivery_point`](crate::TransportConfig::with_partial_delivery_point)),
+    /// or whatever their size when the receive buffer is out of space (a window that would be
+    /// advertised as closed, with nothing readable whole). Its first part has
+    /// [`first`](MessagePart::first) set, and its last `end_of_record`; until then nothing else
+    /// of this stream is read, by either method. What is read leaves the receive buffer at
+    /// once, and a window that was closed is announced open again (RFC 9260 6.2).
+    ///
+    /// Without this, a message larger than the receive buffer, or interleaved messages
+    /// (RFC 8260) that fill it together, cannot arrive under the rule of RFC 9260 section 6.2
+    /// ("When the receiver's advertised window is 0, the receiver MUST drop any new incoming
+    /// DATA chunk with a TSN larger than the largest TSN received so far").
+    ///
+    /// Returns `Ok(None)` when the stream has nothing to read in this way, and an error if the
+    /// stream is closed.
+    pub fn read_part(&mut self) -> Result<Option<MessagePart>> {
+        let threshold = self.association.partial_delivery_threshold();
+        if let Some(s) = self.association.streams.get_mut(&self.stream_identifier)
+            && (s.state == RecvSendState::ReadWritable || s.state == RecvSendState::Readable)
+        {
+            let bytes_before = s.get_num_bytes_in_reassembly_queue();
+            let part = s.reassembly_queue.read_part(threshold);
+            let drained = !s.reassembly_queue.holds_whole_message();
+            self.association
+                .reindex_stream(self.stream_identifier, bytes_before);
+            if part.is_some() {
+                self.association.on_receive_buffer_drained();
+                self.association.offer_partial_delivery();
+            }
+            if drained {
+                self.association
+                    .retry_deferred_resets(self.stream_identifier);
+            }
+            Ok(part)
+        } else {
+            Err(Error::ErrStreamClosed)
+        }
+    }
+
+    /// Whether a message of this stream is being read in parts: its first part was read
+    /// with [`read_part`](Self::read_part) and its last not yet.
+    pub fn in_partial_delivery(&self) -> bool {
+        self.association
+            .streams
+            .get(&self.stream_identifier)
+            .is_some_and(|s| s.reassembly_queue.in_partial_delivery())
     }
 
     /// write_sctp writes len(p) bytes from p to the DTLS connection

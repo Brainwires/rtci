@@ -115,7 +115,7 @@ pub struct TransportConfig {
     zero_checksum: bool,
     path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
     zero_window_overcommit: bool,
-    strict_zero_window_drop: bool,
+    partial_delivery_point: Option<u32>,
 }
 
 impl Default for TransportConfig {
@@ -141,7 +141,7 @@ impl Default for TransportConfig {
             zero_checksum: false,
             path_mtu_discovery: None,
             zero_window_overcommit: false,
-            strict_zero_window_drop: false,
+            partial_delivery_point: None,
         }
     }
 }
@@ -152,14 +152,20 @@ impl TransportConfig {
     /// message the full buffer holds the start of (webrtc-rs/webrtc#822), up to one message
     /// beyond the buffer. Off by default: RFC 9260 section 6.2, "When the receiver's
     /// advertised window is 0, the receiver MUST drop any new incoming DATA chunk with a TSN
-    /// larger than the largest TSN received so far". Without it a buffer full of incomplete
-    /// messages stays full: what is written must fit the buffer, which it does when the
-    /// largest message accepted (`with_max_receive_message_size`) is not larger than the
-    /// receive buffer. While the advertised window is open, a full buffer takes that chunk
-    /// either way (the RFC rule binds a closed advertised window only), and so does an
-    /// association that negotiated user message interleaving (RFC 8260), whatever this
-    /// setting: several part-received I-DATA messages, each smaller than the buffer, can fill
-    /// it together with none of them complete.
+    /// larger than the largest TSN received so far". While the advertised window is open, a
+    /// full buffer takes that chunk either way (the RFC rule binds a closed advertised window
+    /// only).
+    ///
+    /// An application that reads with [`Stream::read_part`](crate::Stream::read_part) does
+    /// not need it: partial delivery (RFC 9260 6.9) empties a buffer full of incomplete
+    /// messages, so the window opens again and the drop never stops a message. It is for an
+    /// application that reads whole messages only
+    /// ([`read_sctp`](crate::Stream::read_sctp)) and accepts messages larger than its
+    /// receive buffer, or negotiates user message interleaving (RFC 8260), where several
+    /// part-received messages, each smaller than the buffer, can fill it together with none
+    /// of them complete. Without it such a reader can deadlock: nothing is readable, so the
+    /// application frees nothing, and the chunk that would complete a message is dropped on
+    /// every retransmission.
     pub fn with_zero_window_overcommit(mut self, value: bool) -> Self {
         self.zero_window_overcommit = value;
         self
@@ -170,27 +176,37 @@ impl TransportConfig {
         self.zero_window_overcommit
     }
 
-    /// RFC 9260 section 6.2 to the letter: once a SACK advertised a_rwnd 0, every new DATA
-    /// chunk above the largest TSN received is dropped, with
-    /// [`with_zero_window_overcommit`](Self::with_zero_window_overcommit) and with user
-    /// message interleaving (RFC 8260) alike. Off by default.
+    /// The partial delivery point (RFC 6458 section 8.1.21, `SCTP_PARTIAL_DELIVERY_POINT`):
+    /// once the fragments of a message held from its first one on, without a gap, come to
+    /// this many bytes, [`Stream::read_part`](crate::Stream::read_part) gives them out before
+    /// the message is complete (RFC 9260 section 6.9). A message no larger than this is read
+    /// whole, unless the receive buffer runs out of space with nothing readable whole: then
+    /// RFC 9260 6.9's "it SHOULD dispatch part of its inbound message" applies to a message
+    /// of any size. Taken as at least 1 and at most the receive buffer size (RFC 6458: the
+    /// point may not be set "larger than the socket receive buffer size").
     ///
-    /// It can deadlock interleaved messages. With I-DATA several part-received messages,
-    /// each smaller than the receive buffer, can fill it together with none of them
-    /// complete: nothing is readable, so the application cannot free any of it; the window
-    /// stays closed; and the chunk that would complete one of them is above the largest TSN,
-    /// so it is dropped on every retransmission. (Six 16 KiB messages on six streams into a
-    /// 16 KiB buffer deliver none.) Without interleaving it can deadlock a message larger than
-    /// the buffer the same way. Use it only where every message fits the buffer and I-DATA is
-    /// not negotiated, or where the RFC form matters more than delivery.
-    pub fn with_strict_zero_window_drop(mut self, value: bool) -> Self {
-        self.strict_zero_window_drop = value;
+    /// The default is half the receive buffer
+    /// ([`with_max_receive_buffer_size`](Self::with_max_receive_buffer_size)); the RFCs give
+    /// none. From there a single message never closes the window by itself: when it starts
+    /// partial delivery at least half the buffer is free, which is at or above the window
+    /// silly window avoidance advertises as closed (`min(buffer / 2, one full chunk)`, RFC 9260
+    /// 6.2), so RFC 9260 6.2's drop never meets it. And every message up to half the buffer
+    /// (512 KiB with the default 1 MiB, above any `max-message-size` a data channel offers by
+    /// default) is still read whole.
+    ///
+    /// [`read_sctp`](crate::Stream::read_sctp) reads whole messages only; an application that
+    /// reads with it alone does not use partial delivery.
+    pub fn with_partial_delivery_point(mut self, value: u32) -> Self {
+        self.partial_delivery_point = Some(value);
         self
     }
 
-    /// See [`with_strict_zero_window_drop`](Self::with_strict_zero_window_drop).
-    pub fn strict_zero_window_drop(&self) -> bool {
-        self.strict_zero_window_drop
+    /// The partial delivery point in effect: see
+    /// [`with_partial_delivery_point`](Self::with_partial_delivery_point).
+    pub fn partial_delivery_point(&self) -> u32 {
+        self.partial_delivery_point
+            .unwrap_or(self.max_receive_buffer_size / 2)
+            .clamp(1, self.max_receive_buffer_size.max(1))
     }
 
     /// Path MTU discovery (DPLPMTUD, RFC 8899 section 6.2, with the PAD chunk of RFC 4820):

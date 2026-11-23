@@ -37,6 +37,10 @@ pub struct Chunks {
     /// The fragments are I-DATA chunks: ordered and checked by their Fragment Sequence
     /// Number, not by their TSN (RFC 8260 2.2.3).
     by_fsn: bool,
+    /// The message is in partial delivery (RFC 9260 6.9): its fragments up to this one were
+    /// handed to the application, and `chunks` holds those received after them. The Fragment
+    /// Sequence Number with I-DATA, the TSN otherwise.
+    next_part: Option<u32>,
 }
 
 impl Chunks {
@@ -143,6 +147,7 @@ impl Chunks {
             index: 0,
             arrival,
             by_fsn: false,
+            next_part: None,
         }
     }
 
@@ -158,6 +163,7 @@ impl Chunks {
             index: 0,
             arrival,
             by_fsn: true,
+            next_part: None,
         }
     }
 
@@ -185,7 +191,7 @@ impl Chunks {
         if idx < self.chunks.len() && self.chunks[idx].tsn == chunk.tsn {
             return false;
         }
-        if self.chunks.is_empty() {
+        if self.chunks.is_empty() && self.next_part.is_none() {
             self.ppid = chunk.ppid();
         }
         self.chunks.insert(idx, chunk);
@@ -195,6 +201,10 @@ impl Chunks {
     }
 
     pub(crate) fn is_complete(&self) -> bool {
+        // A message in partial delivery is never whole again: part of it was read.
+        if self.next_part.is_some() {
+            return false;
+        }
         // Condition for complete set
         //   0. Has at least one chunk.
         //   1. Begins with beginningFragment set to true
@@ -236,6 +246,138 @@ impl Chunks {
     }
 }
 
+impl Chunks {
+    /// The number that orders this message's fragments: the FSN with I-DATA, the TSN
+    /// otherwise.
+    fn key(&self, c: &ChunkPayloadData) -> u32 {
+        if self.by_fsn { c.fsn } else { c.tsn }
+    }
+
+    /// The fragments that can be handed on now, in order: from the first fragment (or the
+    /// one after the last part read) through those that follow it without a gap, and no
+    /// further than the last fragment. Their count, their bytes, and whether the last of them
+    /// ends the message. `None` when the first of them is missing.
+    pub(crate) fn leading_run(&self) -> Option<(usize, usize, bool)> {
+        let first = self.chunks.first()?;
+        let starts = match self.next_part {
+            Some(next) => self.key(first) == next,
+            None => first.beginning_fragment,
+        };
+        if !starts {
+            return None;
+        }
+        let start = self.key(first);
+        let (mut count, mut bytes) = (0usize, 0usize);
+        for (i, c) in self.chunks.iter().enumerate() {
+            if self.key(c) != start.wrapping_add(i as u32) || (i > 0 && c.beginning_fragment) {
+                break;
+            }
+            count += 1;
+            bytes += c.user_data.len();
+            if c.ending_fragment {
+                return Some((count, bytes, true));
+            }
+        }
+        Some((count, bytes, false))
+    }
+
+    /// Whether every fragment of a message in partial delivery that is still to be read has
+    /// arrived, its last fragment included.
+    pub(crate) fn remaining_complete(&self) -> bool {
+        self.next_part.is_some() && self.leading_run().is_some_and(|(_, _, ends)| ends)
+    }
+
+    /// Takes out the fragments [`leading_run`](Self::leading_run) names and puts the message
+    /// in partial delivery from the next one on. Returns them and whether they end it.
+    fn take_leading(&mut self) -> Option<(Vec<ChunkPayloadData>, bool)> {
+        let (count, _, ends) = self.leading_run()?;
+        let taken: Vec<ChunkPayloadData> = self.chunks.drain(..count).collect();
+        let last = taken.last().map(|c| self.key(c)).unwrap_or_default();
+        self.next_part = Some(last.wrapping_add(1));
+        Some((taken, ends))
+    }
+
+    /// The next fragment of a message in partial delivery when every one before it is held:
+    /// after the last held, or the one after the last part read.
+    fn expected_tail(&self) -> Option<u32> {
+        let next = self.next_part?;
+        match self.leading_run() {
+            Some((_, _, true)) => None,
+            Some((count, _, false)) => Some(next.wrapping_add(count as u32)),
+            None => Some(next),
+        }
+    }
+
+    /// A part of this message made of `chunks`.
+    fn part(&self, chunks: Vec<ChunkPayloadData>) -> Chunks {
+        Chunks {
+            ssn: self.ssn,
+            mid: self.mid,
+            ppi: self.ppi,
+            ppid: self.ppid,
+            chunks,
+            offset: 0,
+            index: 0,
+            arrival: self.arrival,
+            by_fsn: self.by_fsn,
+            next_part: None,
+        }
+    }
+}
+
+/// Part of a message, read with [`Stream::read_part`](crate::Stream::read_part): the partial
+/// delivery API of RFC 9260 section 6.9 (the RECEIVE primitive's "partial flag", section
+/// 11.1.7; `MSG_EOR` of RFC 6458 section 3.1.4).
+///
+/// A message that is complete when it is read is one part with `end_of_record` set. One the
+/// receive buffer cannot hold whole is read in several, in order: the first with `first`
+/// set, the last with `end_of_record` set, all of them from the same stream with no part of
+/// another message of that stream between them (RFC 6458 section 3.1.4: "Only one message at
+/// a time can be partially delivered in any stream"). If the sender abandons the message
+/// before its last part (RFC 3758, RFC 8260 section 2.3.1), no part with `end_of_record`
+/// follows: [`StreamEvent::PartialDeliveryAborted`](crate::StreamEvent::PartialDeliveryAborted)
+/// says so instead.
+#[derive(Debug)]
+pub struct MessagePart {
+    /// The bytes of this part, as the fragments that carried them. Its `ssn`, `mid`, `ppi` and
+    /// `ppid` are the message's.
+    pub chunks: Chunks,
+    /// The message was sent unordered.
+    pub unordered: bool,
+    /// This part starts the message.
+    pub first: bool,
+    /// This part ends the message ("no more deliveries will be received for this stream
+    /// sequence number", RFC 9260 section 11.1.7; RFC 6458 `MSG_EOR`).
+    pub end_of_record: bool,
+}
+
+/// The message of a stream that is in partial delivery.
+#[derive(Debug)]
+struct Partial {
+    set: Chunks,
+    unordered: bool,
+}
+
+/// A message whose partial delivery ended without its last part: the sender abandoned it
+/// (RFC 3758 section 3.6, RFC 8260 section 2.3.1), or the stream's sequence numbers were
+/// reset (RFC 6525).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartialAbort {
+    pub(crate) unordered: bool,
+    /// The Stream Sequence Number with DATA, the Message Identifier with I-DATA.
+    pub(crate) sequence: u32,
+}
+
+/// Where the message a stream can start delivering in parts is.
+enum PartCandidate {
+    /// The ordered message that is due, at the front of `ordered`.
+    Ordered,
+    /// An unordered I-DATA message, at this index of `unordered_partial`.
+    UnorderedInterleaved(usize),
+    /// An unordered DATA message whose first fragment is at this index of `unordered_chunks`.
+    UnorderedData(usize),
+}
+
 /// Whether `n` distinct TSNs, sorted, running from `first` to `last` are contiguous.
 fn contiguous_span(first: u32, last: u32, n: usize) -> bool {
     n > 0 && last.wrapping_sub(first) as usize == n - 1
@@ -269,6 +411,11 @@ pub(crate) struct ReassemblyQueue {
     pub(crate) next_mid: u32,
     /// The unordered I-DATA messages still incomplete, in Message Identifier order.
     unordered_partial: Vec<Chunks>,
+    /// The message of this stream in partial delivery, if one is (RFC 9260 6.9): at most one
+    /// per stream, and no other message of the stream is read until it ends (RFC 6458 3.1.4).
+    partial: Option<Partial>,
+    /// A partial delivery that ended without its last part, until the association reports it.
+    partial_aborted: Option<PartialAbort>,
 }
 
 impl ReassemblyQueue {
@@ -291,6 +438,8 @@ impl ReassemblyQueue {
             interleaved: false,
             next_mid: 0,
             unordered_partial: vec![],
+            partial: None,
+            partial_aborted: None,
         }
     }
 
@@ -363,6 +512,11 @@ impl ReassemblyQueue {
     /// ordered or unordered as the entry says, will not be completed: their fragments are
     /// dropped, and the ordered messages after them are no longer held back.
     pub(crate) fn forward_mid(&mut self, unordered: bool, mid: u32) {
+        if self.partial.as_ref().is_some_and(|p| {
+            p.unordered == unordered && sna32lte(p.set.mid, mid) && !p.set.remaining_complete()
+        }) {
+            self.abort_partial();
+        }
         let mut dropped = 0;
         if unordered {
             self.unordered_partial.retain(|s| {
@@ -391,6 +545,9 @@ impl ReassemblyQueue {
         if chunk.stream_identifier != self.si {
             return false;
         }
+        let Some(chunk) = self.push_to_partial(chunk) else {
+            return false;
+        };
         if self.interleaved {
             return self.push_interleaved(chunk);
         }
@@ -453,6 +610,71 @@ impl ReassemblyQueue {
         }
     }
 
+    /// A fragment of the message in partial delivery goes to it; any other is given back.
+    ///
+    /// With I-DATA the message is named by its U bit and Message Identifier, and with DATA an
+    /// ordered one by its Stream Sequence Number. An unordered DATA message has no number of
+    /// its own, so a fragment belongs to it when it is the next TSN after the fragments it
+    /// holds (RFC 9260 6.9: a message's fragments have consecutive TSNs) and does not begin
+    /// a message; the fragments after it that are already held join it.
+    fn push_to_partial(&mut self, chunk: ChunkPayloadData) -> Option<ChunkPayloadData> {
+        let Some(p) = self.partial.as_mut() else {
+            return Some(chunk);
+        };
+        let len = chunk.user_data.len();
+        let next = p.set.next_part.unwrap_or_default();
+        if self.interleaved {
+            if chunk.unordered != p.unordered || chunk.mid != p.set.mid {
+                return Some(chunk);
+            }
+            if sna32gte(chunk.fsn, next) && p.set.insert_fragment(chunk) {
+                self.n_bytes += len;
+            }
+            return None;
+        }
+        if !p.unordered {
+            if chunk.unordered || chunk.stream_sequence_number != p.set.ssn {
+                return Some(chunk);
+            }
+            let before = p.set.chunks.len();
+            if sna32gte(chunk.tsn, next) {
+                p.set.push(chunk);
+            }
+            if p.set.chunks.len() > before {
+                self.n_bytes += len;
+            }
+            return None;
+        }
+        if !chunk.unordered || chunk.beginning_fragment || p.set.expected_tail() != Some(chunk.tsn)
+        {
+            return Some(chunk);
+        }
+        p.set.chunks.push(chunk);
+        self.n_bytes += len;
+        // The fragments after it may have come first.
+        while let Some(tsn) = p.set.expected_tail() {
+            let idx = self
+                .unordered_chunks
+                .partition_point(|c| sna32lt(c.tsn, tsn));
+            if self
+                .unordered_chunks
+                .get(idx)
+                .is_none_or(|c| c.tsn != tsn || c.beginning_fragment)
+            {
+                break;
+            }
+            let c = self.unordered_chunks.remove(idx);
+            if c.ending_fragment {
+                let i = self.unordered_ends.partition_point(|&t| sna32lt(t, tsn));
+                if self.unordered_ends.get(i) == Some(&tsn) {
+                    self.unordered_ends.remove(i);
+                }
+            }
+            p.set.chunks.push(c);
+        }
+        None
+    }
+
     /// Takes out the complete message that holds the fragment with `tsn`, if there is one.
     ///
     /// Every complete message is taken out as soon as its last fragment arrives, so a new
@@ -497,6 +719,11 @@ impl ReassemblyQueue {
     }
 
     pub(crate) fn is_readable(&self) -> bool {
+        // No other message of a stream is read while one is in partial delivery (RFC 6458
+        // 3.1.4, 8.1.20).
+        if self.partial.is_some() {
+            return false;
+        }
         // Check unordered first
         if !self.unordered.is_empty() {
             // The chunk sets in self.unordered should all be complete.
@@ -533,6 +760,9 @@ impl ReassemblyQueue {
     }
 
     pub(crate) fn read(&mut self) -> Option<Chunks> {
+        if self.partial.is_some() {
+            return None;
+        }
         let chunks = if let (Some(unordered_chunks), Some(ordered_chunks)) = (
             self.readable_unordered_chunks(),
             self.readable_ordered_chunks(),
@@ -573,6 +803,11 @@ impl ReassemblyQueue {
     /// Use last_ssn to locate a chunkSet then remove it if the set has
     /// not been complete
     pub(crate) fn forward_tsn_for_ordered(&mut self, last_ssn: u16) {
+        if self.partial.as_ref().is_some_and(|p| {
+            !p.unordered && sna16lte(p.set.ssn, last_ssn) && !p.set.remaining_complete()
+        }) {
+            self.abort_partial();
+        }
         let num_bytes = self
             .ordered
             .iter()
@@ -597,6 +832,18 @@ impl ReassemblyQueue {
     /// Just remove chunks that are equal to or older than new_cumulative_tsn
     /// from the unordered_chunks
     pub(crate) fn forward_tsn_for_unordered(&mut self, new_cumulative_tsn: u32) {
+        // RFC 3758 3.6: the fragment the unordered message in partial delivery needs next is
+        // skipped (were it received, it would be with the message), so it will not be
+        // completed.
+        if self.partial.as_ref().is_some_and(|p| {
+            p.unordered
+                && !p.set.by_fsn
+                && p.set
+                    .expected_tail()
+                    .is_some_and(|tsn| sna32lte(tsn, new_cumulative_tsn))
+        }) {
+            self.abort_partial();
+        }
         let mut last_idx: isize = -1;
         for (i, c) in self.unordered_chunks.iter().enumerate() {
             if sna32gt(c.tsn, new_cumulative_tsn) {
@@ -625,6 +872,13 @@ impl ReassemblyQueue {
     /// delivered, in their order, and the fragments of the others are dropped; the next
     /// ordered message expected has sequence number 0.
     pub(crate) fn reset_sequence_numbers(&mut self) {
+        if self
+            .partial
+            .as_ref()
+            .is_some_and(|p| !p.set.remaining_complete())
+        {
+            self.abort_partial();
+        }
         let mut dropped = 0;
         for set in std::mem::take(&mut self.ordered) {
             if set.is_complete() {
@@ -663,9 +917,169 @@ impl ReassemblyQueue {
         self.n_bytes
     }
 
-    /// Whether the queue holds no fragment and no message.
+    /// Ends the partial delivery under way without its last part, dropping what is held of it.
+    fn abort_partial(&mut self) {
+        if let Some(p) = self.partial.take() {
+            self.subtract_num_bytes(p.set.len());
+            self.partial_aborted = Some(PartialAbort {
+                unordered: p.unordered,
+                sequence: if p.set.by_fsn {
+                    p.set.mid
+                } else {
+                    u32::from(p.set.ssn)
+                },
+            });
+        }
+    }
+
+    /// The partial delivery that ended without its last part since the last call, if one did.
+    pub(crate) fn take_partial_abort(&mut self) -> Option<PartialAbort> {
+        self.partial_aborted.take()
+    }
+
+    /// Whether a message of this stream is in partial delivery.
+    pub(crate) fn in_partial_delivery(&self) -> bool {
+        self.partial.is_some()
+    }
+
+    /// Whether the queue holds a message the application has not read all of and that is all
+    /// here: a complete message that is readable, or the rest of the one in partial delivery.
+    pub(crate) fn holds_whole_message(&self) -> bool {
+        self.is_readable()
+            || self
+                .partial
+                .as_ref()
+                .is_some_and(|p| p.set.remaining_complete())
+    }
+
+    /// The message that can start delivering in parts: one whose fragments from the first
+    /// on, without a gap, come to `threshold` bytes or more. Ordered, only the one that is
+    /// due (the next Stream Sequence Number or Message Identifier); unordered, the first such.
+    fn part_candidate(&self, threshold: usize) -> Option<PartCandidate> {
+        if let Some(set) = self.ordered.front()
+            && self.is_due(set)
+            && set
+                .leading_run()
+                .is_some_and(|(_, bytes, ends)| !ends && bytes >= threshold)
+        {
+            return Some(PartCandidate::Ordered);
+        }
+        if let Some(i) = self.unordered_partial.iter().position(|set| {
+            set.leading_run()
+                .is_some_and(|(_, bytes, ends)| !ends && bytes >= threshold)
+        }) {
+            return Some(PartCandidate::UnorderedInterleaved(i));
+        }
+        for &begin in &self.unordered_begins {
+            let start = self
+                .unordered_chunks
+                .partition_point(|c| sna32lt(c.tsn, begin));
+            let mut bytes = 0;
+            for (i, c) in self.unordered_chunks[start..].iter().enumerate() {
+                if c.tsn != begin.wrapping_add(i as u32)
+                    || (i > 0 && c.beginning_fragment)
+                    || c.ending_fragment
+                {
+                    break;
+                }
+                bytes += c.user_data.len();
+            }
+            if bytes >= threshold && bytes > 0 {
+                return Some(PartCandidate::UnorderedData(start));
+            }
+        }
+        None
+    }
+
+    /// Whether [`read_part`](Self::read_part) with this `threshold` has something to return.
+    pub(crate) fn part_readable(&self, threshold: usize) -> bool {
+        match &self.partial {
+            Some(p) => p.set.leading_run().is_some(),
+            None => self.is_readable() || self.part_candidate(threshold.max(1)).is_some(),
+        }
+    }
+
+    /// RFC 9260 6.9, the partial delivery API: the next part of a message on this stream.
+    ///
+    /// While a message is in partial delivery, the fragments of it that follow the last part
+    /// read without a gap. Otherwise a complete message, whole, as [`read`](Self::read) gives
+    /// it; and failing that the first fragments of a message that come to `threshold` bytes
+    /// (the partial delivery point, RFC 6458 8.1.21), which puts it in partial delivery.
+    pub(crate) fn read_part(&mut self, threshold: usize) -> Option<MessagePart> {
+        if let Some(p) = self.partial.as_mut() {
+            let (taken, ends) = p.set.take_leading()?;
+            let chunks = p.set.part(taken);
+            let unordered = p.unordered;
+            if ends {
+                self.partial = None;
+            }
+            self.subtract_num_bytes(chunks.len());
+            return Some(MessagePart {
+                chunks,
+                unordered,
+                first: false,
+                end_of_record: ends,
+            });
+        }
+        if self.is_readable() {
+            let chunks = self.read()?;
+            let unordered = chunks.chunks.first().is_some_and(|c| c.unordered);
+            return Some(MessagePart {
+                chunks,
+                unordered,
+                first: true,
+                end_of_record: true,
+            });
+        }
+        let (mut set, unordered) = match self.part_candidate(threshold.max(1))? {
+            PartCandidate::Ordered => {
+                let set = self.ordered.pop_front()?;
+                // The messages after it are due once it ends.
+                self.delivered(set.ssn, set.mid);
+                (set, false)
+            }
+            PartCandidate::UnorderedInterleaved(i) => (self.unordered_partial.remove(i), true),
+            PartCandidate::UnorderedData(start) => {
+                let begin = self.unordered_chunks[start].tsn;
+                let mut end = start;
+                while self.unordered_chunks.get(end + 1).is_some_and(|c| {
+                    c.tsn == begin.wrapping_add((end + 1 - start) as u32)
+                        && !c.beginning_fragment
+                        && !c.ending_fragment
+                }) {
+                    end += 1;
+                }
+                let run: Vec<ChunkPayloadData> = self.unordered_chunks.drain(start..=end).collect();
+                let bi = self
+                    .unordered_begins
+                    .partition_point(|&t| sna32lt(t, begin));
+                if self.unordered_begins.get(bi) == Some(&begin) {
+                    self.unordered_begins.remove(bi);
+                }
+                let arrival = self.next_arrival;
+                self.next_arrival += 1;
+                (Chunks::new(arrival, 0, run[0].payload_type, run), true)
+            }
+        };
+        let (taken, ends) = set.take_leading()?;
+        let chunks = set.part(taken);
+        self.subtract_num_bytes(chunks.len());
+        if !ends {
+            self.partial = Some(Partial { set, unordered });
+        }
+        Some(MessagePart {
+            chunks,
+            unordered,
+            first: true,
+            end_of_record: ends,
+        })
+    }
+
+    /// Whether the queue holds no fragment and no message, and no message is in partial
+    /// delivery (one whose next fragment is still to come has to hear of a FORWARD TSN).
     pub(crate) fn is_empty(&self) -> bool {
         self.n_bytes == 0
+            && self.partial.is_none()
             && self.ordered.is_empty()
             && self.unordered.is_empty()
             && self.unordered_chunks.is_empty()

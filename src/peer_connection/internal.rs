@@ -335,6 +335,7 @@ impl RTCPeerConnection {
         .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
         .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
         .with_max_streams(setting_engine.sctp_max_streams)
+        .with_inbound_reassembly_limit(setting_engine.sctp_inbound_reassembly_limit)
         .with_rto(setting_engine.sctp_rto)
         .with_max_retransmissions(setting_engine.sctp_max_retransmissions)
         .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(

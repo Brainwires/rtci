@@ -1490,6 +1490,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556)",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_inbound_reassembly_limit",
+        class: NotGovernedClass::EngineOnly,
+        note: "the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow",
+    },
+    NotGoverned {
         setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
         class: NotGovernedClass::Same,
         note: "UpToTarget in every profile on this base: the retransmissions alone held under the congestion controller's target (measured in tests/capacity_cap_video_rtc2rtc.rs, see RetransmissionRateLimit). libwebrtc limits retransmissions by a RateLimiter of their own: modules/rtp_rtcp/source/rtp_sender.cc::RTPSender::ReSendPacket @ a222406d (lines 331-333) drops a retransmission retransmission_rate_limiter_->TryUseRate refuses (rtc_base/rate_limiter.cc lines 37, 59); where its maximum is set to the target was not found in the snapshot (searched call/call.cc, call/rtp_transport_controller_send.{h,cc}, call/rtp_video_sender.cc, video/), so the Chrome value is unverified beyond that. Pending: conf/gcc-2-rfc-retransmission makes Rfc and StrictRfc WithinTarget (RFC 4588 7) and leaves Chrome and Performance UpToTarget, which turns this into a governed row",

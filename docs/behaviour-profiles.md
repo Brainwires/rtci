@@ -157,7 +157,7 @@ or no RFC-permitted setting changes it:
   the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an
   audit row for the owner).
 
-## 2. Engine-only capabilities: the same in every profile (25)
+## 2. Engine-only capabilities: the same in every profile (26)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
@@ -197,6 +197,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_dtls_alpn` | RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228) |
 | `SettingEngineBuilder::with_dtls_connection_id` | RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further |
 | `DefaultInterceptorOptions::circuit_breaker_packet_size` | RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: "circuit" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556) |
+| `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` | the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow |
 
 ## Examined: the default is libwebrtc's too, or already the RFC's (38)
 

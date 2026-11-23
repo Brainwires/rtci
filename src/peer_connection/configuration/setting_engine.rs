@@ -498,6 +498,9 @@ pub struct SettingEngine {
     pub(crate) sctp_zero_checksum: Option<bool>,
     /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
     pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_inbound_reassembly_limit`]. `None` is the default,
+    /// 64 MiB.
+    pub(crate) sctp_inbound_reassembly_limit: Option<usize>,
     /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
     pub(crate) sctp_rto: Option<sctp::RtoConfig>,
     /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
@@ -703,6 +706,8 @@ impl SettingEngine {
             // Master's fields of the train-12 merge, at the value the derive gave them.
             own_payload_types_in_answers: Default::default(),
             audio_redundancy: Default::default(),
+            // Train 13's field (sctp-15), at the value the derive gave it.
+            sctp_inbound_reassembly_limit: Default::default(),
         }
     }
 
@@ -2633,6 +2638,36 @@ impl SettingEngineBuilder {
     /// is 65535, as browsers ask for; a value of 0 is raised to 1.
     pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
         self.0.sctp_max_streams = Some(streams.max(1));
+        self
+    }
+
+    /// The most bytes of incomplete inbound messages a data channel association holds above
+    /// SCTP. SCTP gives a message it cannot hold whole out in parts (RFC 9260 section 6.9),
+    /// so its receive window reopens while the message is still arriving; the data channel
+    /// layer joins the parts, because a data channel delivers whole messages only.
+    ///
+    /// What a conforming peer can have in progress is bounded by the negotiated parameters:
+    /// at most one message per stream (RFC 8260 section 2.2.2, RFC 6458 section 3.1.4), each
+    /// at most the `max-message-size` this side advertised (RFC 8841 section 6.1; a larger one
+    /// is dropped, as before). The handler holds at most one incomplete message per stream,
+    /// so what it holds never exceeds (streams with a message in progress) ×
+    /// `max-message-size`. This setting is the ceiling over that product: a peer that would
+    /// take the association past it loses the data channel whose part would go over (W3C
+    /// `OnError` with `data-channel-failure`, the message naming this limit; RFC 8831
+    /// section 6.6: "the receiver SHOULD close the corresponding data channel"). The rest of
+    /// that message is read and dropped, then the channel's stream is reset; the other
+    /// channels go on.
+    ///
+    /// Unset, the default, is 64 MiB: 1024 concurrent messages of the default 64 KiB
+    /// `max-message-size`, or 256 of the largest this engine accepts (256 KiB), far more
+    /// than ordinary use keeps in flight at once, and a quarter of what a peer could pin
+    /// with 65535 streams of 1 KiB each. The worst case one association holds for inbound
+    /// data is then its SCTP receive buffer
+    /// ([`with_sctp_max_receive_buffer_size`](Self::with_sctp_max_receive_buffer_size), 1 MiB
+    /// by default) plus this limit: 65 MiB with the defaults. A value below the advertised
+    /// `max-message-size` is raised to it, so that a single message that size always fits.
+    pub fn with_sctp_inbound_reassembly_limit(mut self, bytes: usize) -> Self {
+        self.0.sctp_inbound_reassembly_limit = Some(bytes);
         self
     }
 
