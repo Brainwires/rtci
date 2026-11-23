@@ -951,11 +951,20 @@ mod rtx_test {
         payload_type: u8,
         payload: &'static [u8],
     ) -> Option<(String, rtp::Packet)> {
+        // Each packet a sequence number of its own: the endpoint delivers a sequence number
+        // once (RFC 7587 section 4.1).
+        thread_local!(static NEXT: std::cell::Cell<u16> = const { std::cell::Cell::new(1000) });
+        let sequence_number = NEXT.with(|next| {
+            let n = next.get();
+            next.set(n.wrapping_add(1));
+            n
+        });
         let mut stats = RTCStatsAccumulator::new();
         let packet = rtp::Packet {
             header: rtp::Header {
                 payload_type,
                 ssrc,
+                sequence_number,
                 ..Default::default()
             },
             payload: Bytes::from_static(payload),
