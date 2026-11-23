@@ -247,3 +247,96 @@ fn a_packet_past_rtx_time_is_not_retransmitted() {
     assert_eq!(0, retransmitted(rtx_time, Duration::from_millis(600)));
     assert_eq!(1, retransmitted(None, Duration::from_secs(60)));
 }
+
+/// The sequence numbers each NACK cycle at `base + TICK * tick` asked for.
+fn asked_at(
+    chain: &mut impl Interceptor,
+    base: Instant,
+    ticks: std::ops::RangeInclusive<u32>,
+) -> Vec<Vec<u16>> {
+    ticks
+        .map(|tick| {
+            chain.handle_timeout(base + TICK * tick).unwrap();
+            let mut asked = vec![];
+            while let Some(tagged) = chain.poll_write() {
+                if let Packet::Rtcp(packets) = tagged.message.packet {
+                    for packet in packets {
+                        if let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() {
+                            asked.extend(nack.nacks.iter().flat_map(|p| p.packet_list()));
+                        }
+                    }
+                }
+            }
+            asked
+        })
+        .collect()
+}
+
+/// RFC 4588 6.3: the first request is delayed "to allow for reordering". The generator learns
+/// how much a stream reorders: after 2 came 60 ms behind 3, a later gap (5) is not asked for
+/// at the cycle that first finds it missing, only once 75 ms (60 ms and a quarter) have passed
+/// since; a packet that the path only reordered is then never asked for. Without that
+/// history (a fresh generator), the gap is asked for at once.
+#[test]
+fn a_stream_that_reorders_has_its_gaps_asked_for_after_its_reordering() {
+    let feed = |chain: &mut dyn FnMut(Instant, u16), base: Instant| {
+        chain(base, 1);
+        chain(base, 3);
+        chain(base + Duration::from_millis(60), 2);
+    };
+    let builder = || NackGeneratorBuilder::new().with_max_packet_age(None);
+
+    let base = Instant::now();
+    let mut chain = generator(builder());
+    feed(
+        &mut |now, seq| {
+            chain.handle_read(rtp(now, seq)).unwrap();
+        },
+        base,
+    );
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![Vec::<u16>::new()], asked_at(&mut chain, base, 1..=1));
+    for seq in [4, 6] {
+        chain
+            .handle_read(rtp(base + Duration::from_millis(150), seq))
+            .unwrap();
+    }
+    while chain.poll_read().is_some() {}
+    // Found missing at 200 ms, asked for at 300 ms (100 ms later, past 75 ms).
+    assert_eq!(
+        vec![vec![], vec![5]],
+        asked_at(&mut chain, base, 2..=3),
+        "the learned allowance holds the first request back one cycle"
+    );
+
+    // The retransmission of 5 arrives (it says nothing about reordering).
+    chain
+        .handle_read(rtp(base + Duration::from_millis(310), 5))
+        .unwrap();
+    // A late packet within the allowance is never asked for.
+    chain
+        .handle_read(rtp(base + Duration::from_millis(350), 7))
+        .unwrap();
+    chain
+        .handle_read(rtp(base + Duration::from_millis(350), 9))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![Vec::<u16>::new()], asked_at(&mut chain, base, 4..=4));
+    chain
+        .handle_read(rtp(base + Duration::from_millis(420), 8))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    let later: Vec<u16> = asked_at(&mut chain, base, 5..=8)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(!later.contains(&8), "8 came 70 ms late: {later:?}");
+
+    // Without reordering seen, the first cycle asks.
+    let mut chain = generator(builder());
+    for seq in [4, 6] {
+        chain.handle_read(rtp(base, seq)).unwrap();
+    }
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![vec![5]], asked_at(&mut chain, base, 1..=1));
+}

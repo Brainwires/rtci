@@ -51,6 +51,75 @@ pub const DEFAULT_MAX_NACKS_PER_PACKET: u16 = 10;
 /// retransmission is of no use to an interactive stream.
 pub const DEFAULT_MAX_PACKET_AGE: Duration = Duration::from_secs(2);
 
+/// How far back the reordering a stream showed is remembered for its allowance.
+const REORDERING_WINDOW: Duration = Duration::from_secs(10);
+/// The most the learned reordering allowance holds a first request back.
+const MAX_REORDERING_ALLOWANCE: Duration = Duration::from_millis(500);
+/// How many of a stream's newest advances of the highest sequence number are kept, to tell
+/// when the gap a late packet fills was opened.
+const ADVANCES_KEPT: usize = 512;
+
+/// The reordering a stream has shown: how late its out-of-order packets came, against when
+/// the first packet that overtook each arrived (RFC 4588 6.3: the first request waits for
+/// reordering to be ruled out).
+#[derive(Default)]
+struct Reordering {
+    /// The highest sequence number received, and when each newer one first arrived.
+    highest: Option<u16>,
+    advances: VecDeque<(u16, Instant)>,
+    /// When each late packet arrived and how long after its gap opened.
+    late: VecDeque<(Instant, Duration)>,
+}
+
+impl Reordering {
+    fn on_packet(&mut self, now: Instant, seq: u16, asked_for: bool) {
+        let newer = |a: u16, b: u16| (1..0x8000).contains(&a.wrapping_sub(b));
+        match self.highest {
+            Some(highest) if !newer(seq, highest) => {
+                // Out of order. A packet that was asked for may be its retransmission: that
+                // says nothing about the path's reordering.
+                if seq != highest
+                    && !asked_for
+                    && let Some((_, opened)) = self
+                        .advances
+                        .iter()
+                        .find(|(advanced, _)| newer(*advanced, seq))
+                {
+                    self.late
+                        .push_back((now, now.saturating_duration_since(*opened)));
+                }
+            }
+            _ => {
+                self.highest = Some(seq);
+                self.advances.push_back((seq, now));
+                while self.advances.len() > ADVANCES_KEPT {
+                    self.advances.pop_front();
+                }
+            }
+        }
+        while let Some((at, _)) = self.late.front() {
+            if now.saturating_duration_since(*at) <= REORDERING_WINDOW {
+                break;
+            }
+            self.late.pop_front();
+        }
+    }
+
+    /// How long a missing packet of this stream may still be on its way: the latest a
+    /// reordered packet came in the last ten seconds, with a quarter on top, at most
+    /// [`MAX_REORDERING_ALLOWANCE`].
+    fn allowance(&self, now: Instant) -> Duration {
+        self.late
+            .iter()
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= REORDERING_WINDOW)
+            .map(|(_, late)| *late)
+            .max()
+            .map_or(Duration::ZERO, |late| {
+                late.mul_f64(1.25).min(MAX_REORDERING_ALLOWANCE)
+            })
+    }
+}
+
 impl Default for NackGeneratorBuilder {
     fn default() -> Self {
         Self {
@@ -114,8 +183,12 @@ impl NackGeneratorBuilder {
     }
 
     /// Set how long a packet has to be missing before the first NACK for it (RFC 4588 6.3:
-    /// the request is delayed to allow for reordering). Default: zero, the gap is asked for
-    /// at the next cycle.
+    /// the request is delayed to allow for reordering). Default: zero.
+    ///
+    /// On top of it the generator learns each stream's reordering: a first request also
+    /// waits for as long as the stream's out-of-order packets arrived late in the last ten
+    /// seconds (a quarter more, at most 500 ms), so a path that reorders does not have every
+    /// overtaken packet asked for and retransmitted.
     pub fn with_reorder_delay(mut self, reorder_delay: Duration) -> Self {
         self.reorder_delay = reorder_delay;
         self
@@ -179,6 +252,8 @@ pub struct NackGeneratorInterceptor {
 
     /// What has been asked for, per SSRC and missing sequence number.
     requests: HashMap<u32, HashMap<u16, Request>>,
+    /// The reordering each stream showed.
+    reordering: HashMap<u32, Reordering>,
 
     /// Queue for outgoing NACK packets
     write_queue: VecDeque<TaggedPacket>,
@@ -203,6 +278,7 @@ impl NackGeneratorInterceptor {
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
             requests: HashMap::new(),
+            reordering: HashMap::new(),
             write_queue: VecDeque::new(),
         }
     }
@@ -228,6 +304,11 @@ impl NackGeneratorInterceptor {
                 (age, rtx_time) => age.or(rtx_time),
             };
 
+            let reorder_delay = self.reorder_delay.max(
+                self.reordering
+                    .get(&ssrc)
+                    .map_or(Duration::ZERO, |reordering| reordering.allowance(now)),
+            );
             let requests = self.requests.entry(ssrc).or_default();
             // A packet that arrived, or that the log no longer covers, is forgotten.
             requests.retain(|sequence_number, _| missing.contains(sequence_number));
@@ -251,7 +332,7 @@ impl NackGeneratorInterceptor {
                     }
                     let due = match request.last_asked {
                         // The first request waits out the reordering allowance.
-                        None => missing_for >= self.reorder_delay,
+                        None => missing_for >= reorder_delay,
                         // The next waits for the retransmission to have had a round trip.
                         Some(last_asked) => self
                             .round_trip_time
@@ -317,6 +398,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
                     for source in &goodbye.sources {
                         self.receive_logs.remove(source);
                         self.requests.remove(source);
+                        self.reordering.remove(source);
                     }
                 }
             }
@@ -334,6 +416,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
             && let Some(receive_log) = self.receive_logs.get_mut(&rtp_packet.header.ssrc)
         {
             receive_log.add(rtp_packet.header.sequence_number);
+            let ssrc = rtp_packet.header.ssrc;
+            let seq = rtp_packet.header.sequence_number;
+            let asked_for = self
+                .requests
+                .get(&ssrc)
+                .and_then(|requests| requests.get(&seq))
+                .is_some_and(|request| request.last_asked.is_some());
+            self.reordering
+                .entry(ssrc)
+                .or_default()
+                .on_packet(msg.now, seq, asked_for);
 
             // Arm the NACK timer from the first tracked packet's instant. `None` means nothing is
             // scheduled, so the interceptor asks for no wake-up until a stream is actually flowing.
@@ -407,6 +500,7 @@ impl Interceptor for NackGeneratorInterceptor {
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
         self.receive_logs.remove(&info.ssrc);
         self.requests.remove(&info.ssrc);
+        self.reordering.remove(&info.ssrc);
         self.rtx_payload_types.remove(&info.ssrc);
     }
 

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors**: reordering is no longer taken for loss (`conf/cb-1-false-trip`).
+  - RFC 8083 section 4.3: the RTP circuit breaker ceased a speech flow (the audio pipeline's
+    rtc-to-rtc test, 0 % loss, 0 to 40 ms of jitter) about a second in. A packet overtaken
+    across a report's boundary made one report's fraction lost 25/256 and the next 0 (the
+    fraction cannot go negative, RFC 3550 A.3, while the cumulative count came back to 0);
+    averaged over CB_INTERVAL with the 23-byte packets of the silence frames as s, ten times
+    the TCP rate fell under the flow's rate. The breaker now uses the smaller of that average
+    and the share of the window's packets the cumulative count says were lost, the newest
+    report's count taken only where it gives packets back (a packet missing then may still
+    arrive). Loss that stays lost trips the breaker as before, one report later at most.
+  - RFC 3550 6.4.1: a packet older than the first one received (it was overtaken by it)
+    extends the sequence back instead of counting as a duplicate; it left `packetsLost` at
+    -1 for the whole session on a lossless reordering path.
+  - RFC 4588 6.3: the NACK generator learns how late each stream's out-of-order packets come
+    and holds a first request back that long (the last 10 s, a quarter more, at most 500 ms;
+    `with_reorder_delay` is the floor). A 500 kbit/s video flow with 40 ms of reordering and
+    no loss sent 164 NACKs a minute and had 154 packets retransmitted; now none.
+  - `tests/circuit_breaker_reordering_rtc2rtc.rs`: the default interceptors over a link that
+    reorders, and the sweep (`-- --ignored sweep`) of where the breaker fires.
+
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
     section 5.2.2): the formats of the most recent answer first in its order, then every
