@@ -105,6 +105,8 @@ pub mod handshaker;
 pub mod prf;
 /// The record layer: framing, sequence numbers and epochs.
 pub mod record_layer;
+/// DTLS 1.2 session resumption (RFC 5246 section 7.3, RFC 5077, RFC 7627 section 5.3).
+pub(crate) mod resumption;
 /// DTLS 1.3 pre-shared keys: session tickets and their store, external PSKs.
 pub mod session;
 /// Signature and hash algorithm pairs, as negotiated for certificate verification.

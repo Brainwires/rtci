@@ -193,6 +193,7 @@ impl RTCPeerConnection {
             multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
             multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
             multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+            multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
             multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
             multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
             multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
@@ -210,9 +211,11 @@ impl RTCPeerConnection {
             failed_nomination: setting_engine.ice.failed_nomination,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
             ta: setting_engine.ice.pacing,
+            pacing_group: setting_engine.ice.pacing_group.clone(),
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
             data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
             send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
+            hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
             nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
             nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
                 RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -3308,6 +3311,7 @@ impl RTCPeerConnection {
         &mut self,
         candidate_value: &str,
         url: Option<&str>,
+        relay_protocol: Option<RTCIceServerTransportProtocol>,
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
         let known = self.ice_transport().agent.get_local_candidates().len();
@@ -3382,6 +3386,27 @@ impl RTCPeerConnection {
             // also names the media section of the transport (W3C "surface the candidate").
             self.ice_transport()
                 .describe_local_candidate(&mut rtc_candidate);
+            // W3C webrtc-pc 4.8.1 (RTCIceCandidate constructor, RTCLocalIceCandidateInit):
+            // a local candidate carries the url of the server it was gathered from, and a
+            // relay candidate the protocol to its TURN server: the one the application gave,
+            // else the one its TURN URL names. Any other candidate has no relayProtocol.
+            if rtc_candidate.url.is_none()
+                && matches!(
+                    rtc_candidate.typ,
+                    RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay
+                )
+            {
+                rtc_candidate.url = url.map(str::to_owned);
+            }
+            rtc_candidate.relay_protocol = if rtc_candidate.typ == RTCIceCandidateType::Relay {
+                relay_protocol
+                    .filter(|protocol| *protocol != RTCIceServerTransportProtocol::Unspecified)
+                    .unwrap_or_else(|| {
+                        url.map_or_else(Default::default, relay_protocol_of_turn_url)
+                    })
+            } else {
+                RTCIceServerTransportProtocol::Unspecified
+            };
             let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()

@@ -1382,6 +1382,13 @@ impl RTCPeerConnection {
         } else {
             self.local_description_was_set = true;
             self.after_local_description(sdp_type);
+            // The local description lists the candidates gathered so far, and it is the one
+            // the application sends: they are conveyed with it (RFC 8838 section 10).
+            if sdp_type != RTCSdpType::Rollback {
+                self.ice_transport_mut()
+                    .agent
+                    .all_local_candidates_conveyed();
+            }
         }
         applied
     }
@@ -3259,7 +3266,11 @@ impl RTCPeerConnection {
             return Err(Error::InvalidStateError);
         }
         if !candidate_value.is_empty() {
-            self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
+            self.add_ice_local_candidate(
+                candidate_value,
+                local_candidate.url.as_deref(),
+                local_candidate.relay_protocol,
+            )?;
         } else {
             self.finish_local_gathering();
         }

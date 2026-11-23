@@ -47,6 +47,12 @@
 //! section 4.2.4 and RFC 9147 section 5.8 set no total limit on a handshake, and a peer
 //! connection's handshake ends on ICE failure (consent expiry), a fatal alert or a close.
 //!
+//! At 30 % and 40 % loss every response to a nomination's requests can be lost while the peer
+//! has accepted it: RFC 8445 section 7.2.5.3.4 then fails the pair and the checklist when the
+//! nomination's transaction ends (`Rc` requests, 39.5 seconds, section 14.3), and that is a
+//! valid end there, as long as the controlling peer reports it as an ICE failure
+//! (`NominationFailed`) and no earlier.
+//!
 //! At every loss rate the consent rule is judged on every datagram, whatever the number of
 //! datagrams a run takes: a peer sends no application data (anything but STUN, RFC 7983)
 //! before a Binding success response has reached it or more than 30 seconds after the last
@@ -57,6 +63,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtc::ice::FailedNomination;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
@@ -150,10 +157,18 @@ struct Peer {
     /// The first application datagram (not STUN) this peer sent without consent: when, and
     /// how long it had been since the last Binding success response reached it.
     sent_without_consent: Option<(Instant, Option<Duration>)>,
+    /// The nomination (a Binding request with USE-CANDIDATE) this peer started or, controlled,
+    /// received last: when, and its transaction id.
+    nomination: Option<(Instant, [u8; 12])>,
 }
 
 impl Peer {
-    fn new(addr: &str, now: Instant, seed: u64) -> Result<Self> {
+    fn new(
+        addr: &str,
+        now: Instant,
+        seed: u64,
+        failed_nomination: FailedNomination,
+    ) -> Result<Self> {
         let provider = Arc::new(SeededProvider {
             inner: default_provider()?,
             rng: Mutex::new(Rng(seed)),
@@ -163,6 +178,7 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_crypto_provider(provider)
+                    .with_ice_failed_nomination(failed_nomination)
                     .build(),
             )
             .build(now)?;
@@ -176,6 +192,7 @@ impl Peer {
             received: Vec::new(),
             last_binding_success: None,
             sent_without_consent: None,
+            nomination: None,
         })
     }
 
@@ -198,6 +215,34 @@ impl Peer {
         self.states.contains(&RTCPeerConnectionState::Failed)
             || self.ice_states.contains(&RTCIceConnectionState::Failed)
     }
+
+    /// Whether this peer's ICE failed while it was still checking, at the end of the
+    /// transaction of its last nomination (the controlled peer's: of the check the last one it
+    /// received triggered) or later: RFC 8445 section 7.2.5.3.4.
+    fn nomination_failed(&self, now: Instant) -> bool {
+        self.ice_states.contains(&RTCIceConnectionState::Failed)
+            && !self.ice_states.contains(&RTCIceConnectionState::Connected)
+            && self
+                .nomination
+                .is_some_and(|(at, _)| now - at >= NOMINATION_TRANSACTION)
+    }
+}
+
+/// The transaction id of a Binding request (STUN type 0x0001) with USE-CANDIDATE (0x0025).
+fn nomination_id(data: &[u8]) -> Option<[u8; 12]> {
+    if data.len() < 20 || data[0] != 0x00 || data[1] != 0x01 {
+        return None;
+    }
+    let mut at = 20;
+    while at + 4 <= data.len() {
+        let typ = u16::from_be_bytes([data[at], data[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([data[at + 2], data[at + 3]]));
+        if typ == 0x0025 {
+            return data[8..20].try_into().ok();
+        }
+        at += 4 + len.div_ceil(4) * 4;
+    }
+    None
 }
 
 struct World {
@@ -216,14 +261,14 @@ struct World {
 impl World {
     /// `salt` changes what the peers draw (and so the course of ICE, DTLS and SCTP) and not
     /// the link's losses and delays.
-    fn new(link: Link, seed: u64, salt: u64) -> Result<Self> {
+    fn new(link: Link, seed: u64, salt: u64, failed_nomination: FailedNomination) -> Result<Self> {
         let now = Instant::now();
         // Each peer its own stream, apart from each other and from the link's.
         let peer_seed = |i: u64| Rng(seed ^ (0x5eed_0000 + i) ^ (salt << 32)).next_u64();
         Ok(Self {
             peers: [
-                Peer::new("10.0.0.1:5000", now, peer_seed(1))?,
-                Peer::new("10.0.0.2:5000", now, peer_seed(2))?,
+                Peer::new("10.0.0.1:5000", now, peer_seed(1), failed_nomination)?,
+                Peer::new("10.0.0.2:5000", now, peer_seed(2), failed_nomination)?,
             ],
             now,
             link,
@@ -256,6 +301,11 @@ impl World {
                     {
                         peer.sent_without_consent = Some((self.now, silent_for));
                     }
+                    if let Some(id) = nomination_id(&msg.message)
+                        && peer.nomination.is_none_or(|(_, last)| last != id)
+                    {
+                        peer.nomination = Some((self.now, id));
+                    }
                     self.sent += 1;
                     if self.rng.unit() < self.link.loss {
                         self.dropped += 1;
@@ -278,6 +328,11 @@ impl World {
                 }
                 let (dest, from, data) = entry.remove();
                 let peer = &mut self.peers[dest];
+                if let Some(id) = nomination_id(&data)
+                    && peer.nomination.is_none_or(|(_, last)| last != id)
+                {
+                    peer.nomination = Some((self.now, id));
+                }
                 // STUN message type 0x0101: Binding success response.
                 if data.len() >= 20 && data[0] == 0x01 && data[1] == 0x01 {
                     peer.last_binding_success = Some(self.now);
@@ -377,7 +432,16 @@ enum Outcome {
     /// The SCTP association gave up by its retransmission limits before the channel opened,
     /// and the channel failed with an error (only where `lapse_allowed`, see the module docs).
     AssociationFailed,
+    /// A peer's ICE failed while checking, at the end of its nomination's transaction (the
+    /// controlled peer's: of the check the nomination triggered), every response to it lost
+    /// (RFC 8445 section 7.2.5.3.4; only where `lapse_allowed`, see the module docs).
+    NominationFailed,
 }
+
+/// How long a nomination's transaction lasts unanswered: `Rc` (7) requests, RTO, 2 RTO, ...
+/// apart, the last given `Rm` (16) RTOs, at an RTO of at least 500 ms (RFC 8445 section 14.3,
+/// RFC 8489 section 6.2.1).
+const NOMINATION_TRANSACTION: Duration = Duration::from_millis(39_500);
 
 /// RFC 7675 Section 5.1: "Consent expires after 30 seconds."
 const CONSENT_EXPIRY: Duration = Duration::from_secs(30);
@@ -405,6 +469,7 @@ fn session_over(
         link,
         seed,
         0,
+        FailedNomination::default(),
         count,
         open_within,
         deliver_within,
@@ -413,16 +478,18 @@ fn session_over(
 }
 
 /// [`session_over`], with the peers' randomness salted (see [`World::new`]).
+#[allow(clippy::too_many_arguments)]
 fn session_over_salted(
     link: Link,
     seed: u64,
     salt: u64,
+    failed_nomination: FailedNomination,
     count: u32,
     open_within: Duration,
     deliver_within: Duration,
     lapse_allowed: bool,
 ) -> Result<Outcome> {
-    let mut world = World::new(link, seed, salt)?;
+    let mut world = World::new(link, seed, salt, failed_nomination)?;
     world.peers[0].pc.create_data_channel(
         "lossy-link",
         Some(RTCDataChannelInit {
@@ -472,6 +539,9 @@ fn session_over_salted(
             );
         }
         if let Some(failed) = world.peers.iter().find(|p| p.failed()) {
+            if lapse_allowed && failed.nomination_failed(world.now) {
+                return Ok(Outcome::NominationFailed);
+            }
             let silent_for = world.now - failed.last_binding_success.unwrap_or(start).max(start);
             if lapse_allowed && silent_for >= CONSENT_EXPIRY {
                 return Ok(Outcome::ConsentLapsed);
@@ -714,6 +784,7 @@ fn a_channel_whose_association_ends_on_one_side_fails_on_the_other() -> Result<(
             THIRTY_PERCENT,
             0x5eed,
             salt,
+            FailedNomination::default(),
             50,
             Duration::from_secs(400),
             Duration::from_secs(900),
@@ -738,25 +809,26 @@ const FORTY_PERCENT: Link = Link {
 /// RFC 8445 section 14.3) still open. ICE's inherited checking timer (`disconnected_timeout +
 /// failed_timeout`, 30 s from entering checking) failed the agent anyway; RFC 8445 sections
 /// 6.1.4.2 and 8.1.2 fail a checklist only when every pair has failed. The agent now fails by
-/// that timer only with nothing left in progress, and a nomination that times out is sent
-/// again while the peer is heard from: on these seeds the session fails only when consent
-/// lapses.
-#[test]
-fn ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss() -> Result<()> {
+/// that timer only with nothing left in progress.
+const HEAVY_LOSS_NOMINATION_SEEDS: [(Link, u64); 5] = [
+    (THIRTY_PERCENT, 0x4a),
+    (THIRTY_PERCENT, 0xff),
+    (THIRTY_PERCENT, 0x127),
+    (FORTY_PERCENT, 0x1c),
+    (FORTY_PERCENT, 0x21),
+];
+
+fn heavy_loss_outcomes(failed_nomination: FailedNomination) -> Result<Vec<(f64, u64, Outcome)>> {
     let mut outcomes = Vec::new();
-    for (link, seed) in [
-        (THIRTY_PERCENT, 0x4a),
-        (THIRTY_PERCENT, 0xff),
-        (THIRTY_PERCENT, 0x127),
-        (FORTY_PERCENT, 0x1c),
-        (FORTY_PERCENT, 0x21),
-    ] {
+    for (link, seed) in HEAVY_LOSS_NOMINATION_SEEDS {
         outcomes.push((
             link.loss,
             seed,
-            session_over(
+            session_over_salted(
                 link,
                 seed,
+                0,
+                failed_nomination,
                 50,
                 Duration::from_secs(400),
                 Duration::from_secs(900),
@@ -764,6 +836,31 @@ fn ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss() -> Resu
             )?,
         ));
     }
-    println!("outcome by loss and seed: {outcomes:?}");
+    println!("{failed_nomination:?}: outcome by loss and seed: {outcomes:?}");
+    Ok(outcomes)
+}
+
+/// [`HEAVY_LOSS_NOMINATION_SEEDS`] by default (RFC 8445 section 7.2.5.3.4): no peer fails
+/// while the nomination's transaction is open; when it ends unanswered, the controlling peer
+/// reports an ICE failure (`NominationFailed`), and otherwise the session fails only when
+/// consent lapses.
+#[test]
+fn ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss() -> Result<()> {
+    heavy_loss_outcomes(FailedNomination::default())?;
+    Ok(())
+}
+
+/// [`HEAVY_LOSS_NOMINATION_SEEDS`] with `FailedNomination::Retry`: a nomination whose
+/// transaction times out is sent again while the peer is heard from, so the controlling peer
+/// never fails by its nomination; the session fails only when consent lapses.
+#[test]
+fn a_retried_nomination_keeps_the_session_over_heavy_loss() -> Result<()> {
+    for (loss, seed, outcome) in heavy_loss_outcomes(FailedNomination::Retry)? {
+        assert_ne!(
+            outcome,
+            Outcome::NominationFailed,
+            "{loss} loss, seed {seed:#x}: the nomination failed with Retry"
+        );
+    }
     Ok(())
 }

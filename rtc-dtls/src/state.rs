@@ -103,6 +103,32 @@ pub struct State {
     pub(crate) early_datagrams: Vec<bytes::BytesMut>,
     /// DTLS 1.3: whether 0-RTT data was accepted; `None` when none was offered.
     pub(crate) early_data_accepted: Option<bool>,
+    /// DTLS 1.2: the session id of this handshake (RFC 5246 7.4.1.2, 7.4.1.3). A client's
+    /// offer until the ServerHello, then the ServerHello's.
+    pub(crate) session_id: Vec<u8>,
+    /// DTLS 1.2 client: the session its ClientHello offers to resume.
+    pub(crate) dtls12_offer: Option<crate::session::Dtls12Session>,
+    /// DTLS 1.2 client: what its ClientHello's SessionTicket extension carries (RFC 5077
+    /// section 3.2): a ticket, or nothing to ask for one. `None`: no extension.
+    pub(crate) session_ticket_offer: Option<Vec<u8>>,
+    /// DTLS 1.2: the session this abbreviated handshake resumes (RFC 5246 7.3).
+    pub(crate) resuming: Option<crate::session::Dtls12Session>,
+    /// DTLS 1.2: a NewSessionTicket comes in the server's last flight (RFC 5077 section 3.3:
+    /// the ServerHello carried an empty SessionTicket extension).
+    pub(crate) new_session_ticket: bool,
+    /// DTLS 1.2 client: the ticket the server sent in this handshake, if not empty, with its
+    /// lifetime hint in seconds (RFC 5077 section 3.3).
+    pub(crate) received_ticket: Option<(Vec<u8>, u32)>,
+    /// DTLS 1.2 server: the ticket it issued in this handshake (its id and when it expires),
+    /// retired if the association fails (RFC 5246 7.2.2).
+    pub(crate) issued_ticket: Option<([u8; 12], u64)>,
+    /// DTLS 1.2 server: the NewSessionTicket of this handshake, once made.
+    pub(crate) pending_ticket: Option<
+        crate::handshake::handshake_message_new_session_ticket::HandshakeMessageNewSessionTicket,
+    >,
+    /// DTLS 1.2 client: the id the session of this association is stored under, to forget it
+    /// if the association fails (RFC 5246 7.2.2).
+    pub(crate) stored_session_id: Option<Vec<u8>>,
     //pub(crate) replay_detector: Vec<Box<dyn ReplayDetector>>,
 }
 
@@ -198,6 +224,15 @@ impl State {
             early_data: vec![],
             early_datagrams: vec![],
             early_data_accepted: None,
+            session_id: vec![],
+            dtls12_offer: None,
+            session_ticket_offer: None,
+            resuming: None,
+            new_session_ticket: false,
+            received_ticket: None,
+            issued_ticket: None,
+            pending_ticket: None,
+            stored_session_id: None,
         }
     }
 }
@@ -381,6 +416,9 @@ impl State {
     pub(crate) fn forget_secrets(&mut self) {
         self.secrets_forgotten = true;
         self.tls13_offer = None;
+        // DTLS 1.2 sessions hold a master secret too (zeroed as they drop).
+        self.dtls12_offer = None;
+        self.resuming = None;
         if let Some((_, exporter_secret)) = &mut self.tls13 {
             *exporter_secret = SecretVec::new(vec![]);
         }
@@ -406,8 +444,10 @@ impl State {
         self.negotiated_version
     }
 
-    /// Whether the DTLS 1.3 handshake was made with a pre-shared key, a ticket of an earlier
-    /// session or an external PSK, rather than with certificates (RFC 8446 section 2.2).
+    /// Whether the handshake resumed a session rather than authenticating with certificates:
+    /// a DTLS 1.3 one made with a pre-shared key, a ticket of an earlier session or an
+    /// external PSK (RFC 8446 section 2.2), or a DTLS 1.2 abbreviated handshake (RFC 5246
+    /// section 7.3, by session id or RFC 5077 ticket).
     pub fn resumed(&self) -> bool {
         self.resumed
     }

@@ -437,6 +437,7 @@ impl Mdns {
                 self.break_probe_ties(inbound, now);
                 if !unicast_arrival {
                     self.note_duplicate_questions(inbound, src, now);
+                    self.observe_unanswered_questions(inbound, src, now);
                 }
             }
         }
@@ -492,7 +493,7 @@ impl Mdns {
         // answers this message; 20 to 120 ms otherwise.
         let delay = if truncated {
             Some(self.jitter.millis(400, 500))
-        } else if all_ours {
+        } else if all_ours && (inbound.questions.len() == 1 || !self.config.multi_question_delay) {
             None
         } else {
             Some(self.jitter.millis(20, 120))

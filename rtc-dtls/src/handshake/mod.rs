@@ -29,6 +29,8 @@ pub mod handshake_message_client_key_exchange;
 pub mod handshake_message_finished;
 /// HelloVerifyRequest: DTLS's cookie exchange, which resists amplification attacks.
 pub mod handshake_message_hello_verify_request;
+/// NewSessionTicket (RFC 5077): a ticket the client may resume the session with.
+pub mod handshake_message_new_session_ticket;
 /// ServerHello: the server's chosen parameters.
 pub mod handshake_message_server_hello;
 /// ServerHelloDone: the server has finished its first flight.
@@ -55,6 +57,7 @@ use handshake_message_client_hello::*;
 use handshake_message_client_key_exchange::*;
 use handshake_message_finished::*;
 use handshake_message_hello_verify_request::*;
+use handshake_message_new_session_ticket::*;
 use handshake_message_server_hello::*;
 use handshake_message_server_hello_done::*;
 use handshake_message_server_key_exchange::*;
@@ -75,6 +78,8 @@ pub enum HandshakeType {
     ServerHello = 2,
     /// `HELLO_VERIFY_REQUEST` (`3`).
     HelloVerifyRequest = 3,
+    /// `NEW_SESSION_TICKET` (`4`, RFC 5077).
+    NewSessionTicket = 4,
     /// `CERTIFICATE` (`11`).
     Certificate = 11,
     /// `SERVER_KEY_EXCHANGE` (`12`).
@@ -101,6 +106,7 @@ impl fmt::Display for HandshakeType {
             HandshakeType::ClientHello => write!(f, "ClientHello"),
             HandshakeType::ServerHello => write!(f, "ServerHello"),
             HandshakeType::HelloVerifyRequest => write!(f, "HelloVerifyRequest"),
+            HandshakeType::NewSessionTicket => write!(f, "NewSessionTicket"),
             HandshakeType::Certificate => write!(f, "Certificate"),
             HandshakeType::ServerKeyExchange => write!(f, "ServerKeyExchange"),
             HandshakeType::CertificateRequest => write!(f, "CertificateRequest"),
@@ -120,6 +126,7 @@ impl From<u8> for HandshakeType {
             1 => HandshakeType::ClientHello,
             2 => HandshakeType::ServerHello,
             3 => HandshakeType::HelloVerifyRequest,
+            4 => HandshakeType::NewSessionTicket,
             11 => HandshakeType::Certificate,
             12 => HandshakeType::ServerKeyExchange,
             13 => HandshakeType::CertificateRequest,
@@ -143,6 +150,8 @@ pub enum HandshakeMessage {
     ServerHello(HandshakeMessageServerHello),
     /// HelloVerifyRequest, DTLS's cookie challenge.
     HelloVerifyRequest(HandshakeMessageHelloVerifyRequest),
+    /// NewSessionTicket, a ticket for a later resumption (RFC 5077).
+    NewSessionTicket(HandshakeMessageNewSessionTicket),
     /// Certificate, carrying a certificate chain.
     Certificate(HandshakeMessageCertificate),
     /// ServerKeyExchange, the server's key-agreement share.
@@ -166,6 +175,7 @@ impl HandshakeMessage {
             HandshakeMessage::ClientHello(msg) => msg.handshake_type(),
             HandshakeMessage::ServerHello(msg) => msg.handshake_type(),
             HandshakeMessage::HelloVerifyRequest(msg) => msg.handshake_type(),
+            HandshakeMessage::NewSessionTicket(msg) => msg.handshake_type(),
             HandshakeMessage::Certificate(msg) => msg.handshake_type(),
             HandshakeMessage::ServerKeyExchange(msg) => msg.handshake_type(),
             HandshakeMessage::CertificateRequest(msg) => msg.handshake_type(),
@@ -182,6 +192,7 @@ impl HandshakeMessage {
             HandshakeMessage::ClientHello(msg) => msg.size(),
             HandshakeMessage::ServerHello(msg) => msg.size(),
             HandshakeMessage::HelloVerifyRequest(msg) => msg.size(),
+            HandshakeMessage::NewSessionTicket(msg) => msg.size(),
             HandshakeMessage::Certificate(msg) => msg.size(),
             HandshakeMessage::ServerKeyExchange(msg) => msg.size(),
             HandshakeMessage::CertificateRequest(msg) => msg.size(),
@@ -202,6 +213,7 @@ impl HandshakeMessage {
             HandshakeMessage::ClientHello(msg) => msg.marshal(writer)?,
             HandshakeMessage::ServerHello(msg) => msg.marshal(writer)?,
             HandshakeMessage::HelloVerifyRequest(msg) => msg.marshal(writer)?,
+            HandshakeMessage::NewSessionTicket(msg) => msg.marshal(writer)?,
             HandshakeMessage::Certificate(msg) => msg.marshal(writer)?,
             HandshakeMessage::ServerKeyExchange(msg) => msg.marshal(writer)?,
             HandshakeMessage::CertificateRequest(msg) => msg.marshal(writer)?,
@@ -291,6 +303,12 @@ impl Handshake {
             HandshakeType::HelloVerifyRequest => HandshakeMessage::HelloVerifyRequest(
                 HandshakeMessageHelloVerifyRequest::unmarshal(reader)?,
             ),
+            HandshakeType::NewSessionTicket => {
+                let body = read_body(reader, handshake_header.length)?;
+                HandshakeMessage::NewSessionTicket(HandshakeMessageNewSessionTicket::unmarshal(
+                    &mut body.as_slice(),
+                )?)
+            }
             HandshakeType::Certificate => {
                 HandshakeMessage::Certificate(HandshakeMessageCertificate::unmarshal(reader)?)
             }

@@ -630,6 +630,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **ice**: `ice::PacingGroup`, `AgentConfig::pacing_group` and
+  `SettingEngineBuilder::with_ice_pacing_group`: agents that share one start at most one
+  transaction per 5 ms together (RFC 8445 section 14.2). `AgentConfig` has a new field: a
+  struct literal without `..Default::default()` no longer compiles.
+- **mdns**: `Mdns::handle_datagram(msg, destination)`: a datagram with the destination of its
+  IP header, for drivers that read it. Then RFC 6762 sections 6 and 11 apply as written: a
+  unicast response is taken only for a recent QU question, and one that arrived at the mDNS
+  multicast address is on-link whatever its source.
+- **turn**: `Client::update_credentials` with a new username no longer re-keys live
+  allocations: they keep the username (and password) that created them, as RFC 8656 section 5
+  asks of every request about an allocation; the new username is for the next `allocate`.
+  Before, the next Refresh went under the new username and was answered 441.
+- **stun**, **ice**: a `stuns` URI whose host is an IP address is refused by default (RFC 8489
+  section 8.1: "MUST be rejected"): `stun::uri::Uri::parse_uri` and `ice::url::Url::parse_url`
+  (and so the peer connection's ICE servers) return `ErrHost`; the new `parse_uri_lenient` /
+  `parse_url_lenient` accept it, as browsers do. `parse_uri_strict` is now the same as
+  `parse_uri`.
+- **ice**: an authenticated error response with an unknown comprehension-required attribute
+  fails its transaction and pair at once (RFC 8489 section 6.3.4); a Binding indication with
+  one, or with a wrong FINGERPRINT, is discarded (section 6.3.2). A lite agent takes only
+  host candidates, one per IP address (RFC 8445 section 5.2).
+- **pc**: `RTCIceCandidateInit` has a new member `relay_protocol` (W3C
+  `RTCLocalIceCandidateInit.relayProtocol`, serialized `relayProtocol`); a struct literal
+  without `..Default::default()` no longer compiles. A local relay candidate's `RTCIceCandidate`
+  carries it (else the protocol its TURN URL names) and its `url`; other types have none (W3C
+  webrtc-pc 4.8.1).
+- **pc**: a peer-reflexive remote candidate at an address the application did not signal is
+  exposed with an empty (null) `address` in the selected candidate pair, `get_candidate_pairs`
+  and the candidate-pair events (W3C webrtc-pc 4.8.1: "the user agent MUST leave the address
+  attribute as null for any exposed remote candidate").
+- **ice**: an ICE restart begun in connected or completed reports connected, not checking: the
+  path is kept until the new generation selects a pair (W3C webrtc-pc 5.6.4; RFC 8445 section
+  9). From disconnected or failed it is checking, and so when the kept path's consent expires
+  before a new pair.
+- **dtls**: ticket keys rotate every ticket lifetime, the previous one kept to open the tickets
+  it sealed (RFC 5077 section 5.5); DTLS 1.3 tickets included.
+- **ice**: a controlled agent whose check triggered by a received USE-CANDIDATE fails (timeout,
+  error response, non-symmetric response) fails the pair and the checklist by default, while no
+  pair is selected (RFC 8445 sections 7.2.5.3.4 and 7.3.1.5: "If the triggered request fails,
+  the agent MUST [...] set the checklist state to Failed"). `FailedNomination::Retry` keeps
+  the earlier behaviour, the pair alone failing, on both sides.
+- **ice**: a controlling agent's failed nomination fails the pair and the checklist by default
+  (RFC 8445 section 7.2.5.3.4: "the agent MUST remove the candidate pair from the valid list,
+  set the candidate pair state to Failed, and set the checklist state to Failed"):
+  `FailedNomination::FailChecklist` is now the default of `AgentConfig::failed_nomination` and
+  `SettingEngineBuilder::with_ice_failed_nomination`, and `FailedNomination::Retry` (send the
+  nomination again while the peer is heard from) the setting. The nomination fails as a
+  request does (section 7.2.5.2): at the end of its transaction (Rc requests, 39.5 s at an RTO
+  of 500 ms, section 14.3), on an unrecoverable error response, or on a response from another
+  address; with `FailChecklist` the 30 s silence bound of `Retry` does not end it earlier, and
+  an error or non-symmetric response fails the checklist instead of moving to the next valid
+  pair. Every ICE default is now the RFC's.
 - **turn**: the client's Binding request (`send_binding_request`, `send_binding_request_to`)
   ends with FINGERPRINT, as every other message it sends does (RFC 8489 section 7).
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
@@ -1331,6 +1383,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **ice**: through the peer connection a local candidate is paired only once it has been
+  conveyed to the peer (RFC 8838 section 10): when the application takes its
+  `OnIceCandidateEvent` from `poll_event`, or sets a local description that lists it. An
+  application that adds a candidate and never takes the event (nor sets a description after
+  it) now sends no check from it. `SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed(true)`
+  pairs at once, as before. In `rtc-ice`, `Agent::add_local_candidate` still pairs at once (the
+  caller conveys the candidate with that call); new `Agent::add_unconveyed_local_candidate`,
+  `local_candidate_conveyed`, `all_local_candidates_conveyed`, `is_local_candidate_unconveyed`
+  and `AgentConfig::hold_local_candidates_until_conveyed` (`ice_local_candidate_conveyed.rs`,
+  `agent_trickle_test.rs`).
+- **ice**: a STUN response to a check is authenticated by MESSAGE-INTEGRITY only, the attribute
+  every check carries; one with MESSAGE-INTEGRITY-SHA256 instead is discarded (RFC 8489
+  sections 9.1.4, 9.1.5). A check, or any other STUN message, larger than the path MTU allows
+  over UDP is not sent (section 6.1: `AgentConfig::path_mtu`, else 576 / 1280 bytes), and the
+  check's pair fails; so does a check that cannot be built (a USERNAME of 509 bytes or more).
+  A check whose responses all failed their integrity check ends with the new
+  `Event::IntegrityViolation` for its pair (section 9.1.4) (`agent_stun_rows_test.rs`).
+- **ice**: connectivity checks and success responses carry SOFTWARE, `rtc-ice <version>` by
+  default (RFC 8489 sections 6.1, 6.3.1.1); `AgentConfig::software` sets another text, or none
+  with an empty one (section 16.1.2). A lite agent that is dual-stack or IPv6-only takes its
+  local preference from the RFC 6724 precedence of the address (RFC 8445 section 5.2), its
+  rank breaking ties; an IPv4-only one keeps 65535.
+- **ice**: once the peer's end-of-candidates has arrived and local gathering is complete, the
+  per-type waits before nominating (`with_*_acceptance_min_wait`) end (RFC 8838 section 14).
+  A host candidate past the cap of published mDNS names is provided under a `.local` name
+  that is not published, instead of being dropped (draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1).
+- **ice**: new `Agent::stop_for_ice_mismatch` ends ICE for the agent's stream (RFC 8839
+  section 5.3: no checks, state failed), for the SDP layer to call on an answer's
+  `a=ice-mismatch`; no RFC 3264 fallback (nothing is sent without consent, RFC 7675).
+- **mdns**: through `rtc-ice` and the peer connection, the answers to a query of more than one
+  question wait 20 to 120 ms even when every question is about the agent's own name (RFC 6762
+  section 6.3); `MdnsConfig::with_multi_question_delay`,
+  `AgentConfig::multicast_dns_multi_question_delay`,
+  `SettingEngineBuilder::with_multicast_dns_multi_question_delay(false)` answers at once as
+  before. `rtc-mdns` alone keeps answering such a query at once unless asked.
+- **mdns**: cached addresses found stale before their TTL ends are flushed (RFC 6762 sections
+  10.4, 10.5): `Mdns::reconfirm(now, name)` (a client's hint) sends two queries and flushes an
+  address no response brought within ten seconds; an address other hosts' queries ask for in
+  vain (two or more in ten seconds) is flushed without a query of our own. New
+  `Mdns::is_reconfirming` (`mdns_stale_test.rs`).
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound
@@ -1853,11 +1946,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
 - **ice**: `AgentConfig::failed_nomination` / `SettingEngineBuilder::with_ice_failed_nomination`
-  (`FailedNomination::{Retry, FailChecklist}`): what a controlling agent does when its
-  nomination times out. `Retry`, the default, nominates the pair again while the peer is heard
-  from; `FailChecklist` is RFC 8445 section 7.2.5.3.4 to the letter (the pair and the checklist
-  fail). The one ICE default that is not the RFC's; see `docs/conformance/audit/rfc8445.md`
-  ("Decisions").
+  (`FailedNomination::{FailChecklist, Retry}`): what a controlling agent does when its
+  nomination fails. `FailChecklist`, the default, is RFC 8445 section 7.2.5.3.4 (the pair and
+  the checklist fail); `Retry` nominates the pair again while the peer is heard from (see
+  `docs/conformance/audit/rfc8445.md`, "Decisions").
 - **ice**: `rank_local_candidates` and `Agent::add_local_candidates` rank candidates gathered
   together as RFC 8421 section 4 recommends for a dual-stack host: the IPv6 candidates of a type
   get a head start of (N4 + N6) / N4 places, then the families alternate. Candidates added one
@@ -3251,6 +3343,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a provider that wraps another and leaves `new_header_mask` at its default gets DTLS 1.2
   instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
   failed on the train).
+
+### DTLS 1.2 session resumption
+
+- **dtls**: DTLS 1.2 session resumption (RFC 5246 section 7.3, RFC 6347 section 4.2.4 figure
+  2), off unless configured, and off in the peer connection. A server resumes by session id from
+  a `session::SessionCache` (`ConfigBuilder::with_session_cache`, `MemorySessionCache`) and by
+  RFC 5077 ticket when `with_session_tickets` is above 0 (sealed by the DTLS 1.3 ticket key,
+  with a version and additional data of their own, each accepted once); a client keeps its
+  `Dtls12Session`s in its `SessionStore` (new provided methods `put_dtls12`, `take_dtls12`,
+  `forget_dtls12`, which keep nothing by default; `MemorySessionStore` implements them, and
+  `len_dtls12`). The abbreviated handshake is two new flights: the server's ServerHello,
+  NewSessionTicket, ChangeCipherSpec and Finished, the client's ChangeCipherSpec and Finished
+  as the last flight. Only sessions made with the extended master secret are kept, and RFC 7627
+  section 5.3 applies on both sides; a session is not resumed for another server name (RFC 6066
+  section 3), a suite the ClientHello does not offer, or a configured client authentication it
+  would not have met; it is kept once its handshake completes and forgotten when a connection
+  that used it fails (RFC 5246 sections 7.2, 7.2.2). `State::resumed` also reports a DTLS 1.2
+  resumption. New handshake message `HandshakeMessageNewSessionTicket` (type 4) and
+  `HandshakeType::NewSessionTicket`; the hellos carry their `session_id`. Interop with OpenSSL
+  3.5.4, both roles, by session id (`-no_ticket`) and by ticket.
+
+- **dtls**: `examples/dtls_interop.rs` takes `DTLS_CID=<n>` (ask for an n-byte connection id,
+  count the `tls12_cid` records each way) and `DTLS_SRTP_OPTIONAL=1`. With them, DTLS 1.2
+  connection ids (RFC 9146) interoperate with Mbed TLS 3.6.2 in both roles.
 
 ### DTLS 1.3 pre-shared keys
 

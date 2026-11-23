@@ -18,6 +18,8 @@ mod conn_transport_test;
 #[cfg(test)]
 mod connection_id_test;
 #[cfg(test)]
+mod mbedtls_cid_kat_test;
+#[cfg(test)]
 mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;
@@ -966,6 +968,10 @@ impl DTLSConn {
         if let Some(v13) = &mut self.v13 {
             v13.fail();
         }
+        // RFC 5246 7.2, 7.2.2: the session of a failed connection is not resumed.
+        if self.v13.is_none() && !self.failed {
+            crate::resumption::on_failed(&mut self.state, &self.handshake_config);
+        }
         self.failed = true;
         self.closed = true;
         self.current_retransmit_timer = None;
@@ -1041,6 +1047,7 @@ impl DTLSConn {
                 handshake_type,
                 HandshakeType::HelloVerifyRequest
                     | HandshakeType::ServerHello
+                    | HandshakeType::NewSessionTicket
                     | HandshakeType::Certificate
                     | HandshakeType::ServerKeyExchange
                     | HandshakeType::CertificateRequest
@@ -1300,6 +1307,10 @@ impl DTLSConn {
 
     pub(crate) fn set_handshake_completed(&mut self) {
         self.handshake_completed = true;
+        // DTLS 1.2: the session this handshake made or resumed, kept for the next one.
+        if self.v13.is_none() {
+            crate::resumption::on_completed(&mut self.state, &self.handshake_config);
+        }
     }
 
     pub(crate) fn is_handshake_completed(&self) -> bool {

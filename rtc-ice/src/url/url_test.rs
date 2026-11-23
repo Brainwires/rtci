@@ -159,3 +159,25 @@ fn test_ipv6_host_is_written_in_brackets() {
         assert_eq!(parsed.port, 3478);
     }
 }
+
+/// RFC 8489 section 8.1: "A 'stuns' URI containing an IP address MUST be rejected" (the
+/// certificate is checked against a name); `parse_url_lenient` takes it, as browsers do. A
+/// `stun` URI may name an address.
+#[test]
+fn test_a_stuns_url_with_an_ip_address_is_rejected() -> Result<()> {
+    for raw in [
+        "stuns:192.0.2.1",
+        "stuns:192.0.2.1:5349",
+        "stuns:[2001:db8::1]:5349",
+    ] {
+        assert!(matches!(Url::parse_url(raw), Err(Error::ErrHost)), "{raw}");
+        assert_eq!(
+            Url::parse_url_lenient(raw)?.scheme,
+            SchemeType::Stuns,
+            "{raw}"
+        );
+    }
+    assert_eq!(Url::parse_url("stun:192.0.2.1")?.host, "192.0.2.1");
+    assert_eq!(Url::parse_url("stuns:example.org")?.host, "example.org");
+    Ok(())
+}

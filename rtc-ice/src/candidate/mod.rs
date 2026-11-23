@@ -232,6 +232,10 @@ pub struct Candidate {
     /// The related address (the base) is a host address hidden behind an mDNS name: it is
     /// not signalled. See [`Candidate::signalled_related_address`].
     pub(crate) hide_related_address: bool,
+    /// A local candidate the agent holds but has not been told is conveyed to the peer yet:
+    /// it is not paired until it is (RFC 8838 Section 10). See
+    /// [`Agent::add_unconveyed_local_candidate`](crate::agent::Agent::add_unconveyed_local_candidate).
+    pub(crate) unconveyed: bool,
 
     pub(crate) network: String,
 
@@ -262,6 +266,7 @@ impl Default for Candidate {
             priority_override: 0,
             local_preference_rank: None,
             hide_related_address: false,
+            unconveyed: false,
             network: String::new(),
 
             url: None,

@@ -7,7 +7,7 @@ use super::key_schedule::{DTLS13_LABEL_PREFIX, KeySchedule, Transcript};
 use super::messages::CLIENT_HELLO;
 use super::suite::Suite13;
 use crate::cipher_suite::{CipherSuiteHash, CipherSuiteId};
-use crate::session::{ExternalPsk, MAX_TICKET_LIFETIME, Tls13Session};
+use crate::session::{Dtls12Session, ExternalPsk, MAX_TICKET_LIFETIME, Tls13Session};
 use crypto::{AeadAlgorithm, HashAlgorithm, RTCCrypto, RTCCryptoProvider, SecretVec};
 use shared::error::{Error, Result};
 use std::collections::HashMap;
@@ -34,6 +34,18 @@ const TICKET_NONCE_LEN: usize = 12;
 const TICKET_TAG_LEN: usize = 16;
 const TICKET_KEY_LEN: usize = 32;
 const TICKET_AAD: &[u8] = b"rtc-dtls dtls13 ticket";
+/// A DTLS 1.2 ticket (RFC 5077) has a version and additional data of its own, so that the
+/// one kind can never be opened as the other.
+const DTLS12_TICKET_VERSION: u8 = 0x12;
+const DTLS12_TICKET_AAD: &[u8] = b"rtc-dtls dtls12 ticket";
+const DTLS12_TICKET_EMS: u8 = 1;
+const DTLS12_TICKET_PEER_VERIFIED: u8 = 2;
+
+fn new_ticket_key(provider: &dyn RTCCryptoProvider) -> Result<SecretVec> {
+    let mut key = vec![0u8; TICKET_KEY_LEN];
+    provider.random().fill(&mut key).map_err(crypto_error)?;
+    Ok(SecretVec::new(key))
+}
 
 fn crypto_error(error: crypto::CryptoError) -> Error {
     Error::Crypto(error.to_string())
@@ -325,12 +337,22 @@ pub(crate) struct TicketContents {
     pub(crate) max_early_data: u32,
 }
 
-/// A server's tickets: the key they are sealed under, the clock they are dated by, and the
+/// The keys tickets are sealed under (RFC 5077 section 5.5: random, used for tickets only,
+/// "changed regularly"): a new one every ticket lifetime, the one before kept for the tickets
+/// it sealed, which are all expired once it goes.
+struct TicketKeys {
+    current: SecretVec,
+    /// When `current` was made (ms from the issuer's origin).
+    since_ms: u64,
+    previous: Option<SecretVec>,
+}
+
+/// A server's tickets: the keys they are sealed under, the clock they are dated by, and the
 /// tickets already accepted.
 pub(crate) struct TicketIssuer {
     pub(crate) count: u8,
     pub(crate) lifetime: Duration,
-    key: SecretVec,
+    keys: Mutex<TicketKeys>,
     /// The `now` the first ticket of this configuration was dated by: ticket times are
     /// milliseconds from it (the engine reads no clock, and an `Instant` has no value outside
     /// the process).
@@ -345,15 +367,46 @@ impl TicketIssuer {
         count: u8,
         lifetime: Duration,
     ) -> Result<Self> {
-        let mut key = vec![0u8; TICKET_KEY_LEN];
-        provider.random().fill(&mut key).map_err(crypto_error)?;
         Ok(Self {
             count,
             lifetime: lifetime.min(MAX_TICKET_LIFETIME),
-            key: SecretVec::new(key),
+            keys: Mutex::new(TicketKeys {
+                current: new_ticket_key(provider)?,
+                since_ms: 0,
+                previous: None,
+            }),
             origin: Mutex::new(None),
             used: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The key to seal with at `now`: a new one once the current one is a ticket lifetime old
+    /// (at least a second), the current one becoming the previous.
+    fn sealing_key(&self, provider: &dyn RTCCryptoProvider, now: Instant) -> Result<SecretVec> {
+        let now_ms = self.ms(now);
+        let rotation_ms = (self.lifetime.as_millis() as u64).max(1000);
+        let mut keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if now_ms.saturating_sub(keys.since_ms) >= rotation_ms {
+            let next = new_ticket_key(provider)?;
+            let current = std::mem::replace(&mut keys.current, next);
+            keys.previous = Some(current);
+            keys.since_ms = now_ms;
+        }
+        Ok(keys.current.clone())
+    }
+
+    /// The keys a ticket may be sealed under: the current one, then the previous one.
+    fn opening_keys(&self) -> Vec<SecretVec> {
+        let keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::iter::once(keys.current.clone())
+            .chain(keys.previous.clone())
+            .collect()
     }
 
     /// `now` in milliseconds from the first time this issuer was given.
@@ -394,26 +447,148 @@ impl TicketIssuer {
             }
         });
         plaintext.extend_from_slice(&max_early_data.to_be_bytes());
-        let plaintext = SecretVec::new(plaintext);
+        self.seal_plaintext(provider, now, TICKET_AAD, SecretVec::new(plaintext))
+    }
 
+    /// Encrypts `plaintext` under the issuer's key of `now` with a random nonce: nonce,
+    /// ciphertext, tag.
+    fn seal_plaintext(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        now: Instant,
+        aad: &[u8],
+        plaintext: SecretVec,
+    ) -> Result<Vec<u8>> {
+        let key = self.sealing_key(provider, now)?;
         let mut nonce = [0u8; TICKET_NONCE_LEN];
         provider.random().fill(&mut nonce).map_err(crypto_error)?;
         let mut aead = provider
             .crypto()
-            .new_aead(AeadAlgorithm::Aes256Gcm, self.key.as_ref())
+            .new_aead(AeadAlgorithm::Aes256Gcm, key.as_ref())
             .map_err(crypto_error)?;
         let mut ticket = nonce.to_vec();
         ticket.extend_from_slice(plaintext.as_ref());
         let mut tag = [0u8; TICKET_TAG_LEN];
-        aead.seal_in_place(
-            &nonce,
-            TICKET_AAD,
-            &mut ticket[TICKET_NONCE_LEN..],
-            &mut tag,
-        )
-        .map_err(crypto_error)?;
+        aead.seal_in_place(&nonce, aad, &mut ticket[TICKET_NONCE_LEN..], &mut tag)
+            .map_err(crypto_error)?;
         ticket.extend_from_slice(&tag);
         Ok(ticket)
+    }
+
+    /// Decrypts a ticket sealed by [`Self::seal_plaintext`] with `aad`: its id (the nonce)
+    /// and plaintext, `None` when it does not authenticate.
+    fn open_plaintext(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        aad: &[u8],
+        ticket: &[u8],
+    ) -> Option<([u8; TICKET_NONCE_LEN], SecretVec)> {
+        if ticket.len() < TICKET_NONCE_LEN + TICKET_TAG_LEN + 1 {
+            return None;
+        }
+        let (nonce, rest) = ticket.split_at(TICKET_NONCE_LEN);
+        let (ciphertext, tag) = rest.split_at(rest.len() - TICKET_TAG_LEN);
+        for key in self.opening_keys() {
+            let Ok(mut aead) = provider
+                .crypto()
+                .new_aead(AeadAlgorithm::Aes256Gcm, key.as_ref())
+            else {
+                continue;
+            };
+            let mut plaintext = SecretVec::new(ciphertext.to_vec());
+            if aead
+                .open_in_place(nonce, aad, plaintext.as_mut(), tag)
+                .is_ok()
+            {
+                let mut id = [0u8; TICKET_NONCE_LEN];
+                id.copy_from_slice(nonce);
+                return Some((id, plaintext));
+            }
+        }
+        None
+    }
+
+    /// Seals a DTLS 1.2 session into a ticket (RFC 5077 section 4 recommends the contents:
+    /// the cipher suite, the master secret, the client's identity and when it was issued).
+    pub(crate) fn seal_dtls12(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        now: Instant,
+        session: &Dtls12Session,
+    ) -> Result<Vec<u8>> {
+        let mut plaintext = vec![DTLS12_TICKET_VERSION];
+        put_u16(&mut plaintext, session.cipher_suite as u16);
+        plaintext.extend_from_slice(&self.ms(now).to_be_bytes());
+        plaintext.extend_from_slice(&(self.lifetime.as_secs() as u32).to_be_bytes());
+        let mut flags = 0;
+        if session.extended_master_secret {
+            flags |= DTLS12_TICKET_EMS;
+        }
+        if session.peer_certificates_verified {
+            flags |= DTLS12_TICKET_PEER_VERIFIED;
+        }
+        plaintext.push(flags);
+        put_vec8(&mut plaintext, |out| {
+            out.extend_from_slice(session.master_secret.as_ref())
+        });
+        put_vec16(&mut plaintext, |out| {
+            out.extend_from_slice(session.server_name.as_bytes())
+        });
+        put_vec24(&mut plaintext, |list| {
+            for der in &session.peer_certificates {
+                put_vec24(list, |out| out.extend_from_slice(der));
+            }
+        });
+        self.seal_plaintext(provider, now, DTLS12_TICKET_AAD, SecretVec::new(plaintext))
+    }
+
+    /// Opens a DTLS 1.2 ticket of this issuer that is still valid at `now`: its id, when it
+    /// stops being valid (ms from the issuer's origin) and the session. `None` for anything
+    /// else: another server's ticket, a DTLS 1.3 one, a forged, altered or expired one.
+    pub(crate) fn open_dtls12(
+        &self,
+        provider: &dyn RTCCryptoProvider,
+        ticket: &[u8],
+        now: Instant,
+    ) -> Option<([u8; TICKET_NONCE_LEN], u64, Dtls12Session)> {
+        let (id, plaintext) = self.open_plaintext(provider, DTLS12_TICKET_AAD, ticket)?;
+        let mut reader = Reader::new(plaintext.as_ref());
+        let parse = |reader: &mut Reader<'_>| -> Result<(u64, Dtls12Session)> {
+            if reader.u8()? != DTLS12_TICKET_VERSION {
+                return Err(Error::ErrInvalidCipherSuite);
+            }
+            let cipher_suite = CipherSuiteId::from(reader.u16()?);
+            let issued_ms = reader.u64()?;
+            let lifetime = reader.u32()?;
+            let flags = reader.u8()?;
+            let master_secret = SecretVec::new(reader.vec8()?.to_vec());
+            let server_name = String::from_utf8(reader.vec16()?.to_vec())
+                .map_err(|_| Error::ErrInvalidSniFormat)?;
+            let mut chain_reader = Reader::new(reader.vec24()?);
+            let mut peer_certificates = vec![];
+            while !chain_reader.is_empty() {
+                peer_certificates.push(chain_reader.vec24()?.to_vec());
+            }
+            reader.finish()?;
+            let expires_ms = issued_ms.saturating_add(u64::from(lifetime) * 1000);
+            Ok((
+                expires_ms,
+                Dtls12Session {
+                    session_id: vec![],
+                    ticket: None,
+                    master_secret,
+                    cipher_suite,
+                    extended_master_secret: flags & DTLS12_TICKET_EMS != 0,
+                    peer_certificates,
+                    peer_certificates_verified: flags & DTLS12_TICKET_PEER_VERIFIED != 0,
+                    server_name,
+                    created: now,
+                    lifetime: Duration::from_secs(u64::from(lifetime)),
+                },
+            ))
+        };
+        let (expires_ms, session) = parse(&mut reader).ok()?;
+        (self.ms(now) < expires_ms).then_some((id, expires_ms, session))
     }
 
     /// Opens a ticket of this issuer. `None` for anything else: another server's ticket, a
@@ -423,18 +598,7 @@ impl TicketIssuer {
         provider: &dyn RTCCryptoProvider,
         ticket: &[u8],
     ) -> Option<TicketContents> {
-        if ticket.len() < TICKET_NONCE_LEN + TICKET_TAG_LEN + 1 {
-            return None;
-        }
-        let (nonce, rest) = ticket.split_at(TICKET_NONCE_LEN);
-        let (ciphertext, tag) = rest.split_at(rest.len() - TICKET_TAG_LEN);
-        let mut aead = provider
-            .crypto()
-            .new_aead(AeadAlgorithm::Aes256Gcm, self.key.as_ref())
-            .ok()?;
-        let mut plaintext = SecretVec::new(ciphertext.to_vec());
-        aead.open_in_place(nonce, TICKET_AAD, plaintext.as_mut(), tag)
-            .ok()?;
+        let (id, plaintext) = self.open_plaintext(provider, TICKET_AAD, ticket)?;
         let mut reader = Reader::new(plaintext.as_ref());
         let parse = |reader: &mut Reader<'_>| -> Result<TicketContents> {
             if reader.u8()? != TICKET_VERSION {
@@ -454,8 +618,6 @@ impl TicketIssuer {
             }
             let max_early_data = reader.u32()?;
             reader.finish()?;
-            let mut id = [0u8; TICKET_NONCE_LEN];
-            id.copy_from_slice(nonce);
             Ok(TicketContents {
                 id,
                 suite,
@@ -559,4 +721,55 @@ pub(crate) fn parse_new_session_ticket(body: &[u8]) -> Result<NewSessionTicket<'
         ticket,
         max_early_data,
     })
+}
+
+#[cfg(test)]
+mod key_rotation_test {
+    use super::*;
+
+    /// RFC 5077 section 5.5: the ticket key is changed regularly, here every ticket lifetime.
+    /// A ticket sealed under the key before still opens (it may still be valid); one sealed two
+    /// rotations ago does not.
+    #[test]
+    fn the_ticket_key_changes_every_lifetime_and_the_one_before_still_opens() -> Result<()> {
+        let provider = crypto::default_provider().map_err(crypto_error)?;
+        let issuer = TicketIssuer::new(provider.as_ref(), 1, Duration::from_secs(10))?;
+        let start = Instant::now();
+        let seal = |at: Duration| {
+            issuer.seal_plaintext(
+                provider.as_ref(),
+                start + at,
+                DTLS12_TICKET_AAD,
+                SecretVec::new(b"session".to_vec()),
+            )
+        };
+        let opens = |ticket: &[u8]| {
+            issuer
+                .open_plaintext(provider.as_ref(), DTLS12_TICKET_AAD, ticket)
+                .is_some()
+        };
+        let first = seal(Duration::ZERO)?;
+        let first_key = issuer.opening_keys()[0].clone();
+        let same = seal(Duration::from_secs(5))?;
+        assert_eq!(
+            issuer.opening_keys()[0].as_ref(),
+            first_key.as_ref(),
+            "within a lifetime"
+        );
+        assert!(opens(&first) && opens(&same));
+
+        let second = seal(Duration::from_secs(11))?;
+        assert_ne!(
+            issuer.opening_keys()[0].as_ref(),
+            first_key.as_ref(),
+            "a new key"
+        );
+        assert!(opens(&first), "the key before still opens its tickets");
+        assert!(opens(&second));
+
+        seal(Duration::from_secs(22))?;
+        assert!(!opens(&first), "two rotations later the first key is gone");
+        assert!(opens(&second));
+        Ok(())
+    }
 }

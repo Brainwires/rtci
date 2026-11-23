@@ -24,6 +24,7 @@ fn announced(candidate_type: RTCIceCandidateType) -> Vec<RTCIceCandidate> {
         sdp_mline_index: Some(0),
         username_fragment: None,
         url: None,
+        relay_protocol: None,
     })
     .expect("add local candidate");
     let mut out = vec![];
