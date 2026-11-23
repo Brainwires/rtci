@@ -367,6 +367,25 @@ impl World {
         Ok(offer.sdp)
     }
 
+    /// `renegotiate_with`, the offer made by peer `offerer` and answered by the other.
+    fn exchange_from(&mut self, offerer: usize, edit: impl Fn(String) -> String) -> Result<String> {
+        let now = self.now;
+        let answerer = 1 - offerer;
+        let offer = self.peers[offerer].pc.create_offer(None)?;
+        self.peers[offerer]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        self.peers[answerer]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::offer(edit(offer.sdp.clone()))?)?;
+        let answer = self.peers[answerer].pc.create_answer(None)?;
+        self.peers[answerer]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        self.peers[offerer].pc.set_remote_description(now, answer)?;
+        Ok(offer.sdp)
+    }
+
     /// `gather`, with peer 0 on one local address for every transport (one socket), peer 1
     /// on a port per transport.
     fn gather_on_one_socket(&mut self) -> Result<()> {
@@ -2227,53 +2246,275 @@ fn a_restart_that_drops_the_local_candidates_reconnects_every_transport() -> Res
                 "{} transports, unique credentials {unique}",
                 kinds.len() + 1
             );
-            let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
-                SettingEngineBuilder::new()
-                    .with_unique_transport_credentials(unique)
-                    .with_discard_local_candidates_during_ice_restart(true)
-            })?;
+            let mut world = World::with_setting_engines(
+                RTCBundlePolicy::MaxCompat,
+                dropping_candidates(unique),
+            )?;
             let (senders, _) = world.negotiate_media(kinds, true, without_bundle_group)?;
             world.gather()?;
             world.run_traced(&format!("{what}: connected"), |peers| {
                 peers.iter().all(|p| p.connected && p.channel.is_some())
             })?;
-            let before: Vec<Vec<(String, String, bool)>> =
-                world.peers.iter().map(transport_ice).collect();
-            assert!(
-                before.iter().all(|t| t.len() == kinds.len() + 1),
-                "{what}: {before:?}"
-            );
-
-            world.peers[0].pc.restart_ice();
-            world.renegotiate_with(without_bundle_group)?;
-            for (i, peer) in world.peers.iter().enumerate() {
-                for t in peer.pc.dtls_transports() {
-                    assert!(
-                        t.ice_transport().get_local_candidates().is_empty(),
-                        "{what}: peer {i}: the restart dropped the local candidates"
-                    );
-                }
+            for peer in &world.peers {
+                assert_eq!(peer.pc.dtls_transports().len(), kinds.len() + 1, "{what}");
             }
-            world.regather(7000)?;
-            world.run_traced(
-                &format!("{what}: every transport selected a pair on the new ports"),
-                |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
-            )?;
-            for (i, peer) in world.peers.iter().enumerate() {
-                let after = transport_ice(peer);
-                for ((local, remote, _), (old_local, old_remote, _)) in after.iter().zip(&before[i])
-                {
-                    assert_ne!(local, old_local, "{what}: peer {i}: new local credentials");
-                    assert_ne!(
-                        remote, old_remote,
-                        "{what}: peer {i}: new remote credentials"
-                    );
-                }
-            }
-            media_and_data_arrive(&mut world, &senders, &what)?;
+            restart_dropping_candidates(&mut world, 0, without_bundle_group, &senders, &what)?;
         }
     }
     Ok(())
+}
+
+/// `restartIce` on peer `restarter`, its offer going through `edit`, with the local
+/// candidates of every transport dropped (the peers are built with
+/// `with_discard_local_candidates_during_ice_restart`): after the exchange no transport of
+/// either peer holds a local candidate; the application gathers on new ports
+/// (`World::regather`); every transport of both peers then selects a pair on the new ports
+/// with new credentials on both sides, and media of every sender in `senders` and a data
+/// channel message from peer 0 arrive.
+fn restart_dropping_candidates(
+    world: &mut World,
+    restarter: usize,
+    edit: impl Fn(String) -> String,
+    senders: &[RTCRtpSenderId],
+    what: &str,
+) -> Result<()> {
+    let before: Vec<Vec<(String, String, bool)>> = world.peers.iter().map(transport_ice).collect();
+    world.peers[restarter].pc.restart_ice();
+    world.exchange_from(restarter, edit)?;
+    for (i, peer) in world.peers.iter().enumerate() {
+        for t in peer.pc.dtls_transports() {
+            assert!(
+                t.ice_transport().get_local_candidates().is_empty(),
+                "{what}: peer {i}: the restart dropped the local candidates"
+            );
+        }
+    }
+    world.regather(7000)?;
+    world.run_traced(
+        &format!("{what}: every transport selected a pair on the new ports"),
+        |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
+    )?;
+    for (i, peer) in world.peers.iter().enumerate() {
+        let after = transport_ice(peer);
+        assert_eq!(after.len(), before[i].len(), "{what}: peer {i}");
+        for ((local, remote, _), (old_local, old_remote, _)) in after.iter().zip(&before[i]) {
+            assert_ne!(local, old_local, "{what}: peer {i}: new local credentials");
+            assert_ne!(
+                remote, old_remote,
+                "{what}: peer {i}: new remote credentials"
+            );
+        }
+    }
+    media_and_data_arrive(world, senders, what)
+}
+
+/// The settings of a peer whose ICE restarts drop the local candidates, with credentials of
+/// its own per transport (`unique`) or shared.
+fn dropping_candidates(unique: bool) -> impl Fn() -> SettingEngineBuilder {
+    move || {
+        SettingEngineBuilder::new()
+            .with_unique_transport_credentials(unique)
+            .with_discard_local_candidates_during_ice_restart(true)
+    }
+}
+
+/// `two_bundle_groups_run_on_two_transports`'s setup: peer 0 adds an audio and a video
+/// sender and a data channel, and its offer reaches peer 1 with two BUNDLE groups (the RTP
+/// sections, the data section); the answer keeps both. Returns the senders.
+fn negotiate_two_bundle_groups(world: &mut World) -> Result<Vec<RTCRtpSenderId>> {
+    let mut senders = vec![];
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                }],
+            }),
+        )?;
+        senders.push(
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .context("a sender")?,
+        );
+    }
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let now = world.now;
+    let local = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, local.clone())?;
+    world.peers[1].pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(two_bundle_groups(local.sdp))?,
+    )?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    Ok(senders)
+}
+
+/// `a_restart_that_drops_the_local_candidates_reconnects_every_transport` with BUNDLE: two
+/// BUNDLE groups (RFC 9143 section 5: each group a transport of its own), restarted by the
+/// peer that offered them again (a JSEP endpoint keeps both groups, RFC 9429 section
+/// 5.2.2); and a mix of a bundled group (audio and data, RFC 9143) and an unbundled section
+/// (video outside the group), restarted by the other peer, credentials shared and unique.
+/// Each transport selects a pair on the new ports and media and data continue.
+#[test]
+fn a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbundled_sections()
+-> Result<()> {
+    let mut world =
+        World::with_setting_engines(RTCBundlePolicy::MaxCompat, dropping_candidates(true))?;
+    let senders = negotiate_two_bundle_groups(&mut world)?;
+    world.gather()?;
+    world.run_traced("two BUNDLE groups: connected", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.dtls_transports().len(), 2, "a transport per group");
+    }
+    restart_dropping_candidates(&mut world, 1, |sdp| sdp, &senders, "two BUNDLE groups")?;
+
+    for unique in [false, true] {
+        let what = format!("a group and an unbundled section, unique credentials {unique}");
+        let mut world =
+            World::with_setting_engines(RTCBundlePolicy::Balanced, dropping_candidates(unique))?;
+        let (senders, _) = world.negotiate(video_outside_the_group)?;
+        world.gather()?;
+        world.run_traced(&format!("{what}: connected"), |peers| {
+            peers.iter().all(|p| p.connected && p.channel.is_some())
+        })?;
+        for peer in &world.peers {
+            assert_eq!(
+                peer.pc.dtls_transports().len(),
+                2,
+                "{what}: the group's transport and the video's"
+            );
+        }
+        restart_dropping_candidates(&mut world, 0, video_outside_the_group, &senders, &what)?;
+    }
+    Ok(())
+}
+
+/// RFC 5764 section 4.4 ("Once the key lifetime has been reached, a new DTLS session SHOULD
+/// be established") end to end with three transports (audio, video and data outside any
+/// BUNDLE group), with the default settings, so each new association runs on a new 3-tuple
+/// (RFC 8842 section 5.1). Peer 0's SRTP keys have a lifetime of 320 packets: before one
+/// runs out the engine raises negotiation-needed by itself, the application only answers it
+/// (a new offer, and gathering on new ports for the transports that dropped their
+/// candidates), and every transport gets a new association with new ICE credentials. Every
+/// packet of both senders arrives across the renewals, every transport ends on a pair of the
+/// latest ports, and the data channel opened at the start still carries messages.
+#[test]
+fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<()> {
+    const PACKETS: u16 = 900;
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let lifetime = Some(rtc::srtp::keying::KeyLifetime {
+        srtp_packets: 320,
+        srtcp_packets: 1 << 31,
+    });
+    world.peers = [
+        Peer::with_setting_engine(
+            "10.0.0.1",
+            RTCBundlePolicy::MaxCompat,
+            None,
+            SettingEngineBuilder::new().with_srtp_key_lifetime(lifetime),
+        )?,
+        Peer::with_setting_engine(
+            "10.0.0.2",
+            RTCBundlePolicy::Balanced,
+            None,
+            SettingEngineBuilder::new(),
+        )?,
+    ];
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    let local_sdp = |world: &World| {
+        world.peers[0]
+            .pc
+            .local_description()
+            .map(|d| d.sdp)
+            .unwrap_or_default()
+    };
+    let first_tls_ids = tls_ids(&world.renegotiate_with(without_bundle_group)?);
+    assert_eq!(first_tls_ids.len(), 3, "a tls-id per transport");
+    let first: Vec<Vec<(String, String, bool)>> = world.peers.iter().map(transport_ice).collect();
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    world.peers[1].rtp.clear();
+    let mut seen = world.peers[0].events.len();
+    let mut renegotiations = 0u16;
+    for seq in 1..=PACKETS {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+        world.advance(Duration::from_millis(20))?;
+        let raised = world.peers[0].events[seen..]
+            .iter()
+            .any(|e| matches!(e, RTCPeerConnectionEvent::OnNegotiationNeededEvent));
+        seen = world.peers[0].events.len();
+        if raised
+            && world
+                .peers
+                .iter()
+                .all(|p| p.pc.signaling_state() == RTCSignalingState::Stable)
+        {
+            world.renegotiate_with(without_bundle_group)?;
+            renegotiations += 1;
+            world.regather(7000 + 100 * renegotiations)?;
+        }
+    }
+    world.advance(Duration::from_secs(1))?;
+    assert!(
+        world.peers[0]
+            .events
+            .iter()
+            .any(|e| matches!(e, RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. })),
+        "the key lifetime event"
+    );
+    assert!(renegotiations >= 1, "the engine asked for a renegotiation");
+    let last_tls_ids = tls_ids(&local_sdp(&world));
+    assert_eq!(last_tls_ids.len(), 3, "{}", local_sdp(&world));
+    assert!(
+        last_tls_ids.iter().all(|id| !first_tls_ids.contains(id)),
+        "every transport has a new association: {first_tls_ids:?} -> {last_tls_ids:?}"
+    );
+    for (i, peer) in world.peers.iter().enumerate() {
+        for ((local, _, _), (old, _, _)) in transport_ice(peer).iter().zip(&first[i]) {
+            assert_ne!(local, old, "peer {i}: an ICE restart on every transport");
+        }
+    }
+    let latest = 7000 + 100 * renegotiations;
+    if !world.peers.iter().all(|p| selected_on_new_ports(p, latest)) {
+        bail!(
+            "every transport on the latest ports {latest}\n{}",
+            world.trace()
+        );
+    }
+    for ssrc in &ssrcs {
+        let received: HashSet<u16> = world.peers[1]
+            .rtp
+            .iter()
+            .filter(|h| h.ssrc == *ssrc)
+            .map(|h| h.sequence_number)
+            .collect();
+        let missing: Vec<u16> = (1..=PACKETS).filter(|s| !received.contains(s)).collect();
+        assert!(
+            missing.is_empty(),
+            "SSRC {ssrc}: {} packets lost across {renegotiations} renewals: {missing:?}",
+            missing.len()
+        );
+    }
+    media_and_data_arrive(&mut world, &senders, "the renewals")
 }
 
 /// RFC 8839 section 4.4.3.1 for a stream with a transport of its own: once the section is
