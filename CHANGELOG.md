@@ -1216,6 +1216,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp**, **peer_connection**: path MTU discovery (RFC 8899 DPLPMTUD, RFC 8261 section 4,
+  RFC 8831 section 5), on by default. Once established an association confirms its packet
+  size with a probe (a HEARTBEAT and a PAD chunk, RFC 4820, of exactly the size tried),
+  searches for larger packets (MAX_PLPMTU first, then by halves; PROBE_TIMER 16 s,
+  MAX_PROBES 3), falls back to the initial size after two retransmission timeouts in a row
+  without progress (a black hole), and searches again every 600 s and after a path change.
+  A peer connection starts from RFC 8831's 1200 / 1280-byte IP packet as before and searches
+  up to a 1500-byte IP packet less the headers of the selected pair and the DTLS record, so
+  its datagrams grow on paths that carry them. New API: `sctp::PathMtuDiscoveryConfig`,
+  `sctp::PathMtuState`, `TransportConfig::with_path_mtu_discovery` (`None` turns it off),
+  `Association::{set_max_path_mtu, path_mtu_state}`,
+  `SettingEngineBuilder::with_sctp_path_mtu_discovery(Option<u32>)` (the largest IP packet,
+  `None` off; a fixed `with_sctp_mtu` turns it off too). `Association::set_path_mtu` sets
+  BASE_PLPMTU with discovery on (setting the same value again changes nothing). A received
+  PAD chunk is now parsed and skipped (it was skipped as an unknown chunk).
 - **sctp**: association restart (RFC 9260 5.2.4 action A, with the Tie-Tags of 5.2.1 and
   5.2.2). A peer that lost its state and starts over between the same ports takes the
   association over: the INIT ACK of its unexpected INIT carries a cookie for a new

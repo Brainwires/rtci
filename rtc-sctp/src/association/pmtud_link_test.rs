@@ -284,3 +284,31 @@ fn a_pad_chunk_is_skipped_and_the_rest_of_the_packet_processed() {
         "no Unrecognized Chunk Type error"
     );
 }
+
+/// RFC 8261 section 6.1 and RFC 8831 section 5: on a path change the path MTU is tested
+/// again. A completed discovery starts over from BASE_PLPMTU, which the packets use until a
+/// new probe confirms it, and searches again.
+#[test]
+fn a_path_change_starts_the_discovery_over() {
+    let mtu = Rc::new(Cell::new(1400usize));
+    let sent = Rc::new(std::cell::RefCell::new(vec![]));
+    let mut link = link_with_mtu(mtu, sent.clone());
+    let deadline = link.now + Duration::from_secs(300);
+    assert!(link.run_until(deadline, |l| {
+        l.client.connected()
+            && l.client.conn().path_mtu_state() == Some(PathMtuState::SearchComplete)
+    }));
+    assert_eq!(link.client.conn().path_mtu(), MAX);
+    let before = sent.borrow().len();
+    let now = link.now;
+    link.client.conn().on_path_change(now);
+    assert_eq!(link.client.conn().path_mtu(), BASE, "back to the base");
+    let deadline = link.now + Duration::from_secs(60);
+    assert!(link.run_until(deadline, |l| l.client.conn().path_mtu() == MAX));
+    let probes: Vec<usize> = sent.borrow()[before..]
+        .iter()
+        .filter(|(from_client, d, _)| *from_client && is_probe(d))
+        .map(|(_, d, _)| d.len())
+        .collect();
+    assert_eq!(probes, [BASE as usize, MAX as usize]);
+}
