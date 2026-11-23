@@ -111,12 +111,9 @@ RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing spec
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3.2.2-1	C	M	jsep (running)	Apply msid when the offer is set; several streams per track
 RFC8830-3.2.5-1	C	M	jsep (running)	Move a track between streams; act on removal
-RFC8839-4.2.4-1	C	M	jsep (running)	Answer checks with the local credentials before the answer arrives
 RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remote-candidates` (rtc-ice call)
-RFC8851-6.2.2-6	C	M	jsep (running)	Check restriction values against the codec (section 8)
 RFC8851-6.3-6	E	S	jsep (running)	The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes)
-RFC8851-6.4-1	C	M	jsep (running)	Codec compatibility of answered values (section 8)
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9143-9.2-5	C	S	jsep (running)	Move a declared SSRC or a layer on a later MID
 RFC9429-3.6.2-2	E	S	jsep (running)	Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1

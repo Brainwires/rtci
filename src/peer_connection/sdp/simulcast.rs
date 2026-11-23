@@ -238,6 +238,59 @@ pub(crate) struct SectionRids {
 /// exist"); a rid-id whose `a=rid` line has the other direction is not used ("The direction
 /// for the rid-id MUST be aligned with the direction specified for the corresponding RTP
 /// stream identifier on the 'a=rid' line"), nor is one without a line.
+/// RFC 8851 section 8: whether some size the section's `a=imageattr` lines allow for the
+/// rid's formats (its `pt=` list, else every format of the m= line), in the rid's direction,
+/// is within the rid's `max-width`, `max-height` and `max-fs`. A format no `a=imageattr`
+/// line of that direction restricts (or `*`) admits any size.
+fn admitted_by_imageattr(
+    rid: &SimulcastRid,
+    media: &MediaDescription,
+    listed: &HashSet<u8>,
+) -> bool {
+    use sdp::attribute::{ImageAttrList, ImageAttrRange};
+    let limits = rid.to_restrictions();
+    if limits.max_width.is_none() && limits.max_height.is_none() && limits.max_fs.is_none() {
+        return true;
+    }
+    let Ok(attributes) = media.imageattrs() else {
+        return true;
+    };
+    let minimum = |range: &ImageAttrRange<u32>| -> u64 {
+        u64::from(match range {
+            ImageAttrRange::Value(v) => *v,
+            ImageAttrRange::Range { min, .. } => *min,
+            ImageAttrRange::List(values) => values.iter().copied().min().unwrap_or(0),
+        })
+    };
+    let formats: Vec<u8> = if rid.formats.is_empty() {
+        listed.iter().copied().collect()
+    } else {
+        rid.formats.clone()
+    };
+    formats.iter().any(|pt| {
+        let sets = attributes
+            .iter()
+            .filter(|a| a.payload_type.is_none_or(|p| p == *pt))
+            .filter_map(|a| match rid.direction {
+                SimulcastDirection::Send => a.send.as_ref(),
+                SimulcastDirection::Recv => a.recv.as_ref(),
+            })
+            .find_map(|list| match list {
+                ImageAttrList::Sets(sets) => Some(sets),
+                ImageAttrList::Any => None,
+            });
+        let Some(sets) = sets else {
+            return true;
+        };
+        sets.iter().any(|set| {
+            let (width, height) = (minimum(&set.x), minimum(&set.y));
+            limits.max_width.is_none_or(|max| width <= max)
+                && limits.max_height.is_none_or(|max| height <= max)
+                && limits.max_fs.is_none_or(|max| width * height <= max)
+        })
+    })
+}
+
 pub(crate) fn section_rids(media: &MediaDescription) -> SectionRids {
     let listed: HashSet<u8> = media
         .media_name
@@ -303,7 +356,21 @@ pub(crate) fn section_rids(media: &MediaDescription) -> SectionRids {
         if !usable {
             continue;
         }
-        rids.push(SimulcastRid::from_rid(rid));
+        let rid = SimulcastRid::from_rid(rid);
+        // Step 6 and RFC 8851 section 8: the line's restrictions "combined with other
+        // restrictions on the media stream, are expected to result in a non-empty
+        // intersection"; one whose limits no `a=imageattr` set of its formats admits ("if
+        // image attributes are used to indicate that a PT has a minimum width of 640, then
+        // specification of "max-width=320" ... is nonsensical") is discarded.
+        if !admitted_by_imageattr(&rid, media, &listed) {
+            log::warn!(
+                "a=rid:{} is discarded: no a=imageattr set of its formats admits its limits \
+                 (RFC 8851 section 8)",
+                rid.id
+            );
+            continue;
+        }
+        rids.push(rid);
     }
     // Step 5, until no line is discarded any more: a line may depend on a discarded one.
     loop {
@@ -567,6 +634,29 @@ mod tests {
             without_repeated_rids("send a;b;a recv c;~b,d").as_deref(),
             Some("send a;b recv c;d")
         );
+    }
+
+    /// RFC 8851 sections 6.2.2 (step 6) and 8: a rid whose limits no `a=imageattr` set of its
+    /// formats admits ("a minimum width of 640 ... "max-width=320" ... is nonsensical") is
+    /// discarded, in the direction of the line; a format without a set of that direction, or
+    /// with `*`, admits any size; `max-fs` counts the smallest picture of a set.
+    #[test]
+    fn a_rid_no_imageattr_set_admits_is_discarded() {
+        let section = section_rids(&video(
+            &["96", "97"],
+            &[
+                ("imageattr", "96 send [x=[640:1920],y=[360:1080]] recv *"),
+                ("imageattr", "97 send [x=1280,y=720]"),
+                ("rid", "small send max-width=320;pt=96,97"),
+                ("rid", "wide send max-width=1920;pt=96"),
+                ("rid", "tall send max-height=320;pt=96"),
+                ("rid", "frame send max-fs=230399;pt=96"),
+                ("rid", "frame2 send max-fs=230400;pt=96"),
+                ("rid", "nopt send max-width=1000"),
+                ("rid", "in recv max-width=100;pt=96"),
+            ],
+        ));
+        assert_eq!(ids(&section), ["wide", "frame2", "nopt", "in"]);
     }
 
     #[test]

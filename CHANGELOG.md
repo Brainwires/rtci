@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: receive-side JSEP rows (`conf/jsep-61-receive-rows`, jsep16).
+  - An `a=rid` line whose `max-width`, `max-height` or `max-fs` no `a=imageattr` set of its
+    formats admits is discarded, in an offer and in an answer (RFC 8851 sections 6.2.2, 6.4
+    and 8).
+  - Tested end to end: an offerer answers the answerer's connectivity checks before the
+    answer arrives (RFC 8839 section 4.2.4; the ICE agent already verified them with its own
+    credentials).
+
 - **audit**: JSEP umbrella rows closed by their children (`conf/jsep-60-umbrellas`, jsep16).
   No engine change. RFC8859-4.8-1, A-7, A-29, A-33, RFC9429-5.2.1-57, 5.3.1-11, 5.5-5, 5.2-1
   and WEBRTC-4.4.2-43 are `tested` (every child row is); RFC9429-4.1.8-1 and 5.3-1 are

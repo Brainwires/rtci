@@ -319,3 +319,44 @@ fn a_restart_changes_pinned_credentials_on_both_sides() -> Result<()> {
     world.ping_pong("after the restart")?;
     Ok(())
 }
+
+/// RFC 8839 section 4.2.4: an agent "MUST be prepared to receive" Binding requests on its
+/// candidates once they are in an offer or answer; RFC 8445 section 7.3: a request that
+/// arrives before the peer's credentials "MUST immediately" be answered. The offerer applies
+/// its offer and gathers; the answerer applies it, answers, and checks the offerer's
+/// candidate at once. Before the answer reaches the offerer, the offerer's ICE agent answers
+/// the checks with its own credentials, so the answerer's pair succeeds; once the answer
+/// arrives the connection completes.
+#[test]
+fn an_offerer_answers_checks_that_arrive_before_the_answer() -> Result<()> {
+    use rtc::peer_connection::sdp::RTCSessionDescription;
+    let mut world = World::new(Peer::new(A, full())?, Peer::new(B, full())?);
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(now, offer)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.trickle()?;
+    world.run_for(Duration::from_millis(500), |_| false);
+    let answerer = pairs(&mut world, 1);
+    assert!(
+        answerer
+            .values()
+            .any(|(state, _, _)| *state == RTCStatsIceCandidatePairState::Succeeded),
+        "the offerer answered the answerer's checks before it had the answer: {answerer:?}"
+    );
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::answer(answer.sdp)?)?;
+    world.run("connected once the answer arrived", |peers| {
+        peers.iter().all(|p| p.connected() && p.channel.is_some())
+    })?;
+    Ok(())
+}

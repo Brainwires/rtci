@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4981 of 5087 (97.9 %).
-- Tested as the default (`tested`): 4962 of 5087 (97.5 %); `setting`: 14; `conflict` (two specifications conflict, the governing one's form is the default): 5.
-- Open (not tested in any form): 106: 20 untested, 63 partial, 22 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4984 of 5087 (98.0 %).
+- Tested as the default (`tested`): 4965 of 5087 (97.6 %); `setting`: 14; `conflict` (two specifications conflict, the governing one's form is the default): 5.
+- Open (not tested in any form): 103: 20 untested, 60 partial, 22 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 14 | 13 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 56 | 35 |
+| C | partly implemented | 53 | 32 |
 | D | not implemented | 22 | 18 |
 | E | cannot be met or observed inside this engine | 17 | 11 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 125 | 77 |
+| all | | 122 | 74 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 94 rows, 52 of size S, 33 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 91 rows, 52 of size S, 30 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 22 | 1 | 2 | 0 | 25 | 12 | 12 | 1 |
+| jsep (running) | 0 | 19 | 1 | 2 | 0 | 22 | 12 | 9 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -106,9 +106,6 @@ Sorted by class, then owner, size and ID.
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | partial | C | A MediaStream object and stream-added notice | M | jsep (running) |
 | RFC8830-3.2.2-1 | `rfc8830.md` | Answerer: msid values of the offer create or update the remote tracks ... | partial | C | Apply msid when the offer is set; several streams per track | M | jsep (running) |
 | RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | partial | C | Move a track between streams; act on removal | M | jsep (running) |
-| RFC8839-4.2.4-1 | `rfc8839.md` | Ready to receive Binding requests on candidates once they are in an ... | partial | C | Answer checks with the local credentials before the answer arrives | M | jsep (running) |
-| RFC8851-6.2.2-6 | `rfc8851.md` | Restrictions incompatible with the codecs, or unsupported, discard ... | partial | C | Check restriction values against the codec (section 8) | M | jsep (running) |
-| RFC8851-6.4-1 | `rfc8851.md` | The offerer validates the answer's a=rid lines: no new restrictions, ... | partial | C | Codec compatibility of answered values (section 8) | M | jsep (running) |
 | RFC9429-5.2.1-28 | `rfc9429.md` | FEC mechanisms of RFC 8854 7 are supported and offered | partial | C | Offer RED / ULPFEC by default (they exist now; the note's D1 is stale) | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | partial | C | The draft's threshold time base is a setting (`Gcc::with_threshold_time_base`), not the default: it measured worse on queueing delay, no interop failure. Owner decision on the default | S | media (running) |
