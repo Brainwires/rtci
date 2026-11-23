@@ -931,6 +931,27 @@ impl MediaEngine {
                 codec.payload_type, codec.rtp_codec.mime_type
             )));
         }
+        // RFC 8627 section 5.1 (draft-03 section 5.1): `repair-window` is required. A FlexFEC
+        // format registered without one is offered with the window its receiver uses when a
+        // line has none (`interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW`, 10 s).
+        let mut codec = codec;
+        if crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
+            &codec.rtp_codec.mime_type,
+        ) && interceptor::FlexFecParameters::parse(&codec.rtp_codec.sdp_fmtp_line)
+            .repair_window
+            .is_none()
+        {
+            let window = interceptor::FlexFecParameters::with_repair_window(
+                interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW,
+            )
+            .to_fmtp();
+            let line = codec.rtp_codec.sdp_fmtp_line.trim();
+            codec.rtp_codec.sdp_fmtp_line = if line.is_empty() {
+                window
+            } else {
+                format!("{line};{window}")
+            };
+        }
         match typ {
             RtpCodecKind::Audio => {
                 MediaEngine::add_codec(&mut self.audio_codecs, codec);
@@ -1617,6 +1638,14 @@ impl MediaEngine {
                             .is_some_and(|apt| removed.contains(&apt)))
             });
 
+            // RFC 8627 section 5.1 (and draft-ietf-payload-flexible-fec-scheme-03 section 5.1):
+            // `repair-window` is a required parameter, so a FlexFEC format without one is not
+            // negotiated. Section 5.2.1: "the receiver ... MUST reject" a repair window it
+            // cannot support: one longer than the window this endpoint registered.
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                matches.retain(|codec| self.repair_window_supported(codec, typ));
+            }
+
             // RFC 8627 section 1.1.7: offered FlexFEC and another RTP retransmission method,
             // the answer contains only FlexFEC.
             if !self.flexfec_with_retransmission {
@@ -1655,6 +1684,48 @@ impl MediaEngine {
         }
 
         Ok(())
+    }
+
+    /// Whether a remote FlexFEC format (`codec`, RFC 8627 or draft-03) has the required
+    /// `repair-window` (section 5.1) and it is no longer than the one this endpoint registered
+    /// for the format (section 5.2.1). Any other format passes.
+    fn repair_window_supported(&self, codec: &RTCRtpCodecParameters, typ: RtpCodecKind) -> bool {
+        let mime_type = &codec.rtp_codec.mime_type;
+        if !crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(mime_type) {
+            return true;
+        }
+        let Some(remote) =
+            interceptor::FlexFecParameters::parse(&codec.rtp_codec.sdp_fmtp_line).repair_window
+        else {
+            log::debug!(
+                "{mime_type} payload type {} without repair-window: not negotiated (RFC 8627 \
+                 section 5.1)",
+                codec.payload_type
+            );
+            return false;
+        };
+        let registered = match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            _ => &self.application_codecs,
+        };
+        let supported = registered
+            .iter()
+            .filter(|local| local.rtp_codec.mime_type.eq_ignore_ascii_case(mime_type))
+            .filter_map(|local| {
+                interceptor::FlexFecParameters::parse(&local.rtp_codec.sdp_fmtp_line).repair_window
+            })
+            .max()
+            .unwrap_or(interceptor::FLEXFEC_MAX_REPAIR_WINDOW);
+        if remote > supported {
+            log::debug!(
+                "{mime_type} payload type {}: repair window {remote:?} longer than the \
+                 {supported:?} this endpoint supports: not negotiated (RFC 8627 section 5.2.1)",
+                codec.payload_type
+            );
+            return false;
+        }
+        true
     }
 
     /// The `a=fmtp` parameters this endpoint states for `codec`, a format of a media section it

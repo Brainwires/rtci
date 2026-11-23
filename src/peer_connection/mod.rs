@@ -2465,6 +2465,7 @@ impl RTCPeerConnection {
             }
         }
 
+        check_bundled_payload_types(parsed)?;
         self.check_remote_transports(parsed, answers)?;
         // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
         remote_candidates(parsed)?;
@@ -4714,6 +4715,59 @@ impl RTCPeerConnection {
         }
         Ok(self.get_stats(now, selector))
     }
+}
+
+/// RFC 9143 section 9.1.1: "in order for a given payload type value to be used inside more
+/// than one bundled "m=" section, all codecs associated with the payload type number MUST
+/// share an identical codec configuration"; RFC 8834 section 4.3: "A single RTP payload type
+/// number MUST NOT be assigned to different RTP payload formats, or different configurations
+/// of the same RTP payload format, within a single RTP session" (a BUNDLE group is one). A
+/// remote description whose bundled sections give one payload type two configurations (media
+/// type, encoding name, clock rate, channels or format parameters) is refused: the payload
+/// type could not tell the streams' format.
+fn check_bundled_payload_types(
+    parsed: &::sdp::description::session::SessionDescription,
+) -> Result<()> {
+    for group in crate::peer_connection::sdp::bundle_groups(parsed) {
+        let mut seen: std::collections::HashMap<u8, (String, RTCRtpCodecParameters)> =
+            std::collections::HashMap::new();
+        for media in parsed.media_descriptions.iter().filter(|m| {
+            is_live_rtp_section(m)
+                && get_mid_value(m).is_some_and(|mid| group.contains(&mid.as_str()))
+        }) {
+            let Ok(codecs) = codecs_from_media_description(media) else {
+                continue;
+            };
+            let kind = media.media_name.media.to_ascii_lowercase();
+            for codec in codecs {
+                match seen.get(&codec.payload_type) {
+                    None => {
+                        seen.insert(codec.payload_type, (kind.clone(), codec));
+                    }
+                    Some((seen_kind, earlier)) => {
+                        let (a, b) = (&earlier.rtp_codec, &codec.rtp_codec);
+                        let same = *seen_kind == kind
+                            && a.mime_type.eq_ignore_ascii_case(&b.mime_type)
+                            && a.clock_rate == b.clock_rate
+                            && a.channels == b.channels
+                            && crate::rtp_transceiver::fmtp::parse(&a.mime_type, &a.sdp_fmtp_line)
+                                .equal(&*crate::rtp_transceiver::fmtp::parse(
+                                    &b.mime_type,
+                                    &b.sdp_fmtp_line,
+                                ));
+                        if !same {
+                            return Err(Error::SdpInvalidValue(format!(
+                                "payload type {} has two configurations in one BUNDLE group \
+                                 ({} and {}; RFC 9143 section 9.1.1)",
+                                codec.payload_type, a.mime_type, b.mime_type
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

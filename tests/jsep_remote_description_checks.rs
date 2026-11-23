@@ -135,3 +135,60 @@ fn a_subsequent_offer_without_a_restart_keeps_the_ice_attributes() -> TestResult
     )?;
     Ok(())
 }
+
+/// A remote offer of two bundled video sections whose formats are `first` and `second`
+/// (each an `m=` format list and its lines).
+fn two_bundled_video_sections(
+    first: (&str, &str),
+    second: (&str, &str),
+) -> Result<RTCSessionDescription, rtc::shared::error::Error> {
+    RTCSessionDescription::offer(crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0 1\n\
+         m=video 9 UDP/TLS/RTP/SAVPF {}\n{TRANSPORT}a=mid:0\na=sendrecv\n{}\
+         m=video 9 UDP/TLS/RTP/SAVPF {}\n{TRANSPORT}a=mid:1\na=sendrecv\n{}",
+        first.0, first.1, second.0, second.1
+    )))
+}
+
+/// RFC 9143 section 9.1.1: a payload type used in more than one bundled section "MUST share an
+/// identical codec configuration"; RFC 8834 section 4.3: one payload type "MUST NOT be assigned
+/// to different RTP payload formats, or different configurations of the same RTP payload
+/// format, within a single RTP session". A remote offer whose bundled sections give 96 to VP8
+/// and to VP9, or to H.264 of two packetization modes, is refused; the same VP8 under 96 in
+/// both is applied.
+#[test]
+fn a_payload_type_with_two_configurations_in_one_bundle_group_refuses_the_description() -> TestResult
+{
+    let vp8 = ("96", "a=rtpmap:96 VP8/90000\n");
+    for other in [
+        ("96", "a=rtpmap:96 VP9/90000\n"),
+        ("96", "a=rtpmap:96 VP8/48000\n"),
+    ] {
+        let mut pc = default_peer()?;
+        let refused =
+            pc.set_remote_description(Instant::now(), two_bundled_video_sections(vp8, other)?);
+        assert!(refused.is_err(), "{other:?}: {refused:?}");
+    }
+    let h264 = |mode: u8| {
+        format!(
+            "a=rtpmap:102 H264/90000\na=fmtp:102 level-asymmetry-allowed=1;\
+             packetization-mode={mode};profile-level-id=42e01f\n"
+        )
+    };
+    let (mode0, mode1) = (h264(0), h264(1));
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("102", &mode1), ("102", &mode0))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), two_bundled_video_sections(vp8, vp8)?)?;
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("102", &mode1), ("102", &mode1))?,
+    )?;
+    Ok(())
+}

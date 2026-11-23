@@ -959,4 +959,55 @@ mod rtx_apt_test {
         // Out of the u8 payload-type range.
         assert_eq!(parse_rtx_apt("apt=300"), None);
     }
+
+    fn tmmbr(parameter: &str) -> Vec<super::RTCPFeedback> {
+        vec![super::RTCPFeedback {
+            typ: super::TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: parameter.to_owned(),
+        }]
+    }
+
+    /// RFC 5104 section 7.2: "the highest value from offer and answer SHALL be used", and
+    /// section 7.1: without `smaxpr` the rate "defaults to infinity". This endpoint's offered
+    /// `smaxpr` against a remote answer: a higher answered value wins, a lower one loses, and
+    /// an answer without one leaves the session without a limit (infinity is the highest).
+    #[test]
+    fn the_session_maximum_packet_rate_is_the_highest_of_offer_and_answer() {
+        let ours = tmmbr("tmmbr smaxpr=120");
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=200")),
+            tmmbr("tmmbr smaxpr=200")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=60")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr")),
+            tmmbr("tmmbr")
+        );
+        // An answerer without a limit of its own keeps the offered one: the highest of the
+        // two is the offer's, which it states (section 7.2 forbids only adding one).
+        assert_eq!(
+            super::rtcp_feedback_intersection(&tmmbr("tmmbr"), &tmmbr("tmmbr smaxpr=120")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+    }
+
+    /// RFC 3611 section 5.1: `rcvr-rtt=<mode>[:<max size>]` reaches the stream as the remote
+    /// side signalled it, mode and maximum DLRR size included, whatever form this endpoint
+    /// registered, so that the RTCP session keeps its DLRR blocks within the peer's maximum.
+    #[test]
+    fn the_remote_rcvr_rtt_mode_and_maximum_are_negotiated() {
+        let rrtr = |parameter: &str| {
+            vec![super::RTCPFeedback {
+                typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                parameter: parameter.to_owned(),
+            }]
+        };
+        assert_eq!(
+            super::rtcp_feedback_intersection(&rrtr("rcvr-rtt=all"), &rrtr("rcvr-rtt=sender:64")),
+            rrtr("rcvr-rtt=sender:64")
+        );
+    }
 }

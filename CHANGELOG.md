@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: the SDP halves of media rows. A remote description whose bundled sections give one
+  payload type two configurations is refused (RFC 9143 section 9.1.1, RFC 8834 section 4.3;
+  Chromium refuses it too). FlexFEC (RFC 8627 and draft-03): a remote format without the
+  required `repair-window` is not negotiated, nor one whose window is longer than the one
+  registered for the format (section 5.2.1); two windows no longer make two formats; a format
+  registered without a window is offered with 10 s. Tests record what already held: RED's
+  slash list read under the offer's numbering, `smaxpr` the highest of offer and answer
+  (absent is infinity), `rcvr-rtt` mode and maximum negotiated as the peer signalled them.
 - **jsep**: the JSEP description rules hold for every transport (merge of the JSEP stack with
   several transports and BUNDLE groups). Each DTLS association states its own `a=tls-id`, on
   the first section of its transport (RFC 8842 section 5), and a remote description's values

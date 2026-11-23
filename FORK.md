@@ -378,6 +378,12 @@ reason. Today there are two:
 
 ### Defaults the fork narrows on purpose
 
+- SDP (jsep-43): a remote description whose bundled sections give one payload type two codec
+  configurations is refused (RFC 9143 section 9.1.1; upstream applied it); a remote FlexFEC
+  format without `repair-window`, or with one longer than the registered one, is not
+  negotiated (RFC 8627 sections 5.1, 5.2.1); FlexFEC registered without a window is offered with
+  10 s.
+
 - SRTP (`rtc-srtp`), each following RFC 3711 where upstream does not: a `Context` created without
   replay options has a 64-packet replay window (upstream: none; pass
   `srtp_no_replay_protection()`); `srtp_replay_protection(n)` / `srtcp_replay_protection(n)`
