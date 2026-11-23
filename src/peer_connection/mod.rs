@@ -3062,7 +3062,8 @@ impl RTCPeerConnection {
     /// # Parameters
     ///
     /// - `local_candidate`: The ICE candidate initialization data, or a value whose `candidate`
-    ///   field is empty to signal end-of-gathering. For candidates of type `srflx` (server
+    ///   field is empty to signal end-of-gathering: of the transport of the section its
+    ///   `sdp_mid` / `sdp_mline_index` names, or of every transport when it names none. For candidates of type `srflx` (server
     ///   reflexive) or `relay`, set `url` to the STUN/TURN server the candidate was gathered
     ///   from, so that `getStats` attributes it correctly.
     ///
@@ -3077,6 +3078,30 @@ impl RTCPeerConnection {
         // A candidate is gathered for the transport of the section its `sdp_mid` (or
         // `sdp_mline_index`) names, the default transport without either. Each transport
         // needs candidates on a local address of its own.
+        let is_end_of_candidates = local_candidate
+            .candidate
+            .strip_prefix("candidate:")
+            .unwrap_or(&local_candidate.candidate)
+            .is_empty();
+        if self.pipeline_context.transports.len() > 1
+            && is_end_of_candidates
+            && local_candidate.sdp_mid.is_none()
+            && local_candidate.sdp_mline_index.is_none()
+        {
+            // The end of gathering that names no section is every transport's, as a remote
+            // end-of-candidates without `sdpMid` and `sdpMLineIndex` is for every media
+            // description (W3C webrtc-pc 4.4.1.6 addIceCandidate). An application that
+            // gathers on one socket for the default transport only finishes the others too:
+            // the connection's gathering state completes (W3C 4.3.2) instead of staying
+            // "gathering" until an answer closes them.
+            if self.is_closed() {
+                return Err(Error::ErrConnectionClosed);
+            }
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.finish_local_gathering());
+            }
+            return Ok(());
+        }
         if self.pipeline_context.transports.len() > 1 {
             let local = self.local_description().and_then(|l| l.parsed);
             let id = self.transport_of_candidate(

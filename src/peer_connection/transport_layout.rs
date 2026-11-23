@@ -112,10 +112,18 @@ impl RTCPeerConnection {
         let now = self.pipeline_context.now;
         let mut agent_config =
             internal::ice_agent_config(&self.configuration, &self.setting_engine)?;
-        // A transport's credentials are its own (RFC 8839 section 5.4: per transport); fixed
-        // ones from the settings are the first transport's.
-        agent_config.local_ufrag = String::new();
-        agent_config.local_pwd = String::new();
+        // A transport's credentials are the first transport's, as the browsers have them,
+        // unless each transport is to have its own (RFC 9429 section 5.2.1;
+        // `with_unique_transport_credentials`). Fixed ones from the settings are the first
+        // transport's.
+        if self.setting_engine.unique_transport_credentials {
+            agent_config.local_ufrag = String::new();
+            agent_config.local_pwd = String::new();
+        } else {
+            let (ufrag, pwd) = self.shared_transport_credentials();
+            agent_config.local_ufrag = ufrag;
+            agent_config.local_pwd = pwd;
+        }
         let crypto_provider = self
             .setting_engine
             .crypto_provider
@@ -150,6 +158,17 @@ impl RTCPeerConnection {
             DtlsHandlerContext::new(dtls_transport),
             srtp,
         ))
+    }
+
+    /// The ICE credentials a transport added beside the first one takes when the transports
+    /// share theirs: the default transport's, the ones of a restart it has staged (an offer
+    /// being created with an ICE restart advertises those) included.
+    fn shared_transport_credentials(&self) -> (String, String) {
+        let credentials = self
+            .ice_transport_of(self.pipeline_context.transports.default_id())
+            .agent
+            .get_local_credentials();
+        (credentials.ufrag.clone(), credentials.pwd.clone())
     }
 
     /// Puts each group of m= sections on one transport: the one a section of the group is on
