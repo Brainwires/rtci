@@ -77,3 +77,52 @@ fn source_bindings_are_rebuilt_from_each_remote_description() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 5576 section 4.2: a group "MUST list at least one <ssrc-id> for a group and MAY list
+/// any number of additional ones". An `a=ssrc-group:SIM` of three sources is one track with
+/// three simulcast streams, each with the RTX flow its `FID` group names and the FEC flow of
+/// a `FEC-FR` group of three ids (two sources, one repair flow, RFC 5956 section 4.2); no
+/// repair flow is a stream of its own.
+#[test]
+fn groups_of_three_ids_and_a_sim_group_make_one_track_of_three_streams() -> TestResult {
+    let mut pc = default_peer()?;
+    answer(
+        &mut pc,
+        video_offer(
+            2,
+            "a=ssrc-group:SIM 1001 1002 1003\n\
+             a=ssrc-group:FID 1001 2001\n\
+             a=ssrc-group:FID 1002 2002\n\
+             a=ssrc-group:FID 1003 2003\n\
+             a=ssrc-group:FEC-FR 1001 1002 3001\n\
+             a=ssrc:1001 cname:remote\na=ssrc:1002 cname:remote\na=ssrc:1003 cname:remote\n\
+             a=ssrc:2001 cname:remote\na=ssrc:2002 cname:remote\na=ssrc:2003 cname:remote\n\
+             a=ssrc:3001 cname:remote\n",
+        )?,
+    )?;
+    assert_eq!(receiver_ssrcs(&mut pc), vec![1001, 1002, 1003]);
+    let id = pc.get_receivers().next().expect("a receiver");
+    let receiver = pc.rtp_receiver(id).expect("the receiver");
+    let layers: Vec<(Option<SSRC>, Option<SSRC>, Option<SSRC>)> = receiver
+        .track()
+        .codings()
+        .iter()
+        .map(|coding| {
+            let c = &coding.rtp_coding_parameters;
+            (
+                c.ssrc,
+                c.rtx.as_ref().map(|r| r.ssrc),
+                c.fec.as_ref().map(|f| f.ssrc),
+            )
+        })
+        .collect();
+    assert_eq!(
+        layers,
+        vec![
+            (Some(1001), Some(2001), Some(3001)),
+            (Some(1002), Some(2002), Some(3001)),
+            (Some(1003), Some(2003), None),
+        ]
+    );
+    Ok(())
+}
