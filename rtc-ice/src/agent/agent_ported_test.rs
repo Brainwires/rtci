@@ -981,7 +981,8 @@ fn test_agent_restart_when_closed() -> Result<()> {
 }
 
 /// One side restarts: it no longer answers the other's checks, so the other side goes to
-/// disconnected (or failed).
+/// disconnected (or failed). The side that restarts stays connected (W3C webrtc-pc 5.6.4: the
+/// path is kept until the new generation selects a pair; upstream went to checking).
 #[test]
 fn test_agent_restart_one_side() -> Result<()> {
     let base = Instant::now();
@@ -996,7 +997,7 @@ fn test_agent_restart_one_side() -> Result<()> {
     let _ = states(&mut b);
 
     a.restart(connected_at, String::new(), String::new(), false)?;
-    assert_eq!(a.state(), ConnectionState::Checking);
+    assert_eq!(a.state(), ConnectionState::Connected);
     assert!(
         a.get_remote_credentials().is_none(),
         "a restart waits for the peer's new credentials"
@@ -1064,7 +1065,16 @@ fn test_agent_restart_both_side() -> Result<()> {
     a.set_remote_credentials(b_credentials.ufrag, b_credentials.pwd)?;
     b.set_remote_credentials(a_credentials.ufrag, a_credentials.pwd)?;
 
-    connect(&mut a, &mut b, connected_at)?;
+    // Both stay connected through the restart (W3C webrtc-pc 5.6.4): run until each has
+    // selected a pair of the new generation.
+    let mut now = connected_at;
+    for _ in 0..200 {
+        step(&mut a, &mut b, now)?;
+        if a.get_selected_candidate_pair().is_some() && b.get_selected_candidate_pair().is_some() {
+            break;
+        }
+        now += STEP;
+    }
 
     let (a_local, a_remote) = a
         .get_selected_candidate_pair()
@@ -1146,5 +1156,107 @@ fn test_lite_lifecycle() -> Result<()> {
     );
 
     b.close()?;
+    Ok(())
+}
+
+/// Runs `a` alone (its peer gone) from `from` until `done` or 60 s of virtual time; the
+/// connection states it reported, and the time it stopped.
+fn run_alone(
+    a: &mut Agent,
+    from: Instant,
+    done: impl Fn(&Agent) -> bool,
+) -> Result<(Vec<ConnectionState>, Instant)> {
+    let mut seen = vec![];
+    let mut now = from;
+    while now < from + Duration::from_secs(60) {
+        a.handle_timeout(now)?;
+        while a.poll_write().is_some() {}
+        seen.extend(states(a));
+        if done(a) {
+            break;
+        }
+        now += STEP;
+    }
+    Ok((seen, now))
+}
+
+fn short_timeouts() -> AgentConfig {
+    AgentConfig {
+        disconnected_timeout: Some(Duration::from_secs(1)),
+        failed_timeout: Some(Duration::from_secs(1)),
+        ..quiet_config()
+    }
+}
+
+/// W3C webrtc-pc 5.6.4 (RTCIceTransportState): "An ICE restart causes candidate gathering and
+/// connectivity checks to begin anew, causing a transition to connected if begun in the
+/// completed state". Begun in connected it stays connected: no checking on the way.
+#[test]
+fn test_a_restart_from_connected_or_completed_is_connected() -> Result<()> {
+    let base = Instant::now();
+    let (mut a, mut b) = agent_pair(base, short_timeouts(), short_timeouts())?;
+    start_both(&mut a, &mut b, base)?;
+    let connected_at = connect(&mut a, &mut b, base)?;
+    let _ = states(&mut a);
+    a.restart(connected_at, String::new(), String::new(), true)?;
+    assert_eq!(a.state(), ConnectionState::Connected);
+    assert!(states(&mut a).is_empty(), "no checking on the way");
+
+    let (mut a, mut b) = agent_pair(base, short_timeouts(), short_timeouts())?;
+    start_both(&mut a, &mut b, base)?;
+    let mut now = connect(&mut a, &mut b, base)?;
+    a.set_remote_end_of_candidates();
+    a.set_local_gathering_complete();
+    for _ in 0..200 {
+        step(&mut a, &mut b, now)?;
+        if a.state() == ConnectionState::Completed {
+            break;
+        }
+        now += STEP;
+    }
+    assert_eq!(a.state(), ConnectionState::Completed);
+    let _ = states(&mut a);
+    a.restart(now, String::new(), String::new(), true)?;
+    assert_eq!(states(&mut a), [ConnectionState::Connected]);
+    Ok(())
+}
+
+/// "If begun in the transient disconnected state, it causes a transition to checking"; and
+/// begun in failed. An agent connected through a restart whose kept path's consent expires
+/// (RFC 7675 section 5.1) before the new generation selects a pair is checking.
+#[test]
+fn test_a_restart_from_disconnected_or_failed_is_checking() -> Result<()> {
+    let base = Instant::now();
+    for target in [ConnectionState::Disconnected, ConnectionState::Failed] {
+        // Disconnected is transient: with a long failed timeout it lasts.
+        let cfg = || match target {
+            ConnectionState::Disconnected => AgentConfig {
+                failed_timeout: Some(Duration::from_secs(25)),
+                ..short_timeouts()
+            },
+            _ => short_timeouts(),
+        };
+        let (mut a, mut b) = agent_pair(base, cfg(), cfg())?;
+        start_both(&mut a, &mut b, base)?;
+        let connected_at = connect(&mut a, &mut b, base)?;
+        let (_, at) = run_alone(&mut a, connected_at, |a| a.state() == target)?;
+        assert_eq!(a.state(), target);
+        a.restart(at, String::new(), String::new(), true)?;
+        assert_eq!(
+            states(&mut a),
+            [ConnectionState::Checking],
+            "from {target:?}"
+        );
+    }
+
+    let (mut a, mut b) = agent_pair(base, short_timeouts(), short_timeouts())?;
+    start_both(&mut a, &mut b, base)?;
+    let connected_at = connect(&mut a, &mut b, base)?;
+    a.restart(connected_at, String::new(), String::new(), true)?;
+    assert_eq!(a.state(), ConnectionState::Connected);
+    let (seen, _) = run_alone(&mut a, connected_at, |a| {
+        a.state() != ConnectionState::Connected
+    })?;
+    assert_eq!(seen.first(), Some(&ConnectionState::Checking), "{seen:?}");
     Ok(())
 }

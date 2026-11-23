@@ -43,18 +43,29 @@ impl Flight for Flight5 {
         cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Box<dyn Flight>, (Option<Alert>, Option<Error>)> {
+        // RFC 5077 section 3.3: a NewSessionTicket, when the ServerHello announced one,
+        // comes ahead of the server's ChangeCipherSpec and Finished.
         let (_seq, msgs) = match cache.full_pull_map(
             state.handshake_recv_sequence,
-            &[HandshakeCachePullRule {
-                typ: HandshakeType::Finished,
-                epoch: cfg.initial_epoch + 1,
-                is_client: false,
-                optional: false,
-            }],
+            &[
+                HandshakeCachePullRule {
+                    typ: HandshakeType::NewSessionTicket,
+                    epoch: cfg.initial_epoch,
+                    is_client: false,
+                    optional: true,
+                },
+                HandshakeCachePullRule {
+                    typ: HandshakeType::Finished,
+                    epoch: cfg.initial_epoch + 1,
+                    is_client: false,
+                    optional: false,
+                },
+            ],
         ) {
             Ok((seq, msgs)) => (seq, msgs),
             Err(_) => return Err((None, None)),
         };
+        take_new_session_ticket(state, &msgs)?;
 
         let finished =
             if let Some(HandshakeMessage::Finished(h)) = msgs.get(&HandshakeType::Finished) {
@@ -128,6 +139,12 @@ impl Flight for Flight5 {
                 typ: HandshakeType::Finished,
                 epoch: cfg.initial_epoch + 1,
                 is_client: true,
+                optional: false,
+            },
+            HandshakeCachePullRule {
+                typ: HandshakeType::NewSessionTicket,
+                epoch: cfg.initial_epoch,
+                is_client: false,
                 optional: false,
             },
         ]);

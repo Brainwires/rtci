@@ -383,10 +383,12 @@ impl Mdns {
         inbound: &Inbound,
         src: SocketAddr,
         unicast_arrival: bool,
+        multicast_arrival: bool,
         now: Instant,
     ) {
-        // RFC 6762 section 11: only what originates on the link counts.
-        let on_link = self.is_on_link(src.ip());
+        // RFC 6762 section 11: only what originates on the link counts; a response the driver
+        // says arrived at the multicast address did, whatever its source.
+        let on_link = multicast_arrival || self.is_on_link(src.ip());
         // Addresses this response gives, by name; and the names it says have no address.
         let mut resolved: Vec<(&str, IpAddr)> = Vec::new();
         let mut without_address: Vec<&str> = Vec::new();
@@ -412,7 +414,7 @@ impl Mdns {
                 }
                 match record.data {
                     InData::Addr(addr) => {
-                        if !self.trusts(addr, src.ip()) {
+                        if !self.trusts(addr, src.ip(), multicast_arrival) {
                             log::warn!(
                                 "mDNS ignores an answer for {} with address {} from {}: an answer is taken only from an on-link sender, and an A record only from the address it names",
                                 record.key,

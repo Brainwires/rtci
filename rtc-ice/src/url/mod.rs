@@ -137,8 +137,19 @@ impl fmt::Display for Url {
 impl Url {
     /// Parses a STUN or TURN urls following the ABNF syntax described in
     /// [IETF rfc-7064](https://tools.ietf.org/html/rfc7064) and
-    /// [IETF rfc-7065](https://tools.ietf.org/html/rfc7065) respectively.
+    /// [IETF rfc-7065](https://tools.ietf.org/html/rfc7065) respectively, with RFC 8489
+    /// section 8.1: "A 'stuns' URI containing an IP address MUST be rejected" (`ErrHost`).
     pub fn parse_url(raw: &str) -> Result<Self> {
+        let url = Self::parse_url_lenient(raw)?;
+        if url.scheme == SchemeType::Stuns && url.host.parse::<std::net::IpAddr>().is_ok() {
+            return Err(Error::ErrHost);
+        }
+        Ok(url)
+    }
+
+    /// [`parse_url`](Self::parse_url) without the RFC 8489 section 8.1 rule: a `stuns` URI
+    /// whose host is an IP address is accepted, as browsers do.
+    pub fn parse_url_lenient(raw: &str) -> Result<Self> {
         // work around for url crate
         if raw.contains("//") {
             return Err(Error::ErrInvalidUrl);
