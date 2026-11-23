@@ -559,6 +559,8 @@ pub struct Association {
     /// The cause code (RFC 9260 section 3.3.10) the association was aborted with: the first
     /// cause of the ABORT it received or sent.
     abort_cause_code: Option<u16>,
+    /// The Upper Layer Abort Reason of the peer's User-Initiated Abort (RFC 9260 9.1).
+    peer_abort_reason: Option<Bytes>,
     /// `ended`, as the endpoint that routes to this association sees it: an ended association
     /// takes no more packets and no longer counts against the endpoint's limit.
     ended_flag: Arc<AtomicBool>,
@@ -718,6 +720,7 @@ impl Default for Association {
             error: None,
             ended: false,
             abort_cause_code: None,
+            peer_abort_reason: None,
             ended_flag: Arc::new(AtomicBool::new(false)),
             drained_emitted: false,
             pending_error_causes: vec![],
@@ -1418,6 +1421,29 @@ impl Association {
         self.abort_cause_code
     }
 
+    /// The Upper Layer Abort Reason the peer gave when it aborted the association (RFC 9260
+    /// sections 3.3.10.12 and 9.1: "the Upper Layer Abort Reason ... SHOULD be made available
+    /// to the upper layer"). `None` when the association did not end by the peer's
+    /// User-Initiated Abort; empty when that carried no reason.
+    pub fn peer_abort_reason(&self) -> Option<&[u8]> {
+        self.peer_abort_reason.as_deref()
+    }
+
+    /// As [`abort`](Self::abort), with an Upper Layer Abort Reason in the User-Initiated
+    /// Abort error cause (RFC 9260 section 3.3.10.12) for the peer's application.
+    pub fn abort_with_reason(&mut self, reason: &[u8]) -> Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        self.abort_with(
+            vec![ErrorCause {
+                code: USER_INITIATED_ABORT,
+                raw: Bytes::copy_from_slice(reason),
+            }],
+            AssociationError::LocallyClosed,
+        )
+    }
+
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
         // Keyed on `ended`, not on the CLOSED state: an accepting association is in SCTP's
@@ -1848,6 +1874,7 @@ impl Association {
             for e in &c.error_causes {
                 if matches!(e.code, USER_INITIATED_ABORT) {
                     debug!("User initiated abort received");
+                    self.peer_abort_reason = Some(e.raw.clone());
                     // The peer aborted the association: its streams are lost with it, which
                     // is not the stream reset `Reset` reports for a channel's own close.
                     let _ = self.close(AssociationError::AssociationClosed);

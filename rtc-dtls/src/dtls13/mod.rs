@@ -45,6 +45,8 @@ mod record_test;
 mod reliability_test;
 #[cfg(test)]
 mod rfc8446_conformance_test;
+#[cfg(test)]
+mod rfc9147_rows_test;
 
 /// DTLS 1.3 on the wire, in `supported_versions` (RFC 9147 section 5.3).
 pub(crate) const DTLS1_3_WIRE_VERSION: u16 = 0xfefc;

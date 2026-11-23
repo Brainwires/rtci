@@ -617,6 +617,23 @@ pub enum RTCPeerConnectionEvent {
     /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
     /// dropped. Not a W3C event: a fork addition.
     OnCryptexRequiredViolation(u32),
+
+    /// A packet from the peer was discarded by SRTP: a replay (`replay` true), or one whose
+    /// authentication tag did not verify (RFC 3711 section 3.3, steps 2 and 5: "the event
+    /// SHOULD be logged"; the engine also logs it at `warn`). `ssrc` and `index` (the RTP
+    /// sequence number or the SRTCP index) are what the packet says, unauthenticated for an
+    /// authentication failure. At most 64 such events wait per SRTP context: a flood of
+    /// forged packets is not queued without bound. Not a W3C event: a fork addition.
+    OnSrtpPacketDiscarded {
+        /// SRTCP (`true`) or SRTP.
+        rtcp: bool,
+        /// The SSRC the packet names.
+        ssrc: u32,
+        /// Its sequence number or SRTCP index.
+        index: u64,
+        /// A replay; otherwise an authentication failure.
+        replay: bool,
+    },
 }
 
 /// Reserved for future use.

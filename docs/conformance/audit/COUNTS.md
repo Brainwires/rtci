@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4436 | 144 | 261 | 112 | 22 | 615 | 5590 |
+| MUST | 4436 | 144 | 262 | 112 | 21 | 615 | 5590 |
 | SHOULD | 686 | 73 | 73 | 71 | 6 | 328 | 1237 |
 | MAY | 391 | 33 | 36 | 128 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5571 | 253 | 373 | 314 | 28 | 1111 | 7650 |
+| all | 5571 | 253 | 374 | 314 | 27 | 1111 | 7650 |
 
 ## Per file
 
@@ -83,7 +83,7 @@ is a procedure step without a keyword.
 | `rfc5124.md` | MUST | 3 | 3 | 0 | 2 | 1 | 2 | 11 |
 | `rfc5124.md` | SHOULD | 0 | 2 | 0 | 0 | 0 | 3 | 5 |
 | `rfc5124.md` | MAY | 4 | 0 | 0 | 0 | 0 | 3 | 7 |
-| `rfc5246.md` | MUST | 91 | 0 | 0 | 0 | 1 | 6 | 98 |
+| `rfc5246.md` | MUST | 91 | 0 | 1 | 0 | 0 | 6 | 98 |
 | `rfc5246.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 3 | 8 |
 | `rfc5246.md` | MAY | 10 | 0 | 0 | 0 | 0 | 0 | 10 |
 | `rfc5506.md` | MUST | 11 | 1 | 1 | 0 | 0 | 0 | 13 |

@@ -425,7 +425,7 @@ fn the_downgrade_sentinel_is_set_and_checked() -> Result<()> {
 }
 
 /// A signing key that produces signatures that do not verify.
-struct WrongSigner(Arc<dyn SigningKey>);
+pub(crate) struct WrongSigner(pub(crate) Arc<dyn SigningKey>);
 
 impl SigningKey for WrongSigner {
     fn supports(&self, scheme: SignatureScheme) -> bool {

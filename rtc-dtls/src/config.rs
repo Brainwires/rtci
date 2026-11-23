@@ -414,9 +414,10 @@ impl ConfigBuilder {
         self
     }
 
-    /// How many invalid records (malformed, or failing authentication) a DTLS 1.3
-    /// association takes before it gives its peer up as persistently misbehaving and fails,
-    /// without an alert (RFC 9147 section 5.10). `None`, the default, never does: over UDP
+    /// How many invalid records (malformed, or failing authentication) an association takes
+    /// before it gives its peer up as persistently misbehaving and fails, without an alert
+    /// (RFC 9147 section 5.10 for DTLS 1.3; RFC 6347 section 4.2.7 for DTLS 1.2, which counts
+    /// the protected records that fail authentication). `None`, the default, never does: over UDP
     /// anyone who knows the addresses can send such records, and a limit lets them end the
     /// association. A limit suits a transport where only the peer can send (under ICE, a
     /// selected pair with consent checks narrows it to on-path senders).

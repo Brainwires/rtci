@@ -1400,3 +1400,23 @@ fn a_heartbeat_is_answered_with_its_own_information() {
     assert_eq!(1, acks.len(), "one HEARTBEAT ACK");
     assert_eq!(info, acks[0][4..].to_vec(), "the Heartbeat Info, unchanged");
 }
+
+/// RFC 9260 9.1 and 3.3.10.12: the Upper Layer Abort Reason of a User-Initiated Abort is made
+/// available to the upper layer of the peer. A plain abort has none (an empty reason).
+#[test]
+fn the_upper_layer_abort_reason_reaches_the_peer() {
+    let mut link = connected_link(32);
+    assert_eq!(link.server.conn().peer_abort_reason(), None);
+    link.client.conn().abort_with_reason(b"going away").unwrap();
+    link.run_for(Duration::from_secs(1));
+    assert!(link.server.conn().is_ended());
+    assert_eq!(
+        link.server.conn().peer_abort_reason(),
+        Some(&b"going away"[..])
+    );
+
+    let mut link = connected_link(33);
+    link.client.conn().abort().unwrap();
+    link.run_for(Duration::from_secs(1));
+    assert_eq!(link.server.conn().peer_abort_reason(), Some(&b""[..]));
+}

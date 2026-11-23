@@ -1267,6 +1267,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **srtp**, **peer_connection**: a replayed SRTP/SRTCP packet and one that fails
+  authentication are reported (RFC 3711 section 3.3: "the event SHOULD be logged"):
+  `srtp::keying::ContextEvent::PacketDiscarded { kind, ssrc, index, reason }` with
+  `DiscardReason::{Replay, AuthenticationFailed}` (at most `MAX_PENDING_DISCARD_EVENTS` = 64
+  queued per context; a flood is counted, `Context::discarded_packets()`), and in the peer
+  connection `RTCPeerConnectionEvent::OnSrtpPacketDiscarded { rtcp, ssrc, index, replay }`,
+  logged at `warn`.
+- **dtls**: `ConfigBuilder::with_invalid_record_limit` applies to DTLS 1.2 too (RFC 6347
+  section 4.2.7): a DTLS 1.2 association that receives more protected records failing
+  authentication than the limit fails, without an alert. Off by default, as for 1.3.
 - **dtls**: DTLS 1.2 CBC records (not in the WebRTC default set) are unprotected in constant
   time for every padding length (RFC 5246 section 6.2.3.2, Lucky Thirteen): the received MAC is
   read through a mask from every offset it could have, and an equalizing HMAC makes the SHA-1
@@ -1317,6 +1327,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer_connection**: the default DTLS-SRTP profiles put `SRTP_AEAD_AES_256_GCM` first, ahead
+  of `SRTP_AEAD_AES_128_GCM` and `SRTP_AES128_CM_HMAC_SHA1_80` (RFC 3711 section 9.2: keys "as
+  large as possible"; RFC 6188 section 6). Two engine peers now negotiate AES-256-GCM; every
+  browser offers it. `SettingEngineBuilder::with_srtp_protection_profiles` sets another order.
+- **peer_connection**: after a new DTLS association (a new `tls-id`, `renew_dtls_association`)
+  the inbound SRTP keys of the one before are kept for 10 s for its late packets (RFC 5764
+  section 4.3), for each stream until a packet of it has arrived under the new keys. Nothing
+  is sent with them.
 - **sctp**: an outgoing message takes its Stream Sequence Number (and its I-DATA Message
   Identifier) when its first fragment leaves the send queue, no longer when it is written. An
   ordered message whose lifetime runs out before it is sent is dropped without a TSN, a stream
@@ -1741,6 +1759,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `Association::peer_abort_reason()` (the Upper Layer Abort Reason of the peer's
+  User-Initiated Abort, RFC 9260 sections 3.3.10.12 and 9.1) and
+  `Association::abort_with_reason(&[u8])`.
 - **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
   association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
   new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
@@ -2704,6 +2725,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **dtls**: a DTLS 1.3 client whose ClientHello was retransmitted kept the backed-off
+  retransmission timer only until the ServerHello: the association that goes on as DTLS 1.3
+  started again from the initial value. It now takes the backed-off value over (RFC 9147
+  section 5.8.2: kept until a flight gets through without retransmission).
 - **sctp**, **datachannel**: a peer that restarts the SCTP association (RFC 9260 5.2.4 action
   A) no longer closes the SCTP transport. The peer connection's SCTP handler took every
   endpoint event of an association for its drain and removed the association, and since the
