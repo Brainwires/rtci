@@ -78,6 +78,31 @@ def instrument(cls):
 instrument(rtcrtpreceiver.RTCRtpReceiver)
 instrument(rtcrtpsender.RTCRtpSender)
 
+# Media packets received, by kind: aiortc's getStats files every SSRC of a receiver under one
+# id ("inbound-rtp_" + id(receiver), rtcrtpreceiver.py getStats), so its report shows one
+# stream per receiver, whichever came last (the RTX stream's, with the engine's probe
+# padding, when there is one). The receiver's RTP handler is wrapped instead (observation
+# only): a packet of a negotiated, non-RTX payload type is counted.
+RTP_IN = defaultdict(lambda: [0, 0])
+
+
+def count_rtp():
+    orig = rtcrtpreceiver.RTCRtpReceiver._handle_rtp_packet
+
+    async def counted(self, packet, arrival_time_ms):
+        codecs = getattr(self, "_RTCRtpReceiver__codecs", {}) or {}
+        codec = codecs.get(packet.payload_type)
+        if codec is not None and not codec.mimeType.lower().endswith("/rtx"):
+            e = RTP_IN[getattr(self, "_RTCRtpReceiver__kind", "video")]
+            e[0] += 1
+            e[1] += len(packet.payload)
+        return await orig(self, packet, arrival_time_ms)
+
+    rtcrtpreceiver.RTCRtpReceiver._handle_rtp_packet = counted
+
+
+count_rtp()
+
 # OpenSSL names of the suites aiortc's DTLS offers, as IANA names (the W3C dtlsCipher form).
 IANA = {
     "ECDHE-ECDSA-AES128-GCM-SHA256": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
@@ -258,7 +283,19 @@ class Peer:
                 sdp = strip_bundle(sdp)
             self.munge_remote = ""
             self.record("received", "offer", sdp)
-            await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+            try:
+                await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+            except ValueError:
+                attrs = [l for l in sdp.splitlines() if l.startswith("a=extmap:") and len(l.split()) > 2]
+                if attrs:
+                    raise NotApplicable(
+                        "aiortc cannot parse an a=extmap line with extension attributes, which Rust's offer has "
+                        "for its RFC 6904 encrypted header extensions",
+                        "aiortc 1.16.0 sdp.py SessionDescription.parse: `ext_id, ext_uri = value.split()`; RFC 8285 "
+                        "section 5 allows `<extensionattributes>` after the URI and RFC 6904 section 4 uses them; "
+                        f"lines: {attrs}",
+                    )
+                raise
             await self.pc.setLocalDescription(await self.pc.createAnswer())
             await self.send_description("answer", self.pc.localDescription.sdp)
         elif t == "candidate":
@@ -312,8 +349,7 @@ class Peer:
         return out, ssrcs
 
     async def rtp_count(self, kind):
-        out, _ = await self.inbound()
-        return out[kind][0]
+        return RTP_IN[kind][0]
 
     def rust_rtp(self, kind):
         rtp = (self.res["rust"] or {}).get("rtp") or {}
@@ -408,7 +444,8 @@ class Peer:
             self.pc.addTransceiver(st["kind"], direction=st.get("direction", "recvonly"))
         elif op == "remove-track":
             track, tr = self.tracks.pop(st["kind"])
-            await tr.sender.replaceTrack(None)
+            # RTCRtpSender.replaceTrack is a plain method in aiortc 1.16.0.
+            tr.sender.replaceTrack(None)
             tr.direction = "recvonly"
             track.stop()
         elif op == "offer":
@@ -464,8 +501,14 @@ class Peer:
                 await self.report()
                 await self.wait(300)
         elif op == "rtcp":
-            _, ssrcs = await self.inbound()
             receivers = [t.receiver for t in self.pc.getTransceivers() if t.kind == "video"]
+            # The media SSRCs each receiver has seen, without its RTX streams' SSRCs.
+            primary = []
+            for r in receivers:
+                streams = getattr(r, "_RTCRtpReceiver__remote_streams", {}) or {}
+                rtx = getattr(r, "_RTCRtpReceiver__rtx_ssrc", {}) or {}
+                primary += [ssrc for ssrc in streams if ssrc not in rtx]
+            ssrcs = {"video": primary}
             if not ssrcs["video"] or not receivers:
                 raise Failure("no video from Rust to send feedback about")
             for _ in range(3):
@@ -535,16 +578,15 @@ class Peer:
         if not self.pc:
             return
         self.res["connectionState"] = self.pc.connectionState
-        out, _ = await self.inbound()
         answers = [d[2] for d in self.res["descriptions"] if d[1] == "answer"]
-        for kind, (packets, _) in out.items():
+        for kind, (packets, nbytes) in list(RTP_IN.items()):
             codec = None
             if answers:
                 sec = next((s for s in answers[-1].split("\nm=")[1:] if s.startswith(kind)), "")
                 pts = sec.split("\n")[0].split()[3:4]
                 m = re.search(rf"(?m)^a=rtpmap:{pts[0]} ([^/\s]+)/", sec) if pts else None
                 codec = f"{kind}/{m.group(1)}".lower() if m else None
-            self.res["rtp"][kind] = {"packets": packets, "bytes": None, "codec": codec}
+            self.res["rtp"][kind] = {"packets": packets, "bytes": nbytes, "codec": codec}
         for s in (await self.pc.getStats()).values():
             if s.type == "outbound-rtp":
                 e = self.res["rtpSent"].setdefault(s.kind, {"packets": 0, "bytes": 0})
@@ -585,6 +627,8 @@ class Peer:
 
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(name)s %(message)s")
+    # RTCP / SRTP parse and unprotect failures are logged at debug level.
+    logging.getLogger("aiortc.rtcdtlstransport").setLevel(logging.DEBUG)
     with open(sys.argv[1]) as f:
         plan = json.load(f)
     p = Peer(plan)

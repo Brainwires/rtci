@@ -674,7 +674,7 @@ test("simulcast: three RIDs from the peer reach Rust", async () => {
   expectOk(r);
   for (const rid of ["q", "h", "f"]) {
     const n = Object.entries(r.rust?.rtp || {}).filter(([k]) => k.startsWith(`video:${rid}:`)).reduce((a, [, c]) => a + c, 0);
-    expect(n, `no packets on rid ${rid}: ${ctx(r)}`).toBeGreaterThan(20);
+    expect(n, `no packets on rid ${rid}: ${ctx(r, { peerOutbound: r.outbound, rustTransports: r.rust?.stats?.transports })}`).toBeGreaterThan(20);
   }
 });
 

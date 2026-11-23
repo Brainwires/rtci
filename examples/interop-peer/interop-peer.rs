@@ -1030,6 +1030,8 @@ impl Session {
                         "srtpCipher": t.srtp_cipher,
                         "dtlsRole": serde_json::to_value(t).ok().and_then(|v| v.get("dtlsRole").cloned()),
                         "selectedPair": selected,
+                        "packetsReceived": t.packets_received,
+                        "bytesReceived": t.bytes_received,
                     }))
                 }
                 _ => None,
