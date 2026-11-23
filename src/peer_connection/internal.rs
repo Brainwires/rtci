@@ -346,6 +346,7 @@ impl RTCPeerConnection {
             ice_credentials_to_replace: Vec::new(),
             local_description_was_set: false,
             transport_closed: false,
+            seen_selected_pair_changes: 0,
             identity_assertion: None,
             last_stable_state: None,
             pending_remote_transport: None,
@@ -519,9 +520,73 @@ impl RTCPeerConnection {
                 .interceptor_handler_context
                 .ssrcs_replaced,
         );
-        if lite || ssrcs {
+        let pair_changes = self
+            .pipeline_context
+            .ice_handler_context
+            .selected_pair_changes;
+        let aligning = pair_changes != self.seen_selected_pair_changes && {
+            self.seen_selected_pair_changes = pair_changes;
+            self.needs_alignment_offer()
+        };
+        if lite || ssrcs || aligning {
             self.trigger_negotiation_needed();
         }
+    }
+
+    /// RFC 8839 section 4.3.4: "If there are one or more pairs that do not match, and the
+    /// peer did not indicate support for the 'ice2' ice-option, the controlling agent MUST
+    /// generate a subsequent offer in which the connection address, port, and transport
+    /// protocol in the 'c=' and 'm=' lines ... match the corresponding local information of
+    /// the nominated pair". True while this full, controlling agent's selected pair is not the
+    /// default destination of its current local description (a real candidate, not the trickle
+    /// placeholder) and the peer's description has no `ice2`; the next offer names the pair
+    /// (`selected_pair_in_sdp`).
+    pub(crate) fn needs_alignment_offer(&self) -> bool {
+        let ice = self.ice_transport();
+        if self.setting_engine.candidates.ice_lite
+            || ice.role() != RTCIceRole::Controlling
+            || ice.has_pending_restart()
+        {
+            return false;
+        }
+        let Some(remote) = self.remote_description().and_then(|r| r.parsed.as_ref()) else {
+            return false;
+        };
+        if remote_ice_options(remote)
+            .iter()
+            .any(|option| option == "ice2")
+        {
+            return false;
+        }
+        let Some((local, _)) = ice.agent.get_selected_candidate_pair() else {
+            return false;
+        };
+        let Some(section) = self
+            .current_local_description
+            .as_ref()
+            .and_then(|d| d.parsed.as_ref())
+            .and_then(|parsed| {
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .find(|m| !is_rejected_media(m))
+            })
+        else {
+            return false;
+        };
+        let port = section.media_name.port.value;
+        let address = section
+            .connection_information
+            .as_ref()
+            .and_then(|c| c.address.as_ref())
+            .map(|a| a.address.as_str());
+        // A trickled description's placeholder (`9` and `0.0.0.0` / `::`, RFC 8838 section
+        // 5.1, RFC 8839 section 4.2.5 item 2) names no default candidate: there is nothing
+        // to align. Browsers trickle and write no `ice2`; they get no extra offer.
+        if port == 9 && matches!(address, Some("0.0.0.0") | Some("::")) {
+            return false;
+        }
+        !(port == local.port() as isize && address == Some(local.address()))
     }
 
     /// The fingerprints of every local certificate: W3C `RTCPeerConnection` writes an
@@ -2413,6 +2478,11 @@ impl RTCPeerConnection {
             }) {
                 return true;
             }
+        }
+        // A peer without `ice2`: the controlling agent's offer aligns the default destination
+        // with the nominated pair (RFC 8839 section 4.3.4).
+        if self.needs_alignment_offer() {
+            return true;
         }
         // Two lite agents, this one controlling, chose a pair among several: the updated
         // candidate exchange of RFC 8445 section 8.2 is an offer.

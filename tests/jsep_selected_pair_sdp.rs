@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, CandidateServerReflexiveConfig, RTCIceCandidate,
@@ -342,6 +343,15 @@ fn two_lite_agents_reconcile_their_pair_with_an_updated_offer() -> Result<()> {
         (named_remote[1], named_remote[2]),
         "the answer lists the candidate a=remote-candidates names"
     );
+    // RFC 8839 section 4.4.1.3: the lite controlled agent's description has "the default
+    // destination and a candidate for the valid pair": the m= / c= destination is that
+    // candidate too.
+    assert_eq!(
+        destination(&answer.sdp),
+        (answered_fields[5].to_owned(), answered_fields[4].to_owned()),
+        "{}",
+        answer.sdp
+    );
     world.peers[1]
         .pc
         .set_local_description(now, answer.clone())?;
@@ -422,5 +432,172 @@ fn a_later_offer_lists_the_selected_candidate_alone_when_asked() -> Result<()> {
         "{}",
         offer.sdp
     );
+    Ok(())
+}
+
+/// RFC 8839 section 4.4.2.2: a lite agent that believed it was controlling and is offered
+/// `a=remote-candidates` lost the glare: it "MUST change its role to controlled". Peer 0
+/// offered first and is the controlling agent; peer 1's offer naming a remote candidate makes
+/// it the controlled one.
+#[test]
+fn a_lite_agent_offered_remote_candidates_becomes_controlled() -> Result<()> {
+    use rtc::peer_connection::transport::RTCIceRole;
+    let mut world = World {
+        peers: vec![
+            Peer::new(&["10.0.0.1:5000"], true)?,
+            Peer::new(&["10.0.0.2:5000"], true)?,
+        ],
+        now: Instant::now(),
+    };
+    let candidates =
+        |p: &Peer| -> Result<Vec<RTCIceCandidateInit>> { p.addrs.iter().map(host).collect() };
+    let lists = [candidates(&world.peers[0])?, candidates(&world.peers[1])?];
+    world.negotiate(lists)?;
+    let role = |peer: &Peer| {
+        peer.pc
+            .sctp()
+            .map(|sctp| sctp.transport().ice_transport().role())
+    };
+    assert_eq!(role(&world.peers[0]), Some(RTCIceRole::Controlling));
+
+    let now = world.now;
+    let offer = world.peers[1].pc.create_offer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    assert!(attributes(&offer.sdp, "remote-candidates").is_empty());
+    let named = offer
+        .sdp
+        .replace("a=mid:", "a=remote-candidates:1 10.0.0.1 5000\r\na=mid:");
+    assert_ne!(named, offer.sdp);
+    world.peers[0]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::offer(named)?)?;
+    let answer = world.peers[0].pc.create_answer(None)?;
+    world.peers[0].pc.set_local_description(now, answer)?;
+    assert_eq!(role(&world.peers[0]), Some(RTCIceRole::Controlled));
+    Ok(())
+}
+
+/// RFC 8839 section 4.3.4: when the nominated pair does not match the default destination and
+/// "the peer did not indicate support for the 'ice2' ice-option, the controlling agent MUST
+/// generate a subsequent offer" that aligns `m=` / `c=` with the pair. Peer 0 (controlling)
+/// offered its unreachable server-reflexive candidate as the default; ICE selects the host
+/// pair. A peer whose answer lacks `ice2` gets the negotiation-needed flag raised (and the
+/// offer names the pair); one that has `ice2` does not.
+#[test]
+fn a_peer_without_ice2_is_sent_an_offer_that_aligns_the_default_destination() -> Result<()> {
+    for ice2 in [true, false] {
+        let mut world = World {
+            peers: vec![
+                Peer::new(&["10.0.0.1:5000"], false)?,
+                Peer::new(&["10.0.0.2:5000"], false)?,
+            ],
+            now: Instant::now(),
+        };
+        let a = world.peers[0].addrs[0];
+        let b = world.peers[1].addrs[0];
+        world.negotiate([vec![host(&a)?, unreachable_srflx(&a)?], vec![host(&b)?]])?;
+
+        // A second exchange whose offer has the candidates: its default destination is the
+        // server-reflexive one.
+        let now = world.now;
+        let offer = world.peers[0].pc.create_offer(None)?;
+        assert_eq!(
+            destination(&offer.sdp),
+            ("6000".to_owned(), "198.51.100.7".to_owned())
+        );
+        world.peers[0]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        world.peers[1].pc.set_remote_description(now, offer)?;
+        let answer = world.peers[1].pc.create_answer(None)?;
+        world.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        assert!(answer.sdp.contains("a=ice-options:trickle ice2\r\n"));
+        let answer = if ice2 {
+            answer.sdp
+        } else {
+            answer.sdp.replace(
+                "a=ice-options:trickle ice2\r\n",
+                "a=ice-options:trickle\r\n",
+            )
+        };
+        world.peers[0]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::answer(answer)?)?;
+        world.peers[0].negotiation_needed = 0;
+
+        world.run("the connection", |peers| {
+            peers.iter().all(|p| p.connected && p.channel_open)
+        })?;
+        world.run("settle", |_| false).ok();
+        if ice2 {
+            assert_eq!(world.peers[0].negotiation_needed, 0, "with ice2");
+            continue;
+        }
+        assert!(world.peers[0].negotiation_needed > 0, "without ice2");
+        let offer = world.peers[0].pc.create_offer(None)?;
+        assert_eq!(
+            destination(&offer.sdp),
+            ("5000".to_owned(), "10.0.0.1".to_owned()),
+            "{}",
+            offer.sdp
+        );
+        // Applied, and answered again without ice2: aligned, nothing more is asked for.
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        world.peers[1].pc.set_remote_description(now, offer)?;
+        let answer = world.peers[1].pc.create_answer(None)?;
+        world.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        let answer = answer.sdp.replace(
+            "a=ice-options:trickle ice2\r\n",
+            "a=ice-options:trickle\r\n",
+        );
+        world.peers[0]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::answer(answer)?)?;
+        let asked = world.peers[0].negotiation_needed;
+        world.run("settle", |_| false).ok();
+        assert_eq!(world.peers[0].negotiation_needed, asked, "aligned");
+    }
+    Ok(())
+}
+
+/// RFC 8839 section 4.4.1.3: a lite agent "MUST NOT add additional host candidates in a
+/// subsequent offer ... If an agent needs to offer additional candidates ... it MUST request
+/// an ICE restart." Once its gathering is complete, another host candidate is refused until
+/// `restart_ice` asks for a restart; a full agent may add one.
+#[test]
+fn a_lite_agent_adds_no_host_candidate_without_an_ice_restart() -> Result<()> {
+    for lite in [true, false] {
+        let mut world = World {
+            peers: vec![
+                Peer::new(&["10.0.0.1:5000"], lite)?,
+                Peer::new(&["10.0.0.2:5000"], lite)?,
+            ],
+            now: Instant::now(),
+        };
+        let a = world.peers[0].addrs[0];
+        let b = world.peers[1].addrs[0];
+        world.negotiate([vec![host(&a)?], vec![host(&b)?]])?;
+        world.peers[0]
+            .pc
+            .add_local_candidate(RTCIceCandidateInit::default())?;
+        let another = host(&"10.2.0.1:5000".parse()?)?;
+        let added = world.peers[0].pc.add_local_candidate(another.clone());
+        if !lite {
+            assert!(added.is_ok(), "a full agent: {added:?}");
+            continue;
+        }
+        assert_eq!(added, Err(rtc::shared::error::Error::InvalidStateError));
+        world.peers[0].pc.restart_ice();
+        world.peers[0].pc.add_local_candidate(another)?;
+    }
     Ok(())
 }

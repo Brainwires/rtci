@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: ICE signalling rows of RFC 8839.
+  - A remote answer with a media-level `a=ice-mismatch` is refused (sections 4.2.5, 5.3): this
+    endpoint has no media path without ICE.
+  - A full controlling agent whose selected pair is not the default destination it signalled
+    raises negotiation-needed when the peer wrote no `ice2`, and the offer aligns `m=` / `c=` with
+    the pair (section 4.3.4). The trickle placeholder (`9`, `0.0.0.0`) names no default candidate,
+    so trickling peers (browsers) see no extra offer.
+  - A lite agent refuses another host candidate (`InvalidStateError`) once its gathering is
+    complete after a negotiated description, until `restart_ice` (section 4.4.1.3).
+  - A lite agent that applies an offer with `a=remote-candidates` becomes the controlled agent
+    (section 4.4.2.2).
 - **jsep**: a later remote description that asks for a new DTLS association is part of an ICE
   restart (RFC 9429 sections 5.8.3 and 5.11, RFC 8842 section 6). `set_remote_description`
   refuses a re-offer, or the answer to one, whose `a=tls-id` differs from the one in use without

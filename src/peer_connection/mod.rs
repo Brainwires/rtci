@@ -292,16 +292,16 @@ use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, candidate_line_ufrag,
-    check_answer_against_offer, check_extmap_ids, check_extmap_levels, check_repair_primaries,
-    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
-    extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
-    has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap,
-    inherit_session_rtcp_xr, insert_media_line, is_lite_set, is_live_rtp_section,
-    is_rejected_media, is_sdp_token, is_unknown_application_media, media_ice_credentials,
-    negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates, remote_ice_options,
-    remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
-    validate_dtls_attributes,
+    ATTR_KEY_ICE_MISMATCH, ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation,
+    candidate_line_ufrag, check_answer_against_offer, check_extmap_ids, check_extmap_levels,
+    check_repair_primaries, codecs_from_media_description, discard_stray_bundle_only,
+    effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
+    get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
+    inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
+    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
+    media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates,
+    remote_ice_options, remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin,
+    validate_application_media_section, validate_dtls_attributes,
 };
 use crate::peer_connection::state::RTCIceGatheringState;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
@@ -826,6 +826,9 @@ pub struct RTCPeerConnection {
     /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
     /// credentials starts new ICE and DTLS associations.
     transport_closed: bool,
+    /// How many selected-pair changes of the ICE handler were looked at for the RFC 8839
+    /// section 4.3.4 alignment offer (`announce_lite_candidate_update`).
+    seen_selected_pair_changes: u64,
     /// The value of the `a=identity` attribute offers and answers carry (RFC 8827 section 5);
     /// see `dtls_sdp`.
     identity_assertion: Option<String>,
@@ -1906,6 +1909,15 @@ impl RTCPeerConnection {
                 self.ice_transport_mut()
                     .set_remote_credentials(remote_ufrag.clone(), remote_pwd.clone())?;
             }
+            // Two lite agents, this one controlled: an offer with `a=remote-candidates` is the
+            // controlling agent's updated candidate exchange (RFC 8445 section 8.2, RFC 8839
+            // section 4.4.2.2): its candidates replace the remote ones, and the agent selects
+            // again among them.
+            let lite_update = !we_offer
+                && remote_is_lite
+                && self.setting_engine.candidates.ice_lite
+                && transports_started
+                && !remote_candidates(parsed_remote_description)?.is_empty();
             if transports_started {
                 // RFC 8445 section 6.1.1: "Once the roles are determined for a session,
                 // they persist throughout the lifetime of the session", an ICE restart
@@ -1929,6 +1941,13 @@ impl RTCPeerConnection {
                     })
                 } else if new_association {
                     Some(local_ice_role)
+                } else if lite_update {
+                    // RFC 8839 section 4.4.2.2: "if the agent believed it was controlling, but
+                    // the offer contained the 'remote-candidates' attribute, both agents
+                    // believe they are controlling ... The winner takes the role of
+                    // controlling, so that the loser (the answerer ...) MUST change its role
+                    // to controlled."
+                    Some(RTCIceRole::Controlled)
                 } else {
                     None
                 };
@@ -1969,15 +1988,6 @@ impl RTCPeerConnection {
                 }
             }
 
-            // Two lite agents, this one controlled: an offer with `a=remote-candidates` is the
-            // controlling agent's updated candidate exchange (RFC 8445 section 8.2, RFC 8839
-            // section 4.4.2.2): its candidates replace the remote ones, and the agent selects
-            // again among them.
-            let lite_update = !we_offer
-                && remote_is_lite
-                && self.setting_engine.candidates.ice_lite
-                && transports_started
-                && !remote_candidates(parsed_remote_description)?.is_empty();
             if lite_update {
                 self.ice_transport_mut()
                     .agent
@@ -2242,6 +2252,22 @@ impl RTCPeerConnection {
             }
         }
 
+        // RFC 8839 sections 4.2.5, 4.3.3, 5.3: a media-level `a=ice-mismatch` in an answer
+        // means "ICE procedures MUST NOT be used" for that stream and RFC 3264 procedures are
+        // used instead. This endpoint has no media path without ICE: a WebRTC endpoint sends
+        // only to peers that consent by ICE (RFC 8826 section 4.2, RFC 7675; RFC 9429 section
+        // 5.1.1 makes ICE mandatory). So such an answer is refused, and ICE is never run for
+        // the stream.
+        if answers
+            && let Some(index) = parsed.media_descriptions.iter().position(|media| {
+                !is_rejected_media(media) && media.has_attribute(ATTR_KEY_ICE_MISMATCH)
+            })
+        {
+            return Err(Error::SdpInvalidValue(format!(
+                "m= section {index}: a=ice-mismatch; this endpoint has no RFC 3264 media path \
+                 without ICE (RFC 8839 section 5.3, RFC 9429 section 5.1.1)"
+            )));
+        }
         if let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(parsed)? {
             let fingerprints = extract_fingerprints(parsed)?;
             self.check_dtls_change_restarts_ice(parsed, answers, &ufrag, &pwd, &fingerprints)?;
@@ -3097,8 +3123,12 @@ impl RTCPeerConnection {
     ///
     /// # Errors
     ///
-    /// Returns an error if a non-empty candidate string cannot be parsed.
+    /// Returns an error if a non-empty candidate string cannot be parsed, and
+    /// [`Error::InvalidStateError`] for a host candidate of a lite agent ([ice-lite]) once a
+    /// local description was negotiated and its gathering is complete, until an ICE restart is asked for (`restart_ice`) or
+    /// staged (RFC 8839 section 4.4.1.3).
     ///
+    /// [ice-lite]: crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_lite
     /// [`RTCIceGatheringState::Complete`]: crate::peer_connection::state::RTCIceGatheringState::Complete
     /// [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`]: crate::peer_connection::event::RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent
     /// [`RTCIceCandidate::end_of_candidates`]: crate::peer_connection::transport::RTCIceCandidate::end_of_candidates
@@ -3112,6 +3142,26 @@ impl RTCPeerConnection {
             None => local_candidate.candidate.as_str(),
         };
 
+        // RFC 8839 section 4.4.1.3: a lite agent "MUST NOT add additional host candidates in
+        // a subsequent offer, and MUST NOT modify the username fragments and passwords. If an
+        // agent needs to offer additional candidates, or change the username fragments and
+        // passwords, it MUST request an ICE restart". Once the generation's gathering is
+        // complete (the last candidate was signalled), another host candidate is an additional
+        // one: it needs a restart first (`restart_ice`).
+        let is_host = candidate_value
+            .split_whitespace()
+            .skip_while(|token| *token != "typ")
+            .nth(1)
+            == Some("host");
+        if is_host
+            && self.setting_engine.candidates.ice_lite
+            && self.current_local_description.is_some()
+            && self.ice_transport().gathering_state() == RTCIceGatheringState::Complete
+            && !self.ice_transport().has_pending_restart()
+            && self.ice_credentials_to_replace.is_empty()
+        {
+            return Err(Error::InvalidStateError);
+        }
         if !candidate_value.is_empty() {
             self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
         } else {

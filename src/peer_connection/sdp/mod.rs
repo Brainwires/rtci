@@ -355,6 +355,8 @@ pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
 pub(crate) const ATTR_KEY_ICE_PACING: &str = "ice-pacing";
 /// RFC 8839 section 5.2.
 pub(crate) const ATTR_KEY_REMOTE_CANDIDATES: &str = "remote-candidates";
+/// `a=ice-mismatch` (RFC 8839 section 5.3).
+pub(crate) const ATTR_KEY_ICE_MISMATCH: &str = "ice-mismatch";
 /// RFC 6236 section 3.1.
 pub(crate) const ATTR_KEY_IMAGEATTR: &str = "imageattr";
 
