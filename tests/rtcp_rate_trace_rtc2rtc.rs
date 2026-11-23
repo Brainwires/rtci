@@ -764,7 +764,9 @@ fn the_performance_profile_sends_regular_reports_about_once_a_second() -> Result
     let (Some(a), Some(b)) = (rfc.nack_ms, performance.nack_ms) else {
         bail!("no NACK: {rfc:?} / {performance:?}");
     };
-    assert!((a - b).abs() <= 20.0, "NACK after {a} ms / {b} ms");
+    // Not held by T_rr_interval: no later than under the default. (The NACK generator's own
+    // reorder hold, learned from the path, sets the time: 100 to 120 ms here.)
+    assert!(b <= a + 20.0, "NACK after {a} ms / {b} ms");
     Ok(())
 }
 
