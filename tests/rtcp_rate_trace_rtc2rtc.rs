@@ -37,6 +37,10 @@
 //! no rsize" each feedback packet travels in a minimal compound packet with an SR (23 SR/s
 //! under `Performance`: 20 of them carry feedback).
 //!
+//! The audio rows were measured before RED (RFC 2198) became the default for audio (train
+//! 11). With it the "24 kbit/s audio, rsize" call carries 64.5 kbit/s on the wire, and its RTCP
+//! is 7.46% of the media under `Rfc` and 3.57% under `Performance` (hosted run 45240105038).
+//!
 //! The other tests pin what the `Performance` profile saves and that `Rfc` is unchanged, on
 //! shorter runs.
 
@@ -775,7 +779,10 @@ fn the_performance_profile_keeps_low_rate_rtcp_inside_five_percent() -> Result<(
     let performance = measure(AUDIO_24K, BehaviourProfile::Performance, None)?;
     print_row(&AUDIO_24K, BehaviourProfile::Rfc, &rfc);
     print_row(&AUDIO_24K, BehaviourProfile::Performance, &performance);
-    assert!(rfc.share >= 0.10, "{rfc:?}");
+    // Over RFC 3550's 5% by default. (10% and more before RED, RFC 2198, became the default for
+    // audio in train 11: the redundant copy doubles the media on the wire, 38.5 to 64.5
+    // kbit/s, and the RTCP share halves with it.)
+    assert!(rfc.share >= 0.06, "{rfc:?}");
     assert!(performance.share <= 0.05, "{performance:?}");
     assert!(performance.sides[1].cc >= 1.8, "{performance:?}");
     assert!(performance.sides[1].cc_gap_ms <= 550.0, "{performance:?}");

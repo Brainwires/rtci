@@ -412,15 +412,23 @@ The defaults follow the RFCs, MUST and SHOULD alike, except where a named browse
 interoperate with the RFC form. Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
 differently is a setting, and a `BehaviourProfile` sets all of them in one call:
 
-```rust
+```rust,no_run
+use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::BehaviourProfile;
+use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 
-let profile = BehaviourProfile::Chrome; // or Rfc (the defaults), StrictRfc, Performance
-let setting_engine = SettingEngineBuilder::new().with_behaviour_profile(profile).build();
-let mut media_engine = MediaEngine::for_profile(profile);
-media_engine.register_default_codecs()?;
-// Reads the media engine's profile.
-let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let profile = BehaviourProfile::Chrome; // or Rfc (the defaults), StrictRfc, Performance
+    let setting_engine = SettingEngineBuilder::new().with_behaviour_profile(profile).build();
+    let mut media_engine = MediaEngine::for_profile(profile);
+    media_engine.register_default_codecs()?;
+    // Reads the media engine's profile.
+    let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+    let _ = (setting_engine, registry);
+    Ok(())
+}
 ```
 
 - `Rfc`: the engine's defaults, unchanged.
