@@ -482,6 +482,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **stun**, **ice**: a `stuns` URI whose host is an IP address is refused by default (RFC 8489
+  section 8.1: "MUST be rejected"): `stun::uri::Uri::parse_uri` and `ice::url::Url::parse_url`
+  (and so the peer connection's ICE servers) return `ErrHost`; the new `parse_uri_lenient` /
+  `parse_url_lenient` accept it, as browsers do. `parse_uri_strict` is now the same as
+  `parse_uri`.
+- **ice**: an authenticated error response with an unknown comprehension-required attribute
+  fails its transaction and pair at once (RFC 8489 section 6.3.4); a Binding indication with
+  one, or with a wrong FINGERPRINT, is discarded (section 6.3.2). A lite agent takes only
+  host candidates, one per IP address (RFC 8445 section 5.2).
+- **pc**: `RTCIceCandidateInit` has a new member `relay_protocol` (W3C
+  `RTCLocalIceCandidateInit.relayProtocol`, serialized `relayProtocol`); a struct literal
+  without `..Default::default()` no longer compiles. A local relay candidate's `RTCIceCandidate`
+  carries it (else the protocol its TURN URL names) and its `url`; other types have none (W3C
+  webrtc-pc 4.8.1).
+- **pc**: a peer-reflexive remote candidate at an address the application did not signal is
+  exposed with an empty (null) `address` in the selected candidate pair, `get_candidate_pairs`
+  and the candidate-pair events (W3C webrtc-pc 4.8.1: "the user agent MUST leave the address
+  attribute as null for any exposed remote candidate").
+- **ice**: an ICE restart begun in connected or completed reports connected, not checking: the
+  path is kept until the new generation selects a pair (W3C webrtc-pc 5.6.4; RFC 8445 section
+  9). From disconnected or failed it is checking, and so when the kept path's consent expires
+  before a new pair.
+- **dtls**: ticket keys rotate every ticket lifetime, the previous one kept to open the tickets
+  it sealed (RFC 5077 section 5.5); DTLS 1.3 tickets included.
 - **ice**: a controlled agent whose check triggered by a received USE-CANDIDATE fails (timeout,
   error response, non-symmetric response) fails the pair and the checklist by default, while no
   pair is selected (RFC 8445 sections 7.2.5.3.4 and 7.3.1.5: "If the triggered request fails,

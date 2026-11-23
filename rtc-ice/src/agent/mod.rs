@@ -789,6 +789,24 @@ impl Agent {
             return Ok(false);
         }
 
+        // RFC 8445 Section 5.2: a lite implementation has only host candidates, "zero or one
+        // candidate per IP address": another type, or a second candidate on an address it
+        // already has a candidate on, is not taken.
+        if self.lite
+            && (c.candidate_type() != CandidateType::Host
+                || self
+                    .local_candidates
+                    .iter()
+                    .any(|cand| cand.addr().ip() == c.addr().ip()))
+        {
+            warn!(
+                "[{}]: ignoring local candidate {}: a lite agent has one host candidate per IP address",
+                self.get_name(),
+                c
+            );
+            return Ok(false);
+        }
+
         for cand in &self.local_candidates {
             if cand.equal(&c) {
                 return Ok(false);
@@ -2005,8 +2023,18 @@ impl Agent {
         self.start(now);
 
         // Restart is used by NewAgent. Accept/Connect should be used to move to checking
-        // for new Agents
-        if self.connection_state != ConnectionState::New {
+        // for new Agents. W3C webrtc-pc 5.6.4: "An ICE restart [...] causing a transition to
+        // connected if begun in the completed state. If begun in the transient disconnected
+        // state, it causes a transition to checking": a connected or completed agent that keeps
+        // its path (RFC 8445 Section 9) is connected; a disconnected or failed one, or one
+        // without a path, checks.
+        let was_connected = matches!(
+            self.connection_state,
+            ConnectionState::Connected | ConnectionState::Completed
+        );
+        if was_connected && self.previous_media_path.is_some() {
+            self.update_connection_state(Some(now), ConnectionState::Connected);
+        } else if self.connection_state != ConnectionState::New {
             self.update_connection_state(Some(now), ConnectionState::Checking);
         }
 
@@ -2440,6 +2468,11 @@ impl Agent {
             );
             self.previous_media_path = None;
             self.previous_generation = None;
+            // The kept path was what made the agent connected through the restart; without it
+            // and with no pair of the new generation selected, the agent is checking.
+            if self.selected_pair.is_none() && self.connection_state == ConnectionState::Connected {
+                self.update_connection_state(Some(now), ConnectionState::Checking);
+            }
             return;
         }
 
@@ -2982,6 +3015,15 @@ impl Agent {
                         remote_addr,
                         rejection
                     );
+                    // RFC 8489 Section 6.3.4: an (authenticated) error response with unknown
+                    // comprehension-required attributes means the transaction failed. (A
+                    // success response with them is discarded, Section 6.3.3, and the
+                    // transaction goes on.)
+                    if m.typ.class == CLASS_ERROR_RESPONSE
+                        && matches!(rejection, stun::validated::Rejection::UnknownAttributes(_))
+                    {
+                        self.handle_failed_transaction(now, m.transaction_id, remote_addr);
+                    }
                     return Err(rejection_error(&rejection));
                 }
             }
@@ -3002,6 +3044,22 @@ impl Agent {
                 );
                 return Err(Error::ErrUnhandledStunpacket);
             }
+        }
+
+        // RFC 8489 Section 6.3.2: an indication (a lite peer's keepalive) with unknown
+        // comprehension-required attributes, or a wrong FINGERPRINT, is discarded.
+        if m.typ.class == CLASS_INDICATION
+            && let Err(rejection) = stun::validated::Validator::new()
+                .known_attributes(&ice_known_attributes())
+                .unauthenticated(m)
+        {
+            debug!(
+                "[{}]: discard indication from ({}), {}",
+                self.get_name(),
+                remote_addr,
+                rejection
+            );
+            return Err(rejection_error(&rejection));
         }
 
         if let Some(remote) = remote_candidate_index.and_then(|i| self.remote_candidates.get_mut(i))

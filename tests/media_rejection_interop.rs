@@ -242,6 +242,7 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
                     sdp_mline_index: Some(0),
                     username_fragment: None,
                     url: None,
+                    relay_protocol: None,
                 };
                 if let Err(e) = rtc_pc.add_remote_candidate(remote_candidate) {
                     log::warn!("Failed to add remote candidate: {}", e);

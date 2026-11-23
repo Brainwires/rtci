@@ -147,8 +147,38 @@ impl IceTransport {
         self.agent
             .get_candidate_pairs()
             .iter()
-            .map(|(local, remote)| RTCIceCandidatePair::new(local.into(), remote.into()))
+            .map(|(local, remote)| self.exposed_pair(local, remote))
             .collect()
+    }
+
+    /// A pair of the agent as the application sees it: the remote candidate with its address
+    /// withheld unless the application supplied that address (see [`Self::exposed_remote`]).
+    pub(crate) fn exposed_pair(
+        &self,
+        local: &ice::candidate::Candidate,
+        remote: &ice::candidate::Candidate,
+    ) -> RTCIceCandidatePair {
+        RTCIceCandidatePair::new(local.into(), self.exposed_remote(remote))
+    }
+
+    /// W3C webrtc-pc 4.8.1 (`RTCIceCandidate.address`): "By default, the user agent MUST leave
+    /// the address attribute as null for any exposed remote candidate. Once a RTCPeerConnection
+    /// instance learns on an address by the web application using addIceCandidate, the user
+    /// agent can expose the address". The addresses the application supplied are those of the
+    /// remote candidates it signalled (in a description or with `add_remote_candidate`); a
+    /// peer-reflexive candidate the agent learned from a check, at another address, is exposed
+    /// with an empty (null) address.
+    pub(crate) fn exposed_remote(&self, remote: &ice::candidate::Candidate) -> RTCIceCandidate {
+        let mut exposed: RTCIceCandidate = remote.into();
+        let learned = remote.candidate_type() != ice::candidate::CandidateType::PeerReflexive
+            || self.agent.get_remote_candidates().iter().any(|signalled| {
+                signalled.candidate_type() != ice::candidate::CandidateType::PeerReflexive
+                    && signalled.address() == remote.address()
+            });
+        if !learned {
+            exposed.address = String::new();
+        }
+        exposed
     }
 
     /// The agent's candidates of the listed pair that matches `pair` (webrtc-extensions 7.2:
@@ -159,8 +189,17 @@ impl IceTransport {
         pair: &RTCIceCandidatePair,
     ) -> Option<(ice::candidate::Candidate, ice::candidate::Candidate)> {
         fn matches(ours: &RTCIceCandidate, theirs: &RTCIceCandidate) -> bool {
-            ours.candidate().ok() == theirs.candidate().ok()
-                && ours.sdp_mid == theirs.sdp_mid
+            // A remote candidate whose address was withheld has no candidate string of its
+            // own: it is the one with the same id (and the same rest).
+            let same = if ours.address.is_empty() {
+                theirs.address.is_empty()
+                    && ours.id == theirs.id
+                    && ours.port == theirs.port
+                    && ours.typ == theirs.typ
+            } else {
+                ours.candidate().ok() == theirs.candidate().ok()
+            };
+            same && ours.sdp_mid == theirs.sdp_mid
                 && ours.sdp_mline_index == theirs.sdp_mline_index
                 && ours.username_fragment == theirs.username_fragment
         }
@@ -168,7 +207,7 @@ impl IceTransport {
             .get_candidate_pairs()
             .into_iter()
             .find(|(local, remote)| {
-                let candidate = RTCIceCandidatePair::new(local.into(), remote.into());
+                let candidate = self.exposed_pair(local, remote);
                 matches(candidate.local(), pair.local())
                     && matches(candidate.remote(), pair.remote())
             })
@@ -179,7 +218,7 @@ impl IceTransport {
     /// `None` until ICE has nominated a pair.
     pub(crate) fn get_selected_candidate_pair(&self) -> Option<RTCIceCandidatePair> {
         let (local, remote) = self.agent.get_selected_candidate_pair()?;
-        Some(RTCIceCandidatePair::new(local.into(), remote.into()))
+        Some(self.exposed_pair(local, remote))
     }
 
     /// W3C `IceTransport.getRemoteCandidates()`: the remote candidates received so far.

@@ -24,7 +24,7 @@ use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines};
 use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCIceRole};
 
 const A: &str = "10.0.0.1:5000";
 const B: &str = "10.0.0.2:5000";
@@ -291,6 +291,9 @@ fn an_unchanged_description_keeps_the_association() -> Result<()> {
 ///   long before the successor existed, so A nominates that pair again (the successor, as the
 ///   DTLS client, starts its handshake when its ICE agent selects a pair: without the repeated
 ///   nomination it waited for ever).
+///
+/// W3C webrtc-pc 5.6: after the conflict each `RTCIceTransport.role` ([[IceRole]]) is the role
+/// its agent took.
 #[test]
 fn a_successor_is_connected_whichever_agent_wins_the_ice_role_conflict() -> Result<()> {
     for (a_tie_breaker, successor_tie_breaker) in [(2u64, 1u64), (1, 2)] {
@@ -336,6 +339,25 @@ fn a_successor_is_connected_whichever_agent_wins_the_ice_role_conflict() -> Resu
             );
             assert!(!world.peers[i].failed(), "{what}: peer {i}");
         }
+        let role = |peer: &Peer| {
+            peer.pc
+                .sctp()
+                .expect("the data channel's transport")
+                .transport()
+                .ice_transport()
+                .role()
+        };
+        let (a_role, successor_role) = if successor_tie_breaker > a_tie_breaker {
+            (RTCIceRole::Controlled, RTCIceRole::Controlling)
+        } else {
+            (RTCIceRole::Controlling, RTCIceRole::Controlled)
+        };
+        assert_eq!(role(&world.peers[0]), a_role, "{what}: A's [[IceRole]]");
+        assert_eq!(
+            role(&world.peers[1]),
+            successor_role,
+            "{what}: the successor's"
+        );
     }
     Ok(())
 }

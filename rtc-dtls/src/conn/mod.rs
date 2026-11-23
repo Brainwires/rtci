@@ -18,6 +18,8 @@ mod conn_transport_test;
 #[cfg(test)]
 mod connection_id_test;
 #[cfg(test)]
+mod mbedtls_cid_kat_test;
+#[cfg(test)]
 mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;

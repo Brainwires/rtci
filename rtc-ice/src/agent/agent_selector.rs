@@ -1373,6 +1373,40 @@ impl Agent {
         }
     }
 
+    /// The transaction `id` failed on an authenticated response the agent cannot use (RFC 8489
+    /// Section 6.3.4: an error response with unknown comprehension-required attributes): its
+    /// pair fails as on an error response (Section 7.2.5.2.4), its nomination with the
+    /// checklist by default (Section 7.2.5.3.4).
+    pub(crate) fn handle_failed_transaction(
+        &mut self,
+        now: Instant,
+        id: TransactionId,
+        remote_addr: SocketAddr,
+    ) {
+        let Some(pending) = self.handle_inbound_binding_success(now, id) else {
+            return;
+        };
+        if pending.destination != remote_addr || pending.cancelled || pending.consent {
+            return;
+        }
+        let Some(pair_index) = self.find_pair_exact(pending.local_index, pending.remote_index)
+        else {
+            return;
+        };
+        if self.selected_pair == Some(pair_index) {
+            return;
+        }
+        if self.failed_nomination == FailedNomination::FailChecklist
+            && (self.is_open_nomination(&pending, pair_index)
+                || self.is_followed_nomination(&pending, pair_index))
+        {
+            self.fail_nomination(now, pair_index, "an unusable error response");
+            return;
+        }
+        self.fail_pair(pair_index);
+        self.maybe_nominate(now);
+    }
+
     // ---------------------------------------------------------------------------------------
     // Requests (Sections 7.3.1.4, 7.3.1.5, 7.3.2)
     // ---------------------------------------------------------------------------------------
