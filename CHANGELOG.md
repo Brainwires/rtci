@@ -274,6 +274,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
+  DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
+  both without parameters and with NULL parameters"); only the NULL form was before. The
+  providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
+  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
+  `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
+  comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
+  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
+  Row RFC5246-4.7-1 `tested`
+  (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
+
 - **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
   SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:
   the ICE agent's connectivity checks (nominations and consent checks included) and success

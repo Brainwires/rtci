@@ -8,9 +8,9 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 665; rows that
   apply: 5081.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5035 of 5081 (99.1 %).
-- Tested as the default (`tested`): 5009 of 5081 (98.6 %); `setting`: 19; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 46: 4 untested, 29 partial, 13 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5036 of 5081 (99.1 %).
+- Tested as the default (`tested`): 5010 of 5081 (98.6 %); `setting`: 19; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 45: 4 untested, 28 partial, 13 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -18,17 +18,16 @@ Verdicts and classes are defined in `RULES.md`.
 | B | implemented, lacking a test that fails without it | 2 | 2 |
 | C | partly implemented | 26 | 16 |
 | D | not implemented | 12 | 11 |
-| E | cannot be met or observed inside this engine | 12 | 9 |
+| E | cannot be met or observed inside this engine | 11 | 9 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 72 | 55 |
+| all | | 71 | 55 |
 
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 41 rows, 20 of size S, 14 of size M, 7 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
-- Never testable inside this engine (class E, reason stated): 3 rows:
+- Never testable inside this engine (class E, reason stated): 2 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
-  - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
   - RFC7714-13.1-3 (`rfc7714.md`): Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
 
 Class C rows that say "Owner decision" are implemented as a setting whose default differs
@@ -39,7 +38,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 0 | 3 | 0 | 2 | 0 | 5 | 2 | 3 | 0 |
+| dtls-srtp | 0 | 3 | 0 | 1 | 0 | 4 | 1 | 3 | 0 |
 | ice | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
 | media (running) | 2 | 12 | 10 | 2 | 1 | 27 | 15 | 7 | 5 |
@@ -113,7 +112,6 @@ Sorted by class, then owner, size and ID.
 | RFC7798-7.2.5-1 | `rfc7798.md` | MRST / MRMT dependency signalling (RFC 5583); c= with a single ... | partial | D | H.265 MRST / MRMT transmission (multi-stream), never negotiated now | L | media (running) |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first) | M | tcp (running) |
-| RFC5246-4.7-1 | `rfc5246.md` | RSA signatures use DER DigestInfo; accept NULL or absent hash ... | partial | E | Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071) | S | dtls-srtp |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested) | S | dtls-srtp |
 | MDNSICE-7.1-1 | `draft-ietf-mmusic-mdns-ice-candidates.md` | An implementation-wide rate limit covers all mDNS queries and ... | partial | E | Stays partial (audit-5): a process-wide bucket by default is ambient state, which the sans-I/O crates do not keep (`docs/sans-io-deterministic-time.md`), and agents on different clocks cannot share one; one bucket shared by every agent given it is tested. Closes only by an owner decision to share a default bucket | S | ice |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
@@ -129,7 +127,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-40 rows: 10 of class B, 16 of class C, 2 of class D, 5 of class E, 7 of class F. The note of each row says how it was closed.
+41 rows: 10 of class B, 16 of class C, 2 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -163,6 +161,7 @@ Sorted by class, then owner, size and ID.
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | D | tested |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | E | n/a |
 | RFC5124-3.3.1-6 | `rfc5124.md` | A media section offered with another profile is rejected by an ... | E | n/a |
+| RFC5246-4.7-1 | `rfc5246.md` | RSA signatures use DER DigestInfo; accept NULL or absent hash ... | E | tested |
 | RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | E | n/a |
 | RFC8826-4.3-3 | `rfc8826.md` | No API extracts long-term keying material or reaches stored traffic ... | E | n/a |
 | RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | E | tested |
