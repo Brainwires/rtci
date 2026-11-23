@@ -293,10 +293,11 @@ fn the_applied_answer_keeps_the_bundle_attributes_in_the_tagged_section_only() -
 
 /// RFC 8859 section 4.3: an IDENTICAL attribute has the same value in every bundled section,
 /// or (RFC 9143 section 7.1.3, and the note of section 4.3) is carried by the tagged section
-/// only and applies to all. A remote offer whose bundled RTP sections disagree is refused:
-/// a non-tagged section with `a=rtcp-rsize` the tagged one lacks, or two different
-/// `a=ecn-capable-rtp` values. Firefox's form, `a=rtcp-rsize` and `a=extmap-allow-mixed`
-/// in the tagged section only, and the repeated form are applied.
+/// only and applies to all. A remote offer whose bundled sections carry two different values
+/// is refused (`a=ecn-capable-rtp`). Firefox's form, `a=rtcp-rsize` and
+/// `a=extmap-allow-mixed` in the tagged section only, the repeated form, and a section with
+/// `a=rtcp-mux-only` the tagged one lacks (what RFC 9429 section 5.2.2 writes for a section a
+/// later offer adds) are applied.
 #[test]
 fn bundled_sections_that_disagree_on_an_identical_attribute_are_refused() -> TestResult {
     use jsep_common::{SESSION, TRANSPORT, crlf};
@@ -315,13 +316,13 @@ fn bundled_sections_that_disagree_on_an_identical_attribute_are_refused() -> Tes
     };
     for (tagged, other, what) in [
         (
-            "",
-            "a=rtcp-rsize\n",
-            "a=rtcp-rsize in the second section only",
+            "a=ecn-capable-rtp: leap\n",
+            "a=ecn-capable-rtp: rtp\n",
+            "two a=ecn-capable-rtp values",
         ),
         (
             "a=ecn-capable-rtp: leap\n",
-            "a=ecn-capable-rtp: rtp\n",
+            "a=ecn-capable-rtp: leap ect=1\n",
             "two a=ecn-capable-rtp values",
         ),
     ] {
@@ -344,6 +345,11 @@ fn bundled_sections_that_disagree_on_an_identical_attribute_are_refused() -> Tes
             "a=rtcp-rsize\na=extmap-allow-mixed\n",
             "a=extmap-allow-mixed\na=rtcp-rsize\n",
             "repeated",
+        ),
+        (
+            "",
+            "a=rtcp-mux-only\n",
+            "a=rtcp-mux-only in a later section only",
         ),
     ] {
         let mut pc = default_peer()?;

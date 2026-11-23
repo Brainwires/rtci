@@ -535,8 +535,7 @@ versions that support it. Raising it is a deliberate change of the manifest.
   A local rid must be 1 to 255 alphanumerics (RFC 8852 section 3.1); no switch.
 - BUNDLE, IDENTICAL attributes (jsep16): a remote description whose bundled sections carry an
   attribute of RFC 8859's IDENTICAL category (`a=rtcp-rsize`, `a=ecn-capable-rtp`,
-  `a=extmap-allow-mixed`, ...) with different values, or an RTP section carrying one its RTP
-  tagged section lacks, is refused (RFC 8859 section 4.3). An absence is not: the tagged
+  `a=extmap-allow-mixed`, ...) with different values is refused (RFC 8859 section 4.3). An absence is not: the tagged
   section speaks for the group. No browser description recorded by the interop harness breaks
   the rule. An offer whose bundled sections list different ECN methods used to be answered
   with the tagged section's; no switch.
