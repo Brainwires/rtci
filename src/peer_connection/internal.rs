@@ -2873,19 +2873,34 @@ impl RTCPeerConnection {
                         codings,
                     ));
                 } else if let Some(ssrc) = incoming_track.ssrc {
-                    let rtp_coding_parameters = RTCRtpCodingParameters {
-                        rid: "".to_string(),
-                        ssrc: Some(ssrc),
-                        rtx: incoming_track
-                            .rtx_ssrc
-                            .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
-                        fec: incoming_track
-                            .fec_ssrc
-                            .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
-                        ..Default::default()
-                    };
-
-                    receive_codings.push(rtp_coding_parameters.clone());
+                    // The declared stream, and (RFC 5576 `a=ssrc-group:SIM`) the further
+                    // simulcast streams of the track, each a coding with its repair flows.
+                    let layers = std::iter::once(sdp::SsrcLayer {
+                        ssrc,
+                        rtx_ssrc: incoming_track.rtx_ssrc,
+                        fec_ssrc: incoming_track.fec_ssrc,
+                    })
+                    .chain(std::mem::take(&mut incoming_track.ssrc_layers));
+                    let mut codings = vec![];
+                    for layer in layers {
+                        let rtp_coding_parameters = RTCRtpCodingParameters {
+                            rid: "".to_string(),
+                            ssrc: Some(layer.ssrc),
+                            rtx: layer
+                                .rtx_ssrc
+                                .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
+                            fec: layer
+                                .fec_ssrc
+                                .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
+                            ..Default::default()
+                        };
+                        receive_codings.push(rtp_coding_parameters.clone());
+                        codings.push(RTCRtpEncodingParameters {
+                            rtp_coding_parameters,
+                            codec: Default::default(), // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
+                            ..Default::default()
+                        });
+                    }
 
                     receiver.set_remote_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
@@ -2893,11 +2908,7 @@ impl RTCPeerConnection {
                         // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
                         format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
-                        vec![RTCRtpEncodingParameters {
-                            rtp_coding_parameters,
-                            codec: Default::default(), // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
-                            ..Default::default()
-                        }],
+                        codings,
                     ));
 
                     // Deliberately no `interceptor_remote_streams_op` here. It bound nothing: that
@@ -4652,11 +4663,23 @@ fn is_same_remote_track(
     }
 
     match (codings, incoming_track.ssrc) {
-        ([coding], Some(ssrc)) => {
+        ([coding, ..], Some(ssrc)) if codings.len() == 1 + incoming_track.ssrc_layers.len() => {
+            let layers = std::iter::once((ssrc, incoming_track.rtx_ssrc, incoming_track.fec_ssrc))
+                .chain(
+                    incoming_track
+                        .ssrc_layers
+                        .iter()
+                        .map(|layer| (layer.ssrc, layer.rtx_ssrc, layer.fec_ssrc)),
+                );
             coding.rid.is_empty()
-                && coding.ssrc == Some(ssrc)
-                && coding.rtx.as_ref().map(|r| r.ssrc) == incoming_track.rtx_ssrc
-                && coding.fec.as_ref().map(|f| f.ssrc) == incoming_track.fec_ssrc
+                && codings
+                    .iter()
+                    .zip(layers)
+                    .all(|(coding, (ssrc, rtx, fec))| {
+                        coding.ssrc == Some(ssrc)
+                            && coding.rtx.as_ref().map(|r| r.ssrc) == rtx
+                            && coding.fec.as_ref().map(|f| f.ssrc) == fec
+                    })
         }
         _ => false,
     }
