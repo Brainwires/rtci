@@ -160,21 +160,29 @@ impl CryptoCbc {
             .decrypt_blocks(iv, &mut decrypted)
             .map_err(authentication_error)?;
 
-        // Lucky Thirteen: how long the padding and MAC checks take must not depend on the padding
-        // the plaintext claims. The record's length is public; the padding length is not. So the
-        // padding is checked without returning early, a record with bad padding is MACed as if it
-        // had none (RFC 5246 6.2.3.2), and the bytes the padding took are run through the MAC
-        // too, so every record of one length MACs the same number of bytes and fails the same
-        // way. (The MAC interface takes whole messages, so the HMAC's own block count is not
-        // made constant beyond that.)
+        // Lucky Thirteen (RFC 5246 6.2.3.2: "the same amount of time" whether or not the
+        // padding is correct). The record's length is public; the padding length is not. So:
+        // - the padding is checked without returning early, and a record with bad padding is
+        //   MACed as if it had none;
+        // - the received MAC, which sits at an offset the padding decides, is read through a
+        //   mask from every place it could start, so the memory touched is the same;
+        // - the HMAC-SHA1 runs as many compression functions for every padding length: the
+        //   MAC of the content takes fewer the shorter the content, and an equalizing HMAC over
+        //   a run of zeros takes the difference (`equalizer_len`).
         if decrypted.len() <= Self::MAC_SIZE {
             return Err(Error::ErrInvalidMac);
         }
         let (padding_len, padding_valid) = padding::check_padding(&decrypted, Self::MAC_SIZE);
         let strip = padding_len & 0usize.wrapping_sub(usize::from(padding_valid));
-        let content_len = decrypted.len() - Self::MAC_SIZE - strip;
+        let max_content_len = decrypted.len() - Self::MAC_SIZE;
+        let content_len = max_content_len - strip;
 
-        let recv_mac = &decrypted[content_len..content_len + Self::MAC_SIZE];
+        let recv_mac = padding::extract_constant_time::<{ Self::MAC_SIZE }>(
+            &decrypted,
+            content_len,
+            max_content_len.saturating_sub(256),
+            max_content_len,
+        );
         let content = &decrypted[..content_len];
         let mac = prf_mac(
             self.read_mac.as_mut(),
@@ -185,17 +193,16 @@ impl CryptoCbc {
             cid,
             content,
         )?;
-        let _equalizer = prf_mac(
-            self.read_mac.as_mut(),
-            h.epoch,
-            h.sequence_number,
-            h.content_type,
-            h.protocol_version,
-            cid,
-            &decrypted[..strip],
-        )?;
+        let additional_data_len = crate::crypto::record_additional_data(&h, 0, cid).len();
+        let zeros = [0u8; 64 * 8];
+        let equalizer = padding::equalizer_len(additional_data_len, content_len, max_content_len)
+            .min(zeros.len());
+        let mut discard = vec![0; self.read_mac.output_len()];
+        self.read_mac
+            .sign(&[&zeros[..equalizer]], &mut discard)
+            .map_err(|error| Error::Crypto(error.to_string()))?;
 
-        if !(padding_valid & constant_time_eq(recv_mac, &mac)) {
+        if !(padding_valid & constant_time_eq(&recv_mac, &mac)) {
             return Err(Error::ErrInvalidMac);
         }
         let decrypted = content;
@@ -269,5 +276,25 @@ mod tests {
             receiver.decrypt(&truncated),
             Err(Error::ErrInvalidPacketLength)
         );
+    }
+
+    /// RFC 5246 6.2.3.2: the IV of each record is random, so two records of the same content
+    /// under the same keys and header encrypt differently and each decrypts.
+    #[test]
+    fn each_record_has_its_own_random_iv() {
+        let (mut sender, mut receiver) = cipher_pair();
+        let (header, raw) = record(b"the same content twice");
+        let ivs: Vec<Vec<u8>> = (0..8)
+            .map(|_| {
+                let encrypted = sender.encrypt(&header, &raw).unwrap();
+                assert!(receiver.decrypt(&encrypted).is_ok());
+                encrypted
+                    [RECORD_LAYER_HEADER_SIZE..RECORD_LAYER_HEADER_SIZE + CryptoCbc::BLOCK_SIZE]
+                    .to_vec()
+            })
+            .collect();
+        let distinct: std::collections::HashSet<_> = ivs.iter().collect();
+        assert_eq!(distinct.len(), ivs.len(), "an IV used twice");
+        assert!(ivs.iter().all(|iv| iv.iter().any(|b| *b != 0)));
     }
 }

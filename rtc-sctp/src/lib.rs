@@ -58,6 +58,7 @@ use std::{fmt, ops};
 mod association;
 pub use crate::association::{
     Association, AssociationError, Event, ReconfigEvent,
+    pmtud::{PathMtuDiscoveryConfig, PathMtuState},
     stats::AssociationStats,
     stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamState},
     timer::TimerConfig,
