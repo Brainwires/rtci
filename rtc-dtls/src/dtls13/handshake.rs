@@ -708,10 +708,13 @@ impl Conn13 {
                 self.cfg.client_auth,
                 ClientAuthType::RequireAnyClientCert | ClientAuthType::RequireAndVerifyClientCert
             ) {
-                return Err(refuse(
-                    alert::CERTIFICATE_REQUIRED,
-                    Error::ErrClientCertificateRequired,
-                ));
+                // RFC 8122 section 6.2 (SDP offer/answer): bad_certificate.
+                let alert = if self.cfg.bad_certificate_for_a_missing_client_certificate {
+                    alert::BAD_CERTIFICATE
+                } else {
+                    alert::CERTIFICATE_REQUIRED
+                };
+                return Err(refuse(alert, Error::ErrClientCertificateRequired));
             }
             self.state = HandshakeState::ServerWaitFinished;
         } else {
@@ -1661,10 +1664,13 @@ impl Conn13 {
                             | ClientAuthType::RequireAndVerifyClientCert
                     )
                 {
-                    return Err(refuse(
-                        alert::CERTIFICATE_REQUIRED,
-                        Error::ErrClientCertificateRequired,
-                    ));
+                    // RFC 8122 section 6.2 (SDP offer/answer): bad_certificate.
+                    let alert = if self.cfg.bad_certificate_for_a_missing_client_certificate {
+                        alert::BAD_CERTIFICATE
+                    } else {
+                        alert::CERTIFICATE_REQUIRED
+                    };
+                    return Err(refuse(alert, Error::ErrClientCertificateRequired));
                 }
                 self.client_authentication = Some(ClientAuthentication {
                     verified: chain.is_empty(),

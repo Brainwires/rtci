@@ -517,10 +517,10 @@ impl Flight for Flight4 {
                 if state.peer_certificates.is_empty() {
                     return Err((
                         // RFC 5246 7.4.6: handshake_failure for a required certificate
-                        // that was not sent.
+                        // that was not sent; RFC 8122 6.2 (SDP offer/answer): bad_certificate.
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::HandshakeFailure,
+                            alert_description: missing_client_certificate_alert(cfg),
                         }),
                         Some(Error::ErrClientCertificateRequired),
                     ));
@@ -541,10 +541,10 @@ impl Flight for Flight4 {
                 if state.peer_certificates.is_empty() {
                     return Err((
                         // RFC 5246 7.4.6: handshake_failure for a required certificate
-                        // that was not sent.
+                        // that was not sent; RFC 8122 6.2 (SDP offer/answer): bad_certificate.
                         Some(Alert {
                             alert_level: AlertLevel::Fatal,
-                            alert_description: AlertDescription::HandshakeFailure,
+                            alert_description: missing_client_certificate_alert(cfg),
                         }),
                         Some(Error::ErrClientCertificateRequired),
                     ));
@@ -1177,5 +1177,15 @@ mod tests {
         let res = Flight4 {}.parse(&mut state, &cache, &cfg);
         assert!(matches!(res, Err((Some(_), Some(_)))));
         assert!(state.verified_certificate_verify.is_none());
+    }
+}
+
+/// The alert for a required client certificate the client did not send: `handshake_failure`
+/// (RFC 5246 section 7.4.6), or `bad_certificate` where RFC 8122 section 6.2 applies.
+fn missing_client_certificate_alert(cfg: &HandshakeConfig) -> AlertDescription {
+    if cfg.bad_certificate_for_a_missing_client_certificate {
+        AlertDescription::BadCertificate
+    } else {
+        AlertDescription::HandshakeFailure
     }
 }

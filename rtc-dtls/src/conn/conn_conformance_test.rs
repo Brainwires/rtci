@@ -36,6 +36,7 @@ const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 
 const ALERT_FATAL: u8 = 2;
 const ALERT_HANDSHAKE_FAILURE: u8 = 40;
+const ALERT_BAD_CERTIFICATE: u8 = 42;
 const ALERT_ILLEGAL_PARAMETER: u8 = 47;
 const ALERT_DECRYPT_ERROR: u8 = 51;
 
@@ -1354,6 +1355,26 @@ fn client_without_a_certificate_for_the_requested_algorithms_sends_none() {
     assert_eq!(
         plaintext_alerts(&exchange.from_server),
         vec![(ALERT_FATAL, ALERT_HANDSHAKE_FAILURE)]
+    );
+
+    // RFC 8122 section 6.2, the SDP offer/answer model: "if the client does not provide one
+    // ... the server endpoint MUST terminate the media connection with a bad_certificate
+    // error", where the option is set (as the peer connection sets it).
+    let exchange = Exchange::run(
+        client(client_builder()),
+        server(
+            server_builder()
+                .with_client_auth(ClientAuthType::RequireAnyClientCert)
+                .with_bad_certificate_for_a_missing_client_certificate(true),
+        ),
+    );
+    assert_eq!(
+        exchange.server_err,
+        Some(Error::ErrClientCertificateRequired)
+    );
+    assert_eq!(
+        plaintext_alerts(&exchange.from_server),
+        vec![(ALERT_FATAL, ALERT_BAD_CERTIFICATE)]
     );
 }
 

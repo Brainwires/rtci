@@ -120,6 +120,7 @@ pub struct ConfigBuilder {
     use_srtp_optional: bool,
     use_srtp_required: bool,
     client_auth: ClientAuthType,
+    bad_certificate_for_a_missing_client_certificate: bool,
     extended_master_secret: ExtendedMasterSecretType,
     flight_interval: Duration,
     maximum_flight_interval: Duration,
@@ -168,6 +169,7 @@ impl Default for ConfigBuilder {
             use_srtp_optional: false,
             use_srtp_required: false,
             client_auth: ClientAuthType::default(),
+            bad_certificate_for_a_missing_client_certificate: false,
             extended_master_secret: ExtendedMasterSecretType::default(),
             flight_interval: Duration::default(),
             maximum_flight_interval: MAXIMUM_RETRANSMIT_INTERVAL,
@@ -280,6 +282,19 @@ impl ConfigBuilder {
     /// TLS Client Authentication. The default is NoClientCert.
     pub fn with_client_auth(mut self, client_auth: ClientAuthType) -> Self {
         self.client_auth = client_auth;
+        self
+    }
+
+    /// The alert a server that requires a client certificate
+    /// ([`ClientAuthType::RequireAnyClientCert`], [`ClientAuthType::RequireAndVerifyClientCert`])
+    /// ends the handshake with when the client sends none. `false` (the default):
+    /// `handshake_failure` (RFC 5246 section 7.4.6), `certificate_required` under DTLS 1.3 (RFC
+    /// 8446 section 4.4.2.4). `true`: `bad_certificate`, which RFC 8122 section 6.2 requires of
+    /// an endpoint of the SDP offer/answer model ("if the client does not provide one ... the
+    /// server endpoint MUST terminate the media connection with a bad_certificate error");
+    /// the WebRTC peer connection sets it.
+    pub fn with_bad_certificate_for_a_missing_client_certificate(mut self, bad: bool) -> Self {
+        self.bad_certificate_for_a_missing_client_certificate = bad;
         self
     }
 
@@ -1034,6 +1049,8 @@ impl ConfigBuilder {
             use_srtp_required: self.use_srtp_required,
             server_name,
             client_auth: self.client_auth,
+            bad_certificate_for_a_missing_client_certificate: self
+                .bad_certificate_for_a_missing_client_certificate,
             local_certificates: self.certificates,
             name_to_certificate: Default::default(),
             insecure_skip_verify: self.insecure_skip_verify,
@@ -1131,6 +1148,8 @@ pub struct HandshakeConfig {
     pub(crate) use_srtp_required: bool, // A server refuses a client it shares no SRTP profile with
     pub(crate) server_name: String,
     pub(crate) client_auth: ClientAuthType, // If we are a client should we request a client certificate
+    /// RFC 8122 section 6.2: bad_certificate for a missing required client certificate.
+    pub(crate) bad_certificate_for_a_missing_client_certificate: bool,
     pub(crate) local_certificates: Vec<Certificate>,
     pub(crate) name_to_certificate: HashMap<String, Certificate>,
     pub(crate) insecure_skip_verify: bool,
@@ -1214,6 +1233,13 @@ impl fmt::Debug for HandshakeConfig {
 }
 
 impl HandshakeConfig {
+    /// Whether a missing required client certificate ends the handshake with
+    /// `bad_certificate` (RFC 8122 section 6.2); see
+    /// [`ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate`].
+    pub fn bad_certificate_for_a_missing_client_certificate(&self) -> bool {
+        self.bad_certificate_for_a_missing_client_certificate
+    }
+
     pub(crate) fn new(crypto_provider: Arc<dyn RTCCryptoProvider>) -> Self {
         Self {
             crypto_provider,
@@ -1228,6 +1254,7 @@ impl HandshakeConfig {
             use_srtp_required: false,
             server_name: String::new(),
             client_auth: ClientAuthType::NoClientCert,
+            bad_certificate_for_a_missing_client_certificate: false,
             local_certificates: vec![],
             name_to_certificate: HashMap::new(),
             insecure_skip_verify: false,
