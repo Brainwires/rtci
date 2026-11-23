@@ -22,7 +22,7 @@ use rtc::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-const REMOTE_PASSIVE: &str = "127.0.0.2:6000";
+const REMOTE_PASSIVE: &str = "127.0.0.2:6002";
 
 fn tcp_pc(now: Instant) -> Result<RTCPeerConnection> {
     Ok(RTCPeerConnectionBuilder::new()
@@ -67,7 +67,8 @@ fn a_first_answer_that_is_not_stun_fails_the_pair_of_an_active_tcp_candidate() -
     .new_candidate_host()?;
     pc.add_local_candidate(RTCIceCandidate::from(&active).to_json()?)?;
     pc.add_remote_candidate(RTCIceCandidateInit {
-        candidate: "candidate:1 1 tcp 2128609279 127.0.0.2 6000 typ host tcptype passive"
+        sdp_mline_index: Some(0),
+        candidate: "candidate:1 1 tcp 2128609279 127.0.0.2 6002 typ host tcptype passive"
             .to_owned(),
         ..Default::default()
     })?;

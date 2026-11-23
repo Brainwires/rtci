@@ -80,6 +80,7 @@ async fn remote_handler(
 
             let _ = cmd_tx
                 .send(Command::AddIceCandidate(RTCIceCandidateInit {
+                    sdp_mline_index: Some(0),
                     candidate,
                     ..Default::default()
                 }))

@@ -72,6 +72,7 @@ fn a_remote_mdns_candidate_has_its_statistics_before_and_after_its_name_resolves
     .new_candidate_host()?;
     pc.add_local_candidate(RTCIceCandidate::from(&local).to_json()?)?;
     pc.add_remote_candidate(RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!("candidate:1114572465 1 udp 2113939711 {NAME} 61163 typ host"),
         ..Default::default()
     })?;
@@ -195,6 +196,7 @@ fn a_learned_candidate_that_a_resolved_name_replaces_shows_the_name() -> Result<
     browser.add_remote_candidate(host(pc_addr)?)?;
     // The browser signals its candidate under its name only.
     pc.add_remote_candidate(RTCIceCandidateInit {
+        sdp_mline_index: Some(0),
         candidate: format!("candidate:1114572465 1 udp 2113939711 {NAME} 61163 typ host"),
         ..Default::default()
     })?;

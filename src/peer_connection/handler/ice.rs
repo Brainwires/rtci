@@ -33,6 +33,16 @@ pub(crate) struct IceHandlerContext {
     /// it, is told through this (RFC 8831 section 5: "SCTP SHOULD be notified when an address
     /// change has happened"): the event itself ends at the DTLS handler.
     pub(crate) selected_pair_changes: u64,
+
+    /// Two lite agents, this one controlling: the pair it chose among several, which the
+    /// next offer conveys (RFC 8445 section 8.2, RFC 8839 section 4.4.1.3: the local candidate
+    /// alone and `a=remote-candidates`) until an answer to such an offer is applied.
+    pub(crate) lite_candidate_update: Option<(
+        Box<::ice::candidate::Candidate>,
+        Box<::ice::candidate::Candidate>,
+    )>,
+    /// `lite_candidate_update` was set and the negotiation-needed flag is still to be updated.
+    pub(crate) lite_candidate_update_raised: bool,
 }
 
 impl IceHandlerContext {
@@ -46,6 +56,8 @@ impl IceHandlerContext {
 
             selected_pair_key: None,
             selected_pair_changes: 0,
+            lite_candidate_update: None,
+            lite_candidate_update_raised: false,
         }
     }
 }
@@ -335,6 +347,18 @@ impl<'a>
                         ),
                     });
                 }
+                ::ice::Event::CandidatePairNominationProposed(local, remote) => {
+                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
+                        (&*local).into(),
+                        (&*remote).into(),
+                    );
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidatePairNominate(pair),
+                        ),
+                    });
+                }
                 ::ice::Event::CandidatePairRemoved(local, remote) => {
                     let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
                         (&*local).into(),
@@ -375,6 +399,11 @@ impl<'a>
                             ),
                         ),
                     });
+                }
+                ::ice::Event::LiteCandidateUpdate(local, remote) => {
+                    // The peer connection makes the updated offer (`check_negotiation_needed`).
+                    self.ctx.lite_candidate_update = Some((local, remote));
+                    self.ctx.lite_candidate_update_raised = true;
                 }
                 _ => {}
             }

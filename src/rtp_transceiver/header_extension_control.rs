@@ -124,6 +124,33 @@ pub(crate) fn negotiated_from_answer(
             Some((uri, extmap.direction))
         })
         .collect();
+    // The media section's negotiated direction from this side's point of view: an extension
+    // whose direction it leaves no use for (a send-only extension on a section that only
+    // receives, and the reverse) "cannot be used because of other options negotiated in the
+    // answer" and is stopped (webrtc-extensions 4.1). A held (inactive) or rejected section
+    // stops nothing: the list is what the next offers negotiate, and the extensions are
+    // wanted again when the media resumes.
+    let section = if answer_section.media_name.port.value == 0 {
+        RTCRtpTransceiverDirection::Sendrecv
+    } else {
+        let answered = ["sendrecv", "sendonly", "recvonly", "inactive"]
+            .into_iter()
+            .find(|d| answer_section.attributes.iter().any(|a| a.key == *d))
+            .map_or(
+                RTCRtpTransceiverDirection::Sendrecv,
+                RTCRtpTransceiverDirection::from,
+            );
+        if remote_answer {
+            answered.reverse()
+        } else {
+            answered
+        }
+    };
+    let usable = |direction: RTCRtpTransceiverDirection| {
+        section == RTCRtpTransceiverDirection::Inactive
+            || (direction.has_send() && section.has_send())
+            || (direction.has_recv() && section.has_recv())
+    };
     to_negotiate
         .iter()
         .map(|extension| {
@@ -150,6 +177,14 @@ pub(crate) fn negotiated_from_answer(
                 Some(Direction::SendOnly) => RTCRtpTransceiverDirection::Sendonly,
                 Some(Direction::RecvOnly) if remote_answer => RTCRtpTransceiverDirection::Sendonly,
                 Some(Direction::RecvOnly) => RTCRtpTransceiverDirection::Recvonly,
+            };
+            let direction = if direction != RTCRtpTransceiverDirection::Stopped
+                && direction != RTCRtpTransceiverDirection::Inactive
+                && !usable(direction)
+            {
+                RTCRtpTransceiverDirection::Stopped
+            } else {
+                direction
             };
             RTCRtpHeaderExtensionToNegotiate {
                 uri: extension.uri.clone(),

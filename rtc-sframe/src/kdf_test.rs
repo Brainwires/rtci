@@ -1,9 +1,9 @@
 use crypto::HmacAlgorithm;
 
-use crate::kdf::{derive_key_salt, hkdf_expand, hkdf_extract};
+use crate::kdf::{derive_key_salt, hkdf_expand, hkdf_extract, hkdf_extract_salted};
 use crate::test_util::{hex, provider};
 use crate::test_vectors::{AES_256_CTR, BASE_KEY, KID, RFC9605_C3, SFrameVector};
-use crate::{CipherSuite, Error, ratchet_base_key};
+use crate::{CipherSuite, Error, derive_ssrc_key, ratchet_base_key};
 
 fn assert_key_derivation(vector: &SFrameVector) {
     let provider = provider();
@@ -136,4 +136,69 @@ fn ratchet_derives_the_next_base_keys_of_rfc9605_section_5_1() {
             base_key = next.as_ref().to_vec();
         }
     }
+}
+
+/// RFC 5869 appendix A.1 (SHA-256, test case 1): the salted HKDF-Extract and HKDF-Expand the
+/// per-SSRC derivation of draft-ietf-avtcore-rtp-sframe-03 section 7 is built from.
+#[test]
+fn salted_hkdf_matches_rfc5869_test_case_1() {
+    let provider = provider();
+    let ikm = [0x0bu8; 22];
+    let salt = hex("000102030405060708090a0b0c");
+    let info = hex("f0f1f2f3f4f5f6f7f8f9");
+    let prk = hkdf_extract_salted(provider.crypto(), HmacAlgorithm::Sha256, &salt, &ikm).unwrap();
+    assert_eq!(
+        &prk[..32],
+        hex("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+    );
+    let mut okm = [0u8; 42];
+    hkdf_expand(
+        provider.crypto(),
+        HmacAlgorithm::Sha256,
+        &prk[..32],
+        &[&info],
+        &mut okm,
+    )
+    .unwrap();
+    assert_eq!(
+        okm.to_vec(),
+        hex("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    );
+}
+
+/// draft-ietf-avtcore-rtp-sframe-03 section 7: the per-SSRC key is
+/// HKDF-Expand(HKDF-Extract(SSRC as 4 bytes, base_key), "SFrame 1.0 RTP Stream", Nh): one key
+/// per SSRC from one base key, `Nh` bytes, the same for the same inputs.
+#[test]
+fn the_per_ssrc_key_is_hkdf_of_the_base_key_salted_with_the_ssrc() {
+    let provider = provider();
+    let base_key = hex(BASE_KEY);
+    for suite in [
+        CipherSuite::Aes128CtrHmacSha256_80,
+        CipherSuite::Aes128GcmSha256_128,
+    ] {
+        let a = derive_ssrc_key(provider.crypto(), suite, &base_key, 0x0102_0304).unwrap();
+        let b = derive_ssrc_key(provider.crypto(), suite, &base_key, 0x0102_0305).unwrap();
+        assert_eq!(a.len(), suite.hash_len());
+        assert_ne!(a.as_ref(), b.as_ref(), "{suite}: another SSRC, another key");
+        let again = derive_ssrc_key(provider.crypto(), suite, &base_key, 0x0102_0304).unwrap();
+        assert_eq!(a.as_ref(), again.as_ref());
+
+        let prk =
+            hkdf_extract_salted(provider.crypto(), suite.hmac(), &[1, 2, 3, 4], &base_key).unwrap();
+        let mut expected = vec![0u8; suite.hash_len()];
+        hkdf_expand(
+            provider.crypto(),
+            suite.hmac(),
+            &prk[..suite.hash_len()],
+            &[b"SFrame 1.0 RTP Stream"],
+            &mut expected,
+        )
+        .unwrap();
+        assert_eq!(a.as_ref(), expected.as_slice(), "{suite}");
+    }
+    assert!(matches!(
+        derive_ssrc_key(provider.crypto(), CipherSuite::Aes128GcmSha256_128, &[], 1),
+        Err(Error::EmptyBaseKey)
+    ));
 }

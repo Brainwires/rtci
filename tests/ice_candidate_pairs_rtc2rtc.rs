@@ -52,17 +52,29 @@ struct World {
 
 impl World {
     fn new(offerer: &[&str], answerer: &[&str]) -> Result<Self> {
+        Self::new_with_proposals(offerer, answerer, false)
+    }
+
+    /// With `proposals`, the offerer (controlling) proposes its nominations
+    /// (`with_candidate_pair_proposals`).
+    fn new_with_proposals(offerer: &[&str], answerer: &[&str], proposals: bool) -> Result<Self> {
         let now = Instant::now();
-        let peer = |addrs: &[&str]| -> Result<Peer> {
+        let peer = |addrs: &[&str], proposals: bool| -> Result<Peer> {
             Ok(Peer {
-                pc: RTCPeerConnectionBuilder::new().build(now)?,
+                pc: RTCPeerConnectionBuilder::new()
+                    .with_setting_engine(
+                        rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                            .with_candidate_pair_proposals(proposals)
+                            .build(),
+                    )
+                    .build(now)?,
                 addrs: addrs.iter().map(|a| a.parse()).collect::<Result<_, _>>()?,
                 events: vec![],
                 sent_from: vec![],
             })
         };
         Ok(Self {
-            peers: [peer(offerer)?, peer(answerer)?],
+            peers: [peer(offerer, proposals)?, peer(answerer, false)?],
             now,
         })
     }
@@ -298,5 +310,88 @@ fn remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refu
         matches!(refused, Err(Error::InvalidStateError)),
         "{refused:?}"
     );
+    Ok(())
+}
+
+fn nominations(peer: &Peer) -> Vec<RTCIceCandidatePair> {
+    peer.events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidatePairNominate(pair) => Some(pair.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// webrtc-extensions 7 `icecandidatepairnominate`: the controlling agent proposes the pair
+/// it picked before nominating it; while the proposal is pending ([[ProposalPending]])
+/// selectCandidatePair and removeCandidatePair are an InvalidStateError and nothing is
+/// nominated; accepted, the pair is nominated and the connection comes up.
+#[test]
+fn an_accepted_nomination_proposal_nominates_the_pair() -> Result<()> {
+    let mut world = World::new_with_proposals(&["10.0.0.1:5000"], &["10.0.0.3:5000"], true)?;
+    world.negotiate()?;
+    assert!(world.run_until(|w| !nominations(&w.peers[0]).is_empty())?);
+    let proposed = nominations(&world.peers[0])[0].clone();
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(|w| w.now >= until)?;
+    assert_eq!(nominations(&world.peers[0]).len(), 1, "proposed once");
+    assert!(
+        selected(&world.peers[1].pc).is_none(),
+        "nothing nominated yet"
+    );
+    let now = world.now;
+    assert_eq!(
+        world.peers[0].pc.select_candidate_pair(now, &proposed),
+        Err(Error::InvalidStateError)
+    );
+    assert_eq!(
+        world.peers[0].pc.remove_candidate_pair(now, &proposed),
+        Err(Error::InvalidStateError)
+    );
+
+    world.peers[0]
+        .pc
+        .resolve_candidate_pair_nomination(now, true);
+    assert!(world.run_until(|w| {
+        w.peers
+            .iter()
+            .all(|p| p.pc.connection_state() == RTCPeerConnectionState::Connected)
+    })?);
+    assert_eq!(selected(&world.peers[0].pc), Some(proposed));
+    Ok(())
+}
+
+/// webrtc-extensions 7: a cancelled `icecandidatepairnominate` leaves the pair un-nominated
+/// and the agent checking; the application can still select the pair itself.
+#[test]
+fn a_cancelled_nomination_proposal_keeps_the_agent_checking() -> Result<()> {
+    let mut world = World::new_with_proposals(&["10.0.0.1:5000"], &["10.0.0.3:5000"], true)?;
+    world.negotiate()?;
+    assert!(world.run_until(|w| !nominations(&w.peers[0]).is_empty())?);
+    let proposed = nominations(&world.peers[0])[0].clone();
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .resolve_candidate_pair_nomination(now, false);
+    let until = world.now + Duration::from_secs(5);
+    world.run_until(|w| w.now >= until)?;
+    assert!(
+        selected(&world.peers[1].pc).is_none(),
+        "the declined pair was not nominated"
+    );
+    assert_eq!(
+        nominations(&world.peers[0]).len(),
+        1,
+        "and not proposed again"
+    );
+    assert!(
+        world.peers[0].sent_from.is_empty() || selected(&world.peers[0].pc).is_none(),
+        "no pair carries data"
+    );
+
+    let now = world.now;
+    world.peers[0].pc.select_candidate_pair(now, &proposed)?;
+    assert!(world.run_until(|w| selected(&w.peers[0].pc).as_ref() == Some(&proposed))?);
     Ok(())
 }

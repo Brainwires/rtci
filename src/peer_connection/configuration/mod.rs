@@ -290,6 +290,15 @@ pub struct RTCConfiguration {
 
     /// ice_candidate_pool_size describes the size of the prefetched ICE pool.
     pub(crate) ice_candidate_pool_size: u8,
+
+    /// webrtc-extensions 10.2 `rtpHeaderEncryptionPolicy` (Cryptex, RFC 9335), default
+    /// "negotiate"; it cannot change after construction.
+    pub(crate) rtp_header_encryption_policy:
+        crate::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy,
+
+    /// webrtc-extensions 13.2 `alwaysNegotiateDataChannels`, default false; it cannot change
+    /// after construction.
+    pub(crate) always_negotiate_data_channels: bool,
 }
 
 impl RTCConfiguration {
@@ -320,6 +329,18 @@ impl RTCConfiguration {
     /// This indicates which RTCP-mux policy to use when gathering ICE candidates.
     pub fn rtcp_mux_policy(&self) -> RTCRtcpMuxPolicy {
         self.rtcp_mux_policy
+    }
+
+    /// webrtc-extensions 10.2 `rtpHeaderEncryptionPolicy`.
+    pub fn rtp_header_encryption_policy(
+        &self,
+    ) -> crate::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy {
+        self.rtp_header_encryption_policy
+    }
+
+    /// webrtc-extensions 13.2 `alwaysNegotiateDataChannels`.
+    pub fn always_negotiate_data_channels(&self) -> bool {
+        self.always_negotiate_data_channels
     }
 
     /// Returns the peer identity.
@@ -714,6 +735,21 @@ impl RTCConfigurationBuilder {
         self
     }
 
+    /// Sets `rtpHeaderEncryptionPolicy` (webrtc-extensions 10.2; default "negotiate").
+    pub fn with_rtp_header_encryption_policy(
+        mut self,
+        policy: crate::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy,
+    ) -> Self {
+        self.0.rtp_header_encryption_policy = policy;
+        self
+    }
+
+    /// Sets `alwaysNegotiateDataChannels` (webrtc-extensions 13.2; default false).
+    pub fn with_always_negotiate_data_channels(mut self, always: bool) -> Self {
+        self.0.always_negotiate_data_channels = always;
+        self
+    }
+
     /// Builds the RTCConfiguration.
     ///
     /// Creates an immutable configuration that can be used to create a peer connection.
@@ -869,13 +905,16 @@ mod test {
             config.ice_servers[0].urls[0],
             "stun:stun.l.google.com:19302"
         );
-        // Fields not present in JSON should be their Default values
-        assert_eq!(
-            config.ice_transport_policy,
-            RTCIceTransportPolicy::Unspecified
-        );
-        assert_eq!(config.bundle_policy, RTCBundlePolicy::Unspecified);
-        assert_eq!(config.rtcp_mux_policy, RTCRtcpMuxPolicy::Unspecified);
+        // Fields not present in JSON take the dictionary's defaults (W3C webrtc-pc 4.2.1:
+        // iceTransportPolicy "all", bundlePolicy "balanced", rtcpMuxPolicy "require"), and
+        // the configuration serialises them by those names.
+        assert_eq!(config.ice_transport_policy, RTCIceTransportPolicy::All);
+        assert_eq!(config.bundle_policy, RTCBundlePolicy::Balanced);
+        assert_eq!(config.rtcp_mux_policy, RTCRtcpMuxPolicy::Require);
+        let json = serde_json::to_value(RTCConfigurationBuilder::new().build()).expect("json");
+        assert_eq!(json["iceTransportPolicy"], "all");
+        assert_eq!(json["bundlePolicy"], "balanced");
+        assert_eq!(json["rtcpMuxPolicy"], "require");
         assert!(config.certificates.is_empty());
         assert_eq!(config.ice_candidate_pool_size, 0);
     }

@@ -215,12 +215,17 @@ impl RTCRtpReceiver<'_> {
         // negotiation — the point at which the transceiver acquires a mid. Before that the slot
         // is null, which is what the spec means by "prior to construction of the
         // `RTCDtlsTransport` object".
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .as_ref()?;
 
         Some(RTCDtlsTransport {
             peer_connection: self.peer_connection,
+            transport: self
+                .peer_connection
+                .pipeline_context
+                .transports
+                .transport_id_for(mid),
         })
     }
     /// The ids of the remote MediaStreams this receiver's track is in: one per `a=msid` line
@@ -232,6 +237,31 @@ impl RTCRtpReceiver<'_> {
             .receiver()
             .as_ref()
             .map_or(&[], |receiver| receiver.streams())
+    }
+
+    /// The receiver's track, mutably: what the application changes on it (`enabled`,
+    /// `apply_constraints`, `stop`). Stopping it does not stop the receiver (W3C 5.3).
+    pub fn track_mut(&mut self) -> &mut MediaStreamTrack {
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver_mut()
+            .as_mut()
+            .expect("every transceiver has a receiver")
+            .track_mut()
+    }
+
+    /// Reports a video frame the application received on this receiver, `width` x `height`
+    /// pixels, at `now`: its decoder, or a depacketizer that reads the frame size from a key
+    /// frame, supplies it. The receiver's track then reports the frame's size, its aspect
+    /// ratio and a frame-rate estimate from the frames of the last second in its settings
+    /// (W3C webrtc-pc 9.3.1). Ignored for an audio receiver.
+    pub fn report_received_frame(&mut self, now: Instant, width: u32, height: u32) {
+        let receiver = self.peer_connection.rtp_transceivers[self.id.0]
+            .receiver_mut()
+            .as_mut()
+            .expect("every transceiver has a receiver");
+        if receiver.kind() == RtpCodecKind::Video {
+            receiver.report_received_frame(now, width, height);
+        }
     }
 
     /// Returns the track associated with this receiver.
