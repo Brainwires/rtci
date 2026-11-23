@@ -272,10 +272,13 @@ fn every_packet_type_is_a_whole_number_of_words_and_says_its_length() {
 #[test]
 fn unknown_packet_types_and_feedback_formats_stay_raw_bytes() {
     let unknown: [&[u8]; 4] = [
-        &[0x80, 0xd0, 0x00, 0x01, 1, 2, 3, 4],             // PT 208
-        &[0x9f, 0xc0, 0x00, 0x01, 1, 2, 3, 4],             // PT 192 (RFC 2032 FIR)
-        &[0x89, 0xcd, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2], // RTPFB FMT 9
-        &[0x89, 0xce, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2], // PSFB FMT 9
+        &[0x80, 0xd0, 0x00, 0x01, 1, 2, 3, 4], // PT 208
+        &[0x9f, 0xc0, 0x00, 0x01, 1, 2, 3, 4], // PT 192 (RFC 2032 FIR)
+        // RTPFB FMT 12: unassigned (IANA: 1 NACK, 3 TMMBR, 4 TMMBN, 5 RTCP-SR-REQ, 6 RAMS,
+        // 7 TLLEI, 8 RTCP-ECN-FB, 9 PAUSE-RESUME, 10 DBI, 11 CCFB; 15 is the transport-cc
+        // convention). FMT 9 was used here until RFC 7728 PAUSE-RESUME was parsed.
+        &[0x8c, 0xcd, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2],
+        &[0x89, 0xce, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 2], // PSFB FMT 9 (not parsed here)
     ];
     let rr: &[u8] = &[0x80, 0xc9, 0x00, 0x01, 0, 0, 0, 1];
     let datagram = [rr, unknown[0], unknown[1], unknown[2], unknown[3], rr].concat();
@@ -351,6 +354,29 @@ fn a_malformed_packet_fails_the_datagram_unless_read_leniently() {
     assert!(packets[0].as_any().is::<ReceiverReport>());
     assert_eq!(
         Some(&RawPacket(Bytes::from_static(pli))),
+        packets[1].as_any().downcast_ref()
+    );
+    assert!(packets[2].as_any().is::<Goodbye>());
+    assert_eq!(datagram, packet::marshal(&packets).unwrap().freeze());
+}
+
+// A PAUSE-RESUME (RFC 7728 section 8.1, RTPFB FMT 9) without its FCI is malformed like any
+// other known packet: it fails the datagram read strictly and arrives as a `RawPacket` read
+// leniently (the receive path's rule), without taking the packets around it along.
+#[test]
+fn a_malformed_pause_resume_degrades_like_any_known_packet() {
+    let rr: &[u8] = &[0x80, 0xc9, 0x00, 0x01, 0, 0, 0, 1];
+    let pause: &[u8] = &[0x89, 0xcd, 0x00, 0x02, 0, 0, 0, 1, 0, 0, 0, 0];
+    let bye: &[u8] = &[0x81, 0xcb, 0x00, 0x01, 0, 0, 0, 1];
+    let datagram = Bytes::from([rr, pause, bye].concat());
+
+    assert!(packet::unmarshal(&mut datagram.clone()).is_err());
+
+    let packets = packet::unmarshal_lenient(&mut datagram.clone()).unwrap();
+    assert_eq!(3, packets.len());
+    assert!(packets[0].as_any().is::<ReceiverReport>());
+    assert_eq!(
+        Some(&RawPacket(Bytes::from_static(pause))),
         packets[1].as_any().downcast_ref()
     );
     assert!(packets[2].as_any().is::<Goodbye>());
