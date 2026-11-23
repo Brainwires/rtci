@@ -4352,6 +4352,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **rtc**: a stream whose SSRC the remote description declares for an m= section with
+  `a=rid` / `a=simulcast` is received when its packets carry no RID
+  (`conf/demux-1-declared-ssrc-in-rid-section`). Pion v4.2.29 offers simulcast by RID and also
+  declares each layer with `a=ssrc` and `a=ssrc-group:FID`, then writes no MID or RID header
+  extension (interop matrix, train 10 round 4); the engine dropped a rid section's `a=ssrc`
+  lines (`track_details_from_sdp`) and discarded those packets as unassociated
+  (`OnUnassociatedRtpDiscarded`). RFC 9143 section 9.2 associates a packet whose SSRC is in the
+  table built "for each SSRC configured for receiving in that m= section" with the section.
+  The section's declared SSRCs are now kept on its receiver; a packet of one that carries no RID
+  nor RRID, and no MID naming another section, opens a stream of the section without a rid
+  (`RTCTrackEventInit::rid` is `None`; the track is the section's), with the RTX SSRC its FID
+  group names, and a declared RTX packet resolves to its primary. No rid is guessed from the
+  order of the `a=ssrc` lines. A packet that carries a RID is bound by its rid as before
+  (Firefox, which also declares its layers' SSRCs). Tests:
+  `simulcast_repair_rtc2rtc::declared_layer_ssrcs_sent_without_mid_or_rid_are_received_as_streams_of_their_section`,
+  `a_declared_layer_without_rid_is_repaired_over_its_declared_rtx_ssrc`,
+  `interceptor_declared_rid_section_test.rs` (Firefox 152's offer: a layer with its RID binds by
+  rid; one without MID or RID, and a declared RTX packet, without a rid). The interop cell
+  `simulcast without MID or RID on the wire: *` is no longer an expected failure for Pion.
+  Row RFC9143-9.2-7.
+
 - **rtc-interceptor**: a TMMBR held the media sender at the bit rate left at the packet rate of
   the moment it came (`conf/media-22-train-fixes`, train 9). The congestion controller turned
   the bounding set into a limit once, `MxTBR - 8 * overhead * packet rate` with the packet rate
