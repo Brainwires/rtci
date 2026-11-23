@@ -868,15 +868,21 @@ mod tests {
         )
     }
 
+    /// The stream ids of the `a=msid` lines; each line's appdata is the track id `track`
+    /// (`with_msid_appdata`, on by default).
     fn msid_lines(sdp: &str) -> Vec<&str> {
         sdp.lines()
             .filter_map(|line| line.strip_prefix("a=msid:"))
+            .map(|value| {
+                let (stream, appdata) = value.split_once(' ').unwrap_or((value, ""));
+                assert_eq!(appdata, "track", "{value}");
+                stream
+            })
             .collect()
     }
 
-    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, without
-    /// appdata, and the stream id the track itself has (which an application sets to `-`)
-    /// when it is in none.
+    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, and the
+    /// stream id the track itself has (which an application sets to `-`) when it is in none.
     #[test]
     fn test_offer_has_one_msid_line_per_stream() {
         let mut pc = build_pc();
