@@ -15,7 +15,7 @@ use rtc::peer_connection::event::{
 };
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
-use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtc::peer_connection::transport::{RTCDtlsTransportState, RTCIceCandidateInit};
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
@@ -39,6 +39,10 @@ struct Side {
     needed: Vec<RTCLocalCandidatesNeededEvent>,
     /// The sequence numbers of the RTP packets read.
     rtp: Vec<u16>,
+    /// SRTP packets discarded: (sequence number, replay), with when.
+    discarded: Vec<(u64, bool, Instant)>,
+    /// When each new association's DTLS transport connected.
+    dtls_connected: Vec<Instant>,
 }
 
 impl Side {
@@ -56,6 +60,8 @@ impl Side {
             negotiation_needed: false,
             needed: vec![],
             rtp: vec![],
+            discarded: vec![],
+            dtls_connected: vec![],
         })
     }
 
@@ -72,6 +78,15 @@ impl Side {
                 }
                 RTCPeerConnectionEvent::OnNegotiationNeededEvent => self.negotiation_needed = true,
                 RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => self.needed.push(needed),
+                RTCPeerConnectionEvent::OnSrtpPacketDiscarded {
+                    rtcp: false,
+                    index,
+                    replay,
+                    ..
+                } => self.discarded.push((index, replay, Instant::now())),
+                RTCPeerConnectionEvent::OnDtlsTransportStateChange(
+                    RTCDtlsTransportState::Connected,
+                ) => self.dtls_connected.push(Instant::now()),
                 _ => {}
             }
         }
@@ -325,10 +340,22 @@ async fn automatic_srtp_re_keying_carries_every_packet_onto_new_sockets() -> Res
     assert!(renewals >= 1, "the engine asked for a new association");
     let received: HashSet<u16> = b.rtp.iter().copied().collect();
     let missing: Vec<u16> = (1..=PACKETS).filter(|s| !received.contains(s)).collect();
+    let start = b
+        .dtls_connected
+        .first()
+        .copied()
+        .unwrap_or_else(Instant::now);
+    let at = |t: &Instant| t.saturating_duration_since(start);
     assert!(
         missing.is_empty(),
-        "{} packets lost across {renewals} renewals: {missing:?}",
-        missing.len()
+        "{} packets lost across {renewals} renewals: {missing:?}; discarded by SRTP at b \
+         (index, replay, at): {:?}; b's DTLS connected at {:?}",
+        missing.len(),
+        b.discarded
+            .iter()
+            .map(|(i, r, t)| (*i, *r, at(t)))
+            .collect::<Vec<_>>(),
+        b.dtls_connected.iter().map(at).collect::<Vec<_>>()
     );
     for (who, side, reason) in [
         ("a", &a, RTCLocalCandidatesNeededReason::SrtpRekeying),
