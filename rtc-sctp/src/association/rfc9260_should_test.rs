@@ -48,6 +48,8 @@ fn in_flight(n: usize, now: Instant) -> Result<Association> {
 fn the_first_zero_window_probe_waits_one_rto() -> Result<()> {
     let start = Instant::now();
     let mut a = in_flight(1, start)?;
+    // An RTO that backs off (the test association's is fixed at 1 s).
+    a.rto_mgr.set_rto(1000, false);
     a.handle_sack(&sack(100, 0, &[]), start)?;
     assert!(a.inflight_queue.is_empty());
     let rto = Duration::from_millis(a.rto_mgr.get_rto());
