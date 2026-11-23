@@ -187,11 +187,12 @@ pub(crate) struct TmmbrState {
     requests: HashMap<u32, (TmmbEntry, Instant)>,
     /// The bounding set last computed.
     bounding: Vec<TmmbEntry>,
-    /// The limit in force, in bits per second at the current packet rate.
-    limit: Option<f64>,
-    /// A looser limit that may only be used from this instant on
+    /// The bounding set in force: the limit is its net media bit rate at the packet rate the
+    /// sender uses now ([`limit`](Self::limit)), not at the one it used when a request came.
+    in_force: Vec<TmmbEntry>,
+    /// A looser bounding set that may only be used from this instant on
     /// (`2 * RTT + T_Dither_Max`, section 4.2.1.2).
-    pending: Option<(Instant, Option<f64>)>,
+    pending: Option<(Instant, Vec<TmmbEntry>)>,
 }
 
 impl TmmbrState {
@@ -207,9 +208,15 @@ impl TmmbrState {
         &self.bounding
     }
 
-    /// The limit on this sender's RTP bit rate, if any tuple bounds it.
-    pub(crate) fn limit(&self) -> Option<f64> {
-        self.limit
+    /// The limit on this sender's RTP bit rate at `packet_rate` packets per second, the rate
+    /// it sends at now, if any tuple bounds it. Section 3.5.4.2: "the bit rate available for
+    /// RTP payloads is equal to the TMMBR reported bit rate minus the packet rate used,
+    /// multiplied by the TMMBR reported overhead converted to bits", and "which limitation
+    /// applies depends on the packet rate being considered": the limit follows the packet
+    /// rate, so a burst of packets around the request (a probe cluster) does not hold the
+    /// sender at what was left at that moment.
+    pub(crate) fn limit(&self, packet_rate: f64) -> Option<f64> {
+        net_media_bitrate(&self.in_force, packet_rate)
     }
 
     /// Recompute the bounding set and the limit after the requests changed.
@@ -217,19 +224,20 @@ impl TmmbrState {
     /// A tighter limit applies at once. A looser one (or none) applies only after
     /// `2 * RTT + T_Dither_Max`, point-to-point included: other receivers may be about to say
     /// that the old limit still holds for them. `T_Dither_Max` is 0 in a session of two.
+    /// Tighter and looser are judged at `packet_rate`, the rate the sender uses now.
     fn recompute(&mut self, now: Instant, packet_rate: f64, round_trip_time: Duration) {
         self.bounding = bounding_set(&self.tuples());
         let limit = net_media_bitrate(&self.bounding, packet_rate);
-        let tighter = match (limit, self.limit) {
+        let tighter = match (limit, self.limit(packet_rate)) {
             (Some(new), Some(old)) => new <= old,
             (Some(_), None) => true,
             (None, _) => false,
         };
         if tighter {
-            self.limit = limit;
+            self.in_force.clone_from(&self.bounding);
             self.pending = None;
         } else {
-            self.pending = Some((now + round_trip_time * 2, limit));
+            self.pending = Some((now + round_trip_time * 2, self.bounding.clone()));
         }
     }
 
@@ -296,11 +304,11 @@ impl TmmbrState {
         if left {
             self.recompute(now, packet_rate, round_trip_time);
         }
-        if let Some((at, limit)) = self.pending
-            && now >= at
+        if let Some((at, _)) = &self.pending
+            && now >= *at
+            && let Some((_, bounding)) = self.pending.take()
         {
-            self.limit = limit;
-            self.pending = None;
+            self.in_force = bounding;
         }
         left
     }
@@ -312,7 +320,7 @@ impl TmmbrState {
             .values()
             .map(|(_, seen)| *seen + TMMBR_OWNER_TIMEOUT)
             .min();
-        let pending = self.pending.map(|(at, _)| at);
+        let pending = self.pending.as_ref().map(|(at, _)| *at);
         match (owner, pending) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -422,7 +430,7 @@ mod tests {
         let mut state = TmmbrState::default();
 
         state.on_request(now, 9, tuple(1, 500_000, 0), 0.0, rtt);
-        assert_eq!(Some(500_000.0), state.limit(), "at once");
+        assert_eq!(Some(500_000.0), state.limit(0.0), "at once");
 
         state.on_request(
             now + Duration::from_secs(1),
@@ -431,15 +439,26 @@ mod tests {
             0.0,
             rtt,
         );
-        assert_eq!(Some(500_000.0), state.limit(), "not yet");
+        assert_eq!(Some(500_000.0), state.limit(0.0), "not yet");
         assert_eq!(
             Some(now + Duration::from_millis(1300)),
             state.poll_timeout()
         );
         state.on_timeout(now + Duration::from_millis(1299), 0.0, rtt);
-        assert_eq!(Some(500_000.0), state.limit());
+        assert_eq!(Some(500_000.0), state.limit(0.0));
         state.on_timeout(now + Duration::from_millis(1300), 0.0, rtt);
-        assert_eq!(Some(900_000.0), state.limit(), "after 2 * RTT");
+        assert_eq!(Some(900_000.0), state.limit(0.0), "after 2 * RTT");
+    }
+
+    /// RFC 5104 section 3.5.4.2: the limit of a bounding set is its net media bit rate at the
+    /// packet rate it is asked for, not at the one of the request.
+    #[test]
+    fn the_limit_is_taken_at_the_packet_rate_in_use() {
+        let now = Instant::now();
+        let mut state = TmmbrState::default();
+        state.on_request(now, 9, tuple(1, 80_000, 60), 171.0, Duration::ZERO);
+        assert_eq!(Some(0.0), state.limit(171.0));
+        assert_eq!(Some(80_000.0 - 50.0 * 480.0), state.limit(50.0));
     }
 
     /// RFC 5104 section 4.2.2.2: when the owner of a tuple leaves or times out the tuple is
@@ -467,7 +486,7 @@ mod tests {
         state.on_timeout(now + TMMBR_OWNER_TIMEOUT + rtt * 2, 0.0, rtt);
         assert_eq!(
             None,
-            state.limit(),
+            state.limit(0.0),
             "no tuple, no limit, after the hold-off"
         );
     }

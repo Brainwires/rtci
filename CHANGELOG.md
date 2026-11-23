@@ -4282,6 +4282,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **rtc-interceptor**: a TMMBR held the media sender at the bit rate left at the packet rate of
+  the moment it came (`conf/media-22-train-fixes`, train 9). The congestion controller turned
+  the bounding set into a limit once, `MxTBR - 8 * overhead * packet rate` with the packet rate
+  of the last second at that instant, and kept that number until the requests changed. After
+  the start the pacer's probe clusters put 150 to 170 packets a second on the wire, so a TMMBR
+  of 80 kbit/s with 60 bytes of overhead that came then left 0 to 8 kbit/s, and the sender
+  stayed there (an estimate of 0 is no `availableOutgoingBitrate`) although it went back to 50
+  packets a second, where the same tuple leaves 56 kbit/s. RFC 5104 section 3.5.4.2: the bit
+  rate available for RTP payloads is the TMMBR bit rate "minus the packet rate used" times
+  the overhead, and "which limitation applies depends on the packet rate being considered".
+  The bounding set in force is now kept and its limit taken at the current packet rate each
+  time the bounds are applied; tighter and looser (the 2 * RTT hold-off of section 4.2.1.2)
+  are judged at the packet rate of the change. This was the Linux failure of
+  `rtcp_session_rtc2rtc::the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends`
+  ("an estimate", 9 of 12 runs in the container): whether the TMMBR met the probe burst
+  depended on the randomised RTCP timing. Tests:
+  `congestion_control_limits::the_tmmbr_limit_follows_the_packet_rate_the_sender_uses`,
+  `tmmbr::the_limit_is_taken_at_the_packet_rate_in_use`. `sync_outgoing_estimates` (an
+  estimate that came before the selected pair's stats entry) is pinned by
+  `an_estimate_made_before_the_selected_pair_is_listed_reaches_it` and
+  `get_stats_puts_an_earlier_estimate_on_the_selected_pair`.
+- **interop**: the clock-rate browser cells never ran (`na-browser`, "this browser's answer
+  has no PCMU", on all three browsers). The interop peer's audio track names Opus as its
+  encoding's codec, and the engine takes an encoding's codec as the transceiver's codec
+  preference (`codec_preferences_from_encodings`), so Rust's offer listed Opus alone (and
+  telephone-event / CN at 48 kHz) and no answer could have PCMU. The scenario now sets
+  `"audio_codecs":["OPUS","PCMU","PCMA"]`, which the peer applies with
+  `RTCRtpTransceiver::set_codec_preferences`; the switch goes Opus, PCMU, PCMA (the same
+  clock rate: the same SSRC), Opus; the track numbers its packets itself so a stream's
+  sequence numbers run on across the switches; and each cell runs with Rust offering and
+  with the browser offering. A cell is `na-browser` only when the browser's
+  `RTCRtpReceiver.getCapabilities("audio")` lacks PCMU or PCMA; every result carries both
+  descriptions' audio formats.
 - **rtc**: a data-channel-only connection sent RTCP. The RTCP session the peer connection
   installs joined at the first DTLS handshake whatever was negotiated, and with no media SSRC
   reported from one of its own: each peer sent a 56-byte SRTCP compound packet (an empty
@@ -4306,6 +4339,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
   `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
   lossy-link run takes another course now (no RTCP on its data-only connection).
+- **sctp**: in Fast Recovery, a SACK that advanced the Cumulative TSN Ack Point and brought a
+  chunk to its third miss indication sent it at once in a packet that ignored cwnd. RFC 9260
+  section 7.2.4 step 3 is "If not in Fast Recovery": during one the chunk is marked for
+  retransmission, is no Fast Retransmit candidate any more (step 5) and goes out as cwnd
+  allows, as it already did after a SACK that did not advance the Cumulative TSN Ack. Test:
+  `recovery_test.rs::a_third_miss_in_fast_recovery_waits_for_the_window_also_when_the_cumulative_ack_advances`
+  (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
+  and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
+  that had none.
 
 - **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
   HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are

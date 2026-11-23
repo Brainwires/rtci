@@ -759,7 +759,8 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             self.remb = None;
         }
         let remb = self.remb.map(|(bitrate, _)| bitrate);
-        let tmmbr = self.tmmbr.limit();
+        let packet_rate = self.packet_rate(now);
+        let tmmbr = self.tmmbr.limit(packet_rate);
         let breaker = self
             .circuit_breaker
             .as_ref()
