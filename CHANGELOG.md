@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media**: open media MUST rows (`conf/media-25-payload-rows`).
+  - One SSRC across clock rates (the default since `conf/media-23-clock-rate-default`):
+    sender reports extrapolate their RTP timestamp at the clock rate of the payload type sent
+    last, not the rate the stream was bound with (`SenderStream` per-payload-type rates, RFC
+    7160 3.2; Opus to PCMU had put 48 kHz worth of ticks on an 8 kHz stream), and the receiver
+    places an RTP timestamp against a sender report or in-band NTP timestamp taken at another
+    clock rate across the changes since (`MediaClock`, RFC 7160 4.2 continuity), so remote
+    capture times and lip sync hold across a switch
+    (`the_remote_capture_time_holds_across_clock_rate_changes_on_one_ssrc`). Reviewed and
+    completed from the unverified `conf/media-24-one-ssrc-sync` commit 8cb42766.
+  - RFC 7160 4.1-1 to 4.1-3, RFC 8834 4.3-6 and RFC 8108 6.1-2 are `setting`
+    (`with_ssrc_per_clock_rate(true)`, the Chromium / WebKit cells of the browser matrix).
+  - `RTCRtpSender::write_rtp_with_video_orientation`: the CVO element (RFC 7742 4, 3GPP TS
+    26.114 7.4.5) on a video packet when the peer negotiated `urn:3gpp:video-orientation`.
+  - ULPFEC send side: the carriage and payload types come from the negotiated description
+    (RFC 5109 14 and 14.2): the section's `red` / `ulpfec` payload types, a separate stream
+    when the description gives a ULPFEC repair flow and no RED, no FEC when no `ulpfec` format
+    was negotiated. Before, the application's numbers were used whatever was negotiated.
+    Behaviour change for an application whose `configure_ulpfec` numbers differ from the
+    negotiated ones (now the negotiated ones are sent) or whose peer did not negotiate
+    `ulpfec` (now no FEC is sent).
+  - ECN over ICE-TCP: no RTP packet is ECN-marked on a TCP pair, and an offer made after
+    nomination over TCP (`TCP/DTLS/RTP/SAVPF`) carries no `a=ecn-capable-rtp` (RFC 6679
+    6.1.3).
+  - `a=extmap` extension attributes stay with their id (RFC 6464 4): an answer repeats the
+    offer's (`vad=off`), a later offer the ones negotiated for that id; before, a peer's
+    `vad=off` mapping was answered and re-offered without it, which means `vad=on`.
+  - Tests for behaviour that already existed: DTMF bounds and all sixteen events (RFC 7874
+    3), bare encodings on a RED stream (RFC 2198 5), CSRC audio levels (RFC 6465 4), the
+    default audio level extension and its V bit (RFC 6464 4), the SRTCP fields in
+    `avg_rtcp_size` (RFC 5124 2, 2.3), H.264 de-interleaving order against the RFC 6184 7.2.2
+    procedure.
+  - FLEXFEC03-4.2-17 and FLEXFEC03-5.1-5 are `n/a`: superseded by RFC 8627. Open MUST rows
+    67 to 44.
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT
