@@ -1661,6 +1661,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **TURN over TCP and TLS in the engine** (RFC 8656 section 3.1, RFC 8305, RFC 7443; branch
+  `conf/tcp-3-turn-tls`). The configuration's `turn:...?transport=tcp` and `turns:` servers are
+  run by the engine over the stream interface: `StreamCommand::Resolve` /
+  `StreamEvent::Resolved` have the driver resolve the name (A and AAAA together), the
+  addresses are interleaved by family and tried 250 ms apart (Happy Eyeballs,
+  `rtc_shared::stream::happy_eyeballs`), TLS is rustls used sans-I/O (`turn_tls::TlsLayer`,
+  ALPN `stun.turn`, TLS 1.3 and 1.2, the certificate checked against the URI's host with the
+  roots or verifier of `SettingEngineBuilder::with_turn_tls`, or the Mozilla roots with the
+  new feature `turn-tls-webpki-roots`), the TURN client allocates over TURN's own framing, the
+  relayed candidate is announced with `relayProtocol` `tcp` or `tls`, permissions are created
+  as the agent sends (datagrams held meanwhile) and relayed data goes both ways. A
+  `turns:...?transport=udp` (DTLS, RFC 7350) server is left alone. `with_turn_over_streams(false)`
+  turns it off; `turn:` over UDP stays the application's. The library's rustls gains its `tls12`
+  feature (no new crate). Tests: `turn_tls_test.rs`, `happy_eyeballs.rs`,
+  `turn_streams.rs`, env `testenv_turn_streams.rs` against coturn over TCP and TLS. Audits
+  `rfc8305.md`, `rfc7350.md`, `rfc5928.md` added; RFC 8656 3.1-1, 3.1-2, 3.9-1 updated.
+
 - **stream driver**: server-side socket choices in `rtc-stream-driver` (branch
   `conf/tcp-2b-driver-sockets`): `sockets::PortRange` with `bind_udp_in_range` and
   `bind_tcp_listener_in_range` (and `DriverConfig::tcp_port_range` for the engine's

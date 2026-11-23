@@ -33,6 +33,15 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 25 | 3 | 1 | 1 | 0 | 9 |
 | | | SHOULD | 14 | 1 | 2 | 0 | 0 | 16 |
 | | | MAY | 3 | 1 | 0 | 4 | 0 | 1 |
+| RFC 8305 Happy Eyeballs (TURN servers) | `rfc8305.md` | MUST | 2 | 0 | 0 | 0 | 0 | 1 |
+| | | SHOULD | 5 | 1 | 0 | 2 | 0 | 5 |
+| | | MAY | 0 | 0 | 0 | 0 | 0 | 3 |
+| RFC 7350 STUN / TURN over DTLS | `rfc7350.md` | MUST | 3 | 0 | 0 | 4 | 0 | 4 |
+| | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
+| | | MAY | 0 | 0 | 0 | 1 | 0 | 0 |
+| RFC 5928 TURN resolution | `rfc5928.md` | MUST | 2 | 0 | 0 | 4 | 0 | 0 |
+| | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
+| | | MAY | 0 | 0 | 0 | 0 | 0 | 0 |
 | RFC 4571 framing over TCP | `rfc4571.md` | MUST | 2 | 2 | 0 | 0 | 0 | 9 |
 | | | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 |
 | | | MAY | 1 | 0 | 0 | 0 | 0 | 1 |
@@ -48,7 +57,7 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | RFC 5780 NAT discovery | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 2 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
 | | | MAY | 1 | 0 | 0 | 2 | 0 | 0 |
-| RFC 8656 TURN client | `rfc8656.md` | MUST | 32 | 0 | 0 | 0 | 0 | 20 |
+| RFC 8656 TURN client | `rfc8656.md` | MUST | 32 | 0 | 1 | 0 | 0 | 19 |
 | | | SHOULD | 12 | 0 | 0 | 1 | 0 | 10 |
 | | | MAY | 12 | 0 | 0 | 0 | 0 | 12 |
 | | | proc | 37 | 1 | 0 | 2 | 0 | 0 |

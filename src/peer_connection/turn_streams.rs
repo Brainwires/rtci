@@ -110,9 +110,11 @@ impl EngineTurn {
     pub(crate) fn new(urls: &[Url], enabled: bool, tls: TurnTlsConfig) -> Self {
         let links = urls
             .iter()
+            // `turns:` over UDP is DTLS (RFC 7350 section 4), which this does not run: such a
+            // server is left alone (its resolution "MUST stop with an error").
             .filter(|u| {
-                (u.scheme == SchemeType::Turn && u.proto == ProtoType::Tcp)
-                    || u.scheme == SchemeType::Turns
+                matches!(u.scheme, SchemeType::Turn | SchemeType::Turns)
+                    && u.proto == ProtoType::Tcp
             })
             .map(|u| TurnLink {
                 url: u.clone(),
@@ -585,5 +587,40 @@ impl RTCPeerConnection {
         }
         self.drive_turn_races(now);
         self.pump_turn(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_turn_over_tcp_and_turns_over_tcp_servers_get_a_link() {
+        let urls: Vec<Url> = [
+            "turn:192.0.2.1:3478?transport=tcp",
+            "turns:turn.example:5349",
+            "turns:192.0.2.1:5349?transport=tcp",
+            "turn:192.0.2.1:3478",
+            "turns:192.0.2.1:5349?transport=udp",
+            "stun:192.0.2.1:3478",
+        ]
+        .iter()
+        .map(|u| Url::parse_url(u).unwrap())
+        .collect();
+        let turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
+        let links: Vec<(String, bool)> =
+            turn.links.iter().map(|l| (l.url_string(), l.tls)).collect();
+        assert_eq!(
+            links,
+            vec![
+                ("turn:192.0.2.1:3478?transport=tcp".to_owned(), false),
+                ("turns:turn.example:5349?transport=tcp".to_owned(), true),
+                ("turns:192.0.2.1:5349?transport=tcp".to_owned(), true),
+            ]
+        );
+        assert_eq!(turn.links[0].protocol(), RTCIceServerTransportProtocol::Tcp);
+        assert_eq!(turn.links[1].protocol(), RTCIceServerTransportProtocol::Tls);
+        // Nothing started: nothing pending for the end of gathering.
+        assert!(!turn.pending());
     }
 }

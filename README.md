@@ -329,6 +329,10 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
   back-pressure; `examples/stream-driver` is a tokio driver for it
+- ✅ **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
+  interface: resolution by the driver, Happy Eyeballs (RFC 8305), TLS with rustls sans-I/O (ALPN `stun.turn`; roots or a
+  verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
+  `relayProtocol`; TURN over DTLS is not implemented
 - ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
