@@ -299,6 +299,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
   write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
   `the_padding_of_a_probe_cluster_is_due_at_once`).
+- **interceptors**: what any interceptor makes on the read leg for the write leg is due at once
+  (`conf/pacer-2-combined`). An audit of every interceptor that writes while reading found four
+  that left the packet for whatever woke the driver next: the NACK responder (a retransmission,
+  a probe cluster's padding), the RTCP session (the Early SR answering an RTCP-SR-REQ, RFC 6051
+  section 3.2) and the pause/resume interceptor (PAUSED or REFUSED answering a PAUSE, RFC 7728).
+  The chain now takes what its read leg made down the write leg after each read and reports it
+  from `poll_timeout` until `poll_write` takes it (`rtc-interceptor/tests/read_work_is_due.rs`,
+  over the reusable `tests/wakeup_common` helper). At the peer connection,
+  `tests/driver_wakeup_rtc2rtc.rs` runs a call (ICE, DTLS, SCTP, a data channel, video with
+  RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
+  `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
+  ICE, DTLS and SCTP handlers left nothing waiting.
 
 ## [0.22.0+brainwires.6] - 2026-11-23
 
