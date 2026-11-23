@@ -283,6 +283,13 @@ struct RemoteStream {
     timestamp_step_sum: u64,
     timestamp_steps: u64,
     previous_in_order: Option<(u64, u32)>,
+    /// The id of the stream's client-to-mixer audio level extension (RFC 6464), if it
+    /// negotiated one: the VoIP Metrics block's signal and noise levels come from it.
+    audio_level_id: Option<u8>,
+    /// RFC 3611 4.7.4: the levels the audio level extension gave since the beginning of
+    /// reception, in dBm0, summed over the packets with voice (signal) and without (noise).
+    signal_levels: (i64, u64),
+    noise_levels: (i64, u64),
 }
 
 impl RemoteStream {
@@ -302,7 +309,34 @@ impl RemoteStream {
             timestamp_step_sum: 0,
             timestamp_steps: 0,
             previous_in_order: None,
+            audio_level_id: None,
+            signal_levels: (0, 0),
+            noise_levels: (0, 0),
         }
+    }
+
+    /// RFC 3611 4.7.4 from RFC 6464: a packet's audio level (in -dBov) as dBm0 (0 dBov, a
+    /// full-scale sine, is +3 dBm0, ITU-T G.711), counted as signal when the sender marked
+    /// voice in it and as noise when it did not.
+    fn on_audio_level(&mut self, level: u8, voice: bool) {
+        let dbm0 = 3 - i64::from(level.min(127));
+        let sums = if voice {
+            &mut self.signal_levels
+        } else {
+            &mut self.noise_levels
+        };
+        sums.0 += dbm0;
+        sums.1 += 1;
+    }
+
+    /// The mean of `sums` as the block's signed octet, 127 (unavailable) when nothing was
+    /// measured.
+    fn mean_level((sum, count): (i64, u64)) -> u8 {
+        if count == 0 {
+            return rtcp::extended_report::vm::VOIP_METRIC_UNAVAILABLE;
+        }
+        let mean = (sum as f64 / count as f64).round() as i64;
+        (mean.clamp(-126, 126) as i8) as u8
     }
 
     fn ticks(&self, duration: Duration) -> u64 {
@@ -545,6 +579,14 @@ impl XrReportInterceptor {
                 jb_nominal: jitter_buffer.nominal_ms,
                 jb_maximum: jitter_buffer.maximum_ms,
                 jb_abs_max: jitter_buffer.absolute_maximum_ms,
+                // RFC 3611 4.7.4: the signal level during talkspurts and the noise level
+                // during silence, from the RFC 6464 audio levels the stream carried (127 when
+                // it carried none). RERL needs the application's echo canceller: 127.
+                signal_level: RemoteStream::mean_level(stream.signal_levels),
+                noise_level: RemoteStream::mean_level(stream.noise_levels),
+                // RFC 3611 4.7.5: R factor, external R factor, MOS-LQ and MOS-CQ come from a
+                // call quality model (ITU-T G.107) of the decoded media, which is the
+                // application's; they stay 127, "unavailable", as the section allows.
                 ..Default::default()
             }));
         }
@@ -634,6 +676,19 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for XrReportInterceptor {
         if let Packet::Rtp(packet) = &msg.message.packet
             && let Some(stream) = self.streams.get_mut(&packet.header.ssrc)
         {
+            if let Some(level) = stream
+                .audio_level_id
+                .and_then(|id| packet.header.get_extension(id))
+                .and_then(|value| {
+                    use shared::marshal::Unmarshal;
+                    rtp::extension::audio_level_extension::AudioLevelExtension::unmarshal(
+                        &mut value.as_ref(),
+                    )
+                    .ok()
+                })
+            {
+                stream.on_audio_level(level.level, level.voice);
+            }
             stream.on_packet(
                 msg.now,
                 packet.header.sequence_number,
@@ -700,10 +755,14 @@ impl Interceptor for XrReportInterceptor {
             .clone()
             .unwrap_or_else(|| XrFormats::of_stream(info));
         if formats.any() {
-            self.streams.insert(
-                info.ssrc,
-                RemoteStream::new(formats, info.clock_rate, self.gmin),
-            );
+            let mut stream = RemoteStream::new(formats, info.clock_rate, self.gmin);
+            stream.audio_level_id = info
+                .rtp_header_extensions
+                .iter()
+                .find(|ext| ext.uri == rtp::extension::AUDIO_LEVEL_URI)
+                .and_then(|ext| u8::try_from(ext.id).ok())
+                .filter(|id| *id != 0);
+            self.streams.insert(info.ssrc, stream);
         }
     }
 

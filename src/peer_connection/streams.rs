@@ -41,6 +41,9 @@ pub(crate) const TURN: u32 = 2;
 /// The stream-table tag of Binding connections to STUN servers (server-reflexive TCP
 /// candidates).
 pub(crate) const SRFLX: u32 = 3;
+/// The stream-table tag of TURN-TCP data connections (RFC 6062 section 4.3): one peer's TCP
+/// connection through a TCP allocation.
+pub(crate) const TURN_DATA: u32 = 4;
 
 /// The port an active TCP candidate is signalled with (RFC 6544 section 4.5).
 const ACTIVE_PORT: u16 = 9;
@@ -64,9 +67,15 @@ pub struct StreamSettings {
     /// Run the configuration's `turns:` and `turn:...?transport=tcp` servers (RFC 8656
     /// section 3.1). On by default.
     pub turn: bool,
+    /// With them, relayed TCP candidates from a TCP allocation (RFC 6062, RFC 6544 section
+    /// 5.5). On by default.
+    pub turn_tcp_relay: bool,
     /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2): the engine by
     /// default.
     pub reflexive: super::srflx::ReflexiveGathering,
+    /// Who gathers relayed candidates from `turn:` servers over UDP (RFC 8656, RFC 8445
+    /// section 5.1.1.2): the engine by default.
+    pub relay: super::turn_streams::RelayGathering,
 }
 
 impl Default for StreamSettings {
@@ -77,7 +86,9 @@ impl Default for StreamSettings {
             close_unused_connections: true,
             limits: StreamConfig::default(),
             turn: true,
+            turn_tcp_relay: true,
             reflexive: super::srflx::ReflexiveGathering::Engine,
+            relay: super::turn_streams::RelayGathering::Engine,
         }
     }
 }
@@ -111,7 +122,7 @@ pub(crate) struct EngineStreams {
     pub(crate) settings: StreamSettings,
     pub(crate) table: StreamTable,
     /// The application has used the stream interface: it drives streams.
-    driver_seen: bool,
+    pub(crate) driver_seen: bool,
     gathers: Vec<TcpGather>,
     /// Addresses of the active candidates the engine added (port 9).
     active: HashSet<IpAddr>,
@@ -166,10 +177,12 @@ impl EngineStreams {
     }
 
     /// Whether the end of gathering of `transport` waits: for listeners and TURN links a
-    /// driver serves, and for the server-reflexive probes (over UDP whatever the driver).
+    /// driver serves, for TURN-over-DTLS links and for the server-reflexive probes (over UDP
+    /// whatever the driver, a name only with one).
     fn end_of_gathering_waits(&self, transport: TransportId) -> bool {
         let driver = self.driver_seen;
-        (driver && (self.pending_listeners(transport) || self.turn.pending(transport)))
+        (driver && self.pending_listeners(transport))
+            || self.turn.pending(transport, driver)
             || self.srflx.pending(transport, driver)
     }
 
@@ -271,8 +284,16 @@ impl RTCPeerConnection {
         self.streams.driver_seen = true;
         self.release_removed_transports();
         self.start_turn_links();
+        // Permissions for remote candidates learned since (relayed TCP candidates).
+        if self.streams.turn.has_tcp_relay() {
+            let now = self.pipeline_context.now;
+            self.turn_tcp_permissions(now);
+            self.pump_turn(now);
+        }
         self.route_stream_writes();
         self.close_unused_tcp_connections();
+        self.close_settled_srflx_connections();
+        self.close_settled_turn_links();
         self.streams.table.poll_command()
     }
 
@@ -348,6 +369,11 @@ impl RTCPeerConnection {
         }
         if info.tag == SRFLX {
             self.srflx_messages(now, id, messages);
+            self.process_stream_notices(now);
+            return Ok(());
+        }
+        if info.tag == TURN_DATA {
+            self.turn_data_messages(now, id, messages);
             self.process_stream_notices(now);
             return Ok(());
         }
@@ -500,6 +526,8 @@ impl RTCPeerConnection {
             let active = gather.active_added;
             for (addr, tcp_type) in bound {
                 self.add_engine_tcp_candidate(on, addr, tcp_type);
+                // A new ICE generation asks the STUN servers again (`srflx::EngineSrflx::add`).
+                self.gather_srflx_tcp(on, addr, tcp_type);
             }
             if active {
                 self.add_engine_tcp_candidate(
@@ -728,6 +756,18 @@ impl RTCPeerConnection {
                 | StreamNotice::Closed { id, tag: SRFLX, .. } => {
                     self.srflx_connection_ended(now, id)
                 }
+                StreamNotice::Connected {
+                    id,
+                    tag: TURN_DATA,
+                    local,
+                    ..
+                } => self.turn_data_connected(now, id, local),
+                StreamNotice::ConnectFailed {
+                    id, tag: TURN_DATA, ..
+                }
+                | StreamNotice::Closed {
+                    id, tag: TURN_DATA, ..
+                } => self.turn_data_ended(now, id),
                 StreamNotice::Resolved { query, addresses } => {
                     self.name_resolved(query, None, &addresses)
                 }
@@ -860,6 +900,8 @@ impl RTCPeerConnection {
             self.send_via_turn(index, msg);
             return None;
         }
+        // From a relayed TCP candidate: onto the data connection to its peer (RFC 6062).
+        let msg = self.turn_tcp_write(msg)?;
         // Not known to come from one transport: the one its check names, or that knows the
         // peer.
         let on = self

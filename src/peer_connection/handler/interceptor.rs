@@ -89,9 +89,23 @@ pub(crate) struct InterceptorHandlerContext {
     /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
     /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
     pub(crate) arrival_mids: Option<Vec<String>>,
-    /// The congestion controller's last target, in bits per second: what
-    /// `allocate_target_bitrate` divides again when the encodings change.
+    /// The congestion controllers' last targets summed over the transports, in bits per
+    /// second: the connection's figure.
     pub(crate) target_bitrate: Option<f64>,
+    /// Each transport's congestion controller's last target, by transport key: what
+    /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
+    /// encodings change.
+    pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
+    /// The RTP sessions (transport ids) whose RTCP session has been told to join and not to
+    /// leave since (`RTCPeerConnection::sync_rtcp_sessions`).
+    pub(crate) rtcp_joined: std::collections::BTreeSet<usize>,
+    /// The RTP sessions told to leave since the writes were last flushed: their BYE still
+    /// goes out.
+    pub(crate) rtcp_leaving: std::collections::BTreeSet<usize>,
+    /// The transports whose DTLS association has given SRTP keys: RTCP can be protected on
+    /// them (RFC 5764 section 4.1). Kept while the transport lives, so that a new association
+    /// on it (re-keying) does not end the RTP session.
+    pub(crate) srtp_keyed: HashSet<usize>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -122,6 +136,10 @@ impl Default for InterceptorHandlerContext {
             wall_clock: None,
             arrival_mids: None,
             target_bitrate: None,
+            transport_targets: std::collections::BTreeMap::new(),
+            rtcp_joined: Default::default(),
+            rtcp_leaving: Default::default(),
+            srtp_keyed: Default::default(),
         }
     }
 }
@@ -540,6 +558,44 @@ impl<'a> InterceptorHandler<'a> {
         }
     }
 
+    /// The RTCP session of RTP session `session` (a transport) joins, under the connection's
+    /// CNAME and with what SRTCP adds to each of its packets (RFC 3711 section 3.4): the
+    /// transport has SRTP keys and carries a negotiated RTP m= section (RFC 3550 section 6;
+    /// RFC 8834 section 4.1). Before this the session sends nothing.
+    pub(crate) fn join_rtcp_session(
+        &mut self,
+        now: Instant,
+        session: usize,
+        srtcp_overhead: usize,
+    ) -> Result<()> {
+        for control in [
+            RtcpSessionControl::Cname(self.ctx.cname.clone()),
+            RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
+            RtcpSessionControl::Start,
+        ] {
+            let mut packet = control.into_packet(now);
+            packet
+                .message
+                .add(interceptor::RtpSession(session).attribute());
+            self.interceptor.handle_write(packet)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ctx_mut(&mut self) -> &mut InterceptorHandlerContext {
+        self.ctx
+    }
+
+    /// The RTP session `session` has no negotiated RTP m= section any more: its RTCP session
+    /// says BYE for every SSRC it used (RFC 3550 section 6.6) and is silent from then on.
+    pub(crate) fn leave_rtcp_session(&mut self, now: Instant, session: usize) -> Result<()> {
+        let mut packet = RtcpSessionControl::Leave.into_packet(now);
+        packet
+            .message
+            .add(interceptor::RtpSession(session).attribute());
+        self.interceptor.handle_write(packet)
+    }
+
     /// RFC 3550 6.6: the connection is closing, so every local SSRC says BYE. Called before
     /// the transports are torn down, while the BYE can still be routed.
     pub(crate) fn request_goodbye(&mut self, now: Instant) {
@@ -813,12 +869,47 @@ impl<'a> InterceptorHandler<'a> {
             }
         };
 
+        // A retransmission stream of a single-stream receiver, named by its payload type.
+        if let Some(bound) = self.associate_rtx_by_apt(index, ssrc, payload_type) {
+            return bound;
+        }
+
+        // A receiver that already has a stream: a simulcast one (its codings have rids) is the
+        // rid path's. One of a single stream takes the new SSRC over when the packet is media
+        // of its section: the remote source moved to another SSRC (RFC 7160 section 4.1: an
+        // SSRC per clock rate; RFC 3550 section 8.2: a collision), and RFC 8834 section 4.3
+        // wants every negotiated format accepted at any time. The track carries on under the
+        // new SSRC; the old stream is unbound.
+        let mut takeover = false;
         if let Some(transceiver) = self.rtp_transceivers.get(index)
             && let Some(receiver) = transceiver.receiver()
             && !receiver.track().codings().is_empty()
         {
-            // it is rid-based (or already bound), let's use the rid path
-            return false;
+            let codings = receiver.track().codings();
+            let single = codings.len() == 1
+                && codings[0].rtp_coding_parameters.rid.is_empty()
+                && codings[0].rtp_coding_parameters.ssrc != Some(ssrc);
+            let media = receiver.get_codec_preferences().iter().any(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+            });
+            if !(single && media) {
+                // it is rid-based (or already bound), let's use the rid path
+                return false;
+            }
+            let old = codings[0].rtp_coding_parameters.ssrc;
+            debug!("ssrc {ssrc} takes over the stream of ssrc {old:?} in transceiver {index}");
+            if let Some(receiver) = self.rtp_transceivers[index].receiver_mut() {
+                receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+                receiver.set_coding_parameters(vec![]);
+                receiver.track_mut().set_codings(vec![]);
+            }
+            if let Some(old) = old {
+                self.ctx.ssrc_owners.remove(old);
+                self.ctx.placed_ssrcs.remove(&old);
+            }
+            takeover = true;
         }
 
         let Some(transceiver) = self.rtp_transceivers.get_mut(index) else {
@@ -895,8 +986,134 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
-        self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        // The track the new SSRC took over is open already.
+        if !takeover {
+            self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        }
         true
+    }
+
+    /// RFC 6051 section 3.3: the `ntp-64` or `ntp-56` timestamp `packet` carries, if its
+    /// stream negotiated either, as the stream's newest RTP-to-NTP mapping.
+    fn record_in_band_ntp(&mut self, packet: &rtp::Packet, now: Instant) {
+        use shared::marshal::Unmarshal;
+        let id = |uri: &str| {
+            let (id, audio, video) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    });
+            ((audio || video) && id != 0).then_some(id as u8)
+        };
+        let Some(stream) = self.stats.inbound_rtp_streams.get_mut(&packet.header.ssrc) else {
+            return;
+        };
+        let ntp = if let Some(value) =
+            id(rtp::extension::NTP_64_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            rtp::extension::ntp_timestamp_extension::Ntp64Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .map(|extension| extension.ntp_time)
+        } else if let Some(value) =
+            id(rtp::extension::NTP_56_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            let report = stream.remote_ntp_time;
+            rtp::extension::ntp_timestamp_extension::Ntp56Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .zip(report)
+                .map(|(extension, report)| extension.ntp_time(report))
+        } else {
+            None
+        };
+        if let Some(ntp) = ntp.filter(|ntp| *ntp != 0) {
+            stream.in_band_ntp = Some((ntp, packet.header.timestamp, now));
+        }
+    }
+
+    /// RFC 4588 section 5.3: "Upon reception of original RTP packets with a new SSRC, the
+    /// receiver MUST perform the SSRC association again". An RTX packet from an SSRC no
+    /// description or header extension associates, whose payload type is an RTX format of
+    /// transceiver `index`'s section (its `apt` a media format there), belongs to the one
+    /// original stream of that section's single-stream receiver (the MID, or the section's
+    /// payload types, named the section; SSRC multiplexing, one original per section, so the
+    /// association is not ambiguous): it becomes that stream's RTX SSRC, in place of the one
+    /// before (the sender moved both, RFC 7160 section 4.1, or restarted its RTX stream).
+    ///
+    /// `None` when the packet is not RTX of such a receiver; `Some(false)` when it is RTX but
+    /// there is no original stream to associate it with yet (it is dropped).
+    fn associate_rtx_by_apt(
+        &mut self,
+        index: usize,
+        ssrc: SSRC,
+        payload_type: PayloadType,
+    ) -> Option<bool> {
+        let receiver = self
+            .rtp_transceivers
+            .get_mut(index)?
+            .receiver_mut()
+            .as_mut()?;
+        let codec = receiver
+            .get_codec_preferences()
+            .iter()
+            .find(|codec| {
+                codec.payload_type == payload_type
+                    && codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                        crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                    )
+            })
+            .cloned()?;
+        let apt = crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt(
+            &codec.rtp_codec.sdp_fmtp_line,
+        )?;
+        if !receiver
+            .get_codec_preferences()
+            .iter()
+            .any(|media| media.payload_type == apt)
+        {
+            return None;
+        }
+        // Before its original stream there is nothing to associate it with: a retransmission
+        // is never a stream of its own.
+        if receiver.get_coding_parameters().is_empty() {
+            return Some(false);
+        }
+        let single = receiver.get_coding_parameters().len() == 1
+            && receiver.get_coding_parameters()[0].rid.is_empty();
+        if !single {
+            return None;
+        }
+        let coding = receiver.get_coding_parameter_mut_by_rid("")?;
+        let Some(primary) = coding.ssrc.filter(|primary| *primary != ssrc) else {
+            return Some(false);
+        };
+        let replaced = coding.rtx.as_ref().map(|rtx| rtx.ssrc);
+        coding.rtx = Some(RTCRtpRtxParameters { ssrc });
+        debug!("rtx ssrc {ssrc} associated with ssrc {primary} by its payload type (RFC 4588 5.3)");
+        let parameters = receiver.get_parameters(self.media_engine);
+        let flow = repair_flow_codec(&codec.rtp_codec);
+        for (bind, repair) in [(false, replaced.filter(|r| *r != 0)), (true, Some(ssrc))] {
+            let Some(repair) = repair else {
+                continue;
+            };
+            RTCRtpReceiverInternal::interceptor_remote_stream_op(
+                self.interceptor,
+                bind,
+                repair,
+                None,
+                None,
+                codec.payload_type,
+                None,
+                None,
+                &flow,
+                &parameters.rtp_parameters.header_extensions,
+                &[],
+            );
+        }
+        if let Some(replaced) = replaced {
+            self.ctx.ssrc_owners.remove(replaced);
+        }
+        self.stats.update_inbound_rtx_ssrc(primary, ssrc);
+        Some(true)
     }
 
     /// A repair (RTX) stream announced only by the `repaired-rtp-stream-id` header extension
@@ -1578,6 +1795,14 @@ impl<'a>
                         }
                     }
 
+                    // RFC 6051 section 3.3: an in-band NTP-format timestamp is taken "in exactly
+                    // the same way as if an additional RTCP SR packet had been received". The
+                    // 56-bit variant's upper eight bits of seconds come from the stream's SRs,
+                    // so it counts only after one.
+                    if rtp_packet.header.extension && retransmitted.is_none() {
+                        self.record_in_band_ntp(rtp_packet, msg.now);
+                    }
+
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
                     // included.
@@ -1628,15 +1853,26 @@ impl<'a>
                 for attribute in &packet.message.attributes {
                     match attribute {
                         Attribute::TargetBitrateChanged { bits_per_second } => {
-                            // The selected pair's `availableOutgoingBitrate`, and each
-                            // outbound stream's `targetBitrate`: its share by priority and
-                            // maxBitrate (`allocate_target_bitrate`).
-                            self.ctx.target_bitrate = Some(*bits_per_second);
-                            let shares = crate::peer_connection::priority::allocate_target_bitrate(
-                                self.rtp_transceivers,
-                                *bits_per_second,
-                            );
-                            self.stats.on_target_bitrate(*bits_per_second, &shares);
+                            // One controller per transport (`PerRtpSession`): the estimate is
+                            // that transport's, named by the session tag. Its selected pair's
+                            // `availableOutgoingBitrate`, and the `targetBitrate` of each
+                            // outbound stream on it: its share by priority and maxBitrate
+                            // (`allocate_target_bitrate_on`). The connection's figure is the
+                            // sum over the transports.
+                            let key = interceptor::RtpSession::of(&packet.message)
+                                .unwrap_or_else(|| self.stats.active_transport());
+                            self.ctx.transport_targets.insert(key, *bits_per_second);
+                            self.ctx.target_bitrate =
+                                Some(self.ctx.transport_targets.values().sum());
+                            let stats = &*self.stats;
+                            let on_transport = |mid: &str| stats.section_transport_key(mid) == key;
+                            let shares =
+                                crate::peer_connection::priority::allocate_target_bitrate_on(
+                                    self.rtp_transceivers,
+                                    *bits_per_second,
+                                    on_transport,
+                                );
+                            self.stats.on_target_bitrate(key, *bits_per_second, &shares);
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
@@ -1764,10 +2000,22 @@ impl<'a>
                     _ => None,
                 };
 
+                // With several transports, the RTCP an RTP session's instance wrote names the
+                // session: it goes down that session's transport, also when none of its SSRCs
+                // is a section's (a receive-only endpoint's reporting SSRC).
+                let session = self
+                    .rtp_session
+                    .and_then(|_| interceptor::RtpSession::of(&packet.message));
+                let message = match (session, packet.message.packet) {
+                    (Some(session), Packet::Rtcp(packets)) => {
+                        RTPMessage::SessionRtcp(session, packets)
+                    }
+                    (_, packet) => RTPMessage::Packet(packet),
+                };
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: packet.now,
                     transport: packet.transport,
-                    message: RTCMessageInternal::Rtp(RTPMessage::Packet(packet.message.packet)),
+                    message: RTCMessageInternal::Rtp(message),
                 });
                 trace!("interceptor write {:?}", packet.transport.peer_addr);
             }
@@ -1777,27 +2025,12 @@ impl<'a>
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
-        if let RTCEventInternal::DTLSHandshakeComplete(local_srtp_context, _) = &evt.event {
+        if let RTCEventInternal::DTLSHandshakeComplete(_, _) = &evt.event {
             debug!("interceptor recv dtls handshake complete");
-            let first = !self.ctx.is_dtls_handshake_complete;
             self.ctx.is_dtls_handshake_complete = true;
-            if first {
-                // RFC 3711 section 3.4: what SRTCP adds to each compound packet (E flag and
-                // index, the tag; no MKI is used) is part of the size the RTCP interval rests
-                // on.
-                let srtcp_overhead = srtcp_overhead(local_srtp_context.as_ref());
-                // The RTCP session joins when the transport is up, under the connection's
-                // CNAME: an endpoint that only receives reports from then on, not from its
-                // first inbound packet (RFC 3550 6.2).
-                for control in [
-                    RtcpSessionControl::Cname(self.ctx.cname.clone()),
-                    RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
-                    RtcpSessionControl::Start,
-                ] {
-                    self.interceptor
-                        .handle_write(control.into_packet(evt.now))?;
-                }
-            }
+            // The RTCP session of the transport joins once it also carries a negotiated RTP
+            // m= section (`RTCPeerConnection::sync_rtcp_sessions`), not at the handshake: a
+            // data-channel-only connection has no RTP session and sends no RTCP.
         }
 
         self.ctx.event_outs.push_back(evt);
@@ -2272,6 +2505,34 @@ mod boundary_tests {
         assert_eq!(1000, stream.remote_bytes_sent);
         assert_eq!(Some(now), stream.remote_report_received_at);
         assert_eq!(1, stream.reports_received);
+    }
+
+    /// RFC 9143 section 9.2: "RTCP packets that cannot be associated with an appropriate "m="
+    /// section MUST still be processed as usual by the RTP layer". A sender report from a
+    /// source no section has (no stream of either direction is known) goes into the chain,
+    /// whose RTCP session takes its sender as a member and its size into the report interval.
+    #[test]
+    fn rtcp_that_matches_no_section_still_goes_to_the_rtp_layer() {
+        let mut stats = RTCStatsAccumulator::default();
+        let reads = read_rtcp(
+            &mut stats,
+            Instant::now(),
+            vec![Box::new(SenderReport {
+                ssrc: 0x7777,
+                packet_count: 1,
+                octet_count: 100,
+                ..Default::default()
+            })],
+        );
+        assert!(stats.inbound_rtp_streams.is_empty());
+        let reached = reads.iter().any(|read| {
+            matches!(&read.message.packet, Packet::Rtcp(packets) if packets.iter().any(|p| {
+                p.as_any()
+                    .downcast_ref::<SenderReport>()
+                    .is_some_and(|sr| sr.ssrc == 0x7777)
+            }))
+        });
+        assert!(reached, "the report did not reach the RTP layer");
     }
 }
 

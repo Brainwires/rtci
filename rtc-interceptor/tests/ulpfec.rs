@@ -1052,3 +1052,84 @@ fn a_ulpfec_repair_flow_the_signalling_groups_is_decoded_as_a_separate_stream() 
     );
     assert!(delivered.iter().all(|m| !m.has(&Attribute::RecoveredByFec)));
 }
+
+/// A stream bound with `onelevelonly=1` on its section's `ulpfec` format (what the peer
+/// connection passes in `StreamInfo::section_fmtp_lines` from the negotiated description).
+fn one_level_only_info() -> StreamInfo {
+    StreamInfo {
+        section_fmtp_lines: vec![(MEDIA_PT, String::new()), (FEC_PT, "onelevelonly=1".into())],
+        ..stream_info("video/VP8", false)
+    }
+}
+
+/// RFC 5109 section 13: "If 1 is signaled, only one level of FEC protection SHALL be used in
+/// the stream." The sender reads `onelevelonly` from the negotiated `ulpfec` format of the
+/// stream's section, not only from its builder: a sender built for two levels sends one on a
+/// stream whose section says `onelevelonly=1`, and two on one whose section does not.
+#[test]
+fn the_negotiated_onelevelonly_keeps_the_sender_to_one_level() {
+    let packets: Vec<_> = (1..5).map(|seq| media(seq, 0, false, 100)).collect();
+    let levels = |info: StreamInfo| {
+        let mut chain = Registry::new()
+            .with(
+                Slot::FecEncoder,
+                red_builder()
+                    .with_num_media_packets(4)
+                    .with_level_lengths([20u16, 30])
+                    .build(),
+            )
+            .build();
+        chain.bind_local_stream(&info);
+        let wire = send(&mut chain, Instant::now(), &packets);
+        UlpfecPacket::parse(&wire[4].payload[1..])
+            .unwrap()
+            .levels
+            .len()
+    };
+    assert_eq!(
+        1,
+        levels(one_level_only_info()),
+        "onelevelonly=1 negotiated"
+    );
+    assert_eq!(
+        2,
+        levels(stream_info("video/VP8", false)),
+        "nothing negotiated"
+    );
+}
+
+/// RFC 5109 sections 13 and 14.3: for a receiving stream `onelevelonly=1` "indicates what the
+/// receiver accepts to receive". Signalled on this side's `ulpfec` format, the receiver does
+/// not use FEC with two levels, though its builder was not told.
+#[test]
+fn the_negotiated_onelevelonly_keeps_the_receiver_from_two_levels() {
+    let now = Instant::now();
+    let mut sender = red_sender(
+        red_builder()
+            .with_num_media_packets(2)
+            .with_level_lengths([10u16, 30]),
+    );
+    let packets = vec![media(1, 0, false, 30), media(2, 0, false, 30)];
+    let mut wire = send(&mut sender, now, &packets);
+    wire.remove(0);
+
+    let recovered = |info: StreamInfo| {
+        let mut receiver = Registry::new()
+            .with(
+                Slot::FecDecoder,
+                UlpfecReceiveBuilder::red(RED_PT, FEC_PT).build(),
+            )
+            .build();
+        receiver.bind_remote_stream(&info);
+        receive(&mut receiver, now, &wire)
+            .iter()
+            .filter(|m| m.has(&Attribute::RecoveredByFec))
+            .count()
+    };
+    assert_eq!(0, recovered(one_level_only_info()), "two levels refused");
+    assert_eq!(
+        1,
+        recovered(stream_info("video/VP8", false)),
+        "used otherwise"
+    );
+}

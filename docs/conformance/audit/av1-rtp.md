@@ -8,7 +8,7 @@ Appendix A (Dependency Descriptor header extension, A.3 to A.9). Sections 1 to 3
 and A.10 carry no normative keyword. MUST NOT / SHALL / REQUIRED count as MUST, RECOMMENDED / SHOULD NOT
 as SHOULD, OPTIONAL as MAY.
 
-- MUST: tested 58 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 12
+- MUST: tested 59 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 12
 - SHOULD: tested 13 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 3
 
@@ -93,7 +93,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-7.2.3-1 | 7.2.3 | MAY | The answerer declares its own profile / level / tier (parameters are asymmetric) | tested | `media_engine.rs` `local_fmtp_line` (an exact AV1 match answers with the local fmtp) | `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The answer states this endpoint's own fmtp, not the offer's `level-idx` / `tier` |
 | AV1RTP-7.2.3-2 | 7.2.3 | MUST | The stream sent stays within the profile, level and tier the receiving agent declared | n-a | | | Encoder's job; application reads the fmtp |
 | AV1RTP-7.2.4-1 | 7.2.4 | MUST | Declarative SDP (RTSP, SAP): a receiver that cannot support the declared values rejects or stays out | n-a | | | RTSP and SAP, not WebRTC |
-| AV1RTP-8.1-1 | 8.1 | MUST | On FIR the sender starts a new coded video sequence for each SSRC named, as soon as possible | partial | `rtc-interceptor/src/keyframe.rs:58-64` | `keyframe.rs::pli_and_fir_reach_the_application` | The engine's part, handing the FIR to the application that owns the encoder, is done and tested. It does not filter by the FCI's SSRC or drop repeats (see `rfc5104.md`, RFC5104-4.3.1.2-3). `ccm fir` is offered for AV1 (`media_engine.rs:407`) |
+| AV1RTP-8.1-1 | 8.1 | MUST | On FIR the sender starts a new coded video sequence for each SSRC named, as soon as possible | tested | `src/peer_connection/handler/endpoint.rs` (`handle_rtcp_message`: by the FCI's SSRCs), `rtc-interceptor/src/keyframe.rs` (`drop_repeated_firs`) | `a_fir_reaches_only_the_senders_its_fci_names`, `a_fir_for_two_senders_reaches_both`, `a_repeated_fir_is_delivered_once`, `pli_and_fir_reach_the_application` | The engine's part, as for RFC5104-4.3.1.2-3: a FIR reaches the encoder (the application's) of each local sender its FCI names and of no other, once per command sequence number; starting the coded video sequence is the encoder's. `ccm fir` is offered for AV1 (`media_engine.rs:407`). media-21: the FCI routing test, checked to fail with the FIR routed by its media SSRC field |
 | AV1RTP-8.1-2 | 8.1 | MAY | Sender also starts new coded video sequences on the other simulcast encodings | n-a | | | Application drives the encoders |
 | AV1RTP-8.2-1 | 8.2 | MUST | Layer Refresh Requests use the VP9 LRR format with the SID high bit 0 | tested | `rtc-rtcp/src/payload_feedbacks/layer_refresh_request.rs` (`LrrEntry::av1`, `LrrEntry::vp9`) | `an_av1_layer_refresh_request_uses_the_vp9_format_with_a_two_bit_sid` | The VP9 layout with the SID's high bit 0. `ccm lrr` is not offered by default (JSEP) |
 | AV1RTP-10-1 | 10 | SHOULD | Data origin authentication and integrity protection of the RTP packet (for example SRTP) | tested | `rtc-srtp/src/context/srtp.rs` | `rtc-srtp/src/context/srtp_test.rs::test_rtp_invalid_auth` | Always SRTP in WebRTC; clause detail in `rfc3711.md` |

@@ -362,7 +362,7 @@ impl<'a>
                         "serialized rtp/rtcp is never written past srtp unprotected".to_string(),
                     ));
                 }
-                RTPMessage::TrackPacket(_) => {
+                RTPMessage::TrackPacket(_) | RTPMessage::SessionRtcp(..) => {
                     return Err(Error::Other(
                         "application level track message should never reach here".to_string(),
                     ));
@@ -739,6 +739,69 @@ mod tests {
             })
             .unwrap();
         assert!(SrtpHandler::new(&mut ctx).poll_read().is_some());
+    }
+
+    /// RFC 4585 section 8: senders and receivers "SHOULD behave conservatively" with feedback
+    /// from sources they cannot authenticate. A compound packet of an RR and a PLI whose SRTCP
+    /// authentication tag was forged (the payload decrypts, the tag does not verify) is not
+    /// read: nothing reaches the interceptors or the application, the discard is reported;
+    /// the same packet with its genuine tag is read, PLI and all.
+    #[test]
+    fn feedback_in_an_srtcp_packet_with_a_forged_tag_is_not_read() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let mut plain = vec![0x80, 201, 0, 1, 0, 0, 0, 1];
+        plain.extend_from_slice(&pli());
+        let genuine = context(1).encrypt_rtcp(&plain).unwrap();
+        let mut forged = genuine.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 0x40;
+
+        let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Rtp(RTPMessage::Raw(forged)),
+        });
+        assert!(read.is_err(), "a forged tag fails authentication");
+        let mut handler = SrtpHandler::new(&mut ctx);
+        assert!(handler.poll_read().is_none(), "no feedback is read from it");
+        let events: Vec<_> = std::iter::from_fn(|| handler.poll_event().map(|e| e.event)).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnSrtpPacketDiscarded { rtcp: true, .. }
+                )
+            )),
+            "the discard is reported: {} events",
+            events.len()
+        );
+
+        let packets = read_rtcp_protected(&mut ctx, genuine);
+        assert_eq!(2, packets.len());
+        assert!(
+            packets[1]
+                .as_any()
+                .is::<rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
+        );
+    }
+
+    /// The RTCP packets read from `protected`, one SRTCP datagram.
+    fn read_rtcp_protected(
+        ctx: &mut SrtpHandlerContext,
+        protected: BytesMut,
+    ) -> Vec<Box<dyn rtcp::Packet>> {
+        SrtpHandler::new(ctx)
+            .handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(protected)),
+            })
+            .unwrap();
+        match SrtpHandler::new(ctx).poll_read().map(|m| m.message) {
+            Some(RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(packets)))) => packets,
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     /// RFC 3711 section 3.3 step 2: a replayed packet is discarded, and the event is logged

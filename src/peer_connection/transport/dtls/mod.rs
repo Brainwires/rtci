@@ -1864,9 +1864,34 @@ mod tests {
             .prepare_transport(RTCIceRole::Controlled, dummy_params(RTCDtlsRole::Server))?;
         let mut client = Endpoint::new(client_addr, TransportProtocol::UDP, None);
         client.connect(std::time::Instant::now(), server_addr, engine_client, None)?;
-        let hello = client.poll_transmit().expect("a ClientHello").message;
-        // Record header (13), handshake header (12), version (2), random (32).
-        let body = &hello[25..];
+        // With a provider that has the hybrid post-quantum key share (aws-lc-rs) the
+        // ClientHello is larger than one record: its fragments are put back together. Each
+        // record: header (13); each fragment: handshake header (12: type, length (3),
+        // message_seq (2), fragment_offset (3), fragment_length (3)) and its bytes.
+        let mut hello_body: Vec<u8> = vec![];
+        while let Some(transmit) = client.poll_transmit() {
+            let datagram = transmit.message;
+            let mut record = 0;
+            while record + 13 <= datagram.len() {
+                let length =
+                    u16::from_be_bytes([datagram[record + 11], datagram[record + 12]]) as usize;
+                let fragment = &datagram[record + 13..record + 13 + length];
+                if datagram[record] == 22 && fragment[0] == 1 {
+                    let total =
+                        u32::from_be_bytes([0, fragment[1], fragment[2], fragment[3]]) as usize;
+                    let offset =
+                        u32::from_be_bytes([0, fragment[6], fragment[7], fragment[8]]) as usize;
+                    let size =
+                        u32::from_be_bytes([0, fragment[9], fragment[10], fragment[11]]) as usize;
+                    hello_body.resize(total, 0);
+                    hello_body[offset..offset + size].copy_from_slice(&fragment[12..12 + size]);
+                }
+                record += 13 + length;
+            }
+        }
+        assert!(!hello_body.is_empty(), "a ClientHello");
+        // Version (2), random (32).
+        let body = &hello_body[..];
         let session_id_length = body[34] as usize;
         assert_eq!(session_id_length, 0, "no session id offered");
         let mut at = 35;

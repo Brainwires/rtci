@@ -20,6 +20,9 @@ use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
 use rtcp::payload_feedbacks::slice_loss_indication::SliceLossIndication;
+use rtcp::payload_feedbacks::temporal_spatial_tradeoff::{
+    TemporalSpatialTradeoffNotification, TemporalSpatialTradeoffRequest,
+};
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
@@ -182,6 +185,19 @@ pub enum RtcpSessionControl {
         /// The RepairedRtpStreamId (the rid of the stream a redundancy stream repairs).
         repaired_rid: Option<String>,
     },
+    /// RFC 7160 section 4.1: the local stream `current` took over from the streams `previous`
+    /// because the sender switched to another clock rate (each clock rate has an SSRC of its
+    /// own). The next compound packet "MUST contain multiple SR packets, the first one
+    /// containing the mapping for the current clock rate and the subsequent SR packet(s)
+    /// containing the mapping for the other clock rates seen during the last period": it
+    /// leads with `current`'s report, followed by those of the `previous` streams that sent
+    /// lately.
+    ClockRateSwitch {
+        /// The SSRC of the clock rate now in use.
+        current: u32,
+        /// The SSRCs of the other clock rates the stream was sent with, still in the session.
+        previous: Vec<u32>,
+    },
 }
 
 impl RtcpSessionControl {
@@ -255,6 +271,8 @@ pub struct RtcpSessionBuilder {
     point_to_point: Option<bool>,
     report_from_every_ssrc: bool,
     immediate_congestion_feedback: bool,
+    joins_on_start: bool,
+    first_report_at_join: bool,
     random: Box<dyn RtcpRandom>,
 }
 
@@ -272,6 +290,8 @@ impl Default for RtcpSessionBuilder {
             point_to_point: None,
             report_from_every_ssrc: false,
             immediate_congestion_feedback: true,
+            joins_on_start: false,
+            first_report_at_join: false,
             random: Box::new(ThreadRandom),
         }
     }
@@ -377,6 +397,34 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// Whether the session joins only when told [`RtcpSessionControl::Start`] (`true`), or at
+    /// the first control, packet or stream it is given (`false`, the default).
+    ///
+    /// RFC 3550 section 6: RTCP is the control protocol of an RTP session, and there is none
+    /// until an RTP m= section is negotiated (RFC 8834 section 4.1). A peer connection knows
+    /// when that is, per transport, and joins the session then; with `true` nothing else makes
+    /// it join: until `Start` it sends nothing (no report, no SDES, no SSRC of its own), and
+    /// what is written to it as RTCP is dropped. After [`RtcpSessionControl::Leave`], a
+    /// `Start` joins it again (RTCP resumes from a new reporting SSRC).
+    pub fn with_joins_on_start(mut self, joins_on_start: bool) -> Self {
+        self.joins_on_start = joins_on_start;
+        self
+    }
+
+    /// Whether the first compound packet goes out when the session joins (`true`), or after
+    /// the initial interval of RFC 3550 section 6.2 (`false`, the default).
+    ///
+    /// RFC 8834 section 4.1, with RFC 3550 section 6.2 as RFC 8108 updates it: "The delay
+    /// before sending the initial compound RTCP packet can be set to zero." A peer connection
+    /// joins a transport's session when its keys exist, and reporting then tells the peer the
+    /// endpoint's SSRCs at once (RFC 3550 section 8.2: an SSRC collision is found from the
+    /// first packet that shows it) and starts the round-trip and loss reports congestion
+    /// control reads.
+    pub fn with_first_report_at_join(mut self, at_join: bool) -> Self {
+        self.first_report_at_join = at_join;
+        self
+    }
+
     /// The source of the session's random numbers; a test supplies one that repeats.
     pub fn with_random(mut self, random: impl RtcpRandom + 'static) -> Self {
         self.random = Box::new(random);
@@ -413,6 +461,8 @@ impl RtcpSessionBuilder {
             point_to_point: template.point_to_point,
             report_from_every_ssrc: template.report_from_every_ssrc,
             immediate_congestion_feedback: template.immediate_congestion_feedback,
+            joins_on_start: template.joins_on_start,
+            first_report_at_join: template.first_report_at_join,
             random: Box::new(random.clone()),
         };
         let first = make(&template).build();
@@ -439,6 +489,9 @@ impl RtcpSessionBuilder {
             report_from_every_ssrc: self.report_from_every_ssrc,
             random: self.random,
 
+            joins_on_start: self.joins_on_start,
+            first_report_at_join: self.first_report_at_join,
+            start_given: false,
             started: false,
             left: false,
             locals: Vec::new(),
@@ -456,6 +509,8 @@ impl RtcpSessionBuilder {
             outside_budget: false,
             pending: Vec::new(),
             early_at: None,
+            sender_report_requested: None,
+            clock_rate_switch: None,
             compound_sent: false,
             reference_times: HashMap::new(),
             dlrr_limits: HashMap::new(),
@@ -680,6 +735,12 @@ pub struct RtcpSessionInterceptor {
     report_from_every_ssrc: bool,
     random: Box<dyn RtcpRandom>,
 
+    /// [`RtcpSessionBuilder::with_joins_on_start`].
+    joins_on_start: bool,
+    /// [`RtcpSessionBuilder::with_first_report_at_join`].
+    first_report_at_join: bool,
+    /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
+    start_given: bool,
     started: bool,
     left: bool,
     /// In the order they were bound.
@@ -712,6 +773,12 @@ pub struct RtcpSessionInterceptor {
     pending: Vec<Box<dyn rtcp::Packet>>,
     /// RFC 4585 3.5.2: when the scheduled Early packet goes.
     early_at: Option<Instant>,
+    /// RFC 6051 section 3.2: the local SSRC an RTCP-SR-REQ asked for an SR of, until an
+    /// Early packet carries it.
+    sender_report_requested: Option<usize>,
+    /// RFC 7160 section 4.1: the clock rate switch the next compound packet reports
+    /// ([`RtcpSessionControl::ClockRateSwitch`]): the current SSRC, then the previous ones.
+    clock_rate_switch: Option<(u32, Vec<u32>)>,
     /// Whether a compound packet has been sent (RFC 5506 4: none reduced-size before).
     compound_sent: bool,
     /// The receiver reference times received and not yet answered, by sender SSRC.
@@ -1147,12 +1214,38 @@ impl RtcpSessionInterceptor {
 
     // ---- joining ---------------------------------------------------------------------
 
+    /// Whether anything may make the session join: always, unless it joins on
+    /// [`RtcpSessionControl::Start`] only and has not been given it.
+    fn may_join(&self) -> bool {
+        !self.joins_on_start || self.start_given
+    }
+
+    /// [`RtcpSessionControl::Start`] after [`RtcpSessionControl::Leave`]: the session is
+    /// joined afresh (RFC 3550 section 6.3.2's initial state), with no members, nothing
+    /// pending and the next local SSRC it reports from a new one.
+    fn rejoin(&mut self) {
+        self.left = false;
+        self.started = false;
+        self.departing.clear();
+        self.pending.clear();
+        self.early_at = None;
+        self.bye = None;
+        self.members.clear();
+        self.pmembers = 0;
+        self.avg_rtcp_size = 0.0;
+        self.compound_sent = false;
+        self.reference_times.clear();
+        self.awaited = None;
+        self.unanswered_reduced_nacks = 0;
+    }
+
     /// Joins the session if it has not, and gives every participating SSRC its timer.
     fn sync(&mut self, now: Instant) {
-        if self.left {
+        if self.left || !self.may_join() {
             return;
         }
         self.sync_reporter();
+        let joining = !self.started;
         if !self.started {
             self.started = true;
             // RFC 3550 6.3.2: avg_rtcp_size starts at the probable size of the first packet:
@@ -1168,8 +1261,12 @@ impl RtcpSessionInterceptor {
         }
         for index in 0..self.locals.len() {
             if self.locals[index].timing.is_none() && self.locals[index].participates() {
-                let t = self.interval(index, now);
-                self.locals[index].timing = Some(Timing::new(now, t));
+                self.locals[index].timing = Some(if joining && self.first_report_at_join {
+                    Timing::immediate(now)
+                } else {
+                    let t = self.interval(index, now);
+                    Timing::new(now, t)
+                });
             }
         }
         self.flush_departing(now);
@@ -1481,6 +1578,15 @@ impl RtcpSessionInterceptor {
                 self.heard(now, sender, false);
             }
 
+            // RFC 6051 section 3.2: "a media source that understands the RTCP-SR-REQ packet
+            // SHOULD generate an RTCP SR packet as soon as possible while complying with the
+            // RTCP early feedback rules".
+            if let Some(request) = any.downcast_ref::<RapidResynchronizationRequest>()
+                && let Some(index) = self.local_index(request.media_ssrc)
+            {
+                self.request_sender_report(now, index);
+            }
+
             if let Some(sr) = any.downcast_ref::<SenderReport>() {
                 if let Some(remote) = self.remotes.get_mut(&sr.ssrc) {
                     remote.stream.process_sender_report(now, sr);
@@ -1584,7 +1690,14 @@ impl RtcpSessionInterceptor {
     fn has_feedback(&self) -> bool {
         self.pending.iter().any(|packet| {
             let any = packet.as_any();
-            !any.is::<ExtendedReport>() && !any.is::<Goodbye>()
+            // RFC 5104 sections 4.3.2.3 and 4.3.3.3: a TSTR "is not time critical and SHOULD
+            // be sent using regular RTCP timing", and so is the TSTN that answers it. They
+            // wait for the next regular packet and ask for no Early one (another feedback
+            // message that does takes them along).
+            !any.is::<ExtendedReport>()
+                && !any.is::<Goodbye>()
+                && !any.is::<TemporalSpatialTradeoffRequest>()
+                && !any.is::<TemporalSpatialTradeoffNotification>()
         })
     }
 
@@ -1622,6 +1735,39 @@ impl RtcpSessionInterceptor {
         // Step 4b.
         let te = after(now, self.unit() * t_dither_max);
         if te <= now {
+            self.send_early(now, index);
+        } else {
+            self.early_at = Some(te);
+        }
+    }
+
+    /// RFC 6051 section 3.2: an SR from the local SSRC `index` as soon as RFC 4585 3.5.2
+    /// allows, in an Early packet (a regular one due within the dither carries it anyway,
+    /// as does the next regular one when no Early packet is allowed now). Under RTP/AVP
+    /// there is no Early packet; nor is there an SR to give for an SSRC that has not sent.
+    fn request_sender_report(&mut self, now: Instant, index: usize) {
+        if self.profile == RtcpProfile::Avp || !self.we_sent(index, now) {
+            return;
+        }
+        let Some(timing) = self.locals[index].timing else {
+            return;
+        };
+        self.sender_report_requested = Some(index);
+        if self.early_at.is_some() {
+            return;
+        }
+        let t_dither_max = if self.is_point_to_point() {
+            0.0
+        } else {
+            0.5 * seconds_between(timing.tp, timing.tn).max(0.0)
+        };
+        if after(now, t_dither_max) > timing.tn || !timing.allow_early {
+            self.sender_report_requested = None;
+            return;
+        }
+        let te = after(now, self.unit() * t_dither_max);
+        if te <= now {
+            self.sender_report_requested = None;
             self.send_early(now, index);
         } else {
             self.early_at = Some(te);
@@ -1891,6 +2037,30 @@ impl RtcpSessionInterceptor {
     /// indices of those that reported; `Shape::Minimal` carries the leading report alone.
     fn send_compound(&mut self, now: Instant, first: usize, shape: Shape) -> Vec<usize> {
         let mut budget = self.mtu;
+        // RFC 7160 section 4.1: after a clock rate switch the packet leads with the report of
+        // the SSRC now in use, and the SRs of the other clock rates' SSRCs follow it. The SSRC
+        // whose timer brought the packet is in it as well.
+        let switch = self
+            .clock_rate_switch
+            .take()
+            .and_then(|(current, previous)| {
+                let lead = self.local_index(current)?;
+                let previous: Vec<usize> = previous
+                    .iter()
+                    .filter_map(|ssrc| self.local_index(*ssrc))
+                    .filter(|&index| index != lead && self.we_sent(index, now))
+                    .collect();
+                Some((lead, previous))
+            });
+        let (first, switched): (usize, Vec<usize>) = match switch {
+            Some((lead, mut previous)) => {
+                if first != lead && !previous.contains(&first) {
+                    previous.push(first);
+                }
+                (lead, previous)
+            }
+            None => (first, vec![]),
+        };
         let mut included = vec![first];
         let mut reports: Vec<Box<dyn rtcp::Packet>> = vec![];
 
@@ -1935,13 +2105,26 @@ impl RtcpSessionInterceptor {
         let report = self.report(first, now, first_blocks);
         budget = budget.saturating_sub(report.marshal_size() + 4 + chunk);
         reports.push(report);
+        // The other clock rates' reports (and the SSRC whose timer this is) right behind the
+        // leader, whatever the shape.
+        for &index in &switched {
+            let own_blocks = if carries_blocks(index) {
+                blocks.clone()
+            } else {
+                vec![]
+            };
+            let report = self.report(index, now, own_blocks);
+            budget = budget.saturating_sub(report.marshal_size() + chunk);
+            reports.push(report);
+            included.push(index);
+        }
 
         if shape == Shape::Full {
             // RFC 8108 5.3.2: the other SSRCs, in the order their timers would expire, as
             // long as their reports fit.
             let mut others: Vec<usize> = (0..self.locals.len())
                 .filter(|&index| {
-                    index != first
+                    !included.contains(&index)
                         && self.locals[index].participates()
                         && self.locals[index].timing.is_some()
                 })
@@ -2179,8 +2362,12 @@ impl RtcpSessionInterceptor {
                 .pending
                 .iter()
                 .find_map(|packet| sender_and_media(packet.as_ref()).1);
-            match self.feedback_source(media) {
-                Some(index) if self.has_feedback() => self.send_early(now, index),
+            match (
+                self.feedback_source(media),
+                self.sender_report_requested.take(),
+            ) {
+                (Some(index), _) if self.has_feedback() => self.send_early(now, index),
+                (_, Some(index)) if index < self.locals.len() => self.send_early(now, index),
                 _ => self.early_at = None,
             }
         }
@@ -2205,7 +2392,7 @@ impl RtcpSessionInterceptor {
             // catches up with the expiries it would have suppressed.
             let tc = timing.tn;
             let t = self.interval(index, tc);
-            if !timing.reconsider(tc, t) {
+            if !timing.immediate && !timing.reconsider(tc, t) {
                 self.locals[index].timing = Some(timing);
                 self.pmembers = self.member_count().max(1);
                 continue;
@@ -2343,7 +2530,12 @@ impl RtcpSessionInterceptor {
 
     fn control(&mut self, now: Instant, control: &RtcpSessionControl) {
         match control {
-            RtcpSessionControl::Start => {}
+            RtcpSessionControl::Start => {
+                if self.left {
+                    self.rejoin();
+                }
+                self.start_given = true;
+            }
             RtcpSessionControl::Cname(cname) => self.cname = cname.clone(),
             RtcpSessionControl::Bandwidth(bandwidth) => self.bandwidth = *bandwidth,
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
@@ -2399,7 +2591,16 @@ impl RtcpSessionInterceptor {
                     self.identifiers.insert(*ssrc, items);
                 }
             }
+            RtcpSessionControl::ClockRateSwitch { current, previous } => {
+                self.clock_rate_switch = Some((*current, previous.clone()));
+            }
             RtcpSessionControl::Leave => {
+                // A session that joins on `Start` and was not given it has not joined: there
+                // is nothing to leave.
+                if !self.may_join() || self.left {
+                    return;
+                }
+                self.start_given = false;
                 // RFC 3550 6.6: every SSRC of an endpoint that leaves says BYE.
                 self.sync(now);
                 self.left = true;
@@ -2455,8 +2656,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                 return Ok(());
             }
         }
-        if self.left {
-            // After the BYE nothing more is said (RFC 3550 6.1: BYE is the last packet).
+        if self.left || !self.may_join() {
+            // After the BYE nothing more is said (RFC 3550 6.1: BYE is the last packet), and
+            // before the session joins there is no RTP session to say it in.
             if matches!(msg.message.packet, Packet::Rtp(_)) {
                 self.write_queue.push_back(msg);
             }
@@ -2560,6 +2762,22 @@ impl Interceptor for RtcpSessionInterceptor {
             if let Some(index) = self.local_index(ssrc) {
                 let local = self.locals.remove(index);
                 self.departing.push(local);
+            }
+        }
+    }
+
+    /// A stream moving to another RTP session is not leaving: its SSRCs go from this
+    /// session's members without the BYE `unbind_local_stream` sends (RFC 3550 6.6 is for a
+    /// source that leaves the session; this one carries on in the other session, and this
+    /// session's transport is going away or no longer carries it).
+    fn move_local_stream_out(&mut self, info: &StreamInfo) {
+        self.dlrr_limits.remove(&info.ssrc);
+        for ssrc in std::iter::once(info.ssrc)
+            .chain(info.ssrc_rtx)
+            .chain(info.ssrc_fec)
+        {
+            if let Some(index) = self.local_index(ssrc) {
+                self.locals.remove(index);
             }
         }
     }
@@ -2707,6 +2925,44 @@ mod tests {
                 "{rewritten:?}"
             );
         }
+    }
+
+    /// RFC 8834 section 13 (with RFC 8108): the effect of RTCP from SSRCs this endpoint does
+    /// not know is bounded. Reports and reference times from 5000 different unknown sources
+    /// leave the member table at its bound, so the RTCP interval (which grows with the
+    /// membership, RFC 3550 6.3.1) stays that of 1024 members, and the reference times kept
+    /// for DLRR answers at 64.
+    #[test]
+    fn rtcp_from_many_unknown_ssrcs_has_a_bounded_effect() {
+        let now = Instant::now();
+        let mut session = RtcpSessionBuilder::new().build();
+        session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+        let before = session.report_interval(now);
+        for ssrc in 1..=5000u32 {
+            let xr = boxed(ExtendedReport {
+                sender_ssrc: ssrc,
+                reports: vec![Box::new(ReceiverReferenceTimeReportBlock {
+                    ntp_timestamp: u64::from(ssrc) << 16,
+                })],
+            });
+            session.observe_rtcp(now, &[rr(ssrc), xr]);
+        }
+        assert_eq!(MAX_MEMBERS, session.members.len());
+        assert_eq!(MAX_REFERENCE_TIMES, session.reference_times.len());
+        let flooded = session.report_interval(now);
+        assert!(flooded >= before, "{flooded} {before}");
+        // One more member's worth of interval per member at most: what 1024 members give.
+        let mut bounded = RtcpSessionBuilder::new().build();
+        bounded.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+        for ssrc in 1..=MAX_MEMBERS as u32 {
+            bounded.observe_rtcp(now, &[rr(ssrc)]);
+        }
+        bounded.avg_rtcp_size = session.avg_rtcp_size;
+        assert!(
+            (flooded - bounded.report_interval(now)).abs() < 1e-6,
+            "{flooded} against {}",
+            bounded.report_interval(now)
+        );
     }
 
     #[test]

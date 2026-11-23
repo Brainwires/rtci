@@ -497,3 +497,149 @@ fn messages_follow_the_negotiated_config() {
     pair.advance(Duration::from_millis(1));
     assert_eq!(pair.of(true, PauseResumeType::Paused).len(), 1);
 }
+
+/// The BYE `from` sends for `ssrc`, as an incoming RTCP packet.
+fn bye(now: Instant, ssrc: u32) -> TaggedPacket {
+    TaggedPacket {
+        now,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(Goodbye {
+            sources: vec![ssrc],
+            reason: Default::default(),
+        })])),
+    }
+}
+
+/// Section 6.3.1: "receivers observing this SHALL NOT send further PAUSE or RESUME requests
+/// to it". After the paused sender's BYE for its stream, the receiver neither retransmits a
+/// pending request nor sends one the application asks for afterwards.
+#[test]
+fn no_request_goes_to_a_sender_that_said_bye() {
+    let mut pair = Pair::new("pause", "pause");
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.of(false, PauseResumeType::Pause).len(), 1);
+    pair.advance(Duration::from_millis(1000));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+
+    let now = pair.now;
+    pair.receiver.handle_read(bye(now, MEDIA)).unwrap();
+    while pair.receiver.poll_read().is_some() {}
+    let before = pair.messages.len();
+    pair.receiver_handle.resume(MEDIA);
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_secs(10));
+    let after: Vec<_> = pair.messages[before..]
+        .iter()
+        .filter(|(from_sender, _)| !from_sender)
+        .collect();
+    assert!(after.is_empty(), "requests after the BYE: {after:?}");
+}
+
+/// Section 7: "the target SSRC ... MUST NOT be a CSRC": requests go to the SSRCs of the
+/// streams the receiver has, never to a contributing source of their packets. A pause asked
+/// for an SSRC that is only a CSRC of the received stream sends nothing.
+#[test]
+fn a_csrc_is_not_a_target() {
+    const CSRC: u32 = 0x0C0C;
+    let mut pair = Pair::new("pause", "pause");
+    pair.write_rtp();
+    let packet = TaggedPacket {
+        now: pair.now,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+            header: Header {
+                ssrc: MEDIA,
+                sequence_number: 2000,
+                csrc: vec![CSRC],
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+    };
+    pair.receiver.handle_read(packet).unwrap();
+    while pair.receiver.poll_read().is_some() {}
+    pair.receiver_handle.pause(CSRC);
+    pair.advance(Duration::from_secs(5));
+    assert!(pair.messages.is_empty(), "{:?}", pair.messages);
+    // The stream itself can be paused.
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.of(false, PauseResumeType::Pause)[0].target_ssrc, MEDIA);
+}
+
+/// Section 8.1: "If a PAUSE with the current PauseID is received ... in pausing, paused, or
+/// local paused state, it SHALL be ignored": no REFUSED, no state change, and (pausing) the
+/// hold-off period is not restarted.
+#[test]
+fn a_pause_with_the_current_pause_id_is_ignored_unless_playing() {
+    let mut pair = Pair::new("pause", "pause");
+    let pause = |pair: &Pair| pair.rtcp(RECEIVER, vec![PauseResumeEntry::pause(MEDIA, 0)]);
+    pair.sender.handle_read(pause(&pair)).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Pausing));
+    pair.advance(Duration::from_millis(600));
+    // Pausing: ignored, and the hold-off still ends 1 s after the first PAUSE.
+    pair.sender.handle_read(pause(&pair)).unwrap();
+    pair.advance(Duration::from_millis(500));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+    // Paused: ignored.
+    pair.sender.handle_read(pause(&pair)).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+    // Local paused: ignored.
+    pair.sender_handle.local_pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(
+        pair.sender_handle.state(MEDIA),
+        Some(PauseState::LocalPaused)
+    );
+    pair.sender.handle_read(pause(&pair)).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(
+        pair.sender_handle.state(MEDIA),
+        Some(PauseState::LocalPaused)
+    );
+    assert!(pair.of(true, PauseResumeType::Refused).is_empty());
+}
+
+/// RFC 8853 section 5.2: a stream the session description starts paused (`~`) is "an
+/// unsolicited locally paused stream": bound with `initially_paused`, it sends nothing from
+/// its first packet on and announces PAUSED; unlike a local pause, the receiver's RESUME
+/// (with the current PauseID) plays it ("resumed as described by the RTP pause/resume
+/// specification"). Bound again after a renegotiation, it is not paused again (section 5.3.4:
+/// RFC 7728 signalling decides from then on).
+#[test]
+fn an_initially_paused_stream_starts_paused_and_a_resume_plays_it() {
+    let mut pair = Pair::new("pause", "pause");
+    let paused_info = StreamInfo {
+        initially_paused: true,
+        ..info(MEDIA, "pause")
+    };
+    pair.sender.unbind_local_stream(&info(MEDIA, "pause"));
+    pair.sender.bind_local_stream(&paused_info);
+    pair.write_rtp();
+    pair.write_rtp();
+    pair.advance(Duration::from_millis(1));
+    assert!(pair.sent.is_empty(), "{:?}", pair.sent);
+    assert_eq!(
+        pair.sender_handle.state(MEDIA),
+        Some(PauseState::LocalPaused)
+    );
+    let paused = pair.of(true, PauseResumeType::Paused);
+    assert_eq!(paused.len(), 1);
+    assert_eq!(paused[0].pause_id, 0);
+
+    let resume = pair.rtcp(RECEIVER, vec![PauseResumeEntry::resume(MEDIA, 0)]);
+    pair.sender.handle_read(resume).unwrap();
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert!(pair.of(true, PauseResumeType::Refused).is_empty());
+    pair.write_rtp();
+    assert_eq!(pair.sent.len(), 1);
+
+    pair.sender.unbind_local_stream(&paused_info);
+    pair.sender.bind_local_stream(&paused_info);
+    pair.write_rtp();
+    assert_eq!(pair.sent.len(), 2, "bound again: not paused again");
+}

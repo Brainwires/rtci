@@ -183,6 +183,27 @@ fn a_payload_type_with_two_configurations_in_one_bundle_group_refuses_the_descri
     );
     assert!(refused.is_err(), "{refused:?}");
 
+    // RFC 8859 appendix A: `a=rtcp-fb` is IDENTICAL-PER-PT as well: 96 with NACK in one
+    // section and without it in the other is refused; the same feedback in another order is
+    // the same.
+    let with_feedback = |lines: &str| format!("a=rtpmap:96 VP8/90000\n{lines}");
+    let (nack_pli, pli_nack, none) = (
+        with_feedback("a=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\n"),
+        with_feedback("a=rtcp-fb:96 nack pli\na=rtcp-fb:96 nack\n"),
+        with_feedback(""),
+    );
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &nack_pli), ("96", &none))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &nack_pli), ("96", &pli_nack))?,
+    )?;
+
     let mut pc = default_peer()?;
     pc.set_remote_description(Instant::now(), two_bundled_video_sections(vp8, vp8)?)?;
     let mut pc = default_peer()?;

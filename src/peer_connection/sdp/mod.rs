@@ -148,6 +148,9 @@
 mod sdp_test;
 
 #[cfg(test)]
+mod browser_sdp_test;
+
+#[cfg(test)]
 mod rejected_mline_tests {
     use super::*;
 
@@ -1345,7 +1348,13 @@ impl RTCPeerConnection {
             media = media.with_property_attribute(ATTR_KEY_SFRAME.to_owned());
         }
 
-        let codecs = transceiver.get_codecs(media_engine);
+        // RFC 9429 section 5.2.2: a later offer lists every available format, not only the
+        // negotiated ones.
+        let codecs = if is_offer {
+            transceiver.get_offer_codecs(media_engine)
+        } else {
+            transceiver.get_codecs(media_engine)
+        };
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
         // described only then (codec preferences may leave either out). The FEC flow is the
         // FlexFEC coder's: draft-03 (`video/flexfec-03`) or RFC 8627 (`video/flexfec`), each
@@ -1962,8 +1971,7 @@ impl RTCPeerConnection {
 
             // One `a=msid` line per MediaStream the sender is associated with, "omitting the
             // "appdata" field" (RFC 9429 section 5.2.1; the track id with
-            // `with_msid_appdata`); a sender in no stream writes the stream id `-` (its
-            // track's own stream id, which the application sets to `-` for that).
+            // `with_msid_appdata`); a sender in no stream writes the stream id `-`.
             let track_id = track.track_id().to_string();
             let mut stream_ids: Vec<String> = vec![];
             for stream_id in sender.streams() {
@@ -1972,8 +1980,10 @@ impl RTCPeerConnection {
                 }
             }
             if stream_ids.is_empty() {
-                stream_ids.push(track.stream_id().to_string());
+                stream_ids.push("-".to_owned());
             }
+            // The source-level `msid` (RFC 8830 appendix A) names the same first stream.
+            let source_stream = stream_ids[0].clone();
             let msid: Vec<String> = stream_ids
                 .into_iter()
                 .map(|stream_id| {
@@ -2032,7 +2042,8 @@ impl RTCPeerConnection {
                         sources.extend(rtx_flow.map(|rtx| rtx.ssrc));
                         sources.extend(fec_flow.map(|fec| fec.ssrc));
                         for source in sources {
-                            media = with_source_attributes(media, source, track, cname);
+                            media =
+                                with_source_attributes(media, source, &source_stream, track, cname);
                             // RFC 5576 sections 5 and 6.2: a source that moved after a
                             // collision names the SSRCs it had, once.
                             let previous = sender.previous_ssrcs(source);
@@ -2076,6 +2087,7 @@ impl RTCPeerConnection {
 fn with_source_attributes(
     media: MediaDescription,
     ssrc: SSRC,
+    stream_id: &str,
     track: &MediaStreamTrack,
     cname: &str,
 ) -> MediaDescription {
@@ -2083,7 +2095,7 @@ fn with_source_attributes(
         .with_value_attribute(ATTR_KEY_SSRC.to_owned(), format!("{ssrc} cname:{cname}"))
         .with_value_attribute(
             ATTR_KEY_SSRC.to_owned(),
-            format!("{ssrc} msid:{} {}", track.stream_id(), track.track_id()),
+            format!("{ssrc} msid:{stream_id} {}", track.track_id()),
         )
 }
 
@@ -3550,20 +3562,61 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
     }
 }
 
-/// Every `a=rtcp` line of the description, at session or media level, parses by RFC 3605
-/// section 2.1 (RFC 9429 section 5.8.2); the values are not used.
-pub(crate) fn check_rtcp_attributes(desc: &SessionDescription) -> Result<()> {
-    use sdp::attribute::TypedAttribute;
+/// RFC 9429 section 5.8: "If any line is not well formed or cannot be parsed as described,
+/// the parser MUST stop with an error and reject the session description, even if the value
+/// is to be discarded." `unmarshal` checks every line type; this checks the value of every
+/// attribute, at session and media level, by the grammar of its name
+/// ([`sdp::attribute::check_attribute`]: `a=rtcp` by RFC 3605 section 2.1, which section
+/// 5.8.2 asks to be parsed although its value is ignored, and every other attribute rtc-sdp
+/// has a type for; an unknown attribute is ignored, RFC 8866 section 5.13).
+///
+/// The exceptions are the lines another specification has the receiver ignore when they are
+/// malformed, which the reader of each then skips:
+/// - `a=msid`: RFC 8830 section 2, "If the 'msid' attribute does not conform to the ABNF
+///   given here, it SHOULD be ignored" (`media_msid`), and the `msid` source attribute
+///   (`a=ssrc:<id> msid:...`, appendix A) likewise;
+/// - `a=rid`: RFC 8851 section 6.2.2 step 1, "In the case of a syntax error, the 'a=rid'
+///   line is discarded" (`section_rids`).
+///
+/// Unless `strict`, white space at the end of a value is not held against it
+/// (`SettingEngineBuilder::with_strict_sdp_attribute_grammar`: webrtc-rs 0.17 and Pion end an
+/// `a=rtcp-fb` without parameters with a space).
+pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> Result<()> {
     let lines = desc.attributes.iter().chain(
         desc.media_descriptions
             .iter()
             .flat_map(|media| media.attributes.iter()),
     );
-    for a in lines.filter(|a| a.key == ATTR_KEY_RTCP) {
-        sdp::attribute::Rtcp::parse(a.value.as_deref().unwrap_or_default())?;
+    for a in lines.filter(|a| !MALFORMED_IGNORED.contains(&a.key.as_str())) {
+        let trimmed;
+        let a = match a.value.as_deref() {
+            Some(value) if !strict && value.len() != value.trim_end().len() => {
+                trimmed = sdp::description::common::Attribute::new(
+                    a.key.clone(),
+                    Some(value.trim_end().to_owned()),
+                );
+                &trimmed
+            }
+            _ => a,
+        };
+        match a.value.as_deref().and_then(|v| v.split_once(' ')) {
+            // `msid` is also a source attribute (RFC 8830 appendix A), ignored when malformed
+            // as the media-level one is: the line's SSRC and attribute name are checked.
+            Some((id, source)) if a.key == ATTR_KEY_SSRC && source.starts_with("msid:") => {
+                sdp::attribute::check_attribute(&sdp::description::common::Attribute::new(
+                    ATTR_KEY_SSRC.to_owned(),
+                    Some(format!("{id} msid-ignored")),
+                ))?;
+            }
+            _ => sdp::attribute::check_attribute(a)?,
+        }
     }
     Ok(())
 }
+
+/// The attributes whose malformed lines are ignored rather than refused (see
+/// [`check_attribute_lines`]).
+const MALFORMED_IGNORED: [&str; 2] = ["msid", "rid"];
 
 /// RFC 5888 section 6: "'a=group' lines that contain identification-tags that do not
 /// correspond to any 'm' line within the session description MUST be ignored. The
@@ -4794,6 +4847,37 @@ fn every_static_payload_type_of_rfc_3551_is_read_without_an_rtpmap() {
         names,
         ["video/JPEG", "video/H261", "video/H263"],
         "0 is an audio type"
+    );
+}
+
+/// RFC 3551 section 3: "the payload type codes below 96 MAY be ... bound dynamically", and
+/// a static binding may be redefined: an `a=rtpmap` for a static number (0, PCMU) or an
+/// unassigned one below 96 (35) gives the format it names, not the table's.
+#[test]
+fn an_rtpmap_rebinds_a_static_or_unassigned_payload_type_below_96() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "0 opus/48000/2".to_owned())
+        .with_value_attribute("rtpmap".to_owned(), "35 telephone-event/8000".to_owned());
+    m.media_name.media = "audio".to_owned();
+    m.media_name.formats = ["0", "35", "8"].map(str::to_owned).to_vec();
+    let codecs = codecs_from_media_description(&m).unwrap();
+    let read: Vec<(u8, &str, u32)> = codecs
+        .iter()
+        .map(|c| {
+            (
+                c.payload_type,
+                c.rtp_codec.mime_type.as_str(),
+                c.rtp_codec.clock_rate,
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (0, "audio/opus", 48000),
+            (35, "audio/telephone-event", 8000),
+            (8, "audio/PCMA", 8000)
+        ]
     );
 }
 

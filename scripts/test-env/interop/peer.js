@@ -2,6 +2,7 @@
 // examples/interop-peer over a WebSocket. The browser offers; the Rust peer answers (and
 // offers only when asked with "request-offer").
 (() => {
+  window.__interopDescriptions = window.__interopDescriptions || [];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function until(fn, ms, what) {
@@ -134,6 +135,9 @@
       held = keep;
     };
     const sendDescription = (type, sdp) => {
+      // The description as this browser wrote it (before any munging), for the SDP fixtures
+      // the engine's grammar checks are tested against (common.mjs recordDescriptions).
+      window.__interopDescriptions.push({ type, sdp: pc.localDescription ? pc.localDescription.sdp : sdp });
       s.descriptions.push(["sent", type, sdp]);
       send({ type, sdp });
       sentSdp = sdp;

@@ -12,6 +12,15 @@
 //!   so the browser answers for media.
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
 //!   connection state, its W3C stats counters and per-stream sequence coverage.
+//! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
+//!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
+//!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
+//!   Each SSRC's sequence numbers run on across the switches (RFC 3550 5.1), and the tone's
+//!   timestamps across a switch between the two G.711 laws.
+//!
+//! The WebSocket URL's query `?ssrc_per_clock_rate=1` builds the peer connection with
+//! `SettingEngineBuilder::with_ssrc_per_clock_rate(true)` (RFC 7160 section 4.1: a new SSRC
+//! per clock rate); without it, the engine's default (one SSRC across clock rates).
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -25,7 +34,10 @@
 //! its own TCP candidates and drive their connections through the stream interface and the
 //! tokio reference driver (`examples/stream-driver`), trickled to the browser; with
 //! `"udp_blocked":true` this peer neither sends nor takes ICE UDP. `"cryptex":"negotiate"|"require"` sets the
-//! RTCRtpHeaderEncryptionPolicy (RFC 9335). Every data channel message is echoed on its channel.
+//! RTCRtpHeaderEncryptionPolicy (RFC 9335). `"audio_codecs":["OPUS","PCMU","PCMA"]` sets the
+//! codec preferences (W3C `setCodecPreferences`, in that order) of every audio track this peer
+//! sends: an audio track names Opus as its encoding's codec, which alone would narrow its
+//! section to Opus. Every data channel message is echoed on its channel.
 //!
 //! An offer that arrives while this side has an offer outstanding (glare) is handled as the
 //! polite peer of perfect negotiation: it rolls its own offer back, answers, then offers again.
@@ -61,10 +73,11 @@ use rtc::peer_connection::transport::{
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RtpCodecKind,
 };
+use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
 use rtc::sansio::Protocol;
 use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
@@ -80,6 +93,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 
 #[derive(Parser)]
 #[command(
@@ -108,9 +122,21 @@ async fn main() -> Result<()> {
         let (stream, from) = listener.accept().await?;
         let (ip, dir) = (cli.ice_ip, cli.media_dir.clone());
         tokio::spawn(async move {
-            match tokio_tungstenite::accept_async(stream).await {
+            let mut ssrc_per_clock_rate = false;
+            // The handshake callback's error type is tungstenite's, not ours to shrink.
+            #[allow(clippy::result_large_err)]
+            let options = |request: &Request, response: Response| {
+                ssrc_per_clock_rate = request
+                    .uri()
+                    .query()
+                    .unwrap_or_default()
+                    .split('&')
+                    .any(|pair| pair == "ssrc_per_clock_rate=1");
+                Ok::<_, ErrorResponse>(response)
+            };
+            match tokio_tungstenite::accept_hdr_async(stream, options).await {
                 Ok(ws) => {
-                    if let Err(e) = Session::run(ws, ip, dir).await {
+                    if let Err(e) = Session::run(ws, ip, dir, ssrc_per_clock_rate).await {
                         eprintln!("session {from}: {e:#}");
                     }
                 }
@@ -164,6 +190,68 @@ fn default_fixture(name: &str) -> &'static str {
         "AV1" => "av1.ivf",
         _ => "opus.ogg",
     }
+}
+
+/// A G.711 tone (`switch-codec`): 20 ms frames of a 440 Hz sine at 8 kHz, on its own
+/// packetizer (its payload type and clock rate are not the track's first codec's).
+struct ToneSource {
+    alaw: bool,
+    mime: String,
+    packetizer: Option<Box<dyn Packetizer + Send>>,
+    sample: u64,
+}
+
+impl ToneSource {
+    /// The next 20 ms frame (160 samples).
+    fn frame(&mut self) -> Bytes {
+        let mut out = Vec::with_capacity(160);
+        for _ in 0..160 {
+            let t = self.sample as f64 / 8000.0;
+            let v = (8000.0 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as i16;
+            out.push(if self.alaw {
+                linear_to_alaw(v)
+            } else {
+                linear_to_ulaw(v)
+            });
+            self.sample += 1;
+        }
+        Bytes::from(out)
+    }
+}
+
+/// ITU-T G.711 mu-law of a 16-bit sample.
+fn linear_to_ulaw(sample: i16) -> u8 {
+    const BIAS: i32 = 0x84;
+    let mut v = i32::from(sample);
+    let sign = if v < 0 {
+        v = -v;
+        0x80
+    } else {
+        0
+    };
+    v = (v + BIAS).min(0x7fff);
+    let exponent = (7 - (v.leading_zeros() as i32 - 17)).clamp(0, 7);
+    let mantissa = (v >> (exponent + 3)) & 0x0f;
+    !(sign | (exponent << 4) as u8 | mantissa as u8)
+}
+
+/// ITU-T G.711 A-law of a 16-bit sample.
+fn linear_to_alaw(sample: i16) -> u8 {
+    let mut v = i32::from(sample) >> 3;
+    let sign = if v >= 0 {
+        0xd5
+    } else {
+        v = -v - 1;
+        0x55
+    };
+    let v = v.min(0x0fff);
+    let byte = if v < 32 {
+        (v >> 1) as u8
+    } else {
+        let exponent = (31 - v.leading_zeros() as i32 - 4).clamp(1, 7);
+        ((exponent << 4) as u8) | ((v >> exponent) & 0x0f) as u8
+    };
+    byte ^ sign
 }
 
 /// A media file streamed to the browser, paced in real time.
@@ -244,6 +332,33 @@ struct Outgoing {
     packetizer: Option<Box<dyn Packetizer + Send>>,
     next: Instant,
     sent_frames: u64,
+    /// `switch-codec`: the tone sent instead of the fixture, while set.
+    tone: Option<ToneSource>,
+    /// When the fixture was last sent from (its timestamps skip the time the tone took).
+    paused_at: Option<Instant>,
+    /// The track's next sequence number: the fixture's and the tone's packetizers number on
+    /// their own, and with one SSRC across clock rates (`switch-codec`) both run on the same
+    /// stream, so the track numbers its packets itself (each new SSRC goes on from there).
+    next_sequence: Option<u16>,
+}
+
+/// The mime type of an audio codec name of `audio_codecs` / `switch-codec`.
+fn audio_mime(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "OPUS" => MIME_TYPE_OPUS,
+        "PCMU" => "audio/PCMU",
+        "PCMA" => "audio/PCMA",
+        "G722" => "audio/G722",
+        _ => return None,
+    })
+}
+
+/// `p`'s sequence number on the track's own run (`Outgoing::next_sequence`): the first packet
+/// keeps its own.
+fn renumber(next_sequence: &mut Option<u16>, p: &mut rtc::rtp::Packet) {
+    let next = next_sequence.get_or_insert(p.header.sequence_number);
+    p.header.sequence_number = *next;
+    *next = next.wrapping_add(1);
 }
 
 /// An accepted ICE-TCP connection: frames for it go to its writer task.
@@ -312,6 +427,7 @@ impl Session {
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         ip: IpAddr,
         media_dir: String,
+        ssrc_per_clock_rate: bool,
     ) -> Result<()> {
         let (mut ws_tx, mut ws_rx) = ws.split();
         let sock = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
@@ -331,6 +447,7 @@ impl Session {
             ))
             .with_sctp_message_size_limit_without_interleaving(false)
             .with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
+            .with_ssrc_per_clock_rate(ssrc_per_clock_rate)
             .build();
         let pc = RTCPeerConnectionBuilder::new()
             .with_media_engine(me)
@@ -708,12 +825,49 @@ impl Session {
                 }
                 self.send_offer()?;
             }
-            "report" => {
-                let sent: Vec<Value> = self
+            "switch-codec" => {
+                let name = v["codec"].as_str().unwrap_or_default().to_ascii_uppercase();
+                let o = self
                     .outgoing
-                    .iter()
-                    .map(|o| json!({"mime": o.codec.mime_type, "frames": o.sent_frames, "ssrc": o.ssrc}))
-                    .collect();
+                    .iter_mut()
+                    .find(|o| codec_kind(&o.codec) == RtpCodecKind::Audio)
+                    .ok_or_else(|| anyhow!("no audio track to switch"))?;
+                // From one G.711 law to the other the tone goes on: its packetizer (timestamps)
+                // and its sample clock; only the payload type and the law change.
+                let previous = o.tone.take();
+                o.tone = match name.as_str() {
+                    "OPUS" => None,
+                    "PCMU" | "PCMA" => {
+                        let (packetizer, sample) =
+                            previous.map_or((None, 0), |t| (t.packetizer, t.sample));
+                        Some(ToneSource {
+                            alaw: name == "PCMA",
+                            mime: format!("audio/{name}"),
+                            packetizer,
+                            sample,
+                        })
+                    }
+                    other => return Err(anyhow!("switch-codec: unknown codec {other:?}")),
+                };
+            }
+            "report" => {
+                let mut sent: Vec<Value> = vec![];
+                for o in &self.outgoing {
+                    // The SSRC the encoding sends with now (RFC 7160 4.1 moves it).
+                    let wire = self.pc.rtp_sender(o.sender).and_then(|mut s| {
+                        s.get_parameters()
+                            .encodings
+                            .first()
+                            .and_then(|e| e.rtp_coding_parameters.ssrc)
+                    });
+                    sent.push(json!({
+                        "mime": o.codec.mime_type,
+                        "frames": o.sent_frames,
+                        "ssrc": o.ssrc,
+                        "wireSsrc": wire,
+                        "tone": o.tone.as_ref().map(|t| t.mime.clone()),
+                    }));
+                }
                 let coverage: Vec<Value> = self.coverage.values().map(|c| c.report(50)).collect();
                 let answer = self
                     .pc
@@ -891,6 +1045,33 @@ impl Session {
                 ..Default::default()
             }],
         ))?;
+        if kind == RtpCodecKind::Audio
+            && let Some(names) = self.scenario["audio_codecs"].as_array()
+        {
+            let capabilities = self
+                .pc
+                .rtp_sender(sender)
+                .and_then(|s| s.get_capabilities(RtpCodecKind::Audio))
+                .map(|c| c.codecs)
+                .unwrap_or_default();
+            let mut preferences = vec![];
+            for name in names.iter().filter_map(Value::as_str) {
+                let mime = audio_mime(name).ok_or_else(|| anyhow!("audio_codecs: {name:?}"))?;
+                preferences.extend(
+                    capabilities
+                        .iter()
+                        .filter(|c| c.mime_type.eq_ignore_ascii_case(mime))
+                        .map(|rtp_codec| RTCRtpCodecParameters {
+                            rtp_codec: rtp_codec.clone(),
+                            payload_type: 0,
+                        }),
+                );
+            }
+            self.pc
+                .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+                .ok_or_else(|| anyhow!("no transceiver for the audio track"))?
+                .set_codec_preferences(preferences)?;
+        }
         let source = if with_source {
             let kind_key = if kind == RtpCodecKind::Audio {
                 "audio"
@@ -920,6 +1101,9 @@ impl Session {
             packetizer: None,
             next: Instant::now(),
             sent_frames: 0,
+            tone: None,
+            paused_at: None,
+            next_sequence: None,
         });
         Ok(())
     }
@@ -1101,6 +1285,10 @@ impl Session {
             if o.source.is_none() || o.next > now {
                 continue;
             }
+            if o.tone.is_some() {
+                self.send_tone(i, now);
+                continue;
+            }
             // A track added by a renegotiation is not sent until its answer names a payload
             // type for it.
             let Some(pt) = self.pc.rtp_sender(o.sender).and_then(|mut s| {
@@ -1171,17 +1359,94 @@ impl Session {
                     }
                 },
             };
+            // Back from the tone: the fixture's timestamps skip the time it was not sent.
+            if let Some(paused) = o.paused_at.take() {
+                let gap = now.saturating_duration_since(paused);
+                pk.skip_samples((gap.as_secs_f64() * f64::from(o.codec.clock_rate)) as u32);
+            }
             let packets = pk.packetize(now, &data, samples)?;
             o.sent_frames += 1;
             o.next = now + step;
             let sender = o.sender;
             if let Some(mut s) = self.pc.rtp_sender(sender) {
-                for p in packets {
+                let wire = s
+                    .get_parameters()
+                    .encodings
+                    .first()
+                    .and_then(|e| e.rtp_coding_parameters.ssrc);
+                for mut p in packets {
+                    // The encoding's SSRC now: a write with a codec of another clock rate
+                    // moves it (RFC 7160 4.1).
+                    if let Some(wire) = wire {
+                        p.header.ssrc = wire;
+                    }
+                    // The number the parameters give the format now: the packetizer was made
+                    // with the one they gave when the first frame went out.
+                    p.header.payload_type = pt;
+                    renumber(&mut o.next_sequence, &mut p);
                     let _ = s.write_rtp(now, p);
                 }
             }
         }
         Ok(())
+    }
+
+    /// One 20 ms frame of outgoing track `i`'s tone (`switch-codec`), on the payload type the
+    /// answer gave its format.
+    fn send_tone(&mut self, i: usize, now: Instant) {
+        let sender = self.outgoing[i].sender;
+        let Some(mut s) = self.pc.rtp_sender(sender) else {
+            return;
+        };
+        let parameters = s.get_parameters();
+        let o = &mut self.outgoing[i];
+        let tone = o.tone.as_mut().expect("a tone");
+        let Some(pt) = parameters
+            .rtp_parameters
+            .codecs
+            .iter()
+            .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(&tone.mime))
+            .map(|c| c.payload_type)
+        else {
+            return;
+        };
+        let wire = parameters
+            .encodings
+            .first()
+            .and_then(|e| e.rtp_coding_parameters.ssrc)
+            .unwrap_or(o.ssrc);
+        let codec = RTCRtpCodec {
+            mime_type: tone.mime.clone(),
+            clock_rate: 8000,
+            channels: 1,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![],
+        };
+        let frame = tone.frame();
+        let pk = tone.packetizer.get_or_insert_with(|| {
+            Box::new(rtc::rtp::packetizer::new_packetizer(
+                now,
+                1200,
+                pt,
+                wire,
+                codec.payloader().expect("a G.711 payloader"),
+                Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                8000,
+            ))
+        });
+        let Ok(packets) = pk.packetize(now, &frame, 160) else {
+            return;
+        };
+        o.paused_at.get_or_insert(now);
+        o.sent_frames += 1;
+        o.next = now + Duration::from_millis(20);
+        for mut p in packets {
+            p.header.ssrc = wire;
+            // The packetizer may be the other law's (`switch-codec`): this one's number.
+            p.header.payload_type = pt;
+            renumber(&mut o.next_sequence, &mut p);
+            let _ = s.write_rtp(now, p);
+        }
     }
 }
 

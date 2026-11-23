@@ -4,7 +4,9 @@
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { naBrowser, naEnv, skipUnlessCodec } from "./na.mjs";
-import { fixtureExists } from "./common.mjs";
+import { fixtureExists, recordDescriptions } from "./common.mjs";
+
+recordDescriptions();
 
 const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");

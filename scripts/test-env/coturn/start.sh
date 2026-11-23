@@ -29,5 +29,6 @@ wait_for() {
   done
   echo "coturn on $port did not start:" >&2; cat "$log" >&2; return 1
 }
-wait_for 3478 "$D/turnserver.log" && wait_for 3479 "$D/turnserver-stale.log" \
-  && wait_for 3480 "$D/turnserver-client.log" && echo "coturn up (3478, 3479, 3480)"
+wait_for 3478 "$D/turnserver.log" && wait_for 5349 "$D/turnserver.log" \
+  && wait_for 3479 "$D/turnserver-stale.log" \
+  && wait_for 3480 "$D/turnserver-client.log" && echo "coturn up (3478, 5349 DTLS, 3479, 3480)"

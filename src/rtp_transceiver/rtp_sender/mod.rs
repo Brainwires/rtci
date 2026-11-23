@@ -380,6 +380,22 @@ impl RTCRtpSender<'_> {
         if self.peer_connection.rtp_transceivers[self.id.0].stopped() {
             return Err(Error::InvalidStateError);
         }
+        let active = |pc: &RTCPeerConnection,
+                      id: usize|
+         -> Vec<(crate::rtp_transceiver::SSRC, bool)> {
+            pc.rtp_transceivers[id]
+                .sender()
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .filter_map(|e| e.rtp_coding_parameters.ssrc.map(|ssrc| (ssrc, e.active)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let before = active(self.peer_connection, self.id.0);
         self.peer_connection.rtp_transceivers[self.id.0]
             .sender_mut()
             .as_mut()
@@ -389,6 +405,22 @@ impl RTCRtpSender<'_> {
                 set_parameter_options,
                 &self.peer_connection.media_engine,
             )?;
+        // RFC 8853 section 5.2: a stream that is not sent is in an RFC 7728 local pause
+        // (announced with PAUSED); an encoding made inactive pauses its stream, made active
+        // again resumes it. Only a stream that negotiated pause and resume has the state.
+        let now = self.peer_connection.pipeline_context.now;
+        for (ssrc, active) in active(self.peer_connection, self.id.0) {
+            if before.contains(&(ssrc, !active)) {
+                let control = if active {
+                    interceptor::PauseResumeControl::LocalResume(ssrc)
+                } else {
+                    interceptor::PauseResumeControl::LocalPause(ssrc)
+                };
+                self.peer_connection
+                    .interceptor
+                    .handle_write(control.into_packet(now))?;
+            }
+        }
         // The encodings' priority, maxBitrate or active flag may have changed: the target is
         // divided again (W3C webrtc-priority 3.2, webrtc 5.2.5).
         self.peer_connection.reallocate_target_bitrate();
@@ -769,16 +801,14 @@ impl RTCRtpSender<'_> {
             .peer_connection
             .setting_engine
             .unnegotiated_header_extensions;
+        let ssrc_per_clock_rate = self.peer_connection.setting_engine.ssrc_per_clock_rate;
         let negotiated_header_extensions = self.peer_connection.rtp_transceivers[self.id.0]
             .negotiated_header_extensions()
             .to_vec();
-        let (sender, media_engine) = (
-            self.peer_connection.rtp_transceivers[self.id.0]
-                .sender_mut()
-                .as_mut()
-                .expect("every transceiver has a sender"),
-            &mut self.peer_connection.media_engine,
-        );
+        let sender = self.peer_connection.rtp_transceivers[self.id.0]
+            .sender_mut()
+            .as_mut()
+            .expect("every transceiver has a sender");
 
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
@@ -805,14 +835,95 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // RFC 7160 section 4.1: "An RTP Sender with RTCP turned on MUST use a different SSRC
+        // for each different clock rate". A packet written with a negotiated codec of another
+        // clock rate than its stream's moves the stream to a new SSRC (a BYE first for the
+        // SSRC of a rate it returns to). Comfort noise and telephone events ride the stream
+        // as they are (RFC 4733 section 2.5.1.2 puts the events in the stream's numbering); a
+        // payload type that is not negotiated is sent as the encoding's codec, below.
+        // Only with `with_ssrc_per_clock_rate(true)`: by default one SSRC.
+        if from_application && ssrc_per_clock_rate {
+            let stream_ssrc = packet.header.ssrc;
+            let chosen = sender
+                .get_send_codecs()
+                .iter()
+                .find(|codec| {
+                    codec.payload_type == packet.header.payload_type
+                        && !crate::peer_connection::handler::endpoint::is_auxiliary_mime_type(
+                            &codec.rtp_codec.mime_type,
+                        )
+                })
+                .cloned()
+                .filter(|codec| {
+                    sender.clock_rate_step(stream_ssrc, codec.rtp_codec.clock_rate)
+                        == internal::ClockRateStep::Move
+                });
+            if let Some(codec) = chosen
+                && let Some(new) = self.peer_connection.move_sender_to_clock_rate(
+                    self.id.0,
+                    stream_ssrc,
+                    &codec,
+                    now,
+                )
+            {
+                packet.header.ssrc = new;
+            }
+        }
+        let (sender, media_engine) = (
+            self.peer_connection.rtp_transceivers[self.id.0]
+                .sender_mut()
+                .as_mut()
+                .expect("every transceiver has a sender"),
+            &mut self.peer_connection.media_engine,
+        );
+
         // W3C webrtc 5.2.5 maxFramerate (video): frames above the encoding's maximum rate are
         // dropped whole.
         if sender.kind() == RtpCodecKind::Video {
+            // RFC 7741 section 6.1 (VP8: "a sender MUST NOT send frames at a higher rate or of
+            // a larger size") and RFC 9628 section 6 (VP9: "SHOULD NOT"): the receiver's
+            // `max-fr` and `max-fs` on the negotiated format.
+            use crate::peer_connection::configuration::media_engine::{
+                MIME_TYPE_VP8, MIME_TYPE_VP9,
+            };
+            let limits = sender
+                .get_send_codecs()
+                .iter()
+                .find(|codec| codec.payload_type == packet.header.payload_type)
+                .and_then(|codec| {
+                    let mime = &codec.rtp_codec.mime_type;
+                    let vp8 = mime.eq_ignore_ascii_case(MIME_TYPE_VP8);
+                    (vp8 || mime.eq_ignore_ascii_case(MIME_TYPE_VP9)).then(|| {
+                        let fmtp = &codec.rtp_codec.sdp_fmtp_line;
+                        (
+                            vp8,
+                            internal::fmtp_number(fmtp, "max-fr").filter(|rate| *rate > 0),
+                            internal::fmtp_number(fmtp, "max-fs").filter(|size| *size > 0),
+                        )
+                    })
+                });
+            let (max_fr, max_fs) = limits.map_or((None, None), |(_, fr, fs)| (fr, fs));
+            let key_size = match limits {
+                Some((true, _, Some(_))) => internal::vp8_key_frame_size(&packet.payload),
+                Some((false, _, Some(_))) => internal::vp9_key_picture_size(&packet.payload),
+                _ => None,
+            };
+            if !sender.admit_under_max_fs(packet.header.ssrc, key_size, max_fs) {
+                trace!(
+                    "rtp_sender {:?} drops RTP ssrc {} ts {}: the frame is larger than max-fs {:?}",
+                    self.id, packet.header.ssrc, packet.header.timestamp, max_fs
+                );
+                return Ok(());
+            }
             let max_framerate = sender
                 .send_encodings()
                 .iter()
                 .find(|e| e.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
                 .and_then(|e| e.max_framerate);
+            let max_framerate = match (max_framerate, max_fr) {
+                (Some(encoding), Some(codec)) => Some(encoding.min(f64::from(codec))),
+                (encoding, codec) => encoding.or(codec.map(f64::from)),
+            };
             if !sender.admit_under_max_framerate(
                 packet.header.ssrc,
                 packet.header.timestamp,

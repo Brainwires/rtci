@@ -499,6 +499,8 @@ pub struct SettingEngine {
     pub(crate) rid_pause_marks: bool,
     /// [`SettingEngineBuilder::with_rollback_content_ignored`].
     pub(crate) rollback_content_ignored: bool,
+    /// [`SettingEngineBuilder::with_strict_sdp_attribute_grammar`].
+    pub(crate) strict_sdp_attribute_grammar: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
     pub(crate) w3c_simulcast_answer: bool,
     /// [`SettingEngineBuilder::with_nominated_candidates_only`].
@@ -514,6 +516,10 @@ pub struct SettingEngine {
     /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
     /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
     pub(crate) unnegotiated_header_extensions: bool,
+    /// [`SettingEngineBuilder::with_ssrc_per_clock_rate`]: a codec of another clock rate moves
+    /// the stream to a new SSRC (RFC 7160 section 4.1). Off by default: one SSRC across clock
+    /// rates, which every browser receiver follows.
+    pub(crate) ssrc_per_clock_rate: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -2362,6 +2368,22 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Checks each attribute value of a remote description against its grammar exactly,
+    /// trailing whitespace included. The default is `false`.
+    ///
+    /// RFC 9429 section 5.8: a line that is not well formed rejects the description, even
+    /// when its value is then ignored; every attribute is checked against its grammar either
+    /// way. By default white space at the end of a value is not held against it: webrtc-rs
+    /// 0.17 (and Pion) write a feedback without parameters as `a=rtcp-fb:96 goog-remb ` (a
+    /// trailing space), which the strict reading refuses
+    /// (`tests/media_rejection_interop.rs::test_video_only_webrtc_offerer_rtc_answerer`:
+    /// "a=rtcp-fb: `96 goog-remb `"), so an engine that reads them strictly cannot answer
+    /// their offers. `true` is the strict RFC form.
+    pub fn with_strict_sdp_attribute_grammar(mut self, strict: bool) -> Self {
+        self.0.strict_sdp_attribute_grammar = strict;
+        self
+    }
+
     /// Answers simulcast as W3C webrtc-pc `createAnswer` (section 4.4.2) does, instead of
     /// RFC 8853 / RFC 8851. The default is `false`.
     ///
@@ -2440,6 +2462,31 @@ impl SettingEngineBuilder {
     /// them through.
     pub fn with_unnegotiated_header_extensions(mut self, pass_through: bool) -> Self {
         self.0.unnegotiated_header_extensions = pass_through;
+        self
+    }
+
+    /// Whether a sender's stream moves to a new SSRC when the application writes a packet
+    /// with a negotiated codec of another clock rate. The default is `false`: one SSRC for
+    /// every clock rate.
+    ///
+    /// RFC 7160 section 4.1: "An RTP Sender with RTCP turned on MUST use a different SSRC for
+    /// each different clock rate. An RTCP BYE MUST be sent and a new SSRC MUST be used if the
+    /// clock rate switches back to a value already seen in the RTP stream." With `true`, a
+    /// packet written with such a codec (Opus at 48 kHz, then PCMU at 8 kHz, on one audio
+    /// sender) goes out as a new SSRC, the encoding's SSRC from then on; the stream it left
+    /// stays in the RTCP session and its sender report follows the new one's in the next
+    /// compound packet; a return to a rate used before sends a BYE for the SSRC that used it
+    /// and takes another new one. Comfort noise and telephone events ride the stream as they
+    /// are. `false` keeps one SSRC for every clock rate (RFC 7160 section 4.2 allows it only
+    /// with RTCP off).
+    ///
+    /// `false` is the default because libwebrtc's receivers (Chromium, WebKit) do not follow
+    /// the new SSRC: the browser interop matrix's RFC-form cells saw their track stay on the
+    /// signalled SSRC and stop counting packets at the switch, in both offer directions, while
+    /// Firefox followed. Turn it on for receivers known to follow (another `rtc` peer
+    /// connection does).
+    pub fn with_ssrc_per_clock_rate(mut self, ssrc_per_clock_rate: bool) -> Self {
+        self.0.ssrc_per_clock_rate = ssrc_per_clock_rate;
         self
     }
 
@@ -2580,10 +2627,20 @@ impl SettingEngineBuilder {
     /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
     /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
     /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
-    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
-    /// application's.
+    /// serve the stream interface sees nothing of it. `turn:` over UDP is
+    /// [`with_relay_gathering`](Self::with_relay_gathering).
     pub fn with_turn_over_streams(mut self, run: bool) -> Self {
         self.0.streams.turn = run;
+        self
+    }
+
+    /// Whether the engine also asks each of its `turn:...?transport=tcp` and `turns:` servers
+    /// for a TCP allocation (RFC 6062, on a control connection of its own) and announces its
+    /// relayed address as a passive TCP candidate and, on port 9, an active one (RFC 6544
+    /// section 5.5): a peer that only reaches the relay over TCP connects through it. On by
+    /// default.
+    pub fn with_turn_tcp_relay(mut self, relay: bool) -> Self {
+        self.0.streams.turn_tcp_relay = relay;
         self
     }
 
@@ -2599,6 +2656,28 @@ impl SettingEngineBuilder {
         who: crate::peer_connection::srflx::ReflexiveGathering,
     ) -> Self {
         self.0.streams.reflexive = who;
+        self
+    }
+
+    /// Who gathers relayed candidates from the configuration's `turn:` servers over UDP (RFC
+    /// 8656; RFC 8445 section 5.1.1.2). By default
+    /// ([`RelayGathering::Engine`](crate::peer_connection::turn_streams::RelayGathering)) the
+    /// engine allocates on each such server for each transport, from the transport's first UDP
+    /// host candidate of the server's family, on the application's socket: the Allocate and
+    /// everything after it leave through `poll_write`, the server's answers, Data indications
+    /// and ChannelData are taken out of `handle_read` before ICE sees them (only those of the
+    /// engine's own transactions and allocations: another TURN client on the socket is not
+    /// disturbed). The server's addresses race as RFC 8656 section 3.9 asks for UDP. A server
+    /// for which the application adds a relayed candidate itself (its `url`, or any relayed
+    /// candidate over UDP without one) is left to it: the engine stops what it has not
+    /// announced yet. An application that runs its own TURN client from a socket other than
+    /// the one whose host candidate it gives the engine, and adds its relayed candidate late,
+    /// would see both: it sets `Application`, and the engine sends nothing to those servers.
+    pub fn with_relay_gathering(
+        mut self,
+        who: crate::peer_connection::turn_streams::RelayGathering,
+    ) -> Self {
+        self.0.streams.relay = who;
         self
     }
 

@@ -296,9 +296,26 @@ impl Interceptor for UlpfecReceiveInterceptor {
         } else if self.carriage == Carriage::Stream {
             return;
         }
+        // RFC 5109 section 13: `onelevelonly=1` on this endpoint's `ulpfec` format of the
+        // section ("what the receiver accepts to receive", section 14.3): FEC with more than
+        // one level is refused.
+        let fec_format = separate
+            .map(|(_, payload_type)| payload_type)
+            .or(match self.carriage {
+                Carriage::Red {
+                    fec_payload_type, ..
+                } => Some(fec_payload_type),
+                Carriage::Stream => None,
+            });
+        let one_level_only = self.one_level_only
+            || fec_format.is_some_and(|payload_type| {
+                info.section_fmtp_lines
+                    .iter()
+                    .any(|(pt, fmtp)| *pt == payload_type && super::one_level_only_from_fmtp(fmtp))
+            });
         self.decoders.insert(
             info.ssrc,
-            UlpfecDecoder::new(info.ssrc).with_one_level_only(self.one_level_only),
+            UlpfecDecoder::new(info.ssrc).with_one_level_only(one_level_only),
         );
     }
 

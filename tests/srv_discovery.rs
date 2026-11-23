@@ -307,3 +307,60 @@ fn a_turns_server_found_by_srv_is_checked_against_the_uris_host() -> Result<()> 
     assert!(!has(b"tls.example.net"), "not the SRV target");
     Ok(())
 }
+
+/// RFC 7350 section 4.2 with RFC 5928 section 3: a `turns:...?transport=udp` URI without a
+/// port is found by S-NAPTR (the `turn.dtls` protocol tag) and SRV (`_turns._udp`); the DTLS
+/// ClientHello goes from the host candidate to the target's address and SRV port.
+#[test]
+fn a_turns_dtls_server_without_a_port_is_found_by_naptr_turn_dtls_then_srv_turns_udp() -> Result<()>
+{
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtc::peer_connection::turn_tls::TurnTlsConfig;
+    let provider = rtc::crypto::default_provider()?;
+    let cert = rtc::dtls::crypto::Certificate::generate_self_signed(
+        vec!["example.net".to_owned()],
+        provider.crypto(),
+    )?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.certificate[0].clone())?;
+    let mut d = Driver::with_settings(
+        "turns:example.net?transport=udp",
+        SettingEngineBuilder::new()
+            .with_turn_tls(TurnTlsConfig {
+                roots: Some(std::sync::Arc::new(roots)),
+                ..Default::default()
+            })
+            .build(),
+    )?;
+    d.add_host()?;
+    let q = d
+        .records_query("example.net", RecordKind::Naptr)
+        .expect("S-NAPTR first");
+    d.event(StreamEvent::ResolvedRecords {
+        query: q,
+        records: vec![
+            naptr("S", "RELAY:turn.tls", "_turns._tcp.example.net."),
+            naptr("S", "RELAY:turn.dtls", "_turns._udp.example.net."),
+        ],
+    })?;
+    let q = d
+        .records_query("_turns._udp.example.net", RecordKind::Srv)
+        .expect("the SRV name of the turn.dtls record");
+    d.event(StreamEvent::ResolvedRecords {
+        query: q,
+        records: vec![srv(10, 5350, "relay.example.net.")],
+    })?;
+    let q = d
+        .address_query("relay.example.net", 5350)
+        .expect("the target's addresses, with the SRV port");
+    d.event(StreamEvent::Resolved {
+        query: q,
+        addresses: vec![a("192.0.2.31:5350")],
+    })?;
+    assert!(
+        d.sent_to.contains(&a("192.0.2.31:5350")),
+        "the ClientHello: {:?}",
+        d.sent_to
+    );
+    Ok(())
+}

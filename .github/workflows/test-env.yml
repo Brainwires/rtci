@@ -134,6 +134,7 @@ jobs:
             target/test-env/*.ivf
             target/test-env/firefox-moz*
             target/test-env/*.moz_log
+            target/test-env/browser-sdp/*.sdp
           if-no-files-found: ignore
 
   # A pull request from a fork: the same steps on GitHub's runners, with a read-only token (a

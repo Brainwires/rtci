@@ -237,12 +237,76 @@ pub fn register_default_interceptors(
 /// What an application holds on to from the standard interceptor set.
 #[derive(Clone)]
 pub struct DefaultInterceptorHandles {
-    /// The congestion controller: the target bit rate for the encoder, and where the limits
-    /// from signalling go (`b=AS` / `b=TIAS`, a path change).
+    /// The congestion controller of the first transport (the only one while every m= section
+    /// is bundled): the target bit rate for the encoder, and where the limits from signalling
+    /// go (`b=AS` / `b=TIAS`, a path change). Every transport's: [`Self::transports`].
     pub congestion_control: CongestionControlHandle,
-    /// The RTP circuit breaker: which flows have ceased transmission and why, and how one is
-    /// restarted.
+    /// The RTP circuit breaker of the first transport: which flows have ceased transmission
+    /// and why, and how one is restarted. Every transport's: [`Self::transports`].
     pub circuit_breaker: CircuitBreakerHandle,
+    /// The congestion controller and circuit breaker of each transport (each RTP session,
+    /// RFC 8834 section 4.4), by its RTP session number
+    /// ([`RTCDtlsTransport::rtp_session`](crate::peer_connection::transport::RTCDtlsTransport::rtp_session)).
+    pub transports: TransportHandles,
+}
+
+/// The congestion controller and circuit breaker handles of each transport of a peer
+/// connection, by RTP session number (0 is the first transport). A transport's appear when
+/// its first stream is bound; they stay while the transport has streams.
+#[derive(Clone, Default)]
+pub struct TransportHandles {
+    shared: std::sync::Arc<std::sync::Mutex<TransportHandleTable>>,
+}
+
+#[derive(Default)]
+struct TransportHandleTable {
+    congestion_control: std::collections::BTreeMap<usize, CongestionControlHandle>,
+    circuit_breakers: std::collections::BTreeMap<usize, CircuitBreakerHandle>,
+}
+
+impl TransportHandles {
+    fn table(&self) -> std::sync::MutexGuard<'_, TransportHandleTable> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The RTP session numbers that have a congestion controller.
+    pub fn sessions(&self) -> Vec<usize> {
+        self.table().congestion_control.keys().copied().collect()
+    }
+
+    /// The congestion controller of the transport of RTP session `session`.
+    pub fn congestion_control(&self, session: usize) -> Option<CongestionControlHandle> {
+        self.table().congestion_control.get(&session).cloned()
+    }
+
+    /// The circuit breaker of the transport of RTP session `session`.
+    pub fn circuit_breaker(&self, session: usize) -> Option<CircuitBreakerHandle> {
+        self.table().circuit_breakers.get(&session).cloned()
+    }
+
+    /// The connection's target: the sum of the transports' targets, in bits per second.
+    pub fn target_bitrate(&self) -> f64 {
+        self.table()
+            .congestion_control
+            .values()
+            .map(CongestionControlHandle::target_bitrate)
+            .sum()
+    }
+
+    /// The circuit breaker handle of `session`, made the first time it is asked for.
+    fn breaker_for(&self, session: usize) -> CircuitBreakerHandle {
+        self.table()
+            .circuit_breakers
+            .entry(session)
+            .or_default()
+            .clone()
+    }
+
+    fn insert_congestion_control(&self, session: usize, handle: CongestionControlHandle) {
+        self.table().congestion_control.insert(session, handle);
+    }
 }
 
 /// The settings of the standard interceptor set. The default of each is what the RFCs say;
@@ -292,6 +356,11 @@ pub struct DefaultInterceptorOptions {
     /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
+    /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
+    /// extension on audio and video, stamped on a stream's first packets and a frame a
+    /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
+    /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
+    pub rapid_synchronisation: bool,
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -301,6 +370,7 @@ impl Default for DefaultInterceptorOptions {
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
             bandwidth_probing: true,
+            rapid_synchronisation: true,
         }
     }
 }
@@ -350,7 +420,22 @@ pub fn register_default_interceptors_with_options(
     // session names it (RFC 5104 section 7.1).
     configure_tmmbr(media_engine);
 
-    let (registry, circuit_breaker) = configure_circuit_breaker(registry);
+    // One circuit breaker per transport (RFC 8083 judges each RTP session's flows on its own
+    // RTCP), given to that transport's congestion controller.
+    let transports = TransportHandles::default();
+    let circuit_breaker = transports.breaker_for(0);
+    let registry = {
+        let transports = transports.clone();
+        registry.with_per_rtp_session(
+            Slot::CircuitBreaker,
+            PerRtpSession::with_first_for_sessions(
+                CircuitBreakerBuilder::new().build_with_handle(&circuit_breaker),
+                move |session| {
+                    CircuitBreakerBuilder::new().build_with_handle(&transports.breaker_for(session))
+                },
+            ),
+        )
+    };
 
     // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888
     // when the peer accepted `ack ccfb`, transport-wide congestion control otherwise.
@@ -360,23 +445,30 @@ pub fn register_default_interceptors_with_options(
     // first transport's controller.
     let initial_target = Gcc::default().target_bitrate();
     let congestion_control_builder = {
-        let circuit_breaker = circuit_breaker.clone();
+        let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
-        move || {
+        move |session: usize| {
             CongestionControlBuilder::new(Gcc::default())
-                .with_circuit_breaker(circuit_breaker.clone())
+                .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
         }
     };
-    let (congestion_control, handle) = congestion_control_builder().build_with_handle();
+    let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();
+    transports.insert_congestion_control(0, handle.clone());
     let pacer_immediate_release = options.pacer_immediate_release;
     let registry = registry
         .with_per_rtp_session(
             Slot::CongestionControl,
-            PerRtpSession::with_first(congestion_control, move || {
-                congestion_control_builder().build()
+            PerRtpSession::with_first_for_sessions(congestion_control, {
+                let transports = transports.clone();
+                move |session| {
+                    let (controller, handle) =
+                        congestion_control_builder(session).build_with_handle();
+                    transports.insert_congestion_control(session, handle);
+                    controller
+                }
             }),
         )
         // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
@@ -407,12 +499,18 @@ pub fn register_default_interceptors_with_options(
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
+    let registry = if options.rapid_synchronisation {
+        configure_rapid_synchronisation(registry, media_engine)?
+    } else {
+        registry
+    };
 
     Ok((
         registry,
         DefaultInterceptorHandles {
             congestion_control: handle,
             circuit_breaker,
+            transports,
         },
     ))
 }
@@ -565,6 +663,38 @@ pub fn configure_abs_send_time(media_engine: &mut MediaEngine) -> Result<()> {
         None,
     )?;
     Ok(())
+}
+
+/// RFC 6051 rapid synchronisation, as RFC 8834 section 5.2.1 recommends: registers the
+/// 64-bit NTP timestamp header extension (`urn:ietf:params:rtp-hdrext:ntp-64`, section 3.3)
+/// on audio and video, so it is offered and answered, and adds the interceptor that stamps it
+/// on a local stream that negotiated it (or `ntp-56`): every packet of the stream's first five
+/// seconds, then a frame a second ([`NtpTimestampInterceptor`](interceptor::NtpTimestampInterceptor)).
+/// A receiving stream that carries either extension is synchronised from it as from a sender
+/// report (the capture times of its frames, before the first SR has arrived). Part of
+/// [`register_default_interceptors`]; registered after the other extensions, so their ids
+/// stay as they were.
+///
+/// # Errors
+///
+/// As [`MediaEngine::register_header_extension`].
+pub fn configure_rapid_synchronisation(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<Registry> {
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: rtp::extension::NTP_64_URI.to_owned(),
+            },
+            kind,
+            None,
+        )?;
+    }
+    Ok(registry.with(
+        Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
+        interceptor::NtpTimestampInterceptor::new(),
+    ))
 }
 
 /// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).
@@ -818,6 +948,37 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
     )
 }
 
+/// [`configure_rtcp_reports`] for a peer connection whose registry brings no RTCP session:
+/// the session draws its random numbers (the report interval's variation, RFC 3550 section
+/// 6.3.1; the dither of early feedback, RFC 4585 section 3.5.2; its SSRC and CNAME) from
+/// `provider`'s `random()`, as ICE, DTLS and SCTP do, so a seeded provider fixes when the
+/// reports go out. Without a provider, from `rand`.
+pub(crate) fn configure_rtcp_reports_from(
+    registry: Registry,
+    provider: Option<&std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+) -> Registry {
+    let session = RtcpSessionBuilder::new().with_t_rr_interval(Duration::ZERO);
+    let session = match provider {
+        Some(provider) => session.with_random(ProviderRtcpRandom(provider.clone())),
+        None => session,
+    };
+    configure_rtcp_reports_with(registry, session)
+}
+
+/// [`interceptor::RtcpRandom`] from a crypto provider's `random()`; from `rand` should the
+/// provider fail (the values need unpredictability, not a particular source).
+struct ProviderRtcpRandom(std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>);
+
+impl interceptor::RtcpRandom for ProviderRtcpRandom {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        match self.0.random().fill(&mut bytes) {
+            Ok(()) => u32::from_be_bytes(bytes),
+            Err(_) => rand::random(),
+        }
+    }
+}
+
 /// [`configure_rtcp_reports`] with the RTCP session built from `session`, for the settings a
 /// session description does not carry.
 ///
@@ -841,8 +1002,16 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
 /// answer is applied.
 pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuilder) -> Registry {
     // An RTCP session per RTP session: one per transport when sections are not bundled
-    // (RFC 3550 section 6, RFC 8834 section 4.4).
-    registry.with_per_rtp_session(Slot::RtcpSession, session.build_per_rtp_session())
+    // (RFC 3550 section 6, RFC 8834 section 4.4). Each joins when the peer connection says
+    // its transport carries a negotiated RTP m= section and has SRTP keys, and leaves when the
+    // last such section goes: a data-channel-only connection sends no RTCP.
+    registry.with_per_rtp_session(
+        Slot::RtcpSession,
+        session
+            .with_joins_on_start(true)
+            .with_first_report_at_join(true)
+            .build_per_rtp_session(),
+    )
 }
 
 /// Adds the RTCP XR report blocks a receiver writes about each source (RFC 3611 section 4:
@@ -1496,6 +1665,12 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
+        section_fmtp_lines: section_codecs
+            .iter()
+            .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
+            .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
     }
 }
 
@@ -1579,6 +1754,50 @@ mod ulpfec_tests {
             names
         );
     }
+
+    /// RFC 5109 section 13: the ULPFEC interceptors read `onelevelonly` from the negotiated
+    /// `ulpfec` format, which is not the stream's own: a stream's information carries the
+    /// fmtp of every format of its section, the repair and redundancy formats with them.
+    #[test]
+    fn a_stream_carries_the_fmtp_of_every_format_of_its_section() {
+        let format = |payload_type: PayloadType, mime_type: &str, fmtp: &str| {
+            crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: mime_type.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: fmtp.to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type,
+                ..Default::default()
+            }
+        };
+        let section = [
+            format(96, "video/VP8", ""),
+            format(116, "video/red", "96/117"),
+            format(117, "video/ulpfec", "onelevelonly=1"),
+        ];
+        let info = create_stream_info(
+            1,
+            None,
+            None,
+            96,
+            None,
+            None,
+            &section[0].rtp_codec,
+            &[],
+            &section,
+        );
+        assert_eq!(
+            vec![
+                (96, String::new()),
+                (116, "96/117".to_owned()),
+                (117, "onelevelonly=1".to_owned())
+            ],
+            info.section_fmtp_lines
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1627,6 +1846,7 @@ mod slot_order_tests {
             vec![
                 Slot::RtcpSession,
                 Slot::CongestionControl,
+                Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
                 Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
                 Slot::TwccSender,
                 Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
@@ -1794,6 +2014,10 @@ mod slot_order_tests {
                 (
                     Slot::CongestionControl,
                     "CongestionControlInterceptor<Gcc>".to_owned()
+                ),
+                (
+                    Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
+                    "NtpTimestampInterceptor".to_owned()
                 ),
                 (
                     Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),

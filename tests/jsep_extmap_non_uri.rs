@@ -1,7 +1,9 @@
-//! A remote `a=extmap` whose extension name isn't a URI is an extension this end doesn't
-//! support: it is left out of the answer (RFC 8285 section 5, RFC 9429 section 5.3.1), and
-//! the description is applied. It used to fail `set_remote_description` with a URL parse
-//! error.
+//! A remote `a=extmap` whose extension name is not a URI is not well formed (RFC 8285 section
+//! 8: `extensionname = URI`), and RFC 9429 section 5.8 has such a line reject the
+//! description "even if the value is to be discarded"; it used to be left out of the answer
+//! (before that, it failed `set_remote_description` with a URL parse error). An extension
+//! named by a URI this end does not support is left out of the answer (RFC 8285 section 5,
+//! RFC 9429 section 5.3.1), and the description is applied.
 
 mod jsep_common;
 
@@ -16,7 +18,8 @@ use rtc::rtp_transceiver::rtp_sender::{RTCRtpHeaderExtensionCapability, RtpCodec
 const MID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 
 #[test]
-fn an_extmap_that_is_not_a_uri_is_left_out_of_the_answer() -> TestResult {
+fn an_extmap_that_is_not_a_uri_refuses_the_description_and_an_unknown_uri_is_left_out() -> TestResult
+{
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     media_engine.register_header_extension(
@@ -30,17 +33,29 @@ fn an_extmap_that_is_not_a_uri_is_left_out_of_the_answer() -> TestResult {
         .with_media_engine(media_engine)
         .build(Instant::now())?;
 
-    let offer = crlf(&format!(
-        "{SESSION}a=group:BUNDLE 0
+    let offer = |name: &str| {
+        crlf(&format!(
+            "{SESSION}a=group:BUNDLE 0
 m=video 9 UDP/TLS/RTP/SAVPF 96
 {TRANSPORT}a=mid:0
 a=sendrecv
-a=extmap:2 bogus
+a=extmap:2 {name}
 a=extmap:3 {MID_URI}
 a=rtpmap:96 VP8/90000
 "
-    ));
-    answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+        ))
+    };
+    let refused = answerer.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer("bogus"))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(answerer.remote_description().is_none());
+
+    answerer.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer("urn:example:bogus"))?,
+    )?;
     let answer = answerer.create_answer(None)?;
 
     assert!(!answer.sdp.contains("bogus"), "{}", answer.sdp);

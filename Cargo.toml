@@ -373,6 +373,11 @@ path = "examples/trickle-ice/trickle-ice.rs"
 bench = false
 
 [[example]]
+name = "stream-driver-loopback"
+path = "examples/stream-driver-loopback/stream-driver-loopback.rs"
+bench = false
+
+[[example]]
 name = "ice-tcp"
 path = "examples/ice-tcp/ice-tcp.rs"
 bench = false

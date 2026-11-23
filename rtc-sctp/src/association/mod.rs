@@ -3001,6 +3001,20 @@ impl Association {
             }
             // RFC 9260 5.2.4 D, and case E of 5.2: the cookie of the association that exists
             // (the COOKIE ACK was lost) is acknowledged again, whatever its age.
+            AssociationState::Established => {
+                let mut chunks: Vec<Box<dyn Chunk>> = vec![Box::new(ChunkCookieAck {})];
+                for data in self.outstanding_data_after_a_cookie_ack(now)? {
+                    chunks.push(Box::new(data));
+                }
+                return Ok(vec![Packet {
+                    common_header: CommonHeader {
+                        verification_tag: self.peer_verification_tag,
+                        source_port: self.source_port,
+                        destination_port: self.destination_port,
+                    },
+                    chunks,
+                }]);
+            }
             _ => {}
         };
 
@@ -3012,6 +3026,62 @@ impl Association {
             },
             chunks: vec![Box::new(ChunkCookieAck {})],
         }])
+    }
+
+    /// The DATA that goes after the COOKIE ACK answering a duplicate COOKIE ECHO in
+    /// ESTABLISHED: the earliest outstanding chunks that fit the packet with it, sent again.
+    ///
+    /// The duplicate says the peer is still in COOKIE-ECHOED: it did not receive the COOKIE
+    /// ACK, and it discarded what DATA reached it (RFC 9260 5.1, "SHOULD discard" in
+    /// COOKIE-ECHOED), so what is outstanding is waiting for T3-rtx, whose RTO those discards
+    /// have backed off. RFC 9260 5.1 D lets DATA come with the COOKIE ACK, and the peer takes
+    /// the packet's COOKIE ACK first (5.1 E), so this DATA arrives in ESTABLISHED. It counts as
+    /// a retransmission: no round trip is measured with it (6.3.1 C5), and partially reliable
+    /// DATA whose retransmissions are spent is abandoned instead (RFC 3758 3.5 A3).
+    fn outstanding_data_after_a_cookie_ack(
+        &mut self,
+        now: Instant,
+    ) -> Result<Vec<ChunkPayloadData>> {
+        // The common header and the COOKIE ACK chunk (a 4-byte chunk header).
+        let mut size = COMMON_HEADER_SIZE as usize + 4;
+        let mut chosen = vec![];
+        let mut tsn = self.cumulative_tsn_ack_point.wrapping_add(1);
+        while sna32lt(tsn, self.my_next_tsn) {
+            let outstanding = self
+                .inflight_queue
+                .get(tsn)
+                .is_some_and(|c| c.is_outstanding() && c.nsent > 0);
+            if outstanding && !self.abandon_retransmit_candidate(tsn, now)? {
+                let Some(c) = self.inflight_queue.get(tsn) else {
+                    break;
+                };
+                if size + c.wire_size() > self.mtu as usize {
+                    break;
+                }
+                size += c.wire_size();
+                chosen.push(tsn);
+            }
+            tsn = tsn.wrapping_add(1);
+        }
+        let mut chunks = vec![];
+        for tsn in chosen {
+            if let Some(c) = self.inflight_queue.get_mut(tsn)
+                && c.is_outstanding()
+            {
+                c.retransmit = false;
+                c.nsent += 1;
+                chunks.push(c.clone());
+            }
+        }
+        if !chunks.is_empty() {
+            debug!(
+                "[{}] COOKIE ACK again, with {} outstanding DATA chunk(s)",
+                self.side,
+                chunks.len()
+            );
+            self.min_tsn2measure_rtt = self.my_next_tsn;
+        }
+        Ok(chunks)
     }
 
     fn handle_cookie_ack(&mut self, now: Instant) -> Result<Vec<Packet>> {
@@ -4216,99 +4286,91 @@ impl Association {
         cum_tsn_ack_point_advanced: bool,
         now: Instant,
     ) -> Result<()> {
-        // HTNA algorithm - RFC 4960 Sec 7.2.4
-        // Increment missIndicator of each chunks that the SACK reported missing
-        // when either of the following is met:
-        // a)  Not in fast-recovery
-        //     miss indications are incremented only for missing TSNs prior to the
-        //     highest TSN newly acknowledged in the SACK.
-        // b)  In fast-recovery AND the Cumulative TSN Ack Point advanced
-        //     the miss indications are incremented for all TSNs reported missing
-        //     in the SACK.
-        if !self.in_fast_recovery || cum_tsn_ack_point_advanced {
-            let max_tsn = if !self.in_fast_recovery {
-                // a) increment only for missing TSNs prior to the HTNA
-                htna
-            } else {
-                // b) increment for all TSNs reported missing, which are those below the
-                //    highest TSN the SACK acknowledges. DATA sent after that is not reported
-                //    missing, only not acknowledged yet: counting it, as the whole in-flight
-                //    queue was counted here, retransmitted DATA that was not lost and
-                //    abandoned partially reliable messages that would have arrived.
-                highest_reported
+        // RFC 9260 7.2.4, the HTNA algorithm: "For each incoming SACK chunk, miss indications
+        // are incremented only for missing TSNs prior to the HTNA in the SACK chunk", and "if an
+        // endpoint is in Fast Recovery and a SACK chunk arrives that advances the Cumulative
+        // TSN Ack Point, the miss indications are incremented for all TSNs reported missing",
+        // which are those below the highest TSN the SACK acknowledges. DATA sent after that
+        // is not reported missing, only not acknowledged yet: counting it, as the whole
+        // in-flight queue was counted here, retransmitted DATA that was not lost and
+        // abandoned partially reliable messages that would have arrived.
+        //
+        // In Fast Recovery a SACK that does not advance the Cumulative TSN Ack Point counted
+        // nothing here: a chunk lost inside the recovery window after it began was never
+        // retransmitted by gap reports, however many reported it missing, and waited for
+        // T3-rtx, which leaves one packet in flight at a doubling RTO. At 10 % loss a few lost
+        // SACKs after that held 176 reliable messages back for more than 90 seconds.
+        let max_tsn = if self.in_fast_recovery && cum_tsn_ack_point_advanced {
+            highest_reported
+        } else {
+            htna
+        };
+        // A chunk that reaches three miss indications during a Fast Recovery that began
+        // before this SACK, whether or not the SACK advances the Cumulative TSN Ack Point, is
+        // not sent at once, ignoring cwnd: step 3 is "If not in Fast Recovery", for the SACK
+        // that starts it. The chunk is marked for retransmission (step 1), goes out "as soon as
+        // cwnd allows" and is not fast retransmitted again (step 5). A partially reliable
+        // chunk whose retransmission budget is spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never
+        // sent again: it takes the fast retransmit path, which abandons it and sends FORWARD
+        // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
+        let recovering = self.in_fast_recovery;
+
+        let mut tsn = cum_tsn_ack_point.wrapping_add(1);
+        while sna32lt(tsn, max_tsn) {
+            let reneged = self.reneged_in_last_sack.contains(&tsn);
+            let Some(c) = self.inflight_queue.get(tsn) else {
+                return Err(Error::ErrTsnRequestNotExist);
             };
-
-            let mut tsn = cum_tsn_ack_point.wrapping_add(1);
-            while sna32lt(tsn, max_tsn) {
-                let reneged = self.reneged_in_last_sack.contains(&tsn);
-                if let Some(c) = self.inflight_queue.get_mut(tsn) {
-                    if c.is_outstanding() && c.miss_indicator < 3 && !reneged {
-                        c.miss_indicator += 1;
-                        if c.miss_indicator == 3 {
-                            self.fast_retransmit_marked.push(tsn);
+            let exhausted = recovering
+                && self.use_forward_tsn
+                && c.is_outstanding()
+                && self.retransmission_policy_exhausted(c, now, true);
+            if let Some(c) = self.inflight_queue.get_mut(tsn)
+                && c.is_outstanding()
+                && c.miss_indicator < 3
+                && !reneged
+            {
+                c.miss_indicator += 1;
+                if c.miss_indicator == 3 {
+                    if recovering && !exhausted {
+                        if c.is_fast_retransmit_candidate() {
+                            c.no_fast_retransmit = true;
+                            c.retransmit = true;
+                            self.t3_retransmit_pending = true;
                         }
-                        if c.miss_indicator == 3 && !self.in_fast_recovery {
-                            // 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
-                            //     destination address(es) to which the missing DATA chunks were
-                            //     last sent, according to the formula described in Section 7.2.3.
-                            self.in_fast_recovery = true;
-                            // RFC 9260 7.2.4 step 6: Fast Recovery lasts until everything
-                            // outstanding now is acknowledged. The exit point was the highest
-                            // TSN this SACK newly acknowledged, below it, so recovery ended
-                            // early and a second loss in the same window cut cwnd again.
-                            self.fast_recover_exit_point = self.my_next_tsn.wrapping_sub(1);
-                            self.ssthresh =
-                                std::cmp::max(self.cwnd / 2, self.pmdcs.saturating_mul(4));
-                            self.cwnd = self.ssthresh;
-                            self.partial_bytes_acked = 0;
-                            self.will_retransmit_fast = true;
-
-                            trace!(
-                                "[{}] updated cwnd={} ssthresh={} inflight={} (FR)",
-                                self.side,
-                                self.cwnd,
-                                self.ssthresh,
-                                self.inflight_queue.get_num_bytes()
-                            );
-                        }
-                    }
-                } else {
-                    return Err(Error::ErrTsnRequestNotExist);
-                }
-
-                tsn = tsn.wrapping_add(1);
-            }
-        } else if self.use_forward_tsn {
-            // In Fast Recovery with no Cumulative TSN Ack advance, the HTNA
-            // rule above counts no new miss indications, so a later loss of
-            // a partially reliable message waited for T3-rtx (and its cwnd
-            // collapse) before it was abandoned: under steady loss an
-            // unreliable channel then delivered a fraction of its messages.
-            // A missing chunk below the HTNA whose retransmission budget is
-            // already spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never sent
-            // again, so counting it changes no congestion state: it reaches
-            // the fast retransmit path, which abandons it and sends FORWARD
-            // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
-            let mut tsn = cum_tsn_ack_point.wrapping_add(1);
-            while sna32lt(tsn, htna) {
-                let exhausted = self.inflight_queue.get(tsn).is_some_and(|c| {
-                    c.is_outstanding()
-                        && c.miss_indicator < 3
-                        && self.retransmission_policy_exhausted(c, now, true)
-                });
-                if exhausted && let Some(c) = self.inflight_queue.get_mut(tsn) {
-                    c.miss_indicator += 1;
-                    if c.miss_indicator == 3 {
+                    } else {
                         self.fast_retransmit_marked.push(tsn);
-                        self.will_retransmit_fast = true;
+                        if recovering {
+                            self.will_retransmit_fast = true;
+                        }
                     }
                 }
-                tsn = tsn.wrapping_add(1);
-            }
-        }
+                if c.miss_indicator == 3 && !self.in_fast_recovery {
+                    // 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
+                    //     destination address(es) to which the missing DATA chunks were
+                    //     last sent, according to the formula described in Section 7.2.3.
+                    self.in_fast_recovery = true;
+                    // RFC 9260 7.2.4 step 6: Fast Recovery lasts until everything
+                    // outstanding now is acknowledged. The exit point was the highest
+                    // TSN this SACK newly acknowledged, below it, so recovery ended
+                    // early and a second loss in the same window cut cwnd again.
+                    self.fast_recover_exit_point = self.my_next_tsn.wrapping_sub(1);
+                    self.ssthresh = std::cmp::max(self.cwnd / 2, self.pmdcs.saturating_mul(4));
+                    self.cwnd = self.ssthresh;
+                    self.partial_bytes_acked = 0;
+                    self.will_retransmit_fast = true;
 
-        if self.in_fast_recovery && cum_tsn_ack_point_advanced {
-            self.will_retransmit_fast = true;
+                    trace!(
+                        "[{}] updated cwnd={} ssthresh={} inflight={} (FR)",
+                        self.side,
+                        self.cwnd,
+                        self.ssthresh,
+                        self.inflight_queue.get_num_bytes()
+                    );
+                }
+            }
+
+            tsn = tsn.wrapping_add(1);
         }
 
         Ok(())

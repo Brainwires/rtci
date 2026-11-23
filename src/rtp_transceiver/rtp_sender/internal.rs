@@ -81,6 +81,9 @@ pub(crate) struct RTCRtpSenderInternal {
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
+    /// The rids of the encodings the first negotiation starts paused (RFC 8853 section 5.2:
+    /// the remote description marks them `~`); bound with `StreamInfo::initially_paused`.
+    initially_paused_rids: Vec<String>,
     /// W3C `[[LastStableRidlessSendEncodings]]`: the lone rid-less encoding a remote offer to
     /// receive simulcast replaced by its proposed encodings, which a rollback restores.
     last_stable_ridless_send_encodings: Option<Vec<RTCRtpEncodingParameters>>,
@@ -102,11 +105,40 @@ pub(crate) struct RTCRtpSenderInternal {
     /// (`admit_under_max_framerate`): the RTP timestamp of the last frame admitted, and the
     /// frame being sent with whether it was admitted.
     max_framerate_limiters: Vec<MaxFramerateLimiter>,
+    /// RFC 7741 section 6.1 `max-fs`: by SSRC, whether the VP8 key frame that started the
+    /// stream's current run of frames fits the receiver's frame size (`admit_under_max_fs`).
+    vp8_frame_size_fits: Vec<(SSRC, bool)>,
     /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
     /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
     /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
     /// with an old SSRC goes out with the new one.
     previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
+    /// RFC 7160 section 4.1, by the SSRC each stream is sent with now: the clock rates the
+    /// stream was sent with, the streams of the other rates (still in the session), and the
+    /// codec the current SSRC is sent with when the application switched to one other than
+    /// the negotiated choice.
+    clock_rates: std::collections::HashMap<SSRC, ClockRateStreams>,
+}
+
+/// What a sender keeps of one encoding's clock rates (RFC 7160 section 4.1: an SSRC per
+/// clock rate, a BYE and a new SSRC on a return to a rate already used).
+#[derive(Default, Debug, Clone)]
+pub(crate) struct ClockRateStreams {
+    history: rtp::clock_rate::ClockRateHistory,
+    /// The streams of the other clock rates the encoding was sent with: they stay bound (their
+    /// sender reports go on, RFC 7160 section 4.1) until the encoding returns to their rate.
+    parked: Vec<StreamInfo>,
+    /// The codec the current SSRC is sent with, when not the one negotiation picked.
+    codec: Option<RTCRtpCodecParameters>,
+}
+
+/// What a packet of another clock rate asks of its stream (RFC 7160 section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClockRateStep {
+    /// The packet's clock rate is the stream's: the SSRC stays.
+    Keep,
+    /// The stream moves to a new SSRC for the packet's clock rate.
+    Move,
 }
 
 /// An encoding's `maxFramerate` state: its SSRC, the RTP timestamp of the last frame
@@ -126,6 +158,19 @@ struct MaxBitrateLimiter {
     refilled: std::time::Instant,
     /// The frame being sent: its RTP timestamp and whether it was admitted.
     frame: Option<(u32, bool)>,
+}
+
+/// The streams `add_track` associates a sender with: the one its track names, or none when
+/// the track names none (an empty stream id, or `-`, the msid-id RFC 8830 section 3 gives
+/// "no MediaStream"; W3C `addTrack(track)` with no streams). A sender in no stream is
+/// written `a=msid:- <id>` (RFC 9429 section 5.2.1).
+pub(crate) fn track_streams(track: &MediaStreamTrack) -> Vec<MediaStreamId> {
+    let stream = track.stream_id();
+    if stream.is_empty() || stream == "-" {
+        vec![]
+    } else {
+        vec![stream.to_string()]
+    }
 }
 
 impl RTCRtpSenderInternal {
@@ -231,6 +276,47 @@ impl RTCRtpSenderInternal {
         }
     }
 
+    /// RFC 7741 section 6.1 and RFC 9628 section 6: a sender does not send frames larger
+    /// than the receiver's `max-fs`, "the maximum frame size in units of macroblocks" (16 by
+    /// 16 pixels), which it decodes "as long as the width and height of the frame in
+    /// macroblocks are less than int(sqrt(max-fs * 8))". The engine has no encoder: it reads
+    /// the size each key picture states (`key_size`: a VP8 key frame's header, RFC 6386
+    /// section 9.1; a VP9 key picture's scalability structure, RFC 9628 section 4.2.1) and
+    /// drops, from one larger than `max_fs` up to the next that fits, every packet of the
+    /// stream (a delta frame needs the key frame it follows). Without a limit everything
+    /// passes.
+    pub(crate) fn admit_under_max_fs(
+        &mut self,
+        ssrc: SSRC,
+        key_size: Option<(u16, u16)>,
+        max_fs: Option<u32>,
+    ) -> bool {
+        let Some(max_fs) = max_fs else {
+            self.vp8_frame_size_fits.retain(|(s, _)| *s != ssrc);
+            return true;
+        };
+        if let Some((width, height)) = key_size {
+            let (columns, rows) = (
+                u32::from(width).div_ceil(16),
+                u32::from(height).div_ceil(16),
+            );
+            let side = f64::from(max_fs * 8).sqrt() as u32;
+            let fits = columns * rows <= max_fs && columns < side && rows < side;
+            match self
+                .vp8_frame_size_fits
+                .iter_mut()
+                .find(|(s, _)| *s == ssrc)
+            {
+                Some(entry) => entry.1 = fits,
+                None => self.vp8_frame_size_fits.push((ssrc, fits)),
+            }
+        }
+        self.vp8_frame_size_fits
+            .iter()
+            .find(|(s, _)| *s == ssrc)
+            .is_none_or(|(_, fits)| *fits)
+    }
+
     /// Creates a new RTP sender internal state.
     ///
     /// # Parameters
@@ -248,7 +334,7 @@ impl RTCRtpSenderInternal {
         send_encodings: Vec<RTCRtpEncodingParameters>,
     ) -> Self {
         let streams = if streams.is_empty() {
-            vec![track.stream_id().to_string()]
+            track_streams(&track)
         } else {
             streams
         };
@@ -943,6 +1029,9 @@ impl RTCRtpSenderInternal {
             .unwrap_or_default();
         replaced.push(old);
         self.previous_ssrcs.push((new, replaced));
+        if let Some(streams) = self.clock_rates.remove(&old) {
+            self.clock_rates.insert(new, streams);
+        }
         self.last_returned_parameters = None;
         self.sync_tracks();
         primary
@@ -992,13 +1081,32 @@ impl RTCRtpSenderInternal {
             // An encoding without a codec of its own is sent with the codec negotiation picked,
             // and its stream is bound like any other: without it the interceptors never see the
             // stream (no sender reports, no NACK responder, no TWCC).
+            // A stream moved to another clock rate (RFC 7160 section 4.1) is sent with the
+            // codec the application switched to, while that is still negotiated.
+            let switched = |ssrc: SSRC| {
+                self.clock_rates
+                    .get(&ssrc)
+                    .and_then(|streams| streams.codec.as_ref())
+                    .and_then(|chosen| {
+                        codecs.iter().find(|codec| {
+                            codec.payload_type == chosen.payload_type
+                                && codec
+                                    .rtp_codec
+                                    .mime_type
+                                    .eq_ignore_ascii_case(&chosen.rtp_codec.mime_type)
+                                && codec.rtp_codec.clock_rate == chosen.rtp_codec.clock_rate
+                        })
+                    })
+            };
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
                 && !self.is_removed_ssrc(ssrc)
-                && let Some(codec) = encoding_send_codec(&coding.codec, codecs)
+                && let Some(codec) = switched(ssrc)
+                    .cloned()
+                    .or_else(|| encoding_send_codec(&coding.codec, codecs))
             {
                 let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);
                 let fec_format = find_fec_format(codecs);
-                infos.push(create_stream_info(
+                let mut info = create_stream_info(
                     ssrc,
                     // A repair SSRC goes with a repair payload type: without one negotiated it
                     // could not be sent, so the stream does not name it.
@@ -1020,10 +1128,26 @@ impl RTCRtpSenderInternal {
                     &codec.rtp_codec,
                     &header_extensions,
                     codecs,
-                ));
+                );
+                info.initially_paused = !coding.rtp_coding_parameters.rid.is_empty()
+                    && self
+                        .initially_paused_rids
+                        .contains(&coding.rtp_coding_parameters.rid);
+                infos.push(info);
             }
         }
         infos
+    }
+
+    /// RFC 8853 sections 5.2 and 5.3.3: the simulcast streams the remote description marks
+    /// initially paused (`~`) start in an unsolicited local pause, with RFC 7728 pause and
+    /// resume negotiated for them (the pause and resume interceptor does it). Only the
+    /// negotiation that first binds the sender's streams sets them: afterwards RFC 7728
+    /// signalling decides, not the marks of later descriptions (section 5.3.4, item 2).
+    pub(crate) fn set_initially_paused_rids(&mut self, rids: Vec<String>) {
+        if self.bound_streams.is_empty() {
+            self.initially_paused_rids = rids;
+        }
     }
 
     /// The sender's encodings as `set_parameters` last left them (their `active` flags are what
@@ -1106,7 +1230,162 @@ impl RTCRtpSenderInternal {
         for info in std::mem::take(&mut self.bound_streams) {
             interceptor.unbind_local_stream(&info);
         }
+        // The streams of the other clock rates leave with it (RFC 3550 6.6: each says BYE).
+        for streams in std::mem::take(&mut self.clock_rates).into_values() {
+            for info in streams.parked {
+                interceptor.unbind_local_stream(&info);
+            }
+        }
     }
+
+    /// RFC 7160 section 4.1: what a packet of the stream `ssrc` sent with a codec of
+    /// `clock_rate` asks of it. The stream's first clock rate is the one it was bound with;
+    /// another one moves it to a new SSRC ([`move_to_clock_rate`](Self::move_to_clock_rate)),
+    /// as does a return to one it used before (after a BYE for the SSRC that used it). A stream
+    /// that is not bound is left alone.
+    pub(crate) fn clock_rate_step(&mut self, ssrc: SSRC, clock_rate: u32) -> ClockRateStep {
+        let Some(bound) = self
+            .bound_streams
+            .iter()
+            .find(|info| info.ssrc == ssrc)
+            .map(|info| info.clock_rate)
+        else {
+            return ClockRateStep::Keep;
+        };
+        let streams = self.clock_rates.entry(ssrc).or_insert_with(|| {
+            let mut streams = ClockRateStreams::default();
+            streams.history.switch_to(bound);
+            streams
+        });
+        match streams.history.switch_to(clock_rate) {
+            rtp::clock_rate::SsrcForClockRate::Keep => ClockRateStep::Keep,
+            rtp::clock_rate::SsrcForClockRate::New
+            | rtp::clock_rate::SsrcForClockRate::NewAfterBye => ClockRateStep::Move,
+        }
+    }
+
+    /// RFC 7160 section 4.1: the stream `old` is sent with `codec`, of another clock rate,
+    /// from now on, as SSRC `new` (its RTX stream as `new_rtx`). The stream it leaves stays in
+    /// the session (its sender reports go on); the stream of `codec`'s clock rate it used
+    /// before, if any, leaves it (BYE). Returns the new stream's information and the SSRCs of
+    /// the other clock rates still in the session.
+    pub(crate) fn move_to_clock_rate(
+        &mut self,
+        old: SSRC,
+        new: SSRC,
+        new_rtx: Option<SSRC>,
+        codec: &RTCRtpCodecParameters,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> (Option<StreamInfo>, Vec<SSRC>) {
+        let mut streams = self.clock_rates.remove(&old).unwrap_or_default();
+        // A rate used before: the SSRC that used it says BYE, and a new one takes its place.
+        if let Some(index) = streams
+            .parked
+            .iter()
+            .position(|info| info.clock_rate == codec.rtp_codec.clock_rate)
+        {
+            let gone = streams.parked.remove(index);
+            interceptor.unbind_local_stream(&gone);
+        }
+        let old_rtx = self
+            .bound_streams
+            .iter()
+            .find(|info| info.ssrc == old)
+            .and_then(|info| info.ssrc_rtx);
+        if let Some(index) = self.bound_streams.iter().position(|info| info.ssrc == old) {
+            streams.parked.push(self.bound_streams.remove(index));
+        }
+        self.replace_ssrc(old, new);
+        if let (Some(old_rtx), Some(new_rtx)) = (old_rtx, new_rtx) {
+            self.replace_ssrc(old_rtx, new_rtx);
+        }
+        streams.codec = Some(codec.clone());
+        let parked: Vec<SSRC> = streams.parked.iter().map(|info| info.ssrc).collect();
+        self.clock_rates.insert(new, streams);
+        let info = self
+            .local_stream_infos(media_engine)
+            .into_iter()
+            .find(|info| info.ssrc == new);
+        if let Some(info) = &info {
+            interceptor.bind_local_stream(info);
+            self.bound_streams.push(info.clone());
+        }
+        (info, parked)
+    }
+
+    /// The SSRCs of the streams of other clock rates this sender keeps in the session.
+    pub(crate) fn parked_ssrcs(&self) -> impl Iterator<Item = SSRC> + '_ {
+        self.clock_rates.values().flat_map(|streams| {
+            streams
+                .parked
+                .iter()
+                .flat_map(|info| std::iter::once(info.ssrc).chain(info.ssrc_rtx))
+        })
+    }
+}
+
+/// The width and height of the VP8 key frame whose first packet `payload` is (RFC 7741
+/// section 4.2 payload descriptor, then the key frame header of RFC 6386 section 9.1: frame
+/// tag with P = 0, start code 9d 01 2a, 14-bit width and height), `None` for any other packet.
+pub(crate) fn vp8_key_frame_size(payload: &[u8]) -> Option<(u16, u16)> {
+    let first = *payload.first()?;
+    // S (start of a partition) with partition index 0: the first packet of a frame.
+    if first & 0x10 == 0 || first & 0x07 != 0 {
+        return None;
+    }
+    let mut offset = 1;
+    if first & 0x80 != 0 {
+        let extension = *payload.get(1)?;
+        offset = 2;
+        if extension & 0x80 != 0 {
+            // PictureID: one octet, two with M set.
+            offset += if payload.get(offset)? & 0x80 != 0 {
+                2
+            } else {
+                1
+            };
+        }
+        if extension & 0x40 != 0 {
+            offset += 1; // TL0PICIDX
+        }
+        if extension & 0x30 != 0 {
+            offset += 1; // TID / Y / KEYIDX
+        }
+    }
+    let header = payload.get(offset..offset + 10)?;
+    if header[0] & 0x01 != 0 || header[3..6] != [0x9d, 0x01, 0x2a] {
+        return None;
+    }
+    let width = u16::from_le_bytes([header[6], header[7]]) & 0x3fff;
+    let height = u16::from_le_bytes([header[8], header[9]]) & 0x3fff;
+    Some((width, height))
+}
+
+/// The largest frame size the scalability structure of a VP9 packet that starts a frame states
+/// (RFC 9628 section 4.2.1, on a key picture's first packet), `None` for any other packet.
+pub(crate) fn vp9_key_picture_size(payload: &bytes::Bytes) -> Option<(u16, u16)> {
+    use rtp::packetizer::Depacketizer;
+    let mut packet = rtp::codec::vp9::Vp9Packet::default();
+    packet.depacketize(payload).ok()?;
+    if !(packet.b && packet.v) {
+        return None;
+    }
+    let width = packet.width.iter().copied().max()?;
+    let height = packet.height.iter().copied().max()?;
+    Some((width, height))
+}
+
+/// A numeric parameter of an `a=fmtp` line (`max-fs=3600;max-fr=30`), by its name in any
+/// case.
+pub(crate) fn fmtp_number(fmtp: &str, name: &str) -> Option<u32> {
+    fmtp.split(';').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
 }
 
 /// webrtc-extensions 5: `scaleResolutionDownTo` is removed from audio encodings; when one

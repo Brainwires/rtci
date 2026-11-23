@@ -385,6 +385,110 @@ fn test_reopened_tcp_connection_becomes_the_media_path() {
     assert_eq!(a.media_path().unwrap().peer_addr, addr("192.168.0.3:40002"));
 }
 
+/// RFC 6544 section 11.1: "If a full agent receives a connectivity check after
+/// re-establishment of the connection, it MUST generate a triggered check over that connection
+/// in response if it has not already sent a check." The passive side of a selected TCP pair,
+/// controlling or controlled, answers the check that arrives on the reopened connection with a
+/// check of its own on it (the reopened connection is a new peer-reflexive pair, never
+/// Succeeded, so the role does not suppress it, RFC 8445 section 7.3.1.4).
+#[test]
+fn a_check_on_a_reestablished_tcp_connection_triggers_a_check_back_in_either_role() {
+    use crate::attributes::control::AttrControlled;
+    for controlling in [false, true] {
+        let now = Instant::now();
+        let listener: SocketAddr = "192.168.0.2:7000".parse().unwrap();
+        let mut a = Agent::new(now, Arc::new(config(controlling)), provider()).unwrap();
+        a.add_local_candidate(
+            CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "tcp".to_owned(),
+                    address: listener.ip().to_string(),
+                    port: listener.port(),
+                    component: 1,
+                    ..Default::default()
+                },
+                tcp_type: TcpType::Passive,
+            }
+            .new_candidate_host()
+            .unwrap(),
+        )
+        .unwrap();
+        a.start_connectivity_checks(
+            now,
+            controlling,
+            REMOTE_UFRAG.to_owned(),
+            REMOTE_PWD.to_owned(),
+        )
+        .unwrap();
+        let read = |a: &mut Agent, at: Instant, from: SocketAddr, m: &Message| {
+            a.handle_read(TaggedBytesMut {
+                now: at,
+                transport: TransportContext {
+                    local_addr: listener,
+                    peer_addr: from,
+                    ecn: None,
+                    transport_protocol: TransportProtocol::TCP,
+                },
+                message: BytesMut::from(&m.raw[..]),
+            })
+            .unwrap();
+        };
+        let role = |nominate: bool| -> Vec<Box<dyn Setter>> {
+            let mut attrs: Vec<Box<dyn Setter>> = if controlling {
+                vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))]
+            } else {
+                vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1000))]
+            };
+            if nominate && !controlling {
+                attrs.push(Box::new(UseCandidateAttr::new()));
+            }
+            attrs
+        };
+        // The first connection: checks both ways (and, controlling, the agent's nomination)
+        // until a pair is selected.
+        let first = addr("192.168.0.3:40001");
+        let mut at = now;
+        let request = peer_request(&a, role(true));
+        read(&mut a, at, first, &request);
+        for _ in 0..50 {
+            if a.media_path().is_some() {
+                break;
+            }
+            at += Duration::from_millis(50);
+            a.handle_timeout(at).unwrap();
+            for (m, to) in sent(&mut a) {
+                if m.typ == BINDING_REQUEST && to == first {
+                    read(
+                        &mut a,
+                        at,
+                        first,
+                        &peer_response(BINDING_SUCCESS, m.transaction_id, listener, None),
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            a.media_path().map(|p| p.peer_addr),
+            Some(first),
+            "selected (controlling: {controlling})"
+        );
+        // The active side reopens the connection from another port and checks it.
+        let again = addr("192.168.0.3:40002");
+        at += Duration::from_secs(3);
+        let request = peer_request(&a, role(false));
+        read(&mut a, at, again, &request);
+        a.handle_timeout(at).unwrap();
+        let back = sent(&mut a)
+            .into_iter()
+            .filter(|(m, to)| m.typ == BINDING_REQUEST && *to == again)
+            .count();
+        assert_eq!(
+            back, 1,
+            "a triggered check over the re-established connection (controlling: {controlling})"
+        );
+    }
+}
+
 /// RFC 8827 section 6.4: when only relayed candidates are gathered (the "relay" ICE transport
 /// policy), a relayed candidate does not give away the address it was allocated from: its
 /// raddr / rport are suppressed. With every candidate type they are signalled.

@@ -379,6 +379,16 @@ pub struct RTCDtlsTransport<'a> {
 }
 
 impl<'a> RTCDtlsTransport<'a> {
+    /// The number of the RTP session this transport carries (RFC 8834 section 4.4: each
+    /// transport is an RTP session of its own), which keys the per-transport interceptors:
+    /// its congestion controller and circuit breaker are
+    /// [`TransportHandles::congestion_control`](crate::peer_connection::configuration::interceptor_registry::TransportHandles::congestion_control)
+    /// and [`TransportHandles::circuit_breaker`](crate::peer_connection::configuration::interceptor_registry::TransportHandles::circuit_breaker)
+    /// of this number. 0 is the connection's first transport. A fork addition.
+    pub fn rtp_session(&self) -> usize {
+        self.transport.0
+    }
+
     /// This transport's identity. See [`RTCTransportId`].
     pub fn id(&self) -> RTCTransportId {
         self.peer_connection.dtls_transport_of(self.transport).id

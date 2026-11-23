@@ -1192,3 +1192,99 @@ fn a_compound_packet_with_several_sender_reports_is_taken_in_full() {
     assert_eq!(Some(0x0002_0003), lsr(0x0A));
     assert_eq!(Some(0x0006_0007), lsr(0x0B));
 }
+
+/// RFC 7160 section 4.1: "the next compound RTCP packet sent by the RTP sender MUST contain
+/// multiple SR packets, the first one containing the mapping for the current clock rate and
+/// the subsequent SR packet(s) containing the mapping for the other clock rates seen during the
+/// last period". Two local audio streams (one SSRC per clock rate, 48 kHz and 8 kHz) both sent
+/// lately; left to their timers the packet leads with one of them. Told that the stream
+/// switched to the other, the next compound packet leads with the other's SR and carries the
+/// first's right behind it.
+#[test]
+fn after_a_clock_rate_switch_the_current_rates_sender_report_leads() {
+    let sr_order = |switch_to: Option<(u32, u32)>| -> Vec<u32> {
+        let mut chain = chain(builder());
+        let base = Instant::now();
+        let narrow = StreamInfo {
+            clock_rate: 8_000,
+            mime_type: "audio/PCMU".to_string(),
+            payload_type: 0,
+            ..audio(200)
+        };
+        chain.bind_local_stream(&audio(100));
+        chain.bind_local_stream(&narrow);
+        control(&mut chain, base, RtcpSessionControl::Start);
+        for (seq, ssrc) in [(1, 100), (2, 100), (1, 200), (2, 200)] {
+            chain.handle_write(rtp(base, ssrc, seq, 960)).unwrap();
+        }
+        if let Some((current, previous)) = switch_to {
+            control(
+                &mut chain,
+                base,
+                RtcpSessionControl::ClockRateSwitch {
+                    current,
+                    previous: vec![previous],
+                },
+            );
+        }
+        let sent = run(&mut chain, base + secs(2.0));
+        let first = sent
+            .iter()
+            .find(|sent| sent.is_compound())
+            .expect("a compound packet");
+        first
+            .get::<SenderReport>()
+            .iter()
+            .map(|sr| sr.ssrc)
+            .collect()
+    };
+    let natural = sr_order(None);
+    assert_eq!(natural.len(), 2, "both streams sent lately: {natural:?}");
+    let (leader, other) = (natural[0], natural[1]);
+    assert_eq!(
+        sr_order(Some((other, leader))),
+        vec![other, leader],
+        "the current clock rate's SR first, the previous one's behind it"
+    );
+}
+
+/// RFC 3550 section 6.4.1: the sender's packet and octet counts "SHOULD be reset if the
+/// sender changes its SSRC identifier". A stream that moved from SSRC 100 (three packets sent)
+/// to SSRC 200 (one packet) reports one packet under 200.
+#[test]
+fn a_sender_that_changes_its_ssrc_counts_from_zero() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_local_stream(&audio(100));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    for seq in 1..=3 {
+        chain.handle_write(rtp(base, 100, seq, 960)).unwrap();
+    }
+    chain.unbind_local_stream(&audio(100));
+    chain.bind_local_stream(&audio(200));
+    chain.handle_write(rtp(base, 200, 1, 960)).unwrap();
+    let sent = run(&mut chain, base + secs(3.0));
+    let counts: Vec<(u32, u32)> = sent
+        .iter()
+        .flat_map(|sent| sent.get::<SenderReport>())
+        .filter(|sr| sr.ssrc == 200)
+        .map(|sr| (sr.packet_count, sr.octet_count))
+        .collect();
+    assert_eq!(counts.first(), Some(&(1, 100)), "{counts:?}");
+}
+
+/// RFC 8834 section 8: the use of XR "SHOULD be signalled". The receiver reference time goes
+/// out only for a stream that negotiated it (`rtcp-fb rrtr`, as libwebrtc signals RFC 3611
+/// 4.4): without, the regular report carries no XR.
+#[test]
+fn no_reference_time_without_its_signalling() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_read(rtp(base, 200, 1, 0)).unwrap();
+    read(&mut chain);
+    let sent = run(&mut chain, base + secs(3.0));
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|sent| !sent.has::<ExtendedReport>()));
+}

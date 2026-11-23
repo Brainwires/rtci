@@ -294,7 +294,20 @@ Once the application serves this interface, the engine gathers a passive, a simu
 and an active TCP candidate for each UDP host address it is given (RFC 6544; per transport when
 sections are not bundled), frames with RFC 4571, connects to `turn:...?transport=tcp` and
 `turns:` servers (names resolved through `StreamCommand::Resolve`, Happy Eyeballs across the
-addresses) and closes the connections ICE no longer needs. With `stun:` / `stuns:` servers
+addresses) and closes the connections ICE no longer needs. For each TCP / TLS server it also makes a TCP allocation
+(RFC 6062): a passive and an active relayed TCP candidate, each peer's connection on a data
+connection to the server (`with_turn_tcp_relay(false)` turns this off). Once ICE has completed
+it closes the TURN connections whose relayed candidate is not selected, and reconnects and
+restarts ICE when the selected one's is lost (RFC 6544 section 11.2). A `turns:...?transport=udp` server is reached over DTLS
+(RFC 7350) from a UDP host candidate's base without the stream interface: its records go out
+through `poll_write` and come back through `handle_read` like any datagram (a name still needs
+`Resolve`). A plain `turn:` server over UDP is allocated on the same way, from each transport's
+UDP host candidate's base: an unauthenticated Allocate to each of the server's addresses (RFC
+8656 section 3.9), the first answered kept; the engine takes out of `handle_read` only the
+answers to its own transactions and the Data indications and ChannelData of its own
+allocations. An application that runs its own TURN client sets
+`with_relay_gathering(RelayGathering::Application)`; one that adds a relayed candidate for a
+server (its `url`) has that server left to it. With `stun:` / `stuns:` servers
 configured it also gathers the server-reflexive candidates: a Binding request from each UDP host
 candidate (out of `poll_write`, the answer taken out of `handle_read`; this needs no stream
 interface for a server given by address) and over TCP / TLS from its ICE-TCP listeners
@@ -308,8 +321,20 @@ back-pressure signal: the engine holds a window of unacknowledged bytes per conn
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
 
+**What is engine and what is driver.** The engine (`rtc`) decides and runs every protocol:
+which TCP candidates exist, which connections to open and when to close them, RFC 4571 and
+TURN framing, TLS and DTLS to TURN servers, the TURN client (UDP and TCP allocations), STUN
+Binding requests, the Happy Eyeballs race, NAPTR / SRV resolution order, ICE, DTLS, SCTP and
+SRTP. It names listeners and connections by id and never touches a socket or a clock. The
+driver owns the sockets and nothing else: it binds, connects, accepts, reads, writes, closes
+and resolves names when the engine says so, and reports what happened. The application owns
+its UDP sockets, signalling and the loop.
+
 **The reference driver** (`examples/stream-driver`, crate `rtc-stream-driver`, not published)
-implements the stream half on tokio, plus the socket choices a server makes:
+implements the stream half on tokio; its crate documentation has the command table and the
+loop. `cargo run --example stream-driver-loopback` runs two peer connections over loopback TCP
+through it with a data channel, the smallest complete program (the test environment runs it).
+The driver also has the socket choices a server makes:
 
 | Need | Where |
 | --- | --- |
@@ -388,7 +413,11 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
   interface: resolution by the driver, Happy Eyeballs (RFC 8305), TLS with rustls sans-I/O (ALPN `stun.turn`; roots or a
   verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
-  `relayProtocol`; TURN over DTLS is not implemented
+  `relayProtocol`; TURN over DTLS (RFC 7350) and over plain UDP on the application's socket as well (who gathers
+  from `turn:` servers over UDP: `with_relay_gathering`)
+- ✅ **NAT-assisted candidates in the reference driver** - `rtc_stream_driver::nat_mapping` (opt-in, no dependency): a
+  PCP (RFC 6887) MAP request with a NAT-PMP (RFC 6886) fallback to the gateway the application names; the mapping is
+  added as a server-reflexive candidate with type preference 105 (RFC 6544 section 5.3)
 - ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first

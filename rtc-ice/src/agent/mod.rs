@@ -1077,7 +1077,7 @@ impl Agent {
         if self.lite && self.is_dual_stack_or_ipv6(c) {
             let precedence = rfc6724_precedence(c.addr().ip());
             let local_preference = (u16::from(precedence) << 8) | (255 - rank.min(255));
-            c.priority_override = (u32::from(c.candidate_type().preference()) << 24)
+            c.priority_override = (u32::from(c.type_preference(c.candidate_type())) << 24)
                 + (u32::from(local_preference) << 8)
                 + 256u32.saturating_sub(u32::from(c.component()));
         }
@@ -1916,13 +1916,45 @@ impl Agent {
     /// `apply_restart` and the first nomination of the new generation was dropped, on both
     /// sides, for as long as the offer/answer exchange took.
     ///
+    /// While the controlling agent's nomination is in flight, it is the nominated pair's. That
+    /// pair is valid, so Section 12.1 allows it ("An ICE agent MAY send data on any valid pair
+    /// before selected pairs have been produced for the data stream"), and it is the pair
+    /// the controlled agent selected when the nomination's first request reached it: the peer
+    /// sends on it from then on (its DTLS handshake starts), and Section 12.2 asks for that
+    /// data to be received ("ICE implementations SHOULD by default be prepared to receive data
+    /// on any of the candidates"). Without it, while the responses to the nomination were
+    /// lost, the controlling agent dropped everything the peer sent and could answer nothing:
+    /// the peer's DTLS retransmissions went unanswered and its timer backed off for nothing,
+    /// so that after a few more losses at 10 % the data channel had not opened in 30 seconds.
+    ///
     /// With [`AgentConfig::send_data_before_nomination`], and before the first pair is
-    /// selected, it is the best valid pair's (Section 12.1: "An ICE agent MAY send data on any
-    /// valid pair before selected pairs have been produced for the data stream").
+    /// selected, it is the best valid pair's (Section 12.1).
     pub fn media_path(&self) -> Option<MediaPath> {
         self.selected_media_path()
             .or(self.previous_media_path)
+            .or_else(|| self.nominating_media_path())
             .or_else(|| self.valid_media_path())
+    }
+
+    /// The path of the valid pair the controlling agent is nominating, before any pair is
+    /// selected, while consent on it is fresh: a Binding success response came from its
+    /// remote candidate less than the consent expiry ago, as of the newest instant the agent
+    /// was given (RFC 7675 Section 5.1: no data once consent has expired). A nomination's
+    /// transaction lasts longer than that (39.5 seconds, RFC 8445 Section 14.3).
+    fn nominating_media_path(&self) -> Option<MediaPath> {
+        if !self.is_controlling || self.selected_pair.is_some() {
+            return None;
+        }
+        let pair = self.candidate_pairs.get(self.nominated_pair?)?;
+        let consent = self
+            .remote_candidates
+            .get(pair.remote_index)?
+            .last_consent()?;
+        (pair.valid
+            && !pair.removed
+            && pair.state != CandidatePairState::Failed
+            && self.clock.saturating_duration_since(consent) < self.consent_expiry())
+        .then(|| self.path_of(pair.local_index, pair.remote_index))
     }
 
     /// The best valid pair's path, when data may be sent before a pair is selected. A lite
