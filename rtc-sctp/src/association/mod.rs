@@ -1584,8 +1584,10 @@ impl Association {
         self.max_message_size
     }
 
-    /// set_max_message_size sets the maximum message size you can send.
-    pub(crate) fn set_max_message_size(&mut self, max_message_size: u32) {
+    /// Sets the maximum message size this side may send: what a later offer/answer exchange
+    /// negotiated (W3C webrtc 4.4.1.4 "update the data max message size", RFC 8841 section
+    /// 6.1).
+    pub fn set_max_message_size(&mut self, max_message_size: u32) {
         self.max_message_size = max_message_size;
     }
 

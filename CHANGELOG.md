@@ -1992,6 +1992,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
+  continues the SCTP association updates `maxMessageSize` and what the association lets this
+  side send from the remote `a=max-message-size` (it kept the first answer's).
+  `rtc_sctp::Association::set_max_message_size` is public (new API).
+
 - **dtls** (audit-5, RFC 8835 section 3.5, RFC 7301): Application-Layer Protocol
   Negotiation in DTLS 1.2 (ServerHello) and DTLS 1.3 (EncryptedExtensions):
   `ConfigBuilder::with_alpn_protocols`, `State::application_protocol` (new API). A server
