@@ -249,6 +249,10 @@ pub enum Slot {
     /// RTCP, so it sits above the pacer; nothing it does depends on arrival order. (Declared
     /// after [`Slot::Custom`] so that variant keeps its discriminant.)
     TradeoffNotifications = 14_100,
+    /// [`PauseResumeInterceptor`](crate::PauseResumeInterceptor) (RFC 7728): closest to the
+    /// application, so that what it holds back while a stream is paused, and the sequence
+    /// numbers it closes up afterwards, are all any other interceptor sees.
+    PauseResume = 14_200,
 }
 
 impl Slot {
@@ -276,6 +280,7 @@ impl Slot {
             Self::KeyFrameRequests => 14_000,
             Self::ExtendedReports => 10_100,
             Self::TradeoffNotifications => 14_100,
+            Self::PauseResume => 14_200,
             Self::Custom(position) => position,
         }
     }

@@ -2305,6 +2305,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **RTP stream pause and resume** (RFC 7728; branch `conf/jsep-46-pause-resume`).
+  `rtcp::transport_feedbacks::pause_resume::{PauseResume, PauseResumeEntry, PauseResumeType}`
+  (RTPFB FMT 9, parsed by the packet parser); `interceptor::{PauseResumeInterceptor,
+  PauseResumeBuilder, PauseResumeHandle, PauseCapability, PauseState, RemotePauseState,
+  pause_config_answer}` at the new `Slot::PauseResume` (14 200, closest to the application);
+  `configure_pause_resume` / `configure_pause_resume_with` offer `a=rtcp-fb:<pt> ccm pause`
+  (optionally `nowait`) and return the handle. The sender runs the playing / pausing / paused
+  / local paused states with the PauseID rules, holds back the RTP the application writes
+  while paused and closes up the sequence numbers after it, sends PAUSED (repeated twice)
+  and REFUSED, and resumes on the requester's BYE or time-out; the receiver sends PAUSE and
+  RESUME with the current PauseID, retransmits them, and refrains after a REFUSED. Answers
+  take the complementary `config` and `nowait` only when offered (section 9.1). With pause
+  offered or negotiated, an inactive simulcast encoding is written `~` (RFC 8853 section 5.2)
+  without `with_rid_pause_marks`. Not in the default interceptors. Audit:
+  `docs/conformance/audit/rfc7728.md`.
 - **TURN over TLS against BCP 195** (branch `conf/tcp-10-srv-naptr`; RFC 8656 3.1-1, RFC
   7350 4-2, RFC 9325). A test of the ClientHello the engine's TLS client sends: TLS 1.3 and 1.2
   only (1.3 alone with `disable_tls12`), null compression only, SNI with the URI's host, only

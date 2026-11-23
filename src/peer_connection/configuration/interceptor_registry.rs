@@ -872,6 +872,62 @@ pub fn configure_tradeoff_notifications(registry: Registry) -> Registry {
     )
 }
 
+/// Adds RTP stream pause and resume (RFC 7728) and offers it for audio and video:
+/// `a=rtcp-fb:<pt> ccm pause` (section 9; the full implementation, `config=1`, without
+/// `nowait`). Returns the handle through which the application asks a remote stream to pause
+/// or resume, pauses its own streams by local decision and reads where each stream is.
+///
+/// The interceptor sits at [`Slot::PauseResume`] and acts for the streams whose section
+/// negotiated `ccm pause`; answers follow section 9.1 (the complementary `config`, `nowait`
+/// only when offered). Not part of [`register_default_interceptors`]: no browser implements it.
+///
+/// # Examples
+///
+/// ```
+/// use rtc::interceptor::Registry;
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_pause_resume;
+/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+///
+/// let mut media_engine = MediaEngine::default();
+/// let (registry, handle) = configure_pause_resume(Registry::new(), &mut media_engine);
+/// assert_eq!(handle.state(0x1234), None);
+/// # let _ = registry;
+/// ```
+pub fn configure_pause_resume(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> (Registry, interceptor::PauseResumeHandle) {
+    configure_pause_resume_with(
+        registry,
+        media_engine,
+        interceptor::PauseResumeBuilder::new(),
+        false,
+    )
+}
+
+/// [`configure_pause_resume`] with the interceptor's parameters and, with `nowait`, the
+/// `nowait` attribute in offers (RFC 7728 section 9.1: "If the offerer believes that itself
+/// and the intended answerer are likely the only endpoints in the RTP session").
+pub fn configure_pause_resume_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    builder: interceptor::PauseResumeBuilder,
+    nowait: bool,
+) -> (Registry, interceptor::PauseResumeHandle) {
+    let parameter = interceptor::PauseCapability { nowait, config: 1 }.parameter();
+    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+        media_engine.register_feedback(
+            RTCPFeedback {
+                typ: TYPE_RTCP_FB_CCM.to_owned(),
+                parameter: parameter.clone(),
+            },
+            kind,
+        );
+    }
+    let (pause_resume, handle) = builder.build();
+    (registry.with(Slot::PauseResume, pause_resume), handle)
+}
+
 /// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,
 /// libwebrtc's feedback name for RTCP XR receiver reference times, RFC 3611 section 4.4).
 ///

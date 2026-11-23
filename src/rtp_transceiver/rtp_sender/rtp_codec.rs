@@ -715,6 +715,32 @@ fn tmmbr_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<RTCPFeedback
     })
 }
 
+/// `Some` when `a` (this endpoint's) and `b` (the peer's) are both `ccm pause` lines: the
+/// negotiated line (RFC 7728 section 9.1), or `None` when the peer's cannot be answered.
+fn pause_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<Option<RTCPFeedback>> {
+    if a.typ != TYPE_RTCP_FB_CCM || b.typ != TYPE_RTCP_FB_CCM {
+        return None;
+    }
+    let (ours, theirs) = (
+        interceptor::PauseCapability::parse(&a.parameter)?,
+        interceptor::PauseCapability::parse(&b.parameter),
+    );
+    let Some(theirs) = theirs else {
+        return b
+            .parameter
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case(interceptor::RTCP_FB_CCM_PAUSE))
+            .then_some(None);
+    };
+    Some(
+        interceptor::PauseCapability::negotiate(&ours, &theirs).map(|negotiated| RTCPFeedback {
+            typ: TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: negotiated.parameter(),
+        }),
+    )
+}
+
 pub(crate) fn rtcp_feedback_intersection(
     a: &[RTCPFeedback],
     b: &[RTCPFeedback],
@@ -722,6 +748,15 @@ pub(crate) fn rtcp_feedback_intersection(
     let mut out = vec![];
     for a_feedback in a {
         for b_feeback in b {
+            // RFC 7728 section 9.1: `ccm pause` is answered with the complementary `config`
+            // and `nowait` only when both sides have it; a `config` the section does not
+            // define removes the line.
+            if let Some(pause) = pause_intersection(a_feedback, b_feeback) {
+                if let Some(pause) = pause {
+                    out.push(pause);
+                }
+                break;
+            }
             if a_feedback.typ == b_feeback.typ
                 && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
             {

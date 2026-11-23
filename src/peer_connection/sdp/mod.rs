@@ -1799,10 +1799,16 @@ impl RTCPeerConnection {
             (rid.formats.is_empty() || !kept.is_empty()).then_some(kept)
         };
         // RFC 8853 section 5.2: `~` marks a stream initially paused, which "MUST" go with
-        // RFC 7728 pause/resume negotiated for the section. The engine does not implement RFC
-        // 7728, so it writes the mark only when told to write it regardless.
+        // RFC 7728 pause/resume negotiated for the section: the section's formats carry
+        // `ccm pause` (offered, or negotiated in an answer), or the setting writes it anyway.
+        let pauses = codecs.iter().any(|codec| {
+            codec.rtp_codec.rtcp_feedback.iter().any(|feedback| {
+                feedback.typ == crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_CCM
+                    && interceptor::PauseCapability::parse(&feedback.parameter).is_some()
+            })
+        });
         let sc_id = |id: &str, paused: bool| -> String {
-            if paused && params.rid_pause_marks {
+            if paused && (params.rid_pause_marks || pauses) {
                 format!("~{id}")
             } else {
                 id.to_owned()
@@ -4373,8 +4379,15 @@ pub(crate) fn codecs_from_media_description(
             .iter()
             .filter_map(|raw| parse_rtcp_feedback(raw))
             .collect();
+        // RFC 7728 section 9: a `*` line with `pause` applies "to all listed payload types
+        // that do not have an explicit "pause" specification".
+        let is_pause = |f: &RTCPFeedback| {
+            f.typ == crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_CCM
+                && interceptor::PauseCapability::parse(&f.parameter).is_some()
+        };
+        let explicit_pause = feedback.iter().any(is_pause);
         for entry in &wildcard_feedback {
-            if !feedback.contains(entry) {
+            if !feedback.contains(entry) && !(explicit_pause && is_pause(entry)) {
                 feedback.push(entry.clone());
             }
         }
