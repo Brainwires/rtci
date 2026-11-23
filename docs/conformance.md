@@ -102,8 +102,9 @@ second group are treated as outside any group and answered with port zero.
 A group is a transport, so the whole of this piece depends on the next one. The part that is
 its own:
 
-1. Parsing. `bundle_groups` already returns every group. Refuse a description in which a mid
-   is in two BUNDLE groups (`check_remote_description`, `SdpInvalidValue`): RFC9143-5-1.
+1. Parsing. `bundle_groups` already returns every group. Done: a description in which a mid
+   is in two BUNDLE groups is refused (`apply_set_remote_description`, `SdpInvalidValue`):
+   RFC9143-5-1 (`a_mid_in_two_bundle_groups_refuses_the_description`).
 2. Offers. Keep generating one group: nothing in RFC 9429 has a JSEP endpoint offer several
    (sections 5.2.1 and 5.2.2 speak of "the" BUNDLE group). A subsequent offer after a remote
    offer with several groups repeats the groups of the most recent answer
@@ -172,8 +173,10 @@ the answer has no BUNDLE group.
    the component-2 rows (RFC9429-5.2.2-11, 5.3.2-9, RFC9143-9.3.1.1-3) stay `n/a`.
 8. Rollback. A transport created by an offer that is rolled back is closed and its
    candidates released (W3C "set a session description", rollback steps; RFC 9429 section
-   5.7): RFC9429-5.7-7. With one transport the only state an abandoned offer leaves today is
-   an ICE restart that was not applied.
+   5.7). With one transport this is done: a remote offer's transport part waits for the
+   answer, and a local offer's ICE restart is taken back by its rollback
+   (`Agent::apply_restart_revertible`), so RFC9429-5.7-7 is tested; a second transport adds
+   "close the transports the offer created".
 9. Connection state. `RTCPeerConnectionState` and `RTCIceConnectionState` aggregate over the
    transports as W3C webrtc-pc sections 4.3.2 and 4.3.3 define (any failed: failed; all
    connected or completed: connected). Statistics get one `transport` and its candidate
@@ -184,6 +187,16 @@ the answer has no BUNDLE group.
     out in the answer; an answer without a BUNDLE group; rollback of an offer that added a
     transport; a datagram for transport B arriving on A's candidate is dropped; and against
     the webrtc 0.17 test peer with `balanced`.
+
+What blocks it, measured on the code (jsep7, 2026-11-22): the single transport is not one
+field but the shape of the read and write paths. `PipelineContext` holds one
+`IceHandlerContext`, `DtlsHandlerContext`, `SrtpHandlerContext` and SCTP context; the
+handlers in `src/peer_connection/handler/` (18 k lines with their tests) take those contexts
+directly; `RTCPeerConnection` reaches the transport through `ice_transport()` /
+`dtls_transport()` and their `_mut` forms at 184 call sites in `src/`. Items 1, 2 and 9 change every one of them, and
+item 2 adds a routing step in front of the demuxer. That is the transport-layer rewrite the
+task excludes; its size is L (about 3 to 5 k lines of change, plus the tests of item 10). The
+pieces that do not need it are done (several BUNDLE groups, item 1; rollback, item 8).
 
 Rows: RFC9143-7.2-1, RFC9143-7.3.2-1, RFC9143-7.4-3, RFC9143-9.3.1.2-3 (moved-out part),
 RFC9429-5.2.1-13, 5.2.1-14, 5.2.1-40, 5.2.2-7, 5.2.2-10, 5.3.1-8, 5.3.1-9, 5.3.1-19, 5.3.2-5,

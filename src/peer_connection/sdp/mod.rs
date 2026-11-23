@@ -177,6 +177,7 @@ mod rejected_mline_tests {
             video_receive_limits: None,
             codec_video_receive_limits: vec![],
             w3c_simulcast_answer: false,
+            msid_appdata: false,
         }
     }
 
@@ -1206,6 +1207,8 @@ pub(crate) struct AddTransceiverSdpParams {
     /// `SettingEngineBuilder::with_w3c_simulcast_answer`: an answer's `a=rid` lines have no
     /// restrictions.
     w3c_simulcast_answer: bool,
+    /// `SettingEngineBuilder::with_msid_appdata`: `a=msid` lines carry the track id.
+    msid_appdata: bool,
     write_ssrc_attributes_for_simulcast: bool,
     /// An offer (initial or subsequent) rather than an answer.
     is_offer: bool,
@@ -1713,6 +1716,7 @@ impl RTCPeerConnection {
             transceiver,
             write_ssrc_attributes_for_simulcast,
             repair_flows,
+            params.msid_appdata,
         );
         // RFC 8853 section 5.1: one line, each direction at most once.
         let mut sc_attr = vec![];
@@ -1750,6 +1754,7 @@ impl RTCPeerConnection {
         transceiver: &mut RTCRtpTransceiverInternal,
         write_ssrc_attributes_for_simulcast: bool,
         repair_flows: RepairFlows,
+        msid_appdata: bool,
     ) -> MediaDescription {
         let cname = media_engine.rtcp_cname.as_str();
         // Every transceiver has a sender; one that has neither a track nor a sending
@@ -1767,9 +1772,10 @@ impl RTCPeerConnection {
                     .iter()
                     .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
 
-            // One `a=msid` line per MediaStream the sender is associated with (RFC 9429,
-            // Section 5.2.1); a sender in no stream writes the stream id `-` (its track's own
-            // stream id, which the application sets to `-` for that).
+            // One `a=msid` line per MediaStream the sender is associated with, "omitting the
+            // "appdata" field" (RFC 9429 section 5.2.1; the track id with
+            // `with_msid_appdata`); a sender in no stream writes the stream id `-` (its
+            // track's own stream id, which the application sets to `-` for that).
             let track_id = track.track_id().to_string();
             let mut stream_ids: Vec<String> = vec![];
             for stream_id in sender.streams() {
@@ -1781,7 +1787,11 @@ impl RTCPeerConnection {
                 stream_ids.push(track.stream_id().to_string());
             }
             for stream_id in stream_ids {
-                media = media.with_property_attribute(format!("msid:{} {}", stream_id, track_id));
+                media = media.with_property_attribute(if msid_appdata {
+                    format!("msid:{stream_id} {track_id}")
+                } else {
+                    format!("msid:{stream_id}")
+                });
             }
 
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
@@ -2126,6 +2136,8 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) codec_video_receive_limits: Vec<(String, RTCVideoResolutionRange)>,
     /// `SettingEngineBuilder::with_w3c_simulcast_answer`.
     pub(crate) w3c_simulcast_answer: bool,
+    /// `SettingEngineBuilder::with_msid_appdata`.
+    pub(crate) msid_appdata: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
     /// not the default.
@@ -2317,6 +2329,7 @@ impl RTCPeerConnection {
                     video_receive_limits: params.video_receive_limits,
                     codec_video_receive_limits: params.codec_video_receive_limits.clone(),
                     w3c_simulcast_answer: params.w3c_simulcast_answer,
+                    msid_appdata: params.msid_appdata,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
                     rtcp_mux_only: params.rtcp_mux_only,
@@ -2339,7 +2352,11 @@ impl RTCPeerConnection {
 
             if let (Some(protos), Some(desc)) = (&m.offered_protos, d.media_descriptions.last_mut())
             {
-                desc.media_name.protos.clone_from(protos);
+                if m.data && protos.as_slice() == ["DTLS", "SCTP"] {
+                    into_legacy_data_section(desc);
+                } else {
+                    desc.media_name.protos.clone_from(protos);
+                }
             }
 
             if should_add_id {
@@ -3335,6 +3352,40 @@ fn check_ice_credentials(ufrag: Option<&str>, pwd: Option<&str>) -> Result<()> {
 /// Returns `Ok(None)` when there is no transport to set up: no m-section other than rejected
 /// ones, and no session-level credentials (the description of a connection that has nothing to
 /// negotiate yet, such as an offer created before any transceiver or data channel was added).
+/// Why a remote `candidate` line that follows the grammar is to be ignored, rather than
+/// refuse its description (RFC 8839 section 5.1): its address is a fully qualified domain
+/// name ("An agent processing remote candidates MUST ignore "candidate" lines that include
+/// candidates with FQDNs"; an mDNS `.local` name is resolved, draft-ietf-mmusic-mdns-ice-
+/// candidates), or its transport or candidate type is one this agent does not know (both are
+/// extensible tokens in the grammar). `None`: the line is parsed as usual, and a line that does
+/// not follow the grammar still refuses the description.
+pub(crate) fn ignored_candidate_line(value: &str) -> Option<&'static str> {
+    let fields: Vec<&str> = value.split_ascii_whitespace().collect();
+    if fields.len() < 8 {
+        return None;
+    }
+    let (transport, address, typ) = (fields[2], fields[4], fields[7]);
+    if !transport.eq_ignore_ascii_case("udp") && !transport.eq_ignore_ascii_case("tcp") {
+        return Some("an unknown transport");
+    }
+    if !matches!(typ, "host" | "srflx" | "prflx" | "relay") {
+        return Some("an unknown candidate type");
+    }
+    let is_ip = address.parse::<std::net::IpAddr>().is_ok();
+    if !is_ip && !address.ends_with(".local") {
+        let fqdn = address.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+        if fqdn {
+            return Some("its address is a domain name (FQDN)");
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_ice_details(desc: &SessionDescription) -> Result<Option<RemoteIceDetails>> {
     let bundle = bundle_group_mids(desc);
     let bundle_set: HashSet<&str> = bundle.iter().copied().collect();
@@ -3431,6 +3482,10 @@ pub(crate) fn extract_ice_details(desc: &SessionDescription) -> Result<Option<Re
             if a.is_ice_candidate()
                 && let Some(value) = &a.value
             {
+                if let Some(reason) = ignored_candidate_line(value) {
+                    log::warn!("ignoring remote candidate line {value:?}: {reason}");
+                    continue;
+                }
                 candidates.push(unmarshal_candidate(value)?);
             }
         }
@@ -3460,22 +3515,71 @@ pub(crate) trait MediaDescriptionExt {
 
 impl MediaDescriptionExt for MediaDescription {
     /// RFC 8841 section 4.4.2: media `application`, proto `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`,
-    /// and the one fmt `webrtc-datachannel`. Any other `m=application` line is not a data
-    /// channel section, the `DTLS/SCTP <port>` line with `a=sctpmap` of the drafts before
-    /// the RFC among them: an offer with one is answered like any media this endpoint does
-    /// not know, rejected with its proto and fmt kept.
+    /// and the one fmt `webrtc-datachannel`; or the `DTLS/SCTP <sctp-port>` line with
+    /// `a=sctpmap:<sctp-port> webrtc-datachannel` of the drafts before the RFC, which RFC 9429
+    /// section 5.1.2 has a JSEP endpoint receive "for backwards compatibility"
+    /// ([`is_legacy_data_section`]). Any other `m=application` line is not a data channel
+    /// section.
     fn is_webrtc_datachannel(&self) -> bool {
         self.media_name.media == MEDIA_SECTION_APPLICATION
-            && self.media_name.formats == ["webrtc-datachannel"]
-            && (self.media_name.protos == ["UDP", "DTLS", "SCTP"]
-                || self.media_name.protos == ["TCP", "DTLS", "SCTP"])
+            && (self.media_name.formats == ["webrtc-datachannel"]
+                && (self.media_name.protos == ["UDP", "DTLS", "SCTP"]
+                    || self.media_name.protos == ["TCP", "DTLS", "SCTP"])
+                || legacy_sctp_port(self).is_some())
+    }
+}
+
+/// The SCTP port of a data section in the form of the drafts before RFC 8841: `m=application
+/// <port> DTLS/SCTP <sctp-port>` with `a=sctpmap:<sctp-port> webrtc-datachannel <streams>`
+/// (draft-ietf-mmusic-sctp-sdp-05). `None` for any other line.
+pub(crate) fn legacy_sctp_port(media: &MediaDescription) -> Option<u16> {
+    if media.media_name.media != MEDIA_SECTION_APPLICATION
+        || media.media_name.protos != ["DTLS", "SCTP"]
+    {
+        return None;
+    }
+    let [format] = media.media_name.formats.as_slice() else {
+        return None;
+    };
+    let port = format.parse::<u16>().ok()?;
+    media
+        .attributes
+        .iter()
+        .filter(|a| a.key == "sctpmap")
+        .filter_map(|a| a.value.as_deref())
+        .any(|value| {
+            let mut fields = value.split_ascii_whitespace();
+            fields.next() == Some(format.as_str()) && fields.next() == Some("webrtc-datachannel")
+        })
+        .then_some(port)
+}
+
+/// Turns this endpoint's data section `media` into the form of the drafts before RFC 8841,
+/// the profile of an offer that used it (RFC 9429 section 5.3.1: the answer's profile "MUST
+/// exactly match the profile provided in the offer"): `DTLS/SCTP <sctp-port>` with
+/// `a=sctpmap:<sctp-port> webrtc-datachannel 65535` in place of `a=sctp-port`.
+pub(crate) fn into_legacy_data_section(media: &mut MediaDescription) {
+    let Some(port) = media
+        .attributes
+        .iter()
+        .find(|a| a.key == "sctp-port")
+        .and_then(|a| a.value.clone())
+    else {
+        return;
+    };
+    media.media_name.protos = vec!["DTLS".to_owned(), "SCTP".to_owned()];
+    media.media_name.formats = vec![port.clone()];
+    for attribute in &mut media.attributes {
+        if attribute.key == "sctp-port" {
+            attribute.key = "sctpmap".to_owned();
+            attribute.value = Some(format!("{port} webrtc-datachannel 65535"));
+        }
     }
 }
 
 /// Whether `media` is an `m=application` line that is neither a data channel section
-/// (RFC 8841) nor application media over RTP: the `DTLS/SCTP <sctp-port>` data section of the
-/// drafts before the RFC (with `a=sctpmap`), or an application protocol this endpoint does
-/// not know. It is answered like a media type this endpoint does not know, rejected with its
+/// (RFC 8841, or the drafts before it) nor application media over RTP: an application
+/// protocol this endpoint does not know. It is answered like a media type this endpoint does not know, rejected with its
 /// own m= line, and gets no transceiver.
 pub(crate) fn is_unknown_application_media(media_desc: &MediaDescription) -> bool {
     media_desc.media_name.media == MEDIA_SECTION_APPLICATION
@@ -3499,7 +3603,8 @@ pub(crate) fn get_application_media_section_sctp_port(
         .iter()
         .find(|attr| attr.key == "sctp-port")
     else {
-        return Ok(None);
+        // The drafts before RFC 8841 name the port in the fmt and `a=sctpmap`.
+        return Ok(legacy_sctp_port(media_desc));
     };
     let value = attribute.value.as_deref().unwrap_or_default();
     if value.is_empty() || value.len() > 5 || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -3509,6 +3614,147 @@ pub(crate) fn get_application_media_section_sctp_port(
         .parse::<u16>()
         .map(Some)
         .map_err(|_| Error::ErrSDPSctpPortInvalid)
+}
+
+/// RFC 9429 sections 5.2.3.2 and 5.3.3.1, `VoiceActivityDetection`: in each live audio
+/// section of `d`, the comfort noise formats (`CN`, RFC 3389) are kept when `vad` is true and
+/// removed with their lines otherwise, and Opus states `usedtx=1` or `usedtx=0` (RFC 7587
+/// section 7: whether this endpoint wants DTX in what it receives). An answer (`offer` is the
+/// remote offer) keeps silence suppression only where the offer's section of the same mid
+/// indicated it: "if support for silence suppression was not indicated in the offer, ... the
+/// answer MUST be generated as if VoiceActivityDetection was set to "false"", per codec.
+pub(crate) fn apply_voice_activity_detection(
+    d: &mut SessionDescription,
+    vad: bool,
+    offer: Option<&SessionDescription>,
+) {
+    fn payload_types(media: &MediaDescription, codec: &str) -> Vec<String> {
+        media
+            .attributes
+            .iter()
+            .filter(|a| a.key == "rtpmap")
+            .filter_map(|a| a.value.as_deref())
+            .filter_map(|value| {
+                let (pt, encoding) = value.split_once(' ')?;
+                let name = encoding.split('/').next()?;
+                name.eq_ignore_ascii_case(codec).then(|| pt.to_owned())
+            })
+            .collect()
+    }
+    fn format_of(value: &str) -> &str {
+        value.split_once(' ').map_or(value, |(format, _)| format)
+    }
+    fn fmtp_params(media: &MediaDescription, pt: &str) -> Option<String> {
+        media
+            .attributes
+            .iter()
+            .filter(|a| a.key == "fmtp")
+            .filter_map(|a| a.value.as_deref())
+            .find_map(|value| {
+                let (format, params) = value.split_once(' ')?;
+                (format == pt).then(|| params.to_owned())
+            })
+    }
+    fn is_usedtx(parameter: &str) -> bool {
+        parameter
+            .split_once('=')
+            .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("usedtx"))
+    }
+    fn wants_dtx(params: &str) -> bool {
+        params
+            .split(';')
+            .any(|p| is_usedtx(p.trim()) && p.split_once('=').is_some_and(|(_, v)| v.trim() == "1"))
+    }
+    for media in &mut d.media_descriptions {
+        if media.media_name.media != "audio" || media.media_name.port.value == 0 {
+            continue;
+        }
+        let offered = offer.and_then(|offer| {
+            let mid = get_mid_value(media)?;
+            offer
+                .media_descriptions
+                .iter()
+                .find(|m| get_mid_value(m).is_some_and(|m| m == mid))
+        });
+        let offered_cn = offered.is_none_or(|o| !payload_types(o, "CN").is_empty());
+        let offered_dtx = offered.is_none_or(|o| {
+            payload_types(o, "opus")
+                .iter()
+                .any(|pt| fmtp_params(o, pt).is_some_and(|p| wants_dtx(&p)))
+        });
+        if !(vad && offered_cn) {
+            let cn = payload_types(media, "CN");
+            media.media_name.formats.retain(|f| !cn.contains(f));
+            media.attributes.retain(|a| {
+                !(matches!(a.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
+                    && a.value
+                        .as_deref()
+                        .is_some_and(|v| cn.iter().any(|pt| format_of(v) == pt.as_str())))
+            });
+        }
+        let usedtx = if vad && offered_dtx { "1" } else { "0" };
+        for pt in payload_types(media, "opus") {
+            let mut parameters: Vec<String> = fmtp_params(media, &pt)
+                .unwrap_or_default()
+                .split(';')
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && !is_usedtx(p))
+                .map(str::to_owned)
+                .collect();
+            parameters.push(format!("usedtx={usedtx}"));
+            let value = format!("{pt} {}", parameters.join(";"));
+            match media
+                .attributes
+                .iter_mut()
+                .find(|a| a.key == "fmtp" && a.value.as_deref().is_some_and(|v| format_of(v) == pt))
+            {
+                Some(attribute) => attribute.value = Some(value),
+                None => media
+                    .attributes
+                    .push(sdp::description::common::Attribute::new(
+                        "fmtp".to_owned(),
+                        Some(value),
+                    )),
+            }
+        }
+    }
+}
+
+/// RFC 9429 section 5.10: "If any RTX or FEC format ... is present, but the primary format it
+/// is associated with is not present, an error MUST be returned": an `a=fmtp:<pt> apt=<x>` of a
+/// live RTP section whose `x` is not one of the section's formats (RFC 4588 section 8.6).
+/// A primary that is present but not supported is not an error: the RTX format is then
+/// ignored (`MediaEngine::match_remote_codec`).
+pub(crate) fn check_repair_primaries(desc: &SessionDescription) -> Result<()> {
+    for media in &desc.media_descriptions {
+        if is_rejected_media(media) || media.is_webrtc_datachannel() {
+            continue;
+        }
+        let formats = &media.media_name.formats;
+        for attribute in media.attributes.iter().filter(|a| a.key == "fmtp") {
+            let Some(value) = attribute.value.as_deref() else {
+                continue;
+            };
+            let Some((pt, parameters)) = value.split_once(' ') else {
+                continue;
+            };
+            if !formats.iter().any(|f| f == pt) {
+                continue;
+            }
+            for parameter in parameters.split(';') {
+                if let Some((key, apt)) = parameter.trim().split_once('=')
+                    && key.trim().eq_ignore_ascii_case("apt")
+                    && !formats.iter().any(|f| f == apt.trim())
+                {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "a=fmtp:{value}: the associated payload type is not on the m= line \
+                         (RFC 9429 section 5.10)"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Checks the data channel section of a remote description, if it has one that is not

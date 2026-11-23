@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: the violated RFC 9429 / RFC 8839 / RFC 5888 rows.
+  - `a=msid` lines carry no appdata by default (`a=msid:<stream id>`, RFC 9429 section
+    5.2.1); new `SettingEngineBuilder::with_msid_appdata(true)` writes the track id as
+    browsers do. Descriptions differ on the wire. The source-level `a=ssrc ... msid:` lines
+    still name the track.
+  - A remote description whose RTX format names a payload type absent from its m= line
+    (`a=fmtp:<pt> apt=<x>`) is refused (RFC 9429 section 5.10); one whose primary is present
+    but unsupported is still ignored.
+  - Remote candidate lines with an FQDN address, an unknown transport or an unknown candidate
+    type are ignored instead of refusing the description (RFC 8839 section 5.1); a line that
+    breaks the grammar still refuses it.
+  - A remote description with a section that has no `a=mid` is not grouped: its `a=group`
+    lines are dropped (RFC 5888 section 6).
+  - The pre-RFC data section (`m=application <port> DTLS/SCTP <sctp-port>` with
+    `a=sctpmap:<sctp-port> webrtc-datachannel`) is accepted and answered in that form (RFC 9429
+    section 5.1.2); it was rejected.
+  - `VoiceActivityDetection` (RFC 9429 sections 5.2.3.2, 5.3.3.1): new
+    `RTCOfferOptions::voice_activity_detection: Option<bool>` (struct literals need
+    `..Default::default()`); `Some(true)` keeps the CN formats and offers Opus `usedtx=1`,
+    `Some(false)` removes CN and offers `usedtx=0`. `RTCAnswerOptions::voice_activity_detection`
+    is now applied when the options are given, keeping silence suppression only where the
+    offer had it.
+  - A remote description listing a mid in two BUNDLE groups is refused (RFC 9143 section 5).
+  - New `SettingEngineBuilder::with_nominated_candidates_only(true)`: once ICE selected a
+    pair, later offers list its local candidate alone (RFC 8839 section 4.4.1.2.2). The
+    default keeps every candidate of the most recent gathering, as RFC 9429 section 5.2.2
+    requires.
 - **jsep**: a rolled-back local offer takes back its ICE restart (RFC 9429 section 5.7). The
   restart is still applied with `set_local_description`, so that checks for the new generation
   are answered at once, but the session it replaced is kept until the answer arrives: a

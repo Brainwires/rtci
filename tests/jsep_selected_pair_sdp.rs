@@ -30,9 +30,13 @@ struct Peer {
 
 impl Peer {
     fn new(addrs: &[&str], lite: bool) -> Result<Self> {
+        Self::with_settings(addrs, SettingEngineBuilder::new().with_lite(lite))
+    }
+
+    fn with_settings(addrs: &[&str], settings: SettingEngineBuilder) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(SettingEngineBuilder::new().with_lite(lite).build())
+            .with_setting_engine(settings.build())
             .build(Instant::now())?;
         Ok(Self {
             pc,
@@ -376,5 +380,47 @@ fn two_lite_agents_reconcile_their_pair_with_an_updated_offer() -> Result<()> {
     let asked = world.peers[0].negotiation_needed;
     world.run("settle", |_| false).ok();
     assert_eq!(world.peers[0].negotiation_needed, asked);
+    Ok(())
+}
+
+/// RFC 8839 section 4.4.1.2.2 with `with_nominated_candidates_only(true)`: once ICE selected
+/// a pair, a later offer lists the pair's local candidate alone ("The offerer MUST NOT include
+/// any other SDP "candidate" attributes"); by default it lists every candidate of the most
+/// recent gathering (RFC 9429 section 5.2.2), as `once_ice_selected_a_pair_descriptions_name_it`
+/// checks.
+#[test]
+fn a_later_offer_lists_the_selected_candidate_alone_when_asked() -> Result<()> {
+    let mut world = World {
+        peers: vec![
+            Peer::with_settings(
+                &["10.0.0.1:5000"],
+                SettingEngineBuilder::new().with_nominated_candidates_only(true),
+            )?,
+            Peer::new(&["10.0.0.2:5000"], false)?,
+        ],
+        now: Instant::now(),
+    };
+    let a = world.peers[0].addrs[0];
+    let b = world.peers[1].addrs[0];
+    world.negotiate([vec![host(&a)?, unreachable_srflx(&a)?], vec![host(&b)?]])?;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    assert_eq!(
+        attributes(&offer.sdp, "candidate").len(),
+        2,
+        "{}",
+        offer.sdp
+    );
+
+    world.run("the connection", |peers| {
+        peers.iter().all(|p| p.connected && p.channel_open)
+    })?;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    let candidates = attributes(&offer.sdp, "candidate");
+    assert_eq!(candidates.len(), 1, "{}", offer.sdp);
+    assert!(
+        candidates[0].contains(" 10.0.0.1 5000 typ host"),
+        "{}",
+        offer.sdp
+    );
     Ok(())
 }

@@ -456,6 +456,10 @@ pub struct SettingEngine {
     pub(crate) rid_pause_marks: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
     pub(crate) w3c_simulcast_answer: bool,
+    /// [`SettingEngineBuilder::with_nominated_candidates_only`].
+    pub(crate) nominated_candidates_only: bool,
+    /// [`SettingEngineBuilder::with_msid_appdata`].
+    pub(crate) msid_appdata: bool,
     /// [`SettingEngineBuilder::with_video_receive_limits`].
     pub(crate) video_receive_limits: Option<crate::peer_connection::sdp::RTCVideoResolutionRange>,
     /// [`SettingEngineBuilder::with_codec_video_receive_limits`], by MIME type.
@@ -2021,6 +2025,28 @@ impl SettingEngineBuilder {
     ///   keep the offered ones (RFC 8851 section 6.3).
     pub fn with_w3c_simulcast_answer(mut self, w3c: bool) -> Self {
         self.0.w3c_simulcast_answer = w3c;
+        self
+    }
+
+    /// Writes the sender's track id as the `appdata` of each `a=msid` line
+    /// (`a=msid:<stream id> <track id>`, RFC 8830 section 2), as browsers do. The default is
+    /// `false`: `a=msid:<stream id>` alone, RFC 9429 section 5.2.1 ("an "a=msid" line ... but
+    /// omitting the "appdata" field"). Either way a remote line's appdata is read when there is
+    /// one, and the recipient names the track itself when there is none (RFC 8830 section 3).
+    /// The source-level `a=ssrc:<ssrc> msid:` lines carry the track id in both forms.
+    pub fn with_msid_appdata(mut self, appdata: bool) -> Self {
+        self.0.msid_appdata = appdata;
+        self
+    }
+
+    /// Once ICE has selected a pair, later offers list the pair's local candidate alone (RFC
+    /// 8839 section 4.4.1.2.2: "The offerer MUST NOT include any other SDP "candidate"
+    /// attributes in the subsequent offer"). The default is `false`: every candidate of the
+    /// most recent gathering, as RFC 9429 section 5.2.2 requires of a JSEP endpoint ("for
+    /// each candidate that has been gathered during the most recent gathering phase ..., an
+    /// "a=candidate" line MUST be added") and browsers do.
+    pub fn with_nominated_candidates_only(mut self, only: bool) -> Self {
+        self.0.nominated_candidates_only = only;
         self
     }
 

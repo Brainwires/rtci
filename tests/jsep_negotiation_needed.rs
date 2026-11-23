@@ -104,7 +104,7 @@ fn set_streams_raises_negotiation_needed_until_the_msid_follows() -> TestResult 
     );
 
     let (offer, _) = exchange(&mut offerer, &mut answerer)?;
-    assert!(offer.contains("a=msid:another-stream "), "{offer}");
+    assert!(offer.contains("a=msid:another-stream\r\n"), "{offer}");
     assert_eq!(negotiation_needed(&mut offerer), 0);
 
     // The same streams again: the check finds nothing to negotiate.

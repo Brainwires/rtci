@@ -518,9 +518,7 @@ fn replace_track_keeps_the_msid_and_ssrcs_and_needs_no_negotiation() -> TestResu
     let offer = offerer.create_offer(None)?;
     let section = &media_sections(&offer.sdp)[0];
     assert!(
-        section
-            .iter()
-            .any(|l| l.starts_with("a=msid:offered-stream ")),
+        section.iter().any(|l| l == "a=msid:offered-stream"),
         "{}",
         offer.sdp
     );
@@ -579,7 +577,7 @@ fn set_streams_sets_exactly_the_given_streams() -> TestResult {
     assert!(
         media_sections(&offer.sdp)[0]
             .iter()
-            .any(|l| l.starts_with("a=msid:- ")),
+            .any(|l| l == "a=msid:-"),
         "no stream is signalled as `-`:\n{}",
         offer.sdp
     );

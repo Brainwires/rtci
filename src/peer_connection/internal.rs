@@ -443,6 +443,14 @@ impl RTCPeerConnection {
         } else {
             None
         };
+        // `with_nominated_candidates_only`: the RFC 8839 section 4.4.1.2.2 form of a later
+        // offer, the selected pair's local candidate alone.
+        let only = only.or_else(|| {
+            (offer && self.setting_engine.nominated_candidates_only)
+                .then(|| self.ice_transport().agent.get_selected_candidate_pair())
+                .flatten()
+                .map(|(local, _)| (local.address().to_owned(), local.port()))
+        });
         Ok(match only {
             Some((address, port)) => candidates
                 .into_iter()
@@ -624,6 +632,7 @@ impl RTCPeerConnection {
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
+            msid_appdata: self.setting_engine.msid_appdata,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -828,8 +837,10 @@ impl RTCPeerConnection {
                     if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
                         // RFC 9429 Section 5.2.2: an offer rejects a stopped transceiver's m=
                         // section. An answer doesn't: a transceiver stopped after the offer
-                        // arrived answers inactive, and is rejected by the next offer (W3C
-                        // `stop()`).
+                        // arrived is W3C "stopping", which "will not affect createAnswer" (W3C
+                        // webrtc-pc 5.4 `stop()`, "to avoid problems with RFC 8843": the section
+                        // may be the BUNDLE-tagged one); it answers inactive, and is rejected by
+                        // the next offer.
                         if include_unmatched && self.rtp_transceivers[i].stopped() {
                             media_sections.push(MediaSection {
                                 mid: mid_value.to_owned(),
@@ -1027,6 +1038,7 @@ impl RTCPeerConnection {
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
+            msid_appdata: self.setting_engine.msid_appdata,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -1906,10 +1918,12 @@ impl RTCPeerConnection {
             .iter()
             .filter_map(|m| get_mid_value(m).filter(|mid| !mid.is_empty()).cloned())
             .collect();
+        let mut numbered = false;
         for (index, media) in parsed.media_descriptions.iter_mut().enumerate() {
             if get_mid_value(media).is_some_and(|mid| !mid.is_empty()) {
                 continue;
             }
+            numbered = true;
             let mid = match local.get(index).cloned().flatten() {
                 Some(mid) if !taken.contains(&mid) => mid,
                 _ => {
@@ -1926,6 +1940,11 @@ impl RTCPeerConnection {
                 key: ATTR_KEY_MID.to_owned(),
                 value: Some(mid),
             });
+        }
+        // RFC 5888 section 6: "If the identification-tag attribute is not present in each "m"
+        // line of the session description, grouping of media lines MUST NOT be performed."
+        if numbered {
+            parsed.attributes.retain(|a| a.key != ATTR_KEY_GROUP);
         }
     }
 

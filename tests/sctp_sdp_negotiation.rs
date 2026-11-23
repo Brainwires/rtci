@@ -279,20 +279,27 @@ fn the_answer_repeats_the_proto_of_the_offer() -> TestResult {
 }
 
 /// The data section of the drafts before RFC 8841 (`DTLS/SCTP` with the SCTP port as fmt and
-/// `a=sctpmap`), which no current browser sends: it is not a section this endpoint can
-/// answer in kind, so it is rejected as any unknown media is, the m= line kept but for the
-/// port, and no SCTP transport is started. (It used to be rejected as
-/// `UDP/DTLS/SCTP webrtc-datachannel`, a line the offer never had.)
+/// `a=sctpmap`), which no current browser sends: RFC 9429 section 5.1.2 has a JSEP endpoint
+/// receive it "for backwards compatibility", and section 5.3.1 has the answer repeat the
+/// offered profile. It is answered in that form (`DTLS/SCTP <sctp-port>` with `a=sctpmap`
+/// and no `a=sctp-port`), and the SCTP transport is set up. (It was rejected before.)
 #[test]
-fn a_pre_rfc_sctpmap_data_section_is_rejected_with_its_own_m_line() -> TestResult {
+fn a_pre_rfc_sctpmap_data_section_is_answered_in_its_own_form() -> TestResult {
     let sdp = format!(
         "{SESSION}a=group:BUNDLE 0 1\n\
          m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=recvonly\na=rtpmap:96 VP8/90000\n\
          m=application 9 DTLS/SCTP 5000\n{TRANSPORT}a=mid:1\na=sctpmap:5000 webrtc-datachannel 1024\n"
     );
     let (pc, answer) = answer_to(RTCSessionDescription::offer(crlf(&sdp))?)?;
-    assert_eq!(data_section(&answer)[0], "m=application 0 DTLS/SCTP 5000");
-    assert!(pc.sctp().is_none());
+    let section = data_section(&answer);
+    assert_eq!(section[0], "m=application 9 DTLS/SCTP 5000", "{answer}");
+    assert_eq!(
+        attribute(&section, "sctpmap"),
+        Some("5000 webrtc-datachannel 65535"),
+        "{answer}"
+    );
+    assert_eq!(attribute(&section, "sctp-port"), None, "{answer}");
+    assert!(pc.sctp().is_some(), "the data section is negotiated");
     Ok(())
 }
 

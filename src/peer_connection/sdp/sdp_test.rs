@@ -110,6 +110,7 @@ fn params(
         video_receive_limits: None,
         codec_video_receive_limits: vec![],
         w3c_simulcast_answer: false,
+        msid_appdata: false,
     }
 }
 

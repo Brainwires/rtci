@@ -115,3 +115,50 @@ fn a_source_level_msid_is_used_when_there_is_no_msid_line() -> TestResult {
     assert_ne!(track, "other", "W3C 5.3: not the msid appdata");
     Ok(())
 }
+
+/// RFC 9429 section 5.2.1: a sending transceiver's section has "an "a=msid" line ... but
+/// omitting the "appdata" field" per MediaStream; `with_msid_appdata(true)` writes the track
+/// id after the stream id, as browsers do.
+#[test]
+fn local_msid_lines_have_no_appdata_unless_asked() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    let msid_lines = |appdata: Option<bool>| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut pc = match appdata {
+            None => default_peer()?,
+            Some(appdata) => {
+                let mut media_engine = MediaEngine::default();
+                media_engine.register_default_codecs()?;
+                RTCPeerConnectionBuilder::new()
+                    .with_configuration(RTCConfigurationBuilder::new().build())
+                    .with_media_engine(media_engine)
+                    .with_setting_engine(
+                        SettingEngineBuilder::new()
+                            .with_msid_appdata(appdata)
+                            .build(),
+                    )
+                    .build(Instant::now())?
+            }
+        };
+        pc.add_track(jsep_common::video_track("the-track", 0x0707_0707))?;
+        let offer = pc.create_offer(None)?;
+        Ok(offer
+            .sdp
+            .lines()
+            .filter(|l| l.starts_with("a=msid:"))
+            .map(str::to_owned)
+            .collect())
+    };
+    let default = msid_lines(None)?;
+    assert!(!default.is_empty());
+    for line in &default {
+        assert_eq!(line.split(' ').count(), 1, "no appdata: {line}");
+    }
+    assert_eq!(msid_lines(Some(false))?, default);
+    for line in msid_lines(Some(true))? {
+        assert!(line.ends_with(" the-track"), "{line}");
+    }
+    Ok(())
+}

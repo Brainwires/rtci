@@ -293,7 +293,7 @@ use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, candidate_line_ufrag,
-    check_answer_against_offer, check_extmap_ids, check_extmap_levels,
+    check_answer_against_offer, check_extmap_ids, check_extmap_levels, check_repair_primaries,
     codecs_from_media_description, discard_stray_bundle_only, effective_direction,
     extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
     has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap,
@@ -895,8 +895,9 @@ impl RTCPeerConnection {
         // options.iceRestart is true": every offer restarts ICE until an answer has replaced
         // the credentials `restart_ice` was called for, even if an earlier restart offer was
         // discarded or rolled back.
+        let options = options.take();
         let is_ice_restart_requested =
-            self.ice_restart_pending() || options.take().is_some_and(|options| options.ice_restart);
+            self.ice_restart_pending() || options.is_some_and(|options| options.ice_restart);
 
         // A new transport after the last one was closed (every m-section rejected) is a new ICE
         // session: the offer carries new credentials and `set_local_description` restarts the
@@ -967,6 +968,11 @@ impl RTCPeerConnection {
             )?
         };
 
+        // RFC 9429 section 5.2.3.2.
+        let mut d = d;
+        if let Some(vad) = options.and_then(|options| options.voice_activity_detection) {
+            crate::peer_connection::sdp::apply_voice_activity_detection(&mut d, vad, None);
+        }
         // wpt100:hdrext — `a=cryptex` per the RTCRtpHeaderEncryptionPolicy (RFC 9335).
         let d = self.add_cryptex_attribute(d, true);
         // `a=tls-id` (RFC 8842) and `a=identity` (RFC 8827).
@@ -1093,7 +1099,7 @@ impl RTCPeerConnection {
     /// [RFC 9429 Section 5.3]: https://datatracker.ietf.org/doc/html/rfc9429#section-5.3
     pub fn create_answer(
         &mut self,
-        _options: Option<RTCAnswerOptions>,
+        options: Option<RTCAnswerOptions>,
     ) -> Result<RTCSessionDescription> {
         if self.remote_description().is_none() {
             return Err(Error::ErrNoRemoteDescription);
@@ -1177,6 +1183,17 @@ impl RTCPeerConnection {
             self.setting_engine.ignore_rid_pause_for_recv,
         )?;
 
+        // RFC 9429 section 5.3.3.1: silence suppression only where the offer indicated it.
+        let mut d = d;
+        if let Some(options) = options
+            && let Some(offer) = self.remote_description().and_then(|r| r.parsed.clone())
+        {
+            crate::peer_connection::sdp::apply_voice_activity_detection(
+                &mut d,
+                options.voice_activity_detection,
+                Some(&offer),
+            );
+        }
         // wpt100:hdrext — `a=cryptex` when the offer had it (RFC 9335 section 4).
         let d = self.add_cryptex_attribute(d, false);
         // `a=tls-id` when the offer had one (RFC 8842 section 5.3), and `a=identity`.
@@ -1731,6 +1748,20 @@ impl RTCPeerConnection {
             self.check_required_cryptex(&parsed)?;
             // RFC 8841 section 5.1: a data section without a valid `a=sctp-port` is invalid.
             validate_application_media_section(&parsed)?;
+            // RFC 9429 section 5.10: an RTX format whose primary is not on the m= line.
+            check_repair_primaries(&parsed)?;
+            // RFC 9143 section 5: "an "m=" section MUST NOT be associated with more than one
+            // BUNDLE group".
+            let groups = crate::peer_connection::sdp::bundle_groups(&parsed);
+            for (i, group) in groups.iter().enumerate() {
+                for later in groups.iter().skip(i + 1) {
+                    if let Some(mid) = group.iter().find(|mid| later.contains(mid)) {
+                        return Err(Error::SdpInvalidValue(format!(
+                            "mid {mid} is in two BUNDLE groups (RFC 9143 section 5)"
+                        )));
+                    }
+                }
+            }
             // So is a description whose DTLS attributes are malformed (RFC 8122 section 5,
             // RFC 4145 section 4, RFC 8842 sections 4 and 5.1).
             validate_dtls_attributes(&parsed, self.setting_engine.accept_lowercase_fingerprints)?;
@@ -5438,7 +5469,10 @@ a=rtcp-mux\r\n";
                         ice_restart: bool,
                         munge: &dyn Fn(&str) -> String| {
             let offer = offerer
-                .create_offer(Some(RTCOfferOptions { ice_restart }))
+                .create_offer(Some(RTCOfferOptions {
+                    ice_restart,
+                    ..Default::default()
+                }))
                 .unwrap();
             offerer.set_local_description(now, offer.clone()).unwrap();
             answerer
