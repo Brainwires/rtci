@@ -1751,6 +1751,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: engine rows.
+  - A packet whose sequence number its stream delivered within the last 1024 is not
+    delivered to the application again (RFC 7587 section 4.1: "at most one copy"): an RTX or
+    NACK retransmission of a packet that arrived after all, or its original arriving after
+    it. It still passes the interceptor chain, so congestion feedback sees the arrival.
+  - `payload_types_reused_across_sections` (crate-internal, for the SDP layer): the payload
+    types two sections of one BUNDLE group use for different formats (RFC 8834 section 4.3).
+
 - **media conformance**: RFC 6679 engine rows.
   - `interceptor::{EcnMarking, EctPreference}`: the codepoint marked packets carry, and the
     receiver's `ect=` (`EctPreference::from_sdp`). The SDP layer hands the remote `ect=` to a
