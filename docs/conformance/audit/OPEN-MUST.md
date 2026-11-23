@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5082.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5016 of 5082 (98.7 %).
-- Tested as the default (`tested`): 4993 of 5082 (98.2 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 66: 8 untested, 40 partial, 18 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5017 of 5082 (98.7 %).
+- Tested as the default (`tested`): 4994 of 5082 (98.3 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 65: 8 untested, 39 partial, 18 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 16 | 14 |
 | B | implemented, lacking a test that fails without it | 3 | 2 |
-| C | partly implemented | 40 | 17 |
+| C | partly implemented | 39 | 17 |
 | D | not implemented | 14 | 11 |
 | E | cannot be met or observed inside this engine | 15 | 11 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 89 | 56 |
+| all | | 88 | 56 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 58 rows, 35 of size S, 15 of size M, 8 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 57 rows, 34 of size S, 15 of size M, 8 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 4 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -51,7 +51,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | sdp | 0 | 6 | 0 | 0 | 0 | 6 | 6 | 0 | 0 |
 | sframe | 1 | 1 | 1 | 0 | 0 | 3 | 2 | 0 | 1 |
 | tcp (running) | 0 | 1 | 1 | 0 | 0 | 2 | 0 | 2 | 0 |
-| w3c | 0 | 3 | 0 | 0 | 0 | 3 | 2 | 1 | 0 |
+| w3c | 0 | 2 | 0 | 0 | 0 | 2 | 1 | 1 | 0 |
 
 ## Rows
 
@@ -116,7 +116,6 @@ Sorted by class, then owner, size and ID.
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-9.2-1 | `rfc6544.md` | Close the selected pair's connection after an ICE restart | untested | C | After an ICE restart, tell the application to close the old selected TCP connection (driver event) | M | tcp (running) |
 | WEBRTC-4.4.1.4-36 | `w3c-webrtc-pc.md` | Answer or pranswer: update the data max message size of the SCTP ... | partial | C | Update the max message size on a pranswer and on renegotiation | S | w3c |
-| WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
 | WEBRTC-4.4.1.4-91 | `w3c-webrtc-pc.md` | Events fire in order: signalingstatechange, channel errors, mute, ... | partial | C | Queue the data channel errors of a description in the spec order | M | w3c |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | missing | D | ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833) | M | dtls-srtp |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | partial | D | A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it | S | media (running) |

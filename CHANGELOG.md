@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: an answer that rejects every m= section closes the transports
+  (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state
+  stable: the transports "no longer referenced by a non-stopped transceiver" are closed, "the
+  RTCDtlsTransports and their associated RTCIceTransports. This results in events firing on
+  these objects in a queued task"; RFC 9429 section 5.11: the ICE components of a rejected
+  section are discarded "unless a non-rejected "m=" section is bundled with" it. With one
+  transport this was only remembered (the next offer restarted ICE on the same agent and asked
+  for a new DTLS association), with no close and no event; with several, the layout of such an
+  answer was not applied at all. Now each transport is closed when the answer is applied, local
+  or remote: its DTLS `statechange` to "closed", then its ICE one (the legacy variants for the
+  default transport and `OnTransportEvent` with the transport's ids), after the description's
+  own events; the connection's states follow (`iceGatheringState`, `iceConnectionState` and
+  `connectionState` "new"), the ICE agent is closed and nothing more is sent. The last
+  transport is replaced in its place by a new one, not started: a new ICE agent with
+  credentials of its own, a new DTLS transport (a new `a=tls-id`, the same certificate), new
+  transport ids, the ICE role undetermined. The next description that sets a section up
+  starts it as the first was (no ICE restart: `a=ice-ufrag` / `a=ice-pwd` are a new
+  generation's). The local candidates the application added are the new agent's too, unless
+  `with_discard_local_candidates_during_ice_restart(true)`; they are announced again when the
+  application adds them for the new generation. Applications that waited for the state events
+  of an ICE restart after such an exchange now see a closed transport and then a new one
+  connecting. Row WEBRTC-4.4.1.4-82 `tested`.
+
 - **jsep**: payload types are kept per direction of each m= section
   (`conf/jsep-71-pt-numbering`). RFC 3264 section 5.1: "the answer might indicate different
   payload type numbers for the same codecs, in which case, the offerer MUST send with the
