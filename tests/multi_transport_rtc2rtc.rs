@@ -1770,7 +1770,29 @@ fn this_side_moves_a_section_out_of_the_bundle_group_and_back() -> Result<()> {
         .expect("the transceiver")
         .set_bundle_request(Some(false));
 
-    let offer = world.renegotiate()?;
+    // The offer already gives the section a transport of its own (RFC 9143 7.5.2: "a unique
+    // address:port"), before any answer: one for the application to gather for.
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    assert_eq!(
+        world.peers[0].pc.dtls_transports().len(),
+        2,
+        "{}",
+        offer.sdp
+    );
+    assert_eq!(world.peers[0].pc.ice_transport_sections().len(), 2);
+    world.peers[1]
+        .pc
+        .set_remote_description(now, offer.clone())?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    let offer = offer.sdp;
     assert!(
         !bundled_mids(&offer).contains(&video_mid),
         "the tag is out of the group:\n{offer}"

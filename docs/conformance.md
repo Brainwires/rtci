@@ -226,7 +226,11 @@ which the security stack's automatic re-keying calls, renews every transport's a
 each writing its own new `a=tls-id` and running its own handshake; the transports an answer leaves unused fire "closed" at their DTLS and
 ICE transports (W3C 4.4.1.6).
 Left: several transports on one 5-tuple (impossible once DTLS runs), the remote of the
-paragraph above, moving the data section out of a group (the API is per transceiver), and the
+paragraph above, an ICE-TCP connection accepted on a passive port several transports share
+when both sides share their credentials and the remote's tie-breakers have not been seen on a
+datagram path (only a check whose full USERNAME, or whose tie-breaker, names one transport ties
+a connection to it, `route_named`: such a port needs `with_unique_transport_credentials(true)`
+on one side; `a_shared_passive_port_with_shared_credentials_is_tied_by_the_full_username_or_tie_breaker`), moving the data section out of a group (the API is per transceiver), and the
 "closed" events of a connection all of whose sections are rejected (one transport, which the
 engine keeps for the next offer). Media after `renew_dtls_association` is not delivered when
 this side offered and is the DTLS server (the default roles), one transport or several, on this

@@ -371,9 +371,9 @@ impl TransportSet {
     /// The transport a datagram on a connection that names none yet belongs to, only when
     /// that is certain: one transport, an address only one transport gathered on, or a
     /// Binding request whose USERNAME names one (rule 1 of [`Self::route`], RFC 8445 section
-    /// 7.2.2). `None` where [`Self::route`] would go by a path, the peer's address or a
-    /// tie-breaker, which two transports may share (two of this side's active ICE-TCP
-    /// candidates to one remote candidate).
+    /// 7.2.2) or whose tie-breaker only one transport was reached with (rule 4). `None` where
+    /// [`Self::route`] would go by a path or the peer's address, which two transports may
+    /// share (two of this side's active ICE-TCP candidates to one remote candidate).
     pub(crate) fn route_named(
         &self,
         transport: &TransportContext,
@@ -388,8 +388,17 @@ impl TransportSet {
             [only] => return Some(*only),
             _ => {}
         }
-        match self.named_by(&on, binding_request(datagram)?, Direction::Inbound)[..] {
-            [only] => Some(only),
+        let request = binding_request(datagram)?;
+        let named = self.named_by(&on, request, Direction::Inbound);
+        match named[..] {
+            [only] => return Some(only),
+            [] => return None,
+            _ => {}
+        }
+        // Rule 4: a tie-breaker one transport alone was reached with (`claim` makes one that
+        // two transports saw decide nothing).
+        match self.learned.tie_breakers.get(&request.tie_breaker?) {
+            Some(Some(id)) if named.contains(id) => Some(*id),
             _ => None,
         }
     }

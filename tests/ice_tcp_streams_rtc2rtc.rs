@@ -731,6 +731,9 @@ fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check(
     let mut peers = max_compat_peers(|| {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
+            // Both sides sharing their credentials leave nothing in a first check on the
+            // shared passive port that names a transport (docs/conformance.md, several
+            // transports, mt-9).
             .with_unique_transport_credentials(true)
             .build()
     })?;
@@ -910,6 +913,7 @@ fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transpor
     let mut peers = max_compat_peers(|| {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
+            .with_unique_transport_credentials(true)
             .build()
     })?;
     let channel = negotiate_two_transports(&mut peers, &net)?;

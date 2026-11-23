@@ -994,6 +994,11 @@ mod tests {
     fn a_frame_before_a_check_on_a_shared_port_ties_the_connection_to_no_transport() {
         let now = Instant::now();
         let mut pc = RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                    .with_unique_transport_credentials(true)
+                    .build(),
+            )
             .build(now)
             .expect("a default peer connection builds");
         let default = pc.pipeline_context.transports.default_id();
@@ -1045,5 +1050,139 @@ mod tests {
         pc.handle_stream_read(now, id, &framed(&binding_request(&format!("{ufrag}:peer"))))
             .unwrap();
         assert_eq!(pc.streams.connection_transport.get(&id), Some(&other));
+    }
+
+    /// The same shared passive port with the default, shared ICE credentials: the receiver's
+    /// ufrag of a check names both transports, so what ties a connection to one is the rest of
+    /// the USERNAME (a remote with credentials of its own per transport), or the tie-breaker
+    /// the remote agent's earlier checks were routed with (rule 4 of `TransportSet::route`);
+    /// a check neither settles ties the connection to no transport.
+    #[test]
+    fn a_shared_passive_port_with_shared_credentials_is_tied_by_the_full_username_or_tie_breaker() {
+        let now = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(now)
+            .expect("a default peer connection builds");
+        let default = pc.pipeline_context.transports.default_id();
+        let other = pc.add_transport().expect("a second transport");
+        let shared: SocketAddr = "10.0.0.1:7000".parse().unwrap();
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                let candidate = ice::candidate::unmarshal_candidate(
+                    "candidate:1 1 tcp 2128609279 10.0.0.1 7000 typ host tcptype passive",
+                )
+                .unwrap();
+                pc.ice_transport_mut()
+                    .add_local_candidate(candidate)
+                    .expect("the shared passive candidate is added")
+            });
+        }
+        let ufrag = pc
+            .ice_transport_of(default)
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone();
+        assert_eq!(
+            ufrag,
+            pc.ice_transport_of(other)
+                .agent
+                .get_local_credentials()
+                .ufrag
+        );
+        let listener = pc
+            .streams
+            .table
+            .listen(shared, Framing::Rfc4571, ICE_TCP, false);
+        pc.handle_stream_event(
+            now,
+            StreamEvent::Listening {
+                listener,
+                local: shared,
+            },
+        )
+        .unwrap();
+        let accept = |pc: &mut RTCPeerConnection, port: u16| {
+            let peer: SocketAddr = format!("10.0.0.2:{port}").parse().unwrap();
+            pc.handle_stream_accepted(now, listener, shared, peer)
+                .expect("the connection is taken")
+        };
+        let check = |sender: &str, tie_breaker: Option<u64>| {
+            let mut message = binding_request(&format!("{ufrag}:{sender}"));
+            if let Some(tie_breaker) = tie_breaker {
+                message.extend_from_slice(&[0x80, 0x2a, 0x00, 0x08]);
+                message.extend_from_slice(&tie_breaker.to_be_bytes());
+                let length = u16::from_be_bytes([message[2], message[3]]) + 12;
+                message[2..4].copy_from_slice(&length.to_be_bytes());
+            }
+            framed(&message)
+        };
+
+        // Nothing tells the two apart: the connection is tied to none.
+        let first = accept(&mut pc, 50000);
+        pc.handle_stream_read(now, first, &check("rem", None))
+            .unwrap();
+        assert_eq!(pc.streams.connection_transport.get(&first), None);
+
+        // A remote with credentials of its own per transport: the sender's part names one.
+        for (id, remote) in [(default, "remA"), (other, "remB")] {
+            pc.with_transport(id, |pc| {
+                pc.ice_transport_mut()
+                    .agent
+                    .set_remote_credentials(remote.to_owned(), "p".repeat(22))
+                    .expect("remote credentials")
+            });
+        }
+        let second = accept(&mut pc, 50001);
+        pc.handle_stream_read(now, second, &check("remB", Some(42)))
+            .unwrap();
+        assert_eq!(pc.streams.connection_transport.get(&second), Some(&other));
+
+        // The remote shares its credentials too; a datagram check that was settled (by the
+        // remote candidate it came from) taught the transport the remote agent's tie-breaker,
+        // and a connection whose first check carries it is that transport's.
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                pc.ice_transport_mut()
+                    .agent
+                    .set_remote_credentials("rem".to_owned(), "p".repeat(22))
+                    .expect("remote credentials")
+            });
+        }
+        pc.with_transport(default, |pc| {
+            let candidate = ice::candidate::unmarshal_candidate(
+                "candidate:2 1 udp 2130706431 10.0.0.2 6000 typ host",
+            )
+            .unwrap();
+            pc.ice_transport_mut()
+                .add_remote_candidate(candidate)
+                .expect("the remote candidate is added")
+        });
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                let candidate = ice::candidate::unmarshal_candidate(
+                    "candidate:3 1 udp 2130706431 10.0.0.1 7000 typ host",
+                )
+                .unwrap();
+                pc.ice_transport_mut()
+                    .add_local_candidate(candidate)
+                    .expect("the shared UDP candidate is added")
+            });
+        }
+        let udp = TransportContext {
+            local_addr: shared,
+            peer_addr: "10.0.0.2:6000".parse().unwrap(),
+            ..Default::default()
+        };
+        let mut datagram = check("rem", Some(7));
+        datagram.drain(..2);
+        assert_eq!(
+            pc.pipeline_context.transports.route(&udp, &datagram),
+            Some(default)
+        );
+        let third = accept(&mut pc, 50002);
+        pc.handle_stream_read(now, third, &check("rem", Some(7)))
+            .unwrap();
+        assert_eq!(pc.streams.connection_transport.get(&third), Some(&default));
     }
 }
