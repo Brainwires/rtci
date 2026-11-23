@@ -3568,8 +3568,10 @@ pub(crate) fn check_rtcp_attributes(desc: &SessionDescription) -> Result<()> {
 /// RFC 5888 section 6: "'a=group' lines that contain identification-tags that do not
 /// correspond to any 'm' line within the session description MUST be ignored. The
 /// application acts as if the 'a=group' line did not exist." Such lines (of any semantics)
-/// are taken out of the parsed description; the SDP text stays as given.
-pub(crate) fn discard_groups_with_unknown_tags(desc: &mut SessionDescription) {
+/// are taken out of the parsed description; the SDP text stays as given. In an answer a
+/// BUNDLE group is kept: RFC 9143 section 7.4 makes one that names a section the offer did
+/// not bundle an error, which the answer check reports.
+pub(crate) fn discard_groups_with_unknown_tags(desc: &mut SessionDescription, answers: bool) {
     let mids: HashSet<String> = desc
         .media_descriptions
         .iter()
@@ -3577,6 +3579,10 @@ pub(crate) fn discard_groups_with_unknown_tags(desc: &mut SessionDescription) {
         .collect();
     desc.attributes.retain(|a| {
         a.key != ATTR_KEY_GROUP
+            || (answers
+                && a.value
+                    .as_deref()
+                    .is_some_and(|value| value.split_whitespace().next() == Some("BUNDLE")))
             || a.value.as_deref().is_none_or(|value| {
                 value
                     .split_whitespace()

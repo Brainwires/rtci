@@ -8,11 +8,10 @@ use anyhow::Result;
 use bytes::Bytes;
 use dtls_sdp_common::{Peer, World};
 use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use std::time::Duration;
 
@@ -29,11 +28,7 @@ fn video_track() -> MediaStreamTrack {
                 ssrc: Some(SSRC),
                 ..Default::default()
             },
-            codec: RTCRtpCodec {
-                mime_type: MIME_TYPE_VP8.to_owned(),
-                clock_rate: 90000,
-                ..Default::default()
-            },
+            // No codec of its own: the sender sends with what negotiation picks.
             ..Default::default()
         }],
     )

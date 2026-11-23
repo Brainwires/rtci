@@ -1848,7 +1848,7 @@ impl RTCPeerConnection {
             // some malformed lines to be ignored, RFC 8830 section 3 for `a=msid`.)
             crate::peer_connection::sdp::check_rtcp_attributes(&parsed)?;
             self.assign_missing_mids(&mut parsed, answers);
-            crate::peer_connection::sdp::discard_groups_with_unknown_tags(&mut parsed);
+            crate::peer_connection::sdp::discard_groups_with_unknown_tags(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
             // W3C webrtc-pc createAnswer: identically named rids reduced to the first
             // (`with_w3c_simulcast_answer`); by default such a line refuses the description.
