@@ -446,7 +446,10 @@ impl<'a> EndpointHandler<'a> {
     // By the time a packet reaches here the SSRC is registered on the receiver's track, so all
     // that is left is to name the track it belongs to.
     /// Whether `payload_type` is one the receiver that owns `ssrc` negotiated: the payload
-    /// types of its receive codecs, the negotiated set of its m= section. An SSRC no receiver
+    /// types of its receive codecs, the negotiated set of its m= section, and while a local
+    /// offer is pending the payload types it lists for the section (RFC 3264 section 5.1: a
+    /// remote that adopts a new codec from a renegotiating offer may send it before this
+    /// endpoint has the answer). An SSRC no receiver
     /// owns, or a receiver with no codecs yet, is left to [`Self::find_track_id`].
     fn payload_type_negotiated(&mut self, ssrc: SSRC, payload_type: PayloadType) -> bool {
         let Some(id) =
@@ -464,6 +467,7 @@ impl<'a> EndpointHandler<'a> {
             || codecs
                 .iter()
                 .any(|codec| codec.payload_type == payload_type)
+            || receiver.offered_payload_types().contains(&payload_type)
     }
 
     fn find_track_id(
@@ -911,6 +915,25 @@ mod rtx_test {
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 111, b"other").is_none());
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+    }
+
+    /// RFC 3264 section 5.1: while this endpoint's renegotiating offer is pending, a payload
+    /// type it offers for the section is received although the receive codecs (the last
+    /// answer's) do not have it yet; once the answer sets them, it is held to those again.
+    #[test]
+    fn a_payload_type_of_the_pending_local_offer_is_received_until_the_answer() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_offered_payload_types(vec![96, 97, 98]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_some());
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_codec_preferences(vec![codec(96, "video/VP8", "")]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"vp8").is_some());
     }
 
     #[test]

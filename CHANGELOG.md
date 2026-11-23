@@ -1618,7 +1618,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **media conformance**: engine rows.
   - The endpoint drops an RTP packet whose payload type its stream's m= section did not
-    negotiate (RFC 3550 section 5.1).
+    negotiate (RFC 3550 section 5.1). While a local offer is pending, the payload types it
+    lists for the section are received too (RFC 3264 section 5.1: the offerer "MUST be
+    prepared to receive media" as offered), so a peer that adopts a codec from a
+    renegotiating offer and sends it before the answer is applied is not cut off; the
+    answer's receive codecs replace them.
   - A minted RTX / FEC SSRC differs from every SSRC the track names; encodings naming one
     SSRC twice are refused with the new `Error::ErrRTPSenderSsrcCollision` (RFC 4588 section 4).
   - `SystemInstant::shared` (rtc-shared): one wall-clock anchor for the sender reports, the

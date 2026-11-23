@@ -67,6 +67,10 @@ pub(crate) struct RTCRtpReceiverInternal {
 
     receive_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The payload types this endpoint's pending offer listed for the section, which it must
+    /// be ready to receive before the answer arrives (RFC 3264 section 5.1); cleared when the
+    /// receive codecs are set again.
+    offered_payload_types: Vec<PayloadType>,
     /// The ids of the remote MediaStreams the track is in, as the remote description's
     /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
     associated_media_stream_ids: Vec<MediaStreamId>,
@@ -110,6 +114,7 @@ impl RTCRtpReceiverInternal {
             receive_codings,
 
             receive_codecs: vec![],
+            offered_payload_types: vec![],
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
             last_returned_parameters: None,
@@ -555,8 +560,22 @@ impl RTCRtpReceiverInternal {
         &self.receive_codecs
     }
 
+    /// Records the payload types a local offer lists for the section
+    /// ([`offered_payload_types`](Self::offered_payload_types)).
+    pub(crate) fn set_offered_payload_types(&mut self, payload_types: Vec<PayloadType>) {
+        self.offered_payload_types = payload_types;
+    }
+
+    /// The payload types of the pending local offer's section, accepted on receive until the
+    /// answer sets the receive codecs (RFC 3264 section 5.1: "the offerer MUST be prepared to
+    /// receive media" as the offer describes it once the offer is sent).
+    pub(crate) fn offered_payload_types(&self) -> &[PayloadType] {
+        &self.offered_payload_types
+    }
+
     pub(crate) fn set_codec_preferences(&mut self, codecs: Vec<RTCRtpCodecParameters>) {
         self.receive_codecs = codecs;
+        self.offered_payload_types.clear();
         self.last_returned_parameters = None;
     }
 
@@ -564,6 +583,8 @@ impl RTCRtpReceiverInternal {
     /// `[[LastStableStateReceiveCodecs]]`).
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpReceiverInternal) {
         self.receive_codecs.clone_from(&saved.receive_codecs);
+        self.offered_payload_types
+            .clone_from(&saved.offered_payload_types);
         self.last_returned_parameters = None;
     }
 
