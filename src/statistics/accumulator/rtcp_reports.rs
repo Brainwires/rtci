@@ -51,6 +51,36 @@ impl RTCStatsAccumulator {
     /// * An RFC 8888 report block describes, packet by packet, how the remote received one of
     ///   our outbound streams: ECN marks, losses and recoveries (the remote-inbound object).
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
+        // RFC 6679 section 7.2.3: under the leap of faith, a receiver report that does not
+        // report on a stream (or reports everything lost) shows no reception of it; the
+        // stream's validation waits for a second such report in a row. A report that is full
+        // (31 blocks) may have left the stream for the next one, and says nothing.
+        let reports: Vec<&dyn rtcp::Packet> = packets
+            .iter()
+            .map(|packet| packet.as_ref())
+            .filter(|packet| {
+                let any = packet.as_any();
+                (any.is::<ReceiverReport>() || any.is::<SenderReport>())
+                    && reception_reports(*packet).len() < 31
+            })
+            .collect();
+        if !reports.is_empty() {
+            let received: Vec<u32> = reports
+                .iter()
+                .flat_map(|packet| reception_reports(*packet))
+                .filter(|report| report.fraction_lost < 255)
+                .map(|report| report.ssrc)
+                .collect();
+            for (ssrc, stream) in self.outbound_rtp_streams.iter_mut() {
+                if let Some(validation) = stream.ecn_validation.as_deref_mut() {
+                    if received.contains(ssrc) {
+                        validation.on_reception_reported();
+                    } else {
+                        validation.on_report_without_reception(now);
+                    }
+                }
+            }
+        }
         // RFC 6679 section 7.2.1: a reception report about a stream that is initiating ECN,
         // in a compound packet with no ECN report about it, ends the initiation when it shows
         // more than three probes should have arrived (the receiver does not do ECN feedback).

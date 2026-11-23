@@ -6,6 +6,7 @@ use super::queue_limit::QueueLimitDetector;
 use super::rate_calc::RateCalculator;
 use super::rate_control::RateController;
 use super::slope::SlopeEstimator;
+use super::threshold::ThresholdTimeBase;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
 use crate::rtpfb::acknowledgement::PacketReport;
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
@@ -131,6 +132,7 @@ pub struct Gcc {
     /// [`with_loss_at_queue_limit_as_overuse`](Self::with_loss_at_queue_limit_as_overuse)).
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
+    threshold_time_base: ThresholdTimeBase,
 }
 
 impl Default for Gcc {
@@ -191,6 +193,7 @@ impl Gcc {
             probed_at: None,
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
+            threshold_time_base: ThresholdTimeBase::default(),
         }
     }
 
@@ -229,6 +232,21 @@ impl Gcc {
     pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
         self.feedback_timeout = feedback_timeout;
         self
+    }
+
+    /// The time step of the adaptive threshold (draft-ietf-rmcat-gcc-02 section 5.4):
+    /// [`ThresholdTimeBase::Departure`] (libwebrtc, the default) or the draft's
+    /// [`ThresholdTimeBase::Arrival`].
+    pub fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
+        self.threshold_time_base = time_base;
+        self.detector = self.detector.with_threshold_time_base(time_base);
+        self
+    }
+
+    /// See [`ThresholdTimeBase`]: the time step of the adaptive threshold (draft-ietf-rmcat-gcc-02
+    /// section 5.4), libwebrtc's departure gaps by default.
+    pub fn threshold_time_base(&self) -> ThresholdTimeBase {
+        self.threshold_time_base
     }
 
     /// Whether the loss-based estimate As_hat is held at or below the delay-based estimate
@@ -336,9 +354,11 @@ impl BandwidthEstimator for Gcc {
             }
             if let Some(trend) = self.slope.accumulate(report) {
                 self.deltas = (self.deltas + 1).min(MAX_SCALED_DELTAS);
-                usage = self
-                    .detector
-                    .update(trend.at, trend.estimate_ms * f64::from(self.deltas));
+                usage = self.detector.update_with_arrival(
+                    trend.at,
+                    trend.arrival,
+                    trend.estimate_ms * f64::from(self.deltas),
+                );
             }
         }
 
@@ -451,7 +471,7 @@ impl BandwidthEstimator for Gcc {
         // Delay measurements across two paths mean nothing, and neither does where the old
         // path converged: start the delay side over, at the current target.
         self.slope = SlopeEstimator::new();
-        self.detector = OveruseDetector::new();
+        self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
         self.deltas = 0;
         self.arrival_anchor = None;

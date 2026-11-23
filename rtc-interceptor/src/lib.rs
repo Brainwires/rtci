@@ -334,7 +334,9 @@ pub use gcc::remb::{
 };
 pub use gcc::slope::{DelayTrend, SlopeEstimator};
 pub use gcc::state::RateControlState;
-pub use gcc::threshold::{AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS};
+pub use gcc::threshold::{
+    AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS, ThresholdTimeBase,
+};
 pub use gcc::twcc_gcc::{GccHandle, GccInterceptor, GccInterceptorBuilder, GccShared};
 /// Derive macros for nested (`#[next]`-field) interceptors.
 pub use interceptor_derive::{Interceptor, interceptor};
@@ -370,7 +372,7 @@ pub use registry::{Registry, Slot};
 pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
 pub use rfc8888::ecn::{
-    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
+    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER, EcnFailure,
     EcnInitiation, EcnMarking, EcnState, EcnValidation, EctPreference,
     PROBE_INTERVAL as ECN_PROBE_INTERVAL, PROBE_SPACING as ECN_PROBE_SPACING,
 };

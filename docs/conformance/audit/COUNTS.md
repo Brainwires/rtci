@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4496 | 137 | 245 | 120 | 22 | 625 | 5645 |
-| SHOULD | 704 | 74 | 72 | 71 | 6 | 334 | 1261 |
+| MUST | 4498 | 137 | 243 | 119 | 22 | 626 | 5645 |
+| SHOULD | 708 | 72 | 71 | 70 | 6 | 334 | 1261 |
 | MAY | 395 | 34 | 36 | 129 | 0 | 169 | 763 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5653 | 248 | 356 | 323 | 28 | 1128 | 7736 |
+| all | 5659 | 246 | 353 | 321 | 28 | 1129 | 7736 |
 
 ## Per file
 
@@ -68,7 +68,7 @@ is a procedure step without a keyword.
 | `rfc4588.md` | MUST | 25 | 0 | 1 | 0 | 0 | 12 | 38 |
 | `rfc4588.md` | SHOULD | 6 | 1 | 3 | 1 | 0 | 2 | 13 |
 | `rfc4588.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
-| `rfc4733.md` | MUST | 22 | 0 | 2 | 0 | 0 | 2 | 26 |
+| `rfc4733.md` | MUST | 23 | 0 | 0 | 0 | 0 | 3 | 26 |
 | `rfc4733.md` | SHOULD | 8 | 0 | 0 | 3 | 0 | 6 | 17 |
 | `rfc4733.md` | MAY | 1 | 1 | 0 | 4 | 0 | 1 | 7 |
 | `rfc5077.md` | MUST | 18 | 0 | 0 | 0 | 0 | 1 | 19 |
@@ -130,7 +130,7 @@ is a procedure step without a keyword.
 | `rfc6544.md` | SHOULD | 9 | 1 | 2 | 0 | 0 | 21 | 33 |
 | `rfc6544.md` | MAY | 3 | 1 | 0 | 4 | 0 | 1 | 9 |
 | `rfc6679.md` | MUST | 30 | 0 | 1 | 14 | 0 | 10 | 55 |
-| `rfc6679.md` | SHOULD | 14 | 2 | 1 | 1 | 0 | 6 | 24 |
+| `rfc6679.md` | SHOULD | 18 | 0 | 0 | 0 | 0 | 6 | 24 |
 | `rfc6679.md` | MAY | 4 | 1 | 0 | 1 | 0 | 1 | 7 |
 | `rfc6762.md` | MUST | 60 | 0 | 1 | 0 | 0 | 9 | 70 |
 | `rfc6762.md` | SHOULD | 27 | 0 | 3 | 0 | 0 | 8 | 38 |
@@ -167,7 +167,7 @@ is a procedure step without a keyword.
 | `rfc7742.md` | MUST | 3 | 2 | 4 | 0 | 0 | 9 | 18 |
 | `rfc7742.md` | SHOULD | 0 | 0 | 1 | 1 | 0 | 4 | 6 |
 | `rfc7742.md` | MAY | 1 | 1 | 1 | 1 | 0 | 1 | 5 |
-| `rfc7798.md` | MUST | 53 | 0 | 1 | 2 | 0 | 23 | 79 |
+| `rfc7798.md` | MUST | 54 | 0 | 1 | 1 | 0 | 23 | 79 |
 | `rfc7798.md` | SHOULD | 5 | 1 | 4 | 1 | 0 | 2 | 13 |
 | `rfc7798.md` | MAY | 2 | 0 | 2 | 6 | 0 | 9 | 19 |
 | `rfc7874.md` | MUST | 4 | 1 | 0 | 3 | 0 | 1 | 9 |

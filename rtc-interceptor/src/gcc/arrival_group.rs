@@ -38,6 +38,9 @@ pub struct InterGroupDelay {
     pub at: Instant,
     /// Bytes in the later group, for the rate calculation downstream.
     pub size: usize,
+    /// When the later group's last packet arrived, on the receiver's clock: t(i) of
+    /// draft-ietf-rmcat-gcc-02 section 5.3.
+    pub arrival: Duration,
 }
 
 /// Collects acknowledgements into bursts and emits the gradient between consecutive bursts.
@@ -166,6 +169,7 @@ fn gradient(previous: &ArrivalGroup, current: &ArrivalGroup) -> InterGroupDelay 
         delta_ms: (arrival_delta - departure_delta) * 1_000.0,
         at: current.departure,
         size: current.size,
+        arrival: current.arrival,
     }
 }
 

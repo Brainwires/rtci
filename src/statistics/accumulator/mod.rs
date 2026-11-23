@@ -995,6 +995,23 @@ impl RTCStatsAccumulator {
         Some(codepoint)
     }
 
+    /// The ECN failures each outbound stream's validation detected since the last call, by
+    /// SSRC (RFC 6679 sections 7.2.1 and 7.4.2).
+    pub(crate) fn take_ecn_failures(&mut self) -> Vec<(u32, interceptor::EcnFailure)> {
+        let mut failures = vec![];
+        for (ssrc, stream) in self.outbound_rtp_streams.iter_mut() {
+            if let Some(validation) = stream.ecn_validation.as_deref_mut() {
+                failures.extend(
+                    validation
+                        .take_failures()
+                        .into_iter()
+                        .map(|failure| (*ssrc, failure)),
+                );
+            }
+        }
+        failures
+    }
+
     /// A remote source named its RTCP CNAME at `now`: each outbound stream's ECN validation
     /// watches for a second participant while its success is provisional (RFC 6679
     /// section 7.2.1).

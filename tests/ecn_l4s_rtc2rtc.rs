@@ -15,7 +15,7 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{EcnInitiation, EcnMarking, Registry};
+use rtc::interceptor::{EcnFailure, EcnInitiation, EcnMarking, Registry};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
@@ -78,6 +78,8 @@ struct Peer {
     addr: SocketAddr,
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
+    /// `OnEcnFailure` events: (SSRC, failure).
+    ecn_failures: Vec<(u32, EcnFailure)>,
 }
 
 impl Peer {
@@ -126,6 +128,7 @@ impl Peer {
             addr: addr.parse()?,
             connected: false,
             states: Vec::new(),
+            ecn_failures: Vec::new(),
         })
     }
 
@@ -285,7 +288,9 @@ impl World {
         }
         for peer in self.peers.iter_mut() {
             while let Some(event) = peer.pc.poll_event() {
-                if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event {
+                if let RTCPeerConnectionEvent::OnEcnFailure { ssrc, failure } = event {
+                    peer.ecn_failures.push((ssrc, failure));
+                } else if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event {
                     if state == RTCPeerConnectionState::Failed {
                         bail!("a peer's connection failed: {:?}", peer.states);
                     }
@@ -738,6 +743,16 @@ fn a_path_that_bleaches_ect_ends_the_marking() -> Result<()> {
         probes.len(),
         "only the probes were sent ECT(1): {remote}"
     );
+    // RFC 6679 section 7.2.1: the failure is logged "to enable follow up", and the
+    // application is told.
+    let failures = &world.peers[0].ecn_failures;
+    assert!(
+        !failures.is_empty()
+            && failures
+                .iter()
+                .all(|failure| *failure == (ssrc, EcnFailure::ProbeArrivedNotEct)),
+        "the failed initiation is reported to the application: {failures:?}"
+    );
     Ok(())
 }
 
@@ -771,6 +786,14 @@ fn a_path_that_drops_ect_packets_ends_the_marking() -> Result<()> {
         inbound["packetsReceived"],
         media.len() - probes,
         "every Not-ECT packet arrived: {inbound}"
+    );
+    let failures = &world.peers[0].ecn_failures;
+    assert!(
+        !failures.is_empty()
+            && failures
+                .iter()
+                .all(|(s, failure)| *s == ssrc && failure.is_initiation_failure()),
+        "the failed initiation reaches the application: {failures:?}"
     );
     Ok(())
 }

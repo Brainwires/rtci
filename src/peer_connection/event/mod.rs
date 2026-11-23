@@ -617,6 +617,18 @@ pub enum RTCPeerConnectionEvent {
     /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
     /// dropped. Not a W3C event: a fork addition.
     OnCryptexRequiredViolation(u32),
+
+    /// The ECN validation of the outbound stream `ssrc` detected a failure (RFC 6679 sections
+    /// 7.2.1 and 7.4.2: an initiation that failed, or ECT packets lost after it). The stream
+    /// sends Not-ECT, initiates again later, or keeps ECN off, as `failure` says. The RFC asks
+    /// for such failures to be logged "to enable follow up": they are, and this hands them to
+    /// the application as well. Not a W3C event: a fork addition.
+    OnEcnFailure {
+        /// The outbound stream.
+        ssrc: u32,
+        /// What was detected.
+        failure: interceptor::EcnFailure,
+    },
 }
 
 /// Reserved for future use.
