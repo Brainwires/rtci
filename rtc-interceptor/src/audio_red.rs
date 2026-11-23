@@ -99,6 +99,8 @@ struct SendStream {
     red_payload_type: u8,
     primary_payload_type: u8,
     encoder: RedEncoder,
+    /// The sequence number of the last primary wrapped.
+    last_sequence_number: Option<u16>,
 }
 
 struct ReceiveStream {
@@ -242,6 +244,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RedAudioInterceptor {
             && let Some(stream) = self.senders.get_mut(&packet.header.ssrc)
             && packet.header.payload_type == stream.primary_payload_type
         {
+            // The receiver numbers a recovered block one packet back per block (RFC 2198
+            // section 4 leaves the sequence number of redundant data to it): a copy goes only
+            // into the packet right after the one it was the primary of.
+            if stream
+                .last_sequence_number
+                .is_some_and(|last| last.wrapping_add(1) != packet.header.sequence_number)
+            {
+                stream.encoder.reset();
+            }
+            stream.last_sequence_number = Some(packet.header.sequence_number);
             // A primary that does not fit a RED payload goes as it is.
             if let Ok(red) = stream.encoder.encode_rtp(stream.red_payload_type, packet) {
                 *packet = red;
@@ -272,6 +284,7 @@ impl Interceptor for RedAudioInterceptor {
                     red_payload_type,
                     primary_payload_type: info.payload_type,
                     encoder: RedEncoder::new(self.config.redundancy, self.config.max_payload_size),
+                    last_sequence_number: None,
                 });
                 if (stream.red_payload_type, stream.primary_payload_type)
                     != (red_payload_type, info.payload_type)
