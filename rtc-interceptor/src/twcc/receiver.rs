@@ -36,6 +36,8 @@ pub struct TwccReceiverBuilder {
     interval: Duration,
     /// Whether the interval stretches to what the RTCP bandwidth allows.
     adaptive_interval: bool,
+    /// Whether packets already reported received are reported again (libwebrtc).
+    rereport_received: bool,
 }
 
 impl Default for TwccReceiverBuilder {
@@ -43,6 +45,7 @@ impl Default for TwccReceiverBuilder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
+            rereport_received: false,
         }
     }
 }
@@ -76,9 +79,22 @@ impl TwccReceiverBuilder {
         self
     }
 
+    /// Whether a packet an earlier feedback message reported as received is reported as
+    /// received again when a late packet moves the base sequence number back over it, as
+    /// libwebrtc does. Off by default: draft-holmer-rmcat-transport-wide-cc-extensions-01
+    /// section 3.1.1 has such packets marked "Packet not received", with no delta. A
+    /// libwebrtc sender drops a packet from its history once it is reported received, so it
+    /// ignores the later "not received" either way.
+    pub fn with_rereport_received(mut self, rereport_received: bool) -> Self {
+        self.rereport_received = rereport_received;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> TwccReceiverInterceptor {
-        TwccReceiverInterceptor::new(self.interval, self.adaptive_interval)
+        let mut interceptor = TwccReceiverInterceptor::new(self.interval, self.adaptive_interval);
+        interceptor.rereport_received = self.rereport_received;
+        interceptor
     }
 }
 
@@ -126,6 +142,8 @@ pub struct TwccReceiverInterceptor {
     next_timeout: Option<Instant>,
     /// Inbound packets ready for the next interceptor.
     read_queue: VecDeque<TaggedPacket>,
+    /// See [`TwccReceiverBuilder::with_rereport_received`].
+    rereport_received: bool,
 }
 
 impl TwccReceiverInterceptor {
@@ -139,6 +157,7 @@ impl TwccReceiverInterceptor {
             rfc8888_ssrcs: HashSet::new(),
             transport_hdr_ext_id: None,
             write_queue: VecDeque::new(),
+            rereport_received: false,
             next_timeout: None,
         }
     }
@@ -192,7 +211,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for TwccReceiverInterceptor {
                 // Initialize recorder on the first packet carrying transport-wide CC
                 if self.recorder.is_none() {
                     // Use a random sender SSRC for feedback
-                    self.recorder = Some(Recorder::new(rand::random()));
+                    self.recorder = Some(
+                        Recorder::new(rand::random())
+                            .with_rereport_received(self.rereport_received),
+                    );
                     self.start_time = Some(msg.now);
                     self.next_timeout = Some(msg.now + self.cadence.interval(msg.now));
                 }

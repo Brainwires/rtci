@@ -177,6 +177,11 @@ pub struct StreamInfo {
     /// Format-specific parameters of the FEC format (its `a=fmtp` line), e.g.
     /// "repair-window=200000".
     pub sdp_fmtp_line_fec: String,
+
+    /// The clock rate of each payload type the stream may carry besides `payload_type`, for a
+    /// source that switches payload type (and with it clock rate, RFC 7160 section 4.3), e.g.
+    /// Opus at 48000 and PCMU at 8000 on one SSRC. Empty: every packet is at `clock_rate`.
+    pub payload_clock_rates: Vec<(u8, u32)>,
 }
 
 impl StreamInfo {

@@ -4,7 +4,7 @@
 use super::*;
 use crate::codec::{
     comfort_noise::ComfortNoisePayloader, g7xx::G711Payloader, h264::H264Payloader,
-    opus::OpusPayloader,
+    h265::HevcPayloader, opus::OpusPayloader,
 };
 
 const SSRC: u32 = 0x1234_ABCD;
@@ -155,6 +155,52 @@ fn a_video_frame_has_one_timestamp_and_the_marker_on_its_last_packet() -> Result
         next[0].header.timestamp
     );
     assert!(next[0].header.marker);
+    Ok(())
+}
+
+/// RFC 6184 section 5.1: an aggregation packet's marker "MUST be set to the value that the
+/// marker bit of the last NAL unit of the aggregation packet would have if it were
+/// transported in an individual RTP packet". The SPS and PPS of an access unit go in a
+/// STAP-A ahead of its IDR: they are not last, so the STAP-A has no marker and the IDR has it.
+#[test]
+fn a_stap_a_carries_the_marker_its_last_nal_unit_would_have_alone() -> Result<()> {
+    let now = Instant::now();
+    let mut h264 = packetizer(1200, Box::new(H264Payloader::default()), 90000);
+    let access_unit = Bytes::from_static(&[
+        0, 0, 0, 1, 0x67, 0x42, 0xC0, 0x1F, // SPS
+        0, 0, 0, 1, 0x68, 0xCE, 0x3C, 0x80, // PPS
+        0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, // IDR
+    ]);
+    let packets = h264.packetize(now, &access_unit, 3000)?;
+    assert_eq!(2, packets.len());
+    assert_eq!(24, packets[0].payload[0] & 0x1F, "a STAP-A first");
+    assert!(!packets[0].header.marker);
+    assert_eq!(5, packets[1].payload[0] & 0x1F);
+    assert!(packets[1].header.marker);
+    Ok(())
+}
+
+/// RFC 7798 sections 4.1 and 4.4.3: the marker is on the last packet of the access unit,
+/// every packet of it has the access unit's timestamp, and the fragments of a NAL unit go
+/// out consecutively in ascending sequence-number order.
+#[test]
+fn an_h265_access_unit_has_one_timestamp_consecutive_fragments_and_the_marker_last() -> Result<()> {
+    let now = Instant::now();
+    let mut h265 = packetizer(12 + 60, Box::new(HevcPayloader::default()), 90000);
+    let mut access_unit = vec![0, 0, 0, 1, 0x26, 0x01];
+    access_unit.extend_from_slice(&[0xAB; 200]);
+    let packets = h265.packetize(now, &Bytes::from(access_unit), 3000)?;
+    assert!(packets.len() > 2, "fragmented");
+    let last = packets.len() - 1;
+    for (i, packet) in packets.iter().enumerate() {
+        assert_eq!(49, (packet.payload[0] >> 1) & 0x3F, "a fragmentation unit");
+        assert_eq!(i == last, packet.header.marker, "packet {i}");
+        assert_eq!(packets[0].header.timestamp, packet.header.timestamp);
+        assert_eq!(
+            packets[0].header.sequence_number.wrapping_add(i as u16),
+            packet.header.sequence_number
+        );
+    }
     Ok(())
 }
 
