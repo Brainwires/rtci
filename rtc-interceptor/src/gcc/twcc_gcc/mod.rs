@@ -294,10 +294,10 @@ impl<P: Interceptor> GccInterceptor<P> {
             msg.message.add(crate::Attribute::TargetBitrateChanged {
                 bits_per_second: f64::from(bits_per_second),
             });
-            if bits_per_second <= self.min_bitrate_bps {
-                msg.message
-                    .add(crate::Attribute::Custom(Arc::new(crate::TargetAtMinimum)));
-            }
+            msg.message
+                .add(crate::Attribute::Custom(Arc::new(crate::MinimumTarget {
+                    bits_per_second: f64::from(self.min_bitrate_bps),
+                })));
         }
         self.inner.handle_read(msg)
     }
@@ -662,55 +662,46 @@ mod tests {
         assert_eq!(Some(estimate), handle.target_bitrate_bps(), "released");
     }
 
-    /// A target at the controller's floor rides with `TargetAtMinimum`, so the NACK responder
-    /// lets the retransmissions take their reserve first; above it, it does not.
+    /// The target rides with the controller's minimum (`MinimumTarget`), so the NACK
+    /// responder knows where the original media cannot be lowered further.
     #[test]
-    fn a_target_at_the_floor_is_marked() {
-        for (min, marked) in [(3_000_000, true), (30_000, false)] {
-            let (gcc_builder, _handle) = GccInterceptorBuilder::new();
-            let mut chain = Registry::new()
-                .with(
-                    Slot::CongestionControl,
-                    PassThroughInterceptor::new().with(
-                        gcc_builder
-                            .with_min_bitrate(min)
-                            .with_max_bitrate(3_000_000)
-                            .build(),
-                    ),
-                )
-                .with(Slot::TwccSender, crate::TwccSenderBuilder::new().build())
-                .build();
-            let ssrc = 1001u32;
-            chain.bind_local_stream(&stream_info_with_twcc(ssrc));
-            let base = Instant::now();
-            for i in 0..5u16 {
-                chain
-                    .handle_write(make_rtp(
-                        ssrc,
-                        i,
-                        base + Duration::from_millis(i as u64 * 33),
-                    ))
-                    .unwrap();
-            }
-            while chain.poll_write().is_some() {}
-            let recv_us: Vec<i64> = (0..5).map(|i: i64| i * 33_000 + 20_000).collect();
+    fn the_target_carries_the_controllers_minimum() {
+        let (gcc_builder, _handle) = GccInterceptorBuilder::new();
+        let mut chain = Registry::new()
+            .with(
+                Slot::CongestionControl,
+                PassThroughInterceptor::new().with(gcc_builder.with_min_bitrate(123_000).build()),
+            )
+            .with(Slot::TwccSender, crate::TwccSenderBuilder::new().build())
+            .build();
+        let ssrc = 1001u32;
+        chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+        let base = Instant::now();
+        for i in 0..5u16 {
             chain
-                .handle_read(make_twcc_feedback(
-                    0,
-                    &recv_us,
-                    base + Duration::from_millis(200),
+                .handle_write(make_rtp(
+                    ssrc,
+                    i,
+                    base + Duration::from_millis(i as u64 * 33),
                 ))
                 .unwrap();
-            let feedback = chain.poll_read().expect("the feedback carries on");
-            assert_eq!(
-                marked,
-                feedback
-                    .message
-                    .custom::<crate::TargetAtMinimum>()
-                    .is_some(),
-                "minimum {min}"
-            );
         }
+        while chain.poll_write().is_some() {}
+        let recv_us: Vec<i64> = (0..5).map(|i: i64| i * 33_000 + 20_000).collect();
+        chain
+            .handle_read(make_twcc_feedback(
+                0,
+                &recv_us,
+                base + Duration::from_millis(200),
+            ))
+            .unwrap();
+        let feedback = chain.poll_read().expect("the feedback carries on");
+        assert_eq!(
+            Some(&crate::MinimumTarget {
+                bits_per_second: 123_000.0
+            }),
+            feedback.message.custom::<crate::MinimumTarget>()
+        );
     }
 
     #[test]

@@ -86,21 +86,27 @@ pub enum RetransmissionRateLimit {
     /// are served and the retransmissions leave the window: with nothing waiting and nothing
     /// retransmitted within the last window it is zero.
     ///
-    /// **At the congestion controller's floor** (its minimum bit rate, which is this engine's
-    /// setting and not the RFC's: the controller computed less, the floor holds it up; the
-    /// controller marks such a target with [`TargetAtMinimum`]) the original media cannot be
-    /// lowered further, an encoder at its own minimum may already fill the floor, and the rule
-    /// above would leave the repairs nothing for as long as the floor holds. There the
-    /// retransmissions of packets still asked for take the reserve first: within the window
-    /// they may send up to the reserve whatever the original packets took. An application
-    /// that follows the lowered target keeps the sum within the floor; one that cannot go
-    /// lower adds its own excess, never the retransmissions'.
+    /// **At the congestion controller's floor.** The controller's minimum bit rate is this
+    /// engine's setting, not the RFC's, and the controller announces it with its target
+    /// ([`MinimumTarget`]). When lowering the original media by the reserve would take it
+    /// under that floor (target − reserve < minimum), the original media cannot make the room:
+    /// an encoder at its own minimum already fills the floor (in the capacity-cap test, 30
+    /// kbit/s of video and 80 kbit/s of audio against a 100 kbit/s target), and the rule above
+    /// would leave the repairs nothing for as long as the estimate stays near the floor. There
+    /// the retransmissions of packets still asked for take the window's room first: they may
+    /// send up to the target within the window, whatever the original packets took, and the
+    /// original media is told the target less the reserve. Section 7 lets the sender
+    /// "selectively retransmit only the packets that it deems important"; a packet still asked
+    /// for is the one deemed important. An application at its minimum adds its own excess
+    /// over the floor; the retransmissions never go over the target.
     ///
     /// What holds the sum on the wire when the application ignores the lowered target: with
     /// a pacer in the chain (the default interceptor set) the pacer sends at the controller's
     /// target, retransmissions and media alike; without one (a chain of NACK, TWCC and GCC
     /// alone) it is this rule: above the floor the retransmissions take only what the
-    /// original packets leave, so the engine never adds to an application's excess.
+    /// original packets leave, so the engine never adds to an application's excess; near the
+    /// floor (target under the minimum plus the reserve, at most twice the minimum with the
+    /// default reserve) they take at most the target.
     #[default]
     WithinTarget,
     /// libwebrtc's rule (`RateLimiter` on the retransmissions, its maximum the target): the
@@ -144,12 +150,16 @@ pub struct RetransmissionReserve {
     pub bits_per_second: f64,
 }
 
-/// Rides with [`Attribute::TargetBitrateChanged`] when the congestion controller's target is
-/// at its configured minimum: the controller computed less and its floor holds it up, so the
-/// original media cannot be lowered for retransmissions, and the NACK responder lets them take
-/// the reserve first ([`RetransmissionRateLimit::WithinTarget`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TargetAtMinimum;
+/// Rides with [`Attribute::TargetBitrateChanged`]: the congestion controller's minimum bit
+/// rate, the floor its target never goes under. Where lowering the original media by the
+/// retransmission reserve would take it under this floor the NACK responder lets the
+/// retransmissions take the window's room first ([`RetransmissionRateLimit::WithinTarget`]).
+/// Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumTarget {
+    /// The minimum, bits per second.
+    pub bits_per_second: f64,
+}
 
 /// How much the reported reserve may move before a new one is announced: 5 % of the target,
 /// at least 5 kbit/s, and any change to or from zero.
@@ -370,8 +380,8 @@ pub struct NackResponderInterceptor {
     rate_limit: RetransmissionRateLimit,
     /// The congestion controller's latest target, bits per second.
     target_bps: Option<f64>,
-    /// Whether that target is at the controller's minimum ([`TargetAtMinimum`]).
-    at_minimum: bool,
+    /// The controller's minimum ([`MinimumTarget`]), bits per second.
+    minimum_bps: Option<f64>,
     /// The original packets of the local streams, and the retransmissions, sent lately.
     originals: RateWindow,
     retransmitted: RateWindow,
@@ -406,7 +416,7 @@ impl NackResponderInterceptor {
             sessions: HashMap::new(),
             rate_limit: RetransmissionRateLimit::default(),
             target_bps: None,
-            at_minimum: false,
+            minimum_bps: None,
             originals: RateWindow::default(),
             retransmitted: RateWindow::default(),
             max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
@@ -432,18 +442,28 @@ impl NackResponderInterceptor {
         let target = Self::window_octets(target_bps);
         let limit = match self.rate_limit {
             RetransmissionRateLimit::WithinTarget => {
-                let left = target.saturating_sub(self.originals.octets);
-                if self.at_minimum {
-                    // At the floor the retransmissions take the reserve first.
-                    left.max(Self::window_octets(self.announced_reserve))
+                if self.at_floor() {
+                    // Near the floor the retransmissions take the window's room first.
+                    target
                 } else {
-                    left
+                    target.saturating_sub(self.originals.octets)
                 }
             }
             RetransmissionRateLimit::UpToTarget => target,
             RetransmissionRateLimit::Unlimited => return None,
         };
         Some(limit.saturating_sub(self.retransmitted.octets))
+    }
+
+    /// Whether lowering the original media by the reserve would take it under the
+    /// controller's minimum (see [`RetransmissionRateLimit::WithinTarget`]).
+    fn at_floor(&self) -> bool {
+        self.rate_limit == RetransmissionRateLimit::WithinTarget
+            && self.announced_reserve > 0.0
+            && match (self.target_bps, self.minimum_bps) {
+                (Some(target), Some(minimum)) => target - self.announced_reserve < minimum,
+                _ => false,
+            }
     }
 
     /// The retransmission reserve at `now`, bits per second (see
@@ -662,30 +682,22 @@ impl NackResponderInterceptor {
         let target = Self::window_octets(target_bps);
         let (originals, retransmitted) = (self.originals.octets, self.retransmitted.octets);
         let fits = match self.rate_limit {
-            RetransmissionRateLimit::WithinTarget => {
-                let used = originals + retransmitted;
-                let mut at = freed_at(
-                    &[&self.originals, &self.retransmitted],
-                    (used + size).saturating_sub(target).max(1),
-                )
-                .filter(|_| size <= target);
-                if self.at_minimum {
-                    // The reserve taken first: only the retransmissions leaving frees it.
-                    let reserve = Self::window_octets(self.announced_reserve);
-                    let by_reserve = freed_at(
-                        &[&self.retransmitted],
-                        (retransmitted + size).saturating_sub(reserve).max(1),
-                    )
-                    .filter(|_| size <= reserve);
-                    at = at.into_iter().chain(by_reserve).min();
-                }
-                at
-            }
-            RetransmissionRateLimit::UpToTarget => freed_at(
-                &[&self.retransmitted],
-                (retransmitted + size).saturating_sub(target).max(1),
+            RetransmissionRateLimit::WithinTarget if !self.at_floor() => freed_at(
+                &[&self.originals, &self.retransmitted],
+                (originals + retransmitted + size)
+                    .saturating_sub(target)
+                    .max(1),
             )
             .filter(|_| size <= target),
+            // Near the floor the room is the retransmissions' first: only they leaving the
+            // window frees it.
+            RetransmissionRateLimit::WithinTarget | RetransmissionRateLimit::UpToTarget => {
+                freed_at(
+                    &[&self.retransmitted],
+                    (retransmitted + size).saturating_sub(target).max(1),
+                )
+                .filter(|_| size <= target)
+            }
             RetransmissionRateLimit::Unlimited => None,
         };
         fits.into_iter().chain(stale).min()
@@ -723,8 +735,8 @@ impl NackResponderInterceptor {
                 ),
             });
         }
-        if self.at_minimum {
-            // At the floor the reserve is the retransmissions' room: use it now.
+        if self.at_floor() {
+            // Near the floor the window's room is the retransmissions': use it now.
             self.release(now);
         }
     }
@@ -847,10 +859,13 @@ impl NackResponderInterceptor {
             let Some(octets) = self.retransmittable(stream, seq, now) else {
                 continue;
             };
+            let budget = stream.retransmit_budget;
             match self.pending_asked.get_mut(&(ssrc, seq)) {
                 Some(asked) => *asked = now,
                 None => {
-                    if self.pending.len() >= MAX_QUEUED_RETRANSMISSIONS {
+                    // The budget (one retransmission per original sent) refuses it: not
+                    // kept, the receiver asks again. Only the rate limit makes a request wait.
+                    if budget == 0 || self.pending.len() >= MAX_QUEUED_RETRANSMISSIONS {
                         break;
                     }
                     self.pending_asked.insert((ssrc, seq), now);
@@ -958,7 +973,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             }) {
             if bits_per_second.is_finite() && *bits_per_second >= 0.0 {
                 self.target_bps = Some(*bits_per_second);
-                self.at_minimum = msg.message.custom::<TargetAtMinimum>().is_some();
+                self.minimum_bps = msg
+                    .message
+                    .custom::<MinimumTarget>()
+                    .map(|minimum| minimum.bits_per_second)
+                    .filter(|minimum| minimum.is_finite());
                 self.release_at = None;
             }
             true

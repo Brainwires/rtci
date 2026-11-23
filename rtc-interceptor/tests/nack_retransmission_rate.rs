@@ -6,9 +6,9 @@
 //! reserve; with libwebrtc's rule the retransmissions alone stay under the target.
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, NackResponderBuilder, Packet, RTCPFeedback, Registry,
-    RetransmissionRateLimit, RetransmissionReserve, Slot, StreamInfo, TaggedPacket,
-    TargetAtMinimum,
+    Attribute, AttributedPacket, Interceptor, MinimumTarget, NackResponderBuilder, Packet,
+    RTCPFeedback, Registry, RetransmissionRateLimit, RetransmissionReserve, Slot, StreamInfo,
+    TaggedPacket,
 };
 use rtcp::transport_feedbacks::transport_layer_nack::{
     TransportLayerNack, nack_pairs_from_sequence_numbers,
@@ -115,14 +115,14 @@ fn drain(chain: &mut impl Interceptor) -> Seen {
 }
 
 /// Reads a NACK for `sequence_numbers` at `now`, riding with the estimate `target_bps` when
-/// given (as a congestion controller wire-ward of the responder attaches it), marked
-/// [`TargetAtMinimum`] when `at_minimum`.
+/// given (as a congestion controller wire-ward of the responder attaches it), with the
+/// controller's minimum `minimum_bps` when given ([`MinimumTarget`]).
 fn read_nack(
     chain: &mut impl Interceptor,
     now: Instant,
     sequence_numbers: &[u16],
     target_bps: Option<f64>,
-    at_minimum: bool,
+    minimum_bps: Option<f64>,
 ) {
     let mut message = AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerNack {
         sender_ssrc: 1,
@@ -131,8 +131,10 @@ fn read_nack(
     })]));
     if let Some(bits_per_second) = target_bps {
         message.add(Attribute::TargetBitrateChanged { bits_per_second });
-        if at_minimum {
-            message.add(Attribute::Custom(Arc::new(TargetAtMinimum)));
+        if let Some(bits_per_second) = minimum_bps {
+            message.add(Attribute::Custom(Arc::new(MinimumTarget {
+                bits_per_second,
+            })));
         }
     }
     chain
@@ -152,7 +154,7 @@ fn nack(
     sequence_numbers: &[u16],
     target_bps: Option<f64>,
 ) -> usize {
-    read_nack(chain, now, sequence_numbers, target_bps, false);
+    read_nack(chain, now, sequence_numbers, target_bps, None);
     while chain.poll_read().is_some() {}
     let mut retransmitted = 0;
     while let Some(tagged) = chain.poll_write() {
@@ -317,7 +319,7 @@ fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions
             base + Duration::from_millis(300),
             &lost,
             Some(target),
-            false,
+            None,
         );
         let seen = drain(&mut chain);
         assert_eq!(0, seen.retransmitted, "the originals took the target");
@@ -335,7 +337,7 @@ fn the_reserve_is_released_when_nothing_waits() {
     send(&mut chain, base, 30);
     let at = base + Duration::from_millis(300);
     // 500 kbit/s: 62 500 octets, the originals took 30 360, the five fit.
-    read_nack(&mut chain, at, &[0, 1, 2, 3, 4], Some(500_000.0), false);
+    read_nack(&mut chain, at, &[0, 1, 2, 3, 4], Some(500_000.0), None);
     let seen = drain(&mut chain);
     assert_eq!(5, seen.retransmitted);
     let in_use = 5.0 * RETRANSMISSION as f64 * 8.0;
@@ -368,34 +370,43 @@ fn up_to_the_target_the_original_media_is_not_lowered() {
         base + Duration::from_millis(300),
         &lost,
         Some(240_000.0),
-        false,
+        None,
     );
     let seen = drain(&mut chain);
     assert!(seen.reserves.is_empty());
     assert_eq!(vec![240_000.0], seen.targets);
 }
 
-/// At the congestion controller's floor (`TargetAtMinimum`) the original media cannot be
-/// lowered: the retransmissions of the packets asked for take the reserve first, whatever the
-/// originals took. At 100 kbit/s the 30 originals (30 360 octets) took more than the window's
-/// 12 500; the reserve is half of 100 kbit/s, 6 250 octets: six retransmissions.
+/// Near the congestion controller's floor ([`MinimumTarget`]) the original media cannot be
+/// lowered by the reserve: the retransmissions of the packets asked for take the window's room
+/// first, whatever the originals took. At 100 kbit/s the 30 originals (30 360 octets) took more
+/// than the window's 12 500 octets; the reserve is half the target, 50 kbit/s. With a minimum
+/// of 100 kbit/s, 100 − 50 is under it: twelve retransmissions of 1014 octets fill the 12 500.
+/// With a minimum of 40 kbit/s, or none announced, the originals' share holds: none.
 #[test]
-fn at_the_floor_retransmissions_take_the_reserve_first() {
-    for (at_minimum, expected) in [(false, 0), (true, 6250 / RETRANSMISSION)] {
+fn near_the_floor_retransmissions_take_the_room_first() {
+    for (minimum, expected) in [
+        (None, 0),
+        (Some(40_000.0), 0),
+        (Some(100_000.0), 12_500 / RETRANSMISSION),
+    ] {
         let base = Instant::now();
         let mut chain = responder(NackResponderBuilder::new());
         send(&mut chain, base, 30);
         let lost: Vec<u16> = (0..20).collect();
         let at = base + Duration::from_millis(300);
-        read_nack(&mut chain, at, &lost, Some(100_000.0), at_minimum);
-        // The reserve is announced as the NACK is read; the retransmissions it allows leave
-        // on the next turn of the driver.
+        read_nack(&mut chain, at, &lost, Some(100_000.0), minimum);
         let mut retransmitted = drain(&mut chain).retransmitted;
-        if let Some(due) = chain.poll_timeout().filter(|due| *due <= at) {
-            chain.handle_timeout(due).unwrap();
-        }
         chain.handle_timeout(at).unwrap();
         retransmitted += drain(&mut chain).retransmitted;
-        assert_eq!(expected, retransmitted, "at the minimum: {at_minimum}");
+        assert_eq!(expected, retransmitted, "minimum {minimum:?}");
+        if minimum.is_some_and(|minimum| minimum > 50_000.0) {
+            let due = chain.poll_timeout().expect("the rest wait");
+            assert_eq!(
+                at + Duration::from_secs(1),
+                due,
+                "until the twelve leave the window"
+            );
+        }
     }
 }
