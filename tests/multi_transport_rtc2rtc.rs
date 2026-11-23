@@ -7,7 +7,7 @@
 //! the BUNDLE group (a peer that does not bundle) keeps them, and media and data each travel on
 //! their own transport.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
 use rtc::data_channel::RTCDataChannelId;
 use rtc::interceptor::Registry;
@@ -25,7 +25,7 @@ use rtc::peer_connection::event::{
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::{
-    RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState,
+    RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState, RTCSignalingState,
 };
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsTransportState, RTCIceCandidate,
@@ -2156,4 +2156,206 @@ fn each_transport_numbers_its_packets_for_congestion_feedback_on_its_own() -> Re
         }
     }
     Ok(())
+}
+
+/// The offer of `negotiate` with its video sections' tags taken out of the BUNDLE group: a
+/// peer that answers only some sections bundled.
+fn video_outside_the_group(sdp: String) -> String {
+    let video: Vec<String> = sdp
+        .split("\r\nm=")
+        .skip(1)
+        .filter(|section| section.starts_with("video "))
+        .filter_map(|section| {
+            section
+                .lines()
+                .find_map(|l| l.strip_prefix("a=mid:"))
+                .map(str::to_owned)
+        })
+        .collect();
+    sdp.lines()
+        .map(|l| match l.strip_prefix("a=group:BUNDLE ") {
+            Some(tags) => {
+                let kept: Vec<&str> = tags
+                    .split(' ')
+                    .filter(|tag| !video.iter().any(|v| v == tag))
+                    .collect();
+                format!("a=group:BUNDLE {}\r\n", kept.join(" "))
+            }
+            None => format!("{l}\r\n"),
+        })
+        .collect()
+}
+
+/// Every DTLS transport of `peer`, by id, with its state.
+fn dtls_states(peer: &Peer) -> Vec<(RTCTransportId, RTCDtlsTransportState)> {
+    peer.pc
+        .dtls_transports()
+        .iter()
+        .map(|t| (t.id(), t.state()))
+        .collect()
+}
+
+/// RFC 9429 section 5.7 under `balanced` with transports of their own: peer 0's offer (a
+/// transport per media type) reaches peer 1 through `edit` (no BUNDLE group, or the video
+/// outside it), and media flows on the transports that gives. Then both peers offer at once:
+/// peer 0, the polite one, rolls its offer back, answers peer 1's (which adds a receive-only
+/// audio section in a BUNDLE group of its own, a transport of its own on both sides), and
+/// offers again through `edit`. The rollback restores the transports as they were, the
+/// exchanges after it close none of them, every transport there is connects (the connection
+/// is "connected" again also when the re-offer's answer rejects the added section, as a peer
+/// that does not bundle answers a second audio section, RFC 9429 4.1.1, and closes its
+/// transport), and RTP of both senders still arrives over the transports it used before.
+fn a_rollback_keeps_the_unbundled_transports(edit: fn(String) -> String) -> Result<()> {
+    let mut world = World::with_credentials(RTCBundlePolicy::Balanced, false)?;
+    let (senders, _) = world.negotiate(edit)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    world.run("every transport connected", |peers| {
+        peers.iter().all(|p| {
+            p.pc.dtls_transports()
+                .iter()
+                .all(|t| t.state() == RTCDtlsTransportState::Connected)
+        })
+    })?;
+    let before: Vec<_> = world.peers.iter().map(dtls_states).collect();
+    assert!(
+        before[0].len() >= 2,
+        "more than one transport to keep: {before:?}"
+    );
+    let sender_transports = |world: &mut World| -> Vec<RTCTransportId> {
+        senders
+            .iter()
+            .map(|s| {
+                world.peers[0]
+                    .pc
+                    .rtp_sender(*s)
+                    .expect("sender")
+                    .transport()
+                    .expect("a transport")
+                    .id()
+            })
+            .collect()
+    };
+    let media_transports = sender_transports(&mut world);
+    assert_ne!(
+        media_transports[0], media_transports[1],
+        "audio and video on two transports"
+    );
+
+    // Glare: peer 1's offer is applied there first; peer 0's crosses it.
+    let now = world.now;
+    world.peers[1].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Recvonly,
+            streams: vec![],
+            send_encodings: vec![],
+        }),
+    )?;
+    let theirs = world.peers[1].pc.create_offer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, theirs.clone())
+        .context("peer 1 applies its offer")?;
+    let ours = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, ours)
+        .context("peer 0 applies its offer")?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, RTCSessionDescription::rollback(None)?)
+        .context("peer 0 rolls its offer back")?;
+    assert_eq!(
+        world.peers[0].pc.signaling_state(),
+        RTCSignalingState::Stable
+    );
+    assert_eq!(
+        dtls_states(&world.peers[0]),
+        before[0],
+        "the rollback leaves the transports as they were"
+    );
+    world.peers[0]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::offer(theirs.sdp.clone())?)
+        .with_context(|| format!("peer 0 applies peer 1's offer:\n{}", theirs.sdp))?;
+    let answer = world.peers[0].pc.create_answer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, answer.clone())
+        .context("peer 0 applies its answer")?;
+    world.peers[1]
+        .pc
+        .set_remote_description(now, answer.clone())
+        .with_context(|| format!("peer 1 applies peer 0's answer:\n{}", answer.sdp))?;
+    // Peer 0 offers again, its offer edited as the first was.
+    let offer = world
+        .renegotiate_with(edit)
+        .context("peer 0 offers again")?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.signaling_state(), RTCSignalingState::Stable);
+    }
+    // A section new in peer 1's offer may have brought a transport of its own: it gathers
+    // and connects too.
+    world.gather_new()?;
+    world.run("every transport connected after the exchanges", |peers| {
+        peers.iter().all(|p| {
+            p.pc.connection_state() == RTCPeerConnectionState::Connected
+                && p.pc
+                    .dtls_transports()
+                    .iter()
+                    .all(|t| t.state() == RTCDtlsTransportState::Connected)
+        })
+    })?;
+    for (i, peer) in world.peers.iter().enumerate() {
+        let after = dtls_states(peer);
+        for kept in &before[i] {
+            assert!(
+                after.contains(kept),
+                "peer {i} keeps {kept:?} connected: {after:?}\n{offer}"
+            );
+        }
+        assert_eq!(
+            peer.pc.connection_state(),
+            RTCPeerConnectionState::Connected
+        );
+    }
+    assert_eq!(
+        sender_transports(&mut world),
+        media_transports,
+        "the senders keep their transports"
+    );
+
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    world.peers[1].rtp.clear();
+    world.paths.clear();
+    for seq in 30..=35 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("audio and video after the rollback", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
+    let from: HashSet<SocketAddr> = world.paths.iter().map(|(from, _)| *from).collect();
+    assert!(
+        from.len() >= 2,
+        "media still leaves on two 5-tuples: {:?}",
+        world.paths
+    );
+    Ok(())
+}
+
+#[test]
+fn balanced_answered_without_bundle_a_rollback_keeps_every_transport() -> Result<()> {
+    a_rollback_keeps_the_unbundled_transports(without_bundle_group)
+}
+
+#[test]
+fn balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports() -> Result<()> {
+    a_rollback_keeps_the_unbundled_transports(video_outside_the_group)
 }

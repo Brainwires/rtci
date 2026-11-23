@@ -513,11 +513,14 @@ test("balanced: Rust's offer has a transport per media type, answered without BU
 // ---- bundlePolicy "balanced" against unbundled answers, with a rollback in each ----
 
 // Rust's default offer (a transport per media type) reaches the browser with `unbundle`
-// applied to every offer of Rust's: no BUNDLE group at all (a peer that does not bundle), or a
-// group without the video section (a peer that answers only some sections unbundled). Audio
-// and video flow; then both sides offer at once, the browser being impolite, so Rust rolls
-// its offer back (RFC 9429 5.7), answers the browser's, and offers again: media still flows on
-// the transports it had, which a rollback must leave as they were.
+// applied to every offer between the two, either way: no BUNDLE group at all (a peer that does
+// not bundle), or a group without the video section (a peer that answers only some sections
+// unbundled). The browser's own offer goes through it too: unedited, it proposes to bundle
+// every section again, which Rust rightly accepts (RFC 9143 7.3), so the transports would
+// merge for a reason other than the rollback. Audio and video flow; then both sides offer at
+// once, the browser being impolite, so Rust rolls its offer back (RFC 9429 5.7), answers the
+// browser's, and offers again, and the browser applies that offer: media still flows on the
+// transports it had, which a rollback must leave as they were.
 async function balancedUnbundledWithRollback(page, unbundle) {
   return page.evaluate(async ([ws, unbundleSrc]) => {
     // eslint-disable-next-line no-new-func
@@ -543,7 +546,8 @@ async function balancedUnbundledWithRollback(page, unbundle) {
     const transportsOf = async () => {
       const stats = await s.pc.getStats();
       const all = [...stats.values()].filter((x) => x.type === "transport");
-      return { reported: all.length, connected: all.filter((x) => x.dtlsState === "connected").length };
+      const connected = all.filter((x) => x.dtlsState === "connected").map((x) => x.id);
+      return { reported: all.length, connected: connected.length, ids: connected };
     };
     const transportsBefore = await transportsOf();
     // Glare: the browser's offer is applied first, Rust is asked to offer right after.
@@ -551,16 +555,20 @@ async function balancedUnbundledWithRollback(page, unbundle) {
     s.pc.addTransceiver("audio", { direction: "recvonly" });
     await s.makeOffer();
     s.send({ type: "request-offer" });
-    await s.sendOffer();
-    await Interop.until(() => s.pc.signalingState === "stable" && s.remoteOffers > 1, 20000, "Rust's offer after its rollback").catch(() => {});
+    await s.sendOffer((sdp) => munge(sdp, Interop));
+    // Rust's offer after its rollback: the third, applied (only the colliding second one is
+    // ignored).
+    await Interop.until(() => s.pc.signalingState === "stable" && s.remoteOffers - s.ignoredOffers > 1, 20000, "Rust's offer after its rollback").catch(() => {});
     const after = await media((before.video.framesDecoded || 15) + 30, (before.audio.packetsReceived || 50) + 100);
     const transportsAfter = await transportsOf();
     const report = await s.report();
+    // Read before close(): Firefox refuses the descriptions of a closed connection.
     const offer = s.pc.remoteDescription.sdp;
+    const local = s.pc.localDescription ? s.pc.localDescription.sdp : "";
     s.close();
     return {
       before, after, transportsBefore, transportsAfter,
-      grouped: /^a=group:BUNDLE/m.test(s.pc.localDescription ? s.pc.localDescription.sdp : ""),
+      grouped: /^a=group:BUNDLE/m.test(local),
       offers: s.remoteOffers, ignored: s.ignoredOffers,
       rollbacks: report.rollbacks,
       rust: { transportsConnected: report.transportsConnected },
@@ -576,9 +584,18 @@ function expectBalancedUnbundled(r) {
   if (r.transportsBefore.reported > 0) expect(r.transportsBefore.connected, JSON.stringify(r)).toBe(2);
   expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBeGreaterThanOrEqual(2);
   expect(r.rollbacks, "Rust (polite) must have rolled its offer back").toBeGreaterThan(0);
+  expect(r.ignored, "the browser ignores only Rust's colliding offer").toBe(1);
+  expect(r.offers, "Rust offered again after its rollback").toBeGreaterThanOrEqual(3);
   expect(r.after.video.error, JSON.stringify(r.after)).toBeUndefined();
   expect(r.after.audio.error, JSON.stringify(r.after)).toBeUndefined();
-  if (r.transportsAfter.reported > 0) expect(r.transportsAfter.connected, JSON.stringify(r)).toBe(2);
+  // The transports are kept: each one connected before still is (the browser's added
+  // section may bring one more), and audio and video arrive over the ones they did.
+  if (r.transportsAfter.reported > 0) {
+    for (const id of r.transportsBefore.ids) expect(r.transportsAfter.ids, JSON.stringify(r)).toContain(id);
+    for (const kind of ["video", "audio"]) {
+      if (r.before[kind].transportId) expect(r.after[kind].transportId, JSON.stringify(r)).toBe(r.before[kind].transportId);
+    }
+  }
   expect(r.errors).toEqual([]);
 }
 

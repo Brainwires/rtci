@@ -1803,6 +1803,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (an ICE restart with it) RTP of every transport flows under the new keys. The transports an
   answer leaves unused fire DTLS and then ICE "closed" (`OnTransportEvent`, W3C 4.4.1.6).
   Bandwidth probing is shown per transport (`each_transport_probes_its_own_path`).
+- **peer connection** (mt-11, bug): a later offer under `balanced` whose only BUNDLE group
+  holds a section new in it (the offer of a peer that answered an earlier offer without
+  BUNDLE) took the default transport's own section for one moved out of a group (RFC 9143
+  7.5.2), gave it a new transport and made another transport the default: the offer wrote the
+  default transport's `a=tls-id` on the video transport's section, which the peer refused
+  ("replaces ... without an ICE restart", RFC 9429 5.8.3), so a glare rollback in that state
+  ended the negotiation. Only sections that have a transport count as moved out now, and a
+  new section the offer puts in a group of new sections only (a new BUNDLE group, RFC 9143
+  section 5) gets a transport of its own, as the answerer gives it, instead of the default
+  transport, whose `a=tls-id` the answer's then seemed to replace. The ICE connection state
+  and the connection state (W3C 4.3.3, 4.3.4) are aggregated again when an answer or a
+  rollback closes a transport: one that closed before it connected held the connection at
+  "connecting". Tests:
+  `balanced_answered_without_bundle_a_rollback_keeps_every_transport`,
+  `balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports`.
+- **interop** (mt-11): the browser scenarios that start with `request-offer` sent their
+  scenario only with the browser's first offer, after the Rust peer had set its own; the peer
+  then changed its header encryption policy, which webrtc-extensions 10.2 refuses
+  (`InvalidModificationError`), and never answered. The scenario now goes with the first
+  offer or `request-offer` and is set up before any description. The two balanced rollback
+  scenarios now edit the browser's offer as they edit Rust's (unedited, the browser proposes
+  to bundle every section again, which Rust rightly accepts), `peer.js` handles signalling
+  messages in arrival order (an offer right after an answer was taken for a colliding one
+  and ignored), the descriptions are read before the connection is closed (Firefox refuses
+  them after), and the check is that the transports from before stay connected and carry
+  the same media.
 - **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
   stream that sent last, whatever transport's congestion controller asked for it, so with
   several transports one transport's probes travelled another's path and measured nothing of
