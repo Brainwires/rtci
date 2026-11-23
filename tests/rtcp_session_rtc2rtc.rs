@@ -1131,3 +1131,64 @@ fn source_changes_fire_ssrcchange_and_csrcchange() -> Result<()> {
     );
     Ok(())
 }
+
+/// RFC 5104 section 7.2 (a party that lists a codec control message "must" be able to receive
+/// it and act on it) and RFC 4585 section 6.3.1: with an empty interceptor registry, a PLI
+/// the remote receiver sends for a negotiated `nack pli` still reaches the sending
+/// application, which owns the encoder.
+#[test]
+fn a_key_frame_request_reaches_an_application_with_an_empty_registry() -> Result<()> {
+    let media_engine = || -> Result<MediaEngine> {
+        let mut media_engine = Peer::media_engine(false)?;
+        media_engine.register_feedback(
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "nack".to_owned(),
+                parameter: "pli".to_owned(),
+            },
+            RtpCodecKind::Video,
+        );
+        Ok(media_engine)
+    };
+    let (mut world, sender) = World::connected_peers([
+        Peer::built(
+            "10.0.0.1:5000",
+            media_engine()?,
+            Registry::new(),
+            SettingEngineBuilder::new().build(),
+        )?,
+        Peer::built(
+            "10.0.0.2:5000",
+            media_engine()?,
+            Registry::new(),
+            SettingEngineBuilder::new().build(),
+        )?,
+    ])?;
+    let (ssrc, _, _) = world.sender_stream(sender);
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    let now = world.now;
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .write_rtcp(
+            now,
+            vec![Box::new(PictureLossIndication {
+                sender_ssrc: 0,
+                media_ssrc: ssrc,
+            })],
+        )?;
+    let is_pli =
+        |packet: &Box<dyn rtc::rtcp::Packet>| packet.as_any().is::<PictureLossIndication>();
+    let deadline = now + Duration::from_secs(20);
+    world.pump()?;
+    while world.now < deadline && !world.peers[0].read_rtcp.iter().any(is_pli) {
+        let next = world.now + Duration::from_millis(100);
+        world.run_until(next)?;
+    }
+    assert!(
+        world.peers[0].read_rtcp.iter().any(is_pli),
+        "the PLI was delivered"
+    );
+    Ok(())
+}

@@ -477,6 +477,9 @@ pub struct SettingEngine {
     /// Received RTCP is held to RFC 3550 Appendix A.2 and section 6.4.1
     /// ([`SettingEngineBuilder::with_strict_rtcp_validity`]).
     pub(crate) strict_rtcp_validity: bool,
+    /// RTCP feedback the application writes is sent whether or not its section negotiated
+    /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
+    pub(crate) unnegotiated_rtcp_feedback: bool,
 }
 
 impl SettingEngine {
@@ -2127,6 +2130,16 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
+    /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
+    /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.
+    pub fn with_unnegotiated_rtcp_feedback(mut self, allowed: bool) -> Self {
+        self.0.unnegotiated_rtcp_feedback = allowed;
         self
     }
 

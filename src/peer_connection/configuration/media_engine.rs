@@ -1525,6 +1525,12 @@ impl MediaEngine {
             }
 
             let mut codecs = codecs_from_media_description(media)?;
+            // RFC 4585 section 4.1: no feedback outside an AVPF-based profile.
+            if !crate::peer_connection::sdp::is_avpf_section(media) {
+                for codec in &mut codecs {
+                    codec.rtp_codec.rtcp_feedback.clear();
+                }
+            }
 
             let add_if_new = |existing_codecs: &mut Vec<RTCRtpCodecParameters>,
                               codec: &RTCRtpCodecParameters| {
@@ -2175,7 +2181,7 @@ mod register_feedback_test {
 /// Whether `codec`, when it is a RED format (RFC 2198), names in its fmtp only formats of
 /// `negotiated` with its own clock rate. Any other format, and a RED format without an fmtp
 /// line, passes.
-fn red_encodings_negotiated(
+pub(crate) fn red_encodings_negotiated(
     codec: &RTCRtpCodecParameters,
     negotiated: &[RTCRtpCodecParameters],
 ) -> bool {

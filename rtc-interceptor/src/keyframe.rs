@@ -68,12 +68,19 @@ impl KeyFrameRequestInterceptor {
     }
 }
 
-/// Whether a compound RTCP packet carries a PLI or a FIR.
+/// Whether a compound RTCP packet carries a request only the encoder can answer: a PLI or a
+/// FIR, and also an SLI or an RPSI (RFC 4585 sections 6.3.2, 6.3.3; RFC 8834 sections 5.1.3,
+/// 5.1.4: a sender "SHOULD" try to repair the slice, and act on a reference picture
+/// selection), which the encoder needs as much as a key-frame request.
 fn asks_for_key_frame(packets: &[Box<dyn rtcp::Packet>]) -> bool {
+    use rtcp::payload_feedbacks::reference_picture_selection_indication::ReferencePictureSelectionIndication;
+    use rtcp::payload_feedbacks::slice_loss_indication::SliceLossIndication;
     packets.iter().any(|p| {
         let p = p.as_any();
-        p.downcast_ref::<PictureLossIndication>().is_some()
-            || p.downcast_ref::<FullIntraRequest>().is_some()
+        p.is::<PictureLossIndication>()
+            || p.is::<FullIntraRequest>()
+            || p.is::<SliceLossIndication>()
+            || p.is::<ReferencePictureSelectionIndication>()
     })
 }
 
@@ -303,6 +310,26 @@ mod tests {
         assert_eq!(delivered(true, vec![fir()]), 1);
         // In a compound packet beside a report.
         assert_eq!(delivered(true, vec![rr(), pli()]), 1);
+    }
+
+    /// RFC 4585 sections 6.3.2 and 6.3.3, RFC 8834 sections 5.1.3 and 5.1.4: SLI and RPSI
+    /// reach the application, whose encoder repairs the slice or switches reference.
+    #[test]
+    fn sli_and_rpsi_reach_the_application() {
+        use rtcp::payload_feedbacks::reference_picture_selection_indication::ReferencePictureSelectionIndication;
+        use rtcp::payload_feedbacks::slice_loss_indication::SliceLossIndication;
+        let sli: Box<dyn rtcp::Packet> = Box::new(SliceLossIndication {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            ..Default::default()
+        });
+        let rpsi: Box<dyn rtcp::Packet> = Box::new(ReferencePictureSelectionIndication {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            ..Default::default()
+        });
+        assert_eq!(delivered(true, vec![rr(), sli]), 1);
+        assert_eq!(delivered(true, vec![rpsi]), 1);
     }
 
     #[test]

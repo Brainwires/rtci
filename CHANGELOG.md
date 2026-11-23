@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: open MUST rows.
+  - `RTCRtpReceiver::write_rtcp` / `RTCRtpSender::write_rtcp` refuse feedback the section did
+    not negotiate (NACK, PLI, SLI, RPSI, FIR, TMMBR/TMMBN, TSTR/TSTN, VBCM, LRR, REMB,
+    transport-cc, RFC 8888, ECN) with the new `Error::ErrRTCPFeedbackNotNegotiated` (RFC 4585
+    section 4.2, RFC 5104 section 7.2); `SettingEngineBuilder::with_unnegotiated_rtcp_feedback(true)`
+    is the earlier behaviour.
+  - A remote section whose profile is not AVPF-based (`RTP/SAVP`, `RTP/AVP`) negotiates no
+    RTCP feedback and no reduced-size RTCP (RFC 4585 section 4.1, RFC 5506 section 4).
+  - `RTCPeerConnectionBuilder::build` adds `KeyFrameRequestInterceptor` when the registry has
+    nothing at `Slot::KeyFrameRequests`: a hand-built chain now delivers PLI and FIR (and SLI,
+    RPSI) to the application (RFC 5104 section 7.2). The key-frame request interceptor also
+    delivers SLI and RPSI.
+  - A remote `rtx` format whose clock rate differs from its `apt` format is not negotiated
+    (RFC 4588 section 4); an offer leaves out a RED format whose fmtp names an encoding the
+    section does not offer (RFC 2198 section 5).
+  - Static payload types without `a=rtpmap` are read from RFC 3551 Tables 4 and 5 in full
+    (video ones too).
+  - `H26xWriter` (H.265) drops a NAL unit with a lost fragment (RFC 7798 section 4.4.3);
+    `H265Packet::depacketize_with_sequence_number` takes a repeated sequence number as a
+    duplicate, not a gap.
+
 - **media conformance**: ECN and FEC engine sides.
   - `rtcp::extended_report::BlockType::EcnSummary` (13): an XR block of type 13 parses as
     `EcnSummaryReportBlock` (RFC 6679 section 5.2) instead of `BlockType::Other(13)` /

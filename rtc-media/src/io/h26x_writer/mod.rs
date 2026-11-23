@@ -120,10 +120,17 @@ impl<W: Write> H26xWriter<W> {
         // The depacketizer returns the NAL units the packet completes, as Annex B: a single
         // NAL unit, the units of an aggregation packet, a NAL unit reassembled from its
         // fragmentation units (bounded), or what a PACI packet carries. Nothing of type 48 to
-        // 63 is among them (RFC 7798 section 6).
-        let data = self
-            .packet
-            .depacketize(&Bytes::copy_from_slice(&packet.payload))?;
+        // 63 is among them (RFC 7798 section 6). The packet's sequence number goes with it:
+        // after a gap the fragments of the NAL unit the lost packet belonged to are dropped
+        // rather than spliced into a NAL unit with a hole in it (section 4.4.3: an incomplete
+        // NAL unit is never passed on with forbidden_zero_bit 0).
+        let data = match &mut self.packet {
+            H26xPacket::H265(p) => p.depacketize_with_sequence_number(
+                packet.header.sequence_number,
+                &Bytes::copy_from_slice(&packet.payload),
+            )?,
+            H26xPacket::H264(p) => p.depacketize(&Bytes::copy_from_slice(&packet.payload))?,
+        };
         self.writer.write_all(&data)?;
 
         Ok(())

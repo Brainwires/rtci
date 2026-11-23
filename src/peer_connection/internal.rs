@@ -1638,7 +1638,11 @@ impl RTCPeerConnection {
                 continue;
             };
             // A bundled section takes the tagged section's when it has none of its own.
+            // RFC 5506 section 4: reduced-size RTCP only "in sessions using the AVPF / SAVPF
+            // early or immediate feedback mode" (and 4.1: never with RTP/AVP or RTP/SAVP).
             let reduced_size = !is_rejected_media(answered)
+                && crate::peer_connection::sdp::is_avpf_section(offered)
+                && crate::peer_connection::sdp::is_avpf_section(answered)
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
@@ -1831,13 +1835,22 @@ impl RTCPeerConnection {
                 .collect()
         };
 
-        // One transport today; the flag belongs with each transport's SRTP context, and becomes
-        // per transport when the sections are split over several.
-        self.pipeline_context
-            .transports
-            .default_mut()
-            .srtp_handler_context
-            .rtcp_reduced_size = reduced_size;
+        // Each transport's SRTP context takes the flag of the sections it carries: reduced-size
+        // RTCP on a transport only when every live section on it negotiated it.
+        let mut per_transport: std::collections::HashMap<TransportId, bool> =
+            std::collections::HashMap::new();
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid);
+            let entry = per_transport.entry(id).or_insert(true);
+            *entry = *entry && transceiver.rtcp_reduced_size();
+        }
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle.srtp_handler_context.rtcp_reduced_size =
+                per_transport.get(&bundle.id).copied().unwrap_or(false);
+        }
         let mut controls = vec![
             RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
             RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),

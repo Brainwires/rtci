@@ -700,7 +700,8 @@ impl RTCPeerConnectionBuilder {
 }
 
 /// RFC 8834 section 4.1: "The RTP Control Protocol (RTCP) ... MUST be implemented and used
-/// by all WebRTC endpoints". A registry that brings no RTCP session (an empty one, or a chain
+/// by all WebRTC endpoints", and the key-frame requests a section signals reach the
+/// application. A registry that brings no RTCP session (an empty one, or a chain
 /// built by hand) gets the one [`configure_rtcp_reports`] installs, unless it reports by itself
 /// through the older report interceptors or the application opted out
 /// ([`with_rtcp_session_omitted`](configuration::setting_engine::SettingEngineBuilder::with_rtcp_session_omitted)).
@@ -711,13 +712,22 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
         .slots()
         .iter()
         .any(|(_, name)| name == "SenderReportInterceptor" || name == "ReceiverReportInterceptor");
-    if setting_engine.rtcp_session_omitted
+    let registry = if setting_engine.rtcp_session_omitted
         || registry.holds(interceptor::Slot::RtcpSession)
         || reports_by_itself
     {
         registry
     } else {
         configuration::interceptor_registry::configure_rtcp_reports(registry)
+    };
+    // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to
+    // receive it and act on it, and RFC 4585 section 6.3.1 the same of PLI: only the
+    // application's encoder can answer a key-frame request, so a chain without the
+    // interceptor that delivers them (which the chain's terminus would otherwise end) gets it.
+    if registry.holds(interceptor::Slot::KeyFrameRequests) {
+        registry
+    } else {
+        configuration::interceptor_registry::configure_key_frame_requests(registry)
     }
 }
 

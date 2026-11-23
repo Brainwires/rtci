@@ -2334,6 +2334,10 @@ pub enum Error {
     /// SSRC values"; RFC 3550 section 8, one SSRC per source.
     #[error("sender encodings name SSRC {0} for more than one stream")]
     ErrRTPSenderSsrcCollision(u32),
+    /// The application wrote RTCP feedback its section did not negotiate (RFC 4585 section
+    /// 4.2, RFC 5104 section 7.2): the `a=rtcp-fb` type and parameter it needs.
+    #[error("RTCP feedback `{0} {1}` was not negotiated for the stream")]
+    ErrRTCPFeedbackNotNegotiated(String, String),
     /// An encoding's rid is not 1 to 255 alphanumeric characters (RFC 8852 section 3.1, the
     /// RtpStreamId the rid is sent as; RFC 8851 section 10).
     #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]

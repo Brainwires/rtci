@@ -603,6 +603,51 @@ mod tests {
         assert_eq!(clean, 1_000_000.0, "no marks: {clean}");
     }
 
+    /// RFC 5104 section 5: after a TMMBR raises (or lifts) the limit, "the sender ... SHALL
+    /// use congestion control" to go up: the target does not jump to the new limit but climbs
+    /// by the estimator's own increase as feedback shows the path carries it.
+    #[test]
+    fn a_raised_limit_is_climbed_to_by_congestion_control_not_jumped_to() {
+        let epoch = Instant::now();
+        let mut gcc = Gcc::new(300_000.0, 50_000.0, 10_000_000.0);
+        gcc.set_external_bounds(None, Some(300_000.0));
+        let mut id = 0u64;
+        let mut batch = |gcc: &mut Gcc, index: u64| {
+            let at = epoch + Duration::from_millis(index * 100);
+            let reports: Vec<PacketReport> = (0..10)
+                .map(|n| {
+                    id += 1;
+                    let departure = at + Duration::from_millis(n * 10);
+                    report(id, departure, Some(index * 100 + n * 10 + 20))
+                })
+                .collect();
+            gcc.on_reports(at + Duration::from_millis(100), &reports);
+        };
+        for index in 0..20 {
+            batch(&mut gcc, index);
+        }
+        assert!(gcc.target_bitrate() <= 300_000.0);
+
+        gcc.set_external_bounds(None, Some(5_000_000.0));
+        let right_after = gcc.target_bitrate();
+        assert!(
+            right_after <= 300_000.0 * 1.01,
+            "no jump to the new limit: {right_after}"
+        );
+        for index in 20..60 {
+            batch(&mut gcc, index);
+        }
+        let later = gcc.target_bitrate();
+        assert!(
+            later > right_after,
+            "the target climbs: {right_after} -> {later}"
+        );
+        assert!(
+            later < 5_000_000.0,
+            "by the increase, not to the limit: {later}"
+        );
+    }
+
     /// The more pessimistic half wins. Here loss is catastrophic while delay is quiet, so the
     /// combined target must follow loss — which is the whole point of the `min`.
     #[test]

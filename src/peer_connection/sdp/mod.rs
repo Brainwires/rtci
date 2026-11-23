@@ -3615,8 +3615,8 @@ pub(crate) fn codecs_from_media_description(
         let codec = match codecs.get(&payload_type).filter(|c| !c.name.is_empty()) {
             Some(codec) => codec,
             None => {
-                let Some((name, clock_rate)) = static_audio_payload_type(payload_type)
-                    .filter(|_| m.media_name.media == "audio")
+                let Some((name, clock_rate, channels)) =
+                    static_payload_type(&m.media_name.media, payload_type)
                 else {
                     continue;
                 };
@@ -3625,7 +3625,7 @@ pub(crate) fn codecs_from_media_description(
                     payload_type,
                     name: name.to_owned(),
                     clock_rate,
-                    encoding_parameters: String::new(),
+                    encoding_parameters: channels.map(|n| n.to_string()).unwrap_or_default(),
                     fmtp: defined.map(|c| c.fmtp.clone()).unwrap_or_default(),
                     rtcp_feedback: defined.map(|c| c.rtcp_feedback.clone()).unwrap_or_default(),
                 };
@@ -3686,19 +3686,91 @@ pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> 
     Some(name)
 }
 
-/// RFC 3551 section 6's static audio payload types: encoding name and clock
-/// rate.
-fn static_audio_payload_type(payload_type: PayloadType) -> Option<(&'static str, u32)> {
-    match payload_type {
-        0 => Some(("PCMU", 8000)),
-        3 => Some(("GSM", 8000)),
-        4 => Some(("G723", 8000)),
-        8 => Some(("PCMA", 8000)),
-        9 => Some(("G722", 8000)),
-        13 => Some(("CN", 8000)),
-        18 => Some(("G729", 8000)),
+/// RFC 3551 section 6's static payload types of a section of `media` (`audio`: Table 4,
+/// `video`: Table 5): encoding name, clock rate and, where the table gives it, the number of
+/// channels. RFC 3551 section 3: a static payload type means its encoding without an
+/// `a=rtpmap` line. A type of the other media kind's table is not one of this section's.
+fn static_payload_type(
+    media: &str,
+    payload_type: PayloadType,
+) -> Option<(&'static str, u32, Option<u16>)> {
+    let audio = match payload_type {
+        0 => Some(("PCMU", 8000, None)),
+        3 => Some(("GSM", 8000, None)),
+        4 => Some(("G723", 8000, None)),
+        5 => Some(("DVI4", 8000, None)),
+        6 => Some(("DVI4", 16000, None)),
+        7 => Some(("LPC", 8000, None)),
+        8 => Some(("PCMA", 8000, None)),
+        9 => Some(("G722", 8000, None)),
+        10 => Some(("L16", 44100, Some(2))),
+        11 => Some(("L16", 44100, None)),
+        12 => Some(("QCELP", 8000, None)),
+        13 => Some(("CN", 8000, None)),
+        14 => Some(("MPA", 90000, None)),
+        15 => Some(("G728", 8000, None)),
+        16 => Some(("DVI4", 11025, None)),
+        17 => Some(("DVI4", 22050, None)),
+        18 => Some(("G729", 8000, None)),
+        _ => None,
+    };
+    let video = match payload_type {
+        25 => Some(("CelB", 90000, None)),
+        26 => Some(("JPEG", 90000, None)),
+        28 => Some(("nv", 90000, None)),
+        31 => Some(("H261", 90000, None)),
+        32 => Some(("MPV", 90000, None)),
+        33 => Some(("MP2T", 90000, None)),
+        34 => Some(("H263", 90000, None)),
+        _ => None,
+    };
+    match media {
+        "audio" => audio,
+        "video" => video,
         _ => None,
     }
+}
+
+/// RFC 3551 section 3 with Tables 4 and 5: every static payload type is read without an
+/// `a=rtpmap` line as its table's encoding, in a section of its media kind only.
+#[test]
+fn every_static_payload_type_of_rfc_3551_is_read_without_an_rtpmap() {
+    let read = |media: &str, formats: &[&str]| {
+        let mut m = MediaDescription::default();
+        m.media_name.media = media.to_owned();
+        m.media_name.formats = formats.iter().map(|f| (*f).to_owned()).collect();
+        codecs_from_media_description(&m).unwrap()
+    };
+    let audio = read("audio", &["10", "14", "16", "34"]);
+    let names: Vec<(&str, u32, u16)> = audio
+        .iter()
+        .map(|c| {
+            (
+                c.rtp_codec.mime_type.as_str(),
+                c.rtp_codec.clock_rate,
+                c.rtp_codec.channels,
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("audio/L16", 44100, 2),
+            ("audio/MPA", 90000, 0),
+            ("audio/DVI4", 11025, 0)
+        ],
+        "34 is a video type"
+    );
+    let video = read("video", &["26", "31", "34", "0"]);
+    let names: Vec<&str> = video
+        .iter()
+        .map(|c| c.rtp_codec.mime_type.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["video/JPEG", "video/H261", "video/H263"],
+        "0 is an audio type"
+    );
 }
 
 #[test]
@@ -3899,6 +3971,17 @@ pub(crate) struct SectionExtension {
     /// The direction the line gives the extension (RFC 8285 section 7), `Unspecified` for
     /// none.
     pub(crate) direction: sdp::direction::Direction,
+}
+
+/// Whether a section's transport protocol is an RTP/AVPF profile or one that inherits its
+/// signalling (`RTP/AVPF`, `RTP/SAVPF`, `UDP/TLS/RTP/SAVPF`, `TCP/DTLS/RTP/SAVPF`): RFC 4585
+/// section 4.1, feedback is used only under such a profile, and RFC 5506 section 4, reduced-size
+/// RTCP only with AVPF's early or immediate feedback.
+pub(crate) fn is_avpf_section(m: &MediaDescription) -> bool {
+    m.media_name
+        .protos
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case("AVPF") || p.eq_ignore_ascii_case("SAVPF"))
 }
 
 /// Whether a section's transport protocol is an SRTP-based RTP profile (`RTP/SAVP`,
