@@ -19,7 +19,7 @@ use crate::peer_connection::handler::ice::IceHandler;
 use crate::peer_connection::handler::interceptor::{InterceptorHandler, InterceptorHandlerContext};
 use crate::peer_connection::handler::sctp::{SctpHandler, SctpHandlerContext};
 use crate::peer_connection::handler::srtp::SrtpHandler;
-use crate::peer_connection::handler::transport_set::TransportSet;
+use crate::peer_connection::handler::transport_set::{TransportId, TransportSet};
 use crate::peer_connection::message::{
     RTCMessage, TaggedRTCMessage,
     internal::{
@@ -57,25 +57,6 @@ macro_rules! forward_handlers {
     };
 }
 
-/// Reverse handler list - invokes callback with handler list
-macro_rules! reverse_handlers {
-    ($callback:ident!($($args:tt)*)) => {
-        $callback!(
-            $($args)*,
-            [
-                get_endpoint_handler,
-                get_interceptor_handler,
-                get_srtp_handler,
-                get_datachannel_handler,
-                get_sctp_handler,
-                get_dtls_handler,
-                get_ice_handler,
-                get_demuxer_handler
-            ]
-        )
-    };
-}
-
 /// Helper macro that processes a list of handlers with code blocks
 macro_rules! process_handler_list {
     (call_macro: process_handler!($self:expr, $handler:ident, $code:block), [$($getter:ident),+]) => {{
@@ -93,11 +74,6 @@ macro_rules! for_each_handler {
     // Forward order: execute code block for each handler
     (forward: $macro:ident!($($args:tt)*)) => {
         forward_handlers!(process_handler_list!(call_macro: $macro!($($args)*)))
-    };
-
-    // Reverse order: execute code block for each handler
-    (reverse: $macro:ident!($($args:tt)*)) => {
-        reverse_handlers!(process_handler_list!(call_macro: $macro!($($args)*)))
     };
 }
 
@@ -133,6 +109,11 @@ pub(crate) struct PipelineContext {
     // Statistics accumulator
     pub(crate) stats: RTCStatsAccumulator,
 
+    /// The `iceConnectionState` last announced: the aggregate over the transports (W3C
+    /// 4.3.4), told when it changes.
+    pub(crate) announced_ice_connection_state:
+        crate::peer_connection::state::ice_connection_state::RTCIceConnectionState,
+
     /// The newest instant the pipeline has been given, through a datagram, a write or a timeout.
     ///
     /// `close()` takes no time of its own, and this crate reads no clock, so the `close_notify`
@@ -141,7 +122,7 @@ pub(crate) struct PipelineContext {
 }
 
 impl PipelineContext {
-    fn observe(&mut self, now: Instant) {
+    pub(crate) fn observe(&mut self, now: Instant) {
         self.now = self.now.max(now);
     }
 }
@@ -164,9 +145,18 @@ impl RTCPeerConnection {
             ..
         }) = &evt
         {
-            self.ice_transport_mut()
-                .agent
-                .local_candidate_conveyed(&candidate.id);
+            // The candidate is of the transport whose ufrag it carries (each transport has
+            // its own agent, RFC 9429 section 5.2.1).
+            let ufrag = candidate.username_fragment.clone();
+            for bundle in self.pipeline_context.transports.iter_mut() {
+                let agent = &mut bundle.ice_handler_context.ice_transport.agent;
+                if ufrag
+                    .as_ref()
+                    .is_none_or(|u| *u == agent.get_local_credentials().ufrag)
+                {
+                    agent.local_candidate_conveyed(&candidate.id);
+                }
+            }
         }
         evt
     }
@@ -362,12 +352,12 @@ impl RTCPeerConnection {
         })
     }
 
-    fn flush_writes(&mut self) {
+    pub(crate) fn flush_writes(&mut self) {
         use sansio::Protocol;
 
+        // The stages above SRTP are the connection's: they run once.
         let mut intermediate_wouts = VecDeque::new();
-
-        for_each_handler!(reverse: process_handler!(self, handler, {
+        process_handler_list!(call_macro: process_handler!(self, handler, {
             while let Some(msg) = intermediate_wouts.pop_front() {
                 if let Err(err) = handler.handle_write(msg) {
                     warn!("{}.handle_write got error: {}", handler.name(), err);
@@ -376,21 +366,137 @@ impl RTCPeerConnection {
             while let Some(msg) = handler.poll_write() {
                 intermediate_wouts.push_back(msg);
             }
-        }));
+        }), [get_endpoint_handler, get_interceptor_handler]);
 
-        // Final poll write out to pipeline's write out
+        // SRTP and below are each transport's: a packet goes down the transport of the m=
+        // section its SSRC belongs to, data channel messages down the one SCTP runs over
+        // (RFC 9143 section 9; RFC 9429 section 5.2.1: a transport per unbundled section).
+        let ids = self.pipeline_context.transports.ids();
+        let data = self.pipeline_context.transports.data_transport_id();
+        let mut per_transport: Vec<VecDeque<TaggedRTCMessageInternal>> =
+            ids.iter().map(|_| VecDeque::new()).collect();
         while let Some(msg) = intermediate_wouts.pop_front() {
-            if let RTCMessageInternal::Raw(message) = msg.message {
-                self.pipeline_context.write_outs.push_back(TaggedBytesMut {
-                    now: msg.now,
-                    transport: msg.transport,
-                    message,
-                });
+            let id = if ids.len() == 1 {
+                ids[0]
+            } else {
+                self.transport_of_write(&msg).unwrap_or(data)
+            };
+            let index = ids.iter().position(|t| *t == id).unwrap_or(0);
+            per_transport[index].push_back(msg);
+        }
+
+        for (id, mut wouts) in ids.into_iter().zip(per_transport) {
+            let previous = self.pipeline_context.transports.active_id();
+            self.pipeline_context.transports.set_active(id);
+            process_handler_list!(call_macro: process_handler!(self, handler, {
+                while let Some(msg) = wouts.pop_front() {
+                    if let Err(err) = handler.handle_write(msg) {
+                        warn!("{}.handle_write got error: {}", handler.name(), err);
+                    }
+                }
+                while let Some(msg) = handler.poll_write() {
+                    wouts.push_back(msg);
+                }
+            }), [get_srtp_handler]);
+            if id == data {
+                process_handler_list!(call_macro: process_handler!(self, handler, {
+                    while let Some(msg) = wouts.pop_front() {
+                        if let Err(err) = handler.handle_write(msg) {
+                            warn!("{}.handle_write got error: {}", handler.name(), err);
+                        }
+                    }
+                    while let Some(msg) = handler.poll_write() {
+                        wouts.push_back(msg);
+                    }
+                }), [get_datachannel_handler, get_sctp_handler]);
+            }
+            process_handler_list!(call_macro: process_handler!(self, handler, {
+                while let Some(msg) = wouts.pop_front() {
+                    if let Err(err) = handler.handle_write(msg) {
+                        warn!("{}.handle_write got error: {}", handler.name(), err);
+                    }
+                }
+                while let Some(msg) = handler.poll_write() {
+                    wouts.push_back(msg);
+                }
+            }), [get_dtls_handler, get_ice_handler, get_demuxer_handler]);
+            self.pipeline_context.transports.set_active(previous);
+
+            // Final poll write out to pipeline's write out; what leaves from one of the
+            // engine's ICE-TCP candidates goes onto that transport's connection instead.
+            while let Some(msg) = wouts.pop_front() {
+                if let RTCMessageInternal::Raw(message) = msg.message
+                    && let Some(out) = self.take_tcp_write(
+                        id,
+                        TaggedBytesMut {
+                            now: msg.now,
+                            transport: msg.transport,
+                            message,
+                        },
+                    )
+                {
+                    self.pipeline_context.write_outs.push_back(out);
+                }
             }
         }
     }
 
+    /// The transport an RTP or RTCP packet on its way to SRTP goes down: that of the m=
+    /// section of its SSRC (the sender's or receiver's whose stream it is, or that an RTCP
+    /// packet reports on). `None` for anything else, and for an SSRC no section has.
+    fn transport_of_write(&self, msg: &TaggedRTCMessageInternal) -> Option<TransportId> {
+        let ssrcs: Vec<u32> = match &msg.message {
+            RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(packet))) => {
+                vec![packet.header.ssrc]
+            }
+            RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(packets))) => packets
+                .iter()
+                .flat_map(|packet| packet.destination_ssrc())
+                .collect(),
+            _ => return None,
+        };
+        ssrcs
+            .into_iter()
+            .find_map(|ssrc| self.transport_of_ssrc(ssrc))
+    }
+
+    /// The transport of the m= section whose sender or receiver has `ssrc` (its media, RTX or
+    /// FEC stream).
+    pub(crate) fn transport_of_ssrc(&self, ssrc: u32) -> Option<TransportId> {
+        let has = |coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters| {
+            coding.ssrc == Some(ssrc)
+                || coding.rtx.as_ref().is_some_and(|rtx| rtx.ssrc == ssrc)
+                || coding.fec.as_ref().is_some_and(|fec| fec.ssrc == ssrc)
+        };
+        self.rtp_transceivers.iter().find_map(|transceiver| {
+            let mid = transceiver.mid().as_ref()?;
+            let sends = transceiver.sender().as_ref().is_some_and(|sender| {
+                sender
+                    .send_encodings()
+                    .iter()
+                    .any(|encoding| has(&encoding.rtp_coding_parameters))
+            });
+            let receives = transceiver
+                .receiver()
+                .as_ref()
+                .is_some_and(|receiver| receiver.get_coding_parameters().iter().any(&has));
+            (sends || receives).then(|| self.pipeline_context.transports.transport_id_for(mid))
+        })
+    }
+
+    /// Runs the pipeline's reads: `msg` up the active transport, or, without one, what every
+    /// transport's handlers have queued.
     fn pump_reads(&mut self, msg: Option<TaggedRTCMessageInternal>) {
+        if msg.is_some() || self.pipeline_context.transports.len() == 1 {
+            self.pump_reads_on_active(msg);
+            return;
+        }
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.pump_reads_on_active(None));
+        }
+    }
+
+    fn pump_reads_on_active(&mut self, msg: Option<TaggedRTCMessageInternal>) {
         let mut intermediate_routs = VecDeque::<TaggedRTCMessageInternal>::new();
 
         if let Some(msg) = msg {
@@ -398,7 +504,10 @@ impl RTCPeerConnection {
         }
 
         use sansio::Protocol;
-        for_each_handler!(forward: process_handler!(self, handler, {
+        // SCTP and the data channels are on the data transport only: another transport's
+        // DTLS carries none of their packets, and its events are not theirs.
+        let carries_data = self.active_carries_data();
+        process_handler_list!(call_macro: process_handler!(self, handler, {
             while let Some(msg) = intermediate_routs.pop_front() {
                 if let Err(err) = handler.handle_read(msg) {
                     warn!("{}.handle_read got error: {}", handler.name(), err);
@@ -407,7 +516,29 @@ impl RTCPeerConnection {
             while let Some(msg) = handler.poll_read() {
                 intermediate_routs.push_back(msg);
             }
-        }));
+        }), [get_demuxer_handler, get_ice_handler, get_dtls_handler]);
+        if carries_data {
+            process_handler_list!(call_macro: process_handler!(self, handler, {
+            while let Some(msg) = intermediate_routs.pop_front() {
+                if let Err(err) = handler.handle_read(msg) {
+                    warn!("{}.handle_read got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_read() {
+                intermediate_routs.push_back(msg);
+            }
+        }), [get_sctp_handler, get_datachannel_handler]);
+        }
+        process_handler_list!(call_macro: process_handler!(self, handler, {
+            while let Some(msg) = intermediate_routs.pop_front() {
+                if let Err(err) = handler.handle_read(msg) {
+                    warn!("{}.handle_read got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_read() {
+                intermediate_routs.push_back(msg);
+            }
+        }), [get_srtp_handler, get_interceptor_handler, get_endpoint_handler]);
 
         // Finally, put intermediate_routs into RTCPeerConnection's routs
         while let Some(msg) = intermediate_routs.pop_front() {
@@ -457,14 +588,36 @@ impl RTCPeerConnection {
         }
     }
 
-    /// Returns whether any handler raised an event during the sweep.
+    /// Whether the active transport is the one the SCTP association runs over.
+    fn active_carries_data(&self) -> bool {
+        let transports = &self.pipeline_context.transports;
+        transports.active_id() == transports.data_transport_id()
+    }
+
+    /// Returns whether any handler raised an event during the sweep, of any transport.
     fn pump_events(&mut self) -> bool {
+        let mut raised = false;
+        for id in self.pipeline_context.transports.ids() {
+            raised |= self.with_transport(id, |pc| pc.pump_events_on_active());
+        }
+        // The SCTP transport's state follows its association, which any event may have moved;
+        // the selected pair is the agent's, whose change event the DTLS handler consumes.
+        self.announce_transport_states();
+        if !self.is_closed() {
+            self.announce_selected_candidate_pair();
+        }
+
+        raised
+    }
+
+    fn pump_events_on_active(&mut self) -> bool {
         let mut intermediate_eouts = VecDeque::new();
         let mut raised = false;
 
         use sansio::Protocol;
 
-        for_each_handler!(forward: process_handler!(self, handler, {
+        let carries_data = self.active_carries_data();
+        process_handler_list!(call_macro: process_handler!(self, handler, {
             while let Some(evt) = intermediate_eouts.pop_front() {
                 if let Err(err) = handler.handle_event(evt) {
                     warn!("{}.handle_event got error: {}", handler.name(), err);
@@ -474,7 +627,31 @@ impl RTCPeerConnection {
                 raised = true;
                 intermediate_eouts.push_back(msg);
             }
-        }));
+        }), [get_demuxer_handler, get_ice_handler, get_dtls_handler]);
+        if carries_data {
+            process_handler_list!(call_macro: process_handler!(self, handler, {
+            while let Some(evt) = intermediate_eouts.pop_front() {
+                if let Err(err) = handler.handle_event(evt) {
+                    warn!("{}.handle_event got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_event() {
+                raised = true;
+                intermediate_eouts.push_back(msg);
+            }
+        }), [get_sctp_handler, get_datachannel_handler]);
+        }
+        process_handler_list!(call_macro: process_handler!(self, handler, {
+            while let Some(evt) = intermediate_eouts.pop_front() {
+                if let Err(err) = handler.handle_event(evt) {
+                    warn!("{}.handle_event got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_event() {
+                raised = true;
+                intermediate_eouts.push_back(msg);
+            }
+        }), [get_srtp_handler, get_interceptor_handler, get_endpoint_handler]);
 
         // Finally, put intermediate_eouts into RTCPeerConnection's eouts, with the transport
         // and connection state events each causes, in the spec's order: the transport's own
@@ -489,10 +666,20 @@ impl RTCPeerConnection {
                     if self.is_closed() {
                         continue;
                     }
-                    self.announce_ice_transport_state(state);
-                    self.pipeline_context.event_outs.push_back(
-                        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state),
-                    );
+                    // The transport's own event is the default transport's (the events
+                    // name no transport); the connection's is the aggregate of every
+                    // transport's state (W3C 4.3.4).
+                    let transports = &self.pipeline_context.transports;
+                    if transports.active_id() == transports.default_id() {
+                        self.announce_ice_transport_state(state);
+                    }
+                    let aggregate = self.ice_connection_state();
+                    if aggregate != self.pipeline_context.announced_ice_connection_state {
+                        self.pipeline_context.announced_ice_connection_state = aggregate;
+                        self.pipeline_context.event_outs.push_back(
+                            RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(aggregate),
+                        );
+                    }
                     self.update_connection_state(false);
                 }
                 RTCEventInternal::DTLSHandshakeComplete(_, _) | RTCEventInternal::DTLSClosed => {
@@ -520,14 +707,21 @@ impl RTCPeerConnection {
                 _ => {}
             }
         }
-        // The SCTP transport's state follows its association, which any event may have moved;
-        // the selected pair is the agent's, whose change event the DTLS handler consumes.
-        self.announce_transport_states();
-        if !self.is_closed() {
-            self.announce_selected_candidate_pair();
-        }
 
         raised
+    }
+}
+
+impl RTCPeerConnection {
+    /// Reads a datagram on the transport `id`, which the caller has already chosen (a stream
+    /// the engine knows the transport of, a relayed candidate's link).
+    pub(crate) fn read_on_transport(&mut self, id: TransportId, msg: TaggedBytesMut) {
+        let msg = TaggedRTCMessageInternal {
+            now: msg.now,
+            transport: msg.transport,
+            message: RTCMessageInternal::Raw(msg.message),
+        };
+        self.with_transport(id, |pc| pc.pump_reads(Some(msg)));
     }
 }
 
@@ -542,15 +736,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         self.pipeline_context.observe(msg.now);
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
         // transport per BUNDLE group or unbundled section) reads it.
-        let transport = self.pipeline_context.transports.route(&msg.transport);
-        let msg = TaggedRTCMessageInternal {
-            now: msg.now,
-            transport: msg.transport,
-            message: RTCMessageInternal::Raw(msg.message),
-        };
-        self.pipeline_context.transports.set_active(transport);
-        self.pump_reads(Some(msg));
-        self.pipeline_context.transports.reset_active();
+        let transport = self
+            .pipeline_context
+            .transports
+            .route(&msg.transport, &msg.message);
+        self.read_on_transport(transport, msg);
         Ok(())
     }
 
@@ -602,7 +792,14 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
         self.flush_writes();
-        self.pipeline_context.write_outs.pop_front()
+        // A datagram for one of the engine's own TCP candidates goes on its connection
+        // (`poll_stream_transmit`), not to the application.
+        while let Some(msg) = self.pipeline_context.write_outs.pop_front() {
+            if let Some(msg) = self.route_stream_write(msg) {
+                return Some(msg);
+            }
+        }
+        None
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEvent) -> Result<(), Self::Error> {
@@ -642,11 +839,36 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // RFC 8837 section 5: the association's congestion control starts over when its
         // codepoint changed (a channel of another priority came or went).
         self.restart_sctp_congestion_control_on_dscp_change(now);
-        for_each_handler!(forward: process_handler!(self, handler, {
+        // The connection's handlers once, each transport's for every transport.
+        process_handler_list!(call_macro: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
-        }));
+        }), [get_demuxer_handler]);
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| -> Result<(), Error> {
+                process_handler_list!(call_macro: process_handler!(pc, handler, {
+                    handler.handle_timeout(now)?;
+                }), [get_ice_handler, get_dtls_handler]);
+                Ok(())
+            })?;
+        }
+        process_handler_list!(call_macro: process_handler!(self, handler, {
+            handler.handle_timeout(now)?;
+        }), [get_sctp_handler, get_datachannel_handler]);
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| -> Result<(), Error> {
+                process_handler_list!(call_macro: process_handler!(pc, handler, {
+                    handler.handle_timeout(now)?;
+                }), [get_srtp_handler]);
+                Ok(())
+            })?;
+        }
+        process_handler_list!(call_macro: process_handler!(self, handler, {
+            handler.handle_timeout(now)?;
+        }), [get_interceptor_handler, get_endpoint_handler]);
         // The DTMF senders' playout (W3C webrtc-pc section 7).
         self.run_dtmf(now)?;
+        // The engine's TURN-over-stream clients and connection races.
+        self.turn_handle_timeout(now);
         Ok(())
     }
 
@@ -657,8 +879,30 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 eto = Some(eto.map_or(next, |curr| std::cmp::min(curr, next)));
             }
         }));
+        // The other transports' ICE, DTLS and SRTP timers.
+        let default = self.pipeline_context.transports.default_id();
+        for id in self.pipeline_context.transports.ids() {
+            if id == default {
+                continue;
+            }
+            let next = self.with_transport(id, |pc| {
+                let mut eto: Option<Instant> = None;
+                process_handler_list!(call_macro: process_handler!(pc, handler, {
+                    if let Some(next) = handler.poll_timeout() {
+                        eto = Some(eto.map_or(next, |curr| std::cmp::min(curr, next)));
+                    }
+                }), [get_ice_handler, get_dtls_handler, get_srtp_handler]);
+                eto
+            });
+            if let Some(next) = next {
+                eto = Some(eto.map_or(next, |curr| curr.min(next)));
+            }
+        }
         if let Some(dtmf) = self.dtmf_timeout() {
             eto = Some(eto.map_or(dtmf, |curr| curr.min(dtmf)));
+        }
+        if let Some(turn) = self.turn_poll_timeout() {
+            eto = Some(eto.map_or(turn, |curr| curr.min(turn)));
         }
         eto
     }
@@ -684,8 +928,13 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // RFC 3550 6.6: the SSRCs of a participant that leaves say BYE.
         self.get_interceptor_handler().request_goodbye(now);
         self.get_sctp_handler().request_abort();
-        self.get_dtls_handler().request_close(now);
+        // Every transport's DTLS association says close_notify.
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.get_dtls_handler().request_close(now));
+        }
         self.flush_writes();
+        // The engine's TCP connections carry what was just queued, then close.
+        self.close_streams();
 
         // Close handlers in reverse order (Endpoint→Interceptor→SRTP→DataChannel→SCTP→
         // DTLS→ICE→Demuxer) so that higher-level protocols (DataChannels, SCTP) shut down
@@ -693,11 +942,42 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // Collect all errors instead of short-circuiting so every handler gets a chance
         // to clean up even if an earlier one fails. (Brainwires fork; see FORK.md.)
         let mut close_errs: Vec<Error> = vec![];
-        for_each_handler!(reverse: process_handler!(self, handler, {
+        process_handler_list!(call_macro: process_handler!(self, handler, {
             if let Err(e) = handler.close() {
                 close_errs.push(e);
             }
-        }));
+        }), [get_endpoint_handler, get_interceptor_handler]);
+        // Each transport's SRTP, DTLS and ICE, the SCTP association's between them.
+        for id in self.pipeline_context.transports.ids() {
+            let carries_data = id == self.pipeline_context.transports.data_transport_id();
+            let errs = self.with_transport(id, |pc| {
+                let mut errs: Vec<Error> = vec![];
+                process_handler_list!(call_macro: process_handler!(pc, handler, {
+                    if let Err(e) = handler.close() {
+                        errs.push(e);
+                    }
+                }), [get_srtp_handler]);
+                if carries_data {
+                    process_handler_list!(call_macro: process_handler!(pc, handler, {
+                        if let Err(e) = handler.close() {
+                            errs.push(e);
+                        }
+                    }), [get_datachannel_handler, get_sctp_handler]);
+                }
+                process_handler_list!(call_macro: process_handler!(pc, handler, {
+                    if let Err(e) = handler.close() {
+                        errs.push(e);
+                    }
+                }), [get_dtls_handler, get_ice_handler]);
+                errs
+            });
+            close_errs.extend(errs);
+        }
+        process_handler_list!(call_macro: process_handler!(self, handler, {
+            if let Err(e) = handler.close() {
+                close_errs.push(e);
+            }
+        }), [get_demuxer_handler]);
 
         // W3C WebRTC §close shutdown work is implemented in individual handler close() methods:
         //   InterceptorHandler::close() → interceptor.close()
@@ -721,8 +1001,12 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         for channel in self.data_channels.values_mut() {
             channel.ready_state = crate::data_channel::RTCDataChannelState::Closed;
         }
-        self.ice_transport_mut().ice_connection_state =
-            crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| {
+                pc.ice_transport_mut().ice_connection_state =
+                    crate::peer_connection::state::ice_connection_state::RTCIceConnectionState::Closed;
+            });
+        }
         self.peer_connection_state = RTCPeerConnectionState::Closed;
         self.close_announced_states();
 

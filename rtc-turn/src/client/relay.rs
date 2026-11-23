@@ -502,13 +502,13 @@ impl Relay<'_> {
             relay,
         )?;
         let credential = Some(relay.credential.clone());
-        Ok(self.client.perform_transaction(
+        self.client.perform_transaction(
             now,
             &msg,
             self.client.turn_server_addr_or_err()?,
             TransactionType::ConnectRequest(self.relayed_addr, peer_addr, retry),
             credential,
-        ))
+        )
     }
 
     pub(super) fn handle_connect_response(
@@ -967,7 +967,7 @@ impl Relay<'_> {
             .client
             .build_request(METHOD_CREATE_PERMISSION, attrs, relay)?;
         let credential = Some(relay.credential.clone());
-        Ok(self.client.perform_transaction(
+        self.client.perform_transaction(
             now,
             &msg,
             self.client.turn_server_addr_or_err()?,
@@ -978,7 +978,7 @@ impl Relay<'_> {
                 retry,
             ),
             credential,
-        ))
+        )
     }
 
     /// Whether the error response `res` is one the request can be sent again after, and takes

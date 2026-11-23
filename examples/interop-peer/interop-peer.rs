@@ -20,7 +20,10 @@
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
 //! only counts (simulcast: packets per RID). `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
-//! 6544) and `"udp":false` leaves out the UDP one. `"cryptex":"negotiate"|"require"` sets the
+//! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
+//! its own TCP candidates and drive their connections through the stream interface and the
+//! tokio reference driver (`examples/stream-driver`), trickled to the browser; with
+//! `"udp_blocked":true` this peer neither sends nor takes ICE UDP. `"cryptex":"negotiate"|"require"` sets the
 //! RTCRtpHeaderEncryptionPolicy (RFC 9335). Every data channel message is echoed on its channel.
 //!
 //! An offer that arrives while this side has an offer outstanding (glare) is handled as the
@@ -249,6 +252,9 @@ struct Session {
     pc: RTCPeerConnection,
     sock: UdpSocket,
     local: SocketAddr,
+    /// One UDP socket per further transport (an m= section outside the BUNDLE group, RFC
+    /// 9429 section 5.2.1), with the mid its candidate was gathered for.
+    transport_socks: Vec<(UdpSocket, SocketAddr, String)>,
     ice_ip: IpAddr,
     /// The mDNS socket (5353, joined to 224.0.0.251): the peer connection resolves a
     /// browser's `.local` host candidates through it.
@@ -258,6 +264,10 @@ struct Session {
     tcp_local: Option<SocketAddr>,
     tcp_out: HashMap<SocketAddr, TcpOut>,
     tcp_in: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    /// Scenario `engine_tcp`: the driver of the engine's own TCP connections.
+    driver: Option<stream_driver::StreamDriver>,
+    /// Scenario `udp_blocked`: no ICE datagram leaves or is taken.
+    udp_blocked: bool,
     candidates_added: bool,
     out: Vec<Value>,
     media: String,
@@ -338,11 +348,14 @@ impl Session {
             pc,
             sock,
             local,
+            transport_socks: vec![],
             ice_ip: ip,
             mdns,
             tcp_listener: None,
             tcp_local: None,
             tcp_out: HashMap::new(),
+            driver: None,
+            udp_blocked: false,
             tcp_in,
             candidates_added: false,
             out: vec![],
@@ -365,6 +378,7 @@ impl Session {
 
         let mut buf = vec![0u8; 2048];
         let mut mbuf = vec![0u8; 2048];
+        let mut tbuf = vec![0u8; 2048];
         loop {
             s.drive()?;
             for v in s.out.drain(..) {
@@ -400,6 +414,11 @@ impl Session {
                     let local = s.local;
                     s.feed(local, peer, TransportProtocol::UDP, &buf[..n]);
                 }
+                res = recv_any(&s.transport_socks, &mut tbuf) => {
+                    if let Ok((n, peer, local)) = res {
+                        s.feed(local, peer, TransportProtocol::UDP, &tbuf[..n]);
+                    }
+                }
                 res = recv_opt(&s.mdns, &mut mbuf) => {
                     if let Ok((n, peer)) = res
                         && let Some(local) = s.mdns.as_ref().and_then(|m| m.local_addr().ok())
@@ -412,6 +431,7 @@ impl Session {
                         s.on_tcp_connection(stream, from);
                     }
                 }
+                input = driver_next(&mut s.driver) => s.on_driver_input(input),
                 Some((from, frame)) = tcp_in_rx.recv() => {
                     if let Some(local) = s.tcp_local {
                         s.feed(local, from, TransportProtocol::TCP, &frame);
@@ -427,6 +447,9 @@ impl Session {
     }
 
     fn feed(&mut self, local: SocketAddr, peer: SocketAddr, proto: TransportProtocol, data: &[u8]) {
+        if self.udp_blocked && proto == TransportProtocol::UDP && local == self.local {
+            return;
+        }
         let _ = self.pc.handle_read(TaggedBytesMut {
             now: Instant::now(),
             transport: TransportContext {
@@ -437,6 +460,30 @@ impl Session {
             },
             message: BytesMut::from(data),
         });
+    }
+
+    /// What the stream driver has for the engine (scenario `engine_tcp`).
+    fn on_driver_input(&mut self, input: stream_driver::DriverInput) {
+        let now = Instant::now();
+        match input {
+            stream_driver::DriverInput::Event(event) => {
+                let _ = self.pc.handle_stream_event(now, event);
+            }
+            stream_driver::DriverInput::Read { id, data } => {
+                let _ = self.pc.handle_stream_read(now, id, &data);
+            }
+            stream_driver::DriverInput::Accepted(accepted) => {
+                if let Some(id) = self.pc.handle_stream_accepted(
+                    now,
+                    accepted.listener,
+                    accepted.local,
+                    accepted.remote,
+                ) && let Some(driver) = self.driver.as_mut()
+                {
+                    driver.adopt(id, accepted);
+                }
+            }
+        }
     }
 
     /// A browser's active ICE-TCP connection to our passive candidate: RFC 4571 frames in both
@@ -481,6 +528,10 @@ impl Session {
             return Ok(());
         }
         self.candidates_added = true;
+        if self.scenario["engine_tcp"].as_bool().unwrap_or(false) {
+            self.driver = Some(stream_driver::StreamDriver::default());
+            self.udp_blocked = self.scenario["udp_blocked"].as_bool().unwrap_or(false);
+        }
         if self.scenario["udp"].as_bool().unwrap_or(true) {
             let host = CandidateHostConfig {
                 base_config: CandidateConfig {
@@ -520,6 +571,38 @@ impl Session {
         Ok(())
     }
 
+    /// A host candidate, on a socket of its own, for each transport but the first: the
+    /// sections a browser offers outside a BUNDLE group (`bundlePolicy: "max-compat"` with the
+    /// group removed) each have one (RFC 9429 section 5.3.1).
+    fn add_transport_candidates(&mut self) -> Result<()> {
+        for (mid, index) in self.pc.ice_transport_sections().into_iter().skip(1) {
+            if self.transport_socks.iter().any(|(_, _, m)| *m == mid) {
+                continue;
+            }
+            let std_sock = std::net::UdpSocket::bind(SocketAddr::new(self.ice_ip, 0))?;
+            std_sock.set_nonblocking(true)?;
+            let sock = UdpSocket::from_std(std_sock)?;
+            let local = sock.local_addr()?;
+            let host = CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "udp".to_owned(),
+                    address: local.ip().to_string(),
+                    port: local.port(),
+                    component: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .new_candidate_host()?;
+            let mut candidate = RTCIceCandidate::from(&host).to_json()?;
+            candidate.sdp_mid = Some(mid.clone());
+            candidate.sdp_mline_index = Some(index);
+            self.pc.add_local_candidate(candidate)?;
+            self.transport_socks.push((sock, local, mid));
+        }
+        Ok(())
+    }
+
     fn send_offer(&mut self) -> Result<()> {
         self.add_candidates()?;
         let offer = self.pc.create_offer(None)?;
@@ -552,6 +635,7 @@ impl Session {
                 let offer =
                     RTCSessionDescription::offer(v["sdp"].as_str().unwrap_or_default().to_owned())?;
                 self.pc.set_remote_description(Instant::now(), offer)?;
+                self.add_transport_candidates()?;
                 let answer = self.pc.create_answer(None)?;
                 self.pc
                     .set_local_description(Instant::now(), answer.clone())?;
@@ -787,8 +871,22 @@ impl Session {
     }
 
     fn drive(&mut self) -> Result<()> {
+        if let Some(driver) = self.driver.as_mut() {
+            while let Some(command) = self.pc.poll_stream_command() {
+                driver.execute(command);
+            }
+            while let Some(transmit) = self.pc.poll_stream_transmit() {
+                driver.write(transmit);
+            }
+        }
         while let Some(m) = self.pc.poll_write() {
             let peer = m.transport.peer_addr;
+            if self.udp_blocked
+                && m.transport.transport_protocol == TransportProtocol::UDP
+                && m.transport.local_addr == self.local
+            {
+                continue;
+            }
             if m.transport.transport_protocol == TransportProtocol::TCP {
                 if let Some(out) = self.tcp_out.get(&peer) {
                     let _ = out.send(frame_packet(&m.message));
@@ -797,12 +895,28 @@ impl Session {
                 && let Some(mdns) = &self.mdns
             {
                 let _ = mdns.try_send_to(&m.message, peer);
+            } else if let Some((sock, _, _)) = self
+                .transport_socks
+                .iter()
+                .find(|(_, local, _)| *local == m.transport.local_addr)
+            {
+                let _ = sock.try_send_to(&m.message, peer);
             } else {
                 let _ = self.sock.try_send_to(&m.message, peer);
             }
         }
         while let Some(e) = self.pc.poll_event() {
             match e {
+                // Scenario `engine_tcp`: the engine's TCP candidates come after the
+                // description; they are trickled (RFC 8838).
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ev) if self.driver.is_some() => {
+                    if let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
+                        && let Ok(init) = c.to_json()
+                    {
+                        self.out
+                            .push(json!({"type": "candidate", "candidate": init}));
+                    }
+                }
                 RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
                     let kind = self
                         .pc
@@ -1002,12 +1116,37 @@ impl Session {
     }
 }
 
+/// The next datagram on any of the transports' own sockets, with the local address it
+/// arrived on.
+async fn recv_any(
+    socks: &[(UdpSocket, SocketAddr, String)],
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
+    if socks.is_empty() {
+        return std::future::pending().await;
+    }
+    let readable = socks.iter().map(|(sock, _, _)| Box::pin(sock.readable()));
+    let (_, index, _) = futures_util::future::select_all(readable).await;
+    let (sock, local, _) = &socks[index];
+    let (n, peer) = sock.try_recv_from(buf)?;
+    Ok((n, peer, *local))
+}
+
 async fn recv_opt(
     sock: &Option<UdpSocket>,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, SocketAddr)> {
     match sock {
         Some(s) => s.recv_from(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn driver_next(
+    driver: &mut Option<stream_driver::StreamDriver>,
+) -> stream_driver::DriverInput {
+    match driver {
+        Some(d) => d.next().await,
         None => std::future::pending().await,
     }
 }

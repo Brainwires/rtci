@@ -21,7 +21,7 @@ is listed too. Where a file counts those separately the "proc" row below carries
 
 | Spec | File | Level | tested | untested | partial | missing | violated | n/a |
 |---|---|---|---|---|---|---|---|---|
-| RFC 8445 ICE | `rfc8445.md` | MUST | 133 | 0 | 1 | 0 | 0 | 22 |
+| RFC 8445 ICE | `rfc8445.md` | MUST | 134 | 0 | 0 | 0 | 0 | 22 |
 | | | SHOULD | 20 | 0 | 0 | 0 | 0 | 29 |
 | | | MAY | 7 | 0 | 0 | 3 | 0 | 6 |
 | RFC 8838 trickle ICE | `rfc8838.md` | MUST | 31 | 0 | 0 | 0 | 0 | 3 |
@@ -30,22 +30,34 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | RFC 8839 SDP for ICE | `rfc8839.md` | MUST | 43 | 15 | 18 | 4 | 3 | 14 |
 | | | SHOULD | 1 | 0 | 1 | 4 | 0 | 2 |
 | | | MAY | 6 | 1 | 0 | 2 | 0 | 3 |
-| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 |
-| | | SHOULD | 9 | 1 | 2 | 0 | 0 | 21 |
+| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 25 | 3 | 1 | 1 | 0 | 9 |
+| | | SHOULD | 14 | 1 | 2 | 0 | 0 | 16 |
 | | | MAY | 3 | 1 | 0 | 4 | 0 | 1 |
+| RFC 8305 Happy Eyeballs (TURN servers) | `rfc8305.md` | MUST | 2 | 0 | 0 | 0 | 0 | 1 |
+| | | SHOULD | 5 | 1 | 0 | 2 | 0 | 5 |
+| | | MAY | 0 | 0 | 0 | 0 | 0 | 3 |
+| RFC 7350 STUN / TURN over DTLS | `rfc7350.md` | MUST | 3 | 0 | 0 | 4 | 0 | 4 |
+| | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
+| | | MAY | 0 | 0 | 0 | 1 | 0 | 0 |
+| RFC 5928 TURN resolution | `rfc5928.md` | MUST | 2 | 0 | 0 | 4 | 0 | 0 |
+| | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
+| | | MAY | 0 | 0 | 0 | 0 | 0 | 0 |
+| RFC 4571 framing over TCP | `rfc4571.md` | MUST | 2 | 2 | 0 | 0 | 0 | 9 |
+| | | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 |
+| | | MAY | 1 | 0 | 0 | 0 | 0 | 1 |
 | RFC 7675 consent | `rfc7675.md` | MUST | 12 | 0 | 0 | 0 | 0 | 1 |
 | | | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 |
 | | | MAY | 0 | 0 | 0 | 0 | 0 | 2 |
 | RFC 8421 dual stack | `rfc8421.md` | MUST | 1 | 0 | 0 | 0 | 0 | 0 |
 | | | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 |
 | | | MAY | 0 | 0 | 0 | 0 | 0 | 0 |
-| RFC 8489 STUN | `rfc8489.md` | MUST | 103 | 0 | 2 | 0 | 0 | 14 |
-| | | SHOULD | 21 | 1 | 1 | 0 | 0 | 1 |
+| RFC 8489 STUN | `rfc8489.md` | MUST | 105 | 0 | 0 | 0 | 0 | 14 |
+| | | SHOULD | 23 | 0 | 0 | 0 | 0 | 1 |
 | | | MAY | 5 | 0 | 0 | 3 | 0 | 0 |
 | RFC 5780 NAT discovery | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 2 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |
 | | | MAY | 1 | 0 | 0 | 2 | 0 | 0 |
-| RFC 8656 TURN client | `rfc8656.md` | MUST | 32 | 0 | 0 | 0 | 0 | 20 |
+| RFC 8656 TURN client | `rfc8656.md` | MUST | 32 | 0 | 1 | 0 | 0 | 19 |
 | | | SHOULD | 12 | 0 | 0 | 1 | 0 | 10 |
 | | | MAY | 12 | 0 | 0 | 0 | 0 | 12 |
 | | | proc | 37 | 1 | 0 | 2 | 0 | 0 |

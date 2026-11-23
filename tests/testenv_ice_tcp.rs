@@ -359,3 +359,221 @@ fn ice_tcp_active_behind_a_nat_offers_to_a_public_passive_peer() {
 fn ice_tcp_public_passive_peer_offers_to_an_active_peer_behind_a_nat() {
     ice_tcp_through_nat(false);
 }
+
+/// Signalling between the two peer threads of the built-in case, as JSON.
+enum Signal {
+    Description(String),
+    Candidate(String),
+    /// The answerer has every message.
+    Done,
+}
+
+/// One peer of the built-in case: the application adds a UDP host candidate and sends no UDP
+/// at all (UDP is "blocked"); the engine gathers its TCP candidates and drives its connections
+/// through the tokio reference driver, whose sockets live in the peer's namespace.
+fn engine_tcp_peer(
+    offerer: bool,
+    ip: std::net::IpAddr,
+    tx: std::sync::mpsc::Sender<Signal>,
+    rx: std::sync::mpsc::Receiver<Signal>,
+    messages: Vec<Vec<u8>>,
+) -> io::Result<(bool, Vec<Vec<u8>>, String)> {
+    use rtc::peer_connection::sdp::RTCSessionDescription;
+    use rtc::peer_connection::transport::RTCIceCandidateInit;
+    use stream_driver::{DriverInput, StreamDriver};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .unwrap();
+        let mut driver = StreamDriver::default();
+        let host = RTCIceCandidateInit {
+            candidate: format!("candidate:1 1 udp 2130706431 {ip} 4000 typ host"),
+            ..Default::default()
+        };
+        let mut channel = None;
+        if offerer {
+            channel = Some(pc.create_data_channel("engine-tcp", None).unwrap().id());
+            let offer = pc.create_offer(None).unwrap();
+            pc.set_local_description(Instant::now(), offer.clone())
+                .unwrap();
+            let _ = tx.send(Signal::Description(serde_json::to_string(&offer).unwrap()));
+            pc.add_local_candidate(host.clone()).unwrap();
+        }
+        let mut received = vec![];
+        let mut sent = false;
+        let mut connected = false;
+        let mut selected = String::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            while let Ok(signal) = rx.try_recv() {
+                match signal {
+                    Signal::Description(json) => {
+                        let d: RTCSessionDescription = serde_json::from_str(&json).unwrap();
+                        pc.set_remote_description(Instant::now(), d).unwrap();
+                        if !offerer {
+                            let answer = pc.create_answer(None).unwrap();
+                            pc.set_local_description(Instant::now(), answer.clone())
+                                .unwrap();
+                            let _ = tx
+                                .send(Signal::Description(serde_json::to_string(&answer).unwrap()));
+                            pc.add_local_candidate(host.clone()).unwrap();
+                        }
+                    }
+                    Signal::Candidate(json) => {
+                        let c: RTCIceCandidateInit = serde_json::from_str(&json).unwrap();
+                        let _ = pc.add_remote_candidate(c);
+                    }
+                    Signal::Done => return Ok((connected, received, selected)),
+                }
+            }
+            while let Some(command) = pc.poll_stream_command() {
+                driver.execute(command);
+            }
+            while let Some(transmit) = pc.poll_stream_transmit() {
+                driver.write(transmit);
+            }
+            // UDP is blocked: nothing written for it leaves.
+            while pc.poll_write().is_some() {}
+            while let Some(e) = pc.poll_event() {
+                match e {
+                    RTCPeerConnectionEvent::OnIceCandidateEvent(ev) => {
+                        if let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
+                            && let Ok(init) = c.to_json()
+                        {
+                            let _ =
+                                tx.send(Signal::Candidate(serde_json::to_string(&init).unwrap()));
+                        }
+                    }
+                    RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
+                        RTCPeerConnectionState::Connected,
+                    ) => connected = true,
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id))
+                        if offerer && Some(id) == channel && !sent =>
+                    {
+                        let mut dc = pc.data_channel(id).unwrap();
+                        for m in &messages {
+                            dc.send(Instant::now(), BytesMut::from(&m[..])).unwrap();
+                        }
+                        sent = true;
+                    }
+                    _ => {}
+                }
+            }
+            while let Some(m) = pc.poll_read() {
+                if let RTCMessage::DataChannelMessage(_, msg) = m.message {
+                    received.push(msg.data.to_vec());
+                }
+            }
+            if connected && selected.is_empty() {
+                let report = pc.get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+                if let Some(pair) = report.candidate_pairs().find(|p| p.nominated) {
+                    selected = format!(
+                        "{} -> {}",
+                        pair.local_candidate_id, pair.remote_candidate_id
+                    );
+                }
+            }
+            if !offerer && received.len() >= messages.len() {
+                let _ = tx.send(Signal::Done);
+                break;
+            }
+            let wake = pc
+                .poll_timeout()
+                .unwrap_or_else(|| Instant::now() + Duration::from_millis(10))
+                .min(Instant::now() + Duration::from_millis(10));
+            let wait = wake.saturating_duration_since(Instant::now());
+            if let Ok(input) = tokio::time::timeout(wait, driver.next()).await {
+                let mut inputs = vec![input];
+                while let Some(more) = driver.try_next() {
+                    inputs.push(more);
+                }
+                for input in inputs {
+                    let now = Instant::now();
+                    match input {
+                        DriverInput::Event(event) => {
+                            let _ = pc.handle_stream_event(now, event);
+                        }
+                        DriverInput::Read { id, data } => {
+                            let _ = pc.handle_stream_read(now, id, &data);
+                        }
+                        DriverInput::Accepted(accepted) => {
+                            if let Some(id) = pc.handle_stream_accepted(
+                                now,
+                                accepted.listener,
+                                accepted.local,
+                                accepted.remote,
+                            ) {
+                                driver.adopt(id, accepted);
+                            }
+                        }
+                    }
+                }
+            }
+            let now = Instant::now();
+            if pc.poll_timeout().is_some_and(|t| t <= now) {
+                let _ = pc.handle_timeout(now);
+            }
+        }
+        Ok((connected, received, selected))
+    })
+}
+
+/// ICE-TCP built into the engine through a NAT, with UDP blocked: each application adds only a
+/// UDP host candidate (and never sends UDP); the engine gathers passive, simultaneous-open and
+/// active TCP candidates and the tokio reference driver (`examples/stream-driver`) owns the
+/// sockets. The peer behind the symmetric NAT can only reach the public one through its
+/// active candidate.
+fn engine_tcp_through_nat(nat_side_offers: bool) {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let messages = messages();
+    let (nat_ns, public_ns) = ("h-symmetric-a", "open-b");
+    let nat_ip = source_ip(nat_ns, env.turn_udp).expect("source address");
+    let public_ip = source_ip(public_ns, env.turn_udp).expect("source address");
+    let (a_tx, b_rx) = std::sync::mpsc::channel();
+    let (b_tx, a_rx) = std::sync::mpsc::channel();
+    let (offer_ns, offer_ip, answer_ns, answer_ip) = if nat_side_offers {
+        (nat_ns, nat_ip, public_ns, public_ip)
+    } else {
+        (public_ns, public_ip, nat_ns, nat_ip)
+    };
+    let m = messages.clone();
+    let offerer = std::thread::spawn(move || {
+        in_netns(offer_ns, move || {
+            engine_tcp_peer(true, offer_ip, a_tx, a_rx, m)
+        })
+    });
+    let m = messages.clone();
+    let answerer = std::thread::spawn(move || {
+        in_netns(answer_ns, move || {
+            engine_tcp_peer(false, answer_ip, b_tx, b_rx, m)
+        })
+    });
+    let (answer_connected, received, answer_pair) = answerer.join().unwrap().unwrap();
+    let (offer_connected, _, offer_pair) = offerer.join().unwrap().unwrap();
+    eprintln!(
+        "ICE-TCP built in (NAT side offers: {nat_side_offers}): received {} of {}; pairs {offer_pair} / {answer_pair}",
+        received.len(),
+        messages.len()
+    );
+    assert!(
+        offer_connected && answer_connected,
+        "not connected over the engine's TCP"
+    );
+    assert_eq!(received, messages, "every message, in order");
+}
+
+#[test]
+#[ignore = "needs the real-network test environment (NAT namespaces): scripts/test-env/run.sh"]
+fn engine_gathered_tcp_connects_through_a_nat_with_udp_blocked_nat_side_offering() {
+    engine_tcp_through_nat(true);
+}
+
+#[test]
+#[ignore = "needs the real-network test environment (NAT namespaces): scripts/test-env/run.sh"]
+fn engine_gathered_tcp_connects_through_a_nat_with_udp_blocked_public_side_offering() {
+    engine_tcp_through_nat(false);
+}

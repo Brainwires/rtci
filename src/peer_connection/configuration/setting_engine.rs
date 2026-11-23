@@ -503,6 +503,12 @@ pub struct SettingEngine {
     /// ECN is used on `ack ccfb` alone, without `a=ecn-capable-rtp`
     /// ([`SettingEngineBuilder::with_ecn_without_signalling`]).
     pub(crate) ecn_without_signalling: bool,
+    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
+    /// and the methods after it).
+    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
+    /// How the engine's TURN-over-TLS connections verify their server
+    /// ([`SettingEngineBuilder::with_turn_tls`]).
+    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
 }
 
 impl SettingEngine {
@@ -2354,6 +2360,61 @@ impl SettingEngineBuilder {
     /// stream with `ack ccfb` negotiated marks, initiating as `with_ecn_initiation` says.
     pub fn with_ecn_without_signalling(mut self, without_signalling: bool) -> Self {
         self.0.ecn_without_signalling = without_signalling;
+        self
+    }
+
+    /// Whether the engine gathers TCP host candidates itself (RFC 6544 section 4.1 says it
+    /// should be configurable; browsers gather them by default). On by default: for the
+    /// address of each UDP host candidate the application adds, the engine asks its driver
+    /// for listeners (`RTCPeerConnection::poll_stream_command`) and adds a passive and a
+    /// simultaneous-open candidate on them and an active one (port 9), whose connections it
+    /// opens itself. A driver that never serves the stream interface gets no TCP candidate.
+    /// `false`: no TCP candidate but those the application adds.
+    pub fn with_tcp_candidate_gathering(mut self, gather: bool) -> Self {
+        self.0.streams.tcp_candidates = gather;
+        self
+    }
+
+    /// Whether the gathered TCP candidates include a simultaneous-open one (RFC 6544 section
+    /// 5.1: one passive and one S-O host candidate per interface). On by default; its
+    /// listener and its connections bind with `reuse_address`. Browsers neither gather nor
+    /// pair them (they connect to one as to a passive candidate, which works).
+    pub fn with_tcp_simultaneous_open(mut self, simultaneous_open: bool) -> Self {
+        self.0.streams.simultaneous_open = simultaneous_open;
+        self
+    }
+
+    /// Whether the engine closes its ICE-TCP connections that carry no selected pair once ICE
+    /// has completed (RFC 6544 section 8, SHOULD). On by default.
+    pub fn with_tcp_close_unused_connections(mut self, close: bool) -> Self {
+        self.0.streams.close_unused_connections = close;
+        self
+    }
+
+    /// The limits of the engine's stream transports: the bytes of a connection the driver may
+    /// hold unwritten, the bytes queued beyond which a packet is dropped whole, and the number
+    /// of connections. See [`StreamConfig`](shared::stream::StreamConfig).
+    pub fn with_stream_limits(mut self, limits: shared::stream::StreamConfig) -> Self {
+        self.0.streams.limits = limits;
+        self
+    }
+
+    /// Whether the engine runs the configuration's `turns:` and `turn:...?transport=tcp`
+    /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
+    /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
+    /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
+    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
+    /// application's.
+    pub fn with_turn_over_streams(mut self, run: bool) -> Self {
+        self.0.streams.turn = run;
+        self
+    }
+
+    /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
+    /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
+    /// server is used.
+    pub fn with_turn_tls(mut self, tls: crate::peer_connection::turn_tls::TurnTlsConfig) -> Self {
+        self.0.turn_tls = tls;
         self
     }
 

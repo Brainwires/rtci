@@ -31,6 +31,8 @@ mod agent_rfc8445_test;
 #[cfg(test)]
 mod agent_stun_rows_test;
 #[cfg(test)]
+mod agent_tcp_integrity_test;
+#[cfg(test)]
 mod agent_test;
 #[cfg(test)]
 mod agent_trickle_test;

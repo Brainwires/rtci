@@ -24,6 +24,9 @@
 //! * [`tcp_framing`] — RFC 4571 length-prefixed framing, for ICE-TCP candidates.
 //! * [`turn_framing`] — splitting a TURN stream into its self-delimiting messages, for TURN
 //!   over TCP.
+//! * [`stream`] — stream transports without sockets: connection ids, the commands an engine
+//!   gives its driver (listen, connect, close, reset) and the events it gets back, framing of
+//!   arbitrarily segmented reads, an optional security layer (TLS) and back-pressure.
 //! * [`ifaces`] — local interface enumeration used during ICE candidate gathering.
 //!
 //! # Feature flags
@@ -76,6 +79,9 @@ pub mod replay_detector;
 pub mod error;
 /// `serde` helpers for types that have no natural serialized form, such as [`std::time::Instant`].
 pub mod serde;
+/// Stream transports (TCP, TLS over TCP) for a sans-I/O engine: ids, commands, events,
+/// framing and back-pressure.
+pub mod stream;
 pub mod tcp_framing;
 /// Conversions between monotonic, Unix and NTP time.
 pub mod time;

@@ -6,15 +6,24 @@
 //! transports, each a [`TransportBundle`] keyed by a [`TransportId`], and says which one an
 //! m= section, a datagram or the SCTP association uses.
 //!
-//! Today the set holds exactly one transport, created with the peer connection: every
-//! section is bundled onto it, every datagram is routed to it and the SCTP association runs
-//! over it, which is what the engine did before the set existed. The lookups are written
-//! for several entries so that the handlers and `RTCPeerConnection` reach a transport only
-//! through them.
+//! The first transport is created with the peer connection and is the default one: every
+//! m= section without a transport of its own is on it, and the single-transport accessors
+//! (`ice_transport()`, `dtls_transport()`) return it. Descriptions add transports for the
+//! sections outside a BUNDLE group (`RTCPeerConnection::update_transport_layout`) and
+//! remove those a BUNDLE group made unused.
+//!
+//! The pipeline's ICE, DTLS and SRTP handlers act on the *active* transport. It is the
+//! default one except while the connection works on another: a datagram routed to it, a
+//! sweep of the pipeline per transport, or [`RTCPeerConnection::with_transport`].
+//!
+//! [`RTCPeerConnection::with_transport`]: crate::peer_connection::RTCPeerConnection
 
 use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
+use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
+use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
+use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use shared::TransportContext;
 use std::collections::HashMap;
 
@@ -34,9 +43,44 @@ pub(crate) struct TransportBundle {
     pub(crate) srtp_handler_context: SrtpHandlerContext,
 }
 
+#[derive(Clone, Copy)]
+enum Direction {
+    Inbound,
+    Outbound,
+}
+
+/// The `(receiver, sender)` ufrags of a STUN Binding request's USERNAME (RFC 8445 section
+/// 7.2.2: `<receiver's ufrag>:<sender's ufrag>`); `None` for anything else.
+pub(crate) fn binding_request_ufrags(datagram: &[u8]) -> Option<(&str, &str)> {
+    const BINDING_REQUEST: u16 = 0x0001;
+    const MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
+    const USERNAME: u16 = 0x0006;
+    if datagram.len() < 20 || datagram[4..8] != MAGIC_COOKIE {
+        return None;
+    }
+    if u16::from_be_bytes([datagram[0], datagram[1]]) != BINDING_REQUEST {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([datagram[2], datagram[3]]));
+    let attributes = datagram.get(20..20 + length)?;
+    let mut at = 0;
+    while at + 4 <= attributes.len() {
+        let kind = u16::from_be_bytes([attributes[at], attributes[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([attributes[at + 2], attributes[at + 3]]));
+        let value = attributes.get(at + 4..at + 4 + len)?;
+        if kind == USERNAME {
+            return std::str::from_utf8(value).ok()?.split_once(':');
+        }
+        at += 4 + len.next_multiple_of(4);
+    }
+    None
+}
+
 /// The transports of a peer connection; never empty.
 pub(crate) struct TransportSet {
     bundles: Vec<TransportBundle>,
+    /// The id the next transport gets: ids are never reused.
+    next: usize,
     /// The transport of each m= section that has been given one; a mid that is not here is
     /// on the default transport.
     by_mid: HashMap<String, TransportId>,
@@ -48,6 +92,10 @@ pub(crate) struct TransportSet {
     /// The transport the pipeline's ICE, DTLS and SRTP handlers act on: the default one,
     /// except while a datagram routed to another is read.
     active: TransportId,
+}
+
+fn agent_of(bundle: &TransportBundle) -> &ice::Agent {
+    &bundle.ice_handler_context.ice_transport.agent
 }
 
 impl TransportSet {
@@ -65,6 +113,7 @@ impl TransportSet {
                 dtls_handler_context,
                 srtp_handler_context,
             }],
+            next: 1,
             by_mid: HashMap::new(),
             default: id,
             data: id,
@@ -109,14 +158,12 @@ impl TransportSet {
     }
 
     /// The transport the m= section `mid` uses.
-    #[allow(dead_code)] // The handlers ask by mid once sections can have transports of their own.
     pub(crate) fn transport_for(&self, mid: &str) -> &TransportBundle {
         let id = self.transport_id_for(mid);
         self.transport(id).unwrap_or_else(|| self.default())
     }
 
     /// The transport the m= section `mid` uses, mutably.
-    #[allow(dead_code)] // The handlers ask by mid once sections can have transports of their own.
     pub(crate) fn transport_for_mut(&mut self, mid: &str) -> &mut TransportBundle {
         let id = self.transport_id_for(mid);
         let id = if self.index(id).is_some() {
@@ -129,9 +176,13 @@ impl TransportSet {
     }
 
     /// Puts the m= section `mid` on the transport `id`.
-    #[allow(dead_code)] // Sections get transports of their own from descriptions, next.
     pub(crate) fn assign(&mut self, mid: &str, id: TransportId) {
         self.by_mid.insert(mid.to_owned(), id);
+    }
+
+    /// Takes the m= section `mid` off its transport: it is on the default one again.
+    pub(crate) fn unassign(&mut self, mid: &str) {
+        self.by_mid.remove(mid);
     }
 
     /// The id of the transport the SCTP association runs over.
@@ -170,12 +221,84 @@ impl TransportSet {
         self.active = self.default;
     }
 
-    /// The transport a datagram belongs to, by the local address and 5-tuple the driver
-    /// reports it with. With one transport that is the one; with several the local candidate
-    /// it arrived on decides, and for a socket shared by transports the ICE username of the
-    /// binding request that validated the 5-tuple.
-    pub(crate) fn route(&self, _transport: &TransportContext) -> TransportId {
-        self.default
+    /// The transport a datagram belongs to, by the local address the driver reports it with:
+    /// the transport one of whose local candidates has that address (or that base). With one
+    /// transport, or for an address no transport gathered on, the default transport.
+    ///
+    /// Each transport normally has a local address of its own (RFC 9429 section 5.2.1 gives
+    /// every transport its own candidates). A driver that shares one port between transports
+    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port) gives several transports the same
+    /// address: then a Binding request names its transport by the receiver's ufrag of its
+    /// USERNAME (RFC 8445 section 7.2.2), and anything else goes to the transport that knows
+    /// the sender as a remote candidate (a check from it has made it a peer-reflexive one if
+    /// it was not signalled). Two transports on one 5-tuple cannot be told apart once DTLS
+    /// runs on both: the default transport takes what is left.
+    pub(crate) fn route(&self, transport: &TransportContext, datagram: &[u8]) -> TransportId {
+        self.route_datagram(transport, datagram, Direction::Inbound)
+    }
+
+    /// The transport a datagram the connection is about to send from `transport.local_addr`
+    /// belongs to: as [`Self::route`], with the sender's ufrag of a Binding request's
+    /// USERNAME (this side's) naming it.
+    pub(crate) fn route_outbound(
+        &self,
+        transport: &TransportContext,
+        datagram: &[u8],
+    ) -> TransportId {
+        self.route_datagram(transport, datagram, Direction::Outbound)
+    }
+
+    fn route_datagram(
+        &self,
+        transport: &TransportContext,
+        datagram: &[u8],
+        direction: Direction,
+    ) -> TransportId {
+        if self.bundles.len() == 1 {
+            return self.default;
+        }
+        let local = transport.local_addr;
+        let on: Vec<&TransportBundle> = self
+            .bundles
+            .iter()
+            .filter(|bundle| {
+                agent_of(bundle)
+                    .get_local_candidates()
+                    .iter()
+                    .any(|candidate| candidate.addr() == local || candidate.base_addr() == local)
+            })
+            .collect();
+        match on.as_slice() {
+            [] => return self.default,
+            [only] => return only.id,
+            _ => {}
+        }
+        if let Some((receiver, sender)) = binding_request_ufrags(datagram) {
+            let ours = match direction {
+                Direction::Inbound => receiver,
+                Direction::Outbound => sender,
+            };
+            if let Some(bundle) = on
+                .iter()
+                .find(|bundle| agent_of(bundle).get_local_credentials().ufrag == ours)
+            {
+                return bundle.id;
+            }
+        }
+        let peer = transport.peer_addr;
+        if let Some(bundle) = on.iter().find(|bundle| {
+            agent_of(bundle)
+                .get_remote_candidates()
+                .iter()
+                .any(|candidate| candidate.addr() == peer)
+        }) {
+            return bundle.id;
+        }
+        // The default transport first: an address several transports gathered on is its.
+        on.iter()
+            .find(|bundle| bundle.id == self.default)
+            .unwrap_or(&on[0])
+            .id
     }
 
     /// Every transport, in the order they were created.
@@ -184,9 +307,205 @@ impl TransportSet {
     }
 
     /// How many transports the set holds: at least one.
-    #[allow(dead_code)] // Read once sections can have transports of their own.
     pub(crate) fn len(&self) -> usize {
         self.bundles.len()
+    }
+
+    /// Adds a transport; it carries no m= section until one is assigned to it.
+    pub(crate) fn insert(
+        &mut self,
+        ice_handler_context: IceHandlerContext,
+        dtls_handler_context: DtlsHandlerContext,
+        srtp_handler_context: SrtpHandlerContext,
+    ) -> TransportId {
+        let id = TransportId(self.next);
+        self.next += 1;
+        self.bundles.push(TransportBundle {
+            id,
+            ice_handler_context,
+            dtls_handler_context,
+            srtp_handler_context,
+        });
+        id
+    }
+
+    /// Takes the transport `id` out of the set, with the m= sections assigned to it, and
+    /// returns it. The last transport is never removed; when the default or the data
+    /// transport goes, the first remaining one takes its place.
+    pub(crate) fn remove(&mut self, id: TransportId) -> Option<TransportBundle> {
+        if self.bundles.len() == 1 {
+            return None;
+        }
+        let index = self.index(id)?;
+        let bundle = self.bundles.remove(index);
+        self.by_mid.retain(|_, on| *on != id);
+        let first = self.bundles[0].id;
+        if self.default == id {
+            self.default = first;
+        }
+        if self.data == id {
+            self.data = first;
+        }
+        if self.active == id {
+            self.active = self.default;
+        }
+        Some(bundle)
+    }
+
+    /// The ids of every transport, in the order they were created.
+    pub(crate) fn ids(&self) -> Vec<TransportId> {
+        self.bundles.iter().map(|bundle| bundle.id).collect()
+    }
+
+    /// The id of the default transport.
+    pub(crate) fn default_id(&self) -> TransportId {
+        self.default
+    }
+
+    /// Makes `id` the default transport, when it is in the set.
+    pub(crate) fn set_default(&mut self, id: TransportId) {
+        if self.index(id).is_some() {
+            self.default = id;
+        }
+    }
+
+    /// Makes `id` the transport the SCTP association runs over, when it is in the set.
+    pub(crate) fn set_data(&mut self, id: TransportId) {
+        if self.index(id).is_some() {
+            self.data = id;
+        }
+    }
+
+    /// The transport the m= section `mid` was assigned to, if any.
+    pub(crate) fn assignment(&self, mid: &str) -> Option<TransportId> {
+        self.by_mid
+            .get(mid)
+            .copied()
+            .filter(|id| self.index(*id).is_some())
+    }
+
+    /// The m= sections assigned to `id`.
+    pub(crate) fn mids_on(&self, id: TransportId) -> Vec<String> {
+        let mut mids: Vec<String> = self
+            .by_mid
+            .iter()
+            .filter(|(_, on)| **on == id)
+            .map(|(mid, _)| mid.clone())
+            .collect();
+        mids.sort();
+        mids
+    }
+
+    /// The id of the active transport.
+    pub(crate) fn active_id(&self) -> TransportId {
+        if self.index(self.active).is_some() {
+            self.active
+        } else {
+            self.default
+        }
+    }
+
+    /// The active transport.
+    pub(crate) fn active(&self) -> &TransportBundle {
+        self.transport(self.active_id())
+            .expect("the active transport is in the set")
+    }
+}
+
+/// W3C webrtc-pc 4.3.4 `RTCIceConnectionState`: the aggregate of the ICE transports' states,
+/// for a connection that is not closed.
+pub(crate) fn aggregate_ice_connection_state(
+    states: impl IntoIterator<Item = RTCIceConnectionState> + Clone,
+) -> RTCIceConnectionState {
+    use RTCIceConnectionState::*;
+    let all = |f: &dyn Fn(RTCIceConnectionState) -> bool| states.clone().into_iter().all(f);
+    let any = |f: &dyn Fn(RTCIceConnectionState) -> bool| states.clone().into_iter().any(f);
+    if any(&|s| s == Failed) {
+        // "None of the previous states apply and any RTCIceTransports are in the failed state."
+        Failed
+    } else if any(&|s| s == Disconnected) {
+        // "... any RTCIceTransports are in the disconnected state."
+        Disconnected
+    } else if all(&|s| matches!(s, New | Closed)) {
+        // "... all RTCIceTransports are in the new or closed state, or there are no transports."
+        New
+    } else if any(&|s| matches!(s, New | Checking)) {
+        // "... any RTCIceTransports are in the new or checking state."
+        Checking
+    } else if all(&|s| matches!(s, Completed | Closed)) {
+        // "... all RTCIceTransports are in the completed or closed state."
+        Completed
+    } else if all(&|s| matches!(s, Connected | Completed | Closed)) {
+        // "... all RTCIceTransports are in the connected, completed or closed state."
+        Connected
+    } else {
+        // An `Unspecified` state, which no transport reports.
+        states.into_iter().next().unwrap_or(New)
+    }
+}
+
+/// W3C webrtc-pc 4.3.3 `RTCPeerConnectionState`: the aggregate of the ICE and DTLS
+/// transports' states, for a connection that is not closed.
+pub(crate) fn aggregate_connection_state(
+    ice: &[RTCIceConnectionState],
+    dtls: &[RTCDtlsTransportState],
+) -> RTCPeerConnectionState {
+    use RTCDtlsTransportState as Dtls;
+    use RTCIceConnectionState as Ice;
+    let ice_any = |f: &dyn Fn(Ice) -> bool| ice.iter().any(|s| f(*s));
+    let ice_all = |f: &dyn Fn(Ice) -> bool| ice.iter().all(|s| f(*s));
+    let dtls_any = |f: &dyn Fn(Dtls) -> bool| dtls.iter().any(|s| f(*s));
+    let dtls_all = |f: &dyn Fn(Dtls) -> bool| dtls.iter().all(|s| f(*s));
+    if ice_any(&|s| s == Ice::Failed) || dtls_any(&|s| s == Dtls::Failed) {
+        // "Any of the RTCIceTransports or RTCDtlsTransports are in a failed state."
+        RTCPeerConnectionState::Failed
+    } else if ice_any(&|s| s == Ice::Disconnected) && !ice_any(&|s| s == Ice::Checking) {
+        // "Any of the RTCIceTransports or RTCDtlsTransports are in the disconnected state and
+        // none of them are in the failed or connecting or checking state."
+        RTCPeerConnectionState::Disconnected
+    } else if ice_all(&|s| matches!(s, Ice::New | Ice::Closed))
+        && dtls_all(&|s| matches!(s, Dtls::New | Dtls::Closed))
+    {
+        // "... all RTCIceTransports are in the new or closed state, and all RTCDtlsTransports
+        // are in the new or closed state, or there are no transports."
+        RTCPeerConnectionState::New
+    } else if ice_any(&|s| matches!(s, Ice::New | Ice::Checking))
+        || dtls_any(&|s| matches!(s, Dtls::New | Dtls::Connecting))
+    {
+        // "... any RTCIceTransport is in the new or checking state or any RTCDtlsTransport is
+        // in the new or connecting state."
+        RTCPeerConnectionState::Connecting
+    } else if ice_all(&|s| matches!(s, Ice::Connected | Ice::Completed | Ice::Closed))
+        && dtls_all(&|s| matches!(s, Dtls::Connected | Dtls::Closed))
+    {
+        // "... all RTCIceTransports are in the connected, completed or closed state and all
+        // RTCDtlsTransports are in the connected or closed state."
+        RTCPeerConnectionState::Connected
+    } else {
+        RTCPeerConnectionState::Connecting
+    }
+}
+
+impl TransportSet {
+    /// Every transport's ICE connection state.
+    pub(crate) fn ice_connection_states(&self) -> Vec<RTCIceConnectionState> {
+        self.bundles
+            .iter()
+            .map(|bundle| {
+                bundle
+                    .ice_handler_context
+                    .ice_transport
+                    .ice_connection_state
+            })
+            .collect()
+    }
+
+    /// Every transport's DTLS state.
+    pub(crate) fn dtls_states(&self) -> Vec<RTCDtlsTransportState> {
+        self.bundles
+            .iter()
+            .map(|bundle| bundle.dtls_handler_context.dtls_transport.state())
+            .collect()
     }
 }
 
@@ -209,7 +528,7 @@ mod tests {
         assert_eq!(transports.data_transport_id(), default);
         assert_eq!(transports.transport_id_for("0"), default);
         assert_eq!(transports.transport_for("audio").id, default);
-        assert_eq!(transports.route(&TransportContext::default()), default);
+        assert_eq!(transports.route(&TransportContext::default(), &[]), default);
         // The single-transport accessors are the default transport's.
         assert_eq!(
             pc.ice_transport().id,
@@ -241,5 +560,169 @@ mod tests {
         assert_eq!(transports.transport_id_for("1"), default);
         transports.reset_active();
         assert_eq!(transports.active_mut().id, default);
+    }
+
+    /// W3C 4.3.4: the connection's ICE state is the aggregate of every transport's, not the
+    /// first one's.
+    #[test]
+    fn the_ice_connection_state_aggregates_every_transport() {
+        use RTCIceConnectionState::*;
+        let aggregate = |states: &[RTCIceConnectionState]| {
+            aggregate_ice_connection_state(states.iter().copied())
+        };
+        assert_eq!(aggregate(&[Connected, Checking]), Checking);
+        assert_eq!(aggregate(&[Connected, Failed]), Failed);
+        assert_eq!(aggregate(&[Connected, Disconnected]), Disconnected);
+        assert_eq!(aggregate(&[Connected, Completed]), Connected);
+        assert_eq!(aggregate(&[Completed, Closed]), Completed);
+        assert_eq!(aggregate(&[New, Closed]), New);
+        assert_eq!(aggregate(&[Connected, New]), Checking);
+        assert_eq!(aggregate(&[]), New);
+    }
+
+    /// W3C 4.3.3: the connection state is the aggregate of every ICE and DTLS transport's.
+    #[test]
+    fn the_connection_state_aggregates_every_transport() {
+        use RTCDtlsTransportState as Dtls;
+        use RTCIceConnectionState as Ice;
+        use RTCPeerConnectionState as Pc;
+        let connected = [Ice::Connected, Ice::Connected];
+        assert_eq!(
+            aggregate_connection_state(&connected, &[Dtls::Connected, Dtls::Connecting]),
+            Pc::Connecting
+        );
+        assert_eq!(
+            aggregate_connection_state(&connected, &[Dtls::Connected, Dtls::Connected]),
+            Pc::Connected
+        );
+        assert_eq!(
+            aggregate_connection_state(&connected, &[Dtls::Connected, Dtls::Failed]),
+            Pc::Failed
+        );
+        assert_eq!(
+            aggregate_connection_state(
+                &[Ice::Connected, Ice::Checking],
+                &[Dtls::Connected, Dtls::New]
+            ),
+            Pc::Connecting
+        );
+        assert_eq!(
+            aggregate_connection_state(&[Ice::New, Ice::Closed], &[Dtls::New, Dtls::Closed]),
+            Pc::New
+        );
+        assert_eq!(
+            aggregate_connection_state(
+                &[Ice::Disconnected, Ice::Connected],
+                &[Dtls::Connected, Dtls::Connected]
+            ),
+            Pc::Disconnected
+        );
+    }
+
+    /// A STUN Binding request with `username` as its USERNAME, and nothing else.
+    fn binding_request(username: &str) -> Vec<u8> {
+        let mut attribute = vec![0x00, 0x06];
+        attribute.extend_from_slice(&(username.len() as u16).to_be_bytes());
+        attribute.extend_from_slice(username.as_bytes());
+        while attribute.len() % 4 != 0 {
+            attribute.push(0);
+        }
+        let mut message = vec![0x00, 0x01];
+        message.extend_from_slice(&(attribute.len() as u16).to_be_bytes());
+        message.extend_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+        message.extend_from_slice(&[7; 12]);
+        message.extend_from_slice(&attribute);
+        message
+    }
+
+    /// A driver that shares one port between transports gives them the same local address
+    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port). A Binding request then goes to the
+    /// transport whose ufrag it names (RFC 8445 section 7.2.2), on the way in by the
+    /// receiver's part and on the way out by the sender's; what follows from a peer goes to
+    /// the transport that knows it as a remote candidate; the rest to the default one.
+    #[test]
+    fn a_port_shared_by_two_transports_is_routed_by_ufrag_then_by_peer() {
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .expect("a default peer connection builds");
+        let default = pc.pipeline_context.transports.default_id();
+        let other = pc.add_transport().expect("a second transport");
+        let shared = "candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host";
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                let candidate = ice::candidate::unmarshal_candidate(shared).unwrap();
+                pc.ice_transport_mut()
+                    .add_local_candidate(candidate)
+                    .expect("the shared candidate is added")
+            });
+        }
+        let ufrag = |pc: &crate::peer_connection::RTCPeerConnection, id| {
+            pc.ice_transport_of(id)
+                .agent
+                .get_local_credentials()
+                .ufrag
+                .clone()
+        };
+        let (ours, theirs) = (ufrag(&pc, other), "peer");
+        let peer: std::net::SocketAddr = "10.0.0.2:5000".parse().unwrap();
+        let context = TransportContext {
+            local_addr: "10.0.0.1:4000".parse().unwrap(),
+            peer_addr: peer,
+            ..Default::default()
+        };
+        let transports = &pc.pipeline_context.transports;
+        assert_eq!(
+            transports.route(&context, &binding_request(&format!("{ours}:{theirs}"))),
+            other,
+            "a check names the second transport's ufrag"
+        );
+        assert_eq!(
+            transports.route_outbound(&context, &binding_request(&format!("{theirs}:{ours}"))),
+            other,
+            "a check the second transport sends names it as the sender"
+        );
+        assert_eq!(
+            transports.route(&context, &binding_request(&format!("{theirs}:{ours}"))),
+            default,
+            "an inbound request is routed by its receiver part only"
+        );
+        assert_eq!(transports.route(&context, &[0x16, 0xfe, 0xfd]), default);
+        // Once the second transport knows the peer, the peer's DTLS goes to it.
+        pc.with_transport(other, |pc| {
+            let candidate = ice::candidate::unmarshal_candidate(
+                "candidate:2 1 udp 2130706431 10.0.0.2 5000 typ host",
+            )
+            .unwrap();
+            pc.ice_transport_mut()
+                .add_remote_candidate(candidate)
+                .expect("the remote candidate is added")
+        });
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&context, &[0x16, 0xfe, 0xfd]),
+            other
+        );
+        // An address only one transport has is that transport's, whatever it carries.
+        let own = TransportContext {
+            local_addr: "10.0.0.1:4001".parse().unwrap(),
+            ..context
+        };
+        pc.with_transport(other, |pc| {
+            let candidate = ice::candidate::unmarshal_candidate(
+                "candidate:3 1 udp 2130706431 10.0.0.1 4001 typ host",
+            )
+            .unwrap();
+            pc.ice_transport_mut()
+                .add_local_candidate(candidate)
+                .unwrap()
+        });
+        assert_eq!(
+            pc.pipeline_context.transports.route(
+                &own,
+                &binding_request(&format!("{}:x", ufrag(&pc, default)))
+            ),
+            other
+        );
     }
 }

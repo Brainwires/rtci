@@ -7,7 +7,9 @@ use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
 use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
-use crate::peer_connection::handler::transport_set::{TransportId, TransportSet};
+use crate::peer_connection::handler::transport_set::{
+    TransportId, TransportSet, aggregate_connection_state,
+};
 use crate::peer_connection::sdp::answered_extension_directions;
 use crate::peer_connection::sdp::ecn;
 use crate::peer_connection::sdp::has_bundle_attribute;
@@ -26,7 +28,6 @@ use crate::peer_connection::sdp::{
     share_bundle_destination,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
-use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use crate::peer_connection::transport::ice::candidate::{
     RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
@@ -116,6 +117,117 @@ pub(super) struct DescriptionSnapshot {
     events: usize,
 }
 
+/// The ICE agent configuration the connection's settings make, for each of its transports.
+pub(super) fn ice_agent_config(
+    configuration: &RTCConfiguration,
+    setting_engine: &SettingEngine,
+) -> Result<AgentConfig> {
+    let mut candidate_types = vec![];
+    if setting_engine.candidates.ice_lite {
+        candidate_types.push(ice::candidate::CandidateType::Host);
+    } else if configuration.ice_transport_policy == RTCIceTransportPolicy::Relay {
+        candidate_types.push(ice::candidate::CandidateType::Relay);
+    }
+
+    let mut validated_servers = vec![];
+    if !configuration.ice_servers.is_empty() {
+        for server in &configuration.ice_servers {
+            let url = server.urls()?;
+            validated_servers.extend(url);
+        }
+    }
+
+    let network_types = if setting_engine.candidates.ice_network_types.is_empty() {
+        ice::network_type::supported_network_types()
+    } else {
+        setting_engine.candidates.ice_network_types.clone()
+    };
+
+    Ok(AgentConfig {
+        lite: setting_engine.candidates.ice_lite,
+        candidate_pair_proposals: setting_engine.candidates.candidate_pair_proposals,
+        urls: validated_servers,
+        disconnected_timeout: setting_engine.timeout.ice_disconnected_timeout,
+        failed_timeout: setting_engine.timeout.ice_failed_timeout,
+        keepalive_interval: setting_engine.timeout.ice_keepalive_interval,
+        candidate_types,
+        network_types,
+        check_interval: setting_engine
+            .timeout
+            .ice_check_interval
+            .unwrap_or(std::time::Duration::from_millis(0)),
+        max_binding_requests: setting_engine.timeout.ice_max_binding_requests,
+        host_acceptance_min_wait: setting_engine.timeout.ice_host_acceptance_min_wait,
+        srflx_acceptance_min_wait: setting_engine.timeout.ice_srflx_acceptance_min_wait,
+        prflx_acceptance_min_wait: setting_engine.timeout.ice_prflx_acceptance_min_wait,
+        relay_acceptance_min_wait: setting_engine.timeout.ice_relay_acceptance_min_wait,
+        multicast_dns_mode: setting_engine.multicast_dns.mode,
+        multicast_dns_local_name: setting_engine.multicast_dns.local_name.clone(),
+        multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
+        multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
+        multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+        multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
+        multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
+        multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
+        multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
+        local_ufrag: setting_engine.candidates.username_fragment.clone(),
+        local_pwd: setting_engine.candidates.password.clone(),
+        allow_loopback_remote_candidates: setting_engine
+            .candidates
+            .allow_loopback_remote_candidates,
+        allow_link_local_remote_candidates: setting_engine
+            .candidates
+            .allow_link_local_remote_candidates,
+        remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
+        tie_breaker: setting_engine.ice.tie_breaker,
+        nomination_acceptance: setting_engine.ice.nomination_acceptance,
+        failed_nomination: setting_engine.ice.failed_nomination,
+        nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
+        ta: setting_engine.ice.pacing,
+        pacing_group: setting_engine.ice.pacing_group.clone(),
+        unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
+        data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
+        send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
+        hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
+        nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
+        nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
+            RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
+            RTCIceCandidateType::Prflx => ice::candidate::CandidateType::PeerReflexive,
+            RTCIceCandidateType::Relay => ice::candidate::CandidateType::Relay,
+            RTCIceCandidateType::Host => ice::candidate::CandidateType::Host,
+            _ => ice::candidate::CandidateType::Unspecified,
+        },
+
+        ..Default::default()
+    })
+}
+
+/// A DTLS transport with the connection's settings and certificates.
+pub(super) fn new_dtls_transport(
+    setting_engine: &SettingEngine,
+    certificates: Vec<crate::peer_connection::certificate::RTCCertificate>,
+    dtls_transport_id: RTCTransportId,
+    ice_transport_id: RTCTransportId,
+    crypto_provider: std::sync::Arc<dyn crypto::RTCCryptoProvider>,
+) -> Result<DtlsTransport> {
+    let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
+        id: dtls_transport_id,
+        ice_transport_id,
+        certificates,
+        answering_dtls_role: setting_engine.answering_dtls_role,
+        srtp_protection_profiles: setting_engine.srtp_protection_profiles.clone(),
+        use_srtp_always: !setting_engine.dtls_use_srtp_only_with_media,
+        dtls_cipher_suites: setting_engine.dtls_cipher_suites.clone(),
+        allow_insecure_verification_algorithm: setting_engine.allow_insecure_verification_algorithm,
+        disable_certificate_fingerprint_verification: setting_engine
+            .disable_certificate_fingerprint_verification,
+        replay_protection: setting_engine.replay_protection,
+        crypto_provider,
+    })?;
+    dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+    Ok(dtls_transport)
+}
+
 impl RTCPeerConnection {
     pub(super) fn new(
         now: Instant,
@@ -125,6 +237,8 @@ impl RTCPeerConnection {
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+        let streams_settings = setting_engine.streams;
+        let turn_tls = setting_engine.turn_tls.clone();
 
         // Each media section negotiates its own codecs unless the application asked for one
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
@@ -149,84 +263,12 @@ impl RTCPeerConnection {
         // connection actually uses, not merely what was requested.
         setting_engine.crypto_provider = Some(crypto_provider.clone());
 
-        let mut candidate_types = vec![];
-        if setting_engine.candidates.ice_lite {
-            candidate_types.push(ice::candidate::CandidateType::Host);
-        } else if configuration.ice_transport_policy == RTCIceTransportPolicy::Relay {
-            candidate_types.push(ice::candidate::CandidateType::Relay);
-        }
-
-        let mut validated_servers = vec![];
-        if !configuration.ice_servers.is_empty() {
-            for server in &configuration.ice_servers {
-                let url = server.urls()?;
-                validated_servers.extend(url);
-            }
-        }
-
-        let network_types = if setting_engine.candidates.ice_network_types.is_empty() {
-            ice::network_type::supported_network_types()
-        } else {
-            setting_engine.candidates.ice_network_types.clone()
-        };
-
-        let agent_config = AgentConfig {
-            lite: setting_engine.candidates.ice_lite,
-            candidate_pair_proposals: setting_engine.candidates.candidate_pair_proposals,
-            urls: validated_servers,
-            disconnected_timeout: setting_engine.timeout.ice_disconnected_timeout,
-            failed_timeout: setting_engine.timeout.ice_failed_timeout,
-            keepalive_interval: setting_engine.timeout.ice_keepalive_interval,
-            candidate_types,
-            network_types,
-            check_interval: setting_engine
-                .timeout
-                .ice_check_interval
-                .unwrap_or(std::time::Duration::from_millis(0)),
-            max_binding_requests: setting_engine.timeout.ice_max_binding_requests,
-            host_acceptance_min_wait: setting_engine.timeout.ice_host_acceptance_min_wait,
-            srflx_acceptance_min_wait: setting_engine.timeout.ice_srflx_acceptance_min_wait,
-            prflx_acceptance_min_wait: setting_engine.timeout.ice_prflx_acceptance_min_wait,
-            relay_acceptance_min_wait: setting_engine.timeout.ice_relay_acceptance_min_wait,
-            multicast_dns_mode: setting_engine.multicast_dns.mode,
-            multicast_dns_local_name: setting_engine.multicast_dns.local_name.clone(),
-            multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
-            multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
-            multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
-            multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
-            multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
-            multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
-            multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
-            local_ufrag: setting_engine.candidates.username_fragment.clone(),
-            local_pwd: setting_engine.candidates.password.clone(),
-            allow_loopback_remote_candidates: setting_engine
-                .candidates
-                .allow_loopback_remote_candidates,
-            allow_link_local_remote_candidates: setting_engine
-                .candidates
-                .allow_link_local_remote_candidates,
-            remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
-            tie_breaker: setting_engine.ice.tie_breaker,
-            nomination_acceptance: setting_engine.ice.nomination_acceptance,
-            failed_nomination: setting_engine.ice.failed_nomination,
-            nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
-            ta: setting_engine.ice.pacing,
-            pacing_group: setting_engine.ice.pacing_group.clone(),
-            unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
-            data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
-            send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
-            hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
-            nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
-            nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
-                RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
-                RTCIceCandidateType::Prflx => ice::candidate::CandidateType::PeerReflexive,
-                RTCIceCandidateType::Relay => ice::candidate::CandidateType::Relay,
-                RTCIceCandidateType::Host => ice::candidate::CandidateType::Host,
-                _ => ice::candidate::CandidateType::Unspecified,
-            },
-
-            ..Default::default()
-        };
+        let agent_config = ice_agent_config(&configuration, &setting_engine)?;
+        let engine_turn = super::turn_streams::EngineTurn::new(
+            &agent_config.urls,
+            streams_settings.turn,
+            turn_tls,
+        );
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
@@ -247,22 +289,13 @@ impl RTCPeerConnection {
         // `set_configuration` compares with them (W3C 4.4.1.5). With none configured the DTLS
         // transport generates its own, which the configuration does not list.
         let certificates = configuration.certificates.clone();
-        let mut dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
-            id: dtls_transport_id,
-            ice_transport_id,
+        let dtls_transport = new_dtls_transport(
+            &setting_engine,
             certificates,
-            answering_dtls_role: setting_engine.answering_dtls_role,
-            srtp_protection_profiles: setting_engine.srtp_protection_profiles.clone(),
-            use_srtp_always: !setting_engine.dtls_use_srtp_only_with_media,
-            dtls_cipher_suites: setting_engine.dtls_cipher_suites.clone(),
-            allow_insecure_verification_algorithm: setting_engine
-                .allow_insecure_verification_algorithm,
-            disable_certificate_fingerprint_verification: setting_engine
-                .disable_certificate_fingerprint_verification,
-            replay_protection: setting_engine.replay_protection,
-            crypto_provider: crypto_provider.clone(),
-        })?;
-        dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+            dtls_transport_id,
+            ice_transport_id,
+            crypto_provider.clone(),
+        )?;
 
         // Create the SCTP transport. The RFC behaviour is the default for each of these: the
         // weighted fair queueing scheduler (RFC 8831 section 6.4), message interleaving
@@ -324,6 +357,7 @@ impl RTCPeerConnection {
                 setting_engine.ecn_initiation,
                 rand::rng().random(),
             ),
+            announced_ice_connection_state: RTCIceConnectionState::New,
             now,
         };
 
@@ -368,6 +402,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
+            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
         })
     }
 
@@ -378,7 +413,7 @@ impl RTCPeerConnection {
     /// The bundle policy in effect: `max-bundle` (W3C webrtc-pc section 4.2.5) is the policy
     /// RFC 9429 section 4.1.1 names `must-bundle`, unless the application has it ignored as
     /// that section's SHOULD says, which leaves the default.
-    fn effective_bundle_policy(&self) -> RTCBundlePolicy {
+    pub(super) fn effective_bundle_policy(&self) -> RTCBundlePolicy {
         match self.configuration.bundle_policy {
             RTCBundlePolicy::MaxBundle if !self.setting_engine.max_bundle_ignored => {
                 RTCBundlePolicy::MustBundle
@@ -726,7 +761,7 @@ impl RTCPeerConnection {
             remote_candidates,
             ecn: self.signalled_ecn(),
         };
-        RTCPeerConnection::populate_sdp(
+        let mut d = RTCPeerConnection::populate_sdp(
             d,
             &dtls_fingerprints,
             &self.media_engine,
@@ -735,7 +770,11 @@ impl RTCPeerConnection {
             &ice_params,
             &media_sections,
             params,
-        )
+        )?;
+        // RFC 9429 section 4.1.1: under `max-compat` each section has a transport of its own.
+        self.plan_offer_transports(&d)?;
+        self.write_transport_attributes(&mut d);
+        Ok(d)
     }
 
     /// generate_matched_sdp generates a SDP and takes the remote state into account
@@ -1183,7 +1222,7 @@ impl RTCPeerConnection {
             remote_candidates,
             ecn: self.signalled_ecn(),
         };
-        RTCPeerConnection::populate_sdp(
+        let mut d = RTCPeerConnection::populate_sdp(
             d,
             &dtls_fingerprints,
             &self.media_engine,
@@ -1192,7 +1231,12 @@ impl RTCPeerConnection {
             &ice_params,
             &media_sections,
             params,
-        )
+        )?;
+        if include_unmatched {
+            self.plan_offer_transports(&d)?;
+        }
+        self.write_transport_attributes(&mut d);
+        Ok(d)
     }
 
     pub(super) fn populate_local_candidates(
@@ -1227,6 +1271,7 @@ impl RTCPeerConnection {
                 };
                 parsed.media_descriptions.insert(0, m);
                 share_bundle_destination(&mut parsed);
+                self.populate_other_transports_candidates(&mut parsed);
             }
 
             Some(RTCSessionDescription {
@@ -1366,6 +1411,8 @@ impl RTCPeerConnection {
                 }
                 self.rollback_transceivers()?;
                 self.restore_last_stable_state();
+                // The transports the offer added go with it.
+                self.restore_transport_layout();
             }
             (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
         }
@@ -1528,11 +1575,13 @@ impl RTCPeerConnection {
         );
     }
 
+    /// The ICE transport of the active transport: the default one, except inside
+    /// [`Self::with_transport`] and the pipeline's sweep of another transport.
     pub(crate) fn ice_transport(&self) -> &IceTransport {
         &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
     }
@@ -1541,16 +1590,17 @@ impl RTCPeerConnection {
         &mut self
             .pipeline_context
             .transports
-            .default_mut()
+            .active_mut()
             .ice_handler_context
             .ice_transport
     }
 
+    /// The DTLS transport of the active transport (see [`Self::ice_transport`]).
     pub(crate) fn dtls_transport(&self) -> &DtlsTransport {
         &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .dtls_handler_context
             .dtls_transport
     }
@@ -1559,9 +1609,24 @@ impl RTCPeerConnection {
         &mut self
             .pipeline_context
             .transports
-            .default_mut()
+            .active_mut()
             .dtls_handler_context
             .dtls_transport
+    }
+
+    /// Runs `f` with `id` the active transport, so that what `f` does through
+    /// [`Self::ice_transport`] and [`Self::dtls_transport`] and the pipeline's handlers is
+    /// done on that transport; the active transport is what it was before afterwards.
+    pub(crate) fn with_transport<R>(
+        &mut self,
+        id: TransportId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.pipeline_context.transports.active_id();
+        self.pipeline_context.transports.set_active(id);
+        let result = f(self);
+        self.pipeline_context.transports.set_active(previous);
+        result
     }
 
     /// The ICE transport of the connection's transport `id`; the default one when `id` names
@@ -2628,36 +2693,16 @@ impl RTCPeerConnection {
             return;
         }
 
-        let connection_state =
-            // The RTCPeerConnection object's [[IsClosed]] slot is true.
-            if is_closed {
-                RTCPeerConnectionState::Closed
-            } else if self.ice_transport().ice_connection_state == RTCIceConnectionState::Failed || self.dtls_transport().state == RTCDtlsTransportState::Failed {
-                // Any of the RTCIceTransports or RTCDtlsTransports are in a "failed" state.
-                RTCPeerConnectionState::Failed
-            } else if self.ice_transport().ice_connection_state == RTCIceConnectionState::Disconnected {
-                // Any of the RTCIceTransports or RTCDtlsTransports are in the "disconnected"
-                // state and none of them are in the "failed" or "connecting" or "checking" state.
-                RTCPeerConnectionState::Disconnected
-            } else if (self.ice_transport().ice_connection_state == RTCIceConnectionState::New || self.ice_transport().ice_connection_state == RTCIceConnectionState::Closed) &&
-                (self.dtls_transport().state == RTCDtlsTransportState::New || self.dtls_transport().state == RTCDtlsTransportState::Closed) {
-                // None of the previous states apply and all RTCIceTransports are in the "new" or "closed" state,
-                // and all RTCDtlsTransports are in the "new" or "closed" state, or there are no transports.
-                RTCPeerConnectionState::New
-            } else if (self.ice_transport().ice_connection_state == RTCIceConnectionState::New || self.ice_transport().ice_connection_state == RTCIceConnectionState::Checking) ||
-                (self.dtls_transport().state == RTCDtlsTransportState::New || self.dtls_transport().state == RTCDtlsTransportState::Connecting) {
-                // None of the previous states apply and any IceTransport is in the "new" or "checking" state or
-                // any DtlsTransport is in the "new" or "connecting" state.
-                RTCPeerConnectionState::Connecting
-            } else if (self.ice_transport().ice_connection_state == RTCIceConnectionState::Connected || self.ice_transport().ice_connection_state == RTCIceConnectionState::Completed || self.ice_transport().ice_connection_state == RTCIceConnectionState::Closed) &&
-                (self.dtls_transport().state == RTCDtlsTransportState::Connected || self.dtls_transport().state == RTCDtlsTransportState::Closed) {
-                // All RTCIceTransports and RTCDtlsTransports are in the "connected", "completed" or "closed"
-                // state and all RTCDtlsTransports are in the "connected" or "closed" state.
-                RTCPeerConnectionState::Connected
-            } else {
-                // "connecting": none of the previous states apply.
-                RTCPeerConnectionState::Connecting
-            };
+        // W3C 4.3.3, over every transport.
+        let connection_state = if is_closed {
+            RTCPeerConnectionState::Closed
+        } else {
+            let transports = &self.pipeline_context.transports;
+            aggregate_connection_state(
+                &transports.ice_connection_states(),
+                &transports.dtls_states(),
+            )
+        };
 
         if self.peer_connection_state == connection_state {
             return;
@@ -4134,7 +4179,7 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
 /// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
 /// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
 /// TURN URL.
-fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
+pub(super) fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("turns:") {
         return RTCIceServerTransportProtocol::Tls;
