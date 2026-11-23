@@ -3489,6 +3489,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **interceptor**: inbound RTCP that no interceptor annotated reached the application as an
+  empty carrier once the chain held a `PerRtpSession` wrapper. The wrapper tags what each
+  session's instance hands on with its `RtpSession`, and the terminus (`NoopInterceptor`)
+  took any attribute as a reason to pass the packet on. The session tag is routing, not an
+  annotation: a report carrying only that ends at the terminus again (a carrier that has a
+  real annotation keeps its tag). Test: `a_report_tagged_only_with_its_rtp_session_still_stops_here`,
+  `tests/congestion_control_boundary.rs::an_unannotated_report_still_stops_at_the_terminus`.
 - **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
   a later packet of it (the segment began at the first packet to arrive and the earlier ones
   were released as consumed); NAL units now come out in sequence-number order from the start
