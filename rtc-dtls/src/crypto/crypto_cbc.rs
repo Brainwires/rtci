@@ -180,7 +180,7 @@ impl CryptoCbc {
         let recv_mac = padding::extract_constant_time::<{ Self::MAC_SIZE }>(
             &decrypted,
             content_len,
-            max_content_len.saturating_sub(255),
+            max_content_len.saturating_sub(256),
             max_content_len,
         );
         let content = &decrypted[..content_len];

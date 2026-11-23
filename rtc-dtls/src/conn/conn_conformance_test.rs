@@ -1609,3 +1609,44 @@ fn key_material_is_exported_only_with_the_extended_master_secret() {
         "both ends export the same keys"
     );
 }
+
+/// RFC 5246 F.1.1.3 (stated for DHE, applied to ECDHE): a fresh ephemeral key for each
+/// handshake. Two handshakes between the same configurations carry different ephemeral
+/// public keys in the ServerKeyExchange and in the ClientKeyExchange.
+#[test]
+fn every_handshake_has_fresh_ephemeral_keys() {
+    let keys = |_: usize| {
+        let certificate = self_signed();
+        let exchange = Exchange::run(
+            client(builder()),
+            server(builder().with_certificates(vec![certificate])),
+        );
+        assert!(
+            exchange.completed(),
+            "{:?} / {:?}",
+            exchange.client_err,
+            exchange.server_err
+        );
+        let server = body_of(&plaintext_handshake_messages(&exchange.from_server), 12)
+            .expect("a ServerKeyExchange");
+        let client = body_of(&plaintext_handshake_messages(&exchange.from_client), 16)
+            .expect("a ClientKeyExchange");
+        // ServerKeyExchange: curve type, named curve, public key length, public key.
+        let point_len = usize::from(server[3]);
+        (server[4..4 + point_len].to_vec(), client)
+    };
+    let (first_server, first_client) = keys(0);
+    let (second_server, second_client) = keys(1);
+    assert_ne!(first_server, second_server, "the server's ephemeral key");
+    assert_ne!(first_client, second_client, "the client's ephemeral key");
+}
+
+/// RFC 5246 7.4.1.2: client_version is the latest (highest) version the client supports. A
+/// DTLS 1.2 client writes DTLS 1.2 (254, 253) in its ClientHello.
+#[test]
+fn the_client_hello_names_the_latest_version_supported() {
+    let exchange = Exchange::run(client(builder()), server(builder()));
+    let hello =
+        body_of(&plaintext_handshake_messages(&exchange.from_client), 1).expect("a ClientHello");
+    assert_eq!(hello[..2], [254, 253]);
+}

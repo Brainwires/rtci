@@ -1834,14 +1834,14 @@ fn after_a_closed_window_is_advertised_new_data_above_the_largest_tsn_is_dropped
         }
         let sack = a.create_selective_ack_chunk();
         assert_eq!(sack.advertised_receiver_window_credit, 0);
-        a.ack_state = AckState::Idle;
+        a.immediate_ack_triggered = false;
         let last = a.peer_last_tsn;
         a.handle_data(&ordered_fragment(tsn, false, false))?;
         if overcommit {
             assert_eq!(a.peer_last_tsn, tsn, "taken with the overcommit");
         } else {
             assert_eq!(a.peer_last_tsn, last, "dropped: above the largest TSN");
-            assert_eq!(a.ack_state, AckState::Immediate, "a SACK at once");
+            assert!(a.immediate_ack_triggered, "a SACK at once");
         }
     }
     Ok(())
