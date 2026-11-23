@@ -671,6 +671,37 @@ mod tests {
         assert_eq!(transports.active_mut().id, default);
     }
 
+    /// A transport added beside the first shares its ICE credentials by default (the
+    /// browsers' form, which Pion and webrtc-rs 0.17 require) and has its own with
+    /// `with_unique_transport_credentials(true)` (RFC 9429 section 5.2.1).
+    #[test]
+    fn added_transports_share_the_first_ones_credentials_unless_unique() {
+        use crate::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+        for unique in [false, true] {
+            let mut pc = RTCPeerConnectionBuilder::new()
+                .with_setting_engine(
+                    SettingEngineBuilder::new()
+                        .with_unique_transport_credentials(unique)
+                        .build(),
+                )
+                .build(Instant::now())
+                .expect("a peer connection builds");
+            let default = pc.pipeline_context.transports.default_id();
+            let other = pc.add_transport().expect("a second transport");
+            let credentials = |id| {
+                let c = pc.ice_transport_of(id).agent.get_local_credentials();
+                (c.ufrag.clone(), c.pwd.clone())
+            };
+            let (first, second) = (credentials(default), credentials(other));
+            if unique {
+                assert_ne!(first.0, second.0);
+                assert_ne!(first.1, second.1);
+            } else {
+                assert_eq!(first, second);
+            }
+        }
+    }
+
     /// W3C 4.3.4: the connection's ICE state is the aggregate of every transport's, not the
     /// first one's.
     #[test]
@@ -765,7 +796,13 @@ mod tests {
     /// the transport that knows it as a remote candidate; the rest to the default one.
     #[test]
     fn a_port_shared_by_two_transports_is_routed_by_ufrag_then_by_peer() {
+        // Routing by ufrag needs credentials per transport; by default they are shared.
         let mut pc = RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                    .with_unique_transport_credentials(true)
+                    .build(),
+            )
             .build(Instant::now())
             .expect("a default peer connection builds");
         let default = pc.pipeline_context.transports.default_id();
