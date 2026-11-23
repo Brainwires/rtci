@@ -3689,6 +3689,21 @@ impl RTCPeerConnection {
     /// # }
     /// ```
     ///
+    /// # During an ICE restart
+    ///
+    /// A candidate added while a restart is staged belongs to the generation the restart
+    /// begins: on the answerer, between `set_remote_description` of the restart offer and
+    /// `set_local_description` of the answer; on the offerer, between the restart offer's
+    /// `create_offer` and its `set_local_description`. It is announced with the new username
+    /// fragment, the restart keeps it even with
+    /// [`with_discard_local_candidates_during_ice_restart`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_discard_local_candidates_during_ice_restart),
+    /// and an answer created after it lists it (RFC 9429 section 5.3.1). It is not paired in
+    /// the session the restart ends once that session has nominated a pair (RFC 8838 section
+    /// 13). So an answerer that gathers for the restart may add its candidates as soon as the
+    /// offer is applied, and need not add them again after `set_local_description`. The
+    /// `username_fragment` of `local_candidate` is not read: the generation is the one staged,
+    /// or the current one when no restart is staged.
+    ///
     /// # Parameters
     ///
     /// - `local_candidate`: The ICE candidate initialization data, or a value whose `candidate`

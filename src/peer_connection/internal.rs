@@ -142,6 +142,14 @@ pub(super) fn ice_agent_config(
         }
     }
 
+    // RFC 8489 section 14.14: fewer than 128 characters, at most 509 bytes.
+    if let Some(software) = setting_engine.ice_agent_software()
+        && (software.len() > stun::textattrs::MAX_TEXT_B
+            || software.chars().count() >= stun::textattrs::MAX_TEXT_CHARS)
+    {
+        return Err(Error::ErrAttributeSizeOverflow);
+    }
+
     let network_types = if setting_engine.candidates.ice_network_types.is_empty() {
         ice::network_type::supported_network_types()
     } else {
@@ -194,6 +202,7 @@ pub(super) fn ice_agent_config(
         data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
         send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
         hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
+        software: setting_engine.ice_agent_software(),
         nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
         nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
             RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -513,21 +522,27 @@ impl RTCPeerConnection {
         if self.ice_transport().has_pending_restart() {
             // An answer to a restart offer: the restart is applied with the answer
             // (`defer_remote_transport`), and keeps the local candidates unless they are to
-            // be discarded; they are the new generation's, so the answer lists them.
+            // be discarded; they are the new generation's, so the answer lists them. Those
+            // gathered since the offer was applied are the new generation's in any case (the
+            // restart keeps them), and the answer lists them too (RFC 9429 section 5.3.1).
             let answers_restart = !offer
                 && self
                     .pending_remote_transport
                     .as_ref()
                     .is_some_and(|pending| pending.ice_restart);
-            if answers_restart
-                && !self
-                    .setting_engine
-                    .candidates
-                    .discard_local_candidates_during_ice_restart
+            if !answers_restart {
+                return Ok(Vec::new());
+            }
+            if !self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart
             {
                 return self.ice_transport().get_local_candidates();
             }
-            return Ok(Vec::new());
+            return Ok(self
+                .ice_transport()
+                .get_restart_generation_local_candidates());
         }
         let candidates = self.ice_transport().get_local_candidates()?;
         // Two lite agents (RFC 8445 section 8.2, RFC 8839 sections 4.4.1.3 and 4.4.2.2): the
