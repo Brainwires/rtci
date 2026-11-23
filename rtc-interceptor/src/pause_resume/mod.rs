@@ -902,6 +902,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         self.now = Some(self.now.map_or(msg.now, |n| n.max(msg.now)));
+        // A local pause asked for before this packet applies to it.
+        self.run_commands(msg.now);
         if let Packet::Rtp(packet) = &mut msg.message.packet
             && let Some(stream) = self.senders.get_mut(&packet.header.ssrc)
         {

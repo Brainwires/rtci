@@ -342,7 +342,7 @@ fn the_receiver_pauses_and_resumes_the_senders_stream() -> Result<()> {
     assert_eq!(world.on_the_wire.len(), 10);
     let ssrc = world.ssrc;
     world.handle(1).pause(ssrc);
-    world.send(25)?;
+    world.send(60)?;
     assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Paused));
     assert_eq!(
         world.handle(1).remote_state(ssrc),
@@ -351,7 +351,7 @@ fn the_receiver_pauses_and_resumes_the_senders_stream() -> Result<()> {
     let before_pause = world.on_the_wire.len();
     assert!(
         (58..=63).contains(&before_pause),
-        "media flows during the 1 s hold-off, about 50 packets: {before_pause}"
+        "media flows during the 1 s hold-off, 50 packets of 20 ms: {before_pause}"
     );
     world.send(20)?;
     assert_eq!(
