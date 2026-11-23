@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: an answer that rejects every m= section closes the transports
+  (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state
+  stable: the transports "no longer referenced by a non-stopped transceiver" are closed, "the
+  RTCDtlsTransports and their associated RTCIceTransports. This results in events firing on
+  these objects in a queued task"; RFC 9429 section 5.11: the ICE components of a rejected
+  section are discarded "unless a non-rejected "m=" section is bundled with" it. With one
+  transport this was only remembered (the next offer restarted ICE on the same agent and asked
+  for a new DTLS association), with no close and no event; with several, the layout of such an
+  answer was not applied at all. Now each transport is closed when the answer is applied, local
+  or remote: its DTLS `statechange` to "closed", then its ICE one (the legacy variants for the
+  default transport and `OnTransportEvent` with the transport's ids), after the description's
+  own events; the connection's states follow (`iceGatheringState`, `iceConnectionState` and
+  `connectionState` "new"), the ICE agent is closed and nothing more is sent. The last
+  transport is replaced in its place by a new one, not started: a new ICE agent with
+  credentials of its own, a new DTLS transport (a new `a=tls-id`, the same certificate), new
+  transport ids, the ICE role undetermined. The next description that sets a section up
+  starts it as the first was (no ICE restart: `a=ice-ufrag` / `a=ice-pwd` are a new
+  generation's). The local candidates the application added are the new agent's too, unless
+  `with_discard_local_candidates_during_ice_restart(true)`; they are announced again when the
+  application adds them for the new generation. Applications that waited for the state events
+  of an ICE restart after such an exchange now see a closed transport and then a new one
+  connecting. Row WEBRTC-4.4.1.4-82 `tested`.
+
+- **jsep**: payload types are kept per direction of each m= section
+  (`conf/jsep-71-pt-numbering`). RFC 3264 section 5.1: "the answer might indicate different
+  payload type numbers for the same codecs, in which case, the offerer MUST send with the
+  payload type numbers from the answer"; section 6.1: the answerer "MUST use the payload type
+  numbers from the offer, even if they differ from those in the answer"; RFC 9429 sections 5.10
+  and 5.11: "The payload type mapping from the remote description is used to determine payload
+  types for the outgoing RTP streams". A sender's codecs (`RTCRtpSender::get_parameters`, what
+  `write_rtp` accepts and the streams the interceptors are bound with) are now the remote
+  section's, with its numbers, RTX `apt` and RED's encodings in that numbering; the receiver's
+  (`RTCRtpReceiver::get_parameters`, demultiplexing, RTX and RED association, statistics) and
+  the formats of this endpoint's own descriptions keep the numbers its descriptions gave them:
+  a remote answer's formats are entered under the payload types of the local offer, not the
+  answer's, and later offers keep them (RFC 3264 section 8.3.2). Behaviour changes only towards
+  a peer that numbers a format otherwise than this endpoint: before, the first remote
+  description's numbers were used for both directions and for every later description, so an
+  answer that renumbered a format was sent to correctly, and what the peer then sent (with the
+  offer's numbers) was read under the wrong ones; a later offer of the peer's with new numbers
+  was answered and sent to with the old ones. New:
+  `SettingEngineBuilder::with_own_payload_types_in_answers(true)` has an answer number the
+  formats as this endpoint registered them (RFC 3264 section 6.1 has "SHOULD" for the offer's
+  numbers, which stays the default). Not covered: `configure_ulpfec` takes one RED and one
+  ULPFEC payload type for both directions, and an `a=rid` `pt=` list is compared by number with
+  this endpoint's formats. Row RFC3264-5.1-8 `tested`; RFC3264-6.1-23 now has a test that sends.
+
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT

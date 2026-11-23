@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5082.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5015 of 5082 (98.7 %).
-- Tested as the default (`tested`): 4992 of 5082 (98.2 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 67: 8 untested, 41 partial, 18 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5017 of 5082 (98.7 %).
+- Tested as the default (`tested`): 4994 of 5082 (98.3 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 65: 8 untested, 39 partial, 18 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 16 | 14 |
 | B | implemented, lacking a test that fails without it | 3 | 2 |
-| C | partly implemented | 41 | 18 |
+| C | partly implemented | 39 | 17 |
 | D | not implemented | 14 | 11 |
 | E | cannot be met or observed inside this engine | 15 | 11 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 90 | 57 |
+| all | | 88 | 56 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 59 rows, 35 of size S, 16 of size M, 8 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 57 rows, 34 of size S, 15 of size M, 8 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 4 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 0 | 5 | 1 | 2 | 0 | 8 | 2 | 6 | 0 |
 | ice | 0 | 1 | 0 | 1 | 0 | 2 | 2 | 0 | 0 |
-| jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
+| jsep (running) | 0 | 2 | 0 | 0 | 0 | 2 | 1 | 0 | 1 |
 | media (running) | 2 | 14 | 10 | 4 | 1 | 31 | 20 | 6 | 5 |
 | media (train 9) | 0 | 4 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
 | payload | 0 | 2 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
@@ -51,7 +51,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | sdp | 0 | 6 | 0 | 0 | 0 | 6 | 6 | 0 | 0 |
 | sframe | 1 | 1 | 1 | 0 | 0 | 3 | 2 | 0 | 1 |
 | tcp (running) | 0 | 1 | 1 | 0 | 0 | 2 | 0 | 2 | 0 |
-| w3c | 0 | 3 | 0 | 0 | 0 | 3 | 2 | 1 | 0 |
+| w3c | 0 | 2 | 0 | 0 | 0 | 2 | 1 | 1 | 0 |
 
 ## Rows
 
@@ -85,7 +85,6 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
 | RFC5761-5.1.3-4 | `rfc5761.md` | ICE checks run for the RTP component only once multiplexing is agreed | untested | C | Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6 | S | ice |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
-| RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | partial | C | The draft's threshold time base is a setting (`Gcc::with_threshold_time_base`), not the default: it measured worse on queueing delay, no interop failure. Owner decision on the default | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | partial | C | Congestion feedback leaves at once by default (`with_immediate_congestion_feedback`): a browser sender did not climb past 300 kbit/s with RFC timing; no named failing cell. Owner decision | S | media (running) |
@@ -117,7 +116,6 @@ Sorted by class, then owner, size and ID.
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-9.2-1 | `rfc6544.md` | Close the selected pair's connection after an ICE restart | untested | C | After an ICE restart, tell the application to close the old selected TCP connection (driver event) | M | tcp (running) |
 | WEBRTC-4.4.1.4-36 | `w3c-webrtc-pc.md` | Answer or pranswer: update the data max message size of the SCTP ... | partial | C | Update the max message size on a pranswer and on renegotiation | S | w3c |
-| WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
 | WEBRTC-4.4.1.4-91 | `w3c-webrtc-pc.md` | Events fire in order: signalingstatechange, channel errors, mute, ... | partial | C | Queue the data channel errors of a description in the spec order | M | w3c |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | missing | D | ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833) | M | dtls-srtp |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | partial | D | A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it | S | media (running) |
