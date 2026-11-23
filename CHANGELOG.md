@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors**: the RTP circuit breaker's packet size follows the sending rate
+  (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
+  times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech
+  those are often 23-byte silence frames while the rate is the talkspurts', and a talking call
+  over 1 to 5 % loss was ceased. By default s is now the mean size of the packets sent over the
+  same last CB_INTERVAL reporting intervals the rate is measured over (bytes sent / packets
+  sent there). The RFC form is `CircuitBreakerPacketSize::LastFrames`
+  (`CircuitBreakerBuilder::with_packet_size`,
+  `DefaultInterceptorOptions::circuit_breaker_packet_size`). Row RFC8083-3-3 is `partial`.
+  - `tests/circuit_breaker_reordering_rtc2rtc.rs` reads the receiver's statistics only once
+    every packet the application wrote has left the sender and arrived: these flows write at a
+    fixed rate above the congestion controller's target on a reordering link (250 to 420 kbit/s
+    for the 500 kbit/s video flow), the pacer held 11 to 25 s of media at the last write, and a
+    receiver report taken while packets were still arriving counted one lost (RFC 3550 6.4.1
+    at that instant). The tests check that everything written left the sender instead of a
+    packet rate in the last second, which the pacer spreading a talkspurt made 35 of 50.
+
 - **interceptors**: reordering is no longer taken for loss (`conf/cb-1-false-trip`).
   - RFC 8083 section 4.3: the RTP circuit breaker ceased a speech flow (the audio pipeline's
     rtc-to-rtc test, 0 % loss, 0 to 40 ms of jitter) about a second in. A packet overtaken
