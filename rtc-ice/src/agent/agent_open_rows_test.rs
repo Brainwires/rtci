@@ -179,7 +179,7 @@ fn test_two_lite_agents_with_several_pairs_select_by_rfc6724_and_update() {
 fn test_a_lite_answerer_takes_the_local_candidate_remote_candidates_names() {
     let now = Instant::now();
     let remote = udp("192.168.0.9", 5000, 1000);
-    let mut b = lite_agent(now, false, &[remote.clone()]);
+    let mut b = lite_agent(now, false, std::slice::from_ref(&remote));
     b.add_local_candidate(udp("10.0.0.2", 1000, 500)).unwrap();
     run(&mut b, now, now + Duration::from_secs(1));
     let local = |a: &Agent| a.get_selected_candidate_pair().map(|(l, _)| l.addr());
