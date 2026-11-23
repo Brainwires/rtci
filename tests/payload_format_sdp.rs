@@ -136,11 +136,50 @@ fn opus_has_a_dynamic_payload_type_and_no_source_level_fmtp() -> TestResult {
     Ok(())
 }
 
-/// RFC 9628 section 6: "If the implementation is willing to receive media, both parameters
-/// [max-fr and max-fs] MUST be provided." Every VP9 format of the default offer states both.
+/// The VP9 formats of `sdp`, each with its fmtp parameters.
+fn vp9_parameters(sdp: &str) -> Vec<(String, Vec<String>)> {
+    rtpmaps(sdp)
+        .into_iter()
+        .filter(|(_, _, e)| e.to_ascii_lowercase().starts_with("vp9/"))
+        .map(|(_, pt, _)| {
+            let parameters = fmtp(sdp, &pt);
+            (pt, parameters)
+        })
+        .collect()
+}
+
+/// The default VP9 formats leave out `max-fr` and `max-fs`: a WebKit sender answered with
+/// them sends no VP9 (browser matrix, "reflect video VP9"). The RFC 9628 section 6 form is
+/// `MediaEngine::set_vp9_receiver_limits(true)`.
 #[test]
-fn the_default_vp9_formats_state_max_fr_and_max_fs() -> TestResult {
-    let sdp = default_offer()?;
+fn the_default_vp9_formats_leave_out_the_receiver_limits() -> TestResult {
+    let vp9 = vp9_parameters(&default_offer()?);
+    assert!(!vp9.is_empty());
+    for (pt, parameters) in vp9 {
+        assert!(
+            parameters
+                .iter()
+                .all(|p| !p.starts_with("max-fr=") && !p.starts_with("max-fs=")),
+            "{pt}: {parameters:?}"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 9628 section 6: "If the implementation is willing to receive media, both parameters
+/// [max-fr and max-fs] MUST be provided." With the receiver limits setting every VP9 format
+/// of the default offer states both.
+#[test]
+fn the_vp9_receiver_limits_setting_states_max_fr_and_max_fs() -> TestResult {
+    let mut media_engine =
+        rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    media_engine.set_vp9_receiver_limits(true);
+    let mut pc = rtc::peer_connection::RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let sdp = pc.create_offer(None)?.sdp;
     let vp9: Vec<String> = rtpmaps(&sdp)
         .into_iter()
         .filter(|(_, _, e)| e.to_ascii_lowercase().starts_with("vp9/"))
