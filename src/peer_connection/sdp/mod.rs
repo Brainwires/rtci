@@ -5688,8 +5688,8 @@ pub(crate) fn update_sdp_origin(
         if d.marshal() == *last_generated {
             return;
         }
-        origin.session_version = origin.session_version.wrapping_add(1);
-        d.origin.session_version = origin.session_version;
+        origin.session_version = origin.session_version.incremented();
+        d.origin.session_version = origin.session_version.clone();
     }
     *last_generated = d.marshal();
 }

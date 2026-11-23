@@ -152,16 +152,132 @@ fn over_limit(what: &str, limit: usize) -> Error {
 /// the version of the Session Description Protocol.
 pub type Version = isize;
 
+/// A decimal number of any length, `1*DIGIT`: the `<sess-id>` and `<sess-version>` of an
+/// `o=` line (RFC 8866 section 9). The grammar sets no upper bound, so a compliant
+/// description may carry values beyond 64 bits (RFC 9429 section 5.2.1 has a JSEP endpoint
+/// generate them within 64 bits, and section 5.8 has it accept compliant SDP that does not
+/// follow its generation rules).
+///
+/// It keeps the digits as written, leading zeros included, so a description is written back
+/// as it was read; equality and order are those of the numbers.
+#[derive(Debug, Clone)]
+pub struct SdpDecimal(String);
+
+impl SdpDecimal {
+    /// `value` when it is `1*DIGIT`.
+    pub fn parse(value: &str) -> Option<Self> {
+        (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| SdpDecimal(value.to_owned()))
+    }
+
+    /// The digits as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The number, when it fits 64 bits.
+    pub fn to_u64(&self) -> Option<u64> {
+        self.0.parse().ok()
+    }
+
+    /// The digits without leading zeros ("0" for zero).
+    fn significant(&self) -> &str {
+        let trimmed = self.0.trim_start_matches('0');
+        if trimmed.is_empty() { "0" } else { trimmed }
+    }
+
+    /// The number plus one (RFC 3264 section 8: the version "MUST increment by one"), with
+    /// no upper bound.
+    pub fn incremented(&self) -> Self {
+        let mut digits: Vec<u8> = self.significant().bytes().collect();
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+        SdpDecimal(String::from_utf8(digits).unwrap_or_default())
+    }
+}
+
+impl Default for SdpDecimal {
+    fn default() -> Self {
+        SdpDecimal("0".to_owned())
+    }
+}
+
+impl From<u64> for SdpDecimal {
+    fn from(value: u64) -> Self {
+        SdpDecimal(value.to_string())
+    }
+}
+
+impl FromStr for SdpDecimal {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        SdpDecimal::parse(value).ok_or_else(|| syntax("1*DIGIT", value))
+    }
+}
+
+impl fmt::Display for SdpDecimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq for SdpDecimal {
+    fn eq(&self, other: &Self) -> bool {
+        self.significant() == other.significant()
+    }
+}
+
+impl Eq for SdpDecimal {}
+
+impl std::hash::Hash for SdpDecimal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.significant().hash(state);
+    }
+}
+
+impl PartialOrd for SdpDecimal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SdpDecimal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let (a, b) = (self.significant(), other.significant());
+        a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+    }
+}
+
+impl PartialEq<u64> for SdpDecimal {
+    fn eq(&self, other: &u64) -> bool {
+        self.to_u64() == Some(*other)
+    }
+}
+
 /// Origin defines the structure for the "o=" field which provides the
 /// originator of the session plus a session identifier and version number.
 #[derive(Debug, Default, Clone)]
 pub struct Origin {
     /// The originator's user name, or `-` when withheld.
     pub username: String,
-    /// A globally unique session identifier.
-    pub session_id: u64,
-    /// Incremented on each modification of the session description.
-    pub session_version: u64,
+    /// A globally unique session identifier, `1*DIGIT` of any length.
+    pub session_id: SdpDecimal,
+    /// Incremented on each modification of the session description; `1*DIGIT` of any
+    /// length.
+    pub session_version: SdpDecimal,
     /// The network type, always `IN` in practice.
     pub network_type: String,
     /// The address type, `IP4` or `IP6`.
@@ -190,8 +306,8 @@ impl Origin {
     pub fn new() -> Self {
         Origin {
             username: "".to_owned(),
-            session_id: 0,
-            session_version: 0,
+            session_id: SdpDecimal::default(),
+            session_version: SdpDecimal::default(),
             network_type: "".to_owned(),
             address_type: "".to_owned(),
             unicast_address: "".to_owned(),
@@ -519,11 +635,14 @@ impl SessionDescription {
             version: 0,
             origin: Origin {
                 username: "-".to_string(),
-                session_id: new_session_id(),
-                session_version: SystemTime::now() // Exemption: wall-clock is correct here to generate random SDP session version
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_else(|_| Duration::from_secs(0))
-                    .subsec_nanos() as u64,
+                session_id: new_session_id().into(),
+                session_version: u64::from(
+                    SystemTime::now() // Exemption: wall-clock is correct here to generate random SDP session version
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_else(|_| Duration::from_secs(0))
+                        .subsec_nanos(),
+                )
+                .into(),
                 network_type: "IN".to_string(),
                 address_type: "IP4".to_string(),
                 unicast_address: "0.0.0.0".to_string(),
@@ -1303,10 +1422,13 @@ impl Parser {
         }
         Ok(Origin {
             username: username.to_owned(),
-            // The grammar has no upper bound; RFC 9429 section 5.2.1 keeps both within
-            // 64 bits, and so does this type.
-            session_id: grammar::digits("o= sess-id", session_id)?,
-            session_version: grammar::digits("o= sess-version", session_version)?,
+            // The grammar has no upper bound (RFC 8866 section 9: `1*DIGIT`), and nor has
+            // this type: RFC 9429 section 5.8 accepts compliant SDP beyond the 64 bits
+            // section 5.2.1 generates.
+            session_id: SdpDecimal::parse(session_id)
+                .ok_or_else(|| syntax("o= sess-id", session_id))?,
+            session_version: SdpDecimal::parse(session_version)
+                .ok_or_else(|| syntax("o= sess-version", session_version))?,
             network_type: network_type.to_owned(),
             address_type: address_type.to_owned(),
             unicast_address: address.to_owned(),

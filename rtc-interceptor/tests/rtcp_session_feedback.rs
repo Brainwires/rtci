@@ -577,3 +577,99 @@ fn a_tstr_and_a_tstn_wait_for_the_regular_packet() {
         assert!(carried, "the regular packet carries it (TSTR: {request})");
     }
 }
+
+/// RFC 7728 sections 6.3 and 8.2 (PAUSED "SHALL also [be repeated] in the next two regular
+/// RTCP reports"), through [`RepeatInRegularReports`]: the packet leaves as feedback (an Early
+/// packet: the minimal compound packet, no report blocks) and a copy of it rides each of the
+/// next two Regular compound packets, the ones with the report blocks, and no packet after
+/// them. [`RtcpSessionControl::StopRepeating`] ends what is still owed.
+#[test]
+fn a_packet_to_repeat_rides_the_next_two_regular_packets() {
+    use rtc_interceptor::{Attribute, RepeatInRegularReports};
+    use rtcp::transport_feedbacks::pause_resume::{PauseResume, PauseResumeEntry};
+    use std::sync::Arc;
+
+    let paused = |now: Instant, count: u8| {
+        let mut packet = rtcp(
+            now,
+            vec![Box::new(PauseResume {
+                sender_ssrc: 300,
+                entries: vec![PauseResumeEntry::paused(300, 7, 1000)],
+            })],
+        );
+        packet
+            .message
+            .attributes
+            .push(Attribute::Custom(Arc::new(RepeatInRegularReports {
+                key: 300,
+                count,
+            })));
+        packet
+    };
+    for stop in [false, true] {
+        let mut chain = chain(builder());
+        let base = Instant::now();
+        chain.bind_local_stream(&video(300));
+        chain.bind_remote_stream(&video(200));
+        control(&mut chain, base, RtcpSessionControl::Start);
+        // The remote stream is received, so a Regular packet reports on it.
+        let mut sent = vec![];
+        let mut seq = 0u16;
+        let mut t = base;
+        let until = base + secs(40.0);
+        let mut pause_at = None;
+        while t < until {
+            chain
+                .handle_read(rtp(t, 200, seq, u32::from(seq) * 3000))
+                .unwrap();
+            let _ = read(&mut chain);
+            seq = seq.wrapping_add(1);
+            if pause_at.is_none() && t >= base + secs(8.0) {
+                chain.handle_write(paused(t, 2)).unwrap();
+                pause_at = Some(t);
+            }
+            if stop && pause_at == Some(t) {
+                sent.extend(written(&mut chain));
+                control(
+                    &mut chain,
+                    t,
+                    RtcpSessionControl::StopRepeating { key: 300 },
+                );
+            }
+            t += secs(0.1);
+            sent.extend(run(&mut chain, t));
+        }
+        let pause_at = pause_at.expect("written");
+        let after: Vec<&Sent> = sent.iter().filter(|s| s.at >= pause_at).collect();
+        let carrying: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .filter(|(_, sent)| sent.has::<PauseResume>())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(after[0].at, pause_at, "the first copy leaves at once");
+        assert!(after[0].reported().is_empty(), "in an Early packet");
+        assert_eq!(carrying[0], 0);
+        let regular: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, sent)| !sent.reported().is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            regular.len() >= 4,
+            "regular packets follow: {}",
+            regular.len()
+        );
+        if stop {
+            assert_eq!(carrying, vec![0], "stopped before the next regular packet");
+        } else {
+            assert_eq!(
+                carrying,
+                vec![0, regular[0], regular[1]],
+                "the next two regular packets carry it, and no other"
+            );
+        }
+    }
+}

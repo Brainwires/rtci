@@ -310,6 +310,9 @@ impl<'a> InterceptorHandler<'a> {
             self.rtx_primary_for(rtp_header.ssrc, rtp_header.payload_type)
                 .unwrap_or((rtp_header.ssrc, rtp_header.payload_type))
         };
+        // RFC 2198: a RED packet carries its primary encoding, which is the stream's codec (the
+        // RED interceptor takes the packet apart before anything else reads it).
+        let payload_type = self.red_primary_for(payload_type);
         let mut owner = known.or_else(|| {
             self.ctx
                 .ssrc_owners
@@ -909,6 +912,32 @@ impl<'a> InterceptorHandler<'a> {
     /// is resolved from the negotiated RTX codec's `apt=` parameter, looked up by the packet's RTX
     /// `payload_type`. Returns `None` when the SSRC is not a known RTX SSRC or the `apt` mapping
     /// cannot be resolved.
+    /// The primary encoding of the RED format `payload_type` (RFC 2198 section 5: the first
+    /// payload type of its fmtp) when a receiver lists both; `payload_type` otherwise.
+    fn red_primary_for(&self, payload_type: PayloadType) -> PayloadType {
+        self.rtp_transceivers
+            .iter()
+            .filter_map(|transceiver| transceiver.receiver().as_ref())
+            .find_map(|receiver| {
+                let red = receiver.receivable_codecs().find(|codec| {
+                    codec.payload_type == payload_type
+                        && codec
+                            .rtp_codec
+                            .mime_type
+                            .to_ascii_lowercase()
+                            .ends_with("/red")
+                })?;
+                let primary = *rtp::codec::red::parse_red_fmtp(red.rtp_codec.sdp_fmtp_line.trim())
+                    .ok()?
+                    .first()?;
+                receiver
+                    .receivable_codecs()
+                    .any(|codec| codec.payload_type == primary)
+                    .then_some(primary)
+            })
+            .unwrap_or(payload_type)
+    }
+
     fn rtx_primary_for(
         &self,
         rtx_ssrc: SSRC,
