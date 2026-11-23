@@ -614,6 +614,13 @@ async fn test_ice_restart_interop() -> Result<()> {
                         rtc_connected = true;
                     }
                 }
+                // A restart begun in "connected" stays "connected" (W3C webrtc-pc 5.6.4: the
+                // path is kept until the new generation selects a pair), so no new state
+                // event comes: the new generation's selected pair is the reconnection.
+                RTCPeerConnectionEvent::OnSelectedCandidatePairChange(pair) => {
+                    log::info!("RTC selected pair after restart: {:?}", pair);
+                    rtc_connected = true;
+                }
                 RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
                     _ => {}
                 },

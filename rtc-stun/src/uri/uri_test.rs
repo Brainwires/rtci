@@ -75,10 +75,11 @@ fn test_an_ipv6_host_is_displayed_in_brackets() -> Result<()> {
         "stun:[2001:db8:1:2:3:4:5:6]:3478",
         "stuns:[2001:db8:1:2:3:4:5:6]",
     ] {
-        let uri = Uri::parse_uri(input)?;
+        // (A `stuns` URI with an address is the lenient parser's: RFC 8489 section 8.1.)
+        let uri = Uri::parse_uri_lenient(input)?;
         assert_eq!(uri.host, "2001:db8:1:2:3:4:5:6");
         assert_eq!(uri.to_string(), input);
-        assert_eq!(Uri::parse_uri(&uri.to_string())?, uri);
+        assert_eq!(Uri::parse_uri_lenient(&uri.to_string())?, uri);
     }
     Ok(())
 }
@@ -95,8 +96,8 @@ fn test_default_ports() -> Result<()> {
     Ok(())
 }
 
-/// RFC 8489 section 8.1: "A 'stuns' URI containing an IP address MUST be rejected". The strict
-/// parser does; `parse_uri` keeps accepting it, as browsers do.
+/// RFC 8489 section 8.1: "A 'stuns' URI containing an IP address MUST be rejected": by
+/// `parse_uri`, the default; `parse_uri_lenient` accepts it, as browsers do.
 #[test]
 fn test_strict_parser_rejects_stuns_with_an_ip_address() -> Result<()> {
     for input in [
@@ -104,8 +105,9 @@ fn test_strict_parser_rejects_stuns_with_an_ip_address() -> Result<()> {
         "stuns:192.0.2.1:5349",
         "stuns:[2001:db8::1]:5349",
     ] {
+        assert_eq!(Uri::parse_uri(input), Err(Error::ErrHost), "{input}");
         assert_eq!(Uri::parse_uri_strict(input), Err(Error::ErrHost), "{input}");
-        let lenient = Uri::parse_uri(input)?;
+        let lenient = Uri::parse_uri_lenient(input)?;
         assert!(lenient.is_secure() && lenient.host_is_ip());
     }
     for input in [
@@ -113,7 +115,7 @@ fn test_strict_parser_rejects_stuns_with_an_ip_address() -> Result<()> {
         "stun:192.0.2.1",
         "stun:[2001:db8::1]:3478",
     ] {
-        assert_eq!(Uri::parse_uri_strict(input)?, Uri::parse_uri(input)?);
+        assert_eq!(Uri::parse_uri(input)?, Uri::parse_uri_lenient(input)?);
     }
     Ok(())
 }

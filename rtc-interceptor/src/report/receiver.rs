@@ -279,7 +279,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for ReceiverReportInterceptor {
 
 impl Interceptor for ReceiverReportInterceptor {
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
-        let stream = ReceiverStream::new(info.ssrc, info.clock_rate);
+        let mut stream = ReceiverStream::new(info.ssrc, info.clock_rate);
+        stream.set_payload_clock_rates(&info.payload_clock_rates);
         self.streams.insert(info.ssrc, stream);
         if info.rtcp_feedback.iter().any(|fb| fb.typ == RTCP_FB_RRTR) {
             self.rrtr_streams.insert(info.ssrc);

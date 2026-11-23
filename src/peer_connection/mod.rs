@@ -3038,7 +3038,11 @@ impl RTCPeerConnection {
         };
 
         if !candidate_value.is_empty() {
-            self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
+            self.add_ice_local_candidate(
+                candidate_value,
+                local_candidate.url.as_deref(),
+                local_candidate.relay_protocol,
+            )?;
         } else {
             self.finish_local_gathering();
         }

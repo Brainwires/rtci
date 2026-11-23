@@ -165,3 +165,88 @@ fn test_on_link_source_scopes() {
         assert!(!is_on_link_source(ip(off)), "{off}");
     }
 }
+
+/// `resolve`, the datagram fed with the destination of its IP header (`handle_datagram`).
+fn resolve_to(packet: BytesMut, src: &str, destination: &str) -> Option<IpAddr> {
+    let now = Instant::now();
+    let mut conn = Mdns::new(now, MdnsConfig::default());
+    let id = conn.query_now(now, NAME);
+    while conn.poll_write().is_some() {}
+    conn.handle_datagram(
+        TaggedBytesMut {
+            now,
+            transport: TransportContext {
+                local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MDNS_PORT),
+                peer_addr: SocketAddr::new(src.parse().unwrap(), MDNS_PORT),
+                transport_protocol: TransportProtocol::UDP,
+                ecn: None,
+            },
+            message: packet,
+        },
+        ip(destination),
+    )
+    .unwrap();
+    let mut resolved = None;
+    while let Some(event) = conn.poll_event() {
+        if let MdnsEvent::QueryAnswered(qid, ip) = event {
+            assert_eq!(qid, id);
+            resolved = Some(ip);
+        }
+    }
+    resolved
+}
+
+/// RFC 6762 section 11: "All responses received with a destination address in the IP header
+/// that is the mDNS [...] multicast address [...] are necessarily deemed to have originated
+/// on the local link, regardless of source IP address"; one received at a unicast
+/// destination is held to the on-link test. With the destination reported by the driver,
+/// an answer from a public source that arrived at 224.0.0.251 (or FF02::FB) resolves; the
+/// same by unicast does not, and neither does it with the destination unknown (the scope of
+/// the source decides then). An A record must still name its sender.
+#[test]
+fn test_a_response_at_the_multicast_address_is_on_link_whatever_its_source() {
+    let public = "203.0.113.9";
+    assert_eq!(
+        resolve_to(answer_packet(ip(public), true, 120), public, "224.0.0.251"),
+        Some(ip(public))
+    );
+    assert_eq!(
+        resolve_to(
+            answer_packet(ip("2001:db8::9"), true, 120),
+            "2001:db8::9",
+            "ff02::fb"
+        ),
+        Some(ip("2001:db8::9"))
+    );
+    assert_eq!(
+        resolve_to(answer_packet(ip(public), true, 120), public, "192.168.1.2"),
+        None,
+        "by unicast, from off the link"
+    );
+    assert_eq!(resolve(answer_packet(ip(public), true, 120), public), None);
+    assert_eq!(
+        resolve_to(
+            answer_packet(ip("10.0.0.7"), true, 120),
+            public,
+            "224.0.0.251"
+        ),
+        None,
+        "an A record naming another address"
+    );
+}
+
+/// RFC 6762 section 6: a response that arrived by unicast is taken only for a recent question
+/// asked with the QU bit; this query asked by multicast (QM), so a unicast answer to it is
+/// ignored, from an on-link sender too, while the same at the multicast address resolves.
+#[test]
+fn test_a_unicast_response_to_a_multicast_question_is_ignored() {
+    let sender = "192.168.1.50";
+    assert_eq!(
+        resolve_to(answer_packet(ip(sender), true, 120), sender, "192.168.1.2"),
+        None
+    );
+    assert_eq!(
+        resolve_to(answer_packet(ip(sender), true, 120), sender, "224.0.0.251"),
+        Some(ip(sender))
+    );
+}

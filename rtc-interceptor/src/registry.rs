@@ -228,6 +228,27 @@ pub enum Slot {
     /// it leaves the chain. (Fork addition; see FORK.md. Declared after
     /// [`Slot::Custom`] so that variant keeps its discriminant.)
     KeyFrameRequests = 14_000,
+    /// `XrReportInterceptor` — RFC 3611 report blocks about received streams (Loss RLE,
+    /// Duplicate RLE, Packet Receipt Times, Statistics Summary, VoIP Metrics).
+    ///
+    /// **Both legs.** *Read:* records each remote packet's arrival. *Write:* emits XR on a
+    /// timer.
+    ///
+    /// **Why here — an arrival recorder next to the receiver report.** It reports what the
+    /// path delivered, so it reads before the FEC decoder rebuilds packets and before the
+    /// jitter buffer holds them, and it generates, so it sits above the pacer. (Declared after
+    /// [`Slot::Custom`] so that variant keeps its discriminant.)
+    ExtendedReports = 10_100,
+    /// `TstnResponderInterceptor` — answers each temporal-spatial trade-off request a local
+    /// media sender receives with a notification (RFC 5104 section 4.3.3).
+    ///
+    /// **Both legs.** *Read:* sees the requests, which go on to the application. *Write:*
+    /// emits the notifications.
+    ///
+    /// **Why here — application-most, next to the key-frame requests.** It only generates
+    /// RTCP, so it sits above the pacer; nothing it does depends on arrival order. (Declared
+    /// after [`Slot::Custom`] so that variant keeps its discriminant.)
+    TradeoffNotifications = 14_100,
 }
 
 impl Slot {
@@ -253,6 +274,8 @@ impl Slot {
             Self::IntervalPli => 12_000,
             Self::JitterBuffer => 13_000,
             Self::KeyFrameRequests => 14_000,
+            Self::ExtendedReports => 10_100,
+            Self::TradeoffNotifications => 14_100,
             Self::Custom(position) => position,
         }
     }

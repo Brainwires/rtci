@@ -25,6 +25,7 @@ fn test_handshake_message() -> Result<()> {
             fragment_length: 0x29,
         },
         handshake_message: HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+            session_id: vec![],
             version: ProtocolVersion {
                 major: 0xFE,
                 minor: 0xFD,

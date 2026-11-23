@@ -720,3 +720,52 @@ fn padding_after_the_report_blocks_is_cut_off() {
     assert_eq!(1, padded.reports.len());
     assert_eq!(20, padded.marshal().unwrap().len());
 }
+
+// RFC 3611 4.1: "If the bit vector chunk is the last chunk and the sequence number range
+// ends partway through it, the remaining bits MUST be set to zero and MUST be ignored by the
+// receiver" (the trailing bits of the vector past `end_seq`).
+#[test]
+fn bits_of_a_last_bit_vector_past_the_range_are_zero_and_ignored() {
+    let block = RLEReportBlock::from_flags(true, 7, 100, 105, 0, &[true, false, true, true, true]);
+    assert_eq!(vec![Chunk(0b1_10111_0000000000)], block.chunks);
+
+    // A sender that left ones past the end: the reader stops at the end of the range.
+    let lax = RLEReportBlock {
+        chunks: vec![Chunk(0b1_10111_1111111111)],
+        ..block.clone()
+    };
+    assert_eq!(vec![true, false, true, true, true], lax.flags());
+}
+
+// RFC 3611 4.1, 4.1.1, 4.1.2: runs of 15 or more are run-length chunks, the rest bit vectors;
+// a reader expands them back to one flag per sequence number, across the 16-bit wrap.
+#[test]
+fn flags_survive_run_lengths_bit_vectors_and_the_wire() {
+    let mut flags = vec![true; 40];
+    flags.extend([false, true, false, false, true, true]);
+    flags.extend(vec![false; 20]);
+    flags.push(true);
+    let begin = 65_500u16;
+    let end = begin.wrapping_add(flags.len() as u16);
+    let block = RLEReportBlock::from_flags(true, 9, begin, end, 0, &flags);
+    assert_eq!(ChunkType::RunLength, block.chunks[0].chunk_type());
+    assert_eq!(40, block.chunks[0].value());
+    assert_eq!(Ok(1), block.chunks[0].run_type());
+    let raw = xr(block.clone()).marshal().unwrap();
+    let read = ExtendedReport::unmarshal(&mut raw.freeze()).unwrap();
+    let read = read.reports[0]
+        .as_any()
+        .downcast_ref::<RLEReportBlock>()
+        .unwrap();
+    assert_eq!(flags, read.flags());
+}
+
+// RFC 3611 4.1: with thinning T, only the sequence numbers that are a multiple of 2^T are
+// reported on.
+#[test]
+fn thinning_reports_on_every_second_sequence_number() {
+    assert_eq!(vec![10, 12, 14], reported_sequence_numbers(9, 16, 1));
+    assert_eq!(vec![65_534, 0], reported_sequence_numbers(65_533, 2, 1));
+    let block = RLEReportBlock::from_flags(true, 1, 9, 16, 1, &[true, false, true]);
+    assert_eq!(vec![true, false, true], block.flags());
+}

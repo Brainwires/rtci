@@ -213,6 +213,28 @@ fn test_new_password_keeps_the_negotiated_realm_nonce_and_algorithm() -> Result<
     client.close()
 }
 
+/// RFC 8656 section 5: every request about an allocation uses the username that created it.
+/// A new username given to `update_credentials` is for the next Allocate; the live
+/// allocation's Refresh still goes under the old username and its password.
+#[test]
+fn test_a_new_username_leaves_a_live_allocation_with_its_own() -> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let provider = test_crypto_provider();
+    let mut client = new_client(TransportProtocol::UDP)?;
+    allocate_sha256(&mut client, now, AllocateOptions::default())?;
+
+    client.update_credentials("someone-else".to_owned(), "other".to_owned())?;
+    client.refresh_allocations(now)?;
+    let refresh = server.next_request(&mut client);
+    assert_eq!(
+        Username::get_from_as(&refresh, ATTR_USERNAME)?.text,
+        USERNAME
+    );
+    MessageIntegritySha256::check(&refresh, &sha256_key(REALM, PASSWORD)?, provider.crypto())?;
+    client.close()
+}
+
 /// RFC 8489 §14.3, §9.2.2: the USERNAME is an OpaqueString (RFC 8265): what the application
 /// gave is sent in Unicode normalization form C, and the key is made of that.
 #[test]

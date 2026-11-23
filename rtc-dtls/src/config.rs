@@ -138,6 +138,7 @@ pub struct ConfigBuilder {
     session_tickets: u8,
     session_ticket_lifetime: Duration,
     session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    session_cache: Option<Arc<dyn crate::session::SessionCache>>,
     external_psks: Vec<crate::session::ExternalPsk>,
     psk_without_key_exchange: bool,
     post_handshake_auth: bool,
@@ -183,6 +184,7 @@ impl Default for ConfigBuilder {
             session_tickets: 0,
             session_ticket_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
             session_store: None,
+            session_cache: None,
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
@@ -423,30 +425,54 @@ impl ConfigBuilder {
         self
     }
 
-    /// DTLS 1.3 server: how many tickets (NewSessionTicket messages, RFC 8446 section 4.6.1)
-    /// to send after each handshake, for the client to resume with. 0, the default, sends
+    /// Server: how many tickets (NewSessionTicket messages, RFC 8446 section 4.6.1) a DTLS 1.3
+    /// server sends after each handshake, for the client to resume with. 0, the default, sends
     /// none and accepts none. Tickets are sealed under a key the configuration makes at
     /// random when it is built, and each is accepted once: see [`crate::session`].
+    ///
+    /// Any count above 0 also makes a DTLS 1.2 server issue and accept RFC 5077 session
+    /// tickets, one per handshake to a client that asks for one, for sessions made with the
+    /// extended master secret.
     pub fn with_session_tickets(mut self, count: u8) -> Self {
         self.session_tickets = count;
         self
     }
 
-    /// DTLS 1.3 server: how long a ticket it issues may be used for (`ticket_lifetime`).
-    /// Two hours by default; at most seven days (RFC 8446 section 4.6.1).
+    /// Server: how long a ticket it issues may be used for (`ticket_lifetime`), and how long a
+    /// DTLS 1.2 session it keeps in its session cache may be resumed. Two hours by default; at
+    /// most seven days (RFC 8446 section 4.6.1).
     pub fn with_session_ticket_lifetime(mut self, lifetime: Duration) -> Self {
         self.session_ticket_lifetime = lifetime;
         self
     }
 
-    /// DTLS 1.3 client: where to keep the tickets servers send, and take one from for the
-    /// next handshake with the same server name. Without a store (the default) a client
-    /// offers no PSK and drops the tickets it is sent.
+    /// Client: where to keep the tickets servers send, and take one from for the next
+    /// handshake with the same server name. Without a store (the default) a client offers no
+    /// PSK and drops the tickets it is sent.
+    ///
+    /// A DTLS 1.2 client keeps its sessions there too (RFC 5246 section 7.3: by session id,
+    /// or RFC 5077: by ticket, and it asks for a ticket in every ClientHello), when they were
+    /// made with the extended master secret (RFC 7627 section 5.3), and offers the most recent
+    /// one again.
     pub fn with_session_store(
         mut self,
         store: Option<Arc<dyn crate::session::SessionStore>>,
     ) -> Self {
         self.session_store = store;
+        self
+    }
+
+    /// DTLS 1.2 server: where to keep the sessions it may resume by session id (RFC 5246
+    /// sections 7.3 and 7.4.1.3). With one, each full handshake that used the extended master
+    /// secret makes a session with a new 32-byte session id, valid for
+    /// [`Self::with_session_ticket_lifetime`]; a ClientHello that offers it gets the
+    /// abbreviated handshake. `None`, the default, gives no session id and resumes by
+    /// session id nothing.
+    pub fn with_session_cache(
+        mut self,
+        cache: Option<Arc<dyn crate::session::SessionCache>>,
+    ) -> Self {
+        self.session_cache = cache;
         self
     }
 
@@ -1024,6 +1050,14 @@ impl ConfigBuilder {
             } else {
                 None
             },
+            session_cache: if is_client {
+                None
+            } else {
+                self.session_cache.take()
+            },
+            session_lifetime: self
+                .session_ticket_lifetime
+                .min(crate::session::MAX_TICKET_LIFETIME),
             external_psks,
             psk_without_key_exchange: self.psk_without_key_exchange,
             post_handshake_auth: is_client && self.post_handshake_auth,
@@ -1113,8 +1147,12 @@ pub struct HandshakeConfig {
     pub(crate) invalid_record_limit: Option<u64>,
     /// DTLS 1.3 server: the tickets it issues and has accepted, if it issues any.
     pub(crate) ticket_issuer: Option<Arc<crate::dtls13::psk::TicketIssuer>>,
-    /// DTLS 1.3 client: where it keeps tickets, if it resumes.
+    /// Client: where it keeps tickets and DTLS 1.2 sessions, if it resumes.
     pub(crate) session_store: Option<Arc<dyn crate::session::SessionStore>>,
+    /// DTLS 1.2 server: the sessions it resumes by session id, if it keeps any.
+    pub(crate) session_cache: Option<Arc<dyn crate::session::SessionCache>>,
+    /// How long a DTLS 1.2 session in `session_cache` may be resumed.
+    pub(crate) session_lifetime: Duration,
     pub(crate) external_psks: Vec<crate::session::ExternalPsk>,
     pub(crate) psk_without_key_exchange: bool,
     /// DTLS 1.3 client: it offers post-handshake authentication.
@@ -1200,6 +1238,8 @@ impl HandshakeConfig {
             invalid_record_limit: None,
             ticket_issuer: None,
             session_store: None,
+            session_cache: None,
+            session_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
