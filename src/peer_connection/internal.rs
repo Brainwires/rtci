@@ -1038,7 +1038,17 @@ impl RTCPeerConnection {
             .flatten()
             .find(|d| d.sdp_type == RTCSdpType::Answer)
             .and_then(|d| d.parsed.as_ref())
-            .map_or_else(BundleMode::initial_offer, BundleMode::following)
+            .map_or_else(BundleMode::initial_offer, |answer| {
+                // The groups the application asked for (RFC 9143 sections 7.5.1, 7.5.2).
+                let requested = |want: bool| -> Vec<String> {
+                    self.rtp_transceivers
+                        .iter()
+                        .filter(|t| !t.stopped() && t.bundle_request() == Some(want))
+                        .filter_map(|t| t.mid().clone())
+                        .collect()
+                };
+                BundleMode::following(answer).with_requests(&requested(false), &requested(true))
+            })
         } else {
             // The offered BUNDLE group, whatever other `a=group` lines the offer has
             // (RFC 9429 section 5.3.1); none when the offer has none.

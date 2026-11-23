@@ -124,6 +124,15 @@ impl RTCPeerConnection {
                 || (has_rtp_media(&d)
                     && self.dtls_transport().is_started()
                     && !self.dtls_transport().can_key_srtp());
+            // Every other transport stages the `tls-id` of the new association it was asked
+            // for (`renew_dtls_association`), which `write_transport_attributes` writes in its
+            // sections (RFC 8842 section 5.5, per transport).
+            let default = self.pipeline_context.transports.default_id();
+            for id in self.pipeline_context.transports.ids() {
+                if id != default {
+                    self.with_transport(id, |pc| pc.dtls_transport_mut().offer_tls_id(false))?;
+                }
+            }
             self.dtls_transport_mut().offer_tls_id(new_association)?
         } else {
             let offered = self

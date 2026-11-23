@@ -435,6 +435,11 @@ impl RTCPeerConnection {
             // Final poll write out to pipeline's write out; what leaves from one of the
             // engine's ICE-TCP candidates goes onto that transport's connection instead.
             while let Some(msg) = wouts.pop_front() {
+                // What this transport sends on a local address others share is how the
+                // answers on that 5-tuple find it (`TransportSet::route`, rule 2).
+                self.pipeline_context
+                    .transports
+                    .learn_path(id, &msg.transport);
                 if let RTCMessageInternal::Raw(message) = msg.message
                     && let Some(out) = self.take_tcp_write(
                         id,
@@ -766,12 +771,16 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
-        // transport per BUNDLE group or unbundled section) reads it.
-        let transport = self
+        // transport per BUNDLE group or unbundled section) reads it. A Binding request on a
+        // local address several transports share that names none of them is dropped
+        // (`TransportSet::route`): the remote retransmits it.
+        if let Some(transport) = self
             .pipeline_context
             .transports
-            .route(&msg.transport, &msg.message);
-        self.read_on_transport(transport, msg);
+            .route(&msg.transport, &msg.message)
+        {
+            self.read_on_transport(transport, msg);
+        }
         Ok(())
     }
 

@@ -338,7 +338,12 @@ impl RTCPeerConnection {
             let on = match self.streams.connection_transport.get(&id) {
                 Some(on) => *on,
                 None => {
-                    let on = self.pipeline_context.transports.route(&transport, &message);
+                    // A first check that names none of the transports sharing the port is
+                    // dropped; the remote retransmits it on the connection.
+                    let Some(on) = self.pipeline_context.transports.route(&transport, &message)
+                    else {
+                        continue;
+                    };
                     self.streams.connection_transport.insert(id, on);
                     on
                 }
@@ -795,7 +800,8 @@ impl RTCPeerConnection {
         let on = self
             .pipeline_context
             .transports
-            .route_outbound(&msg.transport, &msg.message);
+            .route_outbound(&msg.transport, &msg.message)
+            .unwrap_or_else(|| self.pipeline_context.transports.default_id());
         self.take_tcp_write(on, msg)
     }
 
