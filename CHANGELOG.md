@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors**: a packet only overtaken is not a loss for congestion control
+  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
+  received" as lost at once and forgot it, so the later feedback reporting it received matched
+  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
+  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
+  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
+  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
+  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
+  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
+
 - **interceptors**: the pacer bounds its queue time and never refuses a packet
   (`conf/pacer-1-queue-time`).
   - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
