@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: train fixes for the sweep branches (`conf/jsep-54-train-fixes`, jsep14). No
+  engine change.
+  - Real descriptions through the remote-description checks: `tests/fixtures/browser-sdp/`
+    holds SDP as real writers put it on the wire (`<writer>--<scenario>--<n>-<type>.sdp`), and
+    `src/peer_connection/sdp/browser_sdp_test.rs` runs each through the attribute grammar
+    check (RFC 9429 section 5.8), the answer `a=setup` check (RFC 5763 section 5) and the
+    bundled payload-type comparison (RFC 8859), and applies each offer whole. A form the
+    strict grammar refuses must be one of the documented tolerances (trailing white space,
+    webrtc-rs 0.17's `create_offer` text). First fixtures: a Firefox 152 simulcast offer and
+    webrtc-rs 0.17 offers and answers (`tests/webrtc_0_17_descriptions_interop.rs`, which
+    also applies them live). None is refused.
+  - The browser interop harness records every description the browser sends
+    (`scripts/test-env/interop/common.mjs` `recordDescriptions`; artifact
+    `test-env-N/browser-sdp/<project>--<test>--<n>-<type>.sdp`) for the Chromium, Firefox and
+    WebKit fixtures.
+  - Tests that a mutation did not fail now do: the rejected-stream test (RFC 3264 section
+    6) rejected nothing (its answer kept the section's port; only the BUNDLE group lost the
+    mid), it now rejects the section and checks the transceiver is stopped; the RFC 8839 rows
+    (credentials between levels, FQDN candidates, FQDN `c=`, hold) and the RFC 7728 CSRC
+    rule were mutation-checked.
 - **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no
   engine change: the RFC 9143 section 9.1 payload-type rewrite and the RFC 3264 section 8.3.2
   switch to a new answer's formats are separate tests; an encoding that names a codec the new

@@ -2,7 +2,7 @@
 // fixtures, and per-session netem (a tc filter that sends one session's packets through the
 // lossy band interop/run.sh sets up on open-a's eth0).
 import { test } from "@playwright/test";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 export const WS = process.env.RTC_INTEROP_WS || "ws://127.0.0.1:8080";
@@ -14,7 +14,34 @@ export const TURN = {
 };
 const PEER_JS = readFileSync(new URL("./peer.js", import.meta.url), "utf8");
 
+// Writes every description the browser sent in a test (peer.js keeps them, as the browser
+// wrote them) to RTC_INTEROP_SDP_DIR as `<project>--<test title>--<n>-<type>.sdp`, when set:
+// real browser SDP for the engine's fixtures (tests/fixtures/browser-sdp/).
+export function recordDescriptions() {
+  const dir = process.env.RTC_INTEROP_SDP_DIR;
+  if (!dir) return;
+  test.afterEach(async ({ page }, info) => {
+    let sent = [];
+    try {
+      sent = await page.evaluate(() => window.__interopDescriptions || []);
+    } catch {
+      return;
+    }
+    if (!sent.length) return;
+    const slug = info.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 90);
+    try {
+      mkdirSync(dir, { recursive: true });
+      sent.forEach((d, i) =>
+        writeFileSync(`${dir}/${info.project.name}--${slug}--${i + 1}-${d.type}.sdp`, d.sdp),
+      );
+    } catch (e) {
+      console.log(`[${info.project.name}] could not record the descriptions: ${e}`);
+    }
+  });
+}
+
 export function setupPage() {
+  recordDescriptions();
   test.beforeEach(async ({ page }) => {
     page.on("console", (m) => {
       if (m.type() === "error") console.log(`[${test.info().project.name}] console: ${m.text()}`);

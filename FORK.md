@@ -408,7 +408,10 @@ versions that support it. Raising it is a deliberate change of the manifest.
   association, is refused (RFC 5763 section 5, RFC 9429 section 5.8.3); bundled sections
   that give a payload type different `a=rtcp-fb` are refused (RFC 8859 appendix A). White
   space at the end of a value is tolerated by default for webrtc-rs 0.17 / Pion
-  (`with_strict_sdp_attribute_grammar(true)` refuses it).
+  (`with_strict_sdp_attribute_grammar(true)` refuses it). jsep14: real descriptions
+  (`tests/fixtures/browser-sdp/`: Firefox, webrtc-rs 0.17; Chromium, Firefox and WebKit as
+  the interop harness records them) are run through these checks, and a form a real writer
+  uses that the strict grammar refuses must be a listed tolerance.
 
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
   ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops

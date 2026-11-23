@@ -148,6 +148,9 @@
 mod sdp_test;
 
 #[cfg(test)]
+mod browser_sdp_test;
+
+#[cfg(test)]
 mod rejected_mline_tests {
     use super::*;
 
