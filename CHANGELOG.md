@@ -1340,7 +1340,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
-<<<<<<< ours
 - **peer_connection**: the default DTLS-SRTP profiles put `SRTP_AEAD_AES_256_GCM` first, ahead
   of `SRTP_AEAD_AES_128_GCM` and `SRTP_AES128_CM_HMAC_SHA1_80` (RFC 3711 section 9.2: keys "as
   large as possible"; RFC 6188 section 6). Two engine peers now negotiate AES-256-GCM; every
@@ -1355,7 +1354,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequence number or a FORWARD TSN (RFC 3758 section 4.1 TR3, TR4); the next message of the
   stream takes the number. New `StreamEvent::MessageAbandoned { id, transmitted }` for every
   abandoned message (TR3: the upper layer is told).
-=======
 - **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
   readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
   protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
@@ -1425,7 +1423,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `must-bundle`). `iceConnectionState` is the W3C 4.3.4 aggregate: a connection whose only
   transport was closed by a description now reports `new`, as the aggregate of closed
   transports is, where it reported `closed`.
->>>>>>> theirs
 - **sctp**, **peer_connection**: path MTU discovery (RFC 8899 DPLPMTUD, RFC 8261 section 4,
   RFC 8831 section 5), on by default. Once established an association confirms its packet
   size with a probe (a HEARTBEAT and a PAD chunk, RFC 4820, of exactly the size tried),
@@ -1453,16 +1450,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept until the Cumulative TSN Ack covers it (it was dropped at the gap acknowledgement), and
   a SACK that no longer acknowledges it makes it outstanding again with a miss indication and
   T3-rtx; a SHUTDOWN is no renege.
-<<<<<<< ours
-- **peer connection** (mt-2): a remote description whose sections have different ICE
-  credentials outside a BUNDLE group is applied, a transport per section, instead of refused
-  with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
-  the BUNDLE group on its own transport instead of rejecting it with port 0 (it still does under
-  `must-bundle`). `iceConnectionState` is the W3C 4.3.4 aggregate: a connection whose only
-  transport was closed by a description now reports `new`, as the aggregate of closed
-  transports is, where it reported `closed`.
-=======
->>>>>>> theirs
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound
@@ -1847,7 +1834,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-<<<<<<< ours
 - **sctp**: `Association::peer_abort_reason()` (the Upper Layer Abort Reason of the peer's
   User-Initiated Abort, RFC 9260 sections 3.3.10.12 and 9.1) and
   `Association::abort_with_reason(&[u8])`.
@@ -1856,7 +1842,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
   RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
   the new association, browsers ignore a new `tls-id`.
-=======
 - **pc** (pc-26): `SettingEngineBuilder::with_sctp_rto(initial, min, max)` (RFC 9260 RTO.Initial,
   RTO.Min, RTO.Max) and `with_sctp_max_retransmissions` (Association.Max.Retrans), so an
   unanswering peer fails the association (data channels: `sctp-failure`) within a chosen time;
@@ -1903,7 +1888,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiated, an InvalidStateError on audio. `RTCPeerConnectionEvent::OnKeyFrameRequest {
   sender, rid }` for each PLI / FIR naming a sender's SSRC (6.4 `keyframerequest`).
 
->>>>>>> theirs
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
   BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
@@ -1954,14 +1938,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ReferencePictureSelectionIndication::hevc` / `hevc_picture` (RFC 7798 section 8.3) and
     `LrrEntry::vp9` / `LrrEntry::av1` / `target_spatial_id` (RFC 9628 section 5.3, AV1 RTP
     section 8.2).
-<<<<<<< ours
-=======
-- **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
-  association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
-  new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
-  RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
-  the new association, browsers ignore a new `tls-id`.
->>>>>>> theirs
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
