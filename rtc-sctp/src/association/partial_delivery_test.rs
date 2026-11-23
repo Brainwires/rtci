@@ -266,6 +266,10 @@ fn no_other_message_of_a_stream_is_read_while_one_is_in_partial_delivery() -> Re
         a.stream(0)?.read_sctp()?.is_none(),
         "nor are the others read"
     );
+    assert!(
+        !a.has_readable_data(),
+        "nor counted as readable whole: they wait, and do not hold off partial delivery"
+    );
     for i in 5..8 {
         a.handle_data(&data(tsn(i), 0, 0, false, i, 8))?;
     }
@@ -323,7 +327,7 @@ fn interleaved_streams_each_deliver_a_message_in_parts_at_once() -> Result<()> {
                 got[i].extend(bytes_of(&p));
             }
         }
-        if fsn >= 3 && fsn < 7 {
+        if (3..7).contains(&fsn) {
             assert!(a.stream(1)?.in_partial_delivery() && a.stream(2)?.in_partial_delivery());
         }
     }
@@ -500,4 +504,17 @@ fn a_message_abandoned_while_it_is_read_in_parts_is_reported_and_the_next_ones_a
     let got: Vec<&Bytes> = link.server.received.iter().map(|(_, m)| m).collect();
     assert_eq!(got, vec![&messages[1], &messages[2]]);
     Ok(())
+}
+
+/// RFC 6458 8.1.21: "the call will fail if the user attempts to set this value larger than
+/// the socket receive buffer size". A builder cannot fail, so a larger point is taken as the
+/// buffer, and 0 as 1; the default is half the buffer.
+#[test]
+fn the_partial_delivery_point_is_at_most_the_receive_buffer() {
+    let c = TransportConfig::default().with_max_receive_buffer_size(BUFFER);
+    assert_eq!(c.partial_delivery_point(), BUFFER / 2);
+    let above = c.clone().with_partial_delivery_point(4 * BUFFER);
+    assert_eq!(above.partial_delivery_point(), BUFFER);
+    assert_eq!(create_association(above).partial_delivery_point, BUFFER);
+    assert_eq!(c.with_partial_delivery_point(0).partial_delivery_point(), 1);
 }
