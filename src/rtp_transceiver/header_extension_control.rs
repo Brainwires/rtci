@@ -22,6 +22,26 @@ const MANDATORY_TO_IMPLEMENT: &[&str] = &[
     rtp::extension::AUDIO_LEVEL_URI,
 ];
 
+/// W3C webrtc-pc 5.2 / 5.3 `getParameters().headerExtensions`: keeps the extensions
+/// `negotiated` (a transceiver's `[[NegotiatedHeaderExtensions]]`) lists in a direction that
+/// sends (`sending`) or receives; nothing before an answer was applied.
+pub(crate) fn retain_negotiated(
+    extensions: &mut Vec<crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionParameters>,
+    negotiated: &[RTCRtpHeaderExtensionToNegotiate],
+    sending: bool,
+) {
+    extensions.retain(|extension| {
+        negotiated.iter().any(|n| {
+            n.uri == extension.uri
+                && if sending {
+                    n.direction.has_send()
+                } else {
+                    n.direction.has_recv()
+                }
+        })
+    });
+}
+
 /// The initial `[[HeaderExtensionsToNegotiate]]` of a transceiver of `kind` that has no
 /// other non-stopping transceiver of its kind to copy from (webrtc-extensions 4.1): every
 /// extension the media engine registered for the kind, once each, in registration order,

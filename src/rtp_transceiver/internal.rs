@@ -251,7 +251,18 @@ impl RTCRtpTransceiverInternal {
         negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
     ) {
         self.header_extensions_to_negotiate = Some(negotiated.clone());
+        if self.negotiated_header_extensions == negotiated {
+            return;
+        }
         self.negotiated_header_extensions = negotiated;
+        // W3C 5.2 / 5.3 getParameters: the header extensions are those negotiated for each
+        // way, so what an earlier call returned is stale.
+        if let Some(sender) = self.sender.as_mut() {
+            sender.invalidate_parameters();
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.invalidate_parameters();
+        }
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.

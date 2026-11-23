@@ -2975,7 +2975,11 @@ impl RTCPeerConnection {
         };
 
         if !candidate_value.is_empty() {
-            self.add_ice_local_candidate(candidate_value, local_candidate.url.as_deref())?;
+            self.add_ice_local_candidate(
+                candidate_value,
+                local_candidate.url.as_deref(),
+                local_candidate.relay_protocol,
+            )?;
         } else {
             self.finish_local_gathering();
         }
@@ -3874,6 +3878,15 @@ impl RTCPeerConnection {
         }
 
         Ok(self.add_rtp_transceiver(transceiver))
+    }
+
+    /// W3C `[[DataChannels]]` (webrtc-pc 4.4.1.1, an ordered set that starts empty): the
+    /// handles of the data channels this connection holds and has not closed, in the order
+    /// they were created or announced.
+    pub fn data_channel_ids(&self) -> Vec<RTCDataChannelId> {
+        let mut ids: Vec<RTCDataChannelId> = self.data_channels.values().map(|c| c.id).collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Returns a handle to the [`RTCDataChannel`] with the given id, or `None` if no such

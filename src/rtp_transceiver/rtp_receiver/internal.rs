@@ -7,6 +7,7 @@ use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
 };
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
@@ -230,6 +231,13 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
+    /// negotiated state again.
+    pub(crate) fn invalidate_parameters(&mut self) {
+        self.last_returned_parameters = None;
+        self.not_receiving_parameters = None;
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         if self.rtcp_reduced_size != reduced_size {
             self.rtcp_reduced_size = reduced_size;
@@ -293,17 +301,24 @@ impl RTCRtpReceiverInternal {
     }
 
     /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
-    /// direction does not receive (`receiving` false).
+    /// direction does not receive (`receiving` false), and with only the header extensions
+    /// this transceiver's m= section negotiated for receiving (`negotiated_header_extensions`
+    /// is its `[[NegotiatedHeaderExtensions]]`; none before an answer was applied).
     pub(crate) fn get_public_parameters(
         &mut self,
         media_engine: &MediaEngine,
+        negotiated_header_extensions: &[RTCRtpHeaderExtensionToNegotiate],
         receiving: bool,
     ) -> &RTCRtpReceiveParameters {
-        if receiving {
-            return self.get_parameters(media_engine);
-        }
         let mut parameters = self.get_parameters(media_engine).clone();
-        parameters.rtp_parameters.codecs.clear();
+        if !receiving {
+            parameters.rtp_parameters.codecs.clear();
+        }
+        crate::rtp_transceiver::header_extension_control::retain_negotiated(
+            &mut parameters.rtp_parameters.header_extensions,
+            negotiated_header_extensions,
+            false,
+        );
         self.not_receiving_parameters.insert(parameters)
     }
 

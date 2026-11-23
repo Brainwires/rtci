@@ -419,7 +419,13 @@ impl RTCRtpSender<'_> {
             .as_mut()
             .expect("every transceiver has a sender");
         sender.set_negotiated_not_sending(negotiated_not_sending);
-        sender.get_parameters(&self.peer_connection.media_engine)
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let negotiated = transceiver.negotiated_header_extensions().to_vec();
+        transceiver
+            .sender_mut()
+            .as_mut()
+            .expect("every transceiver has a sender")
+            .get_parameters(&self.peer_connection.media_engine, &negotiated)
     }
 
     /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
@@ -606,6 +612,9 @@ impl RTCRtpSender<'_> {
             .peer_connection
             .setting_engine
             .unnegotiated_header_extensions;
+        let negotiated_header_extensions = self.peer_connection.rtp_transceivers[self.id.0]
+            .negotiated_header_extensions()
+            .to_vec();
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
@@ -682,7 +691,7 @@ impl RTCRtpSender<'_> {
             .collect();
         let mixed = sender.extmap_allow_mixed();
         let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
-        let parameters = sender.get_parameters(media_engine);
+        let parameters = sender.get_parameters(media_engine, &negotiated_header_extensions);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
         //From SSRC, find the encoding

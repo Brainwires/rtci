@@ -273,6 +273,7 @@ impl RTCPeerConnection {
         .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing.unwrap_or(true))
         .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
         .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
+        .with_max_streams(setting_engine.sctp_max_streams)
         .with_message_size_limit_without_interleaving(
             setting_engine
                 .sctp_message_size_limit_without_interleaving
@@ -1210,7 +1211,24 @@ impl RTCPeerConnection {
         let (describes, closes) = describes_sctp_association(sd);
         match sd.sdp_type {
             RTCSdpType::Offer if describes => self.sctp_transport_mut().described = true,
-            RTCSdpType::Answer if closes => self.sctp_transport_mut().described = false,
+            RTCSdpType::Answer if closes => {
+                // W3C 6.1.2 "closed": the association is closed intentionally by "applying a
+                // remote description that rejects data or changes the SCTP port", so the
+                // transport the application holds goes to "closed" and fires statechange,
+                // although `sctp()` is null from now on.
+                let was = self.sctp().map(|sctp| sctp.state());
+                self.sctp_transport_mut().described = false;
+                if was.is_some_and(|state| {
+                    state != crate::peer_connection::transport::RTCSctpTransportState::Closed
+                }) {
+                    self.announced.sctp = None;
+                    self.pipeline_context.event_outs.push_back(
+                        RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                            crate::peer_connection::transport::RTCSctpTransportState::Closed,
+                        ),
+                    );
+                }
+            }
             RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
                 self.sctp_transport_mut().described = true;
             }
@@ -2785,6 +2803,7 @@ impl RTCPeerConnection {
         &mut self,
         candidate_value: &str,
         url: Option<&str>,
+        relay_protocol: Option<RTCIceServerTransportProtocol>,
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
         let known = self.ice_transport().agent.get_local_candidates().len();
@@ -2859,6 +2878,28 @@ impl RTCPeerConnection {
             // also names the media section of the transport (W3C "surface the candidate").
             self.ice_transport()
                 .describe_local_candidate(&mut rtc_candidate);
+            // W3C 4.8.1 `url` and `relayProtocol`: the server a local server-reflexive or
+            // relay candidate was gathered from, and for a relay candidate the protocol to
+            // the TURN server (RTCLocalIceCandidateInit; the application gathers, so it
+            // supplies them). Null for every other candidate.
+            match rtc_candidate.typ {
+                RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay => {
+                    if rtc_candidate.url.is_none() {
+                        rtc_candidate.url = url.map(str::to_owned);
+                    }
+                }
+                _ => rtc_candidate.url = None,
+            }
+            if rtc_candidate.typ == RTCIceCandidateType::Relay {
+                rtc_candidate.relay_protocol = relay_protocol.unwrap_or_else(|| {
+                    rtc_candidate
+                        .url
+                        .as_deref()
+                        .map_or(RTCIceServerTransportProtocol::Unspecified, |u| {
+                            relay_protocol_of_turn_url(u)
+                        })
+                });
+            }
             let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()

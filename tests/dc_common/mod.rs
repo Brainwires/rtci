@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::{RTCConfiguration, RTCConfigurationBuilder};
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -39,6 +39,8 @@ pub struct Peer {
     pub events: Vec<RTCDataChannelEvent>,
     /// Every state the peer connection reported, in order.
     pub connection_states: Vec<RTCPeerConnectionState>,
+    /// Every other event the peer connection raised, in order.
+    pub other_events: Vec<RTCPeerConnectionEvent>,
     /// Every message this peer's application received, in order.
     pub received: Vec<Received>,
     /// While set, every datagram this peer writes is lost on the way.
@@ -71,11 +73,25 @@ impl Peer {
         setting_engine: SettingEngineBuilder,
         now: Instant,
     ) -> Result<Self> {
+        Self::with_configuration(
+            addr,
+            setting_engine,
+            RTCConfigurationBuilder::new().build(),
+            now,
+        )
+    }
+
+    pub fn with_configuration(
+        addr: SocketAddr,
+        setting_engine: SettingEngineBuilder,
+        configuration: RTCConfiguration,
+        now: Instant,
+    ) -> Result<Self> {
         // The default codecs, for the tests that negotiate a media section beside the data.
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_configuration(configuration)
             .with_setting_engine(setting_engine.build())
             .with_media_engine(media_engine)
             .build(now)?;
@@ -85,6 +101,7 @@ impl Peer {
             inbox: Vec::new(),
             events: Vec::new(),
             connection_states: Vec::new(),
+            other_events: Vec::new(),
             received: Vec::new(),
             drop_outgoing: false,
             written_sizes: Vec::new(),
@@ -129,7 +146,7 @@ impl Peer {
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
                     self.connection_states.push(state)
                 }
-                _ => {}
+                other => self.other_events.push(other),
             }
         }
         while let Some(read) = self.pc.poll_read() {

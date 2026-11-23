@@ -348,13 +348,14 @@ impl RTCRtpReceiver<'_> {
             transceiver.current_direction(),
             RTCRtpTransceiverDirection::Sendonly | RTCRtpTransceiverDirection::Inactive
         );
+        let negotiated = transceiver.negotiated_header_extensions().to_vec();
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
         transceiver
             .receiver_mut()
             .as_mut()
             .unwrap()
-            .get_public_parameters(&self.peer_connection.media_engine, receiving)
+            .get_public_parameters(&self.peer_connection.media_engine, &negotiated, receiving)
     }
 
     /// Returns an iterator over the contributing sources for this receiver.

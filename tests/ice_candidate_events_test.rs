@@ -27,6 +27,7 @@ fn test_host_candidate_event_emission() {
         sdp_mline_index: Some(0),
         username_fragment: Some("test".to_string()),
         url: None,
+        relay_protocol: None,
     };
 
     println!("🔍 Adding host candidate: {}", host_candidate.candidate);
@@ -85,6 +86,7 @@ fn test_srflx_candidate_event_emission() {
         sdp_mline_index: Some(0),
         username_fragment: Some("test".to_string()),
         url: Some("stun:stun.example.com:3478".to_string()),
+        relay_protocol: None,
     };
 
     println!("🔍 Adding srflx candidate: {}", srflx_candidate.candidate);
@@ -146,6 +148,7 @@ fn test_multiple_candidates_events() {
             sdp_mline_index: Some(0),
             username_fragment: Some("test".to_string()),
             url: None,
+            relay_protocol: None,
         },
         RTCIceCandidateInit {
             candidate: "candidate:2 1 udp 1694498815 203.0.113.1 12345 typ srflx raddr 192.168.1.100 rport 54321".to_string(),
@@ -153,6 +156,7 @@ fn test_multiple_candidates_events() {
             sdp_mline_index: Some(0),
             username_fragment: Some("test".to_string()),
             url: Some("stun:stun.example.com:3478".to_string()),
+            relay_protocol: None,
         },
     ];
 
@@ -206,4 +210,81 @@ fn test_multiple_candidates_events() {
     );
     assert!(host_found, "Host candidate event not found");
     assert!(srflx_found, "Srflx candidate event not found");
+}
+
+/// W3C webrtc-pc 4.8.1 `relayProtocol` and `url`, 4.8.1.5 `RTCIceServerTransportProtocol`: a
+/// surfaced local relay candidate carries the protocol to its TURN server, the one the
+/// application supplied in `RTCLocalIceCandidateInit.relayProtocol` or, left out, the one its
+/// TURN URL names ("udp", "tcp", "tls"); a host candidate has neither member.
+#[test]
+fn a_local_relay_candidate_carries_its_relay_protocol_and_url() {
+    use rtc::peer_connection::transport::{RTCIceCandidateType, RTCIceServerTransportProtocol};
+
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(RTCConfigurationBuilder::new().build())
+        .build(Instant::now())
+        .expect("a peer connection");
+    let relay = |port: u16, url: &str, relay_protocol| RTCIceCandidateInit {
+        candidate: format!(
+            "candidate:{port} 1 udp 16777215 198.51.100.7 {port} typ relay raddr 203.0.113.1 rport 40000"
+        ),
+        url: Some(url.to_owned()),
+        relay_protocol,
+        ..Default::default()
+    };
+    let cases = [
+        (
+            relay(41001, "turn:turn.example.com:3478", None),
+            RTCIceServerTransportProtocol::Udp,
+        ),
+        (
+            relay(41002, "turn:turn.example.com:3478?transport=tcp", None),
+            RTCIceServerTransportProtocol::Tcp,
+        ),
+        (
+            relay(41003, "turns:turn.example.com:5349", None),
+            RTCIceServerTransportProtocol::Tls,
+        ),
+        // What the application says wins over what the URL suggests.
+        (
+            relay(
+                41004,
+                "turn:turn.example.com:3478",
+                Some(RTCIceServerTransportProtocol::Tcp),
+            ),
+            RTCIceServerTransportProtocol::Tcp,
+        ),
+    ];
+    for (init, expected) in cases {
+        let url = init.url.clone();
+        pc.add_local_candidate(init).expect("a relay candidate");
+        let surfaced = std::iter::from_fn(|| pc.poll_event())
+            .find_map(|event| match event {
+                RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate,
+                _ => None,
+            })
+            .expect("the candidate is surfaced");
+        assert_eq!(surfaced.typ, RTCIceCandidateType::Relay);
+        assert_eq!(surfaced.relay_protocol, expected, "{url:?}");
+        assert_eq!(surfaced.url, url);
+    }
+
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:9 1 udp 2130706431 192.168.1.100 54329 typ host".to_owned(),
+        url: Some("turn:turn.example.com:3478".to_owned()),
+        relay_protocol: Some(RTCIceServerTransportProtocol::Udp),
+        ..Default::default()
+    })
+    .expect("a host candidate");
+    let host = std::iter::from_fn(|| pc.poll_event())
+        .find_map(|event| match event {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate,
+            _ => None,
+        })
+        .expect("the host candidate is surfaced");
+    assert_eq!(
+        host.relay_protocol,
+        RTCIceServerTransportProtocol::Unspecified
+    );
+    assert_eq!(host.url, None);
 }

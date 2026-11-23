@@ -66,7 +66,8 @@ fn an_offer_that_describes_sctp_creates_a_connecting_transport() -> TestResult {
 }
 
 /// 4.4.1.6: an answer that closes the SCTP association (RFC 8841 10.4: `a=sctp-port:0`)
-/// makes `[[SctpTransport]]` null, which the offer had created.
+/// makes `[[SctpTransport]]` null, which the offer had created, and the transport goes to
+/// "closed" (6.1.2).
 #[test]
 fn an_answer_that_closes_the_association_makes_the_transport_null() -> TestResult {
     let mut a = peer()?;
@@ -84,8 +85,20 @@ fn an_answer_that_closes_the_association_makes_the_transport_null() -> TestResul
         .to_owned();
     let closing = answer.sdp.replace(&port, "a=sctp-port:0");
     assert!(a.sctp().is_some());
+    while a.poll_event().is_some() {}
     a.set_remote_description(Instant::now(), RTCSessionDescription::answer(closing)?)?;
     assert!(a.sctp().is_none());
+    // W3C 6.1.2 "closed": the association is closed intentionally by a remote description
+    // that rejects data or changes the SCTP port; the transport fires statechange.
+    let closed = std::iter::from_fn(|| a.poll_event())
+        .filter(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnSctpTransportStateChange(RTCSctpTransportState::Closed)
+            )
+        })
+        .count();
+    assert_eq!(closed, 1, "one statechange to closed");
     Ok(())
 }
 

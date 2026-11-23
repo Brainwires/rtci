@@ -177,6 +177,10 @@ pub(crate) struct SctpTransport {
     // the RFC defines (section 6). On by default.
     pub(crate) zero_checksum: bool,
 
+    // The stream count asked for and accepted in each direction
+    // (`SettingEngineBuilder::with_sctp_max_streams`); `None` keeps the association's 65535.
+    pub(crate) max_streams: Option<u16>,
+
     // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
     // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
     // on an association that did not negotiate interleaving, a message over
@@ -253,6 +257,7 @@ impl SctpTransport {
             weighted_fair_queueing: true,
             message_interleaving: true,
             zero_checksum: true,
+            max_streams: None,
             limit_message_size_without_interleaving: true,
             cookie_provider: None,
             path_mtu: None,
@@ -433,6 +438,13 @@ impl SctpTransport {
     /// (RFC 9653).
     pub(crate) fn with_zero_checksum(mut self, enabled: bool) -> Self {
         self.zero_checksum = enabled;
+        self
+    }
+
+    /// The stream count the association `start()` builds asks for and accepts in each
+    /// direction; `None` keeps the default.
+    pub(crate) fn with_max_streams(mut self, streams: Option<u16>) -> Self {
+        self.max_streams = streams;
         self
     }
 
@@ -686,6 +698,11 @@ impl SctpTransport {
             .with_zero_checksum(self.zero_checksum);
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
+        }
+        if let Some(streams) = self.max_streams {
+            sctp_transport_config = sctp_transport_config
+                .with_max_num_outbound_streams(streams)
+                .with_max_num_inbound_streams(streams);
         }
 
         // One association per DTLS transport: once this side has initiated its own, or has

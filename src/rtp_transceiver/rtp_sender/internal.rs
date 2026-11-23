@@ -5,6 +5,7 @@ use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     RTCRtpCodec, RtpCodecKind, codec_dictionary_match, encoding_send_codec, find_fec_format,
@@ -281,6 +282,12 @@ impl RTCRtpSenderInternal {
     }
 
     /// Whether the sender has encodings with SSRCs to describe and send with.
+    /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
+    /// negotiated state again.
+    pub(crate) fn invalidate_parameters(&mut self) {
+        self.last_returned_parameters = None;
+    }
+
     pub(crate) fn has_send_encodings(&self) -> bool {
         !self.send_encodings.is_empty()
     }
@@ -520,10 +527,22 @@ impl RTCRtpSenderInternal {
     /// # Parameters
     ///
     /// * `media_engine` - The media engine containing codec and extension information
-    pub(crate) fn get_parameters(&mut self, media_engine: &MediaEngine) -> &RTCRtpSendParameters {
+    pub(crate) fn get_parameters(
+        &mut self,
+        media_engine: &MediaEngine,
+        negotiated_header_extensions: &[RTCRtpHeaderExtensionToNegotiate],
+    ) -> &RTCRtpSendParameters {
         if self.last_returned_parameters.is_none() {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
+            // W3C 5.2 getParameters: "headerExtensions ... negotiated for sending" by this
+            // transceiver's m= section (webrtc-extensions [[NegotiatedHeaderExtensions]]), not
+            // every extension of the kind: none before an answer was applied.
+            crate::rtp_transceiver::header_extension_control::retain_negotiated(
+                &mut rtp_parameters.header_extensions,
+                negotiated_header_extensions,
+                true,
+            );
 
             rtp_parameters.codecs = if self.negotiated_not_sending {
                 vec![]

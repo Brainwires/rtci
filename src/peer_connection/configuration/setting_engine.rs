@@ -450,6 +450,8 @@ pub struct SettingEngine {
     /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
     /// on.
     pub(crate) sctp_zero_checksum: Option<bool>,
+    /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
+    pub(crate) sctp_max_streams: Option<u16>,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
@@ -1970,6 +1972,16 @@ impl SettingEngineBuilder {
     /// one. `false` does not announce it.
     pub fn with_sctp_zero_checksum(mut self, enabled: bool) -> Self {
         self.0.sctp_zero_checksum = Some(enabled);
+        self
+    }
+
+    /// The number of SCTP streams this endpoint asks for and accepts in each direction
+    /// (the OS and MIS of its INIT or INIT ACK, RFC 9260 section 3.3.2). The association has
+    /// the smaller of both sides' counts, which is W3C `RTCSctpTransport.maxChannels`
+    /// (webrtc-pc 6.1.1): a data channel id at or above it cannot be used. Unset, the default,
+    /// is 65535, as browsers ask for; a value of 0 is raised to 1.
+    pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
+        self.0.sctp_max_streams = Some(streams.max(1));
         self
     }
 

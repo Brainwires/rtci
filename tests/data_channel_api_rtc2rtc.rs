@@ -170,36 +170,40 @@ fn send_refuses_data_above_the_max_buffer_size() -> Result<()> {
 }
 
 /// W3C createDataChannel: a negotiated id at or above the connected transport's
-/// `maxChannels` is an OperationError; below it, the channel opens.
+/// `maxChannels` is an OperationError; below it, the channel opens. The answerer asks for 16
+/// streams (`with_sctp_max_streams`), so the association has 16 and `maxChannels` is 16.
 #[test]
 fn a_negotiated_id_at_or_above_max_channels_is_refused() -> Result<()> {
-    let (mut pair, _) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let mut pair = Pair::with_setting_engines(
+        "127.0.0.1:52030",
+        engine(RTCDtlsRole::Client),
+        "127.0.0.1:52031",
+        engine(RTCDtlsRole::Server).with_sctp_max_streams(16),
+    )?;
+    pair.offerer.pc.create_data_channel("first", None)?;
+    pair.negotiate()?;
+    assert!(pair.run_until(|p| !p.offerer.opened().is_empty())?);
     let sctp = pair.offerer.pc.sctp().expect("sctp");
     assert_eq!(sctp.state(), RTCSctpTransportState::Connected);
-    let max_channels = sctp.max_channels().expect("connected");
-    if max_channels == u16::MAX {
-        // Every stream id an application can name is below it: nothing to refuse here (the
-        // handler test `channels_without_a_usable_id_are_closed_with_a_failure_at_connect`
-        // covers a smaller count).
-        return Ok(());
+    assert_eq!(sctp.max_channels(), Some(16), "the smaller stream count");
+    for id in [16, 20] {
+        let refused = pair.offerer.pc.create_data_channel(
+            "above",
+            Some(RTCDataChannelInit {
+                negotiated: Some(id),
+                ..Default::default()
+            }),
+        );
+        assert!(
+            matches!(refused, Err(Error::ErrDataChannelIdAboveMaxChannels)),
+            "id {id}: {:?}",
+            refused.err()
+        );
     }
-    let refused = pair.offerer.pc.create_data_channel(
-        "above",
-        Some(RTCDataChannelInit {
-            negotiated: Some(max_channels),
-            ..Default::default()
-        }),
-    );
-    assert!(
-        matches!(refused, Err(Error::ErrDataChannelIdAboveMaxChannels)),
-        "{:?}",
-        refused.err()
-    );
-    let below = max_channels - 2;
     pair.offerer.pc.create_data_channel(
         "below",
         Some(RTCDataChannelInit {
-            negotiated: Some(below),
+            negotiated: Some(15),
             ..Default::default()
         }),
     )?;
