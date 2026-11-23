@@ -1280,6 +1280,11 @@ impl RTCPeerConnection {
         if media_section.offered_rtcp_rsize.unwrap_or(true) {
             media = media.with_property_attribute(ATTR_KEY_RTCPRSIZE.to_owned());
         }
+        // draft-ietf-avtcore-rtp-sframe-03 section 6 / webrtc-encoded-transform 2.1: the
+        // transceiver's media is SFrame-encrypted.
+        if transceiver.describe_sframe(is_offer) {
+            media = media.with_property_attribute("sframe".to_owned());
+        }
 
         let codecs = transceiver.get_codecs(media_engine);
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are

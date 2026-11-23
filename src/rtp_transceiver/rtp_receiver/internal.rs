@@ -95,6 +95,8 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// When each video frame reported in the last second was received
     /// ([`report_received_frame`](Self::report_received_frame)), oldest first.
     received_frames: std::collections::VecDeque<Instant>,
+    /// The SSRC and the CSRCs of the last packet received (webrtc-extensions 11).
+    last_frame_sources: Option<(SSRC, Vec<SSRC>)>,
 }
 
 impl RTCRtpReceiverInternal {
@@ -118,6 +120,7 @@ impl RTCRtpReceiverInternal {
             last_stable_remote_streams: vec![],
             end_unannounced: false,
             received_frames: Default::default(),
+            last_frame_sources: None,
         }
         .with_own_track()
     }
@@ -316,7 +319,13 @@ impl RTCRtpReceiverInternal {
         vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
-    ) {
+    ) -> (bool, bool) {
+        // webrtc-extensions 11: whether the SSRC, and the CSRCs, of the last frame changed.
+        let changes = match &self.last_frame_sources {
+            None => (true, !header.csrc.is_empty()),
+            Some((ssrc, csrcs)) => (*ssrc != header.ssrc, *csrcs != header.csrc),
+        };
+        self.last_frame_sources = Some((header.ssrc, header.csrc.clone()));
         let timestamp = wall_clock.unix(now);
         let live = |source: &RTCRtpContributingSource| {
             timestamp.saturating_sub(source.timestamp) < SOURCE_LIFETIME
@@ -361,6 +370,7 @@ impl RTCRtpReceiverInternal {
             let excess = self.contributing_sources.len() - MAX_CONTRIBUTING_SOURCES;
             self.contributing_sources.drain(..excess);
         }
+        changes
     }
 
     /// webrtc-extensions 8: the capture time and the sender's clock offset of a packet of

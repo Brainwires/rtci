@@ -975,6 +975,81 @@ fn test_local_candidates_of_one_type_get_unique_interleaved_priorities() {
     }
 }
 
+/// RFC 8421 Section 4: "Implementations should prioritize IPv6 candidates by putting some of
+/// them first in the intermingled checklist", with the head start `Hi = (N_4 + N_6) / N_4`:
+/// "If a host has two IPv4 addresses and six IPv6 addresses, it will insert an IPv4 address
+/// after four IPv6 addresses". Candidates gathered together and ranked together get that
+/// order whatever order they come in; a host with one address keeps 65535 (RFC 8445 Section
+/// 5.1.2.1).
+#[test]
+fn test_candidates_gathered_together_give_ipv6_a_head_start() {
+    let udp = |address: &str| candidate("udp", address, 1000, TcpType::Unspecified);
+    let mut set: Vec<Candidate> = [
+        "192.0.2.1",
+        "192.0.2.2",
+        "2001:db8::1",
+        "2001:db8::2",
+        "2001:db8::3",
+        "2001:db8::4",
+        "2001:db8::5",
+        "2001:db8::6",
+    ]
+    .into_iter()
+    .map(udp)
+    .collect();
+    crate::candidate::rank_local_candidates(&mut set);
+    let mut by_priority: Vec<&Candidate> = set.iter().collect();
+    by_priority.sort_by_key(|c| std::cmp::Reverse(c.priority()));
+    let order: Vec<String> = by_priority.iter().map(|c| c.address().to_owned()).collect();
+    assert_eq!(
+        order,
+        vec![
+            "2001:db8::1",
+            "2001:db8::2",
+            "2001:db8::3",
+            "2001:db8::4",
+            "192.0.2.1",
+            "2001:db8::5",
+            "192.0.2.2",
+            "2001:db8::6",
+        ]
+    );
+    assert_eq!(by_priority[0].priority(), 2130706431);
+
+    // Through the agent: one IPv4 and one IPv6 added together, IPv4 first: IPv6 leads; a
+    // candidate added later takes the next free rank.
+    let mut a = Agent::new(Instant::now(), Arc::new(config(true)), provider()).unwrap();
+    let added = a
+        .add_local_candidates(vec![udp("192.0.2.1"), udp("2001:db8::1")])
+        .unwrap();
+    assert_eq!(added, vec![true, true]);
+    a.add_local_candidate(udp("192.0.2.2")).unwrap();
+    let local_preference = |c: &Candidate| (c.priority() >> 8) & 0xffff;
+    assert_eq!(
+        a.local_candidates
+            .iter()
+            .map(|c| (c.address().to_owned(), local_preference(c)))
+            .collect::<Vec<_>>(),
+        vec![
+            ("192.0.2.1".to_owned(), 65534),
+            ("2001:db8::1".to_owned(), 65535),
+            ("192.0.2.2".to_owned(), 65533),
+        ]
+    );
+
+    // One family: in order, the first keeps 65535; a rank given by the application is kept
+    // and not given out again.
+    let mut set = vec![udp("192.0.2.1"), udp("192.0.2.2"), udp("192.0.2.3")];
+    set[1].set_local_preference_rank(0);
+    crate::candidate::rank_local_candidates(&mut set);
+    assert_eq!(
+        set.iter()
+            .map(|c| c.local_preference_rank())
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(0), Some(2)]
+    );
+}
+
 /// RFC 6544 Section 4.2: TCP candidates with the same type preference and direction-pref have
 /// a unique other-pref; a single one keeps 8191.
 #[test]
@@ -1669,6 +1744,105 @@ fn test_every_message_the_agent_sends_ends_with_fingerprint() {
             stun::attributes::ATTR_FINGERPRINT
         );
     }
+}
+
+/// The peer's Binding request to `a` like [`peer_request`], authenticated by
+/// MESSAGE-INTEGRITY-SHA256 alone.
+fn peer_request_sha256(a: &Agent, extra: Vec<Box<dyn Setter>>) -> Message {
+    let username = a.ufrag_pwd.local_credentials.ufrag.clone() + ":" + REMOTE_UFRAG;
+    let provider = provider();
+    let mut setters: Vec<Box<dyn Setter>> = vec![
+        Box::new(BINDING_REQUEST),
+        Box::new(TransactionId::new()),
+        Box::new(Username::new(ATTR_USERNAME, username)),
+    ];
+    setters.extend(extra);
+    setters.push(Box::new(
+        MessageIntegritySha256::short_term(&a.ufrag_pwd.local_credentials.pwd, provider.crypto())
+            .unwrap(),
+    ));
+    setters.push(Box::new(FINGERPRINT));
+    let mut msg = Message::new();
+    msg.build(&setters).unwrap();
+    msg
+}
+
+/// RFC 8489 Section 9.1.3: "A response to a request that contains a MESSAGE-INTEGRITY-SHA256
+/// attribute MUST include the MESSAGE-INTEGRITY-SHA256 attribute, computed using the password
+/// utilized to authenticate the request [...] only one of these attributes can appear in a
+/// response." The success response, the 487 and the 420 to such requests carry
+/// MESSAGE-INTEGRITY-SHA256 with the local password and no MESSAGE-INTEGRITY; a request with
+/// MESSAGE-INTEGRITY is still answered with MESSAGE-INTEGRITY only.
+#[test]
+fn test_a_request_with_message_integrity_sha256_is_answered_with_it_only() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    a.tie_breaker = 500;
+    let _ = sent(&mut a);
+    let provider = provider();
+    let key = a.ufrag_pwd.local_credentials.pwd.clone();
+    let answer_to = |a: &mut Agent, m: &Message| -> Message {
+        let _ = deliver(a, now, m, REMOTE_A);
+        let mut answers: Vec<Message> = sent(a)
+            .into_iter()
+            .filter(|(r, _)| r.transaction_id == m.transaction_id)
+            .map(|(r, _)| r)
+            .collect();
+        assert_eq!(answers.len(), 1, "one answer");
+        answers.remove(0)
+    };
+    let sha256_only = |r: &Message| {
+        assert!(r.contains(stun::attributes::ATTR_MESSAGE_INTEGRITY_SHA256));
+        assert!(!r.contains(stun::attributes::ATTR_MESSAGE_INTEGRITY));
+        MessageIntegritySha256::check(r, key.as_bytes(), provider.crypto())
+            .expect("MESSAGE-INTEGRITY-SHA256 with the local password");
+        FINGERPRINT.check(r).unwrap();
+    };
+
+    // Success response.
+    let check = peer_request_sha256(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    let success = answer_to(&mut a, &check);
+    assert_eq!(success.typ, BINDING_SUCCESS);
+    sha256_only(&success);
+
+    // 487: ICE-CONTROLLING with a smaller tiebreaker to a controlling agent.
+    let conflict = peer_request_sha256(
+        &a,
+        vec![Box::new(AttrControlling(100)), Box::new(PriorityAttr(1000))],
+    );
+    let error = answer_to(&mut a, &conflict);
+    assert_eq!(error.typ, BINDING_ERROR);
+    assert_eq!(error_code(&error), CODE_ROLE_CONFLICT.0);
+    sha256_only(&error);
+
+    // 420: an unknown comprehension-required attribute.
+    let unknown = peer_request_sha256(
+        &a,
+        vec![
+            Box::new(AttrControlled(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(stun::attributes::RawAttribute {
+                typ: stun::attributes::AttrType(0x7f00),
+                length: 4,
+                value: vec![1, 2, 3, 4],
+            }),
+        ],
+    );
+    let error = answer_to(&mut a, &unknown);
+    assert_eq!(error_code(&error), 420);
+    sha256_only(&error);
+
+    // MESSAGE-INTEGRITY in, MESSAGE-INTEGRITY out.
+    let check = peer_request(
+        &a,
+        vec![Box::new(AttrControlled(1)), Box::new(PriorityAttr(1000))],
+    );
+    let success = answer_to(&mut a, &check);
+    assert!(success.contains(stun::attributes::ATTR_MESSAGE_INTEGRITY));
+    assert!(!success.contains(stun::attributes::ATTR_MESSAGE_INTEGRITY_SHA256));
 }
 
 /// RFC 8489 Section 6.3.3: "For the Binding method, the client checks that the

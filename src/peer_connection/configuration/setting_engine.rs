@@ -115,7 +115,7 @@ use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
-use ice::{NominationAcceptance, UnauthenticatedRequests};
+use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
@@ -235,6 +235,12 @@ pub struct Candidates {
     /// Enable ICE Lite mode (only respond to connectivity checks, don't initiate).
     pub ice_lite: bool,
 
+    /// webrtc-extensions 7: propose each nomination to the application first
+    /// (`OnIceCandidatePairNominate`, answered with
+    /// `RTCPeerConnection::resolve_candidate_pair_nomination`), the cancelable
+    /// `icecandidatepairnominate`. Off by default: the agent nominates at once.
+    pub candidate_pair_proposals: bool,
+
     /// Restrict candidate gathering to specific network types (e.g., UDP4, UDP6, TCP4).
     pub ice_network_types: Vec<NetworkType>,
     //TODO: pub interface_filter: Arc<Option<InterfaceFilterFn>>,
@@ -272,13 +278,15 @@ pub struct Candidates {
 
 /// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
 /// behaviour, or one of this fork's hardenings, can be chosen instead. Every default is the
-/// RFC's.
+/// RFC's but one: [`SettingEngineBuilder::with_ice_failed_nomination`].
 #[derive(Default, Clone)]
 pub struct IceBehaviour {
     /// See [`SettingEngineBuilder::with_ice_tie_breaker`].
     pub tie_breaker: Option<u64>,
     /// See [`SettingEngineBuilder::with_ice_nomination_acceptance`].
     pub nomination_acceptance: NominationAcceptance,
+    /// See [`SettingEngineBuilder::with_ice_failed_nomination`].
+    pub failed_nomination: FailedNomination,
     /// See [`SettingEngineBuilder::with_ice_nomination_on_consent_checks`].
     pub nominate_on_consent_checks: bool,
     /// See [`SettingEngineBuilder::with_ice_pacing`].
@@ -789,6 +797,17 @@ impl SettingEngineBuilder {
     pub fn with_udp_network(mut self, udp_network: UDPNetwork) -> Self {
         self.0.udp_network = udp_network;
     }*/
+
+    /// webrtc-extensions 7 `icecandidatepairnominate`, cancelable: with `true`, the
+    /// controlling agent proposes the pair it picked to nominate
+    /// (`RTCPeerConnectionEvent::OnIceCandidatePairNominate`) and nominates it only when the
+    /// application accepts (`RTCPeerConnection::resolve_candidate_pair_nomination`); a
+    /// declined pair is not nominated and checks go on. Off by default (an event nobody
+    /// cancels).
+    pub fn with_candidate_pair_proposals(mut self, proposals: bool) -> Self {
+        self.0.candidates.candidate_pair_proposals = proposals;
+        self
+    }
 
     /// Configures ICE Lite mode.
     ///
@@ -1369,6 +1388,32 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_ice_nomination_acceptance(mut self, acceptance: NominationAcceptance) -> Self {
         self.0.ice.nomination_acceptance = acceptance;
+        self
+    }
+
+    /// What the controlling ICE agent does when the transaction of its nomination times out.
+    ///
+    /// The default, [`FailedNomination::Retry`], keeps the pair (it has received a success
+    /// response) and nominates it again while the peer is heard from on it, for up to the
+    /// consent expiry of 30 seconds of silence; then the next valid pair is nominated.
+    /// [`FailedNomination::FailChecklist`] is RFC 8445 section 7.2.5.3.4 to the letter: the
+    /// pair and the checklist fail, and with them the ICE transport. This is the one ICE
+    /// setting whose default is not the RFC's: under heavy loss a whole transaction's
+    /// requests or responses can be lost while the peer has accepted the nomination, and
+    /// failing then leaves the peer connected and this side failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    /// use rtc::ice::FailedNomination;
+    ///
+    /// let _setting_engine = SettingEngineBuilder::new()
+    ///     .with_ice_failed_nomination(FailedNomination::FailChecklist)
+    ///     .build();
+    /// ```
+    pub fn with_ice_failed_nomination(mut self, failed_nomination: FailedNomination) -> Self {
+        self.0.ice.failed_nomination = failed_nomination;
         self
     }
 

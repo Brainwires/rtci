@@ -347,6 +347,18 @@ impl<'a>
                         ),
                     });
                 }
+                ::ice::Event::CandidatePairNominationProposed(local, remote) => {
+                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
+                        (&*local).into(),
+                        (&*remote).into(),
+                    );
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnIceCandidatePairNominate(pair),
+                        ),
+                    });
+                }
                 ::ice::Event::CandidatePairRemoved(local, remote) => {
                     let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
                         (&*local).into(),

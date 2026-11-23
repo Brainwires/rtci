@@ -1094,3 +1094,158 @@ fn set_codec_preferences_with_an_empty_list_resets_to_the_engine_codecs() -> Tes
     assert_eq!(reset, all);
     Ok(())
 }
+
+// --- webrtc-extensions 5 -----------------------------------------------------------------
+
+fn down_to(rid: &str, max_width: u32, max_height: u32) -> RTCRtpEncodingParameters {
+    RTCRtpEncodingParameters {
+        scale_resolution_down_to: Some(
+            rtc::rtp_transceiver::rtp_sender::RTCResolutionRestriction {
+                max_width,
+                max_height,
+            },
+        ),
+        ..with_rid(rid)
+    }
+}
+
+/// webrtc-extensions 5 and 5.1: `scaleResolutionDownTo` overrides `scaleResolutionDownBy`;
+/// the factor is the same for both dimensions, orientation agnostic, and never upscales.
+#[test]
+fn scale_resolution_down_to_gives_one_factor_and_never_upscales() {
+    let encoding = RTCRtpEncodingParameters {
+        scale_resolution_down_by: Some(4.0),
+        ..down_to("", 640, 360)
+    };
+    assert_eq!(
+        encoding.scale_down_factor(1280, 720),
+        2.0,
+        "scaleResolutionDownBy is ignored"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(720, 1280),
+        2.0,
+        "orientation agnostic"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(1280, 1280),
+        3.5555555555555554,
+        "one factor for both"
+    );
+    assert_eq!(
+        encoding.scale_down_factor(320, 180),
+        1.0,
+        "never an upscale"
+    );
+    let by = RTCRtpEncodingParameters {
+        scale_resolution_down_by: Some(4.0),
+        ..Default::default()
+    };
+    assert_eq!(by.scale_down_factor(1280, 720), 4.0);
+}
+
+/// webrtc-extensions 5: in addTransceiver, `scaleResolutionDownTo` on some but not all
+/// active encodings, or with a dimension of 0, is an OperationError; `adaptivePtime` with
+/// `ptime` is an InvalidModificationError; an audio encoding loses `scaleResolutionDownTo`.
+#[test]
+fn add_transceiver_validates_the_extension_members() -> TestResult {
+    let mut pc = default_peer()?;
+    let video = |encodings| init(RTCRtpTransceiverDirection::Sendonly, encodings);
+    let partly = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 640, 360), with_rid("b")]),
+    );
+    assert!(
+        matches!(partly, Err(Error::ErrOperationError(_))),
+        "{partly:?}"
+    );
+    let inactive_without = RTCRtpEncodingParameters {
+        active: false,
+        ..with_rid("b")
+    };
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 640, 360), inactive_without]),
+    )?;
+    let zero = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        video(vec![down_to("a", 0, 360), down_to("b", 320, 180)]),
+    );
+    assert!(matches!(zero, Err(Error::ErrOperationError(_))), "{zero:?}");
+    let both = RTCRtpEncodingParameters {
+        ptime: Some(20),
+        adaptive_ptime: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            init(RTCRtpTransceiverDirection::Sendonly, vec![both])
+        )
+        .err(),
+        Some(Error::InvalidModificationError)
+    );
+    let audio = pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![RTCRtpEncodingParameters {
+                ptime: Some(40),
+                ..down_to("", 640, 360)
+            }],
+        ),
+    )?;
+    let parameters = pc
+        .rtp_sender(audio.into())
+        .expect("sender")
+        .get_parameters()
+        .clone();
+    assert_eq!(parameters.encodings[0].scale_resolution_down_to, None);
+    assert_eq!(parameters.encodings[0].ptime, Some(40));
+    assert!(
+        !parameters.encodings[0].adaptive_ptime,
+        "fixed frame length by default"
+    );
+    Ok(())
+}
+
+/// webrtc-extensions 5: setParameters refuses the same with InvalidModificationError, and
+/// keeps a valid `scaleResolutionDownTo` for getParameters to return.
+#[test]
+fn set_parameters_validates_the_extension_members() -> TestResult {
+    let mut pc = default_peer()?;
+    let id = pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        init(
+            RTCRtpTransceiverDirection::Sendonly,
+            vec![with_rid("a"), with_rid("b")],
+        ),
+    )?;
+    let mut sender = pc.rtp_sender(id.into()).expect("sender");
+    let mut partly = sender.get_parameters().clone();
+    partly.encodings[0].scale_resolution_down_to = down_to("a", 640, 360).scale_resolution_down_to;
+    assert_eq!(
+        sender.set_parameters(partly, None),
+        Err(Error::InvalidModificationError)
+    );
+    let mut adaptive = sender.get_parameters().clone();
+    adaptive.encodings[0].ptime = Some(20);
+    adaptive.encodings[0].adaptive_ptime = true;
+    assert_eq!(
+        sender.set_parameters(adaptive, None),
+        Err(Error::InvalidModificationError)
+    );
+    let mut all = sender.get_parameters().clone();
+    for encoding in &mut all.encodings {
+        encoding.scale_resolution_down_to = down_to("", 640, 360).scale_resolution_down_to;
+    }
+    sender.set_parameters(all, None)?;
+    assert!(
+        sender
+            .get_parameters()
+            .encodings
+            .iter()
+            .all(|e| e.scale_resolution_down_to.is_some())
+    );
+    Ok(())
+}

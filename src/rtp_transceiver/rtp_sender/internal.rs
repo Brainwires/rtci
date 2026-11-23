@@ -451,6 +451,9 @@ impl RTCRtpSenderInternal {
         validate_scalability_modes(self.kind(), &mut parameters.encodings, &send_codecs, |_| {
             Error::InvalidModificationError
         })?;
+        validate_extension_members(self.kind(), &mut parameters.encodings, |_| {
+            Error::InvalidModificationError
+        })?;
 
         self.send_encodings = parameters.encodings;
         self.last_returned_parameters = None;
@@ -877,6 +880,50 @@ impl RTCRtpSenderInternal {
             interceptor.unbind_local_stream(&info);
         }
     }
+}
+
+/// webrtc-extensions 5: `scaleResolutionDownTo` is removed from audio encodings; when one
+/// encoding has it, every active encoding must, each with both dimensions above 0 (`error`:
+/// OperationError in addTransceiver, InvalidModificationError in setParameters);
+/// `adaptivePtime` with `ptime` is an InvalidModificationError.
+pub(crate) fn validate_extension_members(
+    kind: RtpCodecKind,
+    encodings: &mut [RTCRtpEncodingParameters],
+    error: impl Fn(String) -> Error,
+) -> Result<()> {
+    if kind != RtpCodecKind::Video {
+        for encoding in encodings.iter_mut() {
+            encoding.scale_resolution_down_to = None;
+        }
+    }
+    if encodings
+        .iter()
+        .any(|e| e.scale_resolution_down_to.is_some())
+    {
+        if encodings
+            .iter()
+            .any(|e| e.active && e.scale_resolution_down_to.is_none())
+        {
+            return Err(error(
+                "scaleResolutionDownTo must be on every active encoding".to_owned(),
+            ));
+        }
+        if encodings.iter().any(|e| {
+            e.scale_resolution_down_to
+                .is_some_and(|r| r.max_width == 0 || r.max_height == 0)
+        }) {
+            return Err(error(
+                "scaleResolutionDownTo dimensions must be greater than 0".to_owned(),
+            ));
+        }
+    }
+    if encodings
+        .iter()
+        .any(|e| e.adaptive_ptime && e.ptime.is_some())
+    {
+        return Err(Error::InvalidModificationError);
+    }
+    Ok(())
 }
 
 /// W3C webrtc-svc 3.2: the `scalabilityMode` checks of `addTransceiver` (refused with

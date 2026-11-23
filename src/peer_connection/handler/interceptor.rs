@@ -1257,7 +1257,7 @@ impl<'a> InterceptorHandler<'a> {
             });
         let receptive = self.rtp_transceivers[id].receptive();
         if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
-            receiver.record_sources(
+            let (ssrc_changed, csrc_changed) = receiver.record_sources(
                 now,
                 wall_clock,
                 header,
@@ -1267,6 +1267,26 @@ impl<'a> InterceptorHandler<'a> {
                 capture,
                 clock_rate,
             );
+            // webrtc-extensions 11: `ssrcchange`, then `csrcchange`, once both lists are
+            // updated.
+            let receiver_id = crate::rtp_transceiver::RTCRtpReceiverId::from(id);
+            for (changed, event) in [
+                (
+                    ssrc_changed,
+                    RTCPeerConnectionEvent::OnSsrcChange(receiver_id),
+                ),
+                (
+                    csrc_changed,
+                    RTCPeerConnectionEvent::OnCsrcChange(receiver_id),
+                ),
+            ] {
+                if changed {
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(event),
+                    });
+                }
+            }
             // W3C webrtc 9.3: data for a muted, not ended track of a receptive transceiver
             // unmutes it.
             let track = receiver.track_mut();
@@ -2225,6 +2245,9 @@ mod stream_binding_tests {
                 priority: Default::default(),
                 network_priority: None,
                 scalability_mode: None,
+                scale_resolution_down_to: None,
+                ptime: None,
+                adaptive_ptime: false,
             }],
         ));
         transceiver
@@ -2479,6 +2502,9 @@ mod stream_binding_tests {
                     priority: Default::default(),
                     network_priority: None,
                     scalability_mode: None,
+                    scale_resolution_down_to: None,
+                    ptime: None,
+                    adaptive_ptime: false,
                 }],
             ));
         }
@@ -2621,6 +2647,9 @@ mod stream_binding_tests {
                     priority: Default::default(),
                     network_priority: None,
                     scalability_mode: None,
+                    scale_resolution_down_to: None,
+                    ptime: None,
+                    adaptive_ptime: false,
                 }],
             ));
         }

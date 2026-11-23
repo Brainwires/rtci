@@ -71,6 +71,15 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// an answer sets it: the media engine's extensions for the kind, each in the direction
     /// it was registered for (`header_extension_control::default_to_negotiate`).
     header_extensions_to_negotiate: Option<Vec<RTCRtpHeaderExtensionToNegotiate>>,
+    /// webrtc-encoded-transform 2.1 `[[useSFrame]]`: `None` (undefined) until a transform
+    /// sets it or the transceiver is described; then whether its media section has
+    /// `a=sframe` (draft-ietf-avtcore-rtp-sframe-03 section 6).
+    use_sframe: Option<bool>,
+    /// Whether the remote description's section for this transceiver has `a=sframe`.
+    remote_sframe: bool,
+    /// The answer left `a=sframe` out of a section this side offered it in: nothing is sent
+    /// and what arrives is discarded (draft section 6).
+    sframe_refused: bool,
     /// webrtc-extensions `[[NegotiatedHeaderExtensions]]`: empty until an answer is applied.
     negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
@@ -138,6 +147,9 @@ impl RTCRtpTransceiverInternal {
             created_by_remote_description: false,
             associable_with_remote_offer: true,
             header_extensions_to_negotiate: None,
+            use_sframe: None,
+            remote_sframe: false,
+            sframe_refused: false,
             negotiated_header_extensions: vec![],
             rtcp_reduced_size: false,
             receive_simulcast: vec![],
@@ -529,6 +541,56 @@ impl RTCRtpTransceiverInternal {
     /// W3C `[[Stopped]]`.
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// webrtc-encoded-transform 2.1 `[[useSFrame]]`.
+    pub(crate) fn use_sframe(&self) -> Option<bool> {
+        self.use_sframe
+    }
+
+    /// webrtc-encoded-transform 2.2, setting a transform whose `[[useSFrame]]` is
+    /// `transform_uses_sframe` on the sender or receiver: refused (InvalidModificationError)
+    /// when the transceiver's differs; an undefined one takes the transform's.
+    pub(crate) fn set_transform_use_sframe(&mut self, transform_uses_sframe: bool) -> Result<()> {
+        match self.use_sframe {
+            Some(current) if current != transform_uses_sframe => {
+                Err(Error::InvalidModificationError)
+            }
+            _ => {
+                self.use_sframe = Some(transform_uses_sframe);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether this side's next description of the transceiver carries `a=sframe`: in an
+    /// offer when `[[useSFrame]]` is true (an undefined one becomes false now, when the
+    /// transceiver is first described, webrtc-encoded-transform 2.1); in an answer when it is
+    /// true and the offer had it (draft-ietf-avtcore-rtp-sframe-03 section 6).
+    pub(crate) fn describe_sframe(&mut self, is_offer: bool) -> bool {
+        let use_sframe = *self.use_sframe.get_or_insert(false);
+        use_sframe && (is_offer || self.remote_sframe)
+    }
+
+    /// The remote description's section for this transceiver, with or without `a=sframe`:
+    /// an undefined `[[useSFrame]]` is taken from it (webrtc-encoded-transform 2.1).
+    pub(crate) fn note_remote_sframe(&mut self, has_sframe: bool) {
+        self.remote_sframe = has_sframe;
+        if self.use_sframe.is_none() {
+            self.use_sframe = Some(has_sframe);
+        }
+    }
+
+    /// An applied answer: `offered` / `answered` say whether the offer and the answer have
+    /// `a=sframe` in the section. Offered by this side and left out of the answer, SFrame is
+    /// refused: the transceiver sends nothing and discards what it receives (draft section 6).
+    pub(crate) fn apply_sframe_answer(&mut self, we_offered: bool, offered: bool, answered: bool) {
+        self.sframe_refused = we_offered && offered && !answered && self.use_sframe == Some(true);
+    }
+
+    /// See [`apply_sframe_answer`](Self::apply_sframe_answer).
+    pub(crate) fn sframe_refused(&self) -> bool {
+        self.sframe_refused
     }
 
     /// Returns whether this transceiver was implicitly created while applying a remote offer.

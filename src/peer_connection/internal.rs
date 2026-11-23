@@ -170,6 +170,7 @@ impl RTCPeerConnection {
 
         let agent_config = AgentConfig {
             lite: setting_engine.candidates.ice_lite,
+            candidate_pair_proposals: setting_engine.candidates.candidate_pair_proposals,
             urls: validated_servers,
             disconnected_timeout: setting_engine.timeout.ice_disconnected_timeout,
             failed_timeout: setting_engine.timeout.ice_failed_timeout,
@@ -204,6 +205,7 @@ impl RTCPeerConnection {
             remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
             tie_breaker: setting_engine.ice.tie_breaker,
             nomination_acceptance: setting_engine.ice.nomination_acceptance,
+            failed_nomination: setting_engine.ice.failed_nomination,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
             ta: setting_engine.ice.pacing,
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
@@ -279,6 +281,7 @@ impl RTCPeerConnection {
         .with_cookie_provider(crypto_provider)
         .with_max_buffer_size(setting_engine.data_channel_max_buffer_size);
 
+        let always_negotiate = configuration.always_negotiate_data_channels;
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
         let dtls_handler_context = DtlsHandlerContext::new(dtls_transport);
@@ -297,7 +300,10 @@ impl RTCPeerConnection {
             dtls_handler_context,
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            srtp_handler_context: SrtpHandlerContext::default(),
+            srtp_handler_context: SrtpHandlerContext {
+                rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                ..Default::default()
+            },
             interceptor_handler_context: InterceptorHandlerContext::default(),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
@@ -352,7 +358,7 @@ impl RTCPeerConnection {
             pending_remote_transport: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
-            always_negotiate_data_channels: false,
+            always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
         })
@@ -1639,6 +1645,7 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
+            self.rtp_transceivers[i].note_remote_sframe(media.has_attribute("sframe"));
             let of = |bandwidth_type: &str| {
                 media
                     .bandwidth
@@ -1687,6 +1694,7 @@ impl RTCPeerConnection {
         &mut self,
         offer: &SessionDescription,
         answer: &SessionDescription,
+        we_offered: bool,
     ) {
         let transceiver_by_mid =
             RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
@@ -1711,6 +1719,11 @@ impl RTCPeerConnection {
                 && extmap_allow_mixed_in(offer, offered)
                 && extmap_allow_mixed_in(answer, answered);
             self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
+            self.rtp_transceivers[i].apply_sframe_answer(
+                we_offered,
+                offered.has_attribute("sframe"),
+                answered.has_attribute("sframe"),
+            );
         }
     }
 
