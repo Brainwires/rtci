@@ -231,6 +231,7 @@ pub(super) fn new_dtls_transport(
     })?;
     dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
     dtls_transport.connection_id_length = setting_engine.dtls_connection_id_length;
+    dtls_transport.alpn = !setting_engine.dtls_alpn_off;
     Ok(dtls_transport)
 }
 
@@ -3787,6 +3788,9 @@ impl RTCPeerConnection {
         // Start the dtls transport
         self.dtls_transport_mut()
             .start(local_ice_role, remote_dtls_parameters)?;
+        // A ClientHello that arrived before the answer (RFC 8842 section 5.2), now that DTLS
+        // has an endpoint, if ICE has a path already.
+        self.release_early_dtls();
 
         self.update_connection_state(false);
 

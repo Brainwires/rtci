@@ -1601,6 +1601,15 @@ impl RTCPeerConnection {
             self.ice_transport_mut().role_determined = true;
         }
 
+        // W3C 4.4.1.4: a provisional answer updates the data max message size of an
+        // association that already exists (a final one does it with the negotiation below).
+        if local_description.sdp_type == RTCSdpType::Pranswer
+            && let Some(parsed) = &local_description.parsed
+            && let Some(remote) = self.remote_description().and_then(|d| d.parsed.clone())
+        {
+            self.update_sctp_max_message_size(parsed, &remote);
+        }
+
         // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"", each transceiver's
         // [[CurrentDirection]] is the direction it states. A final answer does that below with
         // the rest of the negotiation; a provisional one sets the directions alone.
@@ -3091,6 +3100,18 @@ impl RTCPeerConnection {
                 self.propose_send_encodings(parsed_remote_description);
             }
 
+            // W3C 4.4.1.4: a provisional answer, too, updates the data max message size of
+            // an association that already exists.
+            if remote_description.sdp_type == RTCSdpType::Pranswer
+                && let Some(parsed_local_description) = self
+                    .local_description()
+                    .and_then(|desc| desc.parsed.clone())
+            {
+                self.update_sctp_max_message_size(
+                    &parsed_local_description,
+                    parsed_remote_description,
+                );
+            }
             if is_final_answer
                 && let Some(parsed_local_description) = self
                     .current_local_description
@@ -3932,6 +3953,16 @@ impl RTCPeerConnection {
         self.ice_transport()
             .find_candidate_pair(pair)
             .ok_or(Error::NotFoundError)
+    }
+
+    /// The application protocol the DTLS handshake of the connection's transport selected
+    /// with ALPN (RFC 8835 section 3.5, RFC 8833: `webrtc`, or `c-webrtc` when the remote
+    /// server selected it: a promise to keep the received media confidential that the
+    /// application must keep), once the association is up. `None` before that, or when the
+    /// peer used no ALPN, which RFC 8833 section 2 has the application take as `webrtc`.
+    /// [`SettingEngineBuilder::with_dtls_alpn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_alpn).
+    pub fn dtls_application_protocol(&self) -> Option<&str> {
+        self.dtls_transport().application_protocol()
     }
 
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
@@ -4860,6 +4891,26 @@ impl RTCPeerConnection {
     pub fn reject_data_section(&mut self) {
         self.sctp_transport_mut().staged = Some(SctpRenegotiation::Reject);
         self.trigger_negotiation_needed();
+    }
+
+    /// W3C webrtc 4.4.1.4 for a provisional answer: "If description ... or an SCTP
+    /// association already exists, update the data max message size" from what the
+    /// description pair negotiates for the running association's ports.
+    fn update_sctp_max_message_size(
+        &mut self,
+        local: &::sdp::description::session::SessionDescription,
+        remote: &::sdp::description::session::SessionDescription,
+    ) {
+        if let SctpNegotiation::Association {
+            local_port,
+            remote_port,
+            remote_max_message_size,
+        } = negotiated_sctp(local, remote)
+            && self.sctp_transport().negotiated_ports == Some((local_port, remote_port))
+        {
+            self.sctp_transport_mut()
+                .update_max_message_size(remote_max_message_size);
+        }
     }
 
     /// Brings the SCTP transport in line with what a completed offer/answer exchange

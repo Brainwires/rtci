@@ -2140,6 +2140,24 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
 
 ### Behaviour changes
 
+- **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
+  continues the SCTP association updates `maxMessageSize` and what the association lets this
+  side send from the remote `a=max-message-size` (it kept the first answer's).
+  `rtc_sctp::Association::set_max_message_size` is public (new API).
+
+- **dtls** (audit-5, RFC 8835 section 3.5, RFC 7301): Application-Layer Protocol
+  Negotiation in DTLS 1.2 (ServerHello) and DTLS 1.3 (EncryptedExtensions):
+  `ConfigBuilder::with_alpn_protocols`, `State::application_protocol` (new API). A server
+  without a protocol in common answers `no_application_protocol`.
+- **peer_connection** (audit-5, RFC 8833): the DTLS client offers `webrtc` and `c-webrtc`,
+  the server selects `webrtc`; a peer without ALPN connects as before.
+  `RTCPeerConnection::dtls_application_protocol`, `SettingEngineBuilder::with_dtls_alpn`
+  (new API; `false` leaves the extension out).
+- **peer_connection** (audit-5, RFC 8842 section 5.2, RFC 8122 section 6.2): DTLS datagrams
+  that arrive before ICE has a path (a ClientHello that overtook the answer) are held, at
+  most 8, and taken once the transports start; they were dropped and only the peer's
+  retransmission recovered the handshake.
+
 - **sdp** (audit-5, RFC 6679 section 7.1): with ECN signalled (`with_ecn(true)` without
   `with_ecn_without_signalling`) every audio and video format takes `nack ecn` and the XR ECN
   summary: an offer's RTP sections carry `a=rtcp-fb:* nack ecn` and `a=rtcp-xr:ecn-sum` beside

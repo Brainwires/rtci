@@ -648,6 +648,16 @@ impl Conn13 {
                     }
                     self.early_data_accepted = Some(true);
                 }
+                // RFC 7301 section 3.1: exactly one protocol, one this client offered.
+                EXT_ALPN => {
+                    let protocols = crate::extension::parse_alpn(data).map_err(decode_error)?;
+                    match protocols.as_slice() {
+                        [protocol] if self.cfg.alpn_protocols.contains(protocol) => {
+                            self.application_protocol = Some(protocol.clone());
+                        }
+                        _ => return Err(illegal(Error::ErrInvalidExtensionType)),
+                    }
+                }
                 EXT_USE_SRTP => {
                     // RFC 5764 sections 4.1.1 and 4.1.3: exactly one profile, one of those
                     // offered, and no MKI (this client offers none; RFC 8827 section 6.5).
@@ -977,6 +987,8 @@ impl Conn13 {
         self.transcript.add(CLIENT_HELLO, body);
         self.client_random = hello.random.to_vec();
         self.srtp_profile = negotiated.srtp_profile;
+        self.application_protocol
+            .clone_from(&negotiated.application_protocol);
         self.server_name.clone_from(&negotiated.server_name);
         self.offered_extensions
             .clone_from(&negotiated.offered_extensions);
@@ -1092,6 +1104,14 @@ impl Conn13 {
             if !negotiated.server_name.is_empty() {
                 // RFC 6066 section 3: an empty server_name says the name was used.
                 put_extension(extensions, EXT_SERVER_NAME, |_| {});
+            }
+            // RFC 7301 section 3.1: the protocol selected, the only one in the list.
+            if let Some(protocol) = &self.application_protocol {
+                put_extension(extensions, EXT_ALPN, |data| {
+                    data.extend_from_slice(&crate::extension::encode_alpn(std::slice::from_ref(
+                        protocol,
+                    )))
+                });
             }
             if early_secret.is_some() {
                 put_extension(extensions, EXT_EARLY_DATA, |_| {});
