@@ -1021,7 +1021,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidates are discarded by that setting. `RTCIceCandidateInit::username_fragment` is not
   read by `add_local_candidate`: a candidate added while a restart is staged is the staged
   generation's, otherwise the current one's.
-### Tests
+
+### Testing
 
 - **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
   no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's
