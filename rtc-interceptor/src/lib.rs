@@ -361,8 +361,9 @@ pub use nack::generator::{
     SUGGESTED_MAX_PACKET_AGE as NACK_SUGGESTED_MAX_PACKET_AGE,
 };
 pub use nack::responder::{
-    NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS,
-    RETRANSMISSION_RATE_WINDOW, RetransmissionRateLimit,
+    MAX_RETRANSMISSION_RESERVE, NackResponderBuilder, NackResponderInterceptor,
+    PENDING_REQUEST_LIFETIME, PROBE_PADDING_OCTETS, RETRANSMISSION_RATE_WINDOW,
+    RetransmissionRateLimit, RetransmissionReserve, TargetAtMinimum,
 };
 pub use noop::NoopInterceptor;
 pub use ntp_timestamp::{

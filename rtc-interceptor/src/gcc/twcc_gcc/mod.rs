@@ -76,9 +76,24 @@ use trendline::TrendlineFilter;
 
 /// Shared state written by [`GccInterceptor`] and read by [`GccHandle`].
 pub struct GccShared {
-    /// Latest estimated available send bandwidth, in bits per second.
-    /// `None` until the first TWCC feedback has been processed.
+    /// The target for the original media, in bits per second: the estimate less the NACK
+    /// responder's retransmission reserve (RFC 4588 section 7). `None` until the first TWCC
+    /// feedback has been processed.
     pub target_bitrate_bps: Option<u32>,
+    /// Latest estimated available send bandwidth, in bits per second: what the original media
+    /// and the retransmissions share. `None` until the first TWCC feedback has been processed.
+    pub estimate_bps: Option<u32>,
+    /// The retransmission reserve the NACK responder announced last
+    /// ([`RetransmissionReserve`](crate::RetransmissionReserve)), in bits per second.
+    pub retransmission_reserve_bps: f64,
+}
+
+impl GccShared {
+    fn update_target(&mut self) {
+        self.target_bitrate_bps = self.estimate_bps.map(|estimate| {
+            (f64::from(estimate) - self.retransmission_reserve_bps).max(0.0) as u32
+        });
+    }
 }
 
 /// Read-only handle to the latest GCC bandwidth estimate.
@@ -90,16 +105,26 @@ pub struct GccHandle {
 }
 
 impl GccHandle {
-    /// Returns the latest estimated available send bandwidth in bps, or `None`
-    /// if no TWCC feedback has been processed yet.
+    fn shared(&self) -> std::sync::MutexGuard<'_, GccShared> {
+        self.inner.lock().unwrap_or_else(|e| {
+            log::warn!("gcc: shared mutex poisoned, recovering last estimate");
+            e.into_inner()
+        })
+    }
+
+    /// The target an encoder follows, in bps: the estimate less the retransmission reserve
+    /// the NACK responder holds while it repairs (RFC 4588 section 7: "the sender SHOULD NOT
+    /// send retransmission packets without reducing the packet rate and bitrate of the
+    /// original stream"). The estimate itself while nothing is being repaired, and in a
+    /// chain without a NACK responder. `None` if no TWCC feedback has been processed yet.
     pub fn target_bitrate_bps(&self) -> Option<u32> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| {
-                log::warn!("gcc: shared mutex poisoned, recovering last estimate");
-                e.into_inner()
-            })
-            .target_bitrate_bps
+        self.shared().target_bitrate_bps
+    }
+
+    /// The latest estimated available send bandwidth in bps, which the original media and
+    /// the retransmissions share; `None` if no TWCC feedback has been processed yet.
+    pub fn estimate_bps(&self) -> Option<u32> {
+        self.shared().estimate_bps
     }
 }
 
@@ -121,6 +146,8 @@ impl<P> GccInterceptorBuilder<P> {
     pub fn new() -> (Self, GccHandle) {
         let shared = Arc::new(Mutex::new(GccShared {
             target_bitrate_bps: None,
+            estimate_bps: None,
+            retransmission_reserve_bps: 0.0,
         }));
         let handle = GccHandle {
             inner: shared.clone(),
@@ -159,6 +186,7 @@ impl<P> GccInterceptorBuilder<P> {
                 self.min_bitrate_bps as f64,
                 self.max_bitrate_bps as f64,
             ),
+            min_bitrate_bps: self.min_bitrate_bps,
             shared: self.shared,
         }
     }
@@ -194,6 +222,8 @@ pub struct GccInterceptor<P> {
 
     trendline: TrendlineFilter,
     rate_controller: AimdRateController,
+    /// The rate controller's floor.
+    min_bitrate_bps: u32,
 
     /// Shared state — written here, read via [`GccHandle`].
     shared: Arc<Mutex<GccShared>>,
@@ -207,6 +237,15 @@ impl<P: Interceptor> GccInterceptor<P> {
     /// already been stamped by the time this method is called.
     #[overrides]
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The NACK responder's retransmission reserve, which the target for the original
+        // media leaves out.
+        if let Some(reserve) = msg.message.custom::<crate::RetransmissionReserve>()
+            && reserve.bits_per_second.is_finite()
+        {
+            let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+            shared.retransmission_reserve_bps = reserve.bits_per_second.max(0.0);
+            shared.update_target();
+        }
         if let Packet::Rtp(ref rtp) = msg.message.packet
             && let Some(&ext_id) = self.local_streams.get(&rtp.header.ssrc)
             && let Some(ext_bytes) = rtp.header.get_extension(ext_id)
@@ -242,17 +281,23 @@ impl<P: Interceptor> GccInterceptor<P> {
             }
         }
         // The estimate rides out on the feedback that produced it, so a pacer in the chain
-        // (the standard interceptor set installs one) releases at this estimator's rate.
+        // (the standard interceptor set installs one) releases at this estimator's rate, and
+        // the NACK responder holds the retransmissions to it (it lowers the attribute by its
+        // reserve on the way to the application).
         if processed
             && let Some(bits_per_second) = self
                 .shared
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .target_bitrate_bps
+                .estimate_bps
         {
             msg.message.add(crate::Attribute::TargetBitrateChanged {
                 bits_per_second: f64::from(bits_per_second),
             });
+            if bits_per_second <= self.min_bitrate_bps {
+                msg.message
+                    .add(crate::Attribute::Custom(Arc::new(crate::TargetAtMinimum)));
+            }
         }
         self.inner.handle_read(msg)
     }
@@ -302,13 +347,12 @@ impl<P: Interceptor> GccInterceptor<P> {
             estimate
         );
 
-        self.shared
-            .lock()
-            .unwrap_or_else(|e| {
-                log::warn!("gcc: shared mutex poisoned, recovering to publish estimate");
-                e.into_inner()
-            })
-            .target_bitrate_bps = Some(estimate as u32);
+        let mut shared = self.shared.lock().unwrap_or_else(|e| {
+            log::warn!("gcc: shared mutex poisoned, recovering to publish estimate");
+            e.into_inner()
+        });
+        shared.estimate_bps = Some(estimate as u32);
+        shared.update_target();
     }
 
     /// Reconstruct `(send_time_ms, recv_time_ms)` pairs from a TWCC feedback packet.
@@ -554,6 +598,121 @@ mod tests {
         assert_eq!(handle.target_bitrate_bps(), announced);
     }
 
+    /// RFC 4588 section 7: the target the handle reports for the original media is the
+    /// estimate less the retransmission reserve the NACK responder sends down the write leg;
+    /// the estimate itself stays readable, and the feedback announces it unlowered (the
+    /// responder lowers it on its way to the application, a pacer paces at it).
+    #[test]
+    fn the_target_leaves_out_the_retransmission_reserve() {
+        let (mut chain, handle) = make_chain();
+        let ssrc = 1001u32;
+        chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+        let base = Instant::now();
+        for i in 0..5u16 {
+            chain
+                .handle_write(make_rtp(
+                    ssrc,
+                    i,
+                    base + Duration::from_millis(i as u64 * 33),
+                ))
+                .unwrap();
+        }
+        while chain.poll_write().is_some() {}
+        let recv_us: Vec<i64> = (0..5).map(|i: i64| i * 33_000 + 20_000).collect();
+        chain
+            .handle_read(make_twcc_feedback(
+                0,
+                &recv_us,
+                base + Duration::from_millis(200),
+            ))
+            .unwrap();
+        let estimate = handle.estimate_bps().expect("an estimate");
+        assert_eq!(Some(estimate), handle.target_bitrate_bps());
+
+        let reserve = |bits_per_second: f64| TaggedPacket {
+            now: base + Duration::from_millis(250),
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![])).with(crate::Attribute::Custom(
+                Arc::new(crate::RetransmissionReserve { bits_per_second }),
+            )),
+        };
+        chain.handle_write(reserve(100_000.0)).unwrap();
+        assert_eq!(Some(estimate), handle.estimate_bps());
+        assert_eq!(Some(estimate - 100_000), handle.target_bitrate_bps());
+
+        let announced = chain.poll_read().and_then(|feedback| {
+            match feedback
+                .message
+                .get(&crate::Attribute::TargetBitrateChanged {
+                    bits_per_second: 0.0,
+                }) {
+                Some(crate::Attribute::TargetBitrateChanged { bits_per_second }) => {
+                    Some(*bits_per_second as u32)
+                }
+                _ => None,
+            }
+        });
+        assert_eq!(
+            Some(estimate),
+            announced,
+            "the feedback carries the estimate"
+        );
+
+        chain.handle_write(reserve(0.0)).unwrap();
+        assert_eq!(Some(estimate), handle.target_bitrate_bps(), "released");
+    }
+
+    /// A target at the controller's floor rides with `TargetAtMinimum`, so the NACK responder
+    /// lets the retransmissions take their reserve first; above it, it does not.
+    #[test]
+    fn a_target_at_the_floor_is_marked() {
+        for (min, marked) in [(3_000_000, true), (30_000, false)] {
+            let (gcc_builder, _handle) = GccInterceptorBuilder::new();
+            let mut chain = Registry::new()
+                .with(
+                    Slot::CongestionControl,
+                    PassThroughInterceptor::new().with(
+                        gcc_builder
+                            .with_min_bitrate(min)
+                            .with_max_bitrate(3_000_000)
+                            .build(),
+                    ),
+                )
+                .with(Slot::TwccSender, crate::TwccSenderBuilder::new().build())
+                .build();
+            let ssrc = 1001u32;
+            chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+            let base = Instant::now();
+            for i in 0..5u16 {
+                chain
+                    .handle_write(make_rtp(
+                        ssrc,
+                        i,
+                        base + Duration::from_millis(i as u64 * 33),
+                    ))
+                    .unwrap();
+            }
+            while chain.poll_write().is_some() {}
+            let recv_us: Vec<i64> = (0..5).map(|i: i64| i * 33_000 + 20_000).collect();
+            chain
+                .handle_read(make_twcc_feedback(
+                    0,
+                    &recv_us,
+                    base + Duration::from_millis(200),
+                ))
+                .unwrap();
+            let feedback = chain.poll_read().expect("the feedback carries on");
+            assert_eq!(
+                marked,
+                feedback
+                    .message
+                    .custom::<crate::TargetAtMinimum>()
+                    .is_some(),
+                "minimum {min}"
+            );
+        }
+    }
+
     #[test]
     fn test_no_estimate_before_feedback() {
         let (mut chain, handle) = make_chain();
@@ -698,7 +857,8 @@ mod tests {
         assert!(handle.target_bitrate_bps().is_none());
         assert!(handle2.target_bitrate_bps().is_none());
         // Write through the shared mutex.
-        handle.inner.lock().unwrap().target_bitrate_bps = Some(500_000);
+        handle.inner.lock().unwrap().estimate_bps = Some(500_000);
+        handle.inner.lock().unwrap().update_target();
         assert_eq!(handle2.target_bitrate_bps(), Some(500_000));
     }
 

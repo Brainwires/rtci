@@ -17,8 +17,9 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor as _, PassThroughInterceptor, Registry,
-    RtcpRandom, RtcpSessionBuilder, Slot,
+    GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, NackResponderBuilder,
+    PassThroughInterceptor, Registry, RetransmissionRateLimit, RtcpRandom, RtcpSessionBuilder,
+    Slot,
 };
 use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::media_stream::MediaStreamTrack;
@@ -227,6 +228,7 @@ struct Uplink {
     queue_drops: u64,
     rtx_sent: u64,
     rtx_dropped: u64,
+    audio_dropped: u64,
 }
 
 impl Uplink {
@@ -238,6 +240,7 @@ impl Uplink {
             queue_drops: 0,
             rtx_sent: 0,
             rtx_dropped: 0,
+            audio_dropped: 0,
         }
     }
 
@@ -358,8 +361,14 @@ fn track(kind: RtpCodecKind, codec: RTCRtpCodec, ssrc: u32, rtx: Option<u32>) ->
 }
 
 impl Peer {
-    /// A peer with ParolNet's media engine and interceptor chain, sending Opus and VP8.
-    fn new(addr: &str, seed: u64, ssrc_base: u32) -> Result<Self> {
+    /// A peer with ParolNet's media engine and interceptor chain, sending Opus and VP8; its
+    /// NACK responder holds retransmissions to `rate_limit`, the engine's default when `None`.
+    fn new(
+        addr: &str,
+        seed: u64,
+        ssrc_base: u32,
+        rate_limit: Option<RetransmissionRateLimit>,
+    ) -> Result<Self> {
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
             rng: Mutex::new(Rng(seed)),
@@ -392,7 +401,19 @@ impl Peer {
             },
             RtpCodecKind::Audio,
         )?;
-        let registry = configure_nack(Registry::new(), &mut media_engine);
+        let registry = match rate_limit {
+            None => configure_nack(Registry::new(), &mut media_engine),
+            // `configure_nack` with the responder's rule set (the codec carries the NACK
+            // feedback already).
+            Some(rate_limit) => Registry::new()
+                .with(
+                    Slot::NackResponder,
+                    NackResponderBuilder::new()
+                        .with_rate_limit(rate_limit)
+                        .build(),
+                )
+                .with(Slot::NackGenerator, NackGeneratorBuilder::new().build()),
+        };
         let registry = configure_rtcp_reports_with(
             registry,
             RtcpSessionBuilder::new()
@@ -568,11 +589,14 @@ impl World {
             for i in 0..2 {
                 while let Some(msg) = self.peers[i].pc.poll_write() {
                     moved = true;
-                    let rtx = rtp_payload_type(&msg.message) == Some(RTX_PT);
+                    let payload_type = rtp_payload_type(&msg.message);
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
-                    if rtx {
+                    if payload_type == Some(RTX_PT) {
                         self.uplinks[i].rtx_sent += 1;
                         self.uplinks[i].rtx_dropped += u64::from(arrives.is_none());
+                    }
+                    if payload_type == Some(OPUS_PT) {
+                        self.uplinks[i].audio_dropped += u64::from(arrives.is_none());
                     }
                     let Some(at) = arrives else { continue };
                     self.order += 1;
@@ -718,12 +742,14 @@ impl World {
             self.next_target += Duration::from_millis(100);
             let link = &self.uplinks[0];
             self.trace.push(format!(
-                "{:6.1} target {:7} queue {:3} ms drops {:5} rtx {:5}/{:5} lost usable {:5} unusable {:4}",
+                "{:6.1} target {:7} estimate {:7} queue {:3} ms drops {:5} audio {:4} rtx {:5}/{:5} lost usable {:5} unusable {:4}",
                 at.as_secs_f64(),
                 self.peers[0].target_bps,
+                self.peers[0].gcc.estimate_bps().unwrap_or(0),
                 link.busy_until
                     .map_or(0, |t| t.saturating_duration_since(now).as_millis()),
                 link.queue_drops,
+                link.audio_dropped,
                 link.rtx_sent,
                 link.rtx_dropped,
                 self.peers[1].usable_at.len(),
@@ -778,12 +804,12 @@ impl World {
     }
 
     /// Two peers over host candidates, audio and video each way, connected.
-    fn connected(seed: u64) -> Result<Self> {
+    fn connected(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Self> {
         let start = Instant::now();
         let mut world = World {
             peers: [
-                Peer::new("10.0.0.1:5000", seed ^ 0x1111, 0x1000_0000)?,
-                Peer::new("10.0.0.2:5000", seed ^ 0x2222, 0x2000_0000)?,
+                Peer::new("10.0.0.1:5000", seed ^ 0x1111, 0x1000_0000, rate_limit)?,
+                Peer::new("10.0.0.2:5000", seed ^ 0x2222, 0x2000_0000, rate_limit)?,
             ],
             uplinks: [Uplink::new(), Uplink::new()],
             start,
@@ -863,8 +889,10 @@ struct Outcome {
     reacted: Duration,
     /// Its median over the last twelve seconds of the cap.
     under: u32,
-    /// Its value 20 s after the cap went.
+    /// The target the encoder followed 20 s after the cap went, and the estimate itself then
+    /// (the target less the retransmission reserve, the same with nothing to repair).
     after: u32,
+    estimate_after: u32,
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
@@ -874,13 +902,15 @@ struct Outcome {
     queue_drops: u64,
     rtx_sent: u64,
     rtx_dropped: u64,
+    /// Opus packets dropped at the capped link's queue.
+    audio_dropped: u64,
     unusable: u64,
 }
 
 /// The call: 20 s open, the caller's uplink capped at 300 kbit/s until 20 s after its
 /// estimate went under 400 kbit/s, then open again for 20 s.
-fn run(seed: u64) -> Result<Outcome> {
-    let mut world = World::connected(seed)?;
+fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome> {
+    let mut world = World::connected(seed, rate_limit)?;
     let t = world.now + Duration::from_secs(20);
     world.advance(t)?;
     let before = target_at(&world.peers[0].targets, world.elapsed());
@@ -914,6 +944,7 @@ fn run(seed: u64) -> Result<Outcome> {
     world.advance(t)?;
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
+    let estimate_after = world.peers[0].gcc.estimate_bps().unwrap_or(0);
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
             println!("TRACE seed {seed} {line}");
@@ -926,6 +957,7 @@ fn run(seed: u64) -> Result<Outcome> {
         reacted,
         under,
         after,
+        estimate_after,
         freeze,
         freeze_at,
         capped_at,
@@ -934,14 +966,40 @@ fn run(seed: u64) -> Result<Outcome> {
         queue_drops: world.uplinks[0].queue_drops,
         rtx_sent: world.uplinks[0].rtx_sent,
         rtx_dropped: world.uplinks[0].rtx_dropped,
+        audio_dropped: world.uplinks[0].audio_dropped,
         unusable: callee.unusable,
     })
 }
 
-/// Video through a 300 kbit/s cap that comes and goes, on six seeds: never more than 2 s
-/// without a usable frame on the receiving side (engine v0.22.0+brainwires.5 gave at most
-/// 0.85 s in ParolNet's simulation of the same call; v0.22.0+brainwires.6 froze for 5.9 to
-/// 6.8 s here on every seed).
+/// The six seeds under `rate_limit` (`None`: the engine's default), each outcome printed.
+fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, Outcome)>> {
+    let mut outcomes = Vec::new();
+    for seed in 1..=6 {
+        let outcome = run(seed, rate_limit)?;
+        println!("{rate_limit:?} seed {seed}: {outcome:?}");
+        outcomes.push((seed, outcome));
+    }
+    Ok(outcomes)
+}
+
+/// Never more than 2 s without a usable frame on the receiving side, on every seed.
+fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
+    for (seed, outcome) in outcomes {
+        assert!(
+            outcome.freeze <= Duration::from_secs(2),
+            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+    }
+}
+
+/// Video through a 300 kbit/s cap that comes and goes, on six seeds, under the engine's
+/// default retransmission rule (RFC 4588 section 7: the original and the retransmitted data
+/// share the target, and the target the encoder follows is lowered while repairs are
+/// pending): never more than 2 s without a usable frame on the receiving side (engine
+/// v0.22.0+brainwires.5 gave at most 0.85 s in ParolNet's simulation of the same call;
+/// v0.22.0+brainwires.6 froze for 5.9 to 6.8 s here on every seed; the RFC's sharing
+/// without the lowered target froze for 2.7 to 3.1 s).
 ///
 /// When the cap comes, the sender is still at 1.4 Mbit/s for half a second and some fifty
 /// video packets are dropped at the link's queue. With the release's NACK request policy (ten
@@ -949,27 +1007,36 @@ fn run(seed: u64) -> Result<Outcome> {
 /// to the estimate (about 300, five times the link, three in four of them dropped at the same
 /// queue), some of those packets were given up, stayed lost, the sample builder held every
 /// later frame back for its 256 packets and the picture froze until a key frame. Now a packet
-/// is asked for while it is missing and the retransmissions stay under the estimate.
+/// is asked for while it is missing, the retransmissions stay within the estimate, and the
+/// encoder leaves them room.
 ///
-/// Not asserted: the estimate 20 s after the cap went (`after` in the output). In ParolNet's
-/// simulation v0.22.0+brainwires.5 was at 1.18 Mbit/s there; here it is 0.45 to 1.5 Mbit/s
-/// depending on the seed: GCC climbs from its floor at 8% a second, and when it has reached the
-/// capacity again before the cap goes, the loss at the overflowing queue cuts it back to the
-/// floor on every feedback (draft-ietf-rmcat-gcc-02 section 6) just before the path opens.
+/// Not asserted: the estimate 20 s after the cap went (`estimate_after` in the output). In
+/// ParolNet's simulation v0.22.0+brainwires.5 was at 1.18 Mbit/s there; here it depends on
+/// the seed: GCC climbs from its floor at 8% a second, and when it has reached the capacity
+/// again before the cap goes, the loss at the overflowing queue cuts it back to the floor on
+/// every feedback (draft-ietf-rmcat-gcc-02 section 6) just before the path opens.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
-    let mut outcomes = Vec::new();
-    for seed in 1..=6 {
-        let outcome = run(seed)?;
-        println!("seed {seed}: {outcome:?}");
-        outcomes.push((seed, outcome));
-    }
-    for (seed, outcome) in &outcomes {
-        assert!(
-            outcome.freeze <= Duration::from_secs(2),
-            "seed {seed}: the video froze for {:?}: {outcome:?}",
-            outcome.freeze
-        );
-    }
+    assert_no_long_freeze(&seeds(None)?);
+    Ok(())
+}
+
+/// The same call with libwebrtc's retransmission rule
+/// ([`RetransmissionRateLimit::UpToTarget`]: the retransmissions alone under the target, the
+/// encoder's target not lowered), the `Chrome` and `Performance` profiles' setting.
+#[test]
+fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
+{
+    assert_no_long_freeze(&seeds(Some(RetransmissionRateLimit::UpToTarget))?);
+    Ok(())
+}
+
+/// The same call with retransmissions not congestion controlled
+/// ([`RetransmissionRateLimit::Unlimited`]), for comparison: prints the outcomes, asserts
+/// nothing.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
+    seeds(Some(RetransmissionRateLimit::Unlimited))?;
     Ok(())
 }

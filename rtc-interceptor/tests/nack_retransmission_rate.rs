@@ -1,18 +1,22 @@
 //! RFC 4588 section 7: retransmissions are congestion controlled. The NACK responder holds
 //! what it retransmits to the congestion controller's target, which it reads from
-//! `Attribute::TargetBitrateChanged` as the estimate passes on the read leg: by default the
-//! retransmissions alone stay under the target over the last second (libwebrtc's rule); in the
-//! RFC's form they take only what the original packets leave of it.
+//! `Attribute::TargetBitrateChanged` as the estimate passes on the read leg. By default (the
+//! RFC's form) they take only what the original packets leave of it over the last second, and
+//! while they wait the target reported for the original media is lowered by a retransmission
+//! reserve; with libwebrtc's rule the retransmissions alone stay under the target.
 
 use rtc_interceptor::{
     Attribute, AttributedPacket, Interceptor, NackResponderBuilder, Packet, RTCPFeedback, Registry,
-    RetransmissionRateLimit, Slot, StreamInfo, TaggedPacket,
+    RetransmissionRateLimit, RetransmissionReserve, Slot, StreamInfo, TaggedPacket,
+    TargetAtMinimum,
 };
 use rtcp::transport_feedbacks::transport_layer_nack::{
     TransportLayerNack, nack_pairs_from_sequence_numbers,
 };
+use sansio::Protocol;
 use shared::TransportContext;
 use shared::marshal::MarshalSize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const SSRC: u32 = 0x1234;
@@ -71,15 +75,55 @@ fn send(chain: &mut impl Interceptor, base: Instant, count: u16) {
     while chain.poll_write().is_some() {}
 }
 
-/// A NACK for `sequence_numbers` at `now`, riding with the estimate `target_bps` when given (as
-/// a congestion controller wire-ward of the responder attaches it), and the number of
-/// retransmissions that leave for it.
-fn nack(
+/// What leaves on the write leg and reaches the application on the read leg.
+#[derive(Default, Debug)]
+struct Seen {
+    /// Retransmissions written.
+    retransmitted: usize,
+    /// Every `RetransmissionReserve` written, bits per second.
+    reserves: Vec<f64>,
+    /// Every `TargetBitrateChanged` read, bits per second.
+    targets: Vec<f64>,
+}
+
+/// Takes everything the chain has for the wire and the application.
+fn drain(chain: &mut impl Interceptor) -> Seen {
+    let mut seen = Seen::default();
+    while let Some(tagged) = chain.poll_read() {
+        if let Some(Attribute::TargetBitrateChanged { bits_per_second }) =
+            tagged.message.get(&Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            })
+        {
+            seen.targets.push(*bits_per_second);
+        }
+    }
+    while let Some(tagged) = chain.poll_write() {
+        if let Some(reserve) = tagged.message.custom::<RetransmissionReserve>() {
+            seen.reserves.push(reserve.bits_per_second);
+        }
+        if let Packet::Rtp(packet) = &tagged.message.packet {
+            assert_eq!(RTX_SSRC, packet.header.ssrc);
+            assert_eq!(
+                RETRANSMISSION,
+                packet.header.marshal_size() + packet.payload.len()
+            );
+            seen.retransmitted += 1;
+        }
+    }
+    seen
+}
+
+/// Reads a NACK for `sequence_numbers` at `now`, riding with the estimate `target_bps` when
+/// given (as a congestion controller wire-ward of the responder attaches it), marked
+/// [`TargetAtMinimum`] when `at_minimum`.
+fn read_nack(
     chain: &mut impl Interceptor,
     now: Instant,
     sequence_numbers: &[u16],
     target_bps: Option<f64>,
-) -> usize {
+    at_minimum: bool,
+) {
     let mut message = AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerNack {
         sender_ssrc: 1,
         media_ssrc: SSRC,
@@ -87,6 +131,9 @@ fn nack(
     })]));
     if let Some(bits_per_second) = target_bps {
         message.add(Attribute::TargetBitrateChanged { bits_per_second });
+        if at_minimum {
+            message.add(Attribute::Custom(Arc::new(TargetAtMinimum)));
+        }
     }
     chain
         .handle_read(TaggedPacket {
@@ -95,6 +142,17 @@ fn nack(
             message,
         })
         .unwrap();
+}
+
+/// A NACK for `sequence_numbers` at `now` (see [`read_nack`]), and the number of
+/// retransmissions that leave for it at once.
+fn nack(
+    chain: &mut impl Interceptor,
+    now: Instant,
+    sequence_numbers: &[u16],
+    target_bps: Option<f64>,
+) -> usize {
+    read_nack(chain, now, sequence_numbers, target_bps, false);
     while chain.poll_read().is_some() {}
     let mut retransmitted = 0;
     while let Some(tagged) = chain.poll_write() {
@@ -124,27 +182,32 @@ fn scenario(builder: NackResponderBuilder, target_bps: Option<f64>) -> usize {
     )
 }
 
-/// The default: the retransmissions alone stay under the target over the last second, whatever
-/// the originals took. At 80 kbit/s, 10 000 octets a second: nine retransmissions of 1014
-/// octets, although the originals already took three times that.
+fn up_to_target() -> NackResponderBuilder {
+    NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::UpToTarget)
+}
+
+/// libwebrtc's rule, a setting: the retransmissions alone stay under the target over the last
+/// second, whatever the originals took. At 80 kbit/s, 10 000 octets a second: nine
+/// retransmissions of 1014 octets, although the originals already took three times that.
 #[test]
 fn retransmissions_alone_stay_under_the_target() {
     let target = 80_000.0;
     let allowed = (target / 8.0) as usize / RETRANSMISSION;
     assert_eq!(9, allowed);
-    assert_eq!(allowed, scenario(NackResponderBuilder::new(), Some(target)));
+    assert_eq!(allowed, scenario(up_to_target(), Some(target)));
 }
 
 /// RFC 4588 section 7, "the acceptable packet rate and bitrate include both the original and
-/// retransmitted data": at 320 kbit/s (40 000 octets a second) the 30 originals (30 360 octets)
-/// leave 9 640, room for nine retransmissions; at 240 kbit/s they leave none.
+/// retransmitted data", the default: at 320 kbit/s (40 000 octets a second) the 30 originals
+/// (30 360 octets) leave 9 640, room for nine retransmissions; at 240 kbit/s they leave none.
 #[test]
 fn retransmissions_take_what_the_originals_leave_of_the_target() {
-    let rfc = || NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::WithinTarget);
     let left = 40_000 - 30 * ORIGINAL;
     assert_eq!(9, left / RETRANSMISSION);
+    assert_eq!(9, scenario(NackResponderBuilder::new(), Some(320_000.0)));
+    assert_eq!(0, scenario(NackResponderBuilder::new(), Some(240_000.0)));
+    let rfc = || NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::WithinTarget);
     assert_eq!(9, scenario(rfc(), Some(320_000.0)));
-    assert_eq!(0, scenario(rfc(), Some(240_000.0)));
 }
 
 /// Without a target (no congestion controller in the chain) and with the limit off, every
@@ -161,17 +224,21 @@ fn without_a_target_retransmissions_are_not_held_back() {
     );
 }
 
-/// The window is the last second: what was retransmitted a second ago no longer counts, and
-/// the packets refused before are retransmitted when the receiver asks again.
+/// A retransmission the limit holds back waits and leaves by itself when the window has room:
+/// the responder's deadline is that instant, a second after the retransmission whose leaving
+/// the window makes the room, and not earlier (a driver woken at once would spin).
 #[test]
-fn the_allowance_comes_back_after_a_second() {
+fn a_held_back_retransmission_is_due_when_the_window_has_room() {
     let base = Instant::now();
-    let mut chain = responder(NackResponderBuilder::new());
+    let mut chain = responder(up_to_target());
     send(&mut chain, base, 30);
     let lost: Vec<u16> = (0..20).collect();
     let at = base + Duration::from_millis(300);
     assert_eq!(9, nack(&mut chain, at, &lost, Some(80_000.0)));
-    // Half a second later the window still holds those nine: nothing more.
+    // The nine took the window at `at`: the tenth fits when the first of them has left it.
+    let due = chain.poll_timeout().expect("eleven wait");
+    assert_eq!(at + Duration::from_secs(1), due);
+    // The receiver asks again meanwhile: the requests keep their place.
     assert_eq!(
         0,
         nack(
@@ -181,14 +248,154 @@ fn the_allowance_comes_back_after_a_second() {
             None
         )
     );
-    // A second after them, nine more.
+    assert_eq!(Some(due), chain.poll_timeout());
+    chain
+        .handle_timeout(due - Duration::from_millis(1))
+        .unwrap();
+    assert_eq!(0, drain(&mut chain).retransmitted, "not before");
+    chain.handle_timeout(due).unwrap();
+    assert_eq!(9, drain(&mut chain).retransmitted, "the next nine at once");
+    assert_eq!(0, nack(&mut chain, due, &lost[18..], None));
     assert_eq!(
-        9,
-        nack(
-            &mut chain,
-            at + Duration::from_millis(1000),
-            &lost[9..],
-            None
-        )
+        Some(due + Duration::from_secs(1)),
+        chain.poll_timeout(),
+        "the last two wait for the next second"
     );
+}
+
+/// A request the receiver stops making is dropped after `PENDING_REQUEST_LIFETIME` (the
+/// receiver asks again every round trip while it misses the packet); one it makes again stays.
+/// At 8 kbit/s no retransmission ever fits the window.
+#[test]
+fn a_request_no_longer_made_is_dropped() {
+    let lifetime = rtc_interceptor::PENDING_REQUEST_LIFETIME;
+    for asked_again in [false, true] {
+        let base = Instant::now();
+        let mut chain = responder(up_to_target());
+        send(&mut chain, base, 30);
+        let lost: Vec<u16> = (0..20).collect();
+        let at = base + Duration::from_millis(300);
+        assert_eq!(0, nack(&mut chain, at, &lost, Some(8_000.0)));
+        let mut last = at;
+        if asked_again {
+            last = at + Duration::from_millis(900);
+            assert_eq!(0, nack(&mut chain, last, &lost, None));
+        }
+        let due = chain.poll_timeout().expect("the requests run out");
+        assert!(
+            due > last + lifetime && due <= last + lifetime + Duration::from_millis(1),
+            "due {:?} after the last request",
+            due - last
+        );
+        chain.handle_timeout(last + lifetime).unwrap();
+        assert_eq!(Some(due), chain.poll_timeout(), "still waiting");
+        chain.handle_timeout(due).unwrap();
+        assert_eq!(0, drain(&mut chain).retransmitted);
+        assert_eq!(None, chain.poll_timeout(), "nothing waits");
+    }
+}
+
+/// RFC 4588 section 7, "the sender SHOULD NOT send retransmission packets without reducing
+/// the packet rate and bitrate of the original stream": while retransmissions wait, the target
+/// reported to the application is the controller's less a reserve, at most half of it, and the
+/// reserve goes down the write leg to the congestion controller. Ten packets of 1014 octets
+/// waiting with no round trip measured (a second) need 81 kbit/s: at 240 kbit/s the reserve is
+/// that, at 150 kbit/s it is half the target. Both targets are under what the 30 originals
+/// took, so nothing leaves yet.
+#[test]
+fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions() {
+    for (target, reserve) in [
+        (240_000.0, 10.0 * RETRANSMISSION as f64 * 8.0),
+        (150_000.0, 75_000.0),
+    ] {
+        let base = Instant::now();
+        let mut chain = responder(NackResponderBuilder::new());
+        send(&mut chain, base, 30);
+        let lost: Vec<u16> = (0..10).collect();
+        read_nack(
+            &mut chain,
+            base + Duration::from_millis(300),
+            &lost,
+            Some(target),
+            false,
+        );
+        let seen = drain(&mut chain);
+        assert_eq!(0, seen.retransmitted, "the originals took the target");
+        assert_eq!(vec![reserve], seen.reserves, "at {target}");
+        assert_eq!(vec![target - reserve], seen.targets, "at {target}");
+    }
+}
+
+/// With nothing waiting and nothing retransmitted in the last second the reserve is released:
+/// the application's target is the controller's again.
+#[test]
+fn the_reserve_is_released_when_nothing_waits() {
+    let base = Instant::now();
+    let mut chain = responder(NackResponderBuilder::new());
+    send(&mut chain, base, 30);
+    let at = base + Duration::from_millis(300);
+    // 500 kbit/s: 62 500 octets, the originals took 30 360, the five fit.
+    read_nack(&mut chain, at, &[0, 1, 2, 3, 4], Some(500_000.0), false);
+    let seen = drain(&mut chain);
+    assert_eq!(5, seen.retransmitted);
+    let in_use = 5.0 * RETRANSMISSION as f64 * 8.0;
+    assert_eq!(
+        vec![in_use],
+        seen.reserves,
+        "their rate is reserved while in the window"
+    );
+    assert_eq!(vec![500_000.0 - in_use], seen.targets);
+    let due = chain
+        .poll_timeout()
+        .expect("the reserve falls back to zero");
+    assert_eq!(at + Duration::from_secs(1), due);
+    chain.handle_timeout(due).unwrap();
+    let seen = drain(&mut chain);
+    assert_eq!(vec![0.0], seen.reserves);
+    assert_eq!(vec![500_000.0], seen.targets);
+    assert_eq!(None, chain.poll_timeout());
+}
+
+/// libwebrtc's rule leaves the application's target alone.
+#[test]
+fn up_to_the_target_the_original_media_is_not_lowered() {
+    let base = Instant::now();
+    let mut chain = responder(up_to_target());
+    send(&mut chain, base, 30);
+    let lost: Vec<u16> = (0..20).collect();
+    read_nack(
+        &mut chain,
+        base + Duration::from_millis(300),
+        &lost,
+        Some(240_000.0),
+        false,
+    );
+    let seen = drain(&mut chain);
+    assert!(seen.reserves.is_empty());
+    assert_eq!(vec![240_000.0], seen.targets);
+}
+
+/// At the congestion controller's floor (`TargetAtMinimum`) the original media cannot be
+/// lowered: the retransmissions of the packets asked for take the reserve first, whatever the
+/// originals took. At 100 kbit/s the 30 originals (30 360 octets) took more than the window's
+/// 12 500; the reserve is half of 100 kbit/s, 6 250 octets: six retransmissions.
+#[test]
+fn at_the_floor_retransmissions_take_the_reserve_first() {
+    for (at_minimum, expected) in [(false, 0), (true, 6250 / RETRANSMISSION)] {
+        let base = Instant::now();
+        let mut chain = responder(NackResponderBuilder::new());
+        send(&mut chain, base, 30);
+        let lost: Vec<u16> = (0..20).collect();
+        let at = base + Duration::from_millis(300);
+        read_nack(&mut chain, at, &lost, Some(100_000.0), at_minimum);
+        // The reserve is announced as the NACK is read; the retransmissions it allows leave
+        // on the next turn of the driver.
+        let mut retransmitted = drain(&mut chain).retransmitted;
+        if let Some(due) = chain.poll_timeout().filter(|due| *due <= at) {
+            chain.handle_timeout(due).unwrap();
+        }
+        chain.handle_timeout(at).unwrap();
+        retransmitted += drain(&mut chain).retransmitted;
+        assert_eq!(expected, retransmitted, "at the minimum: {at_minimum}");
+    }
 }
