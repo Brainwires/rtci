@@ -222,6 +222,7 @@ pub(super) fn new_dtls_transport(
         crypto_provider,
     })?;
     dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+    dtls_transport.connection_id_length = setting_engine.dtls_connection_id_length;
     Ok(dtls_transport)
 }
 

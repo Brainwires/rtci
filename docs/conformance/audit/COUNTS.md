@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4518 | 113 | 216 | 105 | 21 | 617 | 5590 |
-| SHOULD | 709 | 59 | 69 | 67 | 5 | 328 | 1237 |
-| MAY | 396 | 31 | 36 | 125 | 0 | 168 | 756 |
+| MUST | 4519 | 112 | 216 | 105 | 21 | 617 | 5590 |
+| SHOULD | 726 | 55 | 58 | 65 | 5 | 328 | 1237 |
+| MAY | 397 | 30 | 36 | 125 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5681 | 206 | 324 | 300 | 26 | 1113 | 7650 |
+| all | 5700 | 200 | 313 | 298 | 26 | 1113 | 7650 |
 
 ## Per file
 
@@ -199,8 +199,8 @@ is a procedure step without a keyword.
 | `rfc8445.md` | SHOULD | 17 | 0 | 2 | 2 | 0 | 28 | 49 |
 | `rfc8445.md` | MAY | 6 | 1 | 0 | 3 | 0 | 6 | 16 |
 | `rfc8446.md` | MUST | 230 | 0 | 0 | 0 | 0 | 83 | 313 |
-| `rfc8446.md` | SHOULD | 36 | 0 | 3 | 0 | 0 | 34 | 73 |
-| `rfc8446.md` | MAY | 16 | 2 | 0 | 0 | 0 | 30 | 48 |
+| `rfc8446.md` | SHOULD | 39 | 0 | 0 | 0 | 0 | 34 | 73 |
+| `rfc8446.md` | MAY | 17 | 1 | 0 | 0 | 0 | 30 | 48 |
 | `rfc8489.md` | MUST | 101 | 2 | 2 | 0 | 0 | 14 | 119 |
 | `rfc8489.md` | SHOULD | 17 | 4 | 1 | 1 | 0 | 1 | 24 |
 | `rfc8489.md` | MAY | 5 | 0 | 0 | 3 | 0 | 0 | 8 |
@@ -278,10 +278,10 @@ is a procedure step without a keyword.
 | `rfc9146.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
 | `rfc9146.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9147.md` | MUST | 90 | 0 | 0 | 0 | 0 | 4 | 94 |
-| `rfc9147.md` | SHOULD | 48 | 0 | 4 | 0 | 0 | 8 | 60 |
+| `rfc9147.md` | SHOULD | 51 | 0 | 1 | 0 | 0 | 8 | 60 |
 | `rfc9147.md` | MAY | 17 | 2 | 0 | 0 | 0 | 5 | 24 |
 | `rfc9260.md` | MUST | 287 | 0 | 0 | 0 | 0 | 28 | 315 |
-| `rfc9260.md` | SHOULD | 152 | 4 | 8 | 3 | 0 | 23 | 190 |
+| `rfc9260.md` | SHOULD | 163 | 0 | 3 | 1 | 0 | 23 | 190 |
 | `rfc9260.md` | MAY | 30 | 0 | 5 | 22 | 0 | 15 | 72 |
 | `rfc9335.md` | MUST | 20 | 2 | 1 | 0 | 0 | 0 | 23 |
 | `rfc9335.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
@@ -297,7 +297,7 @@ is a procedure step without a keyword.
 | `rfc9628.md` | MUST | 50 | 0 | 3 | 0 | 0 | 6 | 59 |
 | `rfc9628.md` | SHOULD | 6 | 1 | 0 | 1 | 0 | 2 | 10 |
 | `rfc9628.md` | MAY | 2 | 1 | 0 | 3 | 0 | 0 | 6 |
-| `rfc9653.md` | MUST | 10 | 1 | 0 | 0 | 0 | 4 | 15 |
+| `rfc9653.md` | MUST | 11 | 0 | 0 | 0 | 0 | 4 | 15 |
 | `rfc9653.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9653.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `w3c-mediacapture-main.md` | MUST | 26 | 0 | 0 | 0 | 0 | 2 | 28 |

@@ -1348,6 +1348,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
+  waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
+  expiry count and the path error count, so probes the receiver keeps answering never end the
+  association.
+- **sctp** (sec-12, RFC 9260 6.2.1 B, C): chunks marked for retransmission (T3-rtx, Fast
+  Retransmit) give their size back to the peer's rwnd, and every retransmission takes it
+  again; T3-rtx retransmissions are limited by cwnd and by rwnd separately.
+- **sctp** (sec-12, RFC 9260 7.2, 7.2.2): cwnd, ssthresh, partial_bytes_acked and the flight
+  size compared with cwnd count DATA chunk lengths with header and padding (user data bytes
+  before); partial_bytes_acked also counts the chunks a SACK reports as Duplicate TSNs. rwnd
+  stays in user data bytes.
+- **dtls** (sec-12, RFC 9147 8): after a key update the epoch before stays readable until a
+  record of the next arrives, so a late record of it is processed (it was dropped once a
+  record under the new keys had been read).
+- **dtls** (sec-12, RFC 8446 4.4.2.4): a DTLS 1.3 endpoint that validates the peer's chain
+  refuses a certificate signed with SHA-1 (bad_certificate). Fingerprint authentication
+  (WebRTC) validates no certificate signature and is not affected.
+- **dtls** (sec-12, RFC 8446 C.2): a signature from an RSA key above 8192 bits is refused.
+- **dtls** (sec-12, RFC 8446 7.1): the DTLS 1.3 handshake traffic secrets are erased once
+  both Finished are done; the key schedule keeps no copy of the application traffic secrets.
+- **peer_connection** (sec-12, RFC 9147 9, 11): `SettingEngineBuilder::with_dtls_connection_id`
+  sets the DTLS connection id length; with connection ids in use a spare id is requested once
+  the association is up, and a change of ICE selected pair switches to a fresh one.
+- **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
+  association of every transport of the connection, not only the first.
 - **peer_connection** (sec-10, RFC 5764 section 4.4): the connection re-keys SRTP by itself.
   When a DTLS-SRTP master key, outbound or inbound, has a sixteenth of its lifetime left, it
   asks for a new DTLS association as `renew_dtls_association()` does and raises

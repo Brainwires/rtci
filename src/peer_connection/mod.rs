@@ -4062,8 +4062,15 @@ impl RTCPeerConnection {
     /// refuses to protect more with the key and the DTLS transport fails. The peer must take a
     /// new association on a transport that has one, which an `rtc` peer does; browsers ignore
     /// the new `tls-id`.
+    ///
+    /// Every transport of the connection gets a new association (a section outside a BUNDLE
+    /// group has its own): the ICE restart replaces the credentials of all of them, and an
+    /// association left on a transport whose credentials change would be one RFC 9429
+    /// section 5.8.3 refuses to continue.
     pub fn renew_dtls_association(&mut self) {
-        self.dtls_transport_mut().renewal_requested = true;
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.dtls_transport_mut().renewal_requested = true);
+        }
         self.ice_credentials_to_replace = self.local_ice_ufrags();
         self.trigger_negotiation_needed();
     }

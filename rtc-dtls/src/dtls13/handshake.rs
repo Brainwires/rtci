@@ -59,6 +59,24 @@ fn refuse_md5(chain: &[Vec<u8>]) -> std::result::Result<(), Refusal> {
     Ok(())
 }
 
+/// RFC 8446 section 4.4.2.4: "it is RECOMMENDED that any endpoint receiving any certificate
+/// which it would need to validate using any signature algorithm using a SHA-1 hash abort the
+/// handshake with a bad_certificate alert". Called where the chain is validated only: under
+/// fingerprint authentication (WebRTC, RFC 8122) no certificate signature is validated, and a
+/// SHA-1-signed self-signed certificate is taken.
+fn refuse_sha1(chain: &[Vec<u8>]) -> std::result::Result<(), Refusal> {
+    if chain
+        .iter()
+        .any(|der| super::certificate_checks::signed_with_sha1(der))
+    {
+        return Err(refuse(
+            alert::BAD_CERTIFICATE,
+            Error::Other("a certificate signed with SHA-1 in a chain to validate".to_owned()),
+        ));
+    }
+    Ok(())
+}
+
 fn internal(error: Error) -> Refusal {
     refuse(alert::INTERNAL_ERROR, error)
 }
@@ -264,8 +282,10 @@ impl Conn13 {
         schedule
             .enter_application(provider.crypto(), &hash)
             .map_err(internal)?;
-        let client = schedule.client_application_traffic.clone();
-        let server = schedule.server_application_traffic.clone();
+        // Handed over, not copied: the association keeps them for its key updates (section
+        // 7.2), and one copy is all there is to erase (section 7.1).
+        let client = schedule.client_application_traffic.take();
+        let server = schedule.server_application_traffic.take();
         self.exporter_secret = schedule.exporter.clone();
         let (Some(client), Some(server)) = (client, server) else {
             return Err(internal(Error::ErrCipherSuiteUnset));
@@ -736,6 +756,7 @@ impl Conn13 {
             self.verify_certificate_signature(scheme, signature, true)?;
             let mut chains = vec![];
             if !self.cfg.insecure_skip_verify {
+                refuse_sha1(&self.peer_certificates)?;
                 let verifier = self.cfg.server_cert_verifier.as_ref().ok_or_else(|| {
                     bad_certificate(Error::Crypto(
                         "CA-chain verification has no configured verifier adapter".to_owned(),
@@ -763,6 +784,7 @@ impl Conn13 {
             }
             self.verify_certificate_signature(scheme, signature, false)?;
             if verifies_chain {
+                refuse_sha1(&self.peer_certificates)?;
                 let verifier = self
                     .cfg
                     .client_cert_verifier
@@ -838,6 +860,11 @@ impl Conn13 {
         }
         let verify_data = self.finished_verify_data(true)?;
         self.add_to_flight(&mut flight, EPOCH_HANDSHAKE, FINISHED, verify_data);
+        // Both Finished are done: the handshake traffic secrets have given all they give
+        // (RFC 8446 section 7.1); the epoch's record keys stay for the retransmissions.
+        if let Some(schedule) = self.schedule.as_mut() {
+            schedule.forget_handshake_secrets();
+        }
         self.derive_resumption_secret()?;
         self.send_flight(flight).map_err(internal)?;
 
@@ -1447,6 +1474,10 @@ impl Conn13 {
             return Err(refuse(alert::DECRYPT_ERROR, Error::ErrVerifyDataMismatch));
         }
         self.transcript.add(FINISHED, body);
+        // RFC 8446 section 7.1, as on the client.
+        if let Some(schedule) = self.schedule.as_mut() {
+            schedule.forget_handshake_secrets();
+        }
         self.derive_resumption_secret()?;
         debug!("server: handshake complete");
         self.establish().map_err(internal)?;

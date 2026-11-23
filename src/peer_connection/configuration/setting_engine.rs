@@ -472,6 +472,8 @@ pub struct SettingEngine {
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// [`SettingEngineBuilder::with_dtls_connection_id`].
+    pub(crate) dtls_connection_id_length: Option<usize>,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
@@ -2125,6 +2127,19 @@ impl SettingEngineBuilder {
     /// fail.
     pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
         self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
+    /// Asks the peer to put a connection id of `length` random bytes in every protected DTLS
+    /// record it sends (RFC 9146 for DTLS 1.2, RFC 9147 section 9 for DTLS 1.3). `None`, the
+    /// default, sends the `connection_id` extension asking for none (RFC 9147 section 5.1).
+    ///
+    /// With connection ids in use the engine follows RFC 9147 sections 9 and 11: when the ICE
+    /// agent's selected pair changes (a new path), a DTLS 1.3 association switches to a fresh
+    /// connection id the peer provided and asks for another, so records on the new path are
+    /// not linked to the old ones by their id.
+    pub fn with_dtls_connection_id(mut self, length: Option<usize>) -> Self {
+        self.0.dtls_connection_id_length = length;
         self
     }
 
