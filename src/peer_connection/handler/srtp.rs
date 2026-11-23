@@ -36,6 +36,43 @@ pub(crate) struct SrtpHandlerContext {
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
     /// The newest instant a read or write carried, for the events the contexts raise.
     pub(crate) now: Option<Instant>,
+    /// Received RTCP is held to RFC 3550 Appendix A.2 and section 6.4.1
+    /// (`SettingEngineBuilder::with_strict_rtcp_validity`).
+    pub(crate) strict_rtcp_validity: bool,
+    /// Reduced-size RTCP was negotiated (RFC 5506): under the strict form a datagram need
+    /// not start with an SR or RR.
+    pub(crate) rtcp_reduced_size: bool,
+}
+
+/// Parses a decrypted RTCP datagram for the chain.
+///
+/// RFC 8834 section 4.1 (RFC 3550 section 6.1): of a compound packet, the packets that can be
+/// understood are processed. One of a known type that fails its own parse is passed on as a
+/// raw packet; it does not cost the others. The framing (version, lengths) has to hold.
+///
+/// That is all the default asks. RFC 3550 Appendix A.2 also discards a datagram whose first
+/// packet is not an SR or RR or has its padding bit set, and section 6.4.1 one with padding on
+/// a packet that is not the last; libwebrtc pads a packet in the middle of a compound packet
+/// (its TWCC feedback), so accepting those is the default and `strict` the RFC's form. Under
+/// it the first-packet rule is RFC 5506's when reduced-size RTCP was negotiated: any RTCP
+/// packet type may come first.
+pub(crate) fn parse_received_rtcp(
+    decrypted: &[u8],
+    strict: bool,
+    reduced_size: bool,
+) -> Result<Vec<Box<dyn rtcp::packet::Packet>>> {
+    if strict {
+        if reduced_size {
+            rtcp::compound_packet::validate_reduced_size(decrypted)?;
+        } else {
+            rtcp::compound_packet::validate_compound_headers(decrypted)?;
+        }
+    }
+    let packets = rtcp::packet::unmarshal_lenient(&mut &decrypted[..])?;
+    if packets.is_empty() {
+        return Err(Error::Other("empty rtcp_packets".to_string()));
+    }
+    Ok(packets)
 }
 
 impl SrtpHandlerContext {
@@ -145,15 +182,12 @@ impl<'a>
             #[allow(clippy::collapsible_else_if)]
             if is_rtcp(&message) {
                 if let Some(context) = self.ctx.remote_srtp_context.as_mut() {
-                    let mut decrypted = context.decrypt_rtcp(&message)?;
-                    // RFC 8834 section 4.1 (RFC 3550 section 6.1): of a compound packet, the
-                    // packets that can be understood are processed. One of a known type that
-                    // fails its own parse is passed on as a raw packet; it does not cost the
-                    // others. The framing (version, lengths) still has to hold.
-                    let rtcp_packets = rtcp::packet::unmarshal_lenient(&mut decrypted)?;
-                    if rtcp_packets.is_empty() {
-                        return Err(Error::Other("empty rtcp_packets".to_string()));
-                    }
+                    let decrypted = context.decrypt_rtcp(&message)?;
+                    let rtcp_packets = parse_received_rtcp(
+                        &decrypted,
+                        self.ctx.strict_rtcp_validity,
+                        self.ctx.rtcp_reduced_size,
+                    )?;
 
                     self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                         now: msg.now,
@@ -322,6 +356,44 @@ mod tests {
     use bytes::BytesMut;
     use sansio::Protocol;
     use shared::TransportContext;
+
+    /// An RR with no report blocks, its padding bit set and four octets of padding, then a
+    /// PLI: padding on a packet that is not the last of the compound packet.
+    fn padded_report_then_pli() -> Vec<u8> {
+        let mut datagram = vec![0xA0, 201, 0, 2, 0, 0, 0, 1, 0, 0, 0, 4];
+        datagram.extend_from_slice(&pli());
+        datagram
+    }
+
+    fn pli() -> [u8; 12] {
+        [0x81, 206, 0, 2, 0, 0, 0, 1, 0, 0, 0, 2]
+    }
+
+    /// RFC 8834 section 4.1 and libwebrtc's compound packets: by default padding on a packet
+    /// in the middle costs nothing, both packets are processed.
+    #[test]
+    fn padding_on_a_packet_that_is_not_the_last_is_accepted_by_default() {
+        let packets = parse_received_rtcp(&padded_report_then_pli(), false, false).unwrap();
+        assert_eq!(2, packets.len());
+    }
+
+    /// RFC 3550 section 6.4.1 ("the padding bit MUST be set only on that packet", the last)
+    /// and Appendix A.2 (the first packet's padding bit is zero), with the strict setting.
+    #[test]
+    fn the_strict_rtcp_validity_discards_padding_on_a_packet_that_is_not_the_last() {
+        assert!(parse_received_rtcp(&padded_report_then_pli(), true, false).is_err());
+        assert!(parse_received_rtcp(&padded_report_then_pli(), true, true).is_err());
+    }
+
+    /// RFC 3550 Appendix A.2: the first packet of a compound packet is an SR or RR; RFC 5506
+    /// section 3.4.2 lifts that where reduced-size RTCP was negotiated. The default takes a
+    /// lone feedback packet either way.
+    #[test]
+    fn the_strict_rtcp_validity_wants_a_report_first_unless_reduced_size_was_negotiated() {
+        assert!(parse_received_rtcp(&pli(), true, false).is_err());
+        assert_eq!(1, parse_received_rtcp(&pli(), true, true).unwrap().len());
+        assert_eq!(1, parse_received_rtcp(&pli(), false, false).unwrap().len());
+    }
 
     fn write(ctx: &mut SrtpHandlerContext, message: RTPMessage) -> Result<()> {
         SrtpHandler::new(ctx).handle_write(TaggedRTCMessageInternal {

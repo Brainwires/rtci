@@ -174,7 +174,18 @@ fn codec(mime_type: &str, clock_rate: u32, channels: u16, sdp_fmtp_line: &str) -
         clock_rate,
         channels,
         sdp_fmtp_line: sdp_fmtp_line.to_owned(),
-        rtcp_feedback: vec![],
+        // The PLI and FIR the feedback-count test writes are negotiated (RFC 4585 section
+        // 4.2, RFC 5104 section 7.2).
+        rtcp_feedback: vec![
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "nack".to_owned(),
+                parameter: "pli".to_owned(),
+            },
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "ccm".to_owned(),
+                parameter: "fir".to_owned(),
+            },
+        ],
     }
 }
 

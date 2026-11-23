@@ -276,13 +276,25 @@ impl Interceptor for UlpfecReceiveInterceptor {
         if !(self.filter)(info) {
             return;
         }
-        if self.carriage == Carriage::Stream {
-            let (Some(ssrc_fec), Some(payload_type_fec)) = (info.ssrc_fec, info.payload_type_fec)
-            else {
-                return;
-            };
+        // The repair flow the signalling associated with the stream (RFC 5956 section 4.3,
+        // `a=ssrc-group:FEC-FR <media> <repair>` with a `ulpfec` format): FEC as a stream of its
+        // own (RFC 5109 section 14.1), whichever carriage the builder names, since the
+        // multiplexing is "indicated out of band" per stream (section 14). With the stream
+        // carriage a repair flow that names no format is taken as ULPFEC.
+        let separate = match (info.ssrc_fec, info.payload_type_fec) {
+            (Some(ssrc_fec), Some(payload_type_fec))
+                if info.fec_is_ulpfec()
+                    || (self.carriage == Carriage::Stream && info.mime_type_fec.is_empty()) =>
+            {
+                Some((ssrc_fec, payload_type_fec))
+            }
+            _ => None,
+        };
+        if let Some((ssrc_fec, payload_type_fec)) = separate {
             self.repair_to_media
                 .insert(ssrc_fec, (info.ssrc, payload_type_fec));
+        } else if self.carriage == Carriage::Stream {
+            return;
         }
         self.decoders.insert(
             info.ssrc,

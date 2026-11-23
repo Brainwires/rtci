@@ -428,6 +428,10 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
+    /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
+    /// connection gets ICE credentials of its own. The derived default `false` shares the first
+    /// transport's.
+    pub(crate) unique_transport_credentials: bool,
     /// [`SettingEngineBuilder::with_implicit_rollback`].
     /// Inverted so that the derived default is "implicit rollback on".
     pub(crate) explicit_rollback_only: bool,
@@ -489,6 +493,15 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The connection runs without the RTCP session the builder otherwise installs
+    /// ([`SettingEngineBuilder::with_rtcp_session_omitted`]); a departure from RFC 8834 4.1.
+    pub(crate) rtcp_session_omitted: bool,
+    /// Received RTCP is held to RFC 3550 Appendix A.2 and section 6.4.1
+    /// ([`SettingEngineBuilder::with_strict_rtcp_validity`]).
+    pub(crate) strict_rtcp_validity: bool,
+    /// RTCP feedback the application writes is sent whether or not its section negotiated
+    /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
+    pub(crate) unnegotiated_rtcp_feedback: bool,
     /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
     /// and the methods after it).
     pub(crate) streams: crate::peer_connection::streams::StreamSettings,
@@ -1698,6 +1711,31 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether each transport of the connection has ICE credentials of its own (RFC 9429
+    /// section 5.2.1: "Each "m=" section, provided it is not marked as bundle-only, MUST
+    /// contain a unique set of ICE credentials"). The default is `false`: the transports an
+    /// offer or answer adds beside the first one (the first section of each media type in a
+    /// `balanced` initial offer, every section under `max-compat`, every section answered
+    /// outside a BUNDLE group) take the first transport's `ice-ufrag` and `ice-pwd`, and an ICE
+    /// restart gives them all one new pair. Each transport keeps its own candidates, DTLS
+    /// association and SRTP keys.
+    ///
+    /// The default is what the browsers write (Chrome and Firefox put one `ice-ufrag` /
+    /// `ice-pwd` pair in every m= section of a session, bundled or not) and RFC 8839 section
+    /// 5.4 allows ("If two data streams have identical "ice-ufrag"s, they MUST have identical
+    /// "ice-pwd"s"). Pion and webrtc-rs 0.17 refuse a description whose sections carry
+    /// different credentials (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so
+    /// the RFC 9429 form cannot reach them: with `true` an initial `balanced` offer with audio
+    /// and video, or media and a data channel, is refused by them.
+    ///
+    /// With shared credentials the transports are told apart by their local addresses only:
+    /// several transports on one local socket need `true`, since the ICE username of a STUN
+    /// request is then the same for each.
+    pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
+        self.0.unique_transport_credentials = unique;
+        self
+    }
+
     // SetICETCPMux enables ICE-TCP when set to a non-nil value. Make sure that
     // NetworkTypeTCP4 or NetworkTypeTCP6 is enabled as well.
     //pub fn SetICETCPMux(&mut self, tcpMux ice.TCPMux) {
@@ -2251,6 +2289,47 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
+    /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
+    /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.
+    pub fn with_unnegotiated_rtcp_feedback(mut self, allowed: bool) -> Self {
+        self.0.unnegotiated_rtcp_feedback = allowed;
+        self
+    }
+
+    /// Builds the connection without an RTCP session: a departure from RFC 8834 section 4.1
+    /// ("RTCP ... MUST be implemented and used by all WebRTC endpoints").
+    ///
+    /// Every peer connection sends RTCP: when the interceptor registry given to
+    /// [`RTCPeerConnectionBuilder::with_interceptor_registry`](crate::peer_connection::RTCPeerConnectionBuilder::with_interceptor_registry)
+    /// has nothing at [`Slot::RtcpSession`](interceptor::Slot::RtcpSession) and no
+    /// `SenderReportInterceptor` / `ReceiverReportInterceptor` of its own,
+    /// [`RTCPeerConnectionBuilder::build`](crate::peer_connection::RTCPeerConnectionBuilder::build)
+    /// installs the session of
+    /// [`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports)
+    /// (an empty registry included). With this on it does not, and a registry without an RTCP
+    /// session sends only the RTCP the application writes. Off by default.
+    pub fn with_rtcp_session_omitted(mut self, omitted: bool) -> Self {
+        self.0.rtcp_session_omitted = omitted;
+        self
+    }
+
+    /// Holds received RTCP to the validity checks of RFC 3550 Appendix A.2 and section 6.4.1:
+    /// a datagram whose first packet is not an SR or RR (unless reduced-size RTCP, RFC 5506,
+    /// was negotiated), whose first packet has its padding bit set, or with padding on a
+    /// packet that is not the last, is discarded whole.
+    ///
+    /// Off by default: libwebrtc sends padding on a packet in the middle of a compound packet
+    /// (its transport-wide congestion control feedback, padded to a multiple of four), so the
+    /// default accepts any datagram whose version and lengths hold, and processes every packet
+    /// in it that parses (RFC 8834 section 4.1).
+    pub fn with_strict_rtcp_validity(mut self, strict: bool) -> Self {
+        self.0.strict_rtcp_validity = strict;
+        self
+    }
+
     /// Whether the engine gathers TCP host candidates itself (RFC 6544 section 4.1 says it
     /// should be configurable; browsers gather them by default). On by default: for the
     /// address of each UDP host candidate the application adds, the engine asks its driver
@@ -2295,6 +2374,21 @@ impl SettingEngineBuilder {
     /// application's.
     pub fn with_turn_over_streams(mut self, run: bool) -> Self {
         self.0.streams.turn = run;
+        self
+    }
+
+    /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2). By default
+    /// ([`ReflexiveGathering::Engine`](crate::peer_connection::srflx::ReflexiveGathering)) the
+    /// engine sends a Binding request to each `stun:` / `stuns:` server of the configuration:
+    /// over UDP from each UDP host candidate the application adds (through `poll_write` /
+    /// `handle_read`), and over TCP / TLS from its ICE-TCP listeners for a driver that serves
+    /// the stream interface; a base for which the application adds a server-reflexive
+    /// candidate itself is left to it. `Application` keeps the engine out of it.
+    pub fn with_server_reflexive_gathering(
+        mut self,
+        who: crate::peer_connection::srflx::ReflexiveGathering,
+    ) -> Self {
+        self.0.streams.reflexive = who;
         self
     }
 

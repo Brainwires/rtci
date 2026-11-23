@@ -80,6 +80,15 @@ pub trait BandwidthEstimator: Send + Sync {
     /// learnt about the old path says nothing about this one (RFC 8836 section 2, 1d).
     fn on_path_change(&mut self, _now: Instant) {}
 
+    /// Of `packets` RTP packets the receiver counted since its last ECN report, `marked`
+    /// arrived ECN-CE (RFC 6679 section 5: the cumulative counters of its RTCP ECN Feedback
+    /// packets and XR ECN Summary Reports, for a stream whose per-packet feedback is not RFC
+    /// 8888, which carries the marks itself). Section 7.3.3: "The default reaction on the
+    /// reception of these ECN-CE-marked packets MUST be to provide the congestion control
+    /// algorithm with a congestion notification that triggers the algorithm to react as if
+    /// packet loss had occurred."
+    fn on_congestion_marks(&mut self, _now: Instant, _marked: u64, _packets: u64) {}
+
     /// A probe cluster showed the path carries `bits_per_second`
     /// ([`probe_estimate`](crate::probe_estimate)). Called only when bandwidth probing is on
     /// ([`CongestionControlBuilder::with_bandwidth_probing`](crate::CongestionControlBuilder::with_bandwidth_probing)).

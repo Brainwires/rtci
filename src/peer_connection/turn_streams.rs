@@ -34,6 +34,8 @@ const MAX_HELD_PER_PEER: usize = 32;
 enum LinkState {
     /// Not started.
     Pending,
+    /// The driver is looking up the server's NAPTR or SRV records (RFC 5928 section 3).
+    Discovering(u64),
     /// The driver is resolving the host name.
     Resolving(u64),
     /// Connection attempts are racing.
@@ -60,6 +62,10 @@ pub(crate) struct TurnLink {
     relay: Option<SocketAddr>,
     /// The ICE generation (local ufrag) the relayed candidate was last announced for.
     announced_ufrag: Option<String>,
+    /// The name's query, while its per-family answers may still come.
+    query: Option<u64>,
+    /// The NAPTR / SRV discovery of a server whose URI gives no port.
+    discovery: Option<crate::peer_connection::dns_discovery::Discovery>,
     held: HashMap<IpAddr, Vec<(SocketAddr, Vec<u8>)>>,
 }
 
@@ -155,6 +161,8 @@ impl EngineTurn {
                 link_local: None,
                 relay: None,
                 announced_ufrag: None,
+                query: None,
+                discovery: None,
                 held: HashMap::new(),
             });
         }
@@ -220,12 +228,31 @@ impl RTCPeerConnection {
                     link.race = Some(HappyEyeballs::new(vec![addr], CONNECTION_ATTEMPT_DELAY));
                     link.state = LinkState::Connecting;
                 }
+                // RFC 5928 section 3: without a port, S-NAPTR and SRV find the server.
+                Err(_) if !link.url.explicit_port => {
+                    let (tag, srv) = if link.tls {
+                        ("turn.tls", "_turns._tcp")
+                    } else {
+                        ("turn.tcp", "_turn._tcp")
+                    };
+                    let discovery = crate::peer_connection::dns_discovery::Discovery::new(
+                        &link.url.host,
+                        link.url.port,
+                        Some(tag),
+                        srv,
+                    );
+                    let first = discovery.start();
+                    link.discovery = Some(discovery);
+                    self.turn_discovery_next(index, first, now);
+                }
                 Err(_) => {
                     let query = self
                         .streams
                         .table
                         .resolve(link.url.host.clone(), link.url.port);
-                    self.streams.turn.links[index].state = LinkState::Resolving(query);
+                    let link = &mut self.streams.turn.links[index];
+                    link.state = LinkState::Resolving(query);
+                    link.query = Some(query);
                 }
             }
         }
@@ -301,8 +328,61 @@ impl RTCPeerConnection {
                 .as_ref()
                 .is_some_and(HappyEyeballs::exhausted)
             {
+                // RFC 5928 section 3: the next SRV target, when there is one.
+                if let Some(next) = self.streams.turn.links[index]
+                    .discovery
+                    .as_mut()
+                    .map(|d| d.next_target())
+                {
+                    self.turn_discovery_next(index, next, now);
+                } else {
+                    debug!(
+                        "TURN server {}: no address connected",
+                        self.streams.turn.links[index].url
+                    );
+                    self.streams.turn.links[index].state = LinkState::Failed;
+                }
+            }
+        }
+    }
+
+    /// Acts on the next step of a link's discovery.
+    fn turn_discovery_next(
+        &mut self,
+        index: usize,
+        next: crate::peer_connection::dns_discovery::Next,
+        now: Instant,
+    ) {
+        use crate::peer_connection::dns_discovery::Next;
+        match next {
+            Next::Records { name, kind } => {
+                let query = self.streams.table.resolve_records(name, kind);
+                let link = &mut self.streams.turn.links[index];
+                link.state = LinkState::Discovering(query);
+                if let Some(d) = link.discovery.as_mut() {
+                    d.asked(query, now);
+                }
+            }
+            Next::Address { host, port } => match host.parse::<IpAddr>() {
+                Ok(ip) => {
+                    let link = &mut self.streams.turn.links[index];
+                    link.race = Some(HappyEyeballs::new(
+                        vec![SocketAddr::new(ip, port)],
+                        CONNECTION_ATTEMPT_DELAY,
+                    ));
+                    link.state = LinkState::Connecting;
+                }
+                Err(_) => {
+                    let query = self.streams.table.resolve(host, port);
+                    let link = &mut self.streams.turn.links[index];
+                    link.state = LinkState::Resolving(query);
+                    link.query = Some(query);
+                    link.race = None;
+                }
+            },
+            Next::Exhausted => {
                 debug!(
-                    "TURN server {}: no address connected",
+                    "TURN server {}: no target connected",
                     self.streams.turn.links[index].url
                 );
                 self.streams.turn.links[index].state = LinkState::Failed;
@@ -310,22 +390,68 @@ impl RTCPeerConnection {
         }
     }
 
-    /// A name the driver resolved.
-    pub(crate) fn turn_resolved(&mut self, query: u64, addresses: Vec<SocketAddr>) {
+    /// The NAPTR or SRV records the driver looked up for a link (`None`: the query timed out).
+    /// Returns whether the query was a link's.
+    pub(crate) fn turn_records(
+        &mut self,
+        query: u64,
+        records: &[shared::stream::DnsRecord],
+    ) -> bool {
         let now = self.pipeline_context.now;
-        if let Some(link) = self
+        let Some(index) = self
             .streams
             .turn
             .links
-            .iter_mut()
-            .find(|l| l.state == LinkState::Resolving(query))
-        {
-            let sorted = sort_addresses(&addresses, true);
-            if sorted.is_empty() {
-                link.state = LinkState::Failed;
-            } else {
-                link.race = Some(HappyEyeballs::new(sorted, CONNECTION_ATTEMPT_DELAY));
-                link.state = LinkState::Connecting;
+            .iter()
+            .position(|l| l.state == LinkState::Discovering(query))
+        else {
+            return false;
+        };
+        let Some(next) = self.streams.turn.links[index]
+            .discovery
+            .as_mut()
+            .map(|d| d.on_records(records))
+        else {
+            return false;
+        };
+        self.turn_discovery_next(index, next, now);
+        self.drive_turn_races(now);
+        true
+    }
+
+    /// A name the driver resolved: every address at once (`ipv6` `None`), or one family's
+    /// as it arrived (RFC 8305 section 3: the race starts on the first answer, and a late one
+    /// joins it).
+    pub(crate) fn turn_resolved(
+        &mut self,
+        query: u64,
+        ipv6: Option<bool>,
+        addresses: &[SocketAddr],
+    ) {
+        let now = self.pipeline_context.now;
+        if let Some(link) = self.streams.turn.links.iter_mut().find(|l| {
+            l.query == Some(query)
+                && (l.state == LinkState::Resolving(query)
+                    || (l.state == LinkState::Connecting
+                        && l.race.as_ref().is_some_and(HappyEyeballs::awaiting)))
+        }) {
+            match ipv6 {
+                None => {
+                    link.query = None;
+                    // No address: an exhausted race, which moves on to the next SRV target
+                    // or fails the link (`drive_turn_races`).
+                    let sorted = sort_addresses(addresses, true);
+                    link.race = Some(HappyEyeballs::new(sorted, CONNECTION_ATTEMPT_DELAY));
+                    link.state = LinkState::Connecting;
+                }
+                Some(ipv6) => {
+                    link.race
+                        .get_or_insert_with(|| {
+                            HappyEyeballs::awaiting_answers(CONNECTION_ATTEMPT_DELAY)
+                        })
+                        .answer(now, ipv6, addresses, true);
+                    link.state = LinkState::Connecting;
+                }
             }
         }
         self.drive_turn_races(now);
@@ -620,6 +746,7 @@ impl RTCPeerConnection {
         let mut next: Option<Instant> = None;
         for link in self.streams.turn.links.iter_mut() {
             let t = match link.state {
+                LinkState::Discovering(_) => link.discovery.as_ref().and_then(|d| d.poll_timeout()),
                 LinkState::Connecting => link.race.as_ref().and_then(HappyEyeballs::poll_timeout),
                 LinkState::Open(_) => link.client.as_mut().and_then(|c| c.poll_timeout()),
                 _ => None,
@@ -642,6 +769,24 @@ impl RTCPeerConnection {
             {
                 debug!("TURN client timer: {err}");
             }
+        }
+        // A records query the driver did not answer counts as empty.
+        let unanswered: Vec<u64> = self
+            .streams
+            .turn
+            .links
+            .iter()
+            .filter_map(|l| match l.state {
+                LinkState::Discovering(q)
+                    if l.discovery.as_ref().is_some_and(|d| d.timed_out(now)) =>
+                {
+                    Some(q)
+                }
+                _ => None,
+            })
+            .collect();
+        for query in unanswered {
+            self.turn_records(query, &[]);
         }
         self.drive_turn_races(now);
         self.pump_turn(now);

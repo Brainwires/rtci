@@ -721,7 +721,9 @@ fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() ->
 /// gives both transports' passive candidates the same address and reports every accept on
 /// one listener. The engine gives each accepted connection to the transport its first check
 /// names (RFC 8445 section 7.2.2) and answers on it; with simultaneous open off, every pair is
-/// active to passive, so both transports connect through the shared port.
+/// active to passive, so both transports connect through the shared port. The transports need
+/// credentials of their own for it (`with_unique_transport_credentials`): by default they
+/// share the first transport's, and the ufrag of a check then names none of them.
 #[test]
 fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check() -> Result<()> {
     let mut net = Net::new();
@@ -729,6 +731,7 @@ fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check(
     let mut peers = max_compat_peers(|| {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
+            .with_unique_transport_credentials(true)
             .build()
     })?;
     let channel = negotiate_two_transports(&mut peers, &net)?;
@@ -907,6 +910,7 @@ fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transpor
     let mut peers = max_compat_peers(|| {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
+            .with_unique_transport_credentials(true)
             .build()
     })?;
     let channel = negotiate_two_transports(&mut peers, &net)?;

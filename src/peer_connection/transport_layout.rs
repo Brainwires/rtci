@@ -19,20 +19,18 @@
 
 use super::*;
 use crate::peer_connection::configuration::RTCBundlePolicy;
-use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::sdp::{
-    add_candidates_to_media_descriptions, bundle_group_mids, extract_fingerprints,
-    extract_ice_details, get_mid_value, is_rejected_media,
+    ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_groups,
+    extract_fingerprints, extract_ice_details, get_mid_value, is_rejected_media,
+    set_default_destination,
 };
 use crate::peer_connection::transport::ice::IceTransport;
-use crate::peer_connection::transport::ice::candidate::{
-    RTCIceCandidate, RTCIceServerTransportProtocol, rtc_ice_candidates_from_ice_candidates,
-};
-use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+use crate::peer_connection::transport::ice::candidate::rtc_ice_candidates_from_ice_candidates;
+use crate::peer_connection::transport::{RTCDtlsTransport, RTCTransportId, TransportKind};
 use ::sdp::description::common::Attribute;
 use ::sdp::description::session::{ATTR_KEY_GROUP, SessionDescription};
 use rand::RngExt;
@@ -42,11 +40,12 @@ use rand::RngExt;
 const TRANSPORT_ICE_ATTRIBUTES: [&str; 4] =
     ["ice-ufrag", "ice-pwd", "candidate", "end-of-candidates"];
 
-/// The m= sections of a description, grouped by the transport they share: the BUNDLE group's
-/// sections that are not rejected, then each other section that is not rejected on its own,
-/// in the order of the first section of each.
+/// The m= sections of a description, grouped by the transport they share: each BUNDLE group's
+/// sections that are not rejected (RFC 9143 section 5: a description may carry several
+/// groups, each a transport), then each other section that is not rejected on its own, in the
+/// order of the first section of each.
 pub(crate) fn transport_groups(desc: &SessionDescription) -> Vec<Vec<String>> {
-    let bundle: Vec<&str> = bundle_group_mids(desc);
+    let bundles: Vec<Vec<&str>> = bundle_groups(desc);
     let live: Vec<&str> = desc
         .media_descriptions
         .iter()
@@ -54,37 +53,40 @@ pub(crate) fn transport_groups(desc: &SessionDescription) -> Vec<Vec<String>> {
         .filter_map(|m| get_mid_value(m).map(String::as_str))
         .collect();
     let mut groups: Vec<Vec<String>> = vec![];
-    let mut bundled_at = None;
+    // Where each BUNDLE group's sections are collected, once its first live section is seen.
+    let mut bundled_at: Vec<Option<usize>> = vec![None; bundles.len()];
     for mid in live {
-        if bundle.contains(&mid) {
-            match bundled_at {
-                Some(index) => {
-                    let group: &mut Vec<String> = &mut groups[index];
-                    group.push(mid.to_owned());
-                }
+        match bundles.iter().position(|group| group.contains(&mid)) {
+            Some(bundle) => match bundled_at[bundle] {
+                Some(index) => groups[index].push(mid.to_owned()),
                 None => {
-                    bundled_at = Some(groups.len());
+                    bundled_at[bundle] = Some(groups.len());
                     groups.push(vec![mid.to_owned()]);
                 }
-            }
-        } else {
-            groups.push(vec![mid.to_owned()]);
+            },
+            None => groups.push(vec![mid.to_owned()]),
         }
     }
     groups
 }
 
 /// The part of `desc` that describes the sections `mids`: the session's attributes, with the
-/// BUNDLE group restricted to them, and their m= sections. It is what one transport is
+/// BUNDLE groups restricted to them, and their m= sections. It is what one transport is
 /// started and checked from.
 pub(crate) fn description_for(desc: &SessionDescription, mids: &[String]) -> SessionDescription {
     let mut part = desc.clone();
     part.media_descriptions
         .retain(|m| get_mid_value(m).is_some_and(|mid| mids.contains(mid)));
-    let bundle: Vec<String> = bundle_group_mids(desc)
+    let bundles: Vec<Vec<String>> = bundle_groups(desc)
         .into_iter()
-        .filter(|mid| mids.iter().any(|m| m == mid))
-        .map(str::to_owned)
+        .map(|group| {
+            group
+                .into_iter()
+                .filter(|mid| mids.iter().any(|m| m == mid))
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .filter(|group| !group.is_empty())
         .collect();
     part.attributes.retain(|a| {
         a.key != ATTR_KEY_GROUP
@@ -93,7 +95,7 @@ pub(crate) fn description_for(desc: &SessionDescription, mids: &[String]) -> Ses
                 .as_deref()
                 .is_some_and(|value| value.starts_with("BUNDLE"))
     });
-    if !bundle.is_empty() {
+    for bundle in bundles {
         part.attributes.push(Attribute::new(
             ATTR_KEY_GROUP.to_owned(),
             Some(format!("BUNDLE {}", bundle.join(" "))),
@@ -110,10 +112,18 @@ impl RTCPeerConnection {
         let now = self.pipeline_context.now;
         let mut agent_config =
             internal::ice_agent_config(&self.configuration, &self.setting_engine)?;
-        // A transport's credentials are its own (RFC 8839 section 5.4: per transport); fixed
-        // ones from the settings are the first transport's.
-        agent_config.local_ufrag = String::new();
-        agent_config.local_pwd = String::new();
+        // A transport's credentials are the first transport's, as the browsers have them,
+        // unless each transport is to have its own (RFC 9429 section 5.2.1;
+        // `with_unique_transport_credentials`). Fixed ones from the settings are the first
+        // transport's.
+        if self.setting_engine.unique_transport_credentials {
+            agent_config.local_ufrag = String::new();
+            agent_config.local_pwd = String::new();
+        } else {
+            let (ufrag, pwd) = self.shared_transport_credentials();
+            agent_config.local_ufrag = ufrag;
+            agent_config.local_pwd = pwd;
+        }
         let crypto_provider = self
             .setting_engine
             .crypto_provider
@@ -148,6 +158,17 @@ impl RTCPeerConnection {
             DtlsHandlerContext::new(dtls_transport),
             srtp,
         ))
+    }
+
+    /// The ICE credentials a transport added beside the first one takes when the transports
+    /// share theirs: the default transport's, the ones of a restart it has staged (an offer
+    /// being created with an ICE restart advertises those) included.
+    fn shared_transport_credentials(&self) -> (String, String) {
+        let credentials = self
+            .ice_transport_of(self.pipeline_context.transports.default_id())
+            .agent
+            .get_local_credentials();
+        (credentials.ufrag.clone(), credentials.pwd.clone())
     }
 
     /// Puts each group of m= sections on one transport: the one a section of the group is on
@@ -202,15 +223,18 @@ impl RTCPeerConnection {
         }
         let default = transports.default_id();
         for id in transports.ids() {
-            if id != default && transports.mids_on(id).is_empty() {
+            if id != default && self.pipeline_context.transports.mids_on(id).is_empty() {
                 log::debug!("transport {id:?} carries no m= section any more: closed");
-                if let Some(mut bundle) = transports.remove(id) {
+                if let Some(mut bundle) = self.pipeline_context.remove_transport(id) {
                     let _ = sansio::Protocol::close(
                         &mut bundle.ice_handler_context.ice_transport.agent,
                     );
                 }
             }
         }
+        self.pipeline_context.describe_section_transports();
+        // A transport that closed no longer counts in the connection's gathering state.
+        self.update_gathering_state();
         Ok(())
     }
 
@@ -238,11 +262,11 @@ impl RTCPeerConnection {
         .and_then(|d| d.parsed.clone());
         let groups = answer.as_ref().map(transport_groups).unwrap_or_default();
         if groups.is_empty() {
-            let transports = &mut self.pipeline_context.transports;
+            let transports = &self.pipeline_context.transports;
             let default = transports.default_id();
             for id in transports.ids() {
                 if id != default {
-                    transports.remove(id);
+                    self.pipeline_context.remove_transport(id);
                 }
             }
             for mid in self
@@ -253,6 +277,8 @@ impl RTCPeerConnection {
             {
                 self.pipeline_context.transports.unassign(&mid);
             }
+            self.pipeline_context.describe_section_transports();
+            self.update_gathering_state();
             return;
         }
         if let Err(err) = self.apply_transport_layout(&groups) {
@@ -385,16 +411,27 @@ impl RTCPeerConnection {
         Ok(())
     }
 
-    /// An offer under the `max-compat` bundle policy (RFC 9429 section 4.1.1: "gather ICE
-    /// candidates for each media track"; one transport per m= section): each section that has
-    /// no transport yet gets one of its own. The first section of an initial offer keeps the
+    /// The transports of an offer this side makes (RFC 9429 sections 4.1.1 and 5.2.1: "each
+    /// m= section that is not bundle-only has its own ICE credentials and candidates").
+    ///
+    /// - `max-compat` gathers "for each media track": each section that has no transport yet
+    ///   gets one of its own, in every offer.
+    /// - `balanced` (the default) gathers "for each media type in use": in an initial offer the
+    ///   first section of each type has a transport of its own and the later ones are
+    ///   bundle-only, on the BUNDLE transport. A later offer gives a new section the BUNDLE
+    ///   transport.
+    /// - `must-bundle` gathers for one track: every section but the first is bundle-only.
+    ///
+    /// A section keeps the transport it has. The first section of an initial offer keeps the
     /// connection's first transport.
     pub(crate) fn plan_offer_transports(&mut self, d: &SessionDescription) -> Result<()> {
-        if self.effective_bundle_policy() != RTCBundlePolicy::MaxCompat {
-            return Ok(());
-        }
+        let own_transports = self.effective_bundle_policy() == RTCBundlePolicy::MaxCompat;
+        // An initial BUNDLE offer (RFC 9143 section 2): no offer/answer exchange completed.
+        let initial = self.is_initial_exchange();
         let transports = &self.pipeline_context.transports;
         let mut groups: Vec<(Option<TransportId>, Vec<String>)> = vec![];
+        // The group a section without a transport of its own joins: the BUNDLE transport's.
+        let mut bundle_group: Option<usize> = None;
         for m in &d.media_descriptions {
             if is_rejected_media(m) {
                 continue;
@@ -402,13 +439,28 @@ impl RTCPeerConnection {
             let Some(mid) = get_mid_value(m) else {
                 continue;
             };
-            match transports.assignment(mid) {
-                Some(id) => match groups.iter_mut().find(|(on, _)| *on == Some(id)) {
-                    Some((_, group)) => group.push(mid.clone()),
-                    None => groups.push((Some(id), vec![mid.clone()])),
-                },
-                None => groups.push((None, vec![mid.clone()])),
-            }
+            let bundle_only = m.attribute(ATTR_KEY_BUNDLE_ONLY).is_some();
+            let index = match transports.assignment(mid) {
+                Some(id) => groups
+                    .iter()
+                    .position(|(on, _)| *on == Some(id))
+                    .or_else(|| {
+                        groups.push((Some(id), vec![]));
+                        Some(groups.len() - 1)
+                    }),
+                // A bundle-only section has no transport of its own (RFC 9143 section 6).
+                None if bundle_only => bundle_group,
+                // A section of an initial offer that is not bundle-only has one; in a later
+                // offer, only under `max-compat`.
+                None if own_transports || initial => None,
+                None => bundle_group,
+            };
+            let index = index.unwrap_or_else(|| {
+                groups.push((None, vec![]));
+                groups.len() - 1
+            });
+            groups[index].1.push(mid.clone());
+            bundle_group.get_or_insert(index);
         }
         // The default transport's group first: it is the one the first section had.
         let default = transports.default_id();
@@ -416,14 +468,23 @@ impl RTCPeerConnection {
             let group = groups.remove(index);
             groups.insert(0, group);
         }
-        let groups: Vec<Vec<String>> = groups.into_iter().map(|(_, group)| group).collect();
+        let groups: Vec<Vec<String>> = groups
+            .into_iter()
+            .map(|(_, group)| group)
+            .filter(|group| !group.is_empty())
+            .collect();
+        if groups.len() <= 1 && self.pipeline_context.transports.len() == 1 {
+            // One transport for everything, as the connection has.
+            return Ok(());
+        }
         self.apply_transport_layout(&groups)
     }
 
     /// Writes into a description this side generates each transport's own ICE attributes in
-    /// the sections on a transport other than the default one: its credentials, its
-    /// candidates (in its first section, RFC 9429 section 5.2.1) and its default destination
-    /// in `m=` / `c=`. The default transport's sections keep what `populate_sdp` wrote.
+    /// the sections on a transport other than the default one that carry transport attributes:
+    /// its credentials, its candidates (in its first such section, RFC 9429 section 5.2.1)
+    /// and its default destination in `m=` / `c=`. The default transport's sections keep what
+    /// `populate_sdp` wrote.
     pub(crate) fn write_transport_attributes(&self, d: &mut SessionDescription) {
         let transports = &self.pipeline_context.transports;
         if transports.len() == 1 {
@@ -448,19 +509,18 @@ impl RTCPeerConnection {
                 {
                     continue;
                 }
+                // Only the sections that carry the transport's attributes: in an answer and a
+                // later offer that is the tagged section of the group alone (RFC 9143 section
+                // 7.1.3), in an initial offer every section that is not bundle-only.
+                if m.attribute("ice-ufrag").is_none() {
+                    continue;
+                }
                 m.attributes
                     .retain(|a| !TRANSPORT_ICE_ATTRIBUTES.contains(&a.key.as_str()));
-                m.media_name.port.value = 9;
-                m.connection_information =
-                    Some(::sdp::description::common::ConnectionInformation {
-                        network_type: "IN".to_owned(),
-                        address_type: "IP4".to_owned(),
-                        address: Some(::sdp::description::common::Address {
-                            address: "0.0.0.0".to_owned(),
-                            ttl: None,
-                            range: None,
-                        }),
-                    });
+                // The dummy destination until the transport has a candidate (RFC 9429 section
+                // 5.2.1: port 9, `c=IN IP4 0.0.0.0` and `a=rtcp:9 IN IP4 0.0.0.0`), not the
+                // default transport's.
+                set_default_destination(m, std::net::Ipv4Addr::UNSPECIFIED.into(), 9);
                 m.attributes.push(Attribute::new(
                     "ice-ufrag".to_owned(),
                     Some(ufrag.to_owned()),
@@ -507,7 +567,8 @@ impl RTCPeerConnection {
 
     /// The local description's first section on each transport other than the default one:
     /// the `sdpMid` / `sdpMLineIndex` its candidates name (W3C 5.6), recorded on the
-    /// transport when a local description is set. Such a transport starts gathering then.
+    /// transport when a local description is set. Such a transport starts gathering its
+    /// generation then, with its events (W3C 5.6 "gathering begins").
     pub(crate) fn describe_other_transports(&mut self, local: &SessionDescription) {
         let default = self.pipeline_context.transports.default_id();
         for id in self.pipeline_context.transports.ids() {
@@ -523,15 +584,12 @@ impl RTCPeerConnection {
                     (self.pipeline_context.transports.transport_id_for(mid) == id)
                         .then(|| (mid.clone(), u16::try_from(index).unwrap_or(u16::MAX)))
                 });
-            if let Some(bundle) = self.pipeline_context.transports.transport_mut(id) {
-                let ice = &mut bundle.ice_handler_context.ice_transport;
+            self.with_transport(id, |pc| {
                 if section.is_some() {
-                    ice.local_media_section = section;
+                    pc.ice_transport_mut().local_media_section = section;
                 }
-                if ice.ice_gathering_state == RTCIceGatheringState::New {
-                    ice.ice_gathering_state = RTCIceGatheringState::Gathering;
-                }
-            }
+                pc.begin_gathering_generation();
+            });
         }
     }
 
@@ -539,86 +597,6 @@ impl RTCPeerConnection {
     /// description as it is read (`populate_local_candidates`).
     pub(crate) fn populate_other_transports_candidates(&self, d: &mut SessionDescription) {
         self.write_transport_attributes(d);
-    }
-
-    /// `add_local_candidate` for a transport other than the default one: the candidate is
-    /// the agent's, and announced with the transport's section; an empty one ends the
-    /// transport's gathering (RFC 8838 section 13) with its end-of-candidates candidate.
-    pub(crate) fn add_other_local_candidate(
-        &mut self,
-        local_candidate: RTCIceCandidateInit,
-    ) -> Result<()> {
-        if self.is_closed() {
-            return Err(Error::ErrConnectionClosed);
-        }
-        let value = local_candidate
-            .candidate
-            .strip_prefix("candidate:")
-            .unwrap_or(local_candidate.candidate.as_str());
-        if value.is_empty() {
-            if self.ice_transport().ice_gathering_state == RTCIceGatheringState::Complete {
-                return Ok(());
-            }
-            // Held back while the engine's TCP listeners or TURN allocations of this
-            // transport are being made (RFC 8838 section 13), as on the default transport.
-            if self.defer_end_of_gathering() {
-                return Ok(());
-            }
-            let mut end = RTCIceCandidate::end_of_candidates_for(None, None, None);
-            self.ice_transport().describe_local_candidate(&mut end);
-            self.ice_transport_mut()
-                .agent
-                .set_local_gathering_complete();
-            self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Complete;
-            self.pipeline_context.event_outs.push_back(
-                RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
-                    candidate: Some(end),
-                    url: None,
-                }),
-            );
-            return Ok(());
-        }
-        let candidate = ::ice::candidate::unmarshal_candidate(value)?;
-        let known = self.ice_transport().agent.get_local_candidates().len();
-        if !self.ice_transport_mut().add_local_candidate(candidate)? {
-            return Ok(());
-        }
-        let added: Vec<RTCIceCandidate> = self
-            .ice_transport()
-            .agent
-            .get_local_candidates()
-            .iter()
-            .skip(known)
-            .map(RTCIceCandidate::from)
-            .collect();
-        for mut rtc_candidate in added {
-            self.ice_transport()
-                .describe_local_candidate(&mut rtc_candidate);
-            // As on the default transport (W3C webrtc-pc 4.8.1): a relay candidate names the
-            // protocol to its TURN server.
-            if rtc_candidate.typ == crate::peer_connection::transport::RTCIceCandidateType::Relay {
-                let url = local_candidate.url.as_deref();
-                if rtc_candidate.url.is_none() {
-                    rtc_candidate.url = url.map(str::to_owned);
-                }
-                rtc_candidate.relay_protocol = local_candidate
-                    .relay_protocol
-                    .filter(|protocol| *protocol != RTCIceServerTransportProtocol::Unspecified)
-                    .unwrap_or_else(|| {
-                        url.map_or_else(Default::default, internal::relay_protocol_of_turn_url)
-                    });
-            }
-            self.pipeline_context.event_outs.push_back(
-                RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
-                    candidate: Some(rtc_candidate),
-                    url: local_candidate.url.clone(),
-                }),
-            );
-        }
-        // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own,
-        // for this transport.
-        self.gather_tcp_candidates(value);
-        Ok(())
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,
@@ -664,5 +642,59 @@ impl RTCPeerConnection {
             .into_iter()
             .map(|(_, mid, index)| (mid, index))
             .collect()
+    }
+
+    /// The connection's DTLS transports, one per transport, the default one first: the
+    /// objects the senders', receivers' and SCTP transport's `transport()` return (W3C
+    /// webrtc-pc 5.2 `RTCRtpSender.transport`, 6.1 `RTCSctpTransport.transport`). One while
+    /// every section is bundled.
+    pub fn dtls_transports(&self) -> Vec<RTCDtlsTransport<'_>> {
+        let transports = &self.pipeline_context.transports;
+        let default = transports.default_id();
+        let mut ids = transports.ids();
+        ids.sort_by_key(|id| *id != default);
+        ids.into_iter()
+            .map(|transport| RTCDtlsTransport {
+                peer_connection: self,
+                transport,
+            })
+            .collect()
+    }
+
+    /// The DTLS transport whose id, or whose ICE transport's id, is `id` (an
+    /// [`RTCTransportEvent`](crate::peer_connection::event::RTCTransportEvent) names both);
+    /// `None` for a transport the connection does not have (any more).
+    pub fn dtls_transport_by_id(&self, id: RTCTransportId) -> Option<RTCDtlsTransport<'_>> {
+        let transports = &self.pipeline_context.transports;
+        transports
+            .ids()
+            .into_iter()
+            .find(|transport| {
+                transports.transport(*transport).is_some_and(|bundle| {
+                    bundle.dtls_handler_context.dtls_transport.id == id
+                        || bundle.ice_handler_context.ice_transport.id == id
+                })
+            })
+            .map(|transport| RTCDtlsTransport {
+                peer_connection: self,
+                transport,
+            })
+    }
+
+    /// The mids of the transceivers whose section is on the active transport; `None` while
+    /// the connection has one transport.
+    pub(crate) fn active_transport_mids(&self) -> Option<Vec<String>> {
+        let transports = &self.pipeline_context.transports;
+        if transports.len() == 1 {
+            return None;
+        }
+        let active = transports.active_id();
+        Some(
+            self.rtp_transceivers
+                .iter()
+                .filter_map(|t| t.mid().clone())
+                .filter(|mid| transports.transport_id_for(mid) == active)
+                .collect(),
+        )
     }
 }

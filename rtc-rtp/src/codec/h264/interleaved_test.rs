@@ -385,6 +385,40 @@ fn sprop_max_don_diff_releases_nal_units_too_far_behind_the_latest() {
     assert_eq!(1, buffer.len());
 }
 
+/// RFC 6184 section 7.2.2 and 8.1: initial buffering lasts `sprop-init-buf-time` (90 kHz
+/// ticks) from the first NAL unit, unless the depth is reached first.
+#[test]
+fn initial_buffering_lasts_the_signalled_init_buf_time() {
+    let start = std::time::Instant::now();
+    let ms = std::time::Duration::from_millis;
+    // 9000 ticks: 100 ms; a depth the two NAL units do not reach.
+    let mut buffer = H264DeinterleavingBuffer::new(4, None).with_init_buf_time(9_000);
+    assert!(buffer.is_initial_buffering(start));
+    assert!(buffer.push_at(start, unit(2, slice(2))).is_empty());
+    assert!(buffer.push_at(start + ms(40), unit(1, slice(1))).is_empty());
+    assert!(buffer.is_initial_buffering(start + ms(99)));
+    assert!(!buffer.is_initial_buffering(start + ms(100)));
+}
+
+/// Initial buffering ends as soon as the buffer holds N VCL NAL units, before the time; and
+/// without `sprop-init-buf-time` only the depth (or the DON spread) ends it.
+#[test]
+fn initial_buffering_ends_at_the_depth_before_the_time() {
+    let start = std::time::Instant::now();
+    let later = start + std::time::Duration::from_secs(5);
+    let mut timed = H264DeinterleavingBuffer::new(1, None).with_init_buf_time(900_000);
+    let mut untimed = H264DeinterleavingBuffer::new(1, None);
+    for buffer in [&mut timed, &mut untimed] {
+        assert!(buffer.push_at(start, unit(1, slice(1))).is_empty());
+        assert!(
+            buffer.is_initial_buffering(later),
+            "10 s not passed, depth not reached"
+        );
+        assert_eq!(vec![1], tags(&buffer.push_at(start, unit(2, slice(2)))));
+        assert!(!buffer.is_initial_buffering(start));
+    }
+}
+
 #[test]
 fn the_buffer_is_bounded_whatever_the_parameters_say() {
     let mut buffer = H264DeinterleavingBuffer::new(32767, None);

@@ -769,3 +769,74 @@ fn thinning_reports_on_every_second_sequence_number() {
     let block = RLEReportBlock::from_flags(true, 1, 9, 16, 1, &[true, false, true]);
     assert_eq!(vec![true, false, true], block.flags());
 }
+
+/// RFC 6679 section 5.2, Figures 3 and 4, in an XR packet built by hand.
+const ECN_SUMMARY_XR: [u8; 32] = [
+    0x80, 0xcf, 0x00, 0x07, // XR, length 7
+    0x00, 0x00, 0x00, 0x09, // sender SSRC
+    0x0d, 0x00, 0x00, 0x05, // BT=13, reserved, block length 5
+    0x00, 0x00, 0x00, 0x02, // SSRC of media sender
+    0x00, 0x00, 0x00, 0x03, // ECT(0)
+    0x00, 0x00, 0x00, 0x04, // ECT(1)
+    0x00, 0x05, 0x00, 0x06, // ECN-CE, not-ECT
+    0x00, 0x07, 0x00, 0x08, // lost, duplicates
+];
+
+fn ecn_summary() -> EcnSummaryReportBlock {
+    EcnSummaryReportBlock {
+        reports: vec![EcnSummaryReport {
+            ssrc: 2,
+            counters: crate::transport_feedbacks::ecn_feedback::EcnCounters {
+                ect0: 3,
+                ect1: 4,
+                ce: 5,
+                not_ect: 6,
+                lost: 7,
+                duplicates: 8,
+            },
+        }],
+    }
+}
+
+#[test]
+fn an_ecn_summary_block_has_the_wire_image_of_rfc_6679_figures_3_and_4() {
+    let xr = ExtendedReport {
+        sender_ssrc: 9,
+        reports: vec![Box::new(ecn_summary())],
+    };
+    assert_eq!(xr.marshal().unwrap().as_ref(), &ECN_SUMMARY_XR[..]);
+    let parsed = ExtendedReport::unmarshal(&mut Bytes::from_static(&ECN_SUMMARY_XR)).unwrap();
+    let block = parsed.reports[0]
+        .as_any()
+        .downcast_ref::<EcnSummaryReportBlock>()
+        .expect("an ECN summary block");
+    assert_eq!(block, &ecn_summary());
+}
+
+/// "the report block SHALL still be sent with no report block entry and a zero report block
+/// length": an empty block is four octets with length 0, and parses back.
+#[test]
+fn an_ecn_summary_block_without_senders_has_length_zero() {
+    let empty = EcnSummaryReportBlock::default();
+    let wire = empty.marshal().unwrap();
+    assert_eq!(wire.as_ref(), &[0x0d, 0x00, 0x00, 0x00]);
+    let parsed = EcnSummaryReportBlock::unmarshal(&mut wire.clone()).unwrap();
+    assert!(parsed.reports.is_empty());
+}
+
+/// "Receivers MUST discard reports where the block length is not a multiple of five"; the
+/// reserved octet is ignored on reception.
+#[test]
+fn an_ecn_summary_block_whose_length_is_not_a_multiple_of_five_is_discarded() {
+    let mut wire = ECN_SUMMARY_XR.to_vec();
+    wire[9] = 0xff; // reserved: ignored
+    let parsed = ExtendedReport::unmarshal(&mut Bytes::from(wire.clone())).unwrap();
+    assert!(parsed.reports[0].as_any().is::<EcnSummaryReportBlock>());
+
+    // Block length 4 (16 octets of data): not a multiple of five.
+    let mut bad = ECN_SUMMARY_XR[..28].to_vec();
+    bad[3] = 0x06;
+    bad[11] = 0x04;
+    let parsed = ExtendedReport::unmarshal(&mut Bytes::from(bad)).unwrap();
+    assert!(!parsed.reports[0].as_any().is::<EcnSummaryReportBlock>());
+}

@@ -13,7 +13,9 @@ use crate::peer_connection::message::internal::{
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_format, find_rtx_payload_type};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    find_receive_fec_format, find_rtx_payload_type,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
 };
@@ -80,6 +82,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
     pub(crate) wall_clock: Option<SystemInstant>,
+    /// With several transports, the m= sections of the one the packets being read arrived on:
+    /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
+    /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
+    pub(crate) arrival_mids: Option<Vec<String>>,
     /// The congestion controller's last target, in bits per second: what
     /// `allocate_target_bitrate` divides again when the encodings change.
     pub(crate) target_bitrate: Option<f64>,
@@ -110,6 +116,7 @@ impl Default for InterceptorHandlerContext {
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
+            arrival_mids: None,
             target_bitrate: None,
         }
     }
@@ -580,7 +587,7 @@ impl<'a> InterceptorHandler<'a> {
             payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -593,6 +600,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // Each repair flow is also bound in its own right, exactly as
@@ -612,6 +620,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -627,6 +636,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -684,8 +694,12 @@ impl<'a> InterceptorHandler<'a> {
                 // transceiver that is not stopped and receives this payload type. None, or
                 // more than one, and the packet belongs nowhere ("Otherwise, drop the
                 // packet").
+                let arrival = self.ctx.arrival_mids.as_deref();
                 let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
                     !t.stopped()
+                        && arrival.is_none_or(|mids| {
+                            t.mid().as_ref().is_some_and(|mid| mids.contains(mid))
+                        })
                         && t.receiver().as_ref().is_some_and(|receiver| {
                             receiver
                                 .get_codec_preferences()
@@ -698,6 +712,16 @@ impl<'a> InterceptorHandler<'a> {
                     _ => return false,
                 }
             } else {
+                // The MID table of the transport the packet arrived on: a MID of another
+                // BUNDLE group's section names no section here.
+                if self
+                    .ctx
+                    .arrival_mids
+                    .as_ref()
+                    .is_some_and(|mids| !mids.contains(&mid))
+                {
+                    return false;
+                }
                 let Some(index) = self
                     .rtp_transceivers
                     .iter()
@@ -764,6 +788,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         let track_id = receiver.track().track_id().to_owned();
@@ -863,6 +888,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -876,6 +902,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &repair_flow_codec(&codec.rtp_codec),
             &parameters.rtp_parameters.header_extensions,
+            &[],
         );
 
         // Attribute RTX packets to the primary stream's stats.
@@ -979,6 +1006,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &codec.rtp_codec,
                 &parameters.rtp_parameters.header_extensions,
+                &parameters.rtp_parameters.codecs,
             );
             self.stats.remove_inbound_rtp_stream(previous_ssrc);
             self.ctx.ssrc_owners.remove(previous_ssrc);
@@ -1013,7 +1041,7 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -1026,6 +1054,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // And each repair flow in its own right, as `interceptor_remote_streams_op` does: naming it
@@ -1045,6 +1074,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -1060,6 +1090,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 

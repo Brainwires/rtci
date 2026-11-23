@@ -968,6 +968,7 @@ impl RTCRtpSenderInternal {
                     fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
+                    codecs,
                 ));
             }
         }
@@ -1285,5 +1286,60 @@ pub(crate) fn restore_repair_ssrcs(
         if parameters.fec.is_none() {
             parameters.fec.clone_from(&saved.fec);
         }
+    }
+}
+
+#[cfg(test)]
+mod repair_ssrc_collision_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
+        RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
+    };
+
+    /// RFC 3550 section 8.2 for a repair flow (draft-ietf-payload-flexible-fec-scheme-03 4.2,
+    /// RFC 8627 4.2.1: "SSRC collisions ... resolved as in RFC 3550"; RFC 4588 section 4: only
+    /// the colliding stream picks a new SSRC): a collision on the FEC or the RTX SSRC moves
+    /// that SSRC alone, and names the primary stream whose streams are bound again.
+    #[test]
+    fn a_colliding_repair_ssrc_alone_moves_to_the_replacement() {
+        let encoding = RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(1000),
+                rtx: Some(RTCRtpRtxParameters { ssrc: 2000 }),
+                fec: Some(RTCRtpFecParameters { ssrc: 3000 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Video,
+            vec![encoding.clone()],
+        );
+        let mut sender =
+            RTCRtpSenderInternal::new(RtpCodecKind::Video, track, vec![], vec![encoding]);
+
+        assert_eq!(
+            Some(1000),
+            sender.replace_ssrc(3000, 3333),
+            "the primary is named"
+        );
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(1000), coding.ssrc);
+        assert_eq!(Some(2000), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(3333), coding.fec.as_ref().map(|fec| fec.ssrc));
+
+        assert_eq!(Some(1000), sender.replace_ssrc(2000, 2222));
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(2222), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(1000), coding.ssrc, "the media SSRC stays");
+        assert_eq!(
+            None,
+            sender.replace_ssrc(9999, 1),
+            "an SSRC the sender does not have"
+        );
     }
 }

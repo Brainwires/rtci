@@ -7,8 +7,8 @@
 //! - Properly tracks stream binding/unbinding
 
 use rtc_interceptor::{
-    AttributedPacket, Interceptor, Packet, RTPHeaderExtension, Registry, Slot, StreamInfo,
-    TaggedPacket, TwccReceiverBuilder, TwccSenderBuilder,
+    AttributedPacket, Interceptor, Packet, RTCPFeedback, RTPHeaderExtension, Registry, Slot,
+    StreamInfo, TaggedPacket, TwccReceiverBuilder, TwccSenderBuilder,
 };
 use sansio::Protocol;
 use shared::TransportContext;
@@ -102,6 +102,10 @@ fn twcc_stream_info(ssrc: u32, ext_id: u16) -> StreamInfo {
         rtp_header_extensions: vec![RTPHeaderExtension {
             uri: TRANSPORT_CC_URI.to_string(),
             id: ext_id,
+        }],
+        rtcp_feedback: vec![RTCPFeedback {
+            typ: "transport-cc".to_string(),
+            parameter: String::new(),
         }],
         ..Default::default()
     }
@@ -1012,4 +1016,64 @@ fn test_twcc_receiver_ignores_unbound_ssrcs_without_any_binding() {
             }
         }
     }
+}
+
+/// Feedback packets the receiver built for five packets of `info` carrying transport-wide
+/// sequence numbers.
+fn feedback_packets_for(info: &StreamInfo, receiver: TwccReceiverBuilder) -> usize {
+    let mut chain = Registry::new()
+        .with(
+            Slot::TwccReceiver,
+            receiver
+                .with_adaptive_interval(false)
+                .with_interval(Duration::from_millis(100))
+                .build(),
+        )
+        .build();
+    chain.bind_remote_stream(info);
+    let base_time = Instant::now();
+    for i in 0..5u16 {
+        let at = base_time + Duration::from_millis(u64::from(i) * 10);
+        chain
+            .handle_read(create_rtp_packet_with_twcc(at, info.ssrc, i, i, 5))
+            .unwrap();
+    }
+    while chain.poll_read().is_some() {}
+    chain
+        .handle_timeout(base_time + Duration::from_millis(150))
+        .unwrap();
+    let mut count = 0;
+    while let Some(pkt) = chain.poll_write() {
+        if let Packet::Rtcp(rtcp_packets) = &pkt.message.packet {
+            count += rtcp_packets
+                .iter()
+                .filter(|p| {
+                    p.as_any()
+                        .downcast_ref::<rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>()
+                        .is_some()
+                })
+                .count();
+        }
+    }
+    count
+}
+
+/// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2.3 and RFC 4585 section 4.2:
+/// transport-wide feedback goes only where `a=rtcp-fb:<pt> transport-cc` was negotiated; the
+/// header extension alone does not make a stream reported.
+#[test]
+fn a_stream_with_the_extension_but_no_transport_cc_feedback_gets_no_report() {
+    let mut info = twcc_stream_info(0x1234_5678, 5);
+    assert!(feedback_packets_for(&info, TwccReceiverBuilder::new()) > 0);
+    info.rtcp_feedback.clear();
+    assert_eq!(0, feedback_packets_for(&info, TwccReceiverBuilder::new()));
+}
+
+/// The lenient setting reports a stream on the header extension alone.
+#[test]
+fn the_extension_alone_setting_reports_a_stream_without_transport_cc_feedback() {
+    let mut info = twcc_stream_info(0x1234_5678, 5);
+    info.rtcp_feedback.clear();
+    let lenient = TwccReceiverBuilder::new().with_feedback_on_extension_alone(true);
+    assert!(feedback_packets_for(&info, lenient) > 0);
 }

@@ -319,7 +319,8 @@ impl RTCIceTransport<'_> {
     /// `username_fragment` of its media section. Peer-reflexive candidates the ICE agent learns
     /// from connectivity checks are not in the description and are not listed.
     pub fn get_remote_candidates(&self) -> Vec<RTCIceCandidate> {
-        self.peer_connection.remote_description_candidates()
+        self.peer_connection
+            .remote_description_candidates(self.transport)
     }
 
     /// webrtc-extensions 7 `getCandidatePairs()`: the ICE agent's candidate pairs, in the
@@ -348,7 +349,8 @@ impl RTCIceTransport<'_> {
 
     /// The local ICE parameters, or `None` before a local description has supplied them.
     pub fn get_local_parameters(&self) -> Option<RTCIceParameters> {
-        self.peer_connection.local_description_ice_parameters()
+        self.peer_connection
+            .local_description_ice_parameters(self.transport)
     }
 
     /// The remote ICE parameters, or `None` before a remote description has supplied them.

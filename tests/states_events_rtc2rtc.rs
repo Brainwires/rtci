@@ -793,6 +793,7 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
         url: "stun:stun.example.org".to_owned(),
         error_code: ICE_SERVER_UNREACHABLE,
         error_text: "unreachable".to_owned(),
+        ..Default::default()
     };
     pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
     pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
@@ -802,6 +803,7 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
         url: "turn:turn.example.org".to_owned(),
         error_code: 401,
         error_text: "Unauthorized".to_owned(),
+        ..Default::default()
     })?;
     let errors: Vec<RTCPeerConnectionIceErrorEvent> = std::iter::from_fn(|| pc.poll_event())
         .filter_map(|e| match e {

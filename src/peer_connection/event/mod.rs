@@ -160,6 +160,7 @@ pub(crate) mod data_channel_event;
 pub(crate) mod ice_error_event;
 pub(crate) mod ice_event;
 pub(crate) mod track_event;
+pub(crate) mod transport_event;
 
 pub use crate::peer_connection::states_events::ICE_SERVER_UNREACHABLE;
 pub use data_channel_event::RTCDataChannelEvent;
@@ -168,6 +169,7 @@ pub use ice_event::RTCPeerConnectionIceEvent;
 pub use track_event::{
     RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
 };
+pub use transport_event::{RTCTransportEvent, RTCTransportEventKind};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///
@@ -629,6 +631,19 @@ pub enum RTCPeerConnectionEvent {
     /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
     /// dropped. Not a W3C event: a fork addition.
     OnCryptexRequiredViolation(u32),
+
+    /// An event of one of the connection's transports, with the transport's ids: the ICE
+    /// transport's `statechange`, `gatheringstatechange` and `selectedcandidatepairchange`,
+    /// the candidate pair events, and the DTLS transport's `statechange` and `error` (W3C
+    /// webrtc-pc 5.5, 5.6; webrtc-extensions 7).
+    ///
+    /// Fired for every transport, the default one included. The single-transport variants
+    /// (`OnIceTransportStateChange`, `OnIceGathererStateChange`,
+    /// `OnSelectedCandidatePairChange`, `OnIceCandidatePair*`, `OnDtlsTransportStateChange`,
+    /// `OnDtlsTransportError`) name no transport and are fired for the default transport only
+    /// (the one every section is on while all are bundled), each right before its
+    /// `OnTransportEvent`.
+    OnTransportEvent(RTCTransportEvent),
 }
 
 /// Reserved for future use.

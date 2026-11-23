@@ -27,6 +27,7 @@ use crate::packetizer::{Depacketizer, Payloader};
 use shared::error::{Error, Result};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use std::time::{Duration, Instant};
 
 /// NAL type 24: STAP-A, which aggregates several small NAL units into one payload.
 pub const STAPA_NALU_TYPE: u8 = 24;
@@ -744,6 +745,12 @@ pub struct H264DeinterleavingBuffer {
     /// The DON and AbsDON of the NAL unit received last.
     last_received: Option<(u16, i64)>,
     bytes: usize,
+    /// `sprop-init-buf-time`, when signalled.
+    init_buf_time: Option<Duration>,
+    /// When the first NAL unit was stored ([`push_at`](Self::push_at)).
+    first_arrival: Option<Instant>,
+    /// Initial buffering ended by the depth or the DON spread (section 7.2.2).
+    initial_buffering_over: bool,
 }
 
 impl H264DeinterleavingBuffer {
@@ -758,6 +765,43 @@ impl H264DeinterleavingBuffer {
             units: Vec::new(),
             last_received: None,
             bytes: 0,
+            init_buf_time: None,
+            first_arrival: None,
+            initial_buffering_over: false,
+        }
+    }
+
+    /// The stream's `sprop-init-buf-time` (RFC 6184 section 8.1), in ticks of a 90 kHz
+    /// clock: "the initial buffering time that a receiver MUST wait before starting decoding".
+    pub fn with_init_buf_time(mut self, sprop_init_buf_time: u32) -> Self {
+        self.init_buf_time = Some(Duration::from_micros(
+            u64::from(sprop_init_buf_time) * 1_000_000 / 90_000,
+        ));
+        self
+    }
+
+    /// [`push`](Self::push) of a NAL unit that arrived at `now`, which starts the initial
+    /// buffering time on the first one.
+    pub fn push_at(&mut self, now: Instant, unit: H264NalUnit) -> Vec<H264NalUnit> {
+        if unit.don.is_some() {
+            self.first_arrival.get_or_insert(now);
+        }
+        self.push(unit)
+    }
+
+    /// Whether the receiver is still in initial buffering at `now` (RFC 6184 section 7.2.2),
+    /// and so is not to start decoding: until the buffer has held N VCL NAL units (N being
+    /// `sprop-interleaving-depth` plus one), or two NAL units more than `sprop-max-don-diff`
+    /// apart, or `sprop-init-buf-time` has passed since the first NAL unit arrived. The NAL
+    /// units the buffer passes on are in decoding order either way; this tells the decoder
+    /// when it may begin with them.
+    pub fn is_initial_buffering(&self, now: Instant) -> bool {
+        if self.initial_buffering_over {
+            return false;
+        }
+        match (self.init_buf_time, self.first_arrival) {
+            (Some(wait), Some(first)) => now.saturating_duration_since(first) < wait,
+            _ => true,
         }
     }
 
@@ -827,6 +871,9 @@ impl H264DeinterleavingBuffer {
         let mut last_out = None;
         // With N VCL NAL units or more in the buffer, NAL units leave until N - 1 are left.
         // The distances are those from PDON as it was when the removal began.
+        if self.vcl_count() >= self.vcl_capacity {
+            self.initial_buffering_over = true;
+        }
         while self.vcl_count() >= self.vcl_capacity {
             let buffered = self.take_next();
             last_out = Some(buffered.don);
@@ -843,6 +890,7 @@ impl H264DeinterleavingBuffer {
                 if !due {
                     break;
                 }
+                self.initial_buffering_over = true;
                 // In decoding order among those due.
                 let index = (0..self.units.len())
                     .filter(|&i| greatest - self.units[i].abs_don > i64::from(max_don_diff))
