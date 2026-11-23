@@ -774,7 +774,7 @@ impl RTCPeerConnection {
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
-            msid_appdata: self.setting_engine.msid_appdata,
+            msid_appdata: !self.setting_engine.msid_appdata_omitted,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
@@ -1233,7 +1233,7 @@ impl RTCPeerConnection {
             video_receive_limits: self.setting_engine.video_receive_limits,
             codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
             w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
-            msid_appdata: self.setting_engine.msid_appdata,
+            msid_appdata: !self.setting_engine.msid_appdata_omitted,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,

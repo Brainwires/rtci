@@ -117,10 +117,11 @@ fn a_source_level_msid_is_used_when_there_is_no_msid_line() -> TestResult {
 }
 
 /// RFC 9429 section 5.2.1: a sending transceiver's section has "an "a=msid" line ... but
-/// omitting the "appdata" field" per MediaStream; `with_msid_appdata(true)` writes the track
-/// id after the stream id, as browsers do.
+/// omitting the "appdata" field" per MediaStream: `with_msid_appdata(false)`. By default the
+/// track id follows the stream id, as browsers write it, since webrtc-rs 0.17 drops a
+/// simulcast section without it.
 #[test]
-fn local_msid_lines_have_no_appdata_unless_asked() -> TestResult {
+fn local_msid_lines_carry_the_track_id_unless_it_is_left_out() -> TestResult {
     use rtc::peer_connection::RTCPeerConnectionBuilder;
     use rtc::peer_connection::configuration::RTCConfigurationBuilder;
     use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -154,11 +155,13 @@ fn local_msid_lines_have_no_appdata_unless_asked() -> TestResult {
     let default = msid_lines(None)?;
     assert!(!default.is_empty());
     for line in &default {
-        assert_eq!(line.split(' ').count(), 1, "no appdata: {line}");
-    }
-    assert_eq!(msid_lines(Some(false))?, default);
-    for line in msid_lines(Some(true))? {
         assert!(line.ends_with(" the-track"), "{line}");
+    }
+    assert_eq!(msid_lines(Some(true))?, default);
+    let rfc = msid_lines(Some(false))?;
+    assert!(!rfc.is_empty());
+    for line in rfc {
+        assert_eq!(line.split(' ').count(), 1, "no appdata: {line}");
     }
     Ok(())
 }

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: train fixes for the JSEP stack (`conf/jsep-44-train-fixes`, merged with tcp-10,
+  mt-8 and sec-11).
+  - `a=msid` lines carry the sender's track id again by default (`a=msid:<stream> <track>`,
+    as browsers write them): webrtc-rs 0.17 drops a simulcast (rid) section whose `a=msid`
+    has no appdata. `with_msid_appdata(false)` is the RFC 9429 section 5.2.1 form. The
+    appdata is the sender's track id, which `replaceTrack` does not change.
+  - ECN: a section's negotiated `a=ecn-capable-rtp` carries the peer's `ect=` to media's
+    `EcnMarking` (ECT(0) unless it asks for ECT(1), a random choice per packet for
+    `ect=random`, `EcnMarking::L4s` always ECT(1)); a stream still marks only where ECN was
+    negotiated.
+  - A local offer's ICE restart is applied on every transport that staged one and stays
+    revertible there until the answer (RFC 9429 section 5.7 with per-transport restarts).
 - **jsep**: the SDP halves of media rows. A remote description whose bundled sections give one
   payload type two configurations is refused (RFC 9143 section 9.1.1, RFC 8834 section 4.3;
   Chromium refuses it too). FlexFEC (RFC 8627 and draft-03): a remote format without the

@@ -501,8 +501,9 @@ pub struct SettingEngine {
     pub(crate) w3c_simulcast_answer: bool,
     /// [`SettingEngineBuilder::with_nominated_candidates_only`].
     pub(crate) nominated_candidates_only: bool,
-    /// [`SettingEngineBuilder::with_msid_appdata`].
-    pub(crate) msid_appdata: bool,
+    /// [`SettingEngineBuilder::with_msid_appdata`]`(false)`: `a=msid` lines without the
+    /// track id (inverted so that the derived default writes it).
+    pub(crate) msid_appdata_omitted: bool,
     /// [`SettingEngineBuilder::with_video_receive_limits`].
     pub(crate) video_receive_limits: Option<crate::peer_connection::sdp::RTCVideoResolutionRange>,
     /// [`SettingEngineBuilder::with_codec_video_receive_limits`], by MIME type.
@@ -2360,16 +2361,17 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Writes the sender's track id as the `appdata` of each `a=msid` line
-    /// (`a=msid:<stream id> <track id>`, RFC 8830 section 2), as browsers do. The default is
-    /// `false`: `a=msid:<stream id>` alone, RFC 9429 section 5.2.1 ("an "a=msid" line ... but
-    /// omitting the "appdata" field"). Either way a remote line's appdata is read when there is
-    /// one, and the recipient names the track itself when there is none (RFC 8830 section 3).
-    /// The source-level `a=ssrc:<ssrc> msid:` lines carry the track id in both forms.
-    /// webrtc-rs 0.17 drops a simulcast (rid) section without the appdata, as that section has
-    /// no `a=ssrc` lines: sending simulcast to it needs `true`.
+    /// Whether each `a=msid` line carries the sender's track id as its `appdata`
+    /// (`a=msid:<stream id> <track id>`, RFC 8830 section 2), as browsers write it. The
+    /// default is `true`: webrtc-rs 0.17 (and Pion, whose track id it is) drops a simulcast
+    /// (rid) section whose `a=msid` has no appdata, as that section has no `a=ssrc` lines to
+    /// name the track (`simulcast_rtc_to_webrtc_interop`), so the interoperable form is the
+    /// default. `false` is RFC 9429 section 5.2.1 ("an "a=msid" line ... but omitting the
+    /// "appdata" field"). Either way a remote line's appdata is read when there is one, and
+    /// the recipient names the track itself when there is none (RFC 8830 section 3). The
+    /// source-level `a=ssrc:<ssrc> msid:` lines carry the track id in both forms.
     pub fn with_msid_appdata(mut self, appdata: bool) -> Self {
-        self.0.msid_appdata = appdata;
+        self.0.msid_appdata_omitted = !appdata;
         self
     }
 
