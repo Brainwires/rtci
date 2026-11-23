@@ -64,12 +64,10 @@ RFC7798-7.2.5-1	D	L	media (running)	H.265 MRST / MRMT transmission (multi-stream
 RFC7874-3-10	B	S	media (running)	Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing
 RFC7874-3-11	F	S	media (running)	Stale note: the 30 ms minimum gap is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes` (10 ms asked, 40 + 30 ms between tone changes); mutation-check and cite
 RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered as RTP without disturbing the stream
-RFC7874-3-13	D	M	media (running)	As RFC7874-3-10: events 0 to 15
 RFC7941-6-1	E	S	security	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC7874-3-13	B	S	media (running)	Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes)
 RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite
 RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
-RFC7941-6-1	C	S	security	Stale in part: the default policy is `Negotiate` (`cryptex.rs`), so MID / RID are encrypted whenever the peer signals Cryptex (RFC 6904 is implemented too); with a peer that signals neither they travel in clear. `Require` (refuse such a peer) is the RFC form: it becomes `setting` once a browser cell without Cryptex is named
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
 RFC8108-5.1-1	C	S	media (running)	Report blocks from every SSRC is a setting (`with_report_from_every_ssrc`), not the default (browser behaviour, no failing cell). Owner decision
