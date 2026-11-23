@@ -19,7 +19,7 @@ use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
+use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
@@ -38,6 +38,7 @@ struct Peer {
     addr: SocketAddr,
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
+    ice_states: Vec<RTCIceConnectionState>,
     channel: Option<RTCDataChannelId>,
     received: Vec<Vec<u8>>,
 }
@@ -57,6 +58,7 @@ impl Peer {
             addr: addr.parse()?,
             connected: false,
             states: Vec::new(),
+            ice_states: Vec::new(),
             channel: None,
             received: Vec::new(),
         })
@@ -138,6 +140,9 @@ impl World {
                             }
                             peer.connected = state == RTCPeerConnectionState::Connected;
                             peer.states.push(state);
+                        }
+                        RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state) => {
+                            peer.ice_states.push(state)
                         }
                         RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
                             peer.channel = Some(id)
@@ -245,6 +250,11 @@ fn restart_step_by_step(discard_local_candidates: bool) -> Result<()> {
     })?;
     world.ping_pong("connected")?;
     let ufrags = [world.peers[0].ufrag(), world.peers[1].ufrag()];
+    let before: Vec<(usize, usize)> = world
+        .peers
+        .iter()
+        .map(|p| (p.states.len(), p.ice_states.len()))
+        .collect();
 
     // The restart, one signalling step at a time. Data flows after each.
     world.peers[0].pc.restart_ice();
@@ -276,7 +286,10 @@ fn restart_step_by_step(discard_local_candidates: bool) -> Result<()> {
     // still flows, now on it.
     world.trickle()?;
     world.ping_pong("the new candidates were signalled")?;
-    // (Applying the restart took both peers back to `Connecting`.)
+    // W3C webrtc-pc 5.6.4: a restart begun in "connected" (or "completed") is connected all
+    // the way: the path is kept until the new generation selects a pair.
+    // One step for the new generation's checks and nomination.
+    let _ = world.run("the new generation's checks", |_| false);
     let mut waited = 0;
     while !world.peers.iter().all(|p| p.connected) {
         if waited == 7 {
@@ -293,8 +306,18 @@ fn restart_step_by_step(discard_local_candidates: bool) -> Result<()> {
         waited += 1;
     }
     world.ping_pong("the restart selected its pair")?;
-    for peer in &world.peers {
+    for (peer, (states, ice_states)) in world.peers.iter().zip(before) {
         assert!(peer.connected, "connection states: {:?}", peer.states);
+        let since: Vec<_> = peer.ice_states[ice_states..].to_vec();
+        assert!(
+            !since.contains(&RTCIceConnectionState::Checking),
+            "ICE through the restart: {since:?}"
+        );
+        assert!(
+            !peer.states[states..].contains(&RTCPeerConnectionState::Connecting),
+            "connection states through the restart: {:?}",
+            &peer.states[states..]
+        );
     }
     assert_eq!(world.dropped, 0, "every datagram went to a peer");
     Ok(())

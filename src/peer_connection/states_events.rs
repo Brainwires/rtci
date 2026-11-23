@@ -89,13 +89,15 @@ impl RTCPeerConnection {
         self.announced.gathering
     }
 
-    /// W3C `iceConnectionState`: the aggregate of the ICE transports' states (W3C 4.3.4); the
-    /// one transport's, and `Closed` once the connection is closed.
+    /// W3C `iceConnectionState`: the aggregate of the ICE transports' states (W3C 4.3.4), and
+    /// `Closed` once the connection is closed.
     pub fn ice_connection_state(&self) -> RTCIceConnectionState {
         if self.is_closed() {
             return RTCIceConnectionState::Closed;
         }
-        self.ice_transport().ice_connection_state
+        crate::peer_connection::handler::transport_set::aggregate_ice_connection_state(
+            self.pipeline_context.transports.ice_connection_states(),
+        )
     }
 
     /// W3C `connectionState`: the aggregate of the ICE and DTLS transports' states (W3C 4.3.3).

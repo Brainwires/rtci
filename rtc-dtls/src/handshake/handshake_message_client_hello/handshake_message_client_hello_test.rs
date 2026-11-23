@@ -23,6 +23,7 @@ fn test_handshake_message_client_hello() -> Result<()> {
         SystemTime::UNIX_EPOCH
     };
     let parsed_client_hello = HandshakeMessageClientHello {
+        session_id: vec![],
         version: ProtocolVersion {
             major: 0xFE,
             minor: 0xFD,

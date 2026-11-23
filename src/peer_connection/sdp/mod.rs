@@ -2292,8 +2292,16 @@ impl RTCPeerConnection {
                     BundleMode::Answer(Some(group)) if group.contains(&m.mid) => {
                         bundled.push(m.mid.clone())
                     }
+                    BundleMode::Answer(Some(_))
+                        if params.bundle_policy != RTCBundlePolicy::MustBundle =>
+                    {
+                        // Outside the offered group: it has a transport of its own (RFC 9143
+                        // section 7.3.2; `RTCPeerConnection::apply_transport_layout`).
+                        with_transport.push(media_type);
+                    }
                     BundleMode::Answer(Some(_)) => {
-                        // Outside the offered group: it would need a transport of its own.
+                        // Outside the offered group under `must-bundle`: no transport but the
+                        // BUNDLE one (RFC 9429 section 4.1.1).
                         if let Some(desc) = d.media_descriptions.last_mut() {
                             desc.media_name.port = RangedPort {
                                 value: 0,

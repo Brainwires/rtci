@@ -337,11 +337,11 @@ pub struct RTCIceCandidateInit {
     /// local candidates that were gathered from STUN/TURN servers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// W3C `RTCLocalIceCandidateInit.relayProtocol` (webrtc-pc 4.8.1): for a local candidate
-    /// of type "relay", the protocol the endpoint reaches the TURN server over. The
-    /// application gathers, so it says; left out, it is read from the TURN `url` (RFC 7065:
-    /// `turns:` is TLS, `?transport=tcp` TCP, else UDP). Ignored for other candidates and
-    /// for remote ones.
+    /// W3C `RTCLocalIceCandidateInit.relayProtocol` (webrtc-pc section 4.8.1): for a local
+    /// relay candidate, the protocol this endpoint reaches its TURN server over (RFC 8656
+    /// section 3.1). The application does the gathering, so it says; when it does not, the
+    /// TURN URL in `url` decides (`turns:` is TLS, `?transport=tcp` TCP, otherwise UDP).
+    /// Ignored for every other candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_protocol: Option<RTCIceServerTransportProtocol>,
 }
