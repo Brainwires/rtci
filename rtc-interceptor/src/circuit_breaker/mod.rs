@@ -86,6 +86,23 @@ pub enum CircuitBreakerState {
     },
 }
 
+/// How the congestion breaker takes s, the packet size of the TCP throughput equation (RFC
+/// 8083 section 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PacketSize {
+    /// The mean size of the RTP packets sent over the reporting intervals the sending rate is
+    /// measured over: s = (bytes sent) / (packets sent) over the last CB_INTERVAL intervals.
+    /// The default: s and the rate it is compared with describe the same packets.
+    #[default]
+    SendingWindow,
+    /// Section 3's definition as written: the mean size of the packets of the last 4 * G
+    /// frames. For speech with silence frames between talkspurts s is then the silence
+    /// frames' size (23 bytes) while the rate is that of the talkspurts, and a call over a
+    /// link with 1 to 5 % loss is ceased.
+    LastFrames,
+}
+
 /// The application's bound on what is still usable media (section 4.4). The RFC leaves the
 /// bound to the application on purpose.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,6 +122,7 @@ struct Config {
     non_reporting_threshold: u32,
     frame_group_size: u32,
     full_tcp_equation: bool,
+    packet_size: PacketSize,
     reduce_before_ceasing: bool,
     group: bool,
     usability: Option<MediaUsability>,
@@ -135,6 +153,7 @@ impl Default for CircuitBreakerBuilder {
                 non_reporting_threshold: DEFAULT_NON_REPORTING_THRESHOLD,
                 frame_group_size: 1,
                 full_tcp_equation: false,
+                packet_size: PacketSize::SendingWindow,
                 reduce_before_ceasing: false,
                 group: false,
                 usability: None,
@@ -182,6 +201,14 @@ impl CircuitBreakerBuilder {
     /// is more sensitive to loss and trips earlier).
     pub fn with_full_tcp_equation(mut self, full: bool) -> Self {
         self.config.full_tcp_equation = full;
+        self
+    }
+
+    /// How s, the packet size of the TCP throughput equation, is taken (section 4.3).
+    /// [`PacketSize::SendingWindow`] by default; [`PacketSize::LastFrames`] is section 3's
+    /// "last 4 * G frames".
+    pub fn with_packet_size(mut self, packet_size: PacketSize) -> Self {
+        self.config.packet_size = packet_size;
         self
     }
 
@@ -340,6 +367,7 @@ struct LossSample {
     fraction_lost: f64,
     duration: Duration,
     bytes_sent: u64,
+    packets_sent: u64,
     /// What the report's cumulative number lost and extended highest sequence number moved
     /// by since the previous report (RFC 3550 6.4.1): the interval's net loss, in which a
     /// packet that was only reordered counts in neither interval.
@@ -506,6 +534,17 @@ fn cb_interval(g: u32, tf: Duration, tr: Duration, tdr: Duration, td: Duration) 
     ((3.0 * reaction.min(cap)) / (3.0 * tdr) - 1e-9)
         .ceil()
         .max(1.0) as u32
+}
+
+/// s over the reporting intervals the sending rate is measured over: the bytes sent in them
+/// divided by the packets sent in them, `None` when none were sent.
+fn window_packet_size(samples: &VecDeque<LossSample>) -> Option<f64> {
+    let (bytes, packets) = samples
+        .iter()
+        .fold((0u64, 0u64), |(bytes, packets), sample| {
+            (bytes + sample.bytes_sent, packets + sample.packets_sent)
+        });
+    (packets > 0).then(|| bytes as f64 / packets as f64)
 }
 
 /// The share of the packets expected over `samples` that the cumulative count says were lost
@@ -743,6 +782,7 @@ impl CircuitBreakerInterceptor {
                     fraction_lost: f64::from(report.fraction_lost) / 256.0,
                     duration,
                     bytes_sent: sent_bytes,
+                    packets_sent: sent_packets,
                     net_lost,
                     net_expected,
                 });
@@ -762,7 +802,10 @@ impl CircuitBreakerInterceptor {
             && flow.losses.len() >= interval as usize
             && !window.is_zero()
             && let Some(tr) = flow.round_trip_time
-            && let Some(packet_size) = flow.packet_size()
+            && let Some(packet_size) = match config.packet_size {
+                PacketSize::SendingWindow => window_packet_size(&flow.losses),
+                PacketSize::LastFrames => flow.packet_size(),
+            }
         {
             let average = flow
                 .losses
