@@ -178,3 +178,17 @@ fn test_end_of_candidates_on_both_sides_ends_the_wait_before_nominating() {
     );
     assert!(a.get_selected_candidate_pair().is_some());
 }
+
+/// RFC 8445 Section 6.1.4.2: "an agent MAY terminate ICE processing for a checklist at any
+/// time by local policy": `close` ends the checks; nothing more is sent.
+#[test]
+fn test_closing_the_agent_stops_its_checks() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A, REMOTE_B]);
+    let first = run(&mut a, now, now + Duration::from_millis(60));
+    assert!(!requests(&first).is_empty(), "checks before");
+    a.close().unwrap();
+    let _ = a.handle_timeout(now + Duration::from_secs(1));
+    assert!(sent(&mut a).is_empty(), "a check after close");
+    assert!(a.poll_timeout().is_none());
+}
