@@ -442,6 +442,8 @@ pub struct MediaEngine {
     /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
     /// See [`MediaEngine::set_flexfec_with_retransmission`].
     pub(crate) flexfec_with_retransmission: bool,
+    /// See [`MediaEngine::set_vp9_receiver_limits`].
+    pub(crate) vp9_receiver_limits: bool,
 
     /// The RTCP CNAME of the connection this media engine belongs to (RFC 7022), set when the
     /// connection is built: what `a=ssrc:<ssrc> cname:` lines and `RTCRtcpParameters::cname`
@@ -470,6 +472,23 @@ pub struct RTCPacketTime {
 /// octet the values 192 to 223, the RTCP packet types.
 pub(crate) fn is_rtcp_conflicting_payload_type(payload_type: PayloadType) -> bool {
     (64..=95).contains(&payload_type)
+}
+
+/// The receiver capabilities the default VP9 formats state with
+/// [`MediaEngine::set_vp9_receiver_limits`] (RFC 9628 section 6: max-fr in frames per second,
+/// max-fs in macroblocks). The engine does not decode, so these are what a typical decoder
+/// takes, the values Firefox offers: 60 frames a second, 12,288 macroblocks (up to 4096 x
+/// 3072). An application whose decoder takes less registers its own VP9 codecs.
+pub const VP9_RECEIVER_LIMITS: &str = "max-fr=60;max-fs=12288";
+
+/// The fmtp line of a default VP9 format of `profile_id`, with or without
+/// [`VP9_RECEIVER_LIMITS`].
+fn default_vp9_fmtp(profile_id: u8, receiver_limits: bool) -> String {
+    if receiver_limits {
+        format!("{VP9_RECEIVER_LIMITS};profile-id={profile_id}")
+    } else {
+        format!("profile-id={profile_id}")
+    }
 }
 
 impl MediaEngine {
@@ -654,7 +673,9 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_VP9.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_owned(),
+                    // RFC 9628 section 6 has a receiver state max-fr and max-fs; by default
+                    // they are left out for WebKit's sake (see `set_vp9_receiver_limits`).
+                    sdp_fmtp_line: default_vp9_fmtp(0, self.vp9_receiver_limits),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 98,
@@ -665,7 +686,7 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_VP9.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=1".to_owned(),
+                    sdp_fmtp_line: default_vp9_fmtp(1, self.vp9_receiver_limits),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 100,
@@ -1088,6 +1109,7 @@ impl MediaEngine {
             application_codecs: self.application_codecs.clone(),
             header_extensions: self.header_extensions.clone(),
             flexfec_with_retransmission: self.flexfec_with_retransmission,
+            vp9_receiver_limits: self.vp9_receiver_limits,
             ..Default::default()
         }
     }
@@ -1108,6 +1130,37 @@ impl MediaEngine {
     /// treatment.
     pub fn set_flexfec_with_retransmission(&mut self, allowed: bool) {
         self.flexfec_with_retransmission = allowed;
+    }
+
+    /// Whether the default VP9 formats state this endpoint's receiver limits,
+    /// [`VP9_RECEIVER_LIMITS`] (`max-fr=60;max-fs=12288`), in their fmtp. `false` by default.
+    ///
+    /// RFC 9628 section 6: "If the implementation is willing to receive media, both
+    /// parameters MUST be provided." That is the form with `true`. It is not the default
+    /// because WebKit does not interoperate with it: in the repository's browser matrix
+    /// (conformance train 5, round 1) a WebKit sender answered with the limits sent no VP9 at
+    /// all ("reflect video VP9": no packet reached the engine), where the same answer without
+    /// them works; Chromium and Firefox take either. Browsers themselves leave the
+    /// parameters out (libwebrtc) or state them (Firefox).
+    ///
+    /// Applies to the default VP9 formats registered after it and to those already
+    /// registered by [`register_default_codecs`](Self::register_default_codecs).
+    pub fn set_vp9_receiver_limits(&mut self, stated: bool) {
+        self.vp9_receiver_limits = stated;
+        for codec in self.video_codecs.iter_mut() {
+            if !codec
+                .rtp_codec
+                .mime_type
+                .eq_ignore_ascii_case(MIME_TYPE_VP9)
+            {
+                continue;
+            }
+            for profile_id in [0, 1] {
+                if codec.rtp_codec.sdp_fmtp_line == default_vp9_fmtp(profile_id, !stated) {
+                    codec.rtp_codec.sdp_fmtp_line = default_vp9_fmtp(profile_id, stated);
+                }
+            }
+        }
     }
 
     /// The packet times this endpoint states in each audio section it offers or answers, as
@@ -1612,6 +1665,23 @@ impl MediaEngine {
             RtpCodecKind::Application => &self.application_codecs,
             RtpCodecKind::Unspecified => return codec.rtp_codec.sdp_fmtp_line.clone(),
         };
+        // RFC 8627 section 5.2.1 (and draft-ietf-payload-flexible-fec-scheme-03 5.2.1): "Any
+        // unknown option in the offer must be ignored and deleted from the answer". A FlexFEC
+        // answer states this endpoint's own parameters (its `repair-window`), as a media
+        // codec's does. RTX and RED keep theirs: they name payload types of the description.
+        if answering
+            && crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
+                &codec.rtp_codec.mime_type,
+            )
+            && let Some(local) = registered.iter().find(|registered| {
+                registered
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+            })
+        {
+            return local.rtp_codec.sdp_fmtp_line.clone();
+        }
         if is_repair_codec(&codec.rtp_codec) {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }

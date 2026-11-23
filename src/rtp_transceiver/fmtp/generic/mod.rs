@@ -63,6 +63,26 @@ impl Fmtp for GenericFmtp {
                 );
             }
 
+            // RFC 7741 section 6.2.2: VP8's `max-fr` and `max-fs` are receiver capabilities,
+            // "declarative", each side's own: they do not make two VP8 formats different.
+            if self
+                .mime_type
+                .rsplit('/')
+                .next()
+                .is_some_and(|subtype| subtype.eq_ignore_ascii_case("vp8"))
+            {
+                let without_limits = |parameters: &HashMap<String, String>| {
+                    let mut parameters = parameters.clone();
+                    parameters.remove("max-fr");
+                    parameters.remove("max-fs");
+                    parameters
+                };
+                return fmtp_consist(
+                    &without_limits(&self.parameters),
+                    &without_limits(&c.parameters),
+                );
+            }
+
             fmtp_consist(&self.parameters, &c.parameters)
         } else {
             false

@@ -43,6 +43,52 @@ pub struct ReferencePictureSelectionIndication {
 }
 
 impl ReferencePictureSelectionIndication {
+    /// An RPSI for an H.265 stream (RFC 7798 section 8.3): a request that the encoder use the
+    /// picture with `nuh_layer_id` (6 bits) and `pic_order_cnt_val` as its reference. The
+    /// native bit string is "a base16 representation of the 8 bits consisting of the 2 most
+    /// significant bits equal to 0 and 6 bits of nuh_layer_id, ... followed by the 32 bits
+    /// representing the value of the PicOrderCntVal (in network byte order)": ten hexadecimal
+    /// digits. RFC 7798 deprecates RPSI as a positive acknowledgement; this is the request
+    /// form, the only one it allows. A `nuh_layer_id` over 63 is refused.
+    pub fn hevc(
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        payload_type: u8,
+        nuh_layer_id: u8,
+        pic_order_cnt_val: u32,
+    ) -> Result<Self> {
+        if nuh_layer_id > 0x3f {
+            return Err(Error::InvalidHeader);
+        }
+        if payload_type > RPSI_PAYLOAD_TYPE_MAX {
+            return Err(Error::WrongPayloadType);
+        }
+        let mut octets = [0u8; 5];
+        octets[0] = nuh_layer_id;
+        octets[1..].copy_from_slice(&pic_order_cnt_val.to_be_bytes());
+        let hex: String = octets.iter().map(|o| format!("{o:02X}")).collect();
+        Ok(Self {
+            sender_ssrc,
+            media_ssrc,
+            payload_type,
+            native_rpsi: Bytes::from(hex.into_bytes()),
+            unused_bits: 0,
+        })
+    }
+
+    /// The `(nuh_layer_id, PicOrderCntVal)` of an H.265 RPSI's native bit string (RFC 7798
+    /// section 8.3), `None` when it is not ten hexadecimal digits with the two high bits of
+    /// the layer octet zero.
+    pub fn hevc_picture(&self) -> Option<(u8, u32)> {
+        if self.native_rpsi.len() != 10 || self.unused_bits != 0 {
+            return None;
+        }
+        let text = std::str::from_utf8(&self.native_rpsi).ok()?;
+        let layer = u8::from_str_radix(&text[..2], 16).ok()?;
+        let poc = u32::from_str_radix(&text[2..], 16).ok()?;
+        (layer <= 0x3f).then_some((layer, poc))
+    }
+
     /// The length of the native bit string in bits.
     pub fn native_rpsi_bits(&self) -> usize {
         (self.native_rpsi.len() * 8).saturating_sub(self.unused_bits as usize)
@@ -171,6 +217,34 @@ impl Unmarshal for ReferencePictureSelectionIndication {
             native_rpsi,
             unused_bits,
         })
+    }
+}
+
+#[cfg(test)]
+mod hevc_test {
+    use super::*;
+
+    /// RFC 7798 section 8.3: the H.265 native RPSI bit string is the base16 text of the layer
+    /// octet (two zero bits, six of `nuh_layer_id`) and the 32-bit PicOrderCntVal, network
+    /// order; RPSI is a reference picture selection request.
+    #[test]
+    fn an_hevc_rpsi_names_the_layer_and_picture_order_count_in_base16() {
+        let rpsi =
+            ReferencePictureSelectionIndication::hevc(0x0102_0304, 0x0a0b_0c0d, 49, 5, 0x0012_34ab)
+                .unwrap();
+        assert_eq!(&b"05001234AB"[..], &rpsi.native_rpsi[..]);
+        assert_eq!(80, rpsi.native_rpsi_bits());
+        let raw = rpsi.marshal().unwrap();
+        let read = ReferencePictureSelectionIndication::unmarshal(&mut raw.freeze()).unwrap();
+        assert_eq!(Some((5, 0x0012_34ab)), read.hevc_picture());
+        assert_eq!(49, read.payload_type);
+
+        assert!(ReferencePictureSelectionIndication::hevc(1, 2, 49, 64, 0).is_err());
+        let not_hevc = ReferencePictureSelectionIndication {
+            native_rpsi: Bytes::from_static(b"C0000000000"),
+            ..rpsi
+        };
+        assert_eq!(None, not_hevc.hevc_picture());
     }
 }
 

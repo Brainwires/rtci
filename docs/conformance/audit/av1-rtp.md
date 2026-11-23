@@ -8,7 +8,7 @@ Appendix A (Dependency Descriptor header extension, A.3 to A.9). Sections 1 to 3
 and A.10 carry no normative keyword. MUST NOT / SHALL / REQUIRED count as MUST, RECOMMENDED / SHOULD NOT
 as SHOULD, OPTIONAL as MAY.
 
-- MUST: tested 55 / untested 1 / partial 2 / missing 1 / violated 0 / n-a 12
+- MUST: tested 58 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 12
 - SHOULD: tested 13 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 3
 
@@ -83,7 +83,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-7.2-1 | 7.2 | MUST | An absent `profile` is inferred to be 0 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::profile`, `match_fmtp`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred`, `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The profile is the format: an absent one is 0, another profile does not match |
 | AV1RTP-7.2-2 | 7.2 | MUST | An absent `level-idx` is inferred to be 5 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::level_idx`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred` | Read as 5 when absent; not part of the format (section 7.2.3) |
 | AV1RTP-7.2-3 | 7.2 | MUST | An absent `tier` is inferred to be 0 | tested | `src/rtp_transceiver/fmtp/av1/mod.rs` (`Av1Fmtp::tier`) | `fmtp/av1/av1_test.rs::an_av1_format_is_its_profile_with_the_absent_parameters_inferred` | Read as 0 when absent; not part of the format |
-| AV1RTP-7.2.1-1 | 7.2.1 | MUST | The media name in the `m=` line is `video` | untested | `media_engine.rs:146`, `:632` | | `tests/jsep_av1_fmtp.rs` finds the AV1 rtpmap but never looks at the `m=` line |
+| AV1RTP-7.2.1-1 | 7.2.1 | MUST | The media name in the `m=` line is `video` | tested | `media_engine.rs:146`, `:632` | `the_default_video_formats_are_video_at_90_khz` | `tests/jsep_av1_fmtp.rs` finds the AV1 rtpmap but never looks at the `m=` line |
 | AV1RTP-7.2.1-2 | 7.2.1 | MUST | The rtpmap encoding name is `AV1` | tested | `media_engine.rs:146`, `:606` | `tests/jsep_av1_fmtp.rs::the_default_av1_codec_offers_profile_not_profile_id` | Fails ("the default codecs offer AV1") if no `AV1/` rtpmap is offered |
 | AV1RTP-7.2.1-3 | 7.2.1 | MUST | The rtpmap clock rate is 90000 | tested | `media_engine.rs:607` | `tests/jsep_codec_parameters.rs::av1_formats_match_by_profile_and_the_answer_declares_its_own_parameters` | The answered rtpmap is `AV1/90000` |
 | AV1RTP-7.2.1-4 | 7.2.1 | MAY | `profile`, `level-idx`, `tier` appear in `a=fmtp` as semicolon-separated pairs | tested | `media_engine.rs:611` | `tests/jsep_av1_fmtp.rs::the_default_av1_codec_offers_profile_not_profile_id` | Default offers `profile=0` only; an application may register a codec with the others |
@@ -95,7 +95,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-7.2.4-1 | 7.2.4 | MUST | Declarative SDP (RTSP, SAP): a receiver that cannot support the declared values rejects or stays out | n-a | | | RTSP and SAP, not WebRTC |
 | AV1RTP-8.1-1 | 8.1 | MUST | On FIR the sender starts a new coded video sequence for each SSRC named, as soon as possible | partial | `rtc-interceptor/src/keyframe.rs:58-64` | `keyframe.rs::pli_and_fir_reach_the_application` | The engine's part, handing the FIR to the application that owns the encoder, is done and tested. It does not filter by the FCI's SSRC or drop repeats (see `rfc5104.md`, RFC5104-4.3.1.2-3). `ccm fir` is offered for AV1 (`media_engine.rs:407`) |
 | AV1RTP-8.1-2 | 8.1 | MAY | Sender also starts new coded video sequences on the other simulcast encodings | n-a | | | Application drives the encoders |
-| AV1RTP-8.2-1 | 8.2 | MUST | Layer Refresh Requests use the VP9 LRR format with the SID high bit 0 | missing | | | No LRR packet type in `rtc-rtcp` (the only `LRR` in the tree is the DLRR "last RR" field), no `ccm lrr` feedback |
+| AV1RTP-8.2-1 | 8.2 | MUST | Layer Refresh Requests use the VP9 LRR format with the SID high bit 0 | tested | `rtc-rtcp/src/payload_feedbacks/layer_refresh_request.rs` (`LrrEntry::av1`, `LrrEntry::vp9`) | `an_av1_layer_refresh_request_uses_the_vp9_format_with_a_two_bit_sid` | The VP9 layout with the SID's high bit 0. `ccm lrr` is not offered by default (JSEP) |
 | AV1RTP-10-1 | 10 | SHOULD | Data origin authentication and integrity protection of the RTP packet (for example SRTP) | tested | `rtc-srtp/src/context/srtp.rs` | `rtc-srtp/src/context/srtp_test.rs::test_rtp_invalid_auth` | Always SRTP in WebRTC; clause detail in `rfc3711.md` |
 | AV1RTP-10-2 | 10 | SHOULD | Header extensions such as the Dependency Descriptor are encrypted (RFC 6904 or a successor) | partial | `src/peer_connection/cryptex.rs` | | RFC 6904 is not implemented (`rfc6904.md`); Cryptex (RFC 9335) is, and covers any header extension when negotiated (`rfc9335.md` for its tested status). No Dependency Descriptor exists to protect |
 | AV1RTP-10-3 | 10 | MUST | Decoders discard reserved OBU types and reserved metadata OBU types | n-a | | | Decoder's job. The depacketizer passes reserved types through (`depacketizer.rs:159-168`) |
@@ -139,7 +139,7 @@ produces, or what a decoder does, are `n-a` and say so.
 | AV1RTP-A.8.3-28 | A.8.3 | MUST | With `chain_cnt > 0` every Decode target is protected by exactly one Chain | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` `FrameDependencyStructure::validate` | `a_structure_the_syntax_cannot_carry_does_not_validate` |  |
 | AV1RTP-A.8.3-29 | A.8.3 | MUST | `fdiff_minus_one` immediately follows `fdiff_follows_flag` = 1 | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` | `the_l1t3_example_structure_is_written_bit_for_bit`, `the_l3t3_example_structure_is_written_bit_for_bit` |  |
 | AV1RTP-A.8.3-30 | A.8.3 | MUST | `fdiff_minus_one` immediately follows a non-zero `next_fdiff_size` | tested | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` | `custom_frame_differences_are_written_bit_for_bit`, `frame_differences_round_trip_at_their_limits_and_wrap` |  |
-| AV1RTP-A.9-1 | A.9 | MUST | The extmap URI is `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | partial | `rtc-rtp/src/codec/dependency_descriptor/mod.rs` `DEPENDENCY_DESCRIPTOR_URI` | `the_extmap_uri_is_the_specifications` | The constant exists. It is not among the default header extensions and nothing registers it: an application registers the URI itself (peer connection plumbing, open) |
+| AV1RTP-A.9-1 | A.9 | MUST | The extmap URI is `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | tested | `rtc-rtp/src/codec/dependency_descriptor`, `configuration/interceptor_registry.rs` (`configure_default_header_extensions`) | `the_dependency_descriptor_is_offered_for_video` | Registered for video by default |
 
 Non-normative text checked (not counted):
 

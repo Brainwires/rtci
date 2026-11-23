@@ -133,3 +133,36 @@ fn an_rtx_packet_keeps_the_originals_csrcs_and_extensions() {
     // OSN, then the original payload.
     assert_eq!(&[0x00, 104, 0xAA, 0xBB], &rtx.payload[..]);
 }
+
+/// RFC 4588 section 4: "the padding of the original packet MUST be removed": an original
+/// sent with padding is retransmitted with no P bit, no padding octets, and the original
+/// payload after the OSN.
+#[test]
+fn the_padding_of_the_original_is_not_retransmitted() {
+    let mut chain = Registry::new()
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .build();
+    chain.bind_local_stream(&stream_info());
+
+    let now = Instant::now();
+    let mut padded = original(now, 200);
+    if let Packet::Rtp(packet) = &mut padded.message.packet {
+        packet.header.padding = true;
+        packet.header.padding_size = 4;
+    }
+    chain.handle_write(padded).unwrap();
+    while chain.poll_write().is_some() {}
+
+    chain.handle_read(nack(now, 200)).unwrap();
+    while chain.poll_read().is_some() {}
+    let rtx = std::iter::from_fn(|| chain.poll_write())
+        .find_map(|tagged| match tagged.message.packet {
+            Packet::Rtp(packet) if packet.header.ssrc == RTX_SSRC => Some(packet),
+            _ => None,
+        })
+        .expect("a retransmission on the RTX SSRC");
+    assert!(!rtx.header.padding);
+    let wire = shared::marshal::Marshal::marshal(&rtx).unwrap();
+    assert_eq!(0, wire[0] & 0x20, "no P bit on the wire");
+    assert_eq!(&[0x00, 200, 0xAA, 0xBB], &wire[wire.len() - 4..]);
+}
