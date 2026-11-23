@@ -805,20 +805,37 @@ fn vp8_seeds() -> Result<()> {
         depth: Duration::from_millis(depth_ms),
         ..Setup::testenv()
     };
-    let mut under = 0;
+    let (mut under, mut broken) = (0, 0);
     for seed in a..b {
         let r = run(setup, seed)?;
         let below = r.played.len() * 50 < r.frames.len() * 49;
         under += usize::from(below);
+        let mut checks = vec![
+            r.check_played_frames_are_sent_frames_in_order(),
+            r.check_every_detectable_loss_is_retransmitted(),
+            r.check_every_packet_in_time_is_played(),
+        ];
+        if depth_ms >= 2000 {
+            checks.push(r.check_every_detectable_loss_is_repaired());
+        }
+        let failed: Vec<String> = checks.into_iter().filter_map(Result::err).collect();
+        broken += usize::from(!failed.is_empty());
         println!(
-            "VP8 {}{}",
+            "VP8 {}{}{}",
             summary(seed, &r),
-            if below { " (under 98 %)" } else { "" }
+            if below { " (under 98 %)" } else { "" },
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!(" GUARANTEE BROKEN: {failed:?}")
+            }
         );
         for l in r.trace() {
             println!("VP8 seed {seed}:   {l}");
         }
     }
-    println!("VP8 seeds {a}..{b}: {under} played under 98 % of the frames");
+    println!(
+        "VP8 seeds {a}..{b}, {depth_ms} ms: {under} played under 98 % of the frames, {broken} broke a guarantee"
+    );
     Ok(())
 }

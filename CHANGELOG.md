@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Tests
+
+- **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
+  no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's
+  windows-latest ("TCP pairs were checked too"): the `stream_net` peers were built at
+  `Instant::now()` while the network's virtual clock starts at `Net::new()`, so each ICE
+  agent's Ta grid began as much later on the virtual clock as building it took. With the
+  second peer built 11 to 40 ms after the first (a preempted thread on a loaded runner), its
+  second Ta slot, where the controlled peer checks the TCP pair, came after the nomination of
+  the UDP pair, which removes the other pairs (RFC 8445 section 8.1.2), and no TCP connection
+  was opened to prove closed. The engine is right (section 8.1.1 leaves the stopping criterion
+  to the agent); the peers are now built at the virtual start, and
+  `the_course_of_a_run_does_not_depend_on_the_real_time_building_the_peers_took` builds them
+  20 ms apart to hold it.
+- **interceptor**: the netem test `vp8_file_through_nack_and_jitter_buffer` asserts what NACK
+  and the jitter buffer guarantee instead of a share of frames (`conf/flake-1-icetcp-vp8`).
+  It asked for 98 % of the frames behind a 250 ms jitter buffer and failed now and then (292
+  and 240 of 300). Its virtual-time twin, `tests/vp8_nack_jitter_buffer_rtc2rtc.rs` (the same
+  netem link, driver loop and fixture shape, seeded), traced why: at 250 ms only about 45 % of
+  the lost packets come back in time. About half the late retransmissions had their NACK held
+  by RFC 4585 section 3.5.2 step 6 (after an Early RTCP packet, feedback waits for the next
+  Regular one, up to about 750 ms at this stream's RTCP bandwidth). The other half were asked
+  for promptly, but detection, the reordering allowance on the generator's 100 ms tick and a
+  round trip took longer than 250 ms. 43 of seeds 1 to 400 played under 98 %. With a 2 s
+  buffer every loss the receiver can detect was repaired (1162 of 1162 over 200 seeds); the
+  rest were the stream's first or last packet, which no receiver can detect. The netem test
+  now uses 2 s and asserts that every frame is played whole and in order, from the first key
+  frame read, apart from an undetectable last one. The twin asserts the same at 2 s, and at
+  250 ms that what is played is whole and in order, that every detectable loss is
+  retransmitted, and that every packet read before the buffer played past its place is
+  played.
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
