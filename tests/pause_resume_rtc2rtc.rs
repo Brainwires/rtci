@@ -688,10 +688,12 @@ fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()>
         .iter()
         .filter(|packets| pause_resume_entries(packets, PauseResumeType::Pause) > 0)
         .collect();
-    assert_eq!(pauses.len(), 1, "one PAUSE: it was answered");
+    // One PAUSE, or more when the PAUSED that answers it waits for a Regular packet longer
+    // than the receiver's retransmission time (2 * RTT, section 8.1).
+    assert!(!pauses.is_empty(), "the PAUSE arrived");
     assert!(
-        has_report(pauses[0]),
-        "the PAUSE rides a compound packet of the receiver's session"
+        pauses.iter().all(|packets| has_report(packets)),
+        "each PAUSE rides a compound packet of the receiver's session: {pauses:?}"
     );
 
     let later = &world.peers[1].rtcp[to_receiver..];
