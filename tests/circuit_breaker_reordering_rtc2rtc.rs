@@ -512,12 +512,22 @@ fn run(kind: RtpCodecKind, shape: Shape, link: Link, seconds: u64, seed: u64) ->
             .len()
     };
     let mut drained_in = None;
+    // Until everything written has left, or nothing more has for three seconds: the default
+    // pacer drops what the target had no room for (`PacerQueueOverflow::Drop`), and waiting
+    // the full minute for packets that will never leave made the file twice as slow.
+    let mut last_progress = (media_left(&world), world.now);
     while world.now < end + Duration::from_secs(60) {
-        if media_left(&world) >= written {
+        let left_now = media_left(&world);
+        if left_now >= written {
             drained_in = Some(world.now.saturating_duration_since(end));
             break;
         }
         if !world.peers[0].handles.circuit_breaker.ceased().is_empty() {
+            break;
+        }
+        if left_now != last_progress.0 {
+            last_progress = (left_now, world.now);
+        } else if world.now.saturating_duration_since(last_progress.1) >= Duration::from_secs(3) {
             break;
         }
         let step = world.now + Duration::from_millis(100);
