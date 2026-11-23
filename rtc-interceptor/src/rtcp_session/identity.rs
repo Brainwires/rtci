@@ -17,6 +17,20 @@ pub trait RtcpRandom: Send + Sync {
     }
 }
 
+/// One [`RtcpRandom`] shared by the RTCP sessions of a peer connection
+/// ([`RtcpSessionBuilder::build_per_rtp_session`](super::RtcpSessionBuilder::build_per_rtp_session)).
+#[derive(Clone)]
+pub(crate) struct SharedRandom(pub(crate) std::sync::Arc<std::sync::Mutex<Box<dyn RtcpRandom>>>);
+
+impl RtcpRandom for SharedRandom {
+    fn next_u32(&mut self) -> u32 {
+        match self.0.lock() {
+            Ok(mut random) => random.next_u32(),
+            Err(poisoned) => poisoned.into_inner().next_u32(),
+        }
+    }
+}
+
 /// [`RtcpRandom`] from the thread's cryptographically secure generator.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ThreadRandom;

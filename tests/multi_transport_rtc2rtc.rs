@@ -13,7 +13,10 @@ use rtc::data_channel::RTCDataChannelId;
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtc::peer_connection::configuration::interceptor_registry::{
+    CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors,
+    register_default_interceptors_with_options,
+};
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
@@ -59,11 +62,26 @@ struct Peer {
 
 impl Peer {
     /// A peer whose transports have credentials of their own (`unique`) or share the first
-    /// transport's (the default).
-    fn with_credentials(ip: &str, policy: RTCBundlePolicy, unique: bool) -> Result<Self> {
+    /// transport's (the default), with the default interceptors or `options`.
+    fn with_options(
+        ip: &str,
+        policy: RTCBundlePolicy,
+        unique: bool,
+        options: Option<&DefaultInterceptorOptions>,
+    ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        let registry = match options {
+            None => register_default_interceptors(Registry::new(), &mut media_engine)?,
+            Some(options) => {
+                register_default_interceptors_with_options(
+                    Registry::new(),
+                    &mut media_engine,
+                    options,
+                )?
+                .0
+            }
+        };
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
                 RTCConfigurationBuilder::new()
@@ -121,15 +139,23 @@ struct World {
 
 impl World {
     fn new(offerer: RTCBundlePolicy) -> Result<Self> {
-        Self::with_credentials(offerer, true)
+        Self::with_options(offerer, true, None)
     }
 
     /// Two peers whose transports have credentials of their own (`unique`) or share them.
     fn with_credentials(offerer: RTCBundlePolicy, unique: bool) -> Result<Self> {
+        Self::with_options(offerer, unique, None)
+    }
+
+    fn with_options(
+        offerer: RTCBundlePolicy,
+        unique: bool,
+        options: Option<&DefaultInterceptorOptions>,
+    ) -> Result<Self> {
         Ok(Self {
             peers: [
-                Peer::with_credentials("10.0.0.1", offerer, unique)?,
-                Peer::with_credentials("10.0.0.2", RTCBundlePolicy::Balanced, unique)?,
+                Peer::with_options("10.0.0.1", offerer, unique, options)?,
+                Peer::with_options("10.0.0.2", RTCBundlePolicy::Balanced, unique, options)?,
             ],
             now: Instant::now(),
             paths: HashSet::new(),
@@ -1512,5 +1538,72 @@ fn a_rejected_section_releases_its_own_transport_at_once() -> Result<()> {
     world.run("audio after the rejection", |peers| {
         peers[1].rtp.iter().any(|h| h.ssrc == audio)
     })?;
+    Ok(())
+}
+
+/// Transport-wide congestion control numbers the packets of one transport (draft-holmer
+/// section 3.1: the sequence number is per transport, and the receiver reports each
+/// transport's): audio and video on transports of their own each carry a sequence without
+/// gaps, though their packets left interleaved. One numbering shared by the transports
+/// would leave every other number missing on each, which the remote reports as lost.
+#[test]
+fn each_transport_numbers_its_packets_for_congestion_feedback_on_its_own() -> Result<()> {
+    let mut options = DefaultInterceptorOptions::default();
+    options.congestion_feedback = CongestionFeedback::Twcc;
+    // Probes would take numbers of their own between the media packets.
+    options.bandwidth_probing = false;
+    let mut world = World::with_options(RTCBundlePolicy::MaxCompat, true, Some(&options))?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    let extension_id = |world: &mut World, sender: RTCRtpSenderId| -> u8 {
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .find(|extension| extension.uri == rtc::sdp::extmap::TRANSPORT_CC_URI)
+            .map(|extension| extension.id as u8)
+            .expect("transport-cc negotiated")
+    };
+    let ids: Vec<u8> = senders
+        .iter()
+        .map(|s| extension_id(&mut world, *s))
+        .collect();
+    for seq in 1..=10 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("ten packets of each sender delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().filter(|h| h.ssrc == *ssrc).count() >= 10)
+    })?;
+    for (ssrc, id) in ssrcs.iter().zip(&ids) {
+        let numbers: Vec<u16> = world.peers[1]
+            .rtp
+            .iter()
+            .filter(|h| h.ssrc == *ssrc)
+            .map(|h| {
+                let raw = h
+                    .get_extension(*id)
+                    .expect("a transport-wide sequence number");
+                u16::from_be_bytes([raw[0], raw[1]])
+            })
+            .collect();
+        for pair in numbers.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0].wrapping_add(1),
+                "SSRC {ssrc:#x}: one numbering per transport, without gaps: {numbers:?}"
+            );
+        }
+    }
     Ok(())
 }

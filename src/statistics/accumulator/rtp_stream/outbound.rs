@@ -137,6 +137,11 @@ pub struct OutboundRtpStreamAccumulator {
     /// RFC 6679 sections 7.2-7.4 for the stream, fed from the RFC 8888 reports (RFC 8888
     /// section 7); `Some` while `ect1_marking`.
     pub ecn_validation: Option<Box<interceptor::EcnValidation>>,
+    /// The ECT codepoint the receiver asked for (`ect=`, RFC 6679 section 6.1).
+    pub ect_preference: Option<interceptor::EctPreference>,
+    /// Every marked packet goes out ECT(1) (L4S, or the receiver asked for it): a Not-ECT
+    /// report of a marked packet is bleaching of ECT(1).
+    pub sends_ect1: bool,
     /// RTP packets sent with ECT(1).
     pub packets_sent_with_ect1: u64,
     /// What the RFC 8888 reports received from the remote say about the stream.
@@ -258,7 +263,7 @@ impl OutboundRtpStreamAccumulator {
         self.ccfb_received
             .get_or_insert_with(|| Box::new(CcfbTally::new()))
             .on_report_block_marked(block, |sequence_number| {
-                validation.is_some_and(|v| v.was_marked(sequence_number))
+                self.sends_ect1 && validation.is_some_and(|v| v.was_marked(sequence_number))
             });
     }
 

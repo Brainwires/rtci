@@ -178,6 +178,7 @@ fn chain_sees(message: TaggedRTCMessageInternal) -> Vec<rtp::Packet> {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     )
     .handle_read(message)
     .expect("handle_read");
@@ -248,6 +249,7 @@ fn stats_after(
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         )
         .handle_read(message)
         .expect("handle_read");
