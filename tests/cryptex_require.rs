@@ -9,6 +9,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, video_track};
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtc::shared::error::Error;
 
@@ -76,16 +77,32 @@ fn require_accepts_cryptex_both_ways() -> TestResult {
     Ok(())
 }
 
-/// RFC 9335 section 4: with BUNDLE, an `a=cryptex` "present for a media line ... MUST be
-/// present for all RTP-based m= sections belonging to the same bundle group" (it is TRANSPORT
-/// in RFC 8859's terms, but RFC 9335 asks for it on every RTP section, so that every
-/// section's encrypted MID can be read). Which sections decide: an answer whose `a=cryptex`
-/// is at the session level, or on every bundled RTP section, negotiates Cryptex; one with
-/// `a=cryptex` on the tagged section alone does not.
-#[test]
-fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestResult {
-    for (placement, negotiated) in [("session", true), ("every", true), ("tagged", false)] {
-        let mut offerer = default_peer()?;
+/// A peer with the default codecs and the given setting engine.
+fn peer_with(
+    settings: rtc::peer_connection::configuration::setting_engine::SettingEngine,
+) -> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine =
+        rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(rtc::peer_connection::RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(settings)
+        .build(Instant::now())?)
+}
+
+/// Whether an offerer reading an answer with `a=cryptex` at the session level, on every
+/// bundled section, or on the BUNDLE-tagged section alone negotiates Cryptex, for each
+/// placement in turn.
+fn negotiated_by_placement(
+    strict: bool,
+) -> Result<Vec<(&'static str, bool)>, Box<dyn std::error::Error>> {
+    let mut negotiated = vec![];
+    for placement in ["session", "every", "tagged", "other"] {
+        let mut offerer = peer_with(
+            SettingEngineBuilder::new()
+                .with_cryptex_required_on_every_bundled_section(strict)
+                .build(),
+        )?;
         offerer.add_track(video_track("first", 0x0c0c_0010))?;
         offerer.add_track(video_track("second", 0x0c0c_0011))?;
         let mut answerer = default_peer()?;
@@ -97,6 +114,7 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
         let answer = answerer.create_answer(None)?;
         answerer.set_local_description(now, answer.clone())?;
         assert!(answer.sdp.contains("a=cryptex"), "{}", answer.sdp);
+        assert!(answer.sdp.contains("a=group:BUNDLE 0 1"), "{}", answer.sdp);
 
         let mut munged = String::new();
         let mut sections = 0;
@@ -113,7 +131,9 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
             let add = match placement {
                 "session" => line.starts_with("t="),
                 "every" => line.starts_with("a=mid:"),
-                _ => line.starts_with("a=mid:") && sections == 1,
+                // The tagged section is the first tag of the group, "0".
+                "tagged" => line.starts_with("a=mid:") && sections == 1,
+                _ => line.starts_with("a=mid:") && sections == 2,
             };
             if add {
                 munged.push_str("a=cryptex\r\n");
@@ -122,13 +142,99 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
         assert_eq!(sections, 2, "{}", answer.sdp);
         offerer.set_remote_description(
             now,
-            rtc::peer_connection::sdp::RTCSessionDescription::answer(munged.clone())?,
+            rtc::peer_connection::sdp::RTCSessionDescription::answer(munged)?,
         )?;
-        assert_eq!(
-            offerer.cryptex_negotiated(),
-            negotiated,
-            "a=cryptex on the {placement} level:\n{munged}"
-        );
+        negotiated.push((placement, offerer.cryptex_negotiated()));
+    }
+    Ok(negotiated)
+}
+
+/// RFC 9335 section 4: "When used with BUNDLE, this attribute is assigned to the TRANSPORT
+/// category [RFC8859]", whose value is the one "associated with the 'm=' line whose
+/// information is used for setting up the underlying transport" (RFC 8859 section 4.5), the
+/// BUNDLE-tagged section, the only one an RFC 9143 section 7.1.3 answerer writes it in. By
+/// default an answer with `a=cryptex` at the session level, on every bundled section, or on
+/// the tagged section alone negotiates Cryptex; on another section alone it does not.
+#[test]
+fn by_default_the_bundle_tagged_sections_cryptex_is_the_groups() -> TestResult {
+    assert_eq!(
+        negotiated_by_placement(false)?,
+        [
+            ("session", true),
+            ("every", true),
+            ("tagged", true),
+            ("other", false)
+        ]
+    );
+    Ok(())
+}
+
+/// RFC 9335 section 4, read strictly with
+/// `SettingEngineBuilder::with_cryptex_required_on_every_bundled_section(true)`: with BUNDLE,
+/// an `a=cryptex` "present for a media line ... MUST be present for all RTP-based m= sections
+/// belonging to the same bundle group". An answer whose `a=cryptex` is at the session level,
+/// or on every bundled RTP section, negotiates Cryptex; one with `a=cryptex` on the tagged
+/// section alone (or another one alone) does not.
+#[test]
+fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestResult {
+    assert_eq!(
+        negotiated_by_placement(true)?,
+        [
+            ("session", true),
+            ("every", true),
+            ("tagged", false),
+            ("other", false)
+        ]
+    );
+    Ok(())
+}
+
+/// RFC 9335 section 4, the writer's rule: with BUNDLE, `a=cryptex` "MUST be present for all
+/// RTP-based 'm=' sections belonging to the same bundle group". Every offer and answer this
+/// engine writes, initial and later, has it so (at the session level, which applies to every
+/// section), whether the BUNDLE attributes are repeated in every bundled section (the default)
+/// or written in the tagged section only (RFC 9143 section 7.1.3,
+/// `with_bundle_attributes_repeated(false)`): the latter form does not take `a=cryptex` off
+/// the other RTP sections.
+#[test]
+fn every_written_offer_and_answer_has_cryptex_for_every_bundled_rtp_section() -> TestResult {
+    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    for repeated in [true, false] {
+        let settings = || {
+            SettingEngineBuilder::new()
+                .with_bundle_attributes_repeated(repeated)
+                .build()
+        };
+        let mut a = peer_with(settings())?;
+        let mut b = peer_with(settings())?;
+        a.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        a.add_track(video_track("first", 0x0c0c_0030))?;
+        a.add_track(video_track("second", 0x0c0c_0031))?;
+        let (offer, answer) = jsep_common::exchange(&mut a, &mut b)?;
+        let (re_offer, re_answer) = jsep_common::exchange(&mut b, &mut a)?;
+        for (what, sdp) in [
+            ("offer", offer),
+            ("answer", answer),
+            ("later offer", re_offer),
+            ("later answer", re_answer),
+        ] {
+            assert!(sdp.contains("a=group:BUNDLE 0 1 2"), "{what}:\n{sdp}");
+            let session_level = sdp
+                .lines()
+                .take_while(|l| !l.starts_with("m="))
+                .any(|l| l == "a=cryptex");
+            let sections = jsep_common::media_sections(&sdp);
+            let rtp: Vec<_> = sections
+                .iter()
+                .filter(|s| s[0].starts_with("m=audio") || s[0].starts_with("m=video"))
+                .collect();
+            assert_eq!(rtp.len(), 3, "{what}:\n{sdp}");
+            assert!(
+                session_level || rtp.iter().all(|s| s.iter().any(|l| l == "a=cryptex")),
+                "{what}, repeated {repeated}: a=cryptex not present for every RTP section:\n{sdp}"
+            );
+        }
+        assert!(a.cryptex_negotiated() && b.cryptex_negotiated());
     }
     Ok(())
 }

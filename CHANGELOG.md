@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
+  (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
+  m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT
+  category, whose value is the tagged section's (RFC 8859 section 4.5), the only section an RFC
+  9143 section 7.1.3 answerer writes it in. By default a group has Cryptex when its tagged
+  section (the first identification-tag with a port, RFC 9143 section 7.3.1) carries it, each
+  group by its own; a section outside any group decides by its own attribute; session-level
+  `a=cryptex` counts for every section, as before. An answer with `a=cryptex` on the tagged
+  section only now negotiates Cryptex; the earlier strict reading (every RTP section must carry
+  it) is `SettingEngineBuilder::with_cryptex_required_on_every_bundled_section(true)`, default
+  off. The engine keeps writing `a=cryptex` at the session level in offers and answers, so it is
+  present for every RTP section with `with_bundle_attributes_repeated` either way
+  (`every_written_offer_and_answer_has_cryptex_for_every_bundled_rtp_section`). Rows
+  RFC9335-4-4, RFC9335-9.1-1 and RFC8859-A-30 `tested`.
+
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
   times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech

@@ -439,6 +439,10 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_bundled_fingerprints_agreeing`]: a remote description whose
     /// bundled sections carry fingerprints other than the tagged section's is refused.
     pub(crate) bundled_fingerprints_agree: bool,
+    /// [`SettingEngineBuilder::with_cryptex_required_on_every_bundled_section`]: `a=cryptex`
+    /// counts only at the session level or on every RTP section, the tagged one not standing
+    /// for its group.
+    pub(crate) cryptex_required_on_every_bundled_section: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
@@ -1825,6 +1829,28 @@ impl SettingEngineBuilder {
     /// [`Error::ErrSessionDescriptionConflictingFingerprints`](shared::error::Error::ErrSessionDescriptionConflictingFingerprints).
     pub fn with_bundled_fingerprints_agreeing(mut self, agreeing: bool) -> Self {
         self.0.bundled_fingerprints_agree = agreeing;
+        self
+    }
+
+    /// Whether a description has Cryptex for a BUNDLE group only when `a=cryptex` is at the
+    /// session level or on every RTP-based m= section of the group. The default is `false`.
+    ///
+    /// RFC 9335 section 4 binds the writer: "If BUNDLE is in use ... and the 'a=cryptex'
+    /// attribute is present for a media line, it MUST be present for all RTP-based 'm='
+    /// sections belonging to the same bundle group", and this engine writes it so (at the
+    /// session level). The same paragraph assigns the attribute to the TRANSPORT category
+    /// (RFC 8859 section 4.5: "the software MUST pick the one that's associated with the 'm='
+    /// line whose information is used for setting up the underlying transport"), and RFC 9143
+    /// section 7.1.3 has an answerer and a later offerer write such attributes "only in the
+    /// tagged 'm=' section". By default the reader therefore takes the group's Cryptex from
+    /// its BUNDLE-tagged section, so a peer that follows RFC 9143 keeps Cryptex; a section
+    /// outside any group decides by its own attribute.
+    ///
+    /// `true` reads strictly (the JSEP stack's earlier form): `a=cryptex` on some but not all
+    /// RTP-based sections of a group, the tagged one alone included, does not negotiate
+    /// Cryptex, and a `Require` policy refuses such a description.
+    pub fn with_cryptex_required_on_every_bundled_section(mut self, required: bool) -> Self {
+        self.0.cryptex_required_on_every_bundled_section = required;
         self
     }
 
