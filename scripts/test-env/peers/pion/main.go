@@ -23,6 +23,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/h264reader"
@@ -139,6 +140,9 @@ type Result struct {
 	RustErrors      []string          `json:"rustErrors"`
 	// Pion's own outbound-rtp stats: what it says it sent, per SSRC and RID.
 	Outbound []map[string]any `json:"outbound"`
+	// The first RTP header Pion's chain wrote per SSRC: its payload type and its header
+	// extensions by id (what Rust receives, before SRTP).
+	FirstHeaders []map[string]any `json:"firstHeaders"`
 }
 
 // naError ends a run as not applicable: the stack cannot express the step.
@@ -211,6 +215,44 @@ func (c *coverage) report(ssrc uint32, tail uint64) map[string]any {
 	return map[string]any{"kind": c.kind, "ssrc": ssrc, "span": span, "missing": missing, "received": len(c.seen)}
 }
 
+// ---- the first outgoing RTP header per SSRC (an interceptor; observation only) ----
+
+type headerLog struct {
+	mu   sync.Mutex
+	seen map[uint32]bool
+	out  []map[string]any
+}
+
+type headerFactory struct{ log *headerLog }
+
+func (f headerFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &headerInterceptor{log: f.log}, nil
+}
+
+type headerInterceptor struct {
+	interceptor.NoOp
+	log *headerLog
+}
+
+func (h *headerInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
+	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, a interceptor.Attributes) (int, error) {
+		h.log.mu.Lock()
+		if !h.log.seen[header.SSRC] && len(h.log.out) < 16 {
+			h.log.seen[header.SSRC] = true
+			ext := map[string]string{}
+			for _, id := range header.GetExtensionIDs() {
+				ext[fmt.Sprint(id)] = fmt.Sprintf("%x", header.GetExtension(id))
+			}
+			h.log.out = append(h.log.out, map[string]any{
+				"ssrc": header.SSRC, "pt": header.PayloadType, "seq": header.SequenceNumber,
+				"extensions": ext, "streamSsrc": info.SSRC, "streamRtxSsrc": info.SSRCRetransmission,
+			})
+		}
+		h.log.mu.Unlock()
+		return writer.Write(header, payload, a)
+	})
+}
+
 // ---- the peer ----
 
 type Peer struct {
@@ -222,6 +264,7 @@ type Peer struct {
 	inbox chan map[string]any
 	cands chan *webrtc.ICECandidate
 	stdin *bufio.Reader
+	hdrs  *headerLog
 
 	sentScenario  bool
 	lastSentSDP   string
@@ -427,6 +470,9 @@ func (p *Peer) setup() error {
 	if err := webrtc.RegisterDefaultInterceptors(m, ir); err != nil {
 		return err
 	}
+	// Last in the chain: the headers as they leave for SRTP.
+	p.hdrs = &headerLog{seen: map[uint32]bool{}}
+	ir.Add(headerFactory{log: p.hdrs})
 	// Sequence numbers for transport-wide congestion control on what this side sends, so Rust
 	// has something to send feedback about.
 	if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, ir); err != nil {
@@ -1448,6 +1494,11 @@ func (p *Peer) collect() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.res.Outbound = outbound
+	if p.hdrs != nil {
+		p.hdrs.mu.Lock()
+		p.res.FirstHeaders = append([]map[string]any{}, p.hdrs.out...)
+		p.hdrs.mu.Unlock()
+	}
 	if pair != nil {
 		p.res.SelectedPair = map[string]any{"local": cand(pair.LocalCandidateID), "remote": cand(pair.RemoteCandidateID)}
 	}
