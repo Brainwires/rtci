@@ -2109,6 +2109,13 @@ impl RTCPeerConnection {
                         .iter()
                         .map(|f| (f.typ.as_str(), f.parameter.as_str())),
                 );
+                let rfc6679 = info.rtcp_feedback.iter().any(|f| {
+                    f.typ == interceptor::RTCP_FB_XR
+                        && f.parameter == interceptor::RTCP_XR_ECN_SUMMARY
+                });
+                self.pipeline_context
+                    .stats
+                    .set_outbound_rfc6679(info.ssrc, rfc6679);
                 self.pipeline_context
                     .stats
                     .set_outbound_ccfb(info.ssrc, ccfb);

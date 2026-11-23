@@ -554,6 +554,28 @@ pub(crate) fn find_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecF
         })
 }
 
+/// The FEC format of a remote stream's `FEC-FR` repair flow in `haystack`: as
+/// [`find_fec_format`], and else ULPFEC (`video/ulpfec`) as a stream of its own (RFC 5109
+/// section 14.1, SSRC-multiplexed in the session as RFC 5956 section 4.3 groups it). Only the
+/// receive side reads it: the engine sends ULPFEC in RED unless the application builds the
+/// separate stream itself, so a local ULPFEC registration mints no repair SSRC.
+pub(crate) fn find_receive_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecFormat> {
+    find_fec_format(haystack).or_else(|| {
+        haystack
+            .iter()
+            .find(|c| {
+                c.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC,
+                )
+            })
+            .map(|c| FecFormat {
+                payload_type: c.payload_type,
+                mime_type: c.rtp_codec.mime_type.clone(),
+                sdp_fmtp_line: c.rtp_codec.sdp_fmtp_line.clone(),
+            })
+    })
+}
+
 /// The payload type of the FEC format in `haystack` ([`find_fec_format`]).
 #[cfg(test)]
 pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {

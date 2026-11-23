@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: ECN and FEC engine sides.
+  - `rtcp::extended_report::BlockType::EcnSummary` (13): an XR block of type 13 parses as
+    `EcnSummaryReportBlock` (RFC 6679 section 5.2) instead of `BlockType::Other(13)` /
+    `UnknownReportBlock`. An RTPFB packet with FMT 8 parses as `EcnFeedback` instead of a raw
+    packet.
+  - `UlpfecReceiveBuilder::red` receivers also decode a separate ULPFEC stream where a remote
+    stream's `FEC-FR` repair flow has the `ulpfec` format (RFC 5109 section 14, RFC 5956
+    section 4.3); `UlpfecReceiveBuilder::stream` no longer claims a repair flow whose format is
+    FlexFEC.
+  - FlexFEC draft-03 honours the negotiated `repair-window` (draft section 5.1): the sender
+    closes a block when the window of its first packet ends (`poll_timeout` now asks to be
+    woken then), the receiver holds packets for recovery no longer than the window.
+
 - **media conformance**: the TWCC receiver reports a remote stream only when `transport-cc`
   was negotiated in its feedback beside the header extension (RFC 4585 section 4.2, as
   libwebrtc); `TwccReceiverBuilder::with_feedback_on_extension_alone(true)` is the earlier
@@ -1615,6 +1628,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **media conformance**: RFC 6679 ECN for RTP.
+  - `rtcp::transport_feedbacks::ecn_feedback::{EcnFeedback, EcnCounters}` (RTCP ECN Feedback
+    packet, RTPFB FMT 8, `FORMAT_ECN`) and `rtcp::extended_report::{EcnSummaryReportBlock,
+    EcnSummaryReport}` (XR BT 13): wire codecs; a summary block whose length is not a multiple
+    of five is discarded.
+  - The RTCP session counts each remote source's ECN field values, losses and duplicates from
+    `TransportContext::ecn` and, for a stream whose negotiated feedback has `nack ecn`
+    (`RTCP_FB_NACK_ECN`), sends an ECN Feedback packet early on the source's first ECT packet,
+    every CE mark and every loss; for one with `xr ecn-sum` (`RTCP_FB_XR`,
+    `RTCP_XR_ECN_SUMMARY`) every regular compound packet carries an XR ECN Summary (empty
+    before any sender). The JSEP layer passes these feedback entries.
+  - `EcnValidation::on_counters`: RFC 6679 initiation, ongoing use and fallback from the
+    cumulative counters. A stream with ECN on and `ecn-sum` negotiated but no RFC 8888 feedback
+    now marks ECT, validated by those reports (`RTCStatsAccumulator::set_outbound_rfc6679`).
+  - `BandwidthEstimator::on_congestion_marks` (defaulted); the congestion controller hands it
+    the CE marks counted by RFC 6679 reports for a stream not reported in RFC 8888, and GCC
+    reacts as to losses (RFC 6679 section 7.3.3).
+  - `docs/conformance/audit/rfc6679.md`: the clause table.
+- **media conformance**: `FlexFec03Decoder::{with_repair_window, decode_at}`;
+  `StreamInfo::fec_is_ulpfec`.
 
 - **media conformance**: engine rows.
   - The endpoint drops an RTP packet whose payload type its stream's m= section did not

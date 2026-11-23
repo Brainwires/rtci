@@ -10,7 +10,7 @@ use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_format,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_receive_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -712,7 +712,7 @@ impl RTCRtpReceiverInternal {
                         .map(|payload_type| (rtx.ssrc, payload_type))
                 });
                 let fec = coding.rtp_coding_parameters.fec.as_ref().and_then(|fec| {
-                    find_fec_format(&parameters.rtp_parameters.codecs)
+                    find_receive_fec_format(&parameters.rtp_parameters.codecs)
                         .map(|fec_format| (fec.ssrc, fec_format))
                 });
 

@@ -5,7 +5,9 @@
 //! What each packet means for the stats is decided here, next to the accumulators it updates.
 
 use super::RTCStatsAccumulator;
-use rtcp::extended_report::{DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock};
+use rtcp::extended_report::{
+    DLRRReportBlock, EcnSummaryReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock,
+};
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -13,6 +15,7 @@ use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtcp::transport_feedbacks::ecn_feedback::EcnFeedback;
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use std::time::Instant;
 
@@ -108,6 +111,38 @@ impl RTCStatsAccumulator {
                 && let Some(stream) = self.outbound_rtp_streams.get_mut(&nack.media_ssrc)
             {
                 stream.on_nack_received();
+            }
+
+            // RFC 6679 sections 5.1 and 5.2: the receiver's ECN counters about one of our
+            // outbound streams. An XR ECN Summary Report carries no sequence number; the
+            // reception report about the same SSRC in the compound packet gives it.
+            if let Some(feedback) = packet.as_any().downcast_ref::<EcnFeedback>()
+                && let Some(stream) = self.outbound_rtp_streams.get_mut(&feedback.media_ssrc)
+            {
+                stream.on_ecn_counters_received(
+                    feedback.extended_highest_sequence_number,
+                    feedback.counters,
+                    now,
+                );
+            }
+            if let Some(xr) = packet.as_any().downcast_ref::<ExtendedReport>() {
+                let summaries = xr
+                    .reports
+                    .iter()
+                    .filter_map(|block| block.as_any().downcast_ref::<EcnSummaryReportBlock>())
+                    .flat_map(|block| &block.reports);
+                for summary in summaries {
+                    let highest = packets
+                        .iter()
+                        .flat_map(|p| reception_reports(p.as_ref()))
+                        .find(|report| report.ssrc == summary.ssrc)
+                        .map(|report| report.last_sequence_number);
+                    if let Some(highest) = highest
+                        && let Some(stream) = self.outbound_rtp_streams.get_mut(&summary.ssrc)
+                    {
+                        stream.on_ecn_counters_received(highest, summary.counters, now);
+                    }
+                }
             }
 
             if let Some(pli) = packet.as_any().downcast_ref::<PictureLossIndication>()

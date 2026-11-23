@@ -293,6 +293,19 @@ impl Gcc {
 }
 
 impl BandwidthEstimator for Gcc {
+    /// RFC 6679 section 7.3.3: CE marks counted by the receiver's ECN reports go to the
+    /// loss-based controller as losses would; the target can only fall by them.
+    fn on_congestion_marks(&mut self, now: Instant, marked: u64, packets: u64) {
+        if marked == 0 || packets == 0 {
+            return;
+        }
+        let packets = packets.min(usize::MAX as u64) as usize;
+        let marked = (marked.min(packets as u64)) as usize;
+        self.loss_control.update(now, marked, packets);
+        let loss_target = self.loss_control.target();
+        self.target = self.target.min(loss_target).clamp(self.min, self.max);
+    }
+
     fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
         if reports.is_empty() {
             return;
@@ -569,6 +582,25 @@ mod tests {
         assert!(marked < 1_000_000.0, "15% marked: {marked}");
         assert!(clean >= 1_000_000.0, "no marks, no losses: {clean}");
         assert!(marked < 0.8 * clean, "{marked} vs {clean}");
+    }
+
+    /// RFC 6679 section 7.3.3: CE marks counted by RFC 6679 ECN reports (no per-packet
+    /// marks) bring the target down as the same share of losses would; reports without marks
+    /// leave it where it was.
+    #[test]
+    fn ce_marks_from_ecn_counters_lower_the_target_as_losses_do() {
+        let epoch = Instant::now();
+        let run = |marked: u64| {
+            let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+            for batch in 0..20u64 {
+                gcc.on_congestion_marks(epoch + Duration::from_millis(batch * 200), marked, 20);
+            }
+            gcc.target_bitrate()
+        };
+        let marked = run(3);
+        let clean = run(0);
+        assert!(marked < 0.8 * 1_000_000.0, "15% marked: {marked}");
+        assert_eq!(clean, 1_000_000.0, "no marks: {clean}");
     }
 
     /// The more pessimistic half wins. Here loss is catastrophic while delay is quiet, so the

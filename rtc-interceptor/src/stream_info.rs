@@ -191,6 +191,12 @@ impl StreamInfo {
         self.mime_type_fec.is_empty() || fec_subtype_is(&self.mime_type_fec, "flexfec-03")
     }
 
+    /// Whether this stream's FEC flow is ULPFEC as a stream of its own (`<type>/ulpfec`, RFC
+    /// 5109 section 14.1, grouped by `a=ssrc-group:FEC-FR`, RFC 5956 section 4.3).
+    pub fn fec_is_ulpfec(&self) -> bool {
+        fec_subtype_is(&self.mime_type_fec, "ulpfec")
+    }
+
     /// Whether this stream's FEC flow is RFC 8627 FlexFEC (`<type>/flexfec`).
     pub fn fec_is_flexfec(&self) -> bool {
         fec_subtype_is(&self.mime_type_fec, "flexfec")

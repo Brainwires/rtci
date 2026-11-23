@@ -13,7 +13,9 @@ use crate::peer_connection::message::internal::{
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_format, find_rtx_payload_type};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    find_receive_fec_format, find_rtx_payload_type,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
 };
@@ -576,7 +578,7 @@ impl<'a> InterceptorHandler<'a> {
             payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -1016,7 +1018,7 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,

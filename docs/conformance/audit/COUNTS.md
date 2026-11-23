@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4238 | 248 | 300 | 137 | 24 | 613 | 5560 |
-| SHOULD | 661 | 82 | 77 | 76 | 6 | 327 | 1229 |
-| MAY | 388 | 33 | 36 | 129 | 0 | 166 | 752 |
+| MUST | 4266 | 249 | 303 | 150 | 24 | 623 | 5615 |
+| SHOULD | 673 | 84 | 80 | 77 | 6 | 333 | 1253 |
+| MAY | 392 | 34 | 36 | 130 | 0 | 167 | 759 |
 | PROC | 57 | 3 | 4 | 3 | 0 | 0 | 67 |
-| all | 5344 | 366 | 417 | 345 | 30 | 1106 | 7608 |
+| all | 5388 | 370 | 423 | 360 | 30 | 1123 | 7694 |
 
 ## Per file
 
@@ -32,7 +32,7 @@ is a procedure step without a keyword.
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 8 | 0 | 2 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 1 | 0 | 2 | 0 | 1 | 5 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 7 | 1 | 2 | 0 | 0 | 0 | 10 |
-| `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 31 | 1 | 2 | 3 | 0 | 2 | 39 |
+| `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 32 | 1 | 3 | 1 | 0 | 2 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 5 | 0 | 0 | 2 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 0 | 1 | 0 | 6 | 0 | 0 | 7 |
 | `draft-ietf-rmcat-gcc.md` | MUST | 34 | 0 | 1 | 0 | 0 | 0 | 35 |
@@ -126,6 +126,9 @@ is a procedure step without a keyword.
 | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 | 39 |
 | `rfc6544.md` | SHOULD | 9 | 1 | 2 | 0 | 0 | 21 | 33 |
 | `rfc6544.md` | MAY | 3 | 1 | 0 | 4 | 0 | 1 | 9 |
+| `rfc6679.md` | MUST | 27 | 1 | 2 | 15 | 0 | 10 | 55 |
+| `rfc6679.md` | SHOULD | 12 | 2 | 3 | 1 | 0 | 6 | 24 |
+| `rfc6679.md` | MAY | 4 | 1 | 0 | 1 | 0 | 1 | 7 |
 | `rfc6762.md` | MUST | 58 | 0 | 3 | 0 | 0 | 9 | 70 |
 | `rfc6762.md` | SHOULD | 27 | 0 | 3 | 0 | 0 | 8 | 38 |
 | `rfc6762.md` | MAY | 4 | 0 | 0 | 1 | 0 | 1 | 6 |

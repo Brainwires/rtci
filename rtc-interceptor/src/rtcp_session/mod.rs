@@ -2,6 +2,7 @@
 //!
 //! See [`RtcpSessionInterceptor`].
 
+mod ecn;
 pub(crate) mod identity;
 pub(crate) mod scheduler;
 
@@ -11,7 +12,8 @@ use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Interceptor, Packet, TaggedPacket};
 use identity::{RtcpRandom, ThreadRandom, choose_ssrc, generate_cname};
 use rtcp::extended_report::{
-    DLRRReport, DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock,
+    DLRRReport, DLRRReportBlock, EcnSummaryReport, EcnSummaryReportBlock, ExtendedReport,
+    ReceiverReferenceTimeReportBlock,
 };
 use rtcp::goodbye::Goodbye;
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
@@ -25,6 +27,7 @@ use rtcp::source_description::{
     SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
 };
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtcp::transport_feedbacks::ecn_feedback::EcnFeedback;
 use rtcp::transport_feedbacks::rapid_resynchronization_request::RapidResynchronizationRequest;
 use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use rtcp::transport_feedbacks::transport_layer_nack::{
@@ -501,6 +504,12 @@ struct Remote {
     kind: Kind,
     /// Whether receiver reference times (RFC 3611 4.4) were negotiated for it.
     rrtr: bool,
+    /// The RTCP ECN Feedback packet (`nack ecn`, RFC 6679 6.2) was negotiated for it.
+    ecn_feedback: bool,
+    /// The XR ECN Summary Report (`xr ecn-sum`, RFC 6679 6.3) was negotiated for it.
+    ecn_summary: bool,
+    /// Its ECN counts (RFC 6679 5.1), kept while either is negotiated.
+    ecn: Option<Box<ecn::EcnTally>>,
     /// The source said BYE or timed out: it is not reported on until it is heard again.
     gone: bool,
 }
@@ -724,6 +733,8 @@ fn sender_and_media(packet: &dyn rtcp::Packet) -> (Option<u32>, Option<u32>) {
         (Some(p.sender_ssrc), None)
     } else if let Some(p) = any.downcast_ref::<RapidResynchronizationRequest>() {
         (Some(p.sender_ssrc), Some(p.media_ssrc))
+    } else if let Some(p) = any.downcast_ref::<EcnFeedback>() {
+        (Some(p.sender_ssrc), Some(p.media_ssrc))
     } else if let Some(p) = any.downcast_ref::<ExtendedReport>() {
         (Some(p.sender_ssrc), None)
     } else if let Some(p) = any.downcast_ref::<SenderReport>() {
@@ -733,6 +744,21 @@ fn sender_and_media(packet: &dyn rtcp::Packet) -> (Option<u32>, Option<u32>) {
     } else {
         (None, None)
     }
+}
+
+/// Whether a remote stream negotiated the RFC 6679 ECN Feedback packet (`a=rtcp-fb:<pt> nack
+/// ecn`, section 6.2) and the XR ECN Summary Report (`a=rtcp-xr:ecn-sum`, section 6.3, which
+/// reaches a stream as an `xr` feedback entry).
+fn negotiated_ecn_feedback(info: &StreamInfo) -> (bool, bool) {
+    let feedback = info
+        .rtcp_feedback
+        .iter()
+        .any(|f| f.typ == "nack" && f.parameter == crate::RTCP_FB_NACK_ECN);
+    let summary = info
+        .rtcp_feedback
+        .iter()
+        .any(|f| f.typ == crate::RTCP_FB_XR && f.parameter == crate::RTCP_XR_ECN_SUMMARY);
+    (feedback, summary)
 }
 
 /// `packet` with `ssrc` as its packet sender, for the types that name one.
@@ -755,6 +781,7 @@ fn with_sender(packet: Box<dyn rtcp::Packet>, ssrc: u32) -> Box<dyn rtcp::Packet
         TransportLayerCc,
         CcFeedbackReport,
         RapidResynchronizationRequest,
+        EcnFeedback,
         ExtendedReport
     );
     packet
@@ -776,6 +803,7 @@ fn delivery_shows(packet: &dyn rtcp::Packet) -> bool {
         || any.is::<FullIntraRequest>()
         || any.is::<TransportLayerCc>()
         || any.is::<CcFeedbackReport>()
+        || any.is::<EcnFeedback>()
 }
 
 /// The maximum DLRR size in `rcvr-rtt=<mode>:<max>` (RFC 3611 section 5.1), `None` without
@@ -1211,7 +1239,12 @@ impl RtcpSessionInterceptor {
     // ---- what arrives ----------------------------------------------------------------
 
     /// Whether the packet goes on to the rest of the chain.
-    fn observe_rtp(&mut self, now: Instant, message: &AttributedPacket) -> bool {
+    fn observe_rtp(
+        &mut self,
+        now: Instant,
+        message: &AttributedPacket,
+        ecn: Option<shared::EcnCodepoint>,
+    ) -> bool {
         let Packet::Rtp(packet) = &message.packet else {
             return true;
         };
@@ -1244,6 +1277,7 @@ impl RtcpSessionInterceptor {
             self.heard(now, csrc, false);
         }
 
+        self.observe_ecn(now, arrival_ssrc, arrival_sequence_number, ecn);
         if let Some(remote) = self.remotes.get_mut(&arrival_ssrc) {
             if arrival_ssrc == header.ssrc {
                 remote.stream.process_rtp(now, packet);
@@ -1276,6 +1310,37 @@ impl RtcpSessionInterceptor {
             self.unanswered_reduced_nacks = 0;
         }
         true
+    }
+
+    /// RFC 6679 5.1, 7.2.1 and 7.3.2: counts the ECN field of an RTP packet from a source
+    /// that negotiated ECN feedback, and asks for an early ECN Feedback packet on the first
+    /// ECT or CE packet of the source, on every CE mark and on a detected loss, where the
+    /// feedback packet (`nack ecn`) was negotiated.
+    fn observe_ecn(
+        &mut self,
+        now: Instant,
+        ssrc: u32,
+        sequence_number: u16,
+        ecn: Option<shared::EcnCodepoint>,
+    ) {
+        let Some(remote) = self.remotes.get_mut(&ssrc) else {
+            return;
+        };
+        let Some(tally) = remote.ecn.as_deref_mut() else {
+            return;
+        };
+        let events = tally.on_packet(sequence_number, ecn);
+        if !(events.any() && remote.ecn_feedback) {
+            return;
+        }
+        let feedback = EcnFeedback {
+            sender_ssrc: 0,
+            media_ssrc: ssrc,
+            extended_highest_sequence_number: tally.extended_highest(),
+            counters: tally.counters(),
+        };
+        self.adopt(boxed(feedback));
+        self.schedule_feedback(now);
     }
 
     fn observe_report_blocks(&mut self, now: Instant, reports: &[ReceptionReport]) {
@@ -1439,6 +1504,15 @@ impl RtcpSessionInterceptor {
                     return;
                 }
             }
+        } else if let Some(feedback) = any.downcast_ref::<EcnFeedback>() {
+            // RFC 6679 5.1: the counters are cumulative, so the newest report says all an
+            // older one waiting beside it would.
+            let media = feedback.media_ssrc;
+            self.pending.retain(|held| {
+                held.as_any()
+                    .downcast_ref::<EcnFeedback>()
+                    .is_none_or(|other| other.media_ssrc != media)
+            });
         } else if let Some(pli) = any.downcast_ref::<PictureLossIndication>()
             && self.pending.iter().any(|held| {
                 held.as_any()
@@ -1666,6 +1740,33 @@ impl RtcpSessionInterceptor {
                 })
                 .collect();
             blocks.push(Box::new(DLRRReportBlock { reports }));
+        }
+        // RFC 6679 7.3.2: "Every time a regular compound RTCP packet is to be transmitted, an
+        // ECN-capable RTP receiver MUST include an RTCP XR ECN Summary Report"; section 5.2:
+        // the SSRCs reported as senders are in it, and with none the block "SHALL still be
+        // sent with no report block entry and a zero report block length".
+        if self
+            .remotes
+            .values()
+            .any(|remote| remote.ecn_summary && !remote.gone)
+        {
+            let mut reports: Vec<EcnSummaryReport> = self
+                .remote_order
+                .iter()
+                .filter_map(|ssrc| {
+                    let remote = self.remotes.get(ssrc)?;
+                    let tally = remote.ecn.as_deref()?;
+                    (remote.ecn_summary && !remote.gone && tally.heard()).then(|| {
+                        EcnSummaryReport {
+                            ssrc: *ssrc,
+                            counters: tally.counters(),
+                        }
+                    })
+                })
+                .collect();
+            // One XR block's length field counts at most 65535 words.
+            reports.truncate(usize::from(u16::MAX) / 5);
+            blocks.push(Box::new(EcnSummaryReportBlock { reports }));
         }
         (!blocks.is_empty()).then_some(ExtendedReport {
             sender_ssrc: ssrc,
@@ -2219,7 +2320,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
         let now = msg.now;
         self.sync(now);
         let pass = match &msg.message.packet {
-            Packet::Rtp(_) => self.observe_rtp(now, &msg.message),
+            Packet::Rtp(_) => self.observe_rtp(now, &msg.message, msg.transport.ecn),
             Packet::Rtcp(packets) => {
                 self.observe_rtcp(now, packets);
                 true
@@ -2364,8 +2465,16 @@ impl Interceptor for RtcpSessionInterceptor {
             .rtcp_feedback
             .iter()
             .any(|feedback| feedback.typ == crate::RTCP_FB_RRTR);
+        let (ecn_feedback, ecn_summary) = negotiated_ecn_feedback(info);
         match self.remotes.get_mut(&info.ssrc) {
             Some(remote) => {
+                remote.ecn_feedback = ecn_feedback;
+                remote.ecn_summary = ecn_summary;
+                if !(ecn_feedback || ecn_summary) {
+                    remote.ecn = None;
+                } else if remote.ecn.is_none() {
+                    remote.ecn = Some(Box::default());
+                }
                 remote.stream.set_clock_rate(info.clock_rate);
                 remote
                     .stream
@@ -2384,6 +2493,9 @@ impl Interceptor for RtcpSessionInterceptor {
                         },
                         kind: Kind::of(&info.mime_type),
                         rrtr,
+                        ecn_feedback,
+                        ecn_summary,
+                        ecn: (ecn_feedback || ecn_summary).then(Box::default),
                         gone: false,
                     },
                 );
