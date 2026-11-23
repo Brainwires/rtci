@@ -9,16 +9,16 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 663; rows that
   apply: 5082.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5015 of 5082 (98.7 %).
-- Tested as the default (`tested`): 4992 of 5082 (98.2 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Tested as the default (`tested`): 4992 of 5082 (98.2 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 67: 8 untested, 41 partial, 18 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 16 | 14 |
 | B | implemented, lacking a test that fails without it | 3 | 2 |
 | C | partly implemented | 41 | 18 |
 | D | not implemented | 14 | 11 |
-| E | cannot be met or observed inside this engine | 16 | 11 |
+| E | cannot be met or observed inside this engine | 15 | 11 |
 | F | stale note: already tested on this tree | 1 | 1 |
 | all | | 90 | 57 |
 
@@ -74,6 +74,7 @@ Sorted by class, then owner, size and ID.
 | RFC3550-6.1-13 | `rfc3550.md` | Padding only on the last packet of a compound packet | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
+| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC7874-3-10 | `rfc7874.md` | Generated DTMF events last no more than 8000 ms and no less than 40 ... | missing | B | Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing | S | media (running) |
 | RFC7874-3-13 | `rfc7874.md` | The endpoint can generate and consume events 0 to 15 (digits, *, #, ... | missing | B | Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes) | S | media (running) |
 | RFC9605-X-4 | `rfc9605.md` | Per-packet SFrame: an application can encrypt each RTP payload and ... | untested | B | A test that `write_rtp` carries an application-encrypted (per-packet) payload under a codec payload type unchanged, the header to SRTP | S | sframe |
@@ -147,7 +148,6 @@ Sorted by class, then owner, size and ID.
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |
 | RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | missing | E | The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds | S | media (running) |
 | RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | untested | E | Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate | S | sctp |
-| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | security |
 | RFC7874-3-11 | `rfc7874.md` | Gap between events is at least 30 ms (default 70 ms) | missing | F | Stale note: the 30 ms minimum gap is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes` (10 ms asked, 40 + 30 ms between tone changes); mutation-check and cite | S | media (running) |
 
 ## Closed since classified
