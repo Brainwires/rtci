@@ -267,6 +267,7 @@ impl RTCIceCandidate {
             sdp_mline_index,
             username_fragment: self.username_fragment.clone(),
             url: None,
+            relay_protocol: None,
         })
     }
 
@@ -336,6 +337,13 @@ pub struct RTCIceCandidateInit {
     /// local candidates that were gathered from STUN/TURN servers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// W3C `RTCLocalIceCandidateInit.relayProtocol` (webrtc-pc section 4.8.1): for a local
+    /// relay candidate, the protocol this endpoint reaches its TURN server over (RFC 8656
+    /// section 3.1). The application does the gathering, so it says; when it does not, the
+    /// TURN URL in `url` decides (`turns:` is TLS, `?transport=tcp` TCP, otherwise UDP).
+    /// Ignored for every other candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_protocol: Option<RTCIceServerTransportProtocol>,
 }
 
 #[cfg(test)]
@@ -352,6 +360,7 @@ mod test {
                     sdp_mline_index: Some(0),
                     username_fragment: Some("def".to_string()),
                     url: None,
+                    relay_protocol: None,
                 },
                 r#"{"candidate":"candidate:abc123","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"def"}"#,
             ),
@@ -362,6 +371,7 @@ mod test {
                     sdp_mline_index: None,
                     username_fragment: None,
                     url: None,
+                    relay_protocol: None,
                 },
                 r#"{"candidate":"candidate:abc123","sdpMid":null,"sdpMLineIndex":null,"usernameFragment":null}"#,
             ),
@@ -372,6 +382,7 @@ mod test {
                     sdp_mline_index: Some(0),
                     username_fragment: None,
                     url: Some("turn:turn.example.com:3478".to_string()),
+                    relay_protocol: None,
                 },
                 r#"{"candidate":"candidate:relay123","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null,"url":"turn:turn.example.com:3478"}"#,
             ),

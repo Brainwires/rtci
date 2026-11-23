@@ -1146,11 +1146,11 @@ impl Client {
     /// So with a new password the existing allocation is re-signed, and its permissions and
     /// channel bindings survive.
     ///
-    /// A new username takes effect for the next [`allocate`](Self::allocate). On a live
-    /// allocation it makes the next Refresh fail: the 441 is reported as
-    /// [`Event::RefreshError`], and the allocation ends when its lifetime runs out
-    /// ([`Event::AllocationLost`]). To change the username, [`Relay::close`] the allocation,
-    /// wait for [`Event::AllocationReleased`], then update the credential and allocate.
+    /// A new username takes effect for the next [`allocate`](Self::allocate) only: RFC 8656
+    /// section 5 has every request about an allocation use the username that created it, so
+    /// live allocations keep signing with theirs (and their password). To move to the new
+    /// username, [`Relay::close`] an allocation, wait for [`Event::AllocationReleased`], and
+    /// allocate again.
     ///
     /// The realm is *not* re-negotiated. It was learned from the server's 401 during the
     /// first `Allocate`, and a credential rotation keeps the same server, so it still
@@ -1159,11 +1159,18 @@ impl Client {
     ///
     /// [RFC 8656 §5]: https://datatracker.ietf.org/doc/html/rfc8656#section-5
     pub fn update_credentials(&mut self, username: String, password: String) -> Result<()> {
+        // RFC 8656 section 5: an allocation's requests stay under the username that created
+        // it; only a new password for that username re-keys it.
+        let same_username = username == self.login.username;
         let login = Arc::new(Login {
             username,
             password,
             password_algorithms: self.login.password_algorithms.clone(),
         });
+        if !same_username {
+            self.login = login;
+            return Ok(());
+        }
 
         // Each allocation carries the credential it will sign its own Refresh /
         // CreatePermission / ChannelBind with, so they have to be re-keyed too — otherwise

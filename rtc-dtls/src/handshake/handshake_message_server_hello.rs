@@ -25,6 +25,9 @@ https://tools.ietf.org/html/rfc5246#section-7.4.1.3
 pub struct HandshakeMessageServerHello {
     pub(crate) version: ProtocolVersion,
     pub(crate) random: HandshakeRandom,
+    /// The session (RFC 5246 7.4.1.3): the ClientHello's when it is resumed, a new one the
+    /// server may resume later, or empty.
+    pub(crate) session_id: Vec<u8>,
 
     pub(crate) cipher_suite: CipherSuiteId,
     pub(crate) compression_method: CompressionMethodId,
@@ -35,6 +38,7 @@ impl PartialEq for HandshakeMessageServerHello {
     fn eq(&self, other: &Self) -> bool {
         self.version == other.version
             && self.random == other.random
+            && self.session_id == other.session_id
             && self.compression_method == other.compression_method
             && self.extensions == other.extensions
             && self.cipher_suite == other.cipher_suite
@@ -45,6 +49,7 @@ impl fmt::Debug for HandshakeMessageServerHello {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = [
             format!("version: {:?} random: {:?}", self.version, self.random),
+            format!("session_id: {:?}", self.session_id),
             format!("cipher_suites: {:?}", self.cipher_suite),
             format!("compression_method: {:?}", self.compression_method),
             format!("extensions: {:?}", self.extensions),
@@ -64,7 +69,7 @@ impl HandshakeMessageServerHello {
         let mut len = 2 + self.random.size();
 
         // SessionID
-        len += 1;
+        len += 1 + self.session_id.len();
 
         len += 2;
 
@@ -88,8 +93,12 @@ impl HandshakeMessageServerHello {
         writer.write_u8(self.version.minor)?;
         self.random.marshal(writer)?;
 
-        // SessionID
-        writer.write_u8(0x00)?;
+        // SessionID<0..32>
+        if self.session_id.len() > MAX_SESSION_ID_LENGTH {
+            return Err(Error::ErrInvalidPacketLength);
+        }
+        writer.write_u8(self.session_id.len() as u8)?;
+        writer.write_all(&self.session_id)?;
 
         writer.write_u16::<BigEndian>(self.cipher_suite as u16)?;
 
@@ -124,8 +133,8 @@ impl HandshakeMessageServerHello {
         if session_id_len > MAX_SESSION_ID_LENGTH {
             return Err(Error::ErrInvalidPacketLength);
         }
-        let mut session_id = [0u8; MAX_SESSION_ID_LENGTH];
-        reader.read_exact(&mut session_id[..session_id_len])?;
+        let mut session_id = vec![0u8; session_id_len];
+        reader.read_exact(&mut session_id)?;
 
         let cipher_suite: CipherSuiteId = reader.read_u16::<BigEndian>()?.into();
 
@@ -138,6 +147,7 @@ impl HandshakeMessageServerHello {
         Ok(HandshakeMessageServerHello {
             version: ProtocolVersion { major, minor },
             random,
+            session_id,
 
             cipher_suite,
             compression_method,

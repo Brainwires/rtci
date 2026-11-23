@@ -336,10 +336,7 @@ impl<'a>
                     });
                 }
                 ::ice::Event::CandidatePairAdded(local, remote) => {
-                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
-                        (&*local).into(),
-                        (&*remote).into(),
-                    );
+                    let pair = self.ctx.ice_transport.exposed_pair(&local, &remote);
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
                         event: RTCEventInternal::RTCPeerConnectionEvent(
@@ -348,10 +345,7 @@ impl<'a>
                     });
                 }
                 ::ice::Event::CandidatePairNominationProposed(local, remote) => {
-                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
-                        (&*local).into(),
-                        (&*remote).into(),
-                    );
+                    let pair = self.ctx.ice_transport.exposed_pair(&local, &remote);
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
                         event: RTCEventInternal::RTCPeerConnectionEvent(
@@ -360,10 +354,7 @@ impl<'a>
                     });
                 }
                 ::ice::Event::CandidatePairRemoved(local, remote) => {
-                    let pair = crate::peer_connection::transport::RTCIceCandidatePair::new(
-                        (&*local).into(),
-                        (&*remote).into(),
-                    );
+                    let pair = self.ctx.ice_transport.exposed_pair(&local, &remote);
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
                         event: RTCEventInternal::RTCPeerConnectionEvent(

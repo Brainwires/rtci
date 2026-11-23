@@ -775,13 +775,21 @@ fn test_request_on_a_failed_pair_rechecks_it() {
 
 // --- Section 8.1.1 / 7.2.5.3.4: a nomination that fails ---
 
-/// The controlling agent has two valid pairs and nominates the better one; the path dies before
-/// the nomination is answered. It gives that pair up and nominates the other one instead of
-/// repeating the nomination until the agent fails.
+/// With `FailedNomination::Retry`: the controlling agent has two valid pairs and nominates the
+/// better one; the path dies before the nomination is answered. It gives that pair up and
+/// nominates the other one instead of repeating the nomination until the agent fails. (By
+/// default, RFC 8445 Section 7.2.5.3.4, the checklist fails instead:
+/// `agent_checklist_test.rs::test_a_nomination_that_times_out_fails_the_pair_and_the_checklist`.)
 #[test]
 fn test_failed_nomination_falls_back_to_the_next_valid_pair() {
     let now = Instant::now();
-    let mut a = bare_agent(now, config(true));
+    let mut a = bare_agent(
+        now,
+        AgentConfig {
+            failed_nomination: FailedNomination::Retry,
+            ..config(true)
+        },
+    );
     a.add_remote_candidate(host_with_priority(addr(REMOTE_A), 2130706431))
         .unwrap();
     a.add_remote_candidate(host_with_priority(addr(REMOTE_B), 2130706175))
@@ -1877,4 +1885,234 @@ fn test_a_success_response_without_xor_mapped_address_is_discarded() {
         a.get_best_valid_candidate_pair().is_some(),
         "the transaction was still open"
     );
+}
+
+// --- Sections 5.2, 7.2.4, 7.3, 12.1, 12.1.1: lite candidates, no RFC 3489, data gates ---
+
+fn lite_config() -> AgentConfig {
+    AgentConfig {
+        lite: true,
+        candidate_types: vec![CandidateType::Host],
+        ..config(false)
+    }
+}
+
+/// Section 5.2: "lite implementations [...] MUST only use host candidates", zero or one per
+/// IP address. A lite agent configured for other types is refused; given a second candidate on
+/// an address it has, or a server-reflexive one, it does not take it; another address it does.
+#[test]
+fn test_a_lite_agent_has_one_host_candidate_per_ip_address() {
+    let now = Instant::now();
+    let refused = Agent::new(
+        now,
+        Arc::new(AgentConfig {
+            lite: true,
+            candidate_types: vec![CandidateType::Host, CandidateType::ServerReflexive],
+            ..config(false)
+        }),
+        provider(),
+    );
+    assert!(refused.is_err(), "a lite agent with reflexive candidates");
+
+    let mut a = bare_agent(now, lite_config());
+    assert!(
+        !a.add_local_candidate(host(addr("192.168.0.2:1001")))
+            .unwrap(),
+        "same IP"
+    );
+    let srflx = crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "203.0.113.9".to_owned(),
+            port: 4000,
+            component: 1,
+            ..Default::default()
+        },
+        rel_addr: "192.168.0.2".to_owned(),
+        rel_port: 1000,
+        url: None,
+    }
+    .new_candidate_server_reflexive()
+    .unwrap();
+    assert!(
+        !a.add_local_candidate(srflx).unwrap(),
+        "not a host candidate"
+    );
+    assert!(
+        a.add_local_candidate(host(addr("192.168.0.7:1000")))
+            .unwrap()
+    );
+    assert_eq!(a.get_local_candidates().len(), 2);
+}
+
+/// Sections 7.2.4 and 7.3: no RFC 3489 backwards compatibility and no ALTERNATE-SERVER. A
+/// Binding request without the magic cookie (RFC 3489's form) is not STUN to the agent: it is
+/// not answered and triggers nothing; an ordinary request is answered with a success response
+/// that has no ALTERNATE-SERVER, never a 300 (Try Alternate).
+#[test]
+fn test_no_rfc_3489_compatibility_and_no_alternate_server() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let _ = run(&mut a, now, now + Duration::from_millis(1));
+    let request = peer_request(
+        &a,
+        vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1000))],
+    );
+    let mut rfc3489 = request.raw.clone();
+    rfc3489[4..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+    let _ = deliver_raw(&mut a, now, &rfc3489, REMOTE_A);
+    let answers: Vec<_> = sent(&mut a)
+        .into_iter()
+        .filter(|(m, _)| m.transaction_id == request.transaction_id)
+        .collect();
+    assert!(
+        answers.is_empty(),
+        "a request without the magic cookie is not answered"
+    );
+
+    deliver(&mut a, now, &request, REMOTE_A).unwrap();
+    let answers: Vec<_> = sent(&mut a)
+        .into_iter()
+        .filter(|(m, _)| m.transaction_id == request.transaction_id)
+        .collect();
+    assert_eq!(answers.len(), 1);
+    let (answer, _) = &answers[0];
+    assert_eq!(answer.typ, stun::message::BINDING_SUCCESS);
+    assert!(!answer.contains(stun::attributes::ATTR_ALTERNATE_SERVER));
+}
+
+/// Section 12.1: without a selected pair the agent does not go on sending data: a failed
+/// agent has no path for data. Section 12.1.1: a lite agent sends none before a nomination
+/// gives it a valid pair.
+#[test]
+fn test_no_data_path_without_a_pair() {
+    let now = Instant::now();
+    let mut lite = started_agent(now, lite_config(), &[REMOTE_A]);
+    let plain = peer_request(
+        &lite,
+        vec![Box::new(AttrControlling(1)), Box::new(PriorityAttr(1000))],
+    );
+    deliver(&mut lite, now, &plain, REMOTE_A).unwrap();
+    assert!(
+        lite.media_path().is_none(),
+        "lite: no data before the nomination"
+    );
+    let nominating = peer_request(
+        &lite,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    deliver(&mut lite, now, &nominating, REMOTE_A).unwrap();
+    assert!(lite.media_path().is_some(), "after it");
+
+    let mut a = started_agent(
+        now,
+        AgentConfig {
+            failed_timeout: Some(Duration::from_secs(1)),
+            disconnected_timeout: Some(Duration::from_secs(1)),
+            ..config(true)
+        },
+        &[REMOTE_A],
+    );
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert!(a.media_path().is_some(), "connected: a path");
+    run_answering(&mut a, now, now + Duration::from_secs(60), |_, _| false);
+    assert_eq!(a.state(), ConnectionState::Failed);
+    assert!(a.media_path().is_none(), "failed: none");
+}
+
+// --- RFC 8489 Sections 6.3.2 to 6.3.4 as the ICE usage receives STUN ---
+
+/// A response or indication of the peer's with an unknown comprehension-required attribute
+/// (0x0099) ahead of its MESSAGE-INTEGRITY.
+fn with_unknown_attribute(
+    typ: MessageType,
+    id: TransactionId,
+    error: Option<ErrorCode>,
+) -> Message {
+    let provider = provider();
+    let mut m = Message::new();
+    m.set_type(typ);
+    m.transaction_id = id;
+    m.write_header();
+    match error {
+        Some(code) => code.add_to(&mut m).unwrap(),
+        None => XorMappedAddress {
+            ip: addr(LOCAL).ip(),
+            port: addr(LOCAL).port(),
+        }
+        .add_to(&mut m)
+        .unwrap(),
+    }
+    m.add(stun::attributes::AttrType(0x0099), &[1, 2, 3, 4]);
+    if typ.class != stun::message::CLASS_INDICATION {
+        MessageIntegrity::new_short_term_integrity_with_provider(
+            REMOTE_PWD.to_owned(),
+            provider.crypto(),
+        )
+        .add_to(&mut m)
+        .unwrap();
+    }
+    FINGERPRINT.add_to(&mut m).unwrap();
+    m
+}
+
+/// RFC 8489 Section 6.3.4: an error response with an unknown comprehension-required attribute
+/// means the transaction failed: the pair fails at once (RFC 8445 Section 7.2.5.2.4), not when
+/// the transaction times out.
+#[test]
+fn test_an_error_response_with_an_unknown_required_attribute_fails_the_transaction() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let (check, to) = first_check(&mut a, now);
+    let response =
+        with_unknown_attribute(BINDING_ERROR, check.transaction_id, Some(CODE_BAD_REQUEST));
+    let _ = deliver(&mut a, now, &response, &to.to_string());
+    assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Failed);
+}
+
+/// RFC 8489 Section 6.3.3: a success response with one is discarded and the transaction goes
+/// on: the pair is not validated by it, and the next (good) response validates it.
+#[test]
+fn test_a_success_response_with_an_unknown_required_attribute_is_discarded() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let (check, to) = first_check(&mut a, now);
+    let response = with_unknown_attribute(BINDING_SUCCESS, check.transaction_id, None);
+    assert!(deliver(&mut a, now, &response, &to.to_string()).is_err());
+    assert_ne!(a.candidate_pairs[0].state, CandidatePairState::Succeeded);
+    let good = peer_response(BINDING_SUCCESS, check.transaction_id, addr(LOCAL), None);
+    deliver(&mut a, now, &good, &to.to_string()).unwrap();
+    assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Succeeded);
+}
+
+/// RFC 8489 Section 6.3.2: an indication with one is discarded: it does not count as
+/// something received from the peer (a lite peer's keepalive is a Binding indication).
+#[test]
+fn test_an_indication_with_an_unknown_required_attribute_is_discarded() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(false), &[REMOTE_A]);
+    let indication = with_unknown_attribute(
+        stun::message::MessageType::new(
+            stun::message::METHOD_BINDING,
+            stun::message::CLASS_INDICATION,
+        ),
+        TransactionId::new(),
+        None,
+    );
+    let _ = deliver(&mut a, now, &indication, REMOTE_A);
+    assert_eq!(a.remote_candidates[0].last_received(), None);
+    let mut plain = Message::new();
+    plain
+        .build(&[
+            Box::new(indication.typ),
+            Box::new(TransactionId::new()),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    deliver(&mut a, now, &plain, REMOTE_A).unwrap();
+    assert_eq!(a.remote_candidates[0].last_received(), Some(now));
 }

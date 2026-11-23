@@ -241,6 +241,7 @@ async fn test_trickle_ice_webrtc_offerer_rtc_answerer() -> Result<()> {
                     sdp_mline_index: Some(0),
                     username_fragment: None,
                     url: None,
+                    relay_protocol: None,
                 };
                 if let Err(e) = rtc_pc.add_remote_candidate(remote_candidate.clone()) {
                     log::warn!("Failed to add remote candidate: {}", e);
@@ -535,6 +536,7 @@ async fn test_trickle_ice_rtc_offerer_webrtc_answerer() -> Result<()> {
                     sdp_mline_index: Some(0),
                     username_fragment: None,
                     url: None,
+                    relay_protocol: None,
                 };
                 if let Err(e) = rtc_pc.add_remote_candidate(remote_candidate.clone()) {
                     log::warn!("Failed to add remote candidate: {}", e);
