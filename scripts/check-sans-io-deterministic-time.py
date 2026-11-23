@@ -191,6 +191,10 @@ PERMANENT: dict[str, tuple[int, str]] = {
     "src/peer_connection/certificate/mod.rs": (1, "X.509 validity window"),
     "src/peer_connection/configuration/mod.rs": (1, "X.509 expiry check, W3C constructor step 3"),
     "src/peer_connection/transport/dtls/mod.rs": (1, "X.509 validity window"),
+
+    # The C ABI (rtc-ffi) takes the caller's time as nanoseconds; `Instant` is opaque, so they
+    # are mapped onto one anchor instant read once per process (`Instant` <-> epoch category).
+    "rtc-ffi/src/clock.rs": (1, "the C ABI's anchor for the caller's nanoseconds"),
 }
 
 HEADER = """\

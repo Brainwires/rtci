@@ -60,7 +60,7 @@ jobs:
       - id: pick
         uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
-          jobs: test_macos=macos-arm64 test_windows=windows-x64
+          jobs: test_macos=macos-arm64 test_windows=windows-x64 c_header=linux-x64
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
@@ -362,6 +362,31 @@ jobs:
           echo "rtc-stun packaging failed for an unexpected reason:"
           cat package.log
           exit 1
+
+  # rtc-ffi's C header is checked in (rtc-ffi/include/rtc.h): it is regenerated from the
+  # crate's source with cbindgen (a build tool only, MPL-2.0; not a dependency of any crate)
+  # and must not differ. On our Linux pool when it has room (the runners job's pick).
+  c_header:
+    name: C header up to date (rtc-ffi)
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').c_header || 'ubuntu-latest' }}
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      !cancelled()
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - name: Install cbindgen
+        run: cargo install cbindgen --locked --version 0.29.2
+      - name: Regenerate the header and compare
+        run: |
+          cbindgen --quiet --config rtc-ffi/cbindgen.toml --crate rtc-ffi --output rtc-ffi/include/rtc.h
+          git diff --exit-code -- rtc-ffi/include/rtc.h
 
   # The workspace builds on its declared `rust-version` (the workspace manifest), every
   # feature. Dependencies resolve to versions that support that toolchain where one exists.
