@@ -584,6 +584,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the association is up, and a change of ICE selected pair switches to a fresh one.
 - **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
   association of every transport of the connection, not only the first.
+- **sctp** (sctp-15, RFC 9260 6.9, 6.2, 11.1.7; RFC 6458 3.1.4, 6.1.7, 8.1.21; RFC 8260):
+  partial delivery. New `Stream::read_part` returns a `MessagePart` (`chunks`, `unordered`,
+  `first`, `end_of_record`): a complete message whole, as one part with the end of record;
+  the in-order leading fragments of a message that has not all arrived once they reach the
+  partial delivery point (new `TransportConfig::with_partial_delivery_point`, default half
+  the receive buffer, at most the buffer), or whatever their size when the receive buffer is
+  out of space with nothing readable whole (RFC 9260 6.9: "it SHOULD dispatch part of its
+  inbound message through a partial delivery API"). One message per stream at a time, an
+  ordered one only when it is due, nothing else of the stream read until its last part;
+  several streams at once with I-DATA (RFC 8260 4.3.1). What is read leaves the receive
+  window at once. New `Stream::in_partial_delivery`. A FORWARD TSN or I-FORWARD-TSN that
+  skips the rest of a message in partial delivery raises the new
+  `StreamEvent::PartialDeliveryAborted { id, unordered, sequence }` (`StreamEvent` is
+  `#[non_exhaustive]`). `read_sctp` is unchanged: whole messages only.
+  - The RFC 9260 6.2 drop (once a_rwnd 0 is advertised, new DATA above the largest TSN is
+    dropped) is the default for every association again: an I-DATA association no longer
+    takes the chunk that unblocks reassembly through a closed window. With partial delivery
+    the drop deadlocks nothing (sctp-14's measurements, now read in parts: six interleaved
+    16 KiB messages into a 16 KiB buffer, 24 of 24 in 2.1 s, 0 of 24 for a reader of whole
+    messages; one 64 KiB message through a 16 KiB buffer, 230 ms; the zero window sweep, 672
+    runs, 0 stalls). `with_zero_window_overcommit` stays, for applications that read whole
+    messages only.
+  - A window the sender sees as too small for a full chunk (the last a_rwnd less what it
+    sent since) is announced by a SACK as soon as a read opens it (RFC 9260 6.2, "When the
+    window opens up, an SCTP receiver SHOULD send additional SACK chunks"); it was only for
+    a window advertised as 0. On the wire: extra window-update SACKs toward a sender that a
+    small receive buffer blocks; none while the sender still sees room for a chunk.
+- **peer_connection** (sctp-15, RFC 9260 6.9, RFC 8841 6.1, RFC 8831 6.6): data channels read
+  SCTP in parts and put messages together above the association, so the SCTP window reopens
+  while a message is still incomplete; the application still gets whole messages (W3C). The
+  zero window overcommit is no longer set when the advertised `max-message-size` is larger
+  than the receive buffer. A message larger than the advertised maximum is dropped as
+  before. A conforming peer has at most one message in progress per stream (RFC 8260
+  2.2.2), each at most that maximum, and the handler holds at most one per stream; over
+  that product the bytes of incomplete messages held for an association have a ceiling,
+  new `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` (64 MiB by default, never
+  below the advertised `max-message-size`; worst case per association: the receive buffer
+  plus the ceiling, 65 MiB with the defaults). A part that would go over fails only its
+  data channel (`OnError`, `data-channel-failure`, the message naming the limit) and resets
+  its stream once the rest of the message has been read and dropped. 16 and 64 concurrent
+  64 KiB messages over I-DATA all arrive under the default. The receive window a peer sees is the same as before
+  for messages that fit half the buffer; a message larger, or interleaved messages that fill
+  it, keep it open instead of closing it.
 
 ### Features
 
@@ -2570,101 +2613,6 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
 
 ### Behaviour changes
 
-- **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
-  engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
-  answer, while the mapped address may be used (the NAT binding lives as long as the
-  connection), and is closed once ICE of its transport has completed (it was closed at the
-  answer). A connection that carries the request but brings no answer within Ti is reset (RST)
-  and one new connection is opened to the same server; a connection that fails or ends before
-  its answer moves on to the server's next address at once. After an ICE restart (mt-8, per
-  transport) the new generation asks each server again, over a kept connection when there is
-  one, instead of announcing the address the previous generation learned.
-
-- **sctp** (sctp-15, RFC 9260 6.9, 6.2, 11.1.7; RFC 6458 3.1.4, 6.1.7, 8.1.21; RFC 8260):
-  partial delivery. New `Stream::read_part` returns a `MessagePart` (`chunks`, `unordered`,
-  `first`, `end_of_record`): a complete message whole, as one part with the end of record;
-  the in-order leading fragments of a message that has not all arrived once they reach the
-  partial delivery point (new `TransportConfig::with_partial_delivery_point`, default half
-  the receive buffer, at most the buffer), or whatever their size when the receive buffer is
-  out of space with nothing readable whole (RFC 9260 6.9: "it SHOULD dispatch part of its
-  inbound message through a partial delivery API"). One message per stream at a time, an
-  ordered one only when it is due, nothing else of the stream read until its last part;
-  several streams at once with I-DATA (RFC 8260 4.3.1). What is read leaves the receive
-  window at once. New `Stream::in_partial_delivery`. A FORWARD TSN or I-FORWARD-TSN that
-  skips the rest of a message in partial delivery raises the new
-  `StreamEvent::PartialDeliveryAborted { id, unordered, sequence }` (`StreamEvent` is
-  `#[non_exhaustive]`). `read_sctp` is unchanged: whole messages only.
-  - The RFC 9260 6.2 drop (once a_rwnd 0 is advertised, new DATA above the largest TSN is
-    dropped) is the default for every association again: an I-DATA association no longer
-    takes the chunk that unblocks reassembly through a closed window. With partial delivery
-    the drop deadlocks nothing (sctp-14's measurements, now read in parts: six interleaved
-    16 KiB messages into a 16 KiB buffer, 24 of 24 in 2.1 s, 0 of 24 for a reader of whole
-    messages; one 64 KiB message through a 16 KiB buffer, 230 ms; the zero window sweep, 672
-    runs, 0 stalls). `with_zero_window_overcommit` stays, for applications that read whole
-    messages only.
-  - A window the sender sees as too small for a full chunk (the last a_rwnd less what it
-    sent since) is announced by a SACK as soon as a read opens it (RFC 9260 6.2, "When the
-    window opens up, an SCTP receiver SHOULD send additional SACK chunks"); it was only for
-    a window advertised as 0. On the wire: extra window-update SACKs toward a sender that a
-    small receive buffer blocks; none while the sender still sees room for a chunk.
-- **peer_connection** (sctp-15, RFC 9260 6.9, RFC 8841 6.1, RFC 8831 6.6): data channels read
-  SCTP in parts and put messages together above the association, so the SCTP window reopens
-  while a message is still incomplete; the application still gets whole messages (W3C). The
-  zero window overcommit is no longer set when the advertised `max-message-size` is larger
-  than the receive buffer. A message larger than the advertised maximum is dropped as
-  before. A conforming peer has at most one message in progress per stream (RFC 8260
-  2.2.2), each at most that maximum, and the handler holds at most one per stream; over
-  that product the bytes of incomplete messages held for an association have a ceiling,
-  new `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` (64 MiB by default, never
-  below the advertised `max-message-size`; worst case per association: the receive buffer
-  plus the ceiling, 65 MiB with the defaults). A part that would go over fails only its
-  data channel (`OnError`, `data-channel-failure`, the message naming the limit) and resets
-  its stream once the rest of the message has been read and dropped. 16 and 64 concurrent
-  64 KiB messages over I-DATA all arrive under the default. The receive window a peer sees is the same as before
-  for messages that fit half the buffer; a message larger, or interleaved messages that fill
-  it, keep it open instead of closing it.
-- **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always
-  makes progress. With sec-12 every SACK that kept a_rwnd at 0 re-armed the one-RTO wait
-  before the next probe, also when it acknowledged the probe just sent, so a message larger
-  than the receiver's buffer (webrtc-rs/webrtc#822, `tests/sctp_receive_buffer_deadlock.rs`)
-  arrived at one fragment per RTO (64 KiB through 16 KiB: about a minute). A SACK that
-  acknowledges the outstanding zero window probe is now progress and the next probe goes at
-  once; only a probe the receiver drops waits, for T3-rtx and its doubling interval. The
-  receiver acknowledges a chunk it takes through its closed window at once instead of after
-  the SACK delay (the test's message arrives in 1.6 s, 9.4 s on master). With I-DATA the
-  probes finish a part-sent message before another is started, so several interleaved
-  messages that together fill the buffer still complete one at a time; and an association
-  that negotiated I-DATA takes the in-sequence chunk that unblocks reassembly through a closed
-  window whatever `with_zero_window_overcommit` says (RFC 8260 section 6). Without that,
-  interleaved messages that each fit the buffer but fill it together (six 16 KiB messages,
-  16 KiB buffer, weighted fair queueing) deadlocked: the RFC 9260 6.2 drop refused the chunk
-  that would complete one of them, for ever. Toward peers without I-DATA (browsers) the drop
-  is unchanged. The literal drop stays available for I-DATA associations too:
-  `TransportConfig::with_strict_zero_window_drop(true)` (new, off by default; it can deadlock
-  interleaved messages, as its documentation says). Audit: RFC9260-6.2-2 is now the
-  association without I-DATA (`tested`); the I-DATA case is the new row RFC9260-6.2-34,
-  `setting` (measured: 0 of 24 messages with the drop, 24 of 24 by default).
-- **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
-  waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
-  expiry count and the path error count, so probes the receiver keeps answering never end the
-  association.
-- **sctp** (sec-12, RFC 9260 6.2.1 B, C): chunks marked for retransmission (T3-rtx, Fast
-  Retransmit) give their size back to the peer's rwnd, and every retransmission takes it
-  again; T3-rtx retransmissions are limited by cwnd and by rwnd separately.
-- **dtls** (sec-12, RFC 9147 8): after a key update the epoch before stays readable until a
-  record of the next arrives, so a late record of it is processed (it was dropped once a
-  record under the new keys had been read).
-- **dtls** (sec-12, RFC 8446 4.4.2.4): a DTLS 1.3 endpoint that validates the peer's chain
-  refuses a certificate signed with SHA-1 (bad_certificate). Fingerprint authentication
-  (WebRTC) validates no certificate signature and is not affected.
-- **dtls** (sec-12, RFC 8446 C.2): a signature from an RSA key above 8192 bits is refused.
-- **dtls** (sec-12, RFC 8446 7.1): the DTLS 1.3 handshake traffic secrets are erased once
-  both Finished are done; the key schedule keeps no copy of the application traffic secrets.
-- **peer_connection** (sec-12, RFC 9147 9, 11): `SettingEngineBuilder::with_dtls_connection_id`
-  sets the DTLS connection id length; with connection ids in use a spare id is requested once
-  the association is up, and a change of ICE selected pair switches to a fresh one.
-- **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
-  association of every transport of the connection, not only the first.
 - **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
   engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
   answer, while the mapped address may be used (the NAT binding lives as long as the

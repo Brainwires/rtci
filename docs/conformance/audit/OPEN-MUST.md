@@ -9,43 +9,23 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5080.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5060 of 5080 (99.6 %).
-- Tested as the default (`tested`): 5028 of 5080 (99.0 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Tested as the default (`tested`): 5029 of 5080 (99.0 %); `setting`: 24; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 20: 2 untested, 13 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 25 | 17 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 24 | 17 |
 | B | implemented, lacking a test that fails without it | 0 | 0 |
 | C | partly implemented | 9 | 4 |
 | D | not implemented | 7 | 6 |
 | E | cannot be met or observed inside this engine | 11 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 52 | 35 |
+| all | | 51 | 35 |
 
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 16 rows, 3 of size S, 7 of size M, 6 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
-- MUST rows: 5746; `n/a` (the clause does not bind this engine): 665; rows that
-  apply: 5081.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5030 of 5081 (99.0 %).
-- Tested as the default (`tested`): 5005 of 5081 (98.5 %); `setting`: 18; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 51: 4 untested, 32 partial, 15 missing, 0 violated.
-
-| Class | Meaning | Rows | of them owned by a running agent |
-|---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 18 | 16 |
-| B | implemented, lacking a test that fails without it | 2 | 2 |
-| C | partly implemented | 29 | 16 |
-| D | not implemented | 14 | 11 |
-| E | cannot be met or observed inside this engine | 12 | 9 |
-| F | stale note: already tested on this tree | 1 | 1 |
-| all | | 76 | 55 |
-
-## What 100 % takes
-
-- Work in code and tests (classes B, C, D, F): 46 rows, 21 of size S, 17 of size M, 8 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 2 rows.
 - Never testable inside this engine (class E, reason stated): 3 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
@@ -63,12 +43,6 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (running) | 0 | 3 | 5 | 1 | 0 | 9 | 2 | 2 | 5 |
-| dtls-srtp | 0 | 5 | 1 | 2 | 0 | 8 | 2 | 6 | 0 |
-| ice | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
-| jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
-| media (running) | 2 | 12 | 10 | 2 | 1 | 27 | 15 | 7 | 5 |
-| media (train 9) | 0 | 4 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
-| sctp | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 1 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 | tcp (running) | 0 | 1 | 1 | 0 | 0 | 2 | 0 | 2 | 0 |
 
@@ -101,7 +75,6 @@ Sorted by class, then owner, size and ID.
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | setting | A | `setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
-| RFC9260-6.2-34 | `rfc9260.md` | With a_rwnd 0, new DATA above the highest TSN received is dropped ... | setting | A | `setting` (measured, sctp-14): `TransportConfig::with_strict_zero_window_drop(true)`, RFC test with its mutation; with I-DATA the drop deadlocks interleaved messages that fill the buffer together (0 of 24 against 24 of 24). Closes as tested only with a partial delivery API (RFC9260-6.9-12), under which the drop would not deadlock | S | sctp |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
 | RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
@@ -110,33 +83,6 @@ Sorted by class, then owner, size and ID.
 | RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form (s over the last 4 * G frames) is a setting (`CircuitBreakerPacketSize::LastFrames`), not the default: s over the CB_INTERVAL window the rate is measured over, because the literal form ceased a talking call at 1 to 5 % loss (measured, cb-2 sweep); no interop failure. Owner decision on the default | S | media (running) |
 | RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | partial | C | Tdr from the RFC 3550 6.2 algorithm instead of the report spacing | M | media (running) |
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | partial | C | Stays partial (audit-5): report blocks on the co-located SSRCs are not sent even with `with_report_from_every_ssrc(true)`, and the default (blocks once, browser behaviour) has no failing cell or measurement. Add the co-located blocks and make the setting the default, or measure | M | media (running) |
-| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
-| RFC7874-3-10 | `rfc7874.md` | Generated DTMF events last no more than 8000 ms and no less than 40 ... | missing | B | Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing | S | media (running) |
-| RFC7874-3-13 | `rfc7874.md` | The endpoint can generate and consume events 0 to 15 (digits, *, #, ... | missing | B | Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes) | S | media (running) |
-| RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | partial | C | Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4) | M | dtls-srtp |
-| RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | The engine has no sockets: on a new association, refuse to reuse the old local candidates (or ask the application for new ones) by default | M | dtls-srtp |
-| RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | As RFC8842-5.1-1, for the offer | M | dtls-srtp |
-| RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | As RFC8842-5.1-1, for the answer | M | dtls-srtp |
-| RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
-| WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
-| RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
-| RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
-| RFC5109-14.2-2 | `rfc5109.md` | An rtpmap gives the FEC a dynamic payload type listed as a secondary ... | partial | C | Check that the RED fmtp lists the ULPFEC payload type | S | media (running) |
-| RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | PDON starts at the DON before the earliest one, not 0 (kept on purpose); owner decision or a test that the RFC start orders a stream numbered from 0 | S | media (running) |
-| RFC6464-4-1 | `rfc6464.md` | Declared in extmap with URI ... | untested | C | Register `ssrc-audio-level` by default so a browser's offer is answered with it | S | media (running) |
-| RFC6464-4-2 | `rfc6464.md` | Signalled with vad=on, the V bit is in use and set by senders | missing | C | Note stale in part: senders set the V bit (`rfc6464_element`, `tests/header_extensions_rtc2rtc.rs`) and the peer's `vad` is read (`the_peers_vad_attribute_is_in_the_negotiated_parameters`); check that the engine states `vad=on` in its own extmap and re-verdict | S | media (running) |
-| RFC6679-6.1.3-1 | `rfc6679.md` | The attribute is not used for RTP over TCP, SCTP, DCCP or non-RTP ... | missing | C | Clear the ECN codepoint when the selected pair is ICE-TCP; needs an ICE-TCP media test | S | media (running) |
-| RFC7742-4-2 | `rfc7742.md` | CVO is sent for all orientations when the peer indicates support | partial | C | Register `urn:3gpp:video-orientation` by default | S | media (running) |
-| RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form (s over the last 4 * G frames) is a setting (`CircuitBreakerPacketSize::LastFrames`), not the default: s over the CB_INTERVAL window the rate is measured over, because the literal form ceased a talking call at 1 to 5 % loss (measured, cb-2 sweep); no interop failure. Owner decision on the default | S | media (running) |
-| RFC8108-6.1-2 | `rfc8108.md` | A new stream after a stopped one, or one that changes media type or ... | partial | C | A new SSRC on a clock-rate change | S | media (running) |
-| RFC5109-14-1 | `rfc5109.md` | The multiplexing configuration (separate stream or redundant ... | partial | C | Send side: derive the carriage (RED or separate stream) from the negotiated description instead of the application's choice | M | media (running) |
-| RFC7742-4-1 | `rfc7742.md` | An endpoint that can produce other orientations supports generating ... | partial | C | Attach CVO to the packets of a sender from the track's orientation | M | media (running) |
-| RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | partial | C | Tdr from the RFC 3550 6.2 algorithm instead of the report spacing | M | media (running) |
-| RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | partial | C | Stays partial (audit-5): report blocks on the co-located SSRCs are not sent even with `with_report_from_every_ssrc(true)`, and the default (blocks once, browser behaviour) has no failing cell or measurement. Add the co-located blocks and make the setting the default, or measure | M | media (running) |
-| RFC7160-4.1-1 | `rfc7160.md` | A sender with RTCP on uses a different SSRC for each clock rate | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
-| RFC7160-4.1-2 | `rfc7160.md` | Send BYE and take a new SSRC when the clock rate switches back to one ... | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
-| RFC7160-4.1-3 | `rfc7160.md` | Next compound RTCP carries several SRs: current clock rate first, ... | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
-| RFC8834-4.3-6 | `rfc8834.md` | Sender changing between clock rates follows RFC 7160 4.1 | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-9.2-1 | `rfc6544.md` | Close the selected pair's connection after an ICE restart | untested | C | After an ICE restart, tell the application to close the old selected TCP connection (driver event) | M | tcp (running) |
 | RFC5109-14.1-2 | `rfc5109.md` | SSRC of a separate FEC stream equals the protected stream's SSRC | partial | D | As RFC5109-7.2-2 | L | media (running) |
@@ -156,13 +102,11 @@ Sorted by class, then owner, size and ID.
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | conflict | E | `conflict`: umbrella of 5.3.1-6 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
-| RFC2198-5-4 | `rfc2198.md` | A receiver that lists RED is prepared to receive the listed encodings ... | partial | E | RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream | S | media (running) |
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |
 
 ## Closed since classified
 
-36 rows: 10 of class B, 10 of class C, 3 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
-35 rows: 10 of class B, 13 of class C, 5 of class E, 7 of class F. The note of each row says how it was closed.
+37 rows: 10 of class B, 11 of class C, 3 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
