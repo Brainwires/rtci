@@ -296,7 +296,10 @@ impl RTCPeerConnection {
             dtls_handler_context,
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            srtp_handler_context: SrtpHandlerContext::default(),
+            srtp_handler_context: SrtpHandlerContext {
+                strict_rtcp_validity: setting_engine.strict_rtcp_validity,
+                ..Default::default()
+            },
             interceptor_handler_context: InterceptorHandlerContext::default(),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
@@ -1670,6 +1673,7 @@ impl RTCPeerConnection {
                 .collect()
         };
 
+        self.pipeline_context.srtp_handler_context.rtcp_reduced_size = reduced_size;
         let mut controls = vec![
             RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
             RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),

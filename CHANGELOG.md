@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: every peer connection runs the RTCP session (RFC 8834 section 4.1:
+  RTCP "MUST be implemented and used by all WebRTC endpoints"). `RTCPeerConnectionBuilder::build`
+  installs the session of `configure_rtcp_reports` when the interceptor registry has nothing at
+  `Slot::RtcpSession` and no `SenderReportInterceptor` / `ReceiverReportInterceptor`: a
+  connection built with an empty or hand-built registry now sends SR / RR / SDES and BYE.
+  `SettingEngineBuilder::with_rtcp_session_omitted(true)` leaves it out (a named departure
+  from the RFC). New `Registry::holds`.
 - **media conformance**: FEC and congestion control signalling.
   - A FlexFEC answer (`video/flexfec`, `video/flexfec-03`) states this endpoint's registered
     fmtp; it repeated the offer's line, unknown options included (RFC 8627 section 5.2.1).
@@ -1459,6 +1466,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: `SettingEngineBuilder::with_strict_rtcp_validity(true)` holds
+  received RTCP to RFC 3550 Appendix A.2 and section 6.4.1 (SR or RR first unless reduced-size
+  RTCP was negotiated, no padding bit on the first packet, padding only on the last); the
+  default keeps accepting libwebrtc's padding on a packet in the middle of a compound packet.
+  New `rtcp::compound_packet::validate_compound_headers`.
 - **media conformance**: `rtp::codec::tone` (`Tone`, `ToneSender`): the `audio/tone` payload
   of RFC 4733 section 4 and its sending rule.
 - **media conformance**: RFC 3611 report blocks, RFC 5104 trade-off and back channel,

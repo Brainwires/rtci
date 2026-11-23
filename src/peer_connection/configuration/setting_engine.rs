@@ -463,6 +463,12 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The connection runs without the RTCP session the builder otherwise installs
+    /// ([`SettingEngineBuilder::with_rtcp_session_omitted`]); a departure from RFC 8834 4.1.
+    pub(crate) rtcp_session_omitted: bool,
+    /// Received RTCP is held to RFC 3550 Appendix A.2 and section 6.4.1
+    /// ([`SettingEngineBuilder::with_strict_rtcp_validity`]).
+    pub(crate) strict_rtcp_validity: bool,
 }
 
 impl SettingEngine {
@@ -2076,6 +2082,37 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Builds the connection without an RTCP session: a departure from RFC 8834 section 4.1
+    /// ("RTCP ... MUST be implemented and used by all WebRTC endpoints").
+    ///
+    /// Every peer connection sends RTCP: when the interceptor registry given to
+    /// [`RTCPeerConnectionBuilder::with_interceptor_registry`](crate::peer_connection::RTCPeerConnectionBuilder::with_interceptor_registry)
+    /// has nothing at [`Slot::RtcpSession`](interceptor::Slot::RtcpSession) and no
+    /// `SenderReportInterceptor` / `ReceiverReportInterceptor` of its own,
+    /// [`RTCPeerConnectionBuilder::build`](crate::peer_connection::RTCPeerConnectionBuilder::build)
+    /// installs the session of
+    /// [`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports)
+    /// (an empty registry included). With this on it does not, and a registry without an RTCP
+    /// session sends only the RTCP the application writes. Off by default.
+    pub fn with_rtcp_session_omitted(mut self, omitted: bool) -> Self {
+        self.0.rtcp_session_omitted = omitted;
+        self
+    }
+
+    /// Holds received RTCP to the validity checks of RFC 3550 Appendix A.2 and section 6.4.1:
+    /// a datagram whose first packet is not an SR or RR (unless reduced-size RTCP, RFC 5506,
+    /// was negotiated), whose first packet has its padding bit set, or with padding on a
+    /// packet that is not the last, is discarded whole.
+    ///
+    /// Off by default: libwebrtc sends padding on a packet in the middle of a compound packet
+    /// (its transport-wide congestion control feedback, padded to a multiple of four), so the
+    /// default accepts any datagram whose version and lengths hold, and processes every packet
+    /// in it that parses (RFC 8834 section 4.1).
+    pub fn with_strict_rtcp_validity(mut self, strict: bool) -> Self {
+        self.0.strict_rtcp_validity = strict;
         self
     }
 

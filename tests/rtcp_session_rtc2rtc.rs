@@ -11,6 +11,7 @@ use rtc::peer_connection::configuration::interceptor_registry::register_default_
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
+use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::event::RTCTrackEvent;
 use rtc::peer_connection::message::RTCMessage;
@@ -70,6 +71,43 @@ impl Peer {
     /// A peer with VP8 and RTX in the default interceptor set; with `fec`, FlexFEC
     /// (`flexfec-03`) too, its encoder and decoder in the chain.
     fn new(addr: &str, fec: bool) -> Result<Self> {
+        let mut media_engine = Self::media_engine(fec)?;
+        let mut registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        if fec {
+            // A fixed amount of repair: by default it follows the receiver's reported loss
+            // (draft-03 section 8), and on a lossless path the first receiver report can stop
+            // it before the first block is closed, so that the FEC SSRC never sends at all.
+            registry = registry
+                .with(
+                    Slot::FecEncoder,
+                    FlexFec03SendBuilder::new()
+                        .with_adaptive_rate(false)
+                        .build(),
+                )
+                .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build());
+        }
+        Self::built(
+            addr,
+            media_engine,
+            registry,
+            SettingEngineBuilder::new().build(),
+        )
+    }
+
+    /// A peer with VP8 and RTX and an empty interceptor registry; with `omit_session`, the
+    /// setting that leaves the RTCP session out.
+    fn bare(addr: &str, omit_session: bool) -> Result<Self> {
+        Self::built(
+            addr,
+            Self::media_engine(false)?,
+            Registry::new(),
+            SettingEngineBuilder::new()
+                .with_rtcp_session_omitted(omit_session)
+                .build(),
+        )
+    }
+
+    fn media_engine(fec: bool) -> Result<MediaEngine> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
             RTCRtpCodecParameters {
@@ -101,23 +139,19 @@ impl Peer {
                 RtpCodecKind::Video,
             )?;
         }
-        let mut registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
-        if fec {
-            // A fixed amount of repair: by default it follows the receiver's reported loss
-            // (draft-03 section 8), and on a lossless path the first receiver report can stop
-            // it before the first block is closed, so that the FEC SSRC never sends at all.
-            registry = registry
-                .with(
-                    Slot::FecEncoder,
-                    FlexFec03SendBuilder::new()
-                        .with_adaptive_rate(false)
-                        .build(),
-                )
-                .with(Slot::FecDecoder, FlexFec03ReceiveBuilder::new().build());
-        }
+        Ok(media_engine)
+    }
+
+    fn built(
+        addr: &str,
+        media_engine: MediaEngine,
+        registry: Registry,
+        setting_engine: SettingEngine,
+    ) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
+            .with_setting_engine(setting_engine)
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
         Ok(Self {
@@ -300,11 +334,16 @@ impl World {
 
     /// [`connected`](Self::connected), with FlexFEC negotiated when `fec`.
     fn connected_with(fec: bool) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_peers([
+            Peer::new("10.0.0.1:5000", fec)?,
+            Peer::new("10.0.0.2:5000", fec)?,
+        ])
+    }
+
+    /// [`connected`](Self::connected), between `peers` (offerer first).
+    fn connected_peers(peers: [Peer; 2]) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [
-                Peer::new("10.0.0.1:5000", fec)?,
-                Peer::new("10.0.0.2:5000", fec)?,
-            ],
+            peers,
             now: Instant::now(),
             drop_once: None,
             fec_ssrc: None,
@@ -583,6 +622,48 @@ fn rtcp_is_a_few_packets_a_second() -> Result<()> {
             peer.rtcp_datagrams
         );
     }
+    Ok(())
+}
+
+/// RFC 8834 4.1: "RTCP ... MUST be implemented and used by all WebRTC endpoints". Two
+/// connections built with an empty interceptor registry still run the RTCP session: each
+/// side sends its reports, and the sender's reach the receiver as SR for the media SSRC.
+#[test]
+fn a_connection_with_an_empty_interceptor_registry_still_sends_rtcp() -> Result<()> {
+    let (mut world, sender) = World::connected_peers([
+        Peer::bare("10.0.0.1:5000", false)?,
+        Peer::bare("10.0.0.2:5000", false)?,
+    ])?;
+    for peer in world.peers.iter_mut() {
+        peer.rtcp_datagrams = 0;
+    }
+    world.send_media(sender, FIRST_SEQ, 250)?;
+    for (name, peer) in ["sender", "receiver"].iter().zip(&world.peers) {
+        assert!(
+            peer.rtcp_datagrams >= 3,
+            "the {name} sent {} RTCP datagrams in five seconds",
+            peer.rtcp_datagrams
+        );
+    }
+    Ok(())
+}
+
+/// The departure from RFC 8834 4.1 the application can ask for: with
+/// `with_rtcp_session_omitted`, a connection whose registry has no RTCP session sends none.
+#[test]
+fn the_rtcp_session_left_out_by_setting_sends_no_rtcp() -> Result<()> {
+    let (mut world, sender) = World::connected_peers([
+        Peer::bare("10.0.0.1:5000", true)?,
+        Peer::bare("10.0.0.2:5000", true)?,
+    ])?;
+    for peer in world.peers.iter_mut() {
+        peer.rtcp_datagrams = 0;
+    }
+    world.send_media(sender, FIRST_SEQ, 250)?;
+    assert_eq!(
+        [0, 0],
+        [world.peers[0].rtcp_datagrams, world.peers[1].rtcp_datagrams]
+    );
     Ok(())
 }
 
