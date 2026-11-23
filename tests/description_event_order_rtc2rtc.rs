@@ -181,6 +181,71 @@ fn sendrecv() -> Option<RTCRtpTransceiverInit> {
     })
 }
 
+/// Both peers for `duration` of virtual time.
+fn run_for(
+    offerer: &mut Peer,
+    answerer: &mut Peer,
+    mut now: Instant,
+    duration: Duration,
+) -> Result<Instant> {
+    let until = now + duration;
+    while now < until {
+        let written = offerer.turn()?;
+        answerer.deliver(offerer.addr, written, now);
+        let written = answerer.turn()?;
+        offerer.deliver(answerer.addr, written, now);
+        if offerer.inbox.is_empty() && answerer.inbox.is_empty() {
+            now += Duration::from_millis(5);
+            offerer.pc.handle_timeout(now)?;
+            answerer.pc.handle_timeout(now)?;
+        }
+    }
+    Ok(now)
+}
+
+/// Writes one Opus packet on the transceiver's sender.
+fn write_audio(
+    peer: &mut Peer,
+    transceiver: rtc::rtp_transceiver::RTCRtpTransceiverId,
+    seq: u16,
+    now: Instant,
+) -> Result<()> {
+    let sender = peer
+        .pc
+        .rtp_transceiver(transceiver)
+        .and_then(|t| t.sender())
+        .expect("sender");
+    let mut sender = peer.pc.rtp_sender(sender).expect("sender");
+    let parameters = sender.get_parameters();
+    let ssrc = parameters.encodings[0]
+        .rtp_coding_parameters
+        .ssrc
+        .expect("an SSRC");
+    let payload_type = parameters
+        .rtp_parameters
+        .codecs
+        .iter()
+        .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
+        .expect("opus")
+        .payload_type;
+    sender.write_rtp(
+        now,
+        rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                version: 2,
+                payload_type,
+                sequence_number: seq,
+                timestamp: u32::from(seq) * 960,
+                ssrc,
+                marker: true,
+                ..Default::default()
+            },
+            payload: bytes::Bytes::from(vec![0x10u8; 60]),
+        },
+    )?;
+    Ok(())
+}
+
 /// Runs both peers until `done` holds or the deadline passes. Returns the virtual time.
 fn run(
     offerer: &mut Peer,
@@ -254,7 +319,6 @@ fn channels_without_an_id_fail_after_the_signaling_state_change_and_before_the_t
             "close:late one",
             "error:late two",
             "close:late two",
-            "streams",
             "track",
         ]
     );
@@ -314,6 +378,19 @@ fn the_channels_of_a_rejected_data_section_close_after_the_descriptions_own_even
             && b.pc.connection_state() == RTCPeerConnectionState::Connected
     })?;
     assert_eq!((opened(&a), opened(&b)), (2, 2), "both channels are open");
+    // The answerer's audio arrives: the offerer's remote track is live and not muted.
+    let mut now = now;
+    for seq in 1..=3u16 {
+        write_audio(&mut b, b_audio, seq, now)?;
+        now = run_for(&mut a, &mut b, now, Duration::from_millis(20))?;
+    }
+    let unmuted = a.events.iter().any(|e| {
+        matches!(
+            e,
+            RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnUnmute(_))
+        )
+    });
+    assert!(unmuted, "the remote track unmuted with its first packet");
 
     // A third channel is being opened (its DCEP OPEN is not acknowledged: no datagram moves
     // from here on) when the data section is rejected; the answerer stops sending audio.
