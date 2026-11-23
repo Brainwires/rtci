@@ -10,10 +10,10 @@ is a procedure step without a keyword.
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
 | MUST | 4893 | 32 | 145 | 24 | 1 | 650 | 5745 |
-| SHOULD | 832 | 18 | 66 | 47 | 5 | 326 | 1294 |
+| SHOULD | 834 | 18 | 64 | 47 | 5 | 326 | 1294 |
 | MAY | 441 | 21 | 35 | 108 | 0 | 171 | 776 |
 | PROC | 61 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6227 | 73 | 249 | 180 | 6 | 1147 | 7882 |
+| all | 6229 | 73 | 247 | 180 | 6 | 1147 | 7882 |
 
 ## Per file
 
@@ -69,7 +69,7 @@ is a procedure step without a keyword.
 | `rfc4585.md` | SHOULD | 6 | 0 | 1 | 0 | 0 | 5 | 12 |
 | `rfc4585.md` | MAY | 11 | 1 | 1 | 2 | 0 | 0 | 15 |
 | `rfc4588.md` | MUST | 26 | 0 | 0 | 0 | 0 | 12 | 38 |
-| `rfc4588.md` | SHOULD | 6 | 0 | 4 | 1 | 0 | 2 | 13 |
+| `rfc4588.md` | SHOULD | 8 | 0 | 2 | 1 | 0 | 2 | 13 |
 | `rfc4588.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `rfc4733.md` | MUST | 23 | 0 | 0 | 0 | 0 | 3 | 26 |
 | `rfc4733.md` | SHOULD | 8 | 0 | 0 | 3 | 0 | 6 | 17 |

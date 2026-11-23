@@ -109,11 +109,13 @@ pub enum RetransmissionRateLimit {
     /// default reserve) they take at most the target.
     #[default]
     WithinTarget,
-    /// libwebrtc's rule (`RateLimiter` on the retransmissions, its maximum the target): the
-    /// retransmissions alone stay under the target, whatever the original packets take. A
-    /// sender whose encoder sits at or above the target (at the congestion controller's
-    /// floor, or with a codec's minimum rate) still repairs at up to the target. The target
-    /// reported for the original media is not lowered: the sum may reach twice the target.
+    /// A rate limiter on the retransmissions alone, its maximum the target (the form of
+    /// libwebrtc's `RtpSender` when it is given a `retransmission_rate_limiter`,
+    /// `modules/rtp_rtcp/source/rtp_sender.cc`): the retransmissions stay under the target
+    /// whatever the original packets take, and the target reported for the original media is
+    /// not lowered, so the sum may reach twice the target. A setting (the `Chrome` and
+    /// `Performance` profiles); measured in `tests/capacity_cap_video_rtc2rtc.rs` against the
+    /// default: longest freeze 1.31 to 1.43 s against 1.33 to 1.44 s.
     UpToTarget,
     /// No limit beyond the per-stream budget (one retransmission per original packet sent): the
     /// fork's behaviour before. Retransmissions are then not congestion controlled.

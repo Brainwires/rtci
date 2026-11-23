@@ -982,13 +982,21 @@ fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, Outcom
     Ok(outcomes)
 }
 
-/// Never more than 2 s without a usable frame on the receiving side, on every seed.
+/// Never more than 2 s without a usable frame on the receiving side, and the retransmissions
+/// congestion controlled (RFC 4588 section 7): at most 100 sent through the cap, on every seed
+/// (the rules held to the target sent 61 to 70, 11 to 13 of them dropped at the link's queue;
+/// without a limit 274 to 370 were sent and three in four dropped).
 fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
     for (seed, outcome) in outcomes {
         assert!(
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
+        );
+        assert!(
+            outcome.rtx_sent <= 100,
+            "seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
         );
     }
 }

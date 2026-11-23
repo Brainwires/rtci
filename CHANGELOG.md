@@ -23,14 +23,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NACK_SUGGESTED_*` (they are not the defaults).
 - **interceptors**: the NACK responder holds its retransmissions to the congestion controller's
   target (RFC 4588 section 7), read from `Attribute::TargetBitrateChanged` on the read leg:
-  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default, `UpToTarget`
-  (libwebrtc's rule), keeps the retransmissions alone under the target over the last second;
-  `WithinTarget` is the RFC's form (they take what the original packets leave of it);
-  `Unlimited` is the earlier behaviour. Without a congestion controller nothing is held back.
-  Measured by `tests/capacity_cap_video_rtc2rtc.rs`: unlimited, about 300 retransmissions (five
-  times the link) of which three in four were dropped at the bottleneck; `UpToTarget`, 66 of which
-  12; the RFC form, too few to repair with while the encoder sat at the controller's floor (a
-  2.7 to 3.1 s freeze).
+  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default is the RFC's
+  form, both halves of section 7 (`conf/gcc-2-rfc-retransmission`): `WithinTarget`, the
+  retransmissions take what the original packets leave of the target over the last second, and
+  while they wait or were sent within it the target reported for the original media is lowered
+  by a retransmission reserve (what the waiting requests need within a round trip, or the
+  retransmission rate in use, at most half the target: `with_max_reserve_fraction`,
+  `MAX_RETRANSMISSION_RESERVE`). The lowered target reaches the application as the
+  `TargetBitrateChanged` the responder passes on (lowered in place, or on a carrier of its own
+  when only the reserve moved) and through `GccHandle::target_bitrate_bps`; the estimate itself
+  is `GccHandle::estimate_bps`. A request that does not fit now waits, oldest first, and leaves
+  when the window has room (the responder's `poll_timeout` is that instant), while the receiver
+  keeps asking for it (`PENDING_REQUEST_LIFETIME`). Near the controller's floor (the target less
+  the reserve under the controller's minimum, which GCC now announces with `MinimumTarget`) the
+  retransmissions take the window's room first. `UpToTarget` (a rate limiter on the
+  retransmissions alone at the target, not lowering the original media) and `Unlimited` (the
+  earlier behaviour) are settings. Without a congestion controller nothing is held back.
+  Measured by `tests/capacity_cap_video_rtc2rtc.rs` (300 kbit/s cap, six seeds), longest
+  freeze: the default 1.33 to 1.44 s with 65 to 70 retransmissions of which 11 to 13 dropped at
+  the link; `UpToTarget` 1.31 to 1.43 s (61 to 65, 11 to 12 dropped); unlimited 1.04 to 1.58 s
+  (274 to 370, three in four dropped); the RFC sharing without the lowered target 2.7 to 3.1 s,
+  and with the floor rule only at the exact minimum 3.7 to 4.8 s. API: `GccShared` gained
+  `estimate_bps` and `retransmission_reserve_bps` (its `target_bitrate_bps` is now the lowered
+  target); new `RetransmissionReserve`, `MinimumTarget`, `NackResponderInterceptor::next_release`.
+  A request the per-stream budget (one retransmission per original sent) refuses is still not
+  kept.
 
 ## [0.22.0+brainwires.6] - 2026-11-23
 
