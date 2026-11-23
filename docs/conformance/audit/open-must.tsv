@@ -43,7 +43,7 @@ RFC6464-4-2	C	S	media (running)	Note stale in part: senders set the V bit (`rfc6
 RFC6464-4-6	D	S	media (running)	Track `vad` per extension ID; needs RFC6464-4-2
 RFC6465-4-5	D	M	media (running)	Fill `getContributingSources().audioLevel` from the CSRC audio level extension
 RFC6544-4.1-9	B	S	ice	A pacing test with TCP pairs (one scheduler paces both)
-RFC6544-6.1-3	D	M	tcp (running)	Lite-to-lite parallel connection (RFC6544-6.1-1 first)
+RFC6544-6.1-3	D	M	ice	Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does
 RFC6544-7-1	B	S	ice	A test that TCP and UDP pairs share one checklist in priority order
 RFC6544-9.2-1	C	M	tcp (running)	After an ICE restart, tell the application to close the old selected TCP connection (driver event)
 RFC6679-6.1.3-1	C	S	media (running)	Clear the ECN codepoint when the selected pair is ICE-TCP; needs an ICE-TCP media test

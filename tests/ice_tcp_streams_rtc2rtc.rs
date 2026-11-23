@@ -225,10 +225,18 @@ fn an_ice_restart_does_not_close_the_selected_tcp_connection() -> Result<()> {
         .conns
         .iter()
         .filter(|c| c.open)
-        .flat_map(|c| [Some((c.a.peer, c.a.id)), c.b.as_ref().map(|b| (b.peer, b.id))])
+        .flat_map(|c| {
+            [
+                Some((c.a.peer, c.a.id)),
+                c.b.as_ref().map(|b| (b.peer, b.id)),
+            ]
+        })
         .flatten()
         .collect();
-    assert!(!selected.is_empty(), "a TCP connection carries the selected pair");
+    assert!(
+        !selected.is_empty(),
+        "a TCP connection carries the selected pair"
+    );
     let ufrags: Vec<String> = peers
         .iter()
         .map(|p| p.pc.local_description().map(|d| d.sdp).unwrap_or_default())

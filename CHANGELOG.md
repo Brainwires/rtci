@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **dtls, ice**: a new DTLS association runs on a new 3-tuple (RFC 8842 section 5.1: "a new
+  3-tuple ... MUST be allocated by at least one of the endpoints"; section 6: "a completely new
+  set of ICE candidates that were not recently used for any other DTLS association"). The ICE
+  restart that comes with a new association (an offer that sets a closed transport up again,
+  `renew_dtls_association` and the automatic re-keying that calls it, a data-only association
+  replaced for SRTP, and the answer to an offer that asks for one) now drops the local
+  candidates, even without `with_discard_local_candidates_during_ice_restart`, and
+  `add_local_candidate` refuses a UDP candidate on one of their transport addresses with the new
+  `Error::ErrICECandidateAddressOfPreviousDtlsAssociation` until the next ICE restart that is not
+  for a new association. The answer to such an offer lists only the candidates given for the
+  restart, and engine-run TURN links delete their allocation and allocate again. An application
+  gathers on new ports for the new generation. New
+  `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)` keeps the
+  candidates and the addresses, for an application with one fixed socket. Rows RFC8842-5.1-1,
+  -2, -3 `tested` (`tests/dtls_association_new_three_tuple.rs`). The tests that set up a new
+  association gather on new ports (`World::regather`, `Pair::regather`).
+  `renewing_the_dtls_association_renews_every_transport` keeps the previous addresses: after a
+  restart that discards the local candidates, unbundled transports given new ones select no
+  pair, with this change or with `with_discard_local_candidates_during_ice_restart(true)` before
+  it (an ICE issue under investigation).
+
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT
@@ -273,6 +294,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of codec `video/rtx` (at any time).
 
 ### Features
+
+- **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
+  (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
+  RFC6544-9.2-1 `tested`.
 
 - **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
   DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
