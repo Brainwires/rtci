@@ -168,6 +168,16 @@ impl<'a> InterceptorHandler<'a> {
         now: Instant,
     ) {
         self.stats.on_rtcp_received(rtcp_packets, now);
+        // RFC 6679 sections 7.2.1 and 7.4.2: what the ECN validations detected goes to the
+        // application, as well as to the log, "to enable follow up".
+        for (ssrc, failure) in self.stats.take_ecn_failures() {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnEcnFailure { ssrc, failure },
+                ),
+            });
+        }
     }
 
     /// Process outgoing RTCP packets and update stats (see `RTCStatsAccumulator::on_rtcp_sent`).

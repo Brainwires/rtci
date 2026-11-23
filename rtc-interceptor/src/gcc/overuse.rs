@@ -1,6 +1,6 @@
 //! Deciding whether the delay trend means the path is congested.
 
-use super::threshold::AdaptiveThreshold;
+use super::threshold::{AdaptiveThreshold, ThresholdTimeBase};
 use std::time::{Duration, Instant};
 
 /// What the delay signal currently says about the path.
@@ -43,6 +43,9 @@ pub struct OveruseDetector {
     /// The previous estimate, to tell a growing queue from one that has stopped growing.
     previous_estimate_ms: f64,
     usage: Usage,
+    time_base: ThresholdTimeBase,
+    /// The arrival time of the previous reading's group, for [`ThresholdTimeBase::Arrival`].
+    last_arrival: Option<Duration>,
 }
 
 impl Default for OveruseDetector {
@@ -54,6 +57,8 @@ impl Default for OveruseDetector {
             consecutive: 0,
             previous_estimate_ms: 0.0,
             usage: Usage::Normal,
+            time_base: ThresholdTimeBase::default(),
+            last_arrival: None,
         }
     }
 }
@@ -62,6 +67,36 @@ impl OveruseDetector {
     /// A detector with the draft's tuning.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The time step the threshold adapts over ([`ThresholdTimeBase`]).
+    pub fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
+        self.time_base = time_base;
+        self
+    }
+
+    /// As [`update`](Self::update), with the arrival time of the reading's group on the
+    /// receiver's clock, which [`ThresholdTimeBase::Arrival`] adapts the threshold over.
+    pub fn update_with_arrival(
+        &mut self,
+        now: Instant,
+        arrival: Duration,
+        estimate_ms: f64,
+    ) -> Usage {
+        let usage = self.classify(now, estimate_ms);
+        match self.time_base {
+            ThresholdTimeBase::Departure => {
+                self.threshold.update(now, estimate_ms);
+            }
+            ThresholdTimeBase::Arrival => {
+                if let Some(last) = self.last_arrival {
+                    self.threshold
+                        .update_over(arrival.saturating_sub(last), estimate_ms);
+                }
+                self.last_arrival = Some(arrival);
+            }
+        }
+        usage
     }
 
     /// What the detector currently believes.
@@ -78,6 +113,15 @@ impl OveruseDetector {
     ///
     /// `estimate_ms` is the kalman-filtered delay gradient; `now` is when it was measured.
     pub fn update(&mut self, now: Instant, estimate_ms: f64) -> Usage {
+        self.classify(now, estimate_ms);
+        // The threshold follows the trend, so a persistently jittery path stops reading as
+        // persistently congested. Updated after the comparison, so a reading is judged against the
+        // threshold that was in force when it was taken.
+        self.threshold.update(now, estimate_ms);
+        self.usage
+    }
+
+    fn classify(&mut self, now: Instant, estimate_ms: f64) -> Usage {
         let threshold_ms = self.threshold.value_ms();
 
         self.usage = if estimate_ms > threshold_ms {
@@ -106,11 +150,6 @@ impl OveruseDetector {
         };
 
         self.previous_estimate_ms = estimate_ms;
-        // The threshold follows the trend, so a persistently jittery path stops reading as
-        // persistently congested. Updated after the comparison, so a reading is judged against the
-        // threshold that was in force when it was taken.
-        self.threshold.update(now, estimate_ms);
-
         self.usage
     }
 }

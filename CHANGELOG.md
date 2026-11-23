@@ -335,6 +335,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local stream is under the one SRTP master key); it was accepted.
 - **ice**: with the "relay" ICE transport policy a relayed candidate is signalled with raddr
   0.0.0.0 rport 9 (RFC 8827 section 6.4).
+- **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
+  (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
+  struct literal outside the crate must name it.
 - **media conformance**: with ECN on (`SettingEngineBuilder::with_ecn`) RTP packets are marked
   ECT(0), not ECT(1), unless the receiver's `a=ecn-capable-rtp` asks for ECT(1) with `ect=1` (or
   `ect=random`): RFC 6679 section 7.3.1, "SHOULD use ECT(0)". The L4S form (ECT(1) always, what
@@ -2667,6 +2670,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured RTO.Max.
 
 
+- **media conformance**: receiver and sender rows (media phase five).
+  - `rtp::codec::h265::H265MultiStreamDepacketizer`: the receiver of an HEVC bitstream carried
+    in several RTP streams, on one transport (MRST) or several (MRMT), RFC 7798 section 4.3
+    ("Receivers MUST support all of SRST, MRST, and MRMT"). With decoding order numbers the
+    NAL units of every stream share one de-packetization buffer and leave by AbsDon (section
+    4.6, derived along each stream; conditions A and B of section 6); without them they leave
+    in NTP timestamp order, dependee streams first. Duplicates and outdated packets are
+    removed. The streams and their dependency order are the application's to give (RFC 5583
+    `a=depend`, not parsed yet).
+  - `RTCPeerConnectionEvent::OnEcnFailure { ssrc, failure }` and
+    `interceptor::EcnFailure`: what an outbound stream's ECN validation detected (a failed
+    initiation, ECT packets lost after it) reaches the application as well as the log (RFC
+    6679 sections 7.2.1 and 7.4.2, "to enable follow up"). `EcnValidation::take_failures`.
+  - RFC 6679 section 7.2.3: under the leap-of-faith initiation, two receiver reports in a row
+    without reception of the stream end the marking (`EcnFailure::NoReception`); one is not
+    enough, since a receiver may report before any packet reached it.
+    `EcnValidation::on_report_without_reception`, `on_reception_reported`.
+  - RFC 6679 section 5.2: an XR ECN Summary Report that would take the compound packet over
+    the MTU reports a subset of the senders, the next ones in turn each time.
+  - `interceptor::ThresholdTimeBase`, `Gcc::with_threshold_time_base`: the adaptive
+    threshold of draft-ietf-rmcat-gcc-02 section 5.4 adapts over the groups' arrival times as
+    the draft writes it (`Arrival`), or over their departure gaps capped at 100 ms
+    (`Departure`, libwebrtc's, the default: the draft's form measured a third more queueing
+    delay on the multi-flow scenarios). `OveruseDetector::update_with_arrival`,
+    `AdaptiveThreshold::update_over`; `InterGroupDelay` and `DelayTrend` carry the group's
+    arrival time (`arrival`), a new public field.
+  - `rtp::codec::telephone_event::packed_telephone_event_packets` (`PackedEventPacket`):
+    consecutive events in one packet, RFC 4733 section 2.5.1.5 (timestamp of the first event,
+    M set, each event's own E bit and duration).
+
+- **media conformance**: engine rows.
+  - A packet whose sequence number its stream delivered within the last 1024 is not
+    delivered to the application again (RFC 7587 section 4.1: "at most one copy"): an RTX or
+    NACK retransmission of a packet that arrived after all, or its original arriving after
+    it. It still passes the interceptor chain, so congestion feedback sees the arrival.
+  - `payload_types_reused_across_sections` (crate-internal, for the SDP layer): the payload
+    types two sections of one BUNDLE group use for different formats (RFC 8834 section 4.3).
 
 
 - **media conformance**: an RTCP session, transport-wide numbering, congestion controller and
@@ -3754,6 +3794,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **interceptor**: inbound RTCP that no interceptor annotated reached the application as an
+  empty carrier once the chain held a `PerRtpSession` wrapper. The wrapper tags what each
+  session's instance hands on with its `RtpSession`, and the terminus (`NoopInterceptor`)
+  took any attribute as a reason to pass the packet on. The session tag is routing, not an
+  annotation: a report carrying only that ends at the terminus again (a carrier that has a
+  real annotation keeps its tag). Test: `a_report_tagged_only_with_its_rtp_session_still_stops_here`,
+  `tests/congestion_control_boundary.rs::an_unannotated_report_still_stops_at_the_terminus`.
 - **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
   a later packet of it (the segment began at the first packet to arrive and the earlier ones
   were released as consumed); NAL units now come out in sequence-number order from the start

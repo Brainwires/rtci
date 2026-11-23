@@ -178,6 +178,63 @@ impl EcnInitiation {
     }
 }
 
+/// An ECN failure a stream's validation detected (RFC 6679 sections 7.2.1 and 7.4.2: detected
+/// failures and erroneous behaviour "should" be logged "to enable follow up"). Each is logged
+/// and kept for the application ([`EcnValidation::take_failures`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EcnFailure {
+    /// Initiation failed: an ECT probe was reported arriving Not-ECT.
+    ProbeArrivedNotEct,
+    /// Initiation failed: no ECT probe arrived.
+    NoProbeArrived,
+    /// Initiation failed: the path clears the ECN field.
+    FieldCleared,
+    /// Initiation failed: the receiver's counters counted the ECT probes as Not-ECT.
+    ProbesCountedNotEct,
+    /// Initiation failed: a receiver reported more than three probes in a reception report
+    /// without an ECN report (section 7.2.1).
+    NoEcnReport,
+    /// Leap of faith failed: two receiver reports in a row showed no reception of the stream
+    /// (section 7.2.3).
+    NoReception,
+    /// After initiation, ECT packets were lost where Not-ECT ones were not (section 7.4.2):
+    /// the stream falls back and initiates again, or, `disabled`, ECN stays off for it.
+    EctLost {
+        /// Whether ECN is now off for the stream.
+        disabled: bool,
+    },
+}
+
+impl EcnFailure {
+    /// Whether this ends an initiation (section 7.2.1), as against a failure after one.
+    pub fn is_initiation_failure(&self) -> bool {
+        !matches!(self, EcnFailure::EctLost { .. })
+    }
+}
+
+impl std::fmt::Display for EcnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            EcnFailure::ProbeArrivedNotEct => "an ECT probe arrived Not-ECT",
+            EcnFailure::NoProbeArrived => "no ECT probe arrived",
+            EcnFailure::FieldCleared => "the path clears the ECN field",
+            EcnFailure::ProbesCountedNotEct => "ECT probes were counted Not-ECT",
+            EcnFailure::NoEcnReport => {
+                "a receiver reported more than three probes without an ECN report"
+            }
+            EcnFailure::NoReception => "two receiver reports in a row showed no reception",
+            EcnFailure::EctLost { disabled: true } => {
+                "ECT packets were lost again; ECN off for the stream"
+            }
+            EcnFailure::EctLost { disabled: false } => "ECT packets were lost; initiating again",
+        })
+    }
+}
+
+/// At most this many failures are kept for the application.
+const MAX_KEPT_FAILURES: usize = 16;
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Sent {
     sequence_number: u16,
@@ -220,6 +277,12 @@ pub struct EcnValidation {
     provisional_until: Option<Instant>,
     /// The RTCP CNAME of the receiver whose reports confirmed the probes.
     receiver_cname: Option<String>,
+    /// Failures detected and not taken yet.
+    failures: Vec<EcnFailure>,
+    /// Marking from the first packet without probes (section 7.2.3), until reception is seen.
+    leap_of_faith: bool,
+    /// Receiver reports in a row that showed no reception of the stream.
+    reports_without_reception: u32,
 }
 
 impl Default for EcnValidation {
@@ -249,6 +312,9 @@ impl EcnValidation {
             initiated_at: None,
             provisional_until: None,
             receiver_cname: None,
+            failures: Vec::new(),
+            leap_of_faith: initiation == EcnInitiation::LeapOfFaith,
+            reports_without_reception: 0,
         }
     }
 
@@ -341,11 +407,11 @@ impl EcnValidation {
                     self.probes_confirmed += 1;
                 } else {
                     // A negative indication: the path cleared the ECN field.
-                    self.fail(now, "an ECT probe arrived Not-ECT");
+                    self.fail(now, EcnFailure::ProbeArrivedNotEct);
                     return;
                 }
                 if self.probes_confirmed == 0 && self.probes_lost >= PROBES_LOST_TO_FAIL {
-                    self.fail(now, "no ECT probe arrived");
+                    self.fail(now, EcnFailure::NoProbeArrived);
                 } else if self.probes_confirmed >= CONFIRMATIONS {
                     self.provisional_success(now);
                 }
@@ -353,7 +419,7 @@ impl EcnValidation {
             EcnState::Active if marked => {
                 self.count(undo_loss, received, !ecn_capable);
                 if self.window.bleached * 4 > WINDOW {
-                    self.fail(now, "the path clears the ECN field");
+                    self.fail(now, EcnFailure::FieldCleared);
                 } else if self.window.lost * 2 >= WINDOW {
                     log::debug!("ECN: high loss of ECT packets; sending Not-ECT to compare");
                     self.state = EcnState::Fallback;
@@ -370,10 +436,10 @@ impl EcnValidation {
                         // The loss went with the marking.
                         self.fallbacks += 1;
                         if self.fallbacks >= FALLBACKS_TO_DISABLE {
-                            log::warn!("ECN: ECT packets were lost again; ECN off for the stream");
+                            self.record(EcnFailure::EctLost { disabled: true });
                             self.state = EcnState::Disabled;
                         } else {
-                            log::warn!("ECN: ECT packets were lost; initiating again");
+                            self.record(EcnFailure::EctLost { disabled: false });
                             self.initiate();
                         }
                     } else {
@@ -444,7 +510,7 @@ impl EcnValidation {
         match self.state {
             EcnState::Initiating => {
                 if bleached > 0 && marked > 0 {
-                    self.fail(now, "ECT probes were counted Not-ECT");
+                    self.fail(now, EcnFailure::ProbesCountedNotEct);
                     return;
                 }
                 self.probes_confirmed += ect.min(u64::from(u32::MAX)) as u32;
@@ -452,7 +518,7 @@ impl EcnValidation {
                     self.probes_lost += marked as u32;
                 }
                 if self.probes_confirmed == 0 && self.probes_lost >= PROBES_LOST_TO_FAIL {
-                    self.fail(now, "no ECT probe arrived");
+                    self.fail(now, EcnFailure::NoProbeArrived);
                 } else if self.probes_confirmed >= CONFIRMATIONS && bleached == 0 {
                     self.provisional_success(now);
                 }
@@ -462,7 +528,7 @@ impl EcnValidation {
                 self.window.lost += lost.min(marked) as u32;
                 self.window.bleached += bleached.min(marked) as u32;
                 if self.window.bleached * 4 > WINDOW {
-                    self.fail(now, "the path clears the ECN field");
+                    self.fail(now, EcnFailure::FieldCleared);
                 } else if self.window.lost * 2 >= WINDOW {
                     log::debug!("ECN: high loss of ECT packets; sending Not-ECT to compare");
                     self.state = EcnState::Fallback;
@@ -479,10 +545,10 @@ impl EcnValidation {
                     if self.window.lost * 4 < WINDOW && self.window.lost * 2 < self.fallback_from {
                         self.fallbacks += 1;
                         if self.fallbacks >= FALLBACKS_TO_DISABLE {
-                            log::warn!("ECN: ECT packets were lost again; ECN off for the stream");
+                            self.record(EcnFailure::EctLost { disabled: true });
                             self.state = EcnState::Disabled;
                         } else {
-                            log::warn!("ECN: ECT packets were lost; initiating again");
+                            self.record(EcnFailure::EctLost { disabled: false });
                             self.initiate();
                         }
                     } else {
@@ -580,11 +646,36 @@ impl EcnValidation {
             })
             .count();
         if due > 3 {
-            self.fail(
-                now,
-                "a receiver reported more than three probes without an ECN report",
-            );
+            self.fail(now, EcnFailure::NoEcnReport);
         }
+    }
+
+    /// RFC 6679 section 7.2.3, leap of faith: a receiver report (SR or RR) arrived that has no
+    /// report block about the stream, or one showing that nothing was received. A path with an
+    /// ECN-blocking middlebox shows that way; but "a receiver might generate its first RTCP
+    /// packet ... before it has had chance to receive any data packets", so "a sender that
+    /// receives an RTCP SR/RR packet indicating lack of reception by a receiver SHOULD ...
+    /// wait for a second RTCP report from that receiver": the second such report in a row
+    /// ends the marking. Nothing changes once reception was reported, outside the leap of
+    /// faith, or before a marked packet was sent.
+    pub fn on_report_without_reception(&mut self, now: Instant) {
+        if !self.leap_of_faith
+            || self.state != EcnState::Active
+            || !self.history.iter().any(|sent| sent.known && sent.marked)
+        {
+            return;
+        }
+        self.reports_without_reception += 1;
+        if self.reports_without_reception >= 2 {
+            self.leap_of_faith = false;
+            self.fail(now, EcnFailure::NoReception);
+        }
+    }
+
+    /// A receiver report showed reception of the stream: the path carries its ECT packets.
+    pub fn on_reception_reported(&mut self) {
+        self.reports_without_reception = 0;
+        self.leap_of_faith = false;
     }
 
     /// A validation that knows the receiver by its RTCP CNAME already (named before the
@@ -610,9 +701,27 @@ impl EcnValidation {
         self.window = Window::default();
     }
 
-    fn fail(&mut self, now: Instant, why: &str) {
-        // RFC 6679 section 7.2.1: "they should log these to enable follow up".
-        log::warn!("ECN: {why}; packets go out Not-ECT");
+    /// RFC 6679 sections 7.2.1 and 7.4.2: a detected failure is logged ("they should log these
+    /// to enable follow up") and kept for the application.
+    fn record(&mut self, failure: EcnFailure) {
+        if failure.is_initiation_failure() {
+            log::warn!("ECN: {failure}; packets go out Not-ECT");
+        } else {
+            log::warn!("ECN: {failure}");
+        }
+        if self.failures.len() == MAX_KEPT_FAILURES {
+            self.failures.remove(0);
+        }
+        self.failures.push(failure);
+    }
+
+    /// The failures detected since the last call, oldest first (at most sixteen are kept).
+    pub fn take_failures(&mut self) -> Vec<EcnFailure> {
+        std::mem::take(&mut self.failures)
+    }
+
+    fn fail(&mut self, now: Instant, failure: EcnFailure) {
+        self.record(failure);
         self.state = EcnState::Failed {
             retry_at: now + self.retry_after,
         };
@@ -964,6 +1073,49 @@ mod tests {
         assert!(send(&mut v, &mut at, 64, 50).is_empty());
     }
 
+    /// RFC 6679 section 7.2.3: under the leap of faith, a receiver report showing no reception
+    /// is not enough (the receiver may have reported before any packet reached it); the second
+    /// in a row ends the marking. A report showing reception in between starts the count over,
+    /// and once reception was shown the path is taken as carrying ECT.
+    #[test]
+    fn leap_of_faith_waits_for_a_second_report_without_reception() {
+        let mut v = EcnValidation::new(EcnInitiation::LeapOfFaith);
+        let mut at = Instant::now();
+        // Nothing sent yet: a report says nothing.
+        v.on_report_without_reception(at);
+        v.on_report_without_reception(at);
+        assert_eq!(v.state(), EcnState::Active);
+        assert_eq!(send(&mut v, &mut at, 0, 10).len(), 10);
+        v.on_report_without_reception(at);
+        assert_eq!(v.state(), EcnState::Active, "one report is not enough");
+        v.on_report_without_reception(at);
+        assert!(
+            matches!(v.state(), EcnState::Failed { .. }),
+            "{:?}",
+            v.state()
+        );
+        assert_eq!(v.take_failures(), vec![EcnFailure::NoReception]);
+        assert!(
+            send(&mut v, &mut at, 10, 10).is_empty(),
+            "Not-ECT after the failure"
+        );
+
+        let mut v = EcnValidation::new(EcnInitiation::LeapOfFaith);
+        send(&mut v, &mut at, 0, 10);
+        v.on_report_without_reception(at);
+        v.on_reception_reported();
+        v.on_report_without_reception(at);
+        v.on_report_without_reception(at);
+        assert_eq!(v.state(), EcnState::Active, "reception was reported");
+
+        // The probing initiation does not use the rule.
+        let mut v = EcnValidation::new(EcnInitiation::RtpAndRtcp);
+        send(&mut v, &mut at, 0, 40);
+        v.on_report_without_reception(at);
+        v.on_report_without_reception(at);
+        assert!(v.take_failures().is_empty());
+    }
+
     #[test]
     fn loss_that_goes_with_the_marking_initiates_again_then_disables() {
         let mut v = EcnValidation::new(EcnInitiation::LeapOfFaith);
@@ -996,6 +1148,13 @@ mod tests {
             send(&mut v, &mut at, seq, 40).is_empty(),
             "disabled for good"
         );
+        // RFC 6679 section 7.4.2: the erroneous behaviour detected is kept for follow-up, each
+        // fallback and the final one.
+        let mut expected =
+            vec![EcnFailure::EctLost { disabled: false }; FALLBACKS_TO_DISABLE as usize - 1];
+        expected.push(EcnFailure::EctLost { disabled: true });
+        assert_eq!(v.take_failures(), expected);
+        assert!(v.take_failures().is_empty(), "taken once");
     }
 
     #[test]
