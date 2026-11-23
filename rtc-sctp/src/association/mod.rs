@@ -547,6 +547,9 @@ pub struct Association {
     acknowledging_by_shutdown: bool,
     /// The a_rwnd of the last SACK sent (of the INIT or INIT ACK before any).
     last_advertised_window: u32,
+    /// User data taken since the last SACK: the sender counts it against
+    /// `last_advertised_window` until a SACK says otherwise.
+    received_since_sack: u32,
     /// SACK.Delay (RFC 9260 6.2, 16), in milliseconds.
     sack_delay: u64,
 
@@ -732,6 +735,7 @@ impl Default for Association {
             reneged_in_last_sack: vec![],
             acknowledging_by_shutdown: false,
             last_advertised_window: 0,
+            received_since_sack: 0,
             sack_delay: ACK_INTERVAL,
 
             // Chunks stored for retransmission
@@ -843,6 +847,7 @@ impl Association {
             slow_start_growth_limit: config.slow_start_growth_limit(),
             max_burst: config.max_burst(),
             last_advertised_window: config.max_receive_buffer_size(),
+            received_since_sack: 0,
             sack_delay: config.sack_delay().as_millis() as u64,
             remote_addr,
             local_addr,
@@ -3648,6 +3653,9 @@ impl Association {
         }
 
         if stream_handle_data {
+            self.received_since_sack = self
+                .received_since_sack
+                .saturating_add(u32::try_from(d.user_data.len()).unwrap_or(u32::MAX));
             if self.holds_for_reset(d) {
                 // RFC 6525 5.2.2 E2: this DATA belongs to its stream as it will be after a
                 // reset that is not performed yet. Its TSN is acknowledged; it is delivered
@@ -5901,6 +5909,7 @@ impl Association {
         let mut duplicate_tsn = self.payload_queue.pop_duplicates();
         duplicate_tsn.truncate(room - gap_ack_blocks.len());
         self.last_advertised_window = self.advertised_window();
+        self.received_since_sack = 0;
         ChunkSelectiveAck {
             cumulative_tsn_ack: self.peer_last_tsn,
             advertised_receiver_window_credit: self.last_advertised_window,
@@ -5918,12 +5927,24 @@ impl Association {
         if free < threshold { 0 } else { free }
     }
 
-    /// The application took data from the receive buffer. RFC 9260 6.2: when the window that
-    /// was advertised as closed has reopened, a SACK says so at once. Without it the sender,
-    /// stopped by a_rwnd 0, learns of the space only from its next window probe, a
-    /// retransmission timeout later (and that timeout doubles).
+    /// The application took data from the receive buffer. RFC 9260 6.2: "When the window
+    /// opens up, an SCTP receiver SHOULD send additional SACK chunks to update the window even
+    /// if no new data is received." A window the sender sees as too small for a full chunk
+    /// (advertised as closed, or used up by what it sent since the last SACK) that has opened
+    /// again is announced by a SACK at once. Without it the sender, stopped by a_rwnd 0,
+    /// learns of the space only from its next window probe, a retransmission timeout later
+    /// (and that timeout doubles); and one whose window a single chunk used up waits for the
+    /// delayed SACK. A sender that still sees room for a full chunk gets no extra SACK.
     pub(crate) fn on_receive_buffer_drained(&mut self) {
-        if self.last_advertised_window == 0
+        // The window as the sender sees it: what the last SACK advertised, less what it has
+        // sent since. Too small for a full chunk, the sender waits for a SACK (RFC 9260 6.1
+        // A); a delayed one held each chunk of a receiver with a small buffer that reads in
+        // parts for the SACK delay, though its window was open again at once.
+        let threshold = (self.max_receive_buffer_size / 2).min(self.pmdcs);
+        let sender_view = self
+            .last_advertised_window
+            .saturating_sub(self.received_since_sack);
+        if sender_view < threshold
             && self.advertised_window() > 0
             && matches!(
                 self.state(),

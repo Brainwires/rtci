@@ -689,3 +689,35 @@ fn sweep(sizes: &[usize]) {
         failures.join("\n")
     );
 }
+
+/// RFC 9260 6.2, "When the window opens up, an SCTP receiver SHOULD send additional SACK
+/// chunks to update the window even if no new data is received": a receiver with a
+/// 1500-byte buffer that reads in parts takes each chunk out at once, but the sender, with
+/// one chunk outstanding, sees no room for the next (RFC 9260 6.1 A) until a SACK says
+/// otherwise. That SACK goes as soon as the chunk is read, so a 64 KiB message takes about
+/// a round trip (20 ms) per chunk; held for the SACK delay (200 ms) it took over 12 s.
+#[test]
+fn a_small_buffer_read_in_parts_announces_its_window_as_soon_as_it_is_read() -> Result<()> {
+    const SIZE: usize = 64 * 1024;
+    let mut link = Link::new(
+        sender(SIZE as u32, false),
+        receiver(1500, SIZE as u32, false),
+        9,
+    );
+    link.connect();
+    let start = link.now;
+    let ppi = PayloadProtocolIdentifier::Binary;
+    let payload = message(3, SIZE);
+    link.client
+        .conn()
+        .open_stream(1, ppi)?
+        .write_sctp(start, &payload, ppi)?;
+    let delivered = link.run_until(start + Duration::from_secs(120), |l| {
+        !l.server.received.is_empty()
+    });
+    let took = link.now - start;
+    assert!(delivered);
+    assert_eq!(link.server.received[0].1, payload);
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    Ok(())
+}
