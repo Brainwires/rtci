@@ -399,3 +399,36 @@ fn each_association_exports_its_own_srtp_master_keys() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 8261 section 5: DTLS takes a message larger than the path MTU: an application record
+/// is not cut to the MTU (SCTP over it sizes its packets itself), and arrives whole, in DTLS
+/// 1.2 and 1.3.
+#[test]
+fn a_message_larger_than_the_mtu_is_sent_whole() -> Result<()> {
+    for version in [DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_3] {
+        let mut pair = Pair::new(
+            client_builder()
+                .with_protocol_versions(version, version)
+                .with_mtu(1200),
+            server_builder()
+                .with_protocol_versions(version, version)
+                .with_mtu(1200),
+        )?
+        .complete();
+        let message = vec![0x3c; 3000];
+        pair.client.write(pair.now, server_addr(), &message)?;
+        let sent = take(&mut pair.client);
+        assert!(
+            sent.iter().any(|datagram| datagram.len() > 1200),
+            "{version:?}"
+        );
+        pair.to_server.clear();
+        pair.deliver_to_server(sent);
+        assert_eq!(
+            crate::dtls13::handshake_test::application_data(&pair.to_server),
+            vec![message],
+            "{version:?}"
+        );
+    }
+    Ok(())
+}

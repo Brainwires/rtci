@@ -2209,6 +2209,9 @@ mod stream_reconfig_test;
 #[path = "untested_rows_test.rs"]
 mod untested_rows_test;
 
+#[path = "rfc9260_rows_test.rs"]
+mod rfc9260_rows_test;
+
 #[path = "reconfig_test.rs"]
 mod reconfig_test;
 

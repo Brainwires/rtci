@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **sctp**: `TransportConfig::with_max_receive_buffer_size` raises a value below 1500 to 1500,
+  and `with_max_num_outbound_streams` / `with_max_num_inbound_streams` raise 0 to 1 (RFC 9260
+  3.3.2, 3.3.3: an INIT or INIT ACK may carry neither).
 - **srtp**: the default DTLS-SRTP profiles no longer include `SRTP_AES128_CM_HMAC_SHA1_32`
   (RFC 3711 sections 5.2 and 9.5: the 32-bit tag only where the application knows its
   conditions hold); `SettingEngineBuilder::with_srtp_protection_profiles` offers it.
@@ -1070,6 +1073,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp**: association restart (RFC 9260 5.2.4 action A, with the Tie-Tags of 5.2.1 and
+  5.2.2). A peer that lost its state and starts over between the same ports takes the
+  association over: the INIT ACK of its unexpected INIT carries a cookie for a new
+  association (sealed when cookies are authenticated, kept otherwise), and its COOKIE ECHO
+  restarts the association with new tags and TSNs, no streams and congestion control from its
+  initial values; new `Event::Restarted`. Not in SHUTDOWN-ACK-SENT (SHUTDOWN ACK and ERROR
+  "Cookie Received While Shutting Down"). The peer connection does not act on the event yet.
+- **sctp**: renege handling (RFC 9260 6.2.1 D iii, 6.3.2 R4): a gap-acknowledged payload is
+  kept until the Cumulative TSN Ack covers it (it was dropped at the gap acknowledgement), and
+  a SACK that no longer acknowledges it makes it outstanding again with a miss indication and
+  T3-rtx; a SHUTDOWN is no renege.
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound

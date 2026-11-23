@@ -8,6 +8,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The smallest a_rwnd an INIT or INIT ACK may carry (RFC 9260 3.3.2, 3.3.3).
+pub(crate) const MIN_ADVERTISED_RECEIVER_WINDOW: u32 = 1500;
+
 /// MTU for inbound packet (from DTLS)
 pub(crate) const RECEIVE_MTU: usize = 8192;
 /// Initial MTU for outgoing packets (to DTLS): bounds the assembled SCTP
@@ -278,9 +281,10 @@ impl TransportConfig {
     }
 
     /// Sets the advertised receive window (a_rwnd), bounding how much unacknowledged data a peer
-    /// may have in flight toward this endpoint.
+    /// may have in flight toward this endpoint. At least 1500: RFC 9260 3.3.2 and 3.3.3 forbid
+    /// a smaller a_rwnd in the INIT and INIT ACK, so a smaller value is raised to it.
     pub fn with_max_receive_buffer_size(mut self, value: u32) -> Self {
-        self.max_receive_buffer_size = value;
+        self.max_receive_buffer_size = value.max(MIN_ADVERTISED_RECEIVER_WINDOW);
         self
     }
 
@@ -301,15 +305,17 @@ impl TransportConfig {
         self
     }
 
-    /// Sets how many outbound streams to request during the handshake.
+    /// Sets how many outbound streams to request during the handshake. At least 1: RFC 9260
+    /// 3.3.2 and 3.3.3 forbid 0 in the INIT and INIT ACK.
     pub fn with_max_num_outbound_streams(mut self, value: u16) -> Self {
-        self.max_num_outbound_streams = value;
+        self.max_num_outbound_streams = value.max(1);
         self
     }
 
-    /// Sets how many inbound streams this endpoint will accept.
+    /// Sets how many inbound streams this endpoint will accept. At least 1, as for the
+    /// outbound streams.
     pub fn with_max_num_inbound_streams(mut self, value: u16) -> Self {
-        self.max_num_inbound_streams = value;
+        self.max_num_inbound_streams = value.max(1);
         self
     }
 
