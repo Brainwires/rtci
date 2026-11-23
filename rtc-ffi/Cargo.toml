@@ -9,8 +9,8 @@ license.workspace = true
 repository.workspace = true
 keywords = ["webrtc", "ffi", "sans-io"]
 categories = ["network-programming", "api-bindings"]
-# Not published: crate names on crates.io are the owner's decision (docs/packaging.md), and the
-# driven layer depends on the unpublished reference driver.
+# Not published to crates.io: a C library, delivered as built binaries and a header
+# (docs/packaging.md), not as a Rust dependency.
 publish = false
 
 [lib]

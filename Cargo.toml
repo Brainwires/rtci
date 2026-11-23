@@ -229,8 +229,9 @@ rand.workspace = true
 sansio.workspace = true
 shared.workspace = true
 # The interop peer's `pipeline` scenario sends and decodes audio with the audio pipeline (a
-# dev-dependency cycle cargo allows: rtc-audio depends on this crate's library).
-rtc-audio = { version = "0.22.0", path = "rtc-audio" }
+# dev-dependency cycle cargo allows: rtc-audio depends on this crate's library). Path only, so
+# `cargo publish` drops it: rtc-audio is published after this crate, which it depends on.
+rtc-audio = { path = "rtc-audio" }
 ice.workspace = true
 signal.workspace = true
 stream-driver.workspace = true

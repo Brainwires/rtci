@@ -6,11 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Sans-I/O audio pipeline for RTC: Opus, G.711, G.722, an adaptive jitter buffer with concealment and time-stretching, and audio processing"
 license.workspace = true
-documentation = "https://docs.rs/rtc-audio"
 repository.workspace = true
 keywords = ["webrtc", "audio", "opus", "jitter-buffer", "sans-io"]
 categories = ["multimedia::audio", "network-programming"]
 readme = "README.md"
+
+# The default features only: `libopus` builds C with CMake.
+[package.metadata.docs.rs]
+features = ["opus", "engine"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
 # none. `libopus` builds the reference C codec (bundled source, CMake) and is opt-in.
