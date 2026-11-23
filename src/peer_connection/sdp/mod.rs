@@ -1331,11 +1331,15 @@ impl RTCPeerConnection {
                     ccfb = true;
                     continue;
                 }
+                // XR formats are `a=rtcp-xr` (below), never `a=rtcp-fb` lines.
+                if feedback.typ == RTCP_FB_XR {
+                    continue;
+                }
                 // Receiver reference times: `a=rtcp-xr`, below; an `a=rtcp-fb ... rrtr` line
                 // only where the offer had one.
                 if feedback.typ == interceptor::RTCP_FB_RRTR {
                     rrtr = true;
-                    if feedback.parameter == RRTR_FROM_RTCP_XR {
+                    if is_rcvr_rtt(&feedback.parameter) {
                         continue;
                     }
                 }
@@ -2358,6 +2362,19 @@ impl RTCPeerConnection {
                     into_legacy_data_section(desc);
                 } else {
                     desc.media_name.protos.clone_from(protos);
+                    // An RTP section offered with a profile without feedback (`RTP/SAVP`, not
+                    // `.../SAVPF`) is answered without it: no `a=rtcp-fb` (RFC 4585 section
+                    // 4.1: the feedback attributes are for the AVPF profiles) and no reduced
+                    // size RTCP (RFC 5506 section 4: reduced-size RTCP "MUST only be used"
+                    // with AVPF / SAVPF). The answer says what the session then negotiates.
+                    if !m.data
+                        && !protos.iter().any(|p| {
+                            p.eq_ignore_ascii_case("AVPF") || p.eq_ignore_ascii_case("SAVPF")
+                        })
+                    {
+                        desc.attributes
+                            .retain(|a| a.key != ATTR_KEY_RTCP_FB && a.key != ATTR_KEY_RTCPRSIZE);
+                    }
                 }
             }
 
@@ -2842,8 +2859,12 @@ pub(crate) const ATTR_KEY_RTCP_XR: &str = "rtcp-xr";
 /// The `xr-format` of `a=rtcp-xr` that asks for receiver reference times and DLRR responses
 /// (RFC 3611 section 5.1, `rcvr-rtt=<mode>`).
 const XR_FORMAT_RCVR_RTT: &str = "rcvr-rtt";
+/// The stream feedback type of an `a=rtcp-xr` format other than `rcvr-rtt` (RFC 3611 section
+/// 5.1); its parameter is the `xr-format` in full.
+pub const RTCP_FB_XR: &str = "xr";
 /// The feedback parameter that marks `rrtr` as coming from `a=rtcp-xr:rcvr-rtt` rather
-/// than from an `a=rtcp-fb` line (libwebrtc's name for the same thing).
+/// than from an `a=rtcp-fb` line (libwebrtc's name for the same thing): the `xr-format` in
+/// full, `rcvr-rtt=<mode>[:<max size>]`, which starts with this.
 pub(crate) const RRTR_FROM_RTCP_XR: &str = "rcvr-rtt";
 
 /// Whether an `xr-format` is `rcvr-rtt` (with its mode and maximum size).
@@ -3968,9 +3989,12 @@ pub(crate) fn codecs_from_media_description(
     // no such blocks (section 5.1: "it SHOULD NOT send XR blocks other than those listed"),
     // whatever its `a=rtcp-fb` lines say.
     let rtcp_xr = media_rtcp_xr(m);
+    // The `rcvr-rtt` format in full (`rcvr-rtt=<mode>[:<max size>]`): the mode and the
+    // maximum block size reach the interceptor as the parameter of the `rrtr` entry (RFC 3611
+    // section 5.1: DLRR blocks within the signalled maximum).
     let xr_rrtr = rtcp_xr
         .as_ref()
-        .map(|formats| formats.iter().any(|f| is_rcvr_rtt(f)));
+        .map(|formats| formats.iter().find(|f| is_rcvr_rtt(f)).cloned());
 
     let mut out = vec![];
     // A payload type listed more than once on the m= line describes one codec: keep its first
@@ -4026,13 +4050,25 @@ pub(crate) fn codecs_from_media_description(
                 feedback.push(entry.clone());
             }
         }
-        match xr_rrtr {
-            Some(true) => feedback.push(RTCPFeedback {
+        match &xr_rrtr {
+            Some(Some(format)) => feedback.push(RTCPFeedback {
                 typ: interceptor::RTCP_FB_RRTR.to_owned(),
-                parameter: RRTR_FROM_RTCP_XR.to_owned(),
+                parameter: format.clone(),
             }),
-            Some(false) => feedback.retain(|f| f.typ != interceptor::RTCP_FB_RRTR),
+            Some(None) => feedback.retain(|f| f.typ != interceptor::RTCP_FB_RRTR),
             None => {}
+        }
+        // The other `xr-format`s of `a=rtcp-xr` (RFC 3611 section 5.1: `pkt-loss-rle`,
+        // `stat-summary`, `voip-metrics`, ...): an `xr` entry each, the format in full as the
+        // parameter, which the XR generator of the interceptor chain is driven by.
+        for format in rtcp_xr.iter().flatten().filter(|f| !is_rcvr_rtt(f)) {
+            let entry = RTCPFeedback {
+                typ: RTCP_FB_XR.to_owned(),
+                parameter: format.clone(),
+            };
+            if !feedback.contains(&entry) {
+                feedback.push(entry);
+            }
         }
 
         out.push(RTCRtpCodecParameters {
@@ -4096,6 +4132,58 @@ fn codecs_from_media_description_reads_static_and_skips_undefined_payload_types(
     assert_eq!(codecs[1].rtp_codec.mime_type, "audio/G722");
     assert_eq!(codecs[2].rtp_codec.mime_type, "audio/PCMU");
     assert_eq!(codecs[2].rtp_codec.clock_rate, 8000);
+}
+
+/// RFC 3611 section 5.1: `rcvr-rtt=<mode>[:<max size>]` reaches the stream's feedback in
+/// full, as the parameter of its `rrtr` entry, so that the XR generator can keep its DLRR
+/// blocks within the maximum size.
+#[test]
+fn the_rcvr_rtt_format_is_passed_on_in_full() {
+    for format in ["rcvr-rtt=all:1024", "rcvr-rtt=sender", "rcvr-rtt=all"] {
+        let mut m = MediaDescription::default()
+            .with_value_attribute("rtpmap".to_owned(), "96 VP8/90000".to_owned())
+            .with_value_attribute(ATTR_KEY_RTCP_XR.to_owned(), format.to_owned());
+        m.media_name.media = "video".to_owned();
+        m.media_name.formats = vec!["96".to_owned()];
+        let codecs = codecs_from_media_description(&m).unwrap();
+        let rrtr: Vec<&str> = codecs[0]
+            .rtp_codec
+            .rtcp_feedback
+            .iter()
+            .filter(|f| f.typ == interceptor::RTCP_FB_RRTR)
+            .map(|f| f.parameter.as_str())
+            .collect();
+        assert_eq!(rrtr, [format]);
+    }
+}
+
+/// RFC 3611 section 5.1: the unilateral `xr-format`s of `a=rtcp-xr` become `xr` entries of
+/// the stream's feedback, each with its format in full, beside `rrtr` for `rcvr-rtt`.
+#[test]
+fn unilateral_xr_formats_become_xr_feedback_entries() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "96 VP8/90000".to_owned())
+        .with_value_attribute(
+            ATTR_KEY_RTCP_XR.to_owned(),
+            "pkt-loss-rle=1024 rcvr-rtt=all stat-summary=loss,jitt".to_owned(),
+        );
+    m.media_name.media = "video".to_owned();
+    m.media_name.formats = vec!["96".to_owned()];
+    let codecs = codecs_from_media_description(&m).unwrap();
+    let entries: Vec<(&str, &str)> = codecs[0]
+        .rtp_codec
+        .rtcp_feedback
+        .iter()
+        .map(|f| (f.typ.as_str(), f.parameter.as_str()))
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (interceptor::RTCP_FB_RRTR, "rcvr-rtt=all"),
+            (RTCP_FB_XR, "pkt-loss-rle=1024"),
+            (RTCP_FB_XR, "stat-summary=loss,jitt"),
+        ]
+    );
 }
 
 #[test]

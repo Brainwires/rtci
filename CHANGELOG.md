@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: SDP for the media work.
+  - A section offered with `RTP/SAVP` (or `RTP/AVP`) is answered without `a=rtcp-fb` and
+    `a=rtcp-rsize` (RFC 4585 section 4.1, RFC 5506 section 4.1).
+  - The default AV1 format offers `a=rtcp-fb:<pt> ccm lrr` (AV1 RTP payload format section 8.2).
+  - `a=rtcp-xr`: the `rrtr` feedback entry's parameter is now the `rcvr-rtt` format in full
+    (`rcvr-rtt=<mode>[:<max size>]`, it was `rcvr-rtt`), and every other format becomes an entry of
+    the new type `RTCP_FB_XR` (`"xr"`) with the format as its parameter (RFC 3611 section 5.1).
+    Code that compared the `rrtr` parameter with `"rcvr-rtt"` must test its prefix.
 - **jsep**: a remote offer to receive simulcast promotes a sender with one rid-less encoding
   (W3C webrtc-pc `proposedSendEncodings`): one encoding per offered `recv` rid, in order,
   duplicates dropped, at most `MAX_SEND_ENCODINGS`, scaled down by 2^(n - index - 1) for video,

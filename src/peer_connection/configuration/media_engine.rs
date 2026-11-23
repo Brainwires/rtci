@@ -800,7 +800,16 @@ impl MediaEngine {
                     // The AV1 RTP payload format's SDP parameter is `profile` (AV1 RTP spec,
                     // section 7.2); `profile-id` is VP9's.
                     sdp_fmtp_line: "profile=0".to_owned(),
-                    rtcp_feedback: video_rtcp_feedback.clone(),
+                    // Layer Refresh Request (`ccm lrr`), which the AV1 RTP payload format names
+                    // for its scalable streams, besides the video feedback of every codec.
+                    rtcp_feedback: video_rtcp_feedback
+                        .iter()
+                        .cloned()
+                        .chain([RTCPFeedback {
+                            typ: "ccm".to_owned(),
+                            parameter: "lrr".to_owned(),
+                        }])
+                        .collect(),
                 },
                 payload_type: 41,
             },
