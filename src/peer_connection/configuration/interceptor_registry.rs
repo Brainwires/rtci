@@ -818,6 +818,37 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
     )
 }
 
+/// [`configure_rtcp_reports`] for a peer connection whose registry brings no RTCP session:
+/// the session draws its random numbers (the report interval's variation, RFC 3550 section
+/// 6.3.1; the dither of early feedback, RFC 4585 section 3.5.2; its SSRC and CNAME) from
+/// `provider`'s `random()`, as ICE, DTLS and SCTP do, so a seeded provider fixes when the
+/// reports go out. Without a provider, from `rand`.
+pub(crate) fn configure_rtcp_reports_from(
+    registry: Registry,
+    provider: Option<&std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+) -> Registry {
+    let session = RtcpSessionBuilder::new().with_t_rr_interval(Duration::ZERO);
+    let session = match provider {
+        Some(provider) => session.with_random(ProviderRtcpRandom(provider.clone())),
+        None => session,
+    };
+    configure_rtcp_reports_with(registry, session)
+}
+
+/// [`interceptor::RtcpRandom`] from a crypto provider's `random()`; from `rand` should the
+/// provider fail (the values need unpredictability, not a particular source).
+struct ProviderRtcpRandom(std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>);
+
+impl interceptor::RtcpRandom for ProviderRtcpRandom {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        match self.0.random().fill(&mut bytes) {
+            Ok(()) => u32::from_be_bytes(bytes),
+            Err(_) => rand::random(),
+        }
+    }
+}
+
 /// [`configure_rtcp_reports`] with the RTCP session built from `session`, for the settings a
 /// session description does not carry.
 ///

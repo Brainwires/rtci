@@ -3797,6 +3797,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **rtc**: a seed did not fix a run. The RTCP session the peer connection installs by default
+  drew its report intervals (RFC 3550 section 6.3.1), feedback dither, SSRC and CNAME from
+  `rand` instead of the crypto provider's `random()`; its reports go out from the moment DTLS
+  is up, also on a data-channel-only session, and moved every later datagram, so the seeded
+  lossy-link tests ran a different course each time (the 10 % test failed once in CI on seed
+  2, 205 of 300 messages delivered, and passed on the same code before and after). It now
+  draws from the provider set with `SettingEngineBuilder::with_crypto_provider`. Test:
+  `tests/lossy_link_rtc2rtc.rs::the_same_seed_gives_the_same_run` (same seed twice, same
+  course, both providers). The lossy-link harness takes `LOSSY_LINK_SEEDS` and has an
+  ignored `sweep` (`LOSSY_LINK_LOSS`, `LOSSY_LINK_SALT`, `LOSSY_LINK_REPEAT`).
+
 - **interceptor**: inbound RTCP that no interceptor annotated reached the application as an
   empty carrier once the chain held a `PerRtpSession` wrapper. The wrapper tags what each
   session's instance hands on with its `RtpSession`, and the terminus (`NoopInterceptor`)
