@@ -87,9 +87,9 @@ fn params(
         connection_role: ConnectionRole::Actpass,
         ice_gathering_state: RTCIceGatheringState::Complete,
         bundle: match match_bundle_group {
-            None => BundleMode::Offer,
+            None => BundleMode::initial_offer(),
             Some(group) => {
-                BundleMode::Answer(Some(group.split_whitespace().map(str::to_owned).collect()))
+                BundleMode::Answer(vec![group.split_whitespace().map(str::to_owned).collect()])
             }
         },
         offered_tag_rtcp_mux_only: false,

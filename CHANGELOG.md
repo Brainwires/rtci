@@ -197,6 +197,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application that never touches the stream interface sees no change.
   `SettingEngineBuilder::with_tcp_candidate_gathering(false)` turns it off. `RTCPeerConnection`
   has a new field, so nothing outside changes, but `SettingEngine` has one too.
+- **peer connection** (mt-6): a subsequent offer keeps the BUNDLE groups of the most recent
+  answer (RFC 9429 section 5.2.2): a section that answer accepted outside every group stays
+  outside (it used to be put in the one group again), and each group of several stays its
+  own. `BundleMode` (internal) carries the groups.
+
+- **peer connection** (mt-5): `bundlePolicy: balanced`, the default, follows RFC 9429
+  section 4.1.1 / 5.2.1 in an initial offer: the first m= section of each media type (audio,
+  video, data) has a transport of its own, with its own ICE credentials, candidates and
+  default destination; the later sections of a type stay bundle-only. Until the answer the
+  offerer has up to three transports (`ice_transport_sections()` lists each); an answer that
+  bundles, as every browser's does, closes all but the tagged section's. An application that
+  gathers only for the first transport still connects with a bundling peer.
+
+- **peer connection** (mt-4): transport identity in the API, for connections with several
+  transports.
+  - `RTCPeerConnectionIceEvent` and `RTCPeerConnectionIceErrorEvent` have an
+    `ice_transport: Option<RTCTransportId>` field: a struct literal needs it (or
+    `..Default::default()`).
+  - The variants that name no transport (`OnIceTransportStateChange`,
+    `OnIceGathererStateChange`, `OnSelectedCandidatePairChange`, `OnIceCandidatePair{Add,
+    Nominate,Remove}`, `OnDtlsTransportStateChange`, `OnDtlsTransportError`) are fired for
+    the default transport only; with several transports the other transports' candidate pair
+    events and DTLS states used to come through them unnamed.
+  - `iceGatheringState` and `OnIceGatheringStateChangeEvent` are the aggregate of every
+    transport's gathering state (W3C 4.3.2), and the null `icecandidate` comes once every
+    transport has finished; they were the first transport's.
+  - The statistics report has a `transport` object per transport (transport 0 keeps its
+    name); RTP stream and codec objects name the transport of their section.
 
 - **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
   draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
@@ -1977,6 +2005,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/stream-driver` (`rtc-stream-driver`, not published) is a tokio driver for it,
   tested over loopback sockets. RFC 4571 audit: `docs/conformance/audit/rfc4571.md`.
 
+- **Several BUNDLE groups** (mt-6; RFC 9143 section 5, RFC 5888 section 6, RFC 9429 sections
+  5.2.2, 5.3.1): each BUNDLE group of a description is a transport. An offer with several is
+  answered group by group (each answerer-tagged section carries its group's transport
+  attributes), the transports follow the answer, a later offer keeps the groups, and an
+  unknown SSRC is looked up in the payload type and MID tables of the transport it arrived on
+  (RFC 9143 section 9.2).
+- **`bundlePolicy: balanced`** (mt-5; RFC 9429 4.1.1, 5.2.1; RFC 9143 7.2; W3C webrtc-pc
+  4.2.4): an initial offer gathers for each media type in use; a peer that does not bundle
+  answers one audio and one video section (and data) on separate transports, the bundle-only
+  sections rejected. A later offer puts a new section on the BUNDLE transport. Browser
+  scenario: "balanced: Rust's offer has a transport per media type, answered without
+  BUNDLE"; `examples/interop-peer` gathers for its own offer's transports.
+- **Transport identity in the API** (mt-4; W3C webrtc-pc 4.3.2, 5.5, 5.6, webrtc-stats 7.1).
+  - `RTCPeerConnectionEvent::OnTransportEvent(RTCTransportEvent)`: every transport's ICE
+    `statechange`, `gatheringstatechange`, `selectedcandidatepairchange`, candidate pair
+    events and DTLS `statechange` / `error`, with the ids of its ICE and DTLS transports.
+  - `RTCPeerConnection::dtls_transports()` and `dtls_transport_by_id(id)` give the handles;
+    each `RTCIceTransport` reports its own remote candidates and local parameters.
+  - Local candidates and end-of-candidates indications name their transport
+    (`ice_transport`); a transport other than the default one gathers through the same path
+    as the default (its candidates' statistics, generations and server URLs included).
+  - The connection's gathering state aggregates the transports (W3C 4.3.2).
+  - `getStats`: a `transport` object per transport with its own candidate pairs and
+    candidates, each RTP stream's `transportId` the transport of its section.
+  - The browser scenario "unbundled: max-compat without a BUNDLE group" checks both of
+    Rust's transports report DTLS "connected" by `OnTransportEvent` and have a `transport`
+    stats object with a selected pair.
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
   BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,

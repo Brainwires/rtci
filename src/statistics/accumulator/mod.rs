@@ -21,6 +21,7 @@ mod rtcp_reports_test;
 mod rtp_stream;
 mod seal;
 mod transport;
+mod transports;
 
 pub(crate) use ccfb::CcfbTally;
 pub(crate) use certificate::{CertificateStatsAccumulator, base64_encode};
@@ -73,8 +74,14 @@ pub(crate) struct RTCStatsAccumulator {
     /// Peer connection level stats.
     pub(crate) peer_connection: PeerConnectionStatsAccumulator,
 
-    /// Transport stats (typically one per peer connection).
+    /// The statistics of the active transport: the one the connection's handlers work on
+    /// (one per peer connection while every section is bundled). The other transports' are in
+    /// `transports`.
     pub(crate) transport: TransportStatsAccumulator,
+
+    /// The transports that are not the active one, and which transport each m= section runs
+    /// over (webrtc-stats 7.1: a `transport` object per transport).
+    transports: transports::ParkedTransports,
 
     /// ICE candidate pairs keyed by pair ID.
     pub(crate) ice_candidate_pairs: HashMap<String, IceCandidatePairAccumulator>,
@@ -288,8 +295,10 @@ impl RTCStatsAccumulator {
             self.peer_connection.snapshot(now),
         ));
 
-        // Transport stats
-        entries.push(RTCStatsReportEntry::Transport(self.transport.snapshot(now)));
+        // Transport stats: one object per transport
+        for transport in self.every_transport() {
+            entries.push(RTCStatsReportEntry::Transport(transport.snapshot(now)));
+        }
 
         // ICE candidate pair stats
         for (id, pair) in &self.ice_candidate_pairs {
@@ -420,6 +429,7 @@ impl RTCStatsAccumulator {
     ) -> RTCStatsReport {
         let mut entries = Vec::new();
         let mut referenced_codec_ids = HashSet::new();
+        let mut referenced_transport_ids: HashSet<String> = HashSet::new();
         let mut has_streams = false;
 
         // Collect outbound RTP streams for this sender
@@ -438,13 +448,18 @@ impl RTCStatsAccumulator {
                 if !stream.codec_id.is_empty() {
                     referenced_codec_ids.insert(stream.codec_id.clone());
                 }
+                referenced_transport_ids.insert(stream.transport_id.clone());
             }
         }
 
         // Add referenced stats if we have any streams
         if has_streams {
-            // Transport stats (always included as streams reference it)
-            entries.push(RTCStatsReportEntry::Transport(self.transport.snapshot(now)));
+            // The transports the streams reference
+            for transport in self.every_transport() {
+                if referenced_transport_ids.contains(&transport.transport_id) {
+                    entries.push(RTCStatsReportEntry::Transport(transport.snapshot(now)));
+                }
+            }
 
             // Referenced codec stats
             for (id, codec) in &self.codecs {
@@ -464,9 +479,11 @@ impl RTCStatsAccumulator {
 
             // ICE candidate pair stats (referenced by transport)
             for (id, pair) in &self.ice_candidate_pairs {
-                entries.push(RTCStatsReportEntry::IceCandidatePair(
-                    pair.snapshot(now, id),
-                ));
+                if referenced_transport_ids.contains(&pair.transport_id) {
+                    entries.push(RTCStatsReportEntry::IceCandidatePair(
+                        pair.snapshot(now, id),
+                    ));
+                }
             }
 
             // Local ICE candidate stats
@@ -496,6 +513,7 @@ impl RTCStatsAccumulator {
     ) -> RTCStatsReport {
         let mut entries = Vec::new();
         let mut referenced_codec_ids = HashSet::new();
+        let mut referenced_transport_ids: HashSet<String> = HashSet::new();
         let mut referenced_playout_ids: HashSet<String> = HashSet::new();
         let mut has_streams = false;
 
@@ -514,6 +532,7 @@ impl RTCStatsAccumulator {
                 if !stream.codec_id.is_empty() {
                     referenced_codec_ids.insert(stream.codec_id.clone());
                 }
+                referenced_transport_ids.insert(stream.transport_id.clone());
                 if let Some(playout_id) = &stream.playout_id {
                     referenced_playout_ids.insert(playout_id.clone());
                 }
@@ -522,8 +541,12 @@ impl RTCStatsAccumulator {
 
         // Add referenced stats if we have any streams
         if has_streams {
-            // Transport stats (always included as streams reference it)
-            entries.push(RTCStatsReportEntry::Transport(self.transport.snapshot(now)));
+            // The transports the streams reference
+            for transport in self.every_transport() {
+                if referenced_transport_ids.contains(&transport.transport_id) {
+                    entries.push(RTCStatsReportEntry::Transport(transport.snapshot(now)));
+                }
+            }
 
             // Referenced codec stats
             for (id, codec) in &self.codecs {
@@ -541,9 +564,11 @@ impl RTCStatsAccumulator {
 
             // ICE candidate pair stats (referenced by transport)
             for (id, pair) in &self.ice_candidate_pairs {
-                entries.push(RTCStatsReportEntry::IceCandidatePair(
-                    pair.snapshot(now, id),
-                ));
+                if referenced_transport_ids.contains(&pair.transport_id) {
+                    entries.push(RTCStatsReportEntry::IceCandidatePair(
+                        pair.snapshot(now, id),
+                    ));
+                }
             }
 
             // Local ICE candidate stats
@@ -605,7 +630,7 @@ impl RTCStatsAccumulator {
             associate(&mut self.fec_ssrc_to_primary, old_fec, fec, ssrc);
         }
 
-        let transport_id = self.transport.transport_id.clone();
+        let transport_id = self.section_transport_id(mid);
         let stream =
             self.inbound_rtp_streams
                 .entry(ssrc)
@@ -711,12 +736,13 @@ impl RTCStatsAccumulator {
             .map(|(track_id, _)| media_source_stats_id(track_id))
             .unwrap_or_default();
 
+        let transport_id = self.section_transport_id(mid);
         self.outbound_rtp_streams
             .entry(ssrc)
             .or_insert_with(|| OutboundRtpStreamAccumulator {
                 ssrc,
                 kind,
-                transport_id: self.transport.transport_id.clone(),
+                transport_id,
                 media_source_id,
                 mid: mid.to_string(),
                 rid: rid.to_string(),
@@ -849,10 +875,24 @@ impl RTCStatsAccumulator {
             local_paired.insert(pair.local_candidate_id.clone());
             remote_paired.insert(pair.remote_candidate_id.clone());
         }
-        self.local_candidates
-            .retain(|id, _| local_held.contains(id) || local_paired.contains(id));
-        self.remote_candidates
-            .retain(|id, _| remote_held.contains(id) || remote_paired.contains(id));
+        // The candidates of the active transport's agent; another transport's are its own.
+        let theirs = |candidates: &HashMap<String, IceCandidateAccumulator>| -> HashSet<String> {
+            candidates
+                .iter()
+                .filter(|(_, candidate)| !self.of_active_transport(&candidate.transport_id))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let (local_theirs, remote_theirs) = (
+            theirs(&self.local_candidates),
+            theirs(&self.remote_candidates),
+        );
+        self.local_candidates.retain(|id, _| {
+            local_theirs.contains(id) || local_held.contains(id) || local_paired.contains(id)
+        });
+        self.remote_candidates.retain(|id, _| {
+            remote_theirs.contains(id) || remote_held.contains(id) || remote_paired.contains(id)
+        });
     }
 
     /// Registers a certificate.
@@ -1290,8 +1330,15 @@ impl RTCStatsAccumulator {
             .map(|cp| candidate_pair_stats_id(&cp.local_candidate_id, &cp.remote_candidate_id))
             .collect();
         let selected = self.transport.selected_candidate_pair_id.clone();
+        // The pairs of the active transport's agent; another transport's are its own.
+        let theirs: HashSet<String> = self
+            .ice_candidate_pairs
+            .iter()
+            .filter(|(_, pair)| !self.of_active_transport(&pair.transport_id))
+            .map(|(id, _)| id.clone())
+            .collect();
         self.ice_candidate_pairs
-            .retain(|id, _| held.contains(id) || *id == selected);
+            .retain(|id, _| theirs.contains(id) || held.contains(id) || *id == selected);
 
         for cp in pairs {
             let pair =
@@ -1378,8 +1425,8 @@ impl RTCStatsAccumulator {
         direction: CodecDirection,
         codec: &RTCRtpCodec,
         payload_type: PayloadType,
+        transport_id: String,
     ) -> String {
-        let transport_id = self.transport.transport_id.clone();
         let accumulator = CodecStatsAccumulator {
             transport_id: transport_id.clone(),
             ..CodecStatsAccumulator::from_codec(codec, payload_type)
@@ -1414,10 +1461,15 @@ impl RTCStatsAccumulator {
         codec: &RTCRtpCodec,
         payload_type: PayloadType,
     ) {
-        if !self.inbound_rtp_streams.contains_key(&ssrc) {
+        let Some(transport_id) = self
+            .inbound_rtp_streams
+            .get(&ssrc)
+            .map(|s| s.transport_id.clone())
+        else {
             return;
-        }
-        let codec_id = self.register_codec(CodecDirection::Receive, codec, payload_type);
+        };
+        let codec_id =
+            self.register_codec(CodecDirection::Receive, codec, payload_type, transport_id);
         // Link the codec to the inbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
         if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
@@ -1437,10 +1489,14 @@ impl RTCStatsAccumulator {
         codec: &RTCRtpCodec,
         payload_type: PayloadType,
     ) {
-        if !self.outbound_rtp_streams.contains_key(&ssrc) {
+        let Some(transport_id) = self
+            .outbound_rtp_streams
+            .get(&ssrc)
+            .map(|s| s.transport_id.clone())
+        else {
             return;
-        }
-        let codec_id = self.register_codec(CodecDirection::Send, codec, payload_type);
+        };
+        let codec_id = self.register_codec(CodecDirection::Send, codec, payload_type, transport_id);
         // Link the codec to the outbound RTP stream; its clock rate is what the RTCP jitter is
         // counted in
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {

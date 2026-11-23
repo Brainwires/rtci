@@ -18,7 +18,6 @@
 use super::RTCPeerConnection;
 use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::state::RTCIceGatheringState;
-use crate::peer_connection::transport::RTCIceCandidateInit;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use bytes::BytesMut;
 use ice::TransportError;
@@ -539,18 +538,10 @@ impl RTCPeerConnection {
         {
             return Ok(());
         }
-        let default = self.pipeline_context.transports.default_id();
+        // Every transport takes its candidates by the default transport's path, run on it
+        // (`with_transport`).
         self.with_transport(transport, |pc| {
-            if transport == default {
-                pc.add_ice_local_candidate(value, url, relay_protocol)
-            } else {
-                pc.add_other_local_candidate(RTCIceCandidateInit {
-                    candidate: format!("candidate:{value}"),
-                    url: url.map(str::to_owned),
-                    relay_protocol,
-                    ..Default::default()
-                })
-            }
+            pc.add_ice_local_candidate(value, url, relay_protocol)
         })
     }
 
@@ -735,17 +726,11 @@ impl RTCPeerConnection {
             if self.pipeline_context.transports.transport(t).is_none() {
                 continue;
             }
-            if t == self.pipeline_context.transports.default_id() {
-                self.with_transport(t, |pc| {
-                    if pc.ice_gathering_state() != RTCIceGatheringState::Complete {
-                        pc.finish_local_gathering();
-                    }
-                });
-            } else if let Err(err) = self.with_transport(t, |pc| {
-                pc.add_other_local_candidate(RTCIceCandidateInit::default())
-            }) {
-                debug!("end of gathering of {t:?}: {err}");
-            }
+            self.with_transport(t, |pc| {
+                if pc.ice_gathering_state() != RTCIceGatheringState::Complete {
+                    pc.finish_local_gathering();
+                }
+            });
         }
     }
 

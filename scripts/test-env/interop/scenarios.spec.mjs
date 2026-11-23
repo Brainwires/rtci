@@ -439,6 +439,7 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
       sameTransport,
       echoed: e.got.length,
       rtp,
+      rust: { transportsConnected: report.transportsConnected, stats: report.stats },
       errors: report.errors,
     };
   }, WS);
@@ -448,8 +449,61 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
   // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
   // transport objects only.
   if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  // Rust's side: each transport fired its own DTLS "connected" (OnTransportEvent) and has a
+  // transport stats object of its own with a selected candidate pair.
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  const rustTransports = r.rust.stats.transports.filter((t) => t.dtlsState === "connected");
+  expect(rustTransports.length, JSON.stringify(r.rust.stats.transports)).toBe(2);
+  expect(rustTransports.every((t) => t.selectedCandidatePairId !== ""), JSON.stringify(rustTransports)).toBe(true);
   expect(r.echoed, JSON.stringify(r)).toBe(1);
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.errors).toEqual([]);
+});
+
+// ---- bundlePolicy "balanced" (RFC 9429 4.1.1, 5.2.1; W3C webrtc-pc 4.2.4) ----
+
+// Rust's initial offer under the default policy gives the first section of each media type a
+// transport of its own (its own ICE credentials and candidates). The browser gets the offer
+// without its BUNDLE group, as a peer that does not bundle would, and answers each section on
+// its own transport: audio and video each travel over theirs.
+test("balanced: Rust's offer has a transport per media type, answered without BUNDLE", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, {});
+    s.mungeRemoteOffer = (sdp) => sdp.replace(/^a=group:BUNDLE[^\r\n]*\r?\n/m, "");
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    s.send({ type: "request-offer", tracks: ["VP8", "OPUS"] });
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    await s.connected();
+    const video = await Interop.until(async () => {
+      const v = await Interop.inbound(s.pc, "video");
+      return v && v.framesDecoded > 15 && v;
+    }, 25000, "15 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+    const audio = await Interop.until(async () => {
+      const a = await Interop.inbound(s.pc, "audio");
+      return a && a.packetsReceived > 50 && a;
+    }, 15000, "50 audio packets").catch(() => Interop.inbound(s.pc, "audio"));
+    const offer = s.pc.remoteDescription.sdp;
+    const ufrags = new Set([...offer.matchAll(/^a=ice-ufrag:(\S+)/gm)].map((m) => m[1]));
+    const stats = await s.pc.getStats();
+    const transportStats = [...stats.values()].filter((x) => x.type === "transport");
+    const transports = transportStats.filter((x) => x.dtlsState === "connected").length;
+    const report = await s.report();
+    s.close();
+    return {
+      ufrags: ufrags.size,
+      transports,
+      transportStats: transportStats.length,
+      video,
+      audio,
+      rust: { transportsConnected: report.transportsConnected },
+      errors: report.errors.concat(s.errors),
+    };
+  }, WS);
+  expect(r.ufrags, "audio and video each have ICE credentials of their own").toBe(2);
+  if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  expect(r.video.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.audio?.packetsReceived || 0, JSON.stringify(r.audio)).toBeGreaterThan(50);
   expect(r.errors).toEqual([]);
 });
 

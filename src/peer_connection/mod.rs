@@ -1905,8 +1905,8 @@ impl RTCPeerConnection {
 
     /// RFC 8839 sections 4.2.5 (item 3), 4.3.3 and 5.3: an answer with a media-level
     /// `a=ice-mismatch` for a data stream means "ICE processing MUST be terminated for this
-    /// data stream". The stream's transport (this endpoint runs one, which carries every
-    /// bundled section) stops its ICE agent (`Agent::stop_for_ice_mismatch`): no checks, no
+    /// data stream". The stream's transport (the one its section is on, which carries every
+    /// section bundled with it) stops its ICE agent (`Agent::stop_for_ice_mismatch`): no checks, no
     /// consent, state failed. The RFC 3264 procedures the RFC then calls for (media to the
     /// `m=` / `c=` destination without ICE) are not taken: a WebRTC endpoint sends nothing to
     /// a peer that did not consent by ICE (RFC 7675 section 5.1, RFC 8826 section 4.2), so
@@ -1915,16 +1915,28 @@ impl RTCPeerConnection {
         if !matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
             return;
         }
-        let mismatch = self
-            .remote_description()
-            .and_then(|d| d.parsed.as_ref())
-            .is_some_and(|parsed| {
-                parsed.media_descriptions.iter().any(|media| {
-                    !is_rejected_media(media) && media.has_attribute(ATTR_KEY_ICE_MISMATCH)
-                })
+        // Each transport with such a section stops: with several transports (sections outside
+        // a BUNDLE group, several groups) that is the transport the section is on.
+        let Some(parsed) = self.remote_description().and_then(|d| d.parsed.clone()) else {
+            return;
+        };
+        let transports = &self.pipeline_context.transports;
+        let mut stopped: Vec<TransportId> = vec![];
+        for media in &parsed.media_descriptions {
+            if is_rejected_media(media) || !media.has_attribute(ATTR_KEY_ICE_MISMATCH) {
+                continue;
+            }
+            let id = get_mid_value(media)
+                .map(|mid| transports.transport_id_for(mid))
+                .unwrap_or_else(|| transports.default_id());
+            if !stopped.contains(&id) {
+                stopped.push(id);
+            }
+        }
+        for id in stopped {
+            self.with_transport(id, |pc| {
+                pc.ice_transport_mut().agent.stop_for_ice_mismatch(now)
             });
-        if mismatch {
-            self.ice_transport_mut().agent.stop_for_ice_mismatch(now);
         }
     }
 
@@ -3129,7 +3141,10 @@ impl RTCPeerConnection {
     /// peer-reflexive candidate the ICE agent learned from a connectivity check is not in the
     /// description and is not listed (webrtc-pc 5.6: "will not expose peer reflexive
     /// candidates since they are not in the remote description").
-    pub(crate) fn remote_description_candidates(&self) -> Vec<transport::RTCIceCandidate> {
+    pub(crate) fn remote_description_candidates(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Vec<transport::RTCIceCandidate> {
         let Some(parsed) = self
             .pending_remote_description
             .as_ref()
@@ -3140,7 +3155,13 @@ impl RTCPeerConnection {
         };
         let mut seen: Vec<&str> = vec![];
         let mut candidates = vec![];
+        let transports = &self.pipeline_context.transports;
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            // The sections of the transport `on` (each transport has candidates of its own,
+            // RFC 9429 section 5.2.1).
+            if get_mid_value(media).is_some_and(|mid| transports.transport_id_for(mid) != on) {
+                continue;
+            }
             for value in media
                 .attributes
                 .iter()
@@ -3167,17 +3188,24 @@ impl RTCPeerConnection {
 
     /// W3C `RTCIceTransport.getLocalParameters()`: the ICE parameters of the local description
     /// (pending, else current), `None` while there is none. Read from the description's first
-    /// media section, the section of the one (BUNDLE) transport.
-    pub(crate) fn local_description_ice_parameters(&self) -> Option<transport::RTCIceParameters> {
+    /// media section on the transport `on`.
+    pub(crate) fn local_description_ice_parameters(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Option<transport::RTCIceParameters> {
         let parsed = self
             .pending_local_description
             .as_ref()
             .or(self.current_local_description.as_ref())?
             .parsed
             .as_ref()?;
+        let transports = &self.pipeline_context.transports;
         let (ufrag, pwd) = parsed
             .media_descriptions
-            .first()
+            .iter()
+            .find(|media| {
+                get_mid_value(media).is_none_or(|mid| transports.transport_id_for(mid) == on)
+            })
             .map(|media| media_ice_credentials(parsed, media))?;
         Some(transport::RTCIceParameters {
             username_fragment: ufrag?.to_owned(),
@@ -3304,12 +3332,15 @@ impl RTCPeerConnection {
                 local.as_ref(),
             );
             if id != self.pipeline_context.transports.default_id() {
-                return self.with_transport(id, |pc| pc.add_other_local_candidate(local_candidate));
+                return self
+                    .with_transport(id, |pc| pc.add_local_candidate_on_default(local_candidate));
             }
         }
         self.add_local_candidate_on_default(local_candidate)
     }
 
+    /// `add_local_candidate` on the active transport (the default one, unless the candidate
+    /// is for another).
     fn add_local_candidate_on_default(
         &mut self,
         local_candidate: RTCIceCandidateInit,

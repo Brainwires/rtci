@@ -158,7 +158,7 @@ mod rejected_mline_tests {
             is_extmap_allow_mixed: false,
             connection_role: ConnectionRole::Active,
             ice_gathering_state: RTCIceGatheringState::Complete,
-            bundle: BundleMode::Offer,
+            bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: true,
             bundle_policy: RTCBundlePolicy::MaxCompat,
@@ -1037,7 +1037,7 @@ fn default_candidate(candidates: &[RTCIceCandidate]) -> Option<(std::net::IpAddr
 /// Puts a default destination in a section: the `m=` port and `c=` address, and the `a=rtcp`
 /// line when the section has one (RTCP is multiplexed, so it is the RTP destination too; RFC
 /// 5761 section 5.1.3).
-fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port: u16) {
+pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port: u16) {
     m.media_name.port = RangedPort {
         value: port as isize,
         range: None,
@@ -1061,39 +1061,40 @@ fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port:
 
 /// RFC 9143 section 7.2 (and 7.5.1 for later offers): the bundled sections that are not
 /// bundle-only share the BUNDLE transport's address and port, the default destination of the
-/// section that carries the candidates.
+/// section of their group that carries the candidates. Each BUNDLE group is a transport of its
+/// own (section 5), with its own destination.
 pub(crate) fn share_bundle_destination(d: &mut SessionDescription) {
-    let group: Vec<String> = bundle_group_mids(d)
+    let groups: Vec<Vec<String>> = bundle_groups(d)
         .into_iter()
-        .map(str::to_owned)
+        .map(|group| group.into_iter().map(str::to_owned).collect())
         .collect();
-    let Some(carrier) = d
-        .media_descriptions
-        .iter()
-        .find(|m| m.attribute("candidate").is_some() && m.media_name.port.value != 0)
-    else {
-        return;
-    };
-    let Some(ip) = carrier
-        .connection_information
-        .as_ref()
-        .and_then(|c| c.address.as_ref())
-        .and_then(|a| a.address.parse::<std::net::IpAddr>().ok())
-    else {
-        return;
-    };
-    let Ok(port) = u16::try_from(carrier.media_name.port.value) else {
-        return;
-    };
-    if ip.is_unspecified() {
-        return;
-    }
-    for m in &mut d.media_descriptions {
-        if m.media_name.port.value != 0
-            && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
-            && get_mid_value(m).is_some_and(|mid| group.contains(mid))
-        {
-            set_default_destination(m, ip, port);
+    for group in groups {
+        let in_group =
+            |m: &MediaDescription| get_mid_value(m).is_some_and(|mid| group.contains(mid));
+        let Some(carrier) = d.media_descriptions.iter().find(|m| {
+            in_group(m) && m.attribute("candidate").is_some() && m.media_name.port.value != 0
+        }) else {
+            continue;
+        };
+        let Some(ip) = carrier
+            .connection_information
+            .as_ref()
+            .and_then(|c| c.address.as_ref())
+            .and_then(|a| a.address.parse::<std::net::IpAddr>().ok())
+        else {
+            continue;
+        };
+        let Ok(port) = u16::try_from(carrier.media_name.port.value) else {
+            continue;
+        };
+        if ip.is_unspecified() {
+            continue;
+        }
+        for m in &mut d.media_descriptions {
+            if m.media_name.port.value != 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY) && in_group(m)
+            {
+                set_default_destination(m, ip, port);
+            }
         }
     }
 }
@@ -2138,28 +2139,87 @@ const BUNDLE_ATTRIBUTES: [&str; 11] = [
 /// What a generated description does about BUNDLE (RFC 9143).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BundleMode {
-    /// An offer: every media section that is not rejected is in the one BUNDLE group.
-    Offer,
-    /// An answer to an offer with this BUNDLE group (its identification-tags, in the offer's
-    /// order), or with none. With a group, the answer's group holds the accepted sections of
-    /// it, in its order (RFC 9143 section 7.3.1: the answerer-tagged section is the first the
-    /// offer suggested that is accepted), and a section outside it, which would need a
-    /// transport of its own, is rejected. With none, no group is written and no section is
-    /// rejected for it (RFC 9143 section 7.3: "The answerer MUST NOT include a BUNDLE group in
-    /// the answer unless the offer contained one"; RFC 9429 section 5.3.1).
-    Answer(Option<Vec<String>>),
+    /// An offer. An initial one (`answered` empty) puts every media section that is not
+    /// rejected in one BUNDLE group. A subsequent one keeps the BUNDLE groups of the most
+    /// recent answer (RFC 9429 section 5.2.2: "the last answer's mids, minus rejected, plus
+    /// new or re-enabled sections"; RFC 9143 section 7.5.2: a section is not moved between
+    /// groups): `groups` are their tags, `answered` the mids that answer accepted. A section
+    /// the answer did not accept (new, or re-enabled) joins the first group, or a new one
+    /// when there is none; one it accepted outside every group stays outside.
+    Offer {
+        groups: Vec<Vec<String>>,
+        answered: Vec<String>,
+    },
+    /// An answer to an offer with these BUNDLE groups (each its identification-tags, in the
+    /// offer's order), or with none. Each group is answered on its own (RFC 9143 section 5:
+    /// "an 'm=' line ... can only be associated with a single BUNDLE group"): its accepted
+    /// sections, in its order (section 7.3.1: the answerer-tagged section is the first the
+    /// offer suggested that is accepted). A section outside every group has a transport of its
+    /// own (rejected under `must-bundle`). With no group, none is written and no section is
+    /// rejected for it (section 7.3: "The answerer MUST NOT include a BUNDLE group in the
+    /// answer unless the offer contained one"; RFC 9429 section 5.3.1).
+    Answer(Vec<Vec<String>>),
 }
 
 impl BundleMode {
-    /// The mode of the answer to `offer`: its first non-empty `a=group:BUNDLE` (an
-    /// `a=group` line of other semantics, such as LS, is not one).
+    /// An initial offer: one BUNDLE group.
+    pub(crate) fn initial_offer() -> Self {
+        BundleMode::Offer {
+            groups: vec![],
+            answered: vec![],
+        }
+    }
+
+    /// Whether the description is an offer.
+    pub(crate) fn is_offer(&self) -> bool {
+        matches!(self, BundleMode::Offer { .. })
+    }
+
+    /// The mode of the answer to `offer`: its non-empty `a=group:BUNDLE` lines (an `a=group`
+    /// line of other semantics, such as LS, is not one).
     pub(crate) fn answering(offer: &SessionDescription) -> Self {
         BundleMode::Answer(
             bundle_groups(offer)
                 .into_iter()
-                .find(|group| !group.is_empty())
-                .map(|group| group.into_iter().map(str::to_owned).collect()),
+                .filter(|group| !group.is_empty())
+                .map(|group| group.into_iter().map(str::to_owned).collect())
+                .collect(),
         )
+    }
+
+    /// The mode of an offer after `answer`, the most recent answer: its BUNDLE groups and the
+    /// sections it accepted.
+    pub(crate) fn following(answer: &SessionDescription) -> Self {
+        BundleMode::Offer {
+            groups: bundle_groups(answer)
+                .into_iter()
+                .filter(|group| !group.is_empty())
+                .map(|group| group.into_iter().map(str::to_owned).collect())
+                .collect(),
+            answered: answer
+                .media_descriptions
+                .iter()
+                .filter(|m| !is_rejected_media(m))
+                .filter_map(|m| get_mid_value(m).cloned())
+                .collect(),
+        }
+    }
+
+    /// The group of the section `mid` in the description (an index into the groups it
+    /// writes), or `None` for a section outside every group.
+    fn group_of(&self, mid: &str) -> Option<usize> {
+        match self {
+            BundleMode::Offer { groups, answered } => {
+                if let Some(index) = groups.iter().position(|g| g.iter().any(|t| t == mid)) {
+                    Some(index)
+                } else if answered.iter().any(|a| a == mid) {
+                    None
+                } else {
+                    Some(0)
+                }
+            }
+            BundleMode::Answer(offered) => offered.iter().position(|g| g.iter().any(|t| t == mid)),
+        }
     }
 }
 
@@ -2389,8 +2449,8 @@ impl RTCPeerConnection {
             vec![]
         };
 
-        // The mids of the BUNDLE group, in media section order.
-        let mut bundled: Vec<String> = vec![];
+        // The mids of each BUNDLE group, in media section order.
+        let mut bundled: Vec<Vec<String>> = vec![];
         // The media types (`audio`, `video`, `application`) of the sections so far that carry
         // their own transport parameters, for the bundle policy.
         let mut with_transport: Vec<String> = vec![];
@@ -2494,7 +2554,7 @@ impl RTCPeerConnection {
                     w3c_simulcast_answer: params.w3c_simulcast_answer,
                     msid_appdata: params.msid_appdata,
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
-                    is_offer: params.bundle == BundleMode::Offer,
+                    is_offer: params.bundle.is_offer(),
                     rtcp_mux_only: params.rtcp_mux_only,
                     ecn: params.ecn,
                 };
@@ -2562,8 +2622,15 @@ impl RTCPeerConnection {
                         RTCBundlePolicy::MustBundle => true,
                         _ => with_transport.contains(&media_type),
                     };
+                let group = params.bundle.group_of(&m.mid);
+                let join = |bundled: &mut Vec<Vec<String>>, index: usize| {
+                    if bundled.len() <= index {
+                        bundled.resize(index + 1, vec![]);
+                    }
+                    bundled[index].push(m.mid.clone());
+                };
                 match &params.bundle {
-                    BundleMode::Offer => {
+                    BundleMode::Offer { .. } => {
                         if params.initial_offer
                             && without_transport
                             && let Some(desc) = d.media_descriptions.last_mut()
@@ -2572,19 +2639,24 @@ impl RTCPeerConnection {
                         } else {
                             with_transport.push(media_type);
                         }
-                        bundled.push(m.mid.clone())
+                        // A section the most recent answer accepted outside every group stays
+                        // outside: it keeps its transport (RFC 9143 section 7.5).
+                        if let Some(index) = group {
+                            join(&mut bundled, index);
+                        }
                     }
-                    BundleMode::Answer(Some(group)) if group.contains(&m.mid) => {
-                        bundled.push(m.mid.clone())
+                    BundleMode::Answer(_) if group.is_some() => {
+                        join(&mut bundled, group.unwrap_or_default());
                     }
-                    BundleMode::Answer(Some(_))
-                        if params.bundle_policy != RTCBundlePolicy::MustBundle =>
+                    BundleMode::Answer(offered)
+                        if !offered.is_empty()
+                            && params.bundle_policy != RTCBundlePolicy::MustBundle =>
                     {
                         // Outside the offered group: it has a transport of its own (RFC 9143
                         // section 7.3.2; `RTCPeerConnection::apply_transport_layout`).
                         with_transport.push(media_type);
                     }
-                    BundleMode::Answer(Some(_)) => {
+                    BundleMode::Answer(offered) if !offered.is_empty() => {
                         // Outside the offered group under `must-bundle`: no transport but the
                         // BUNDLE one (RFC 9429 section 4.1.1).
                         if let Some(desc) = d.media_descriptions.last_mut() {
@@ -2598,7 +2670,7 @@ impl RTCPeerConnection {
                     // own, and the policy says how many this endpoint takes (RFC 9429 section
                     // 4.1.1: balanced "will reject all but the first 'm=' section of each
                     // type", must-bundle "any 'm=' sections other than the first").
-                    BundleMode::Answer(None) => {
+                    BundleMode::Answer(_) => {
                         if without_transport {
                             if let Some(desc) = d.media_descriptions.last_mut() {
                                 desc.media_name.port = RangedPort {
@@ -2648,89 +2720,105 @@ impl RTCPeerConnection {
             d = d.with_property_attribute(ATTR_KEY_EXTMAP_ALLOW_MIXED.to_owned());
         }
 
-        if let BundleMode::Answer(Some(group)) = &params.bundle {
-            // The offer's order: its first accepted tag is the answerer-tagged section.
-            bundled.sort_by_key(|mid| group.iter().position(|tag| tag == mid));
-        }
-        if params.offered_tag_rtcp_mux_only
-            && let Some(tag) = bundled.first()
-            && let Some(tagged) = d.media_descriptions.iter_mut().find(|media| {
-                get_mid_value(media) == Some(tag)
-                    && media.has_attribute(ATTR_KEY_RTCPMUX)
-                    && !media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY)
-            })
-        {
-            let at = tagged
-                .attributes
-                .iter()
-                .position(|a| a.key == ATTR_KEY_RTCPMUX)
-                .map_or(tagged.attributes.len(), |i| i + 1);
-            tagged.attributes.insert(
-                at,
-                sdp::description::common::Attribute::new(ATTR_KEY_RTCP_MUX_ONLY.to_owned(), None),
-            );
-        }
-        // RFC 9143 section 7.1.3: in an answer or a subsequent offer only the tagged section
-        // (the first of the group) carries the BUNDLE attributes, unless the application
-        // asked for the browsers' repeated form.
-        if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
-            // The tagged section speaks for the group, also when it is not RTP itself (RFC
-            // 9143 section 7.1.3, the note: "the tagged 'm=' section might contain an SDP
-            // 'rtcp-mux' attribute even if the tagged 'm=' section does not describe
-            // RTP-based media"; section 9.3.1.2: "MUST include an SDP 'rtcp-mux' attribute
-            // in the answerer-tagged 'm=' section"). So when the tagged section is the data
-            // section it takes `a=rtcp-mux` from the RTP sections that are about to lose it,
-            // and `a=rtcp-rsize` when each of them has it.
-            let others: Vec<&MediaDescription> = bundled
-                .iter()
-                .skip(1)
-                .filter_map(|mid| {
-                    d.media_descriptions
-                        .iter()
-                        .find(|media| get_mid_value(media) == Some(mid))
-                })
-                .filter(|media| media.media_name.media != MEDIA_SECTION_APPLICATION)
-                .collect();
-            let mux = others
-                .iter()
-                .any(|media| media.has_attribute(ATTR_KEY_RTCPMUX));
-            let rsize = !others.is_empty()
-                && others
+        bundled.retain(|group| !group.is_empty());
+        if let BundleMode::Answer(offered) = &params.bundle {
+            // The offer's order: each group's first accepted tag is its answerer-tagged
+            // section.
+            for group in bundled.iter_mut() {
+                if let Some(tags) = offered
                     .iter()
-                    .all(|media| media.has_attribute(ATTR_KEY_RTCPRSIZE));
-            if let Some(tagged) = bundled.first().and_then(|tag| {
-                d.media_descriptions
-                    .iter_mut()
-                    .find(|media| get_mid_value(media) == Some(tag))
-            }) && tagged.media_name.media == MEDIA_SECTION_APPLICATION
+                    .find(|tags| group.first().is_some_and(|mid| tags.contains(mid)))
+                {
+                    group.sort_by_key(|mid| tags.iter().position(|tag| tag == mid));
+                }
+            }
+        }
+        for (index, bundled) in bundled.iter().enumerate() {
+            if index == 0
+                && params.offered_tag_rtcp_mux_only
+                && let Some(tag) = bundled.first()
+                && let Some(tagged) = d.media_descriptions.iter_mut().find(|media| {
+                    get_mid_value(media) == Some(tag)
+                        && media.has_attribute(ATTR_KEY_RTCPMUX)
+                        && !media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY)
+                })
             {
-                for (key, wanted) in [(ATTR_KEY_RTCPMUX, mux), (ATTR_KEY_RTCPRSIZE, rsize)] {
-                    if wanted && !tagged.has_attribute(key) {
-                        tagged
-                            .attributes
-                            .push(sdp::description::common::Attribute::new(
-                                key.to_owned(),
-                                None,
-                            ));
+                let at = tagged
+                    .attributes
+                    .iter()
+                    .position(|a| a.key == ATTR_KEY_RTCPMUX)
+                    .map_or(tagged.attributes.len(), |i| i + 1);
+                tagged.attributes.insert(
+                    at,
+                    sdp::description::common::Attribute::new(
+                        ATTR_KEY_RTCP_MUX_ONLY.to_owned(),
+                        None,
+                    ),
+                );
+            }
+            // RFC 9143 section 7.1.3: in an answer or a subsequent offer only the tagged section
+            // (the first of the group) carries the BUNDLE attributes, unless the application
+            // asked for the browsers' repeated form.
+            if params.bundle_attributes_in_tagged_section_only && !params.initial_offer {
+                // The tagged section speaks for the group, also when it is not RTP itself (RFC
+                // 9143 section 7.1.3, the note: "the tagged 'm=' section might contain an SDP
+                // 'rtcp-mux' attribute even if the tagged 'm=' section does not describe
+                // RTP-based media"; section 9.3.1.2: "MUST include an SDP 'rtcp-mux' attribute
+                // in the answerer-tagged 'm=' section"). So when the tagged section is the data
+                // section it takes `a=rtcp-mux` from the RTP sections that are about to lose it,
+                // and `a=rtcp-rsize` when each of them has it.
+                let others: Vec<&MediaDescription> = bundled
+                    .iter()
+                    .skip(1)
+                    .filter_map(|mid| {
+                        d.media_descriptions
+                            .iter()
+                            .find(|media| get_mid_value(media) == Some(mid))
+                    })
+                    .filter(|media| media.media_name.media != MEDIA_SECTION_APPLICATION)
+                    .collect();
+                let mux = others
+                    .iter()
+                    .any(|media| media.has_attribute(ATTR_KEY_RTCPMUX));
+                let rsize = !others.is_empty()
+                    && others
+                        .iter()
+                        .all(|media| media.has_attribute(ATTR_KEY_RTCPRSIZE));
+                if let Some(tagged) = bundled.first().and_then(|tag| {
+                    d.media_descriptions
+                        .iter_mut()
+                        .find(|media| get_mid_value(media) == Some(tag))
+                }) && tagged.media_name.media == MEDIA_SECTION_APPLICATION
+                {
+                    for (key, wanted) in [(ATTR_KEY_RTCPMUX, mux), (ATTR_KEY_RTCPRSIZE, rsize)] {
+                        if wanted && !tagged.has_attribute(key) {
+                            tagged
+                                .attributes
+                                .push(sdp::description::common::Attribute::new(
+                                    key.to_owned(),
+                                    None,
+                                ));
+                        }
+                    }
+                }
+                for mid in bundled.iter().skip(1) {
+                    if let Some(media) = d
+                        .media_descriptions
+                        .iter_mut()
+                        .find(|media| get_mid_value(media) == Some(mid))
+                    {
+                        media.attributes.retain(|a| {
+                            !BUNDLE_ATTRIBUTES.contains(&a.key.as_str())
+                                && a.key != "end-of-candidates"
+                        });
                     }
                 }
             }
-            for mid in bundled.iter().skip(1) {
-                if let Some(media) = d
-                    .media_descriptions
-                    .iter_mut()
-                    .find(|media| get_mid_value(media) == Some(mid))
-                {
-                    media.attributes.retain(|a| {
-                        !BUNDLE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != "end-of-candidates"
-                    });
-                }
-            }
         }
-        if !bundled.is_empty() {
+        for group in &bundled {
             d = d.with_value_attribute(
                 ATTR_KEY_GROUP.to_owned(),
-                format!("BUNDLE {}", bundled.join(" ")),
+                format!("BUNDLE {}", group.join(" ")),
             );
         }
 
@@ -2772,9 +2860,7 @@ impl RTCPeerConnection {
                 (m.mid.clone(), streams)
             })
             .collect();
-        for group in
-            generated_ls_groups(&live, &params.ls_groups, params.bundle == BundleMode::Offer)
-        {
+        for group in generated_ls_groups(&live, &params.ls_groups, params.bundle.is_offer()) {
             d = d
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }

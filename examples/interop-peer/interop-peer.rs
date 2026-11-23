@@ -294,6 +294,9 @@ struct Session {
     rollbacks: u64,
     connected: bool,
     state: String,
+    /// The ICE transports whose DTLS transport reported "connected" in an
+    /// `OnTransportEvent` (one per transport of the connection).
+    transports_connected: std::collections::HashSet<String>,
     errors: Vec<String>,
 }
 
@@ -373,6 +376,7 @@ impl Session {
             rollbacks: 0,
             connected: false,
             state: "new".to_owned(),
+            transports_connected: Default::default(),
             errors: vec![],
         };
 
@@ -608,8 +612,16 @@ impl Session {
         let offer = self.pc.create_offer(None)?;
         self.pc
             .set_local_description(Instant::now(), offer.clone())?;
+        // The offer's other transports (RFC 9429 section 5.2.1: under `balanced` the first
+        // section of each media type has one) get their candidates, which the local
+        // description then lists.
+        self.add_transport_candidates()?;
+        let sdp = self
+            .pc
+            .local_description()
+            .map_or(offer.sdp, |description| description.sdp);
         self.have_local_offer = true;
-        self.out.push(json!({"type": "offer", "sdp": offer.sdp}));
+        self.out.push(json!({"type": "offer", "sdp": sdp}));
         Ok(())
     }
 
@@ -700,6 +712,7 @@ impl Session {
                     "rollbacks": self.rollbacks,
                     "local_sdp": answer,
                     "stats": stats,
+                    "transportsConnected": self.transports_connected.len(),
                     "errors": self.errors,
                 }));
             }
@@ -769,7 +782,18 @@ impl Session {
                 })
             })
             .collect();
+        let transports: Vec<Value> = report
+            .iter()
+            .filter_map(|e| match e {
+                RTCStatsReportEntry::Transport(t) => Some(json!({
+                    "dtlsState": t.dtls_state.to_string(),
+                    "selectedCandidatePairId": t.selected_candidate_pair_id,
+                })),
+                _ => None,
+            })
+            .collect();
         json!({
+            "transports": transports,
             "inbound": inbound,
             "outbound": outbound,
             "remoteCandidates": remote_candidates,
@@ -937,6 +961,17 @@ impl Session {
                     if let Some(mut dc) = self.pc.data_channel(id) {
                         let _ = dc.send_text(Instant::now(), "hello-from-rust");
                     }
+                }
+                RTCPeerConnectionEvent::OnTransportEvent(event)
+                    if matches!(
+                        event.event,
+                        rtc::peer_connection::event::RTCTransportEventKind::DtlsStateChange(
+                            rtc::peer_connection::transport::RTCDtlsTransportState::Connected
+                        )
+                    ) =>
+                {
+                    self.transports_connected
+                        .insert(event.ice_transport.to_string());
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(st) => {
                     self.connected =
