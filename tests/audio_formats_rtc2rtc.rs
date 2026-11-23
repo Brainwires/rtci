@@ -881,50 +881,6 @@ fn received_red_is_decoded_in_every_mode() -> Result<()> {
     Ok(())
 }
 
-/// The answer of a peer that takes Opus and RED only, its Opus with `minptime=20` (the offer
-/// has 10): to the offerer a partial match of its Opus, while RED matches exactly.
-fn opus_and_red_only_other_opus(sdp: String) -> String {
-    let keep = |l: &str| {
-        ["111", "63"].iter().any(|pt| {
-            l.starts_with(&format!("a=rtpmap:{pt} "))
-                || l.starts_with(&format!("a=fmtp:{pt} "))
-                || l.starts_with(&format!("a=rtcp-fb:{pt} "))
-        })
-    };
-    let lines: Vec<String> = sdp
-        .lines()
-        .filter(|l| {
-            !(l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:") || l.starts_with("a=rtcp-fb:"))
-                || keep(l)
-        })
-        .map(|l| {
-            if l.starts_with("m=audio ") {
-                let mut parts: Vec<&str> = l.split(' ').take(3).collect();
-                parts.extend(["111", "63"]);
-                parts.join(" ")
-            } else {
-                l.replace("a=fmtp:111 minptime=10;", "a=fmtp:111 minptime=20;")
-            }
-        })
-        .collect();
-    lines.join("\r\n") + "\r\n"
-}
-
-/// The order is the remote description's own, not the order in which the engine matched its
-/// formats (exact matches first): an answer whose Opus parameters differ from the offer's
-/// (`minptime=20`: a partial match) while its RED matches exactly still lists Opus first, and
-/// the sender sends Opus.
-#[test]
-fn the_remote_order_decides_even_when_opus_matches_only_partially() -> Result<()> {
-    let other_opus = opus_and_red_only_other_opus;
-    let answer = answer_applied(other_opus)?;
-    assert!(answer.contains("a=fmtp:111 minptime=20;"), "{answer}");
-    assert_eq!(audio_formats(&answer)[..2], ["111", "63"], "{answer}");
-    let (wire, _, _) = opus_call(other_opus, [AudioRedundancy::default(); 2])?;
-    assert_eq!(wire, vec![111; 50]);
-    Ok(())
-}
-
 /// The payload type a sender's parameters give `mime`.
 fn send_payload_type(pc: &mut RTCPeerConnection, sender: RTCRtpSenderId, mime: &str) -> Option<u8> {
     pc.rtp_sender(sender)

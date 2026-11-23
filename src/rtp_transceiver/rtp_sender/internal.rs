@@ -1722,3 +1722,74 @@ mod repair_ssrc_collision_test {
         );
     }
 }
+
+#[cfg(test)]
+mod remote_format_order_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_codec::RTCRtpCodec;
+    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
+
+    fn codec(payload_type: PayloadType, mime_type: &str, fmtp: &str) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate: 48_000,
+                channels: 2,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    /// RFC 3264 sections 5.1 and 6.1: the remote m= line's order is the remote side's
+    /// preference, and the RED interceptor reads it from the bound stream's section. The
+    /// negotiated list puts exact matches before partial ones, so a list that leads with RED
+    /// while the remote line leads with Opus is bound in the remote order; a list set without
+    /// a remote order (before any remote description) is bound as it is.
+    #[test]
+    fn a_local_streams_section_is_bound_in_the_remote_order() {
+        let encoding = RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(1000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Audio,
+            vec![encoding.clone()],
+        );
+        let mut sender =
+            RTCRtpSenderInternal::new(RtpCodecKind::Audio, track, vec![], vec![encoding]);
+        let matched = vec![
+            codec(63, "audio/red", "111/111"),
+            codec(111, "audio/opus", "minptime=20;useinbandfec=1"),
+        ];
+        let section = |sender: &RTCRtpSenderInternal| -> Vec<(u8, String)> {
+            let infos = sender.local_stream_infos(&MediaEngine::default());
+            assert_eq!(infos.len(), 1);
+            assert_eq!(infos[0].payload_type, 111, "Opus is the stream's codec");
+            infos[0].section_mime_types.clone()
+        };
+
+        sender.set_codec_preferences(matched.clone());
+        sender.set_remote_format_order(vec![111, 63]);
+        assert_eq!(
+            section(&sender),
+            vec![(111, "audio/opus".to_owned()), (63, "audio/red".to_owned())],
+            "the remote m= line's order"
+        );
+
+        sender.set_codec_preferences(matched);
+        assert_eq!(
+            section(&sender),
+            vec![(63, "audio/red".to_owned()), (111, "audio/opus".to_owned())],
+            "no remote order: the list as set"
+        );
+    }
+}
