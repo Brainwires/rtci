@@ -156,3 +156,23 @@ fn test_slice_loss_indication_round_trips_through_the_packet_parser() {
         Some(&sli)
     );
 }
+
+/// RFC 7741 section 5.2: a VP8 receiver "MAY set the First parameter to 0, and the Number
+/// parameter to the total number of macroblocks per frame"; PictureID is "the six least
+/// significant bits" of the VP8 PictureID. A 640x480 frame is 1200 macroblocks; PictureID
+/// 0x12F4 is 0x34 in six bits; it reads back as such.
+#[test]
+fn a_vp8_whole_frame_sli_names_every_macroblock_and_six_bits_of_the_picture_id() {
+    let sli = SliceLossIndication::vp8_frame(1, 2, 0x12F4, 640, 480);
+    assert_eq!(
+        vec![SliEntry {
+            first: 0,
+            number: 1200,
+            picture: 0x34,
+        }],
+        sli.sli_entries
+    );
+    let raw = sli.marshal().unwrap();
+    let read = SliceLossIndication::unmarshal(&mut raw.freeze()).unwrap();
+    assert_eq!(sli, read);
+}

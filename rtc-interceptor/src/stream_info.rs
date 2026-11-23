@@ -182,6 +182,13 @@ pub struct StreamInfo {
     /// source that switches payload type (and with it clock rate, RFC 7160 section 4.3), e.g.
     /// Opus at 48000 and PCMU at 8000 on one SSRC. Empty: every packet is at `clock_rate`.
     pub payload_clock_rates: Vec<(u8, u32)>,
+
+    /// The `a=fmtp` parameters of every format of the stream's m= section by payload type,
+    /// repair and redundancy formats included (RTX, RED, ULPFEC, FlexFEC), for an interceptor
+    /// that acts on a format the stream does not name itself: the ULPFEC interceptors read
+    /// `onelevelonly` (RFC 5109 section 13) of their `ulpfec` format here. Empty when the
+    /// binder did not say.
+    pub section_fmtp_lines: Vec<(u8, String)>,
 }
 
 impl StreamInfo {

@@ -209,18 +209,21 @@ impl CircuitBreakerBuilder {
 
     /// Build the interceptor and the handle the application watches it through.
     pub fn build(self) -> (CircuitBreakerInterceptor, CircuitBreakerHandle) {
-        let shared = Arc::new(Mutex::new(Shared::default()));
-        (
-            CircuitBreakerInterceptor {
-                config: self.config,
-                flows: HashMap::new(),
-                awaiting_rtcp_since: None,
-                shared: shared.clone(),
-                read_queue: VecDeque::new(),
-                write_queue: VecDeque::new(),
-            },
-            CircuitBreakerHandle { shared },
-        )
+        let handle = CircuitBreakerHandle::new();
+        (self.build_with_handle(&handle), handle)
+    }
+
+    /// Build the interceptor `handle` watches (made beforehand, for example to give it to the
+    /// congestion controller of the same transport). One interceptor per handle.
+    pub fn build_with_handle(self, handle: &CircuitBreakerHandle) -> CircuitBreakerInterceptor {
+        CircuitBreakerInterceptor {
+            config: self.config,
+            flows: HashMap::new(),
+            awaiting_rtcp_since: None,
+            shared: handle.shared.clone(),
+            read_queue: VecDeque::new(),
+            write_queue: VecDeque::new(),
+        }
     }
 }
 
@@ -245,7 +248,21 @@ pub struct CircuitBreakerHandle {
     shared: Arc<Mutex<Shared>>,
 }
 
+impl Default for CircuitBreakerHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CircuitBreakerHandle {
+    /// A handle with no interceptor yet: [`CircuitBreakerBuilder::build_with_handle`] builds
+    /// the one it watches.
+    pub fn new() -> Self {
+        Self {
+            shared: Arc::new(Mutex::new(Shared::default())),
+        }
+    }
+
     /// What the breaker is doing with the flow sent on `ssrc`, if it is bound.
     pub fn state(&self, ssrc: u32) -> Option<CircuitBreakerState> {
         lock(&self.shared).states.get(&ssrc).copied()

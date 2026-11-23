@@ -259,6 +259,28 @@ fn h265_formats_match_by_configuration_and_the_answer_level_is_not_above_the_off
     Ok(())
 }
 
+/// RFC 7798 section 7.2.2: without `recv-sub-layer-id` "the answer MUST NOT contain a
+/// payload type number used in the offer for the media subtype H265 unless the configuration
+/// is exactly the same as in the offer" (level aside). An offer whose only H.265 formats are of
+/// configurations this endpoint does not have (Main 10, MRST) gets an answer without H.265:
+/// no fallback to the format by its name alone.
+#[test]
+fn an_offer_of_only_other_h265_configurations_is_answered_without_h265() -> TestResult {
+    let answer = answer_to(
+        "video",
+        "100 101 96",
+        "a=rtpmap:100 H265/90000\na=fmtp:100 profile-id=2\n\
+         a=rtpmap:101 H265/90000\na=fmtp:101 tx-mode=MRST\n\
+         a=rtpmap:96 VP8/90000\n",
+    )?;
+    let h265: Vec<(String, String, String)> = formats(&answer)
+        .into_iter()
+        .filter(|(_, r, _)| r.starts_with("H265/"))
+        .collect();
+    assert!(h265.is_empty(), "{h265:?}");
+    Ok(())
+}
+
 /// RFC 6184 section 8.1: "packetization-mode ... MUST be equal to 0, 1, or 2": an offered
 /// format with another mode is not answered.
 #[test]

@@ -95,3 +95,21 @@ fn a_packet_just_past_max_misorder_behind_is_refused() {
     assert!(source.update(1001 - MAX_MISORDER + 1));
     assert!(!source.update(1001 - MAX_MISORDER - 1));
 }
+
+/// RFC 3550 section 5.1: "The initial value of the sequence number SHOULD be random
+/// (unpredictable)"; Appendix A.6: the random identifiers come from a routine that is not
+/// predictable. Sequencers made one after another start at numbers spread over the whole
+/// space: no repeats beyond chance, every bit taking both values.
+#[test]
+fn random_sequencers_start_at_unpredictable_numbers() {
+    let starts: Vec<u16> = (0..256)
+        .map(|_| new_random_sequencer().next_sequence_number())
+        .collect();
+    let distinct: std::collections::HashSet<u16> = starts.iter().copied().collect();
+    // 256 draws from 65536 repeat about once by chance.
+    assert!(distinct.len() >= 250, "{} distinct of 256", distinct.len());
+    let (any, all) = starts
+        .iter()
+        .fold((0u16, u16::MAX), |(any, all), s| (any | s, all & s));
+    assert_eq!((any, all), (u16::MAX, 0), "every bit varies");
+}

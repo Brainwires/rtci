@@ -248,6 +248,9 @@ pub struct Vp9Payloader {
     slots: [Option<u64>; VP9_REF_SLOTS],
     /// The spatial layer of the last frame sent of a picture that has not ended.
     open_picture_sid: Option<u8>,
+    /// [`Payloader::set_next_frame_info`]: the layer information of the next frame
+    /// [`Payloader::payload`] is given.
+    next_frame_info: Option<Vp9FrameInfo>,
     /// Whether any frame has been sent.
     started: bool,
 }
@@ -305,7 +308,25 @@ impl Payloader for Vp9Payloader {
          *       | ..            |
          *       +-+-+-+-+-+-+-+-+
          */
-        self.payload_frame(mtu, payload, None)
+        let info = self.next_frame_info.take();
+        self.payload_frame(mtu, payload, info.as_ref())
+    }
+
+    /// RFC 9628 section 4.1: the marker is set on "the final packet of the highest spatial
+    /// layer frame", the picture's last. After a frame that leaves its picture open
+    /// (`end_of_picture` unset) no packet of that frame carries it.
+    fn marker_rule(&self) -> crate::packetizer::MarkerRule {
+        if self.open_picture_sid.is_some() {
+            crate::packetizer::MarkerRule::Never
+        } else {
+            crate::packetizer::MarkerRule::LastPacketOfFrame
+        }
+    }
+
+    fn set_next_frame_info(&mut self, info: &dyn std::any::Any) {
+        if let Some(info) = info.downcast_ref::<Vp9FrameInfo>() {
+            self.next_frame_info = Some(info.clone());
+        }
     }
 
     fn clone_to(&self) -> Box<dyn Payloader> {

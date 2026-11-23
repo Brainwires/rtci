@@ -120,8 +120,22 @@ impl RTCStatsAccumulator {
         self.transport_name(key)
     }
 
+    /// The key of the transport the m= section `mid` runs over.
+    pub(crate) fn section_transport_key(&self, mid: &str) -> usize {
+        self.transports
+            .sections
+            .get(mid)
+            .copied()
+            .unwrap_or(self.transports.default)
+    }
+
+    /// Whether the connection has one transport only (none parked).
+    pub(crate) fn transports_are_one(&self) -> bool {
+        self.transports.parked.is_empty()
+    }
+
     /// The name of transport `key`'s `transport` object.
-    fn transport_name(&self, key: usize) -> String {
+    pub(crate) fn transport_name(&self, key: usize) -> String {
         if key == self.transports.active {
             self.transport.transport_id.clone()
         } else {

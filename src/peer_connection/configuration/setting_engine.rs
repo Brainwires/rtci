@@ -514,6 +514,10 @@ pub struct SettingEngine {
     /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
     /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
     pub(crate) unnegotiated_header_extensions: bool,
+    /// [`SettingEngineBuilder::with_ssrc_per_clock_rate`] `(false)`: a stream keeps its SSRC
+    /// whatever the clock rate of the codec a packet is written with (inverted so that the
+    /// derived default is RFC 7160's SSRC per clock rate).
+    pub(crate) one_ssrc_across_clock_rates: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -2440,6 +2444,24 @@ impl SettingEngineBuilder {
     /// them through.
     pub fn with_unnegotiated_header_extensions(mut self, pass_through: bool) -> Self {
         self.0.unnegotiated_header_extensions = pass_through;
+        self
+    }
+
+    /// Whether a sender's stream moves to a new SSRC when the application writes a packet
+    /// with a negotiated codec of another clock rate. The default is `true`.
+    ///
+    /// RFC 7160 section 4.1: "An RTP Sender with RTCP turned on MUST use a different SSRC for
+    /// each different clock rate. An RTCP BYE MUST be sent and a new SSRC MUST be used if the
+    /// clock rate switches back to a value already seen in the RTP stream." With `true`, a
+    /// packet written with such a codec (Opus at 48 kHz, then PCMU at 8 kHz, on one audio
+    /// sender) goes out as a new SSRC, the encoding's SSRC from then on; the stream it left
+    /// stays in the RTCP session and its sender report follows the new one's in the next
+    /// compound packet; a return to a rate used before sends a BYE for the SSRC that used it
+    /// and takes another new one. Comfort noise and telephone events ride the stream as they
+    /// are. `false` keeps one SSRC for every clock rate, as the fork did before (RFC 7160
+    /// section 4.2 allows it only with RTCP off).
+    pub fn with_ssrc_per_clock_rate(mut self, ssrc_per_clock_rate: bool) -> Self {
+        self.0.one_ssrc_across_clock_rates = !ssrc_per_clock_rate;
         self
     }
 

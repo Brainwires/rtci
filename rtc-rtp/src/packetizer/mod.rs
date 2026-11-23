@@ -55,6 +55,11 @@ pub trait Payloader: Send + Sync + fmt::Debug {
     fn payload_duration(&self, _payload: &Bytes) -> Option<u32> {
         None
     }
+    /// What the encoder says about the next frame [`payload`](Payloader::payload) is given,
+    /// for a format whose payload describes more than the frame's bytes (VP9's layer indices,
+    /// [`Vp9FrameInfo`](crate::codec::vp9::Vp9FrameInfo)); a type the payloader does not use
+    /// is ignored, as is the call by a payloader that uses none (the default).
+    fn set_next_frame_info(&mut self, _info: &dyn std::any::Any) {}
     /// Clones this payloader behind a trait object.
     fn clone_to(&self) -> Box<dyn Payloader>;
 }
@@ -86,6 +91,12 @@ pub trait Packetizer: Send + Sync + fmt::Debug {
     /// audio format this is a silence period: the next packet starts a talkspurt and carries
     /// the marker bit (RFC 3551 section 4.1; Opus DTX, RFC 7587 section 3.1.3).
     fn skip_samples(&mut self, skipped_samples: u32);
+    /// Describes the next frame [`packetize`](Packetizer::packetize) is given to the
+    /// payloader ([`Payloader::set_next_frame_info`]): for VP9 a
+    /// [`Vp9FrameInfo`](crate::codec::vp9::Vp9FrameInfo), so that the frames of a picture
+    /// with spatial layers carry their layer indices and only the picture's last packet the
+    /// marker (RFC 9628 section 4.1). The default ignores it.
+    fn set_next_frame_info(&mut self, _info: &dyn std::any::Any) {}
     /// Clones this packetizer behind a trait object.
     fn clone_to(&self) -> Box<dyn Packetizer>;
 }
@@ -243,6 +254,10 @@ impl Packetizer for PacketizerImpl {
     fn skip_samples(&mut self, skipped_samples: u32) {
         self.timestamp = self.timestamp.wrapping_add(skipped_samples);
         self.talkspurt_start = true;
+    }
+
+    fn set_next_frame_info(&mut self, info: &dyn std::any::Any) {
+        self.payloader.set_next_frame_info(info);
     }
 
     fn clone_to(&self) -> Box<dyn Packetizer> {

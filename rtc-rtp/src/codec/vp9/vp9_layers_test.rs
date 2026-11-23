@@ -879,3 +879,57 @@ fn a_payloaded_stream_filters_down_to_its_base_layer() -> Result<()> {
     assert_eq!(forwarded.iter().filter(|(_, e, _)| *e).count(), 3);
     Ok(())
 }
+
+/// RFC 9628 section 4.1: "the marker bit ... MUST be set to 1 for the final packet of the
+/// highest spatial layer frame (the final packet of the picture)". Through the generic
+/// `Packetizer` (what an application that does not build packets itself uses), with each
+/// frame's layer information given by `set_next_frame_info`: a key picture of two spatial
+/// layers at an MTU that splits each frame, then a picture of one frame. Only the last packet
+/// of each picture has the marker.
+#[test]
+fn through_the_packetizer_only_a_pictures_last_packet_has_the_marker() -> Result<()> {
+    use crate::packetizer::{Packetizer, new_packetizer};
+    use crate::sequence::new_fixed_sequencer;
+    let mut pck = payloader(false);
+    pck.set_scalability_structure(Some(l2t2_structure()))?;
+    let mut packetizer = new_packetizer(
+        std::time::Instant::now(),
+        60,
+        98,
+        0x1234_5678,
+        Box::new(pck),
+        Box::new(new_fixed_sequencer(1)),
+        90000,
+    );
+    // A key frame of a few hundred octets: more than one packet at this MTU.
+    let mut key = vp9_key_frame_640x480();
+    key.extend([0x55; 200]);
+    let key = Bytes::from(key);
+    let upper = vp9_inter_frame(0x02, 0);
+    let now = std::time::Instant::now();
+    let mut markers = vec![];
+    for (frame, info, samples) in [
+        (&key, layer(0, 0, false, false, false), 0),
+        (&upper, layer(0, 1, true, true, true), 3000),
+        (
+            &vp9_inter_frame(0x00, 0),
+            layer(1, 0, false, false, true),
+            3000,
+        ),
+    ] {
+        packetizer.set_next_frame_info(&info);
+        let packets = packetizer.packetize(now, frame, samples)?;
+        assert!(!packets.is_empty());
+        markers.push(packets.iter().map(|p| p.header.marker).collect::<Vec<_>>());
+    }
+    assert!(markers[0].len() > 1, "the MTU splits the key frame");
+    assert!(
+        markers[0].iter().all(|m| !m),
+        "spatial layer 0 does not end the picture: {markers:?}"
+    );
+    for frame in &markers[1..] {
+        let (last, rest) = frame.split_last().expect("packets");
+        assert!(*last && rest.iter().all(|m| !m), "{markers:?}");
+    }
+    Ok(())
+}

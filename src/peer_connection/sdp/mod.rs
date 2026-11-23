@@ -4797,6 +4797,37 @@ fn every_static_payload_type_of_rfc_3551_is_read_without_an_rtpmap() {
     );
 }
 
+/// RFC 3551 section 3: "the payload type codes below 96 MAY be ... bound dynamically", and
+/// a static binding may be redefined: an `a=rtpmap` for a static number (0, PCMU) or an
+/// unassigned one below 96 (35) gives the format it names, not the table's.
+#[test]
+fn an_rtpmap_rebinds_a_static_or_unassigned_payload_type_below_96() {
+    let mut m = MediaDescription::default()
+        .with_value_attribute("rtpmap".to_owned(), "0 opus/48000/2".to_owned())
+        .with_value_attribute("rtpmap".to_owned(), "35 telephone-event/8000".to_owned());
+    m.media_name.media = "audio".to_owned();
+    m.media_name.formats = ["0", "35", "8"].map(str::to_owned).to_vec();
+    let codecs = codecs_from_media_description(&m).unwrap();
+    let read: Vec<(u8, &str, u32)> = codecs
+        .iter()
+        .map(|c| {
+            (
+                c.payload_type,
+                c.rtp_codec.mime_type.as_str(),
+                c.rtp_codec.clock_rate,
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (0, "audio/opus", 48000),
+            (35, "audio/telephone-event", 8000),
+            (8, "audio/PCMA", 8000)
+        ]
+    );
+}
+
 #[test]
 fn codecs_from_media_description_reads_static_and_skips_undefined_payload_types() {
     let mut m = MediaDescription::default()
