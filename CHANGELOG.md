@@ -380,6 +380,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
+  (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
+  before, whenever RED was negotiated: a 24 kbit/s audio-only call went from 38.5 to 64.5
+  kbit/s on the wire (hosted run 45240105038), against every browser that negotiates RED.
+  RFC 3264 sections 5.1 and 6.1 list an m= line's formats "in order of preference" and have
+  the sender "use the format with the highest preference"; RFC 2198 section 5 reads a
+  section that leads with `red` as the sender sending "redundancy by default"; RFC 8854
+  recommends Opus's in-band FEC for Opus (section 4.1) and FEC only for the loss observed or
+  on the application's request (section 8); libwebrtc sends RED only when it is "negotiated
+  before the actual codec" (`webrtc_voice_engine.cc`, `SetSendCodecs`). Chromium and WebKit
+  list RED after Opus in their offers and in their answers to this engine, so neither side
+  sends RED in a call between them by default.
+  - New `AudioRedundancy { WhenPreferred, Always, Never }` (`rtc-interceptor`, default
+    `WhenPreferred`), `RedAudioBuilder::with_audio_redundancy`,
+    `SettingEngineBuilder::with_audio_redundancy` and
+    `configure_audio_redundancy_with(registry, AudioRedundancy)` (new API).
+    `WhenPreferred`: RED when the remote description lists it ahead of the stream's codec;
+    `Always`: RED whenever negotiated (the jsep17 behaviour); `Never`: the codec only.
+    Received RED is taken apart in every mode. RED stays offered and answered as before.
+  - A sender's streams are bound to the interceptors with their section's formats in the
+    remote m= line's order (`StreamInfo::section_mime_types`); the sender's negotiated codec
+    list itself is unchanged.
+  - The interop peer reports the RTP payload types and octets on the wire in each direction
+    (`wireRtp`), and the "reflect audio Opus" cell records them and asserts Opus both ways.
+    The Chromium and WebKit answer fixtures of "Rust offers media" are refreshed from train
+    11's matrix (they now answer the engine's RED, after Opus).
+
 - **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
   continues the SCTP association updates `maxMessageSize` and what the association lets this
   side send from the remote `a=max-message-size` (it kept the first answer's).
