@@ -22,6 +22,26 @@ const MANDATORY_TO_IMPLEMENT: &[&str] = &[
     rtp::extension::AUDIO_LEVEL_URI,
 ];
 
+/// W3C webrtc-pc 5.2 / 5.3 `getParameters().headerExtensions`: keeps the extensions
+/// `negotiated` (a transceiver's `[[NegotiatedHeaderExtensions]]`) lists in a direction that
+/// sends (`sending`) or receives; nothing before an answer was applied.
+pub(crate) fn retain_negotiated(
+    extensions: &mut Vec<crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionParameters>,
+    negotiated: &[RTCRtpHeaderExtensionToNegotiate],
+    sending: bool,
+) {
+    extensions.retain(|extension| {
+        negotiated.iter().any(|n| {
+            n.uri == extension.uri
+                && if sending {
+                    n.direction.has_send()
+                } else {
+                    n.direction.has_recv()
+                }
+        })
+    });
+}
+
 /// The initial `[[HeaderExtensionsToNegotiate]]` of a transceiver of `kind` that has no
 /// other non-stopping transceiver of its kind to copy from (webrtc-extensions 4.1): every
 /// extension the media engine registered for the kind, once each, in registration order,
@@ -91,6 +111,40 @@ pub(crate) fn validate(
         }
     }
     Ok(())
+}
+
+/// webrtc-extensions 4.2 `setHeaderExtensionsToNegotiate`: "If necessary, restrict
+/// extension.direction as to not exceed the user agent's capabilities for this extension."
+/// The engine's capability for an extension is the direction the media engine registered it
+/// with for the transceiver's kind (`register_header_extension`'s `allowed_direction`; none
+/// is "sendrecv"): a requested direction keeps only the halves that one allows ("sendrecv"
+/// asked of a receive-only extension is "recvonly"). "stopped" stays "stopped".
+pub(crate) fn restrict_to_capabilities(
+    media_engine: &MediaEngine,
+    kind: RtpCodecKind,
+    extensions: &mut [RTCRtpHeaderExtensionToNegotiate],
+) {
+    for extension in extensions.iter_mut() {
+        if extension.direction == RTCRtpTransceiverDirection::Stopped {
+            continue;
+        }
+        let capability = media_engine.header_extensions.iter().find(|registered| {
+            registered.uri == extension.uri
+                && match kind {
+                    RtpCodecKind::Audio => registered.is_audio,
+                    RtpCodecKind::Video => registered.is_video,
+                    _ => false,
+                }
+        });
+        if let Some(
+            allowed @ (RTCRtpTransceiverDirection::Sendonly
+            | RTCRtpTransceiverDirection::Recvonly
+            | RTCRtpTransceiverDirection::Inactive),
+        ) = capability.and_then(|c| c.allowed_direction)
+        {
+            extension.direction = extension.direction.intersect(allowed);
+        }
+    }
 }
 
 /// webrtc-extensions 4.1, applying an answer: each extension of `to_negotiate` takes the

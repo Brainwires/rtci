@@ -444,6 +444,9 @@ pub struct SettingEngine {
     /// budget via rtc-sctp's `max_payload_size_for_mtu`. `None` uses the rtc-sctp
     /// default (`INITIAL_MTU`, 1191 — the TURN-relayed IPv6 minimum-MTU budget).
     pub(crate) sctp_mtu: Option<u32>,
+    /// SCTP path MTU discovery (RFC 8899 section 6.2.3): `Some` with the largest IP packet to
+    /// probe for, `None` off. Unset is the default, on up to 1500 bytes.
+    pub(crate) sctp_path_mtu_discovery: Option<Option<u32>>,
     /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6, RFC 8831 section
     /// 6.4). `None` is the default, on.
     pub(crate) sctp_weighted_fair_queueing: Option<bool>,
@@ -452,11 +455,19 @@ pub struct SettingEngine {
     /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
     /// on.
     pub(crate) sctp_zero_checksum: Option<bool>,
+    /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
+    pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
+    pub(crate) sctp_rto: Option<sctp::RtoConfig>,
+    /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
+    pub(crate) sctp_max_retransmissions: Option<usize>,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
     pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_data_channel_send_before_ack`].
+    pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
@@ -1935,15 +1946,16 @@ impl SettingEngineBuilder {
     /// headers, and 4 bytes of TURN ChannelData framing when relayed.
     ///
     /// Left unset, the budget follows the path: RFC 8831 section 5 says the initial path MTU
-    /// at the IP layer "SHOULD NOT exceed 1200 bytes for IPv4 and 1280 bytes for IPv6", and
-    /// the association does not probe for more, so an SCTP packet is what is left of that
-    /// under the headers of the selected candidate pair and the negotiated DTLS cipher suite
+    /// at the IP layer "SHOULD NOT exceed 1200 bytes for IPv4 and 1280 bytes for IPv6", so an
+    /// SCTP packet starts as what is left of that under the headers of the selected candidate pair and the negotiated DTLS cipher suite
     /// (1135 bytes over IPv4 and UDP with AES-GCM, 1195 over IPv6), recomputed when ICE
     /// selects another pair. Until a pair is selected it is 1191 (the TURN-relayed IPv6
     /// budget, webrtc-rs/rtc#178). Set this only for paths with a known different budget:
     /// raise it where the path genuinely carries more (fewer, larger packets cut per-packet
     /// overhead), lower it for tunnels with an even smaller MTU. A value set here is used as
-    /// it is on every path.
+    /// it is on every path, and path MTU discovery
+    /// ([`with_sctp_path_mtu_discovery`](Self::with_sctp_path_mtu_discovery)), which grows the
+    /// packets from the initial size otherwise, is off.
     ///
     /// The per-chunk payload budget is derived from this value by the inverse of the
     /// default derivation (minus the 12-byte common header and 16-byte DATA chunk header,
@@ -1952,6 +1964,23 @@ impl SettingEngineBuilder {
     /// representable padded DATA packet — are raised to 32 with a warning.
     pub fn with_sctp_mtu(mut self, mtu: u32) -> Self {
         self.0.sctp_mtu = Some(mtu);
+        self
+    }
+
+    /// SCTP path MTU discovery (RFC 8261 section 4, RFC 8831 section 5: SCTP over DTLS
+    /// "MUST" discover the path MTU without ICMP; RFC 8899 section 6.2.3 is the method).
+    /// Once the association is established it confirms the initial packet size (RFC 8831
+    /// section 5's 1200 / 1280-byte IP packet under the headers of the selected pair and
+    /// the DTLS record) with a probe, a HEARTBEAT and a PAD chunk (RFC 4820) of exactly the
+    /// size tried, then searches for larger packets up to `max_ip_packet` bytes at the IP
+    /// layer (the local interface MTU; 1500, Ethernet's, by default), comes back to the
+    /// initial size when the path stops carrying the larger one, and searches again every
+    /// 600 seconds and after ICE selects another pair. Probes carry no data and are lost
+    /// without consequence where the path is smaller. `None` turns it off: the packet size
+    /// then stays the initial one. A fixed [`with_sctp_mtu`](Self::with_sctp_mtu) turns it
+    /// off too.
+    pub fn with_sctp_path_mtu_discovery(mut self, max_ip_packet: Option<u32>) -> Self {
+        self.0.sctp_path_mtu_discovery = Some(max_ip_packet);
         self
     }
 
@@ -1988,6 +2017,40 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The number of SCTP streams this endpoint asks for and accepts in each direction
+    /// (the OS and MIS of its INIT or INIT ACK, RFC 9260 section 3.3.2). The association has
+    /// the smaller of both sides' counts, which is W3C `RTCSctpTransport.maxChannels`
+    /// (webrtc-pc 6.1.1): a data channel id at or above it cannot be used. Unset, the default,
+    /// is 65535, as browsers ask for; a value of 0 is raised to 1.
+    pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
+        self.0.sctp_max_streams = Some(streams.max(1));
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the SCTP association (RFC 9260 sections 6.3.1 and
+    /// 16): the retransmission timeout before a round trip is measured, and its bounds. Unset,
+    /// the default, is the RFC's recommendation: 1, 1 and 60 seconds. A minimum or maximum of
+    /// zero is raised to a millisecond, a maximum below the minimum to the minimum.
+    ///
+    /// With [`Self::with_sctp_max_retransmissions`] this bounds how long the association keeps
+    /// retransmitting to a peer that does not answer before it fails (W3C webrtc-pc 6.2: the
+    /// data channels then fail with `sctp-failure`). At the defaults that is minutes, longer
+    /// than ICE consent (30 seconds) takes to fail the path: an application that wants SCTP
+    /// itself to report an unreachable peer sooner (a path ICE still thinks alive) lowers it.
+    pub fn with_sctp_rto(mut self, initial: Duration, min: Duration, max: Duration) -> Self {
+        self.0.sctp_rto = Some(sctp::RtoConfig { initial, min, max });
+        self
+    }
+
+    /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
+    /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
+    /// takes before it declares the peer unreachable and fails. Unset, the default, is the
+    /// RFC's 10. See [`Self::with_sctp_rto`].
+    pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
+        self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
     /// Whether a message over 16 KB is refused when the SCTP association does not interleave
     /// user messages. On by default: RFC 8831 section 6.6 says "As long as message
     /// interleaving is not supported, the sender SHOULD limit the maximum message size to
@@ -2017,6 +2080,22 @@ impl SettingEngineBuilder {
     /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
+    /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
+    ///
+    /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
+    /// start sending messages containing user data without waiting for the reception of the
+    /// corresponding DATA_CHANNEL_ACK message". The data goes out ordered behind the OPEN, and
+    /// a peer that implements RFC 8832 (any browser, this engine) takes it as the ACK would.
+    ///
+    /// [`Error::ErrDataChannelNotOpen`]: shared::error::Error::ErrDataChannelNotOpen
+    pub fn with_data_channel_send_before_ack(mut self, enabled: bool) -> Self {
+        self.0.data_channel_send_before_ack = enabled;
         self
     }
 

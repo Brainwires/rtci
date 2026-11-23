@@ -42,9 +42,9 @@ pub(crate) const DEFAULT_SCTP_PORT: u16 = 5000;
 /// ICE candidate pair and the DTLS record protection.
 ///
 /// RFC 8831 section 5: "The initial Path MTU at the IP layer SHOULD NOT exceed 1200 bytes for
-/// IPv4 and 1280 bytes for IPv6." The association does not probe the path (no RFC 4821
-/// discovery), so that initial value is the one it keeps, and an SCTP packet is what is left
-/// of it under the headers below.
+/// IPv4 and 1280 bytes for IPv6." An SCTP packet starts as what is left of it under the
+/// headers below; path MTU discovery (RFC 8899 section 6.2.3) then searches up to what
+/// [`SctpPath::packet_budget_within`] leaves of the largest IP packet configured.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct SctpPath {
     /// The selected pair's addresses are IPv6.
@@ -69,19 +69,29 @@ impl SctpPath {
     /// is smaller.
     pub(crate) const DEFAULT_DTLS_RECORD_OVERHEAD: usize = 13 + 24;
 
+    /// The largest IP packet path MTU discovery probes for by default: Ethernet's MTU.
+    pub(crate) const DEFAULT_MAX_IP_PACKET: u32 = 1500;
+
     /// The largest SCTP packet (common header and chunks) that fits the path: the IP-layer
     /// MTU less the IP header, the UDP header (or the TCP header and the two-byte frame
     /// length of RFC 4571), the four-byte TURN ChannelData header on a relayed candidate, and
     /// the DTLS record overhead.
     pub(crate) fn packet_budget(&self) -> u32 {
-        let (path_mtu, ip_header) = if self.ipv6 {
-            (Self::IPV6_PATH_MTU, 40)
+        self.packet_budget_within(if self.ipv6 {
+            Self::IPV6_PATH_MTU
         } else {
-            (Self::IPV4_PATH_MTU, 20)
-        };
+            Self::IPV4_PATH_MTU
+        })
+    }
+
+    /// The largest SCTP packet an IP packet of `ip_packet` bytes carries over this path:
+    /// what [`packet_budget`](Self::packet_budget) takes off the initial path MTU, taken off
+    /// `ip_packet` (RFC 8899 section 6.2.3.2: the probe's size includes the DTLS headers).
+    pub(crate) fn packet_budget_within(&self, ip_packet: u32) -> u32 {
+        let ip_header = if self.ipv6 { 40 } else { 20 };
         let transport_header = if self.tcp { 20 + 2 } else { 8 };
         let turn_header = if self.relayed { 4 } else { 0 };
-        path_mtu
+        ip_packet
             .saturating_sub(ip_header + transport_header + turn_header)
             .saturating_sub(u32::try_from(self.dtls_record_overhead).unwrap_or(u32::MAX))
             .max(::sctp::MIN_DATA_PACKET_MTU)
@@ -132,6 +142,14 @@ pub(crate) struct SctpTransport {
     // so we need a dedicated field
     pub(crate) is_started: bool,
 
+    /// W3C `[[SctpTransport]]` is not null: an applied offer described an SCTP association
+    /// (RFC 8841 section 10.2), and no answer has closed it since (sections 10.3, 10.4). The
+    /// transport is exposed ("connecting" until its association is up) from then on.
+    pub(crate) described: bool,
+    /// W3C `[[LastStableStateSctpTransport]]`: `described` in the last stable state, what a
+    /// rollback brings back.
+    pub(crate) last_stable_described: bool,
+
     // The *configured* ceiling from SettingEngine — an input to the negotiation below, not the
     // value W3C `maxMessageSize` reports. See `negotiated_max_message_size`.
     pub(crate) max_message_size: SctpMaxMessageSize,
@@ -169,6 +187,18 @@ pub(crate) struct SctpTransport {
     // the RFC defines (section 6). On by default.
     pub(crate) zero_checksum: bool,
 
+    // The stream count asked for and accepted in each direction
+    // (`SettingEngineBuilder::with_sctp_max_streams`); `None` keeps the association's 65535.
+    pub(crate) max_streams: Option<u16>,
+
+    // RTO.Initial / RTO.Min / RTO.Max (`SettingEngineBuilder::with_sctp_rto`); `None` keeps
+    // RFC 9260's.
+    pub(crate) rto: Option<::sctp::RtoConfig>,
+
+    // Association.Max.Retrans (`SettingEngineBuilder::with_sctp_max_retransmissions`); `None`
+    // keeps RFC 9260's 10.
+    pub(crate) max_retransmissions: Option<usize>,
+
     // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
     // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
     // on an association that did not negotiate interleaving, a message over
@@ -186,6 +216,14 @@ pub(crate) struct SctpTransport {
     /// candidate pair and the DTLS cipher suite ([`SctpPath::packet_budget`]). `None` until a
     /// pair is selected. `mtu` above, when the application set it, takes its place.
     pub(crate) path_mtu: Option<u32>,
+
+    /// Path MTU discovery: the largest IP packet to probe for, `None` when it is off.
+    pub(crate) path_mtu_discovery: Option<u32>,
+
+    /// The largest SCTP packet discovery probes for on the selected path
+    /// ([`SctpPath::packet_budget_within`] of `path_mtu_discovery`). `None` until a pair is
+    /// selected.
+    pub(crate) max_path_mtu: Option<u32>,
 
     // The largest message accepted from the peer: the `max-message-size` this side advertised
     // (RFC 8841 6.1), which is not the negotiated send limit above. 0 before `start()`.
@@ -234,6 +272,8 @@ impl SctpTransport {
             sctp_associations: HashMap::new(),
 
             is_started: false,
+            described: false,
+            last_stable_described: false,
             max_message_size,
             negotiated_max_message_size: None,
             negotiated_max_buffer_size: None,
@@ -243,9 +283,16 @@ impl SctpTransport {
             weighted_fair_queueing: true,
             message_interleaving: true,
             zero_checksum: true,
+            max_streams: None,
+            rto: None,
+            max_retransmissions: None,
             limit_message_size_without_interleaving: true,
             cookie_provider: None,
             path_mtu: None,
+            // Off for a transport built by hand; a peer connection sets it from its
+            // setting engine (on by default).
+            path_mtu_discovery: None,
+            max_path_mtu: None,
             receive_message_limit: 0,
             local_port: DEFAULT_SCTP_PORT,
             negotiated_ports: None,
@@ -426,6 +473,33 @@ impl SctpTransport {
         self
     }
 
+    /// The stream count the association `start()` builds asks for and accepts in each
+    /// direction; `None` keeps the default.
+    pub(crate) fn with_max_streams(mut self, streams: Option<u16>) -> Self {
+        self.max_streams = streams;
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the association `start()` builds; `None` keeps
+    /// the defaults.
+    pub(crate) fn with_rto(mut self, rto: Option<::sctp::RtoConfig>) -> Self {
+        self.rto = rto;
+        self
+    }
+
+    /// Association.Max.Retrans of the association `start()` builds; `None` keeps the default.
+    pub(crate) fn with_max_retransmissions(mut self, limit: Option<usize>) -> Self {
+        self.max_retransmissions = limit;
+        self
+    }
+
+    /// Path MTU discovery for the associations `start()` builds (RFC 8899 section 6.2.3):
+    /// the largest IP packet to probe for, or `None` for none.
+    pub(crate) fn with_path_mtu_discovery(mut self, max_ip_packet: Option<u32>) -> Self {
+        self.path_mtu_discovery = max_ip_packet;
+        self
+    }
+
     /// Whether a message over 16 KB is refused on an association without message
     /// interleaving (RFC 8831 section 6.6).
     pub(crate) fn with_message_size_limit_without_interleaving(mut self, enabled: bool) -> Self {
@@ -455,6 +529,47 @@ impl SctpTransport {
     /// 1191 bytes).
     pub(crate) fn packet_budget(&self) -> Option<u32> {
         self.mtu.or(self.path_mtu)
+    }
+
+    /// Whether the associations discover the path MTU: configured, and no fixed MTU set by
+    /// the application.
+    pub(crate) fn discovers_path_mtu(&self) -> bool {
+        self.path_mtu_discovery.is_some() && self.mtu.is_none()
+    }
+
+    /// The largest SCTP packet the discovery probes for: on the selected path, or before
+    /// one is known on a UDP path over IPv6 (the larger headers) with the default DTLS
+    /// record overhead. `None` without discovery.
+    pub(crate) fn max_packet_budget(&self) -> Option<u32> {
+        let max_ip_packet = self.path_mtu_discovery.filter(|_| self.mtu.is_none())?;
+        Some(self.max_path_mtu.unwrap_or_else(|| {
+            SctpPath {
+                ipv6: true,
+                tcp: false,
+                relayed: false,
+                dtls_record_overhead: SctpPath::DEFAULT_DTLS_RECORD_OVERHEAD,
+            }
+            .packet_budget_within(max_ip_packet)
+        }))
+    }
+
+    /// The packet sizes a new association of this transport gets: the largest the discovery
+    /// may try, and the size to use (BASE_PLPMTU when it discovers). See [`Self::size_association`].
+    pub(crate) fn association_sizes(&self) -> (Option<u32>, Option<u32>) {
+        (self.max_packet_budget(), self.packet_budget())
+    }
+
+    /// Gives `association` the sizes of [`association_sizes`](Self::association_sizes).
+    pub(crate) fn size_association(
+        association: &mut ::sctp::Association,
+        (max, mtu): (Option<u32>, Option<u32>),
+    ) {
+        if let Some(max) = max {
+            association.set_max_path_mtu(max);
+        }
+        if let Some(mtu) = mtu {
+            association.set_path_mtu(mtu);
+        }
     }
 
     pub(crate) fn calc_message_size(remote_max_message_size: u32, can_send_size: u32) -> u32 {
@@ -601,6 +716,8 @@ impl SctpTransport {
             return Ok(());
         }
         self.is_started = true;
+        // A started association is a transport that exists (`described`).
+        self.described = true;
         self.local_port = local_port;
         self.negotiated_ports = Some((local_port, remote_port));
         self.lost = false;
@@ -671,10 +788,36 @@ impl SctpTransport {
             .with_message_interleaving(self.message_interleaving)
             // RFC 9653 section 6: SCTP over DTLS is an alternate error detection method, so
             // the CRC32c may be left out. Announced, and used when the peer announces it too.
-            .with_zero_checksum(self.zero_checksum);
+            .with_zero_checksum(self.zero_checksum)
+            // RFC 8261 section 4, RFC 8899 section 6.2.3: DPLPMTUD with HEARTBEAT and PAD
+            // probes, unless the application fixed the packet size.
+            .with_path_mtu_discovery(self.discovers_path_mtu().then(|| {
+                ::sctp::PathMtuDiscoveryConfig::default()
+                    .with_max_path_mtu(self.max_packet_budget().unwrap_or(0))
+            }));
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
+        if let Some(streams) = self.max_streams {
+            sctp_transport_config = sctp_transport_config
+                .with_max_num_outbound_streams(streams)
+                .with_max_num_inbound_streams(streams);
+        }
+        if let Some(rto) = self.rto {
+            sctp_transport_config = sctp_transport_config.with_rto_config(rto);
+        }
+        if let Some(limit) = self.max_retransmissions {
+            let mut timers = sctp_transport_config.timer_config();
+            timers.max_t3_rtx_retrans = limit;
+            sctp_transport_config = sctp_transport_config.with_timer_config(timers);
+        }
+        // RFC 9260 6.2 drops new DATA once a closed window was advertised, so a message larger
+        // than the receive buffer could never arrive. Where the `max-message-size` this side
+        // advertised (RFC 8841 6.1) is larger than its buffer, the one-message overcommit
+        // keeps that promise.
+        let receive_buffer = sctp_transport_config.max_receive_buffer_size();
+        sctp_transport_config =
+            sctp_transport_config.with_zero_window_overcommit(can_send_size > receive_buffer);
 
         // One association per DTLS transport: once this side has initiated its own, or has
         // taken the peer's INIT, the endpoint starts no other.

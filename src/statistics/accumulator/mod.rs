@@ -110,6 +110,9 @@ pub(crate) struct RTCStatsAccumulator {
 
     /// Outbound RTP stream accumulators keyed by SSRC.
     pub(crate) outbound_rtp_streams: HashMap<SSRC, OutboundRtpStreamAccumulator>,
+    /// The outbound streams whose `target_bitrate` is a share the connection allocated them
+    /// (`on_target_bitrate`), reported whatever the number of streams.
+    pub(crate) allocated_ssrcs: std::collections::HashSet<SSRC>,
 
     /// Media source stats keyed by track ID.
     pub(crate) media_sources: HashMap<String, MediaSourceStatsAccumulator>,
@@ -239,7 +242,10 @@ impl RTCStatsAccumulator {
         stream: &OutboundRtpStreamAccumulator,
     ) -> crate::statistics::stats::rtp_stream::sent::outbound::RTCOutboundRtpStreamStats {
         let mut stats = stream.snapshot(now, &stream.stats_id());
-        if stream.encoder_stats.target_bitrate.is_none() && self.outbound_rtp_streams.len() > 1 {
+        if stream.encoder_stats.target_bitrate.is_none()
+            && self.outbound_rtp_streams.len() > 1
+            && !self.allocated_ssrcs.contains(&stream.ssrc)
+        {
             stats.target_bitrate = None;
         }
         stats
@@ -1346,13 +1352,21 @@ impl RTCStatsAccumulator {
     /// Sets the congestion controller's estimate: the target bitrate of the outbound streams
     /// and the selected candidate pair's `availableOutgoingBitrate` (webrtc-stats: the bitrate
     /// the congestion control estimates for all the outgoing RTP streams on the pair).
-    pub(crate) fn on_target_bitrate(&mut self, bits_per_second: f64) {
-        // The estimate is one number for the connection, while `target_bitrate` is reported
-        // per outbound stream — with a single stream they are the same thing. Splitting one
-        // estimate across simulcast layers is an allocation problem, and belongs wherever that
-        // allocation is made rather than here.
-        for stream in self.outbound_rtp_streams.values_mut() {
-            stream.target_bitrate = bits_per_second;
+    pub(crate) fn on_target_bitrate(&mut self, bits_per_second: f64, shares: &HashMap<SSRC, f64>) {
+        // The estimate is one number for the connection; each outbound stream's
+        // `targetBitrate` is its share of it (`allocate_target_bitrate`: by priority, capped
+        // at maxBitrate). A stream without a share (not sending now) keeps its last one.
+        // Without any share (no allocation made), every stream is given the estimate, which
+        // the report shows only while there is one stream.
+        for (ssrc, stream) in self.outbound_rtp_streams.iter_mut() {
+            match shares.get(ssrc) {
+                Some(&share) => {
+                    stream.target_bitrate = share;
+                    self.allocated_ssrcs.insert(*ssrc);
+                }
+                None if shares.is_empty() => stream.target_bitrate = bits_per_second,
+                None => {}
+            }
         }
         if let Some(pair) = self
             .ice_candidate_pairs

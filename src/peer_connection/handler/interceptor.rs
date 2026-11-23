@@ -84,6 +84,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
     /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
     pub(crate) arrival_mids: Option<Vec<String>>,
+    /// The congestion controller's last target, in bits per second: what
+    /// `allocate_target_bitrate` divides again when the encodings change.
+    pub(crate) target_bitrate: Option<f64>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -112,6 +115,7 @@ impl Default for InterceptorHandlerContext {
             ssrc_collisions: Default::default(),
             wall_clock: None,
             arrival_mids: None,
+            target_bitrate: None,
         }
     }
 }
@@ -1130,6 +1134,50 @@ impl<'a> InterceptorHandler<'a> {
         });
     }
 
+    /// webrtc-encoded-transform 6.4: a PLI or FIR for an SSRC a sender sends is a
+    /// `keyframerequest` for the encoding of that SSRC, with its RID.
+    fn announce_key_frame_requests(&mut self, now: Instant, packets: &[Box<dyn rtcp::Packet>]) {
+        use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+        use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        let mut requested: Vec<u32> = Vec::new();
+        for packet in packets {
+            let any = packet.as_any();
+            if let Some(pli) = any.downcast_ref::<PictureLossIndication>() {
+                requested.push(pli.media_ssrc);
+            } else if let Some(fir) = any.downcast_ref::<FullIntraRequest>() {
+                requested.extend(fir.fir.iter().map(|entry| entry.ssrc));
+            }
+        }
+        for ssrc in requested {
+            let found = self
+                .rtp_transceivers
+                .iter()
+                .enumerate()
+                .find_map(|(id, t)| {
+                    let sender = t.sender().as_ref()?;
+                    if t.stopped() {
+                        return None;
+                    }
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .find(|e| e.rtp_coding_parameters.ssrc == Some(ssrc))
+                        .map(|e| (id, e.rtp_coding_parameters.rid.clone()))
+                });
+            if let Some((id, rid)) = found {
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnKeyFrameRequest {
+                            sender: crate::rtp_transceiver::RTCRtpSenderId::from(id),
+                            rid: (!rid.is_empty()).then_some(rid),
+                        },
+                    ),
+                });
+            }
+        }
+    }
+
     /// Records the SSRC and CSRCs of a packet the chain released, on the receiver that owns
     /// the SSRC (`RTCRtpReceiver::get_synchronization_sources`, `get_contributing_sources`).
     fn record_sources(&mut self, now: Instant, header: &rtp::Header) {
@@ -1187,6 +1235,22 @@ impl<'a> InterceptorHandler<'a> {
                 )
                 .ok()
             });
+        // The AV1 RTP specification's Dependency Descriptor (appendix A), on video: what
+        // places the frame in the stream's frame numbering (webrtc-encoded-transform 4.2).
+        let dependency_descriptor = header
+            .extension
+            .then(|| {
+                let (extension_id, _, video) =
+                    self.media_engine
+                        .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                            uri: rtp::codec::dependency_descriptor::DEPENDENCY_DESCRIPTOR_URI
+                                .to_owned(),
+                        });
+                (video && extension_id != 0)
+                    .then(|| header.get_extension(extension_id as u8))
+                    .flatten()
+            })
+            .flatten();
         let clock_rate = self
             .media_engine
             .get_codec_by_payload(header.payload_type)
@@ -1218,7 +1282,19 @@ impl<'a> InterceptorHandler<'a> {
                 vad,
                 capture,
                 clock_rate,
+                dependency_descriptor.as_deref(),
             );
+            // W3C webrtc 5.3 jitterBufferTarget: a stream the receiver did not have when the
+            // target was set is given it now (`RTCRtpReceiver::set_jitter_buffer_target`).
+            if ssrc_changed && let Some(target) = receiver.jitter_buffer_target() {
+                let control = interceptor::JitterBufferControl {
+                    ssrcs: vec![header.ssrc],
+                    target: Some(target),
+                };
+                if let Err(err) = self.interceptor.handle_write(control.into_packet(now)) {
+                    log::warn!("jitter buffer target for ssrc {}: {err}", header.ssrc);
+                }
+            }
             // webrtc-extensions 11: `ssrcchange`, then `csrcchange`, once both lists are
             // updated.
             let receiver_id = crate::rtp_transceiver::RTCRtpReceiverId::from(id);
@@ -1382,6 +1458,31 @@ impl<'a>
                             .on_rtp_received(ssrc, overhead_bytes, payload_bytes, msg.now);
                     }
 
+                    // W3C webrtc-stats 8.5 corruptionMeasurements: "If the corruption-detection
+                    // header extension is present in the RTP packets, corruption probability
+                    // measurements MUST be present". The stream's corruption members exist
+                    // from the first such packet that arrives.
+                    if rtp_packet.header.extension {
+                        let (extension_id, _, video) = self.media_engine.get_header_extension_id(
+                            RTCRtpHeaderExtensionCapability {
+                                uri: rtp::extension::CORRUPTION_DETECTION_URI.to_owned(),
+                            },
+                        );
+                        if video
+                            && extension_id != 0
+                            && rtp_packet
+                                .header
+                                .get_extension(extension_id as u8)
+                                .is_some()
+                            && let Some(stream) = self
+                                .stats
+                                .inbound_rtp_streams
+                                .get_mut(&rtp_packet.header.ssrc)
+                        {
+                            stream.corruption_detection_received = true;
+                        }
+                    }
+
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
                     // included.
@@ -1429,10 +1530,15 @@ impl<'a>
                 for attribute in &packet.message.attributes {
                     match attribute {
                         Attribute::TargetBitrateChanged { bits_per_second } => {
-                            // The outbound streams' `targetBitrate` and the selected pair's
-                            // `availableOutgoingBitrate` (see
-                            // `RTCStatsAccumulator::on_target_bitrate`).
-                            self.stats.on_target_bitrate(*bits_per_second);
+                            // The selected pair's `availableOutgoingBitrate`, and each
+                            // outbound stream's `targetBitrate`: its share by priority and
+                            // maxBitrate (`allocate_target_bitrate`).
+                            self.ctx.target_bitrate = Some(*bits_per_second);
+                            let shares = crate::peer_connection::priority::allocate_target_bitrate(
+                                self.rtp_transceivers,
+                                *bits_per_second,
+                            );
+                            self.stats.on_target_bitrate(*bits_per_second, &shares);
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {
@@ -1465,6 +1571,7 @@ impl<'a>
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packet) => {
                         trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
+                        self.announce_key_frame_requests(packet.now, rtcp_packet);
                     }
                     // Media on its way to the application: its sources are the receiver's
                     // synchronization and contributing sources from now on.
@@ -1572,16 +1679,21 @@ impl<'a>
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
-        if let RTCEventInternal::DTLSHandshakeComplete(_, _) = &evt.event {
+        if let RTCEventInternal::DTLSHandshakeComplete(local_srtp_context, _) = &evt.event {
             debug!("interceptor recv dtls handshake complete");
             let first = !self.ctx.is_dtls_handshake_complete;
             self.ctx.is_dtls_handshake_complete = true;
             if first {
+                // RFC 3711 section 3.4: what SRTCP adds to each compound packet (E flag and
+                // index, the tag; no MKI is used) is part of the size the RTCP interval rests
+                // on.
+                let srtcp_overhead = srtcp_overhead(local_srtp_context.as_ref());
                 // The RTCP session joins when the transport is up, under the connection's
                 // CNAME: an endpoint that only receives reports from then on, not from its
                 // first inbound packet (RFC 3550 6.2).
                 for control in [
                     RtcpSessionControl::Cname(self.ctx.cname.clone()),
+                    RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
                     RtcpSessionControl::Start,
                 ] {
                     self.interceptor
@@ -1648,6 +1760,16 @@ mod interceptor_association_test;
 #[cfg(test)]
 #[path = "interceptor_session_test.rs"]
 mod interceptor_session_test;
+
+/// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
+/// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No
+/// MKI is used (RFC 8827 section 6.5). 0 without SRTP.
+pub(crate) fn srtcp_overhead(context: Option<&srtp::context::Context>) -> usize {
+    context.map_or(0, |context| {
+        let profile = context.profile();
+        4 + profile.rtcp_auth_tag_len() + profile.aead_auth_tag_len()
+    })
+}
 
 #[cfg(test)]
 mod boundary_tests {

@@ -488,3 +488,37 @@ fn a_collision_with_a_sender_ssrc_reaches_the_application() {
         .collect();
     assert_eq!(vec![LOCAL_SSRC], collisions);
 }
+
+/// RFC 3711 section 3.4: the RTCP session is told what SRTCP adds to each packet, from the
+/// profile DTLS negotiated: 4 octets of E flag and index and the 80-bit HMAC tag (for the
+/// `_32` profiles too: SRTCP always takes 80 bits), or the 16-octet GCM tag; nothing without
+/// SRTP.
+#[test]
+fn the_srtcp_overhead_follows_the_negotiated_profile() {
+    use srtp::protection_profile::ProtectionProfile;
+    let provider = crypto::default_provider().expect("a crypto provider");
+    let context = |profile: ProtectionProfile| {
+        srtp::context::Context::new(
+            &vec![7; profile.key_len()],
+            &vec![9; profile.salt_len()],
+            profile,
+            None,
+            None,
+            provider.crypto(),
+        )
+        .expect("a context")
+    };
+    for (profile, overhead) in [
+        (ProtectionProfile::Aes128CmHmacSha1_80, 14),
+        (ProtectionProfile::Aes128CmHmacSha1_32, 14),
+        (ProtectionProfile::AeadAes128Gcm, 20),
+        (ProtectionProfile::AeadAes256Gcm, 20),
+    ] {
+        assert_eq!(
+            super::srtcp_overhead(Some(&context(profile))),
+            overhead,
+            "{profile:?}"
+        );
+    }
+    assert_eq!(super::srtcp_overhead(None), 0);
+}

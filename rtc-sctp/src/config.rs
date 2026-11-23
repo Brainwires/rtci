@@ -3,10 +3,14 @@ use crate::util::{
     SourcedAssociationIdGenerator,
 };
 
-use crate::TimerConfig;
+use crate::association::pmtud::PathMtuDiscoveryConfig;
+use crate::{RtoConfig, TimerConfig};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The smallest a_rwnd an INIT or INIT ACK may carry (RFC 9260 3.3.2, 3.3.3).
+pub(crate) const MIN_ADVERTISED_RECEIVER_WINDOW: u32 = 1500;
 
 /// MTU for inbound packet (from DTLS)
 pub(crate) const RECEIVE_MTU: usize = 8192;
@@ -99,6 +103,7 @@ pub struct TransportConfig {
     max_num_outbound_streams: u16,
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
+    rto_config: RtoConfig,
     stream_scheduler: StreamScheduler,
     valid_cookie_life: Duration,
     heartbeat_interval: Option<Duration>,
@@ -108,6 +113,8 @@ pub struct TransportConfig {
     partial_reliability: bool,
     message_interleaving: bool,
     zero_checksum: bool,
+    path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
+    zero_window_overcommit: bool,
 }
 
 impl Default for TransportConfig {
@@ -121,6 +128,7 @@ impl Default for TransportConfig {
             max_num_outbound_streams: u16::MAX,
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
+            rto_config: RtoConfig::default(),
             stream_scheduler: StreamScheduler::default(),
             valid_cookie_life: Duration::from_secs(60),
             heartbeat_interval: Some(Duration::from_secs(30)),
@@ -130,11 +138,54 @@ impl Default for TransportConfig {
             partial_reliability: true,
             message_interleaving: false,
             zero_checksum: false,
+            path_mtu_discovery: None,
+            zero_window_overcommit: false,
         }
     }
 }
 
 impl TransportConfig {
+    /// Whether a receiver that advertised a closed window (a_rwnd 0) still takes the next
+    /// in-sequence DATA chunk when nothing is readable: the chunk that would complete a
+    /// message the full buffer holds the start of (webrtc-rs/webrtc#822), up to one message
+    /// beyond the buffer. Off by default: RFC 9260 section 6.2, "When the receiver's
+    /// advertised window is 0, the receiver MUST drop any new incoming DATA chunk with a TSN
+    /// larger than the largest TSN received so far". Without it a buffer full of incomplete
+    /// messages stays full: what is written must fit the buffer, which it does when the
+    /// largest message accepted (`with_max_receive_message_size`) is not larger than the
+    /// receive buffer. While the advertised window is open, a full buffer takes that chunk
+    /// either way (the RFC rule binds a closed advertised window only).
+    pub fn with_zero_window_overcommit(mut self, value: bool) -> Self {
+        self.zero_window_overcommit = value;
+        self
+    }
+
+    /// See [`with_zero_window_overcommit`](Self::with_zero_window_overcommit).
+    pub fn zero_window_overcommit(&self) -> bool {
+        self.zero_window_overcommit
+    }
+
+    /// Path MTU discovery (DPLPMTUD, RFC 8899 section 6.2, with the PAD chunk of RFC 4820):
+    /// once established, the association confirms its packet size (what
+    /// [`Association::set_path_mtu`](crate::Association::set_path_mtu) set, else the
+    /// default) with a probe, searches for a larger one up to
+    /// [`PathMtuDiscoveryConfig::with_max_path_mtu`], and falls back to it when the path
+    /// stops carrying the larger size (RFC 9260 section 7.3; RFC 8261 section 4: SCTP over
+    /// DTLS "MUST implement and use" a discovery method that works without ICMP). `None`, the
+    /// crate's default, keeps the packet size where the transport sets it: the transport
+    /// knows the largest packet worth probing for, so it turns discovery on. The `rtc` peer
+    /// connection does, by default (`SettingEngineBuilder::with_sctp_path_mtu_discovery`).
+    pub fn with_path_mtu_discovery(mut self, value: Option<PathMtuDiscoveryConfig>) -> Self {
+        self.path_mtu_discovery = value;
+        self
+    }
+
+    /// The path MTU discovery settings, see
+    /// [`with_path_mtu_discovery`](Self::with_path_mtu_discovery).
+    pub fn path_mtu_discovery(&self) -> Option<PathMtuDiscoveryConfig> {
+        self.path_mtu_discovery
+    }
+
     /// Sets L of RFC 9260 section 7.2.1: in slow start one SACK grows the congestion window
     /// by at most the bytes it acknowledges and at most L packets (L x PMDCS). The RFC says L
     /// SHOULD be 1 and MAY be larger (RFC 3465 discusses the choice): 1 is the default. A
@@ -278,9 +329,10 @@ impl TransportConfig {
     }
 
     /// Sets the advertised receive window (a_rwnd), bounding how much unacknowledged data a peer
-    /// may have in flight toward this endpoint.
+    /// may have in flight toward this endpoint. At least 1500: RFC 9260 3.3.2 and 3.3.3 forbid
+    /// a smaller a_rwnd in the INIT and INIT ACK, so a smaller value is raised to it.
     pub fn with_max_receive_buffer_size(mut self, value: u32) -> Self {
-        self.max_receive_buffer_size = value;
+        self.max_receive_buffer_size = value.max(MIN_ADVERTISED_RECEIVER_WINDOW);
         self
     }
 
@@ -301,21 +353,32 @@ impl TransportConfig {
         self
     }
 
-    /// Sets how many outbound streams to request during the handshake.
+    /// Sets how many outbound streams to request during the handshake. At least 1: RFC 9260
+    /// 3.3.2 and 3.3.3 forbid 0 in the INIT and INIT ACK.
     pub fn with_max_num_outbound_streams(mut self, value: u16) -> Self {
-        self.max_num_outbound_streams = value;
+        self.max_num_outbound_streams = value.max(1);
         self
     }
 
-    /// Sets how many inbound streams this endpoint will accept.
+    /// Sets how many inbound streams this endpoint will accept. At least 1, as for the
+    /// outbound streams.
     pub fn with_max_num_inbound_streams(mut self, value: u16) -> Self {
-        self.max_num_inbound_streams = value;
+        self.max_num_inbound_streams = value.max(1);
         self
     }
 
     /// Overrides the retransmission limits; see [`TimerConfig`].
     pub fn with_timer_config(mut self, value: TimerConfig) -> Self {
         self.timer_config = value;
+        self
+    }
+
+    /// Sets RTO.Initial, RTO.Min and RTO.Max (RFC 9260 sections 6.3.1 and 16); see
+    /// [`RtoConfig`]. The defaults are the RFC's: 1, 1 and 60 seconds. With
+    /// [`TimerConfig::max_t3_rtx_retrans`] (Association.Max.Retrans) they bound how long an
+    /// unanswered peer is retransmitted to before the association fails.
+    pub fn with_rto_config(mut self, value: RtoConfig) -> Self {
+        self.rto_config = value;
         self
     }
 
@@ -365,6 +428,11 @@ impl TransportConfig {
     /// The configured retransmission limits.
     pub fn timer_config(&self) -> TimerConfig {
         self.timer_config
+    }
+
+    /// The configured RTO bounds.
+    pub fn rto_config(&self) -> RtoConfig {
+        self.rto_config
     }
 
     /// The configured stream scheduler.

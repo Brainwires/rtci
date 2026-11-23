@@ -165,6 +165,35 @@ impl Endpoint {
                 self.release(ch);
                 self.associations.try_remove(ch.0);
             }
+            EndpointEventInner::Retagged {
+                old_local,
+                new_local,
+                old_peer,
+                new_peer,
+            } => {
+                let Some(meta) = self.associations.get_mut(ch.0) else {
+                    return;
+                };
+                if meta.released {
+                    return;
+                }
+                for cid in meta.loc_cids.values_mut() {
+                    if *cid == old_local {
+                        *cid = new_local;
+                    }
+                }
+                if self.association_ids.get(&old_local) == Some(&ch) {
+                    self.association_ids.remove(&old_local);
+                }
+                self.association_ids.insert(new_local, ch);
+                if meta.init_cid == old_peer {
+                    if self.association_ids_init.get(&old_peer) == Some(&ch) {
+                        self.association_ids_init.remove(&old_peer);
+                    }
+                    meta.init_cid = new_peer;
+                    self.association_ids_init.insert(new_peer, ch);
+                }
+            }
         }
     }
 

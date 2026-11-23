@@ -375,8 +375,35 @@ impl<'a> SctpHandler<'a> {
                     // Its data waits for the event (see `unannounced`).
                     unannounced.insert(ch);
                 }
+                // RFC 9260 section 5.2.4 action A: the peer lost its state and set the
+                // association up again. The old association's streams are gone with what was
+                // remembered about them, its channels close, and the new association is
+                // announced as one that just came up, its data held back until it is.
+                Event::Restarted => {
+                    debug!("association_handle {} was restarted by the peer", ch.0);
+                    pending_readable.retain(|(handle, _)| *handle != ch);
+                    peer_opened.retain(|(handle, _)| *handle != ch);
+                    ordered_until_reply.retain(|(handle, _), _| *handle != ch);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPRestarted(ch.0),
+                    });
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
+                    });
+                    unannounced.insert(ch);
+                }
                 Event::AssociationLost { reason, id } => {
                     debug!("association_handle {} is closed due to {}", ch.0, reason);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamDequeued(
+                            ch.0,
+                            id,
+                            conn.stream_bytes_dequeued(id),
+                        ),
+                    });
                     // The stream is gone, and with it what was remembered about it.
                     ordered_until_reply.remove(&(ch, id));
                     // A stream reset (either side's close) is the channel's own
@@ -438,6 +465,18 @@ impl<'a> SctpHandler<'a> {
                     debug!("association_handle {} path is active again", ch.0);
                 }
                 Event::Reconfig(reconfig) => {
+                    if let ReconfigEvent::OutgoingStreamsResetFailed { streams, .. } = &reconfig {
+                        for &id in streams {
+                            event_outs.push_back(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPStreamDequeued(
+                                    ch.0,
+                                    id,
+                                    conn.stream_bytes_dequeued(id),
+                                ),
+                            });
+                        }
+                    }
                     Self::process_reconfig_event(
                         ch,
                         reconfig,
@@ -716,7 +755,7 @@ impl<'a> SctpHandler<'a> {
         {
             return Ok(());
         }
-        let packet_budget = transport.packet_budget();
+        let sizes = transport.association_sizes();
         let sctp_endpoint = transport
             .sctp_endpoint
             .as_mut()
@@ -730,9 +769,7 @@ impl<'a> SctpHandler<'a> {
                 TransportContext::default().peer_addr,
             )
             .map_err(|e| Error::Other(e.to_string()))?;
-        if let Some(mtu) = packet_budget {
-            conn.set_path_mtu(mtu);
-        }
+        SctpTransport::size_association(&mut conn, sizes);
         transport.sctp_associations.insert(ch, conn);
         transport.lost = false;
 
@@ -750,22 +787,32 @@ impl<'a> SctpHandler<'a> {
     ///
     /// RFC 8831 section 5: "SCTP SHOULD be notified when an address change has happened. In
     /// this case, SCTP SHOULD retest the Path MTU and reset the congestion state to the
-    /// initial state." The association does not probe, so its path MTU is set again from
-    /// what is known of the new path (the address family, the transport and whether it is
+    /// initial state." The association's path MTU is set again from what is known of the
+    /// new path (the address family, the transport and whether it is
     /// relayed, and the DTLS record overhead), first, since the initial congestion window is
     /// counted in packets of that size; then, when ICE selected another pair, the congestion
-    /// control and the RTO start over ([`Association::on_path_change`]).
+    /// control and the RTO start over, and so does path MTU discovery, from that size
+    /// ([`Association::on_path_change`]).
     pub(crate) fn apply_path(&mut self, path: Option<SctpPath>) {
         let now = self.ctx.now;
         let transport = &mut self.ctx.sctp_transport;
         if let Some(path) = path {
             transport.path_mtu = Some(path.packet_budget());
+            if let Some(max_ip_packet) = transport.path_mtu_discovery {
+                transport.max_path_mtu = Some(path.packet_budget_within(max_ip_packet));
+            }
         }
         let packet_budget = transport.packet_budget();
+        let max_packet_budget = transport.max_packet_budget();
         let path_changed = std::mem::take(&mut self.ctx.path_changed) && path.is_some();
         for association in transport.sctp_associations.values_mut() {
             if association.is_ended() {
                 continue;
+            }
+            // RFC 8899 section 6.2.3.2: the discovery's sizes are of the SCTP packet, the
+            // DTLS record and the headers below having been taken off.
+            if let Some(max) = max_packet_budget {
+                association.set_max_path_mtu(max);
             }
             if let Some(mtu) = packet_budget {
                 association.set_path_mtu(mtu);
@@ -786,6 +833,21 @@ impl<'a> SctpHandler<'a> {
     /// closes the channels that ran over the old one either way.
     pub(crate) fn close_for_renegotiation(&mut self, now: Instant, replaced: bool) {
         self.ctx.observe(now);
+        // What each stream sent stays the final `bufferedAmount` of its channel.
+        for (ch, association) in &self.ctx.sctp_transport.sctp_associations {
+            let mut ids = association.stream_ids();
+            ids.sort_unstable();
+            for id in ids {
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPStreamDequeued(
+                        ch.0,
+                        id,
+                        association.stream_bytes_dequeued(id),
+                    ),
+                });
+            }
+        }
         self.abort_associations();
         self.ctx.sctp_transport.sctp_associations.clear();
         self.ctx.association_transport.clear();
@@ -886,7 +948,7 @@ impl<'a>
             // Both are read before `sctp_transport` is split up below, which would otherwise
             // conflict with the borrow of `sctp_associations`.
             let max_len = self.ctx.sctp_transport.receive_message_limit;
-            let packet_budget = self.ctx.sctp_transport.packet_budget();
+            let sizes = self.ctx.sctp_transport.association_sizes();
             let mut budget = self.read_budget();
             let mut inbound_transport = None;
 
@@ -948,9 +1010,7 @@ impl<'a>
                 inbound_transport = Some((ch, msg.transport));
                 match event {
                     DatagramEvent::NewAssociation(mut conn) => {
-                        if let Some(mtu) = packet_budget {
-                            conn.set_path_mtu(mtu);
-                        }
+                        SctpTransport::size_association(&mut conn, sizes);
                         sctp_associations.insert(ch, conn);
                         // An association is there again: the one before it, if it was lost
                         // (see `SctpTransport::association_lost`), no longer counts.
@@ -996,7 +1056,13 @@ impl<'a>
                     )?;
 
                     while let Some(event) = conn.poll_endpoint_event() {
-                        endpoint_events.push((*ch, event));
+                        // Only a drained association goes; any other event (new tags
+                        // after a restart, RFC 9260 5.2.4) is the endpoint's alone.
+                        if event.is_drained() {
+                            endpoint_events.push((*ch, event));
+                        } else {
+                            sctp_endpoint.handle_event(*ch, event);
+                        }
                     }
                     // Transmit flush is deferred to poll_write (batch-drain) so a
                     // burst of inbound DATA coalesces into one SACK.
@@ -1281,6 +1347,14 @@ impl<'a>
                             if !resets {
                                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                                     now,
+                                    event: RTCEventInternal::SCTPStreamDequeued(
+                                        message.association_handle,
+                                        message.stream_id,
+                                        conn.stream_bytes_dequeued(message.stream_id),
+                                    ),
+                                });
+                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                                    now,
                                     event: RTCEventInternal::SCTPStreamClosed(
                                         message.association_handle,
                                         message.stream_id,
@@ -1452,7 +1526,12 @@ impl<'a>
             }
 
             while let Some(event) = conn.poll_endpoint_event() {
-                endpoint_events.push((*ch, event));
+                // As in `handle_read`: only a drained association is removed.
+                if event.is_drained() {
+                    endpoint_events.push((*ch, event));
+                } else {
+                    sctp_endpoint.handle_event(*ch, event);
+                }
             }
             // Transmit flush is deferred to poll_write (batch-drain).
         }

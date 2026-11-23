@@ -356,6 +356,17 @@ impl KeySchedule {
 
     /// Overwrites and drops every secret (RFC 8446 section 6.2: a failed connection's
     /// secrets are forgotten).
+    /// Whether [`Self::forget`] has run: no secret is left.
+    #[cfg(test)]
+    pub(crate) fn is_forgotten(&self) -> bool {
+        self.current.as_ref().is_empty()
+            && self.client_handshake_traffic.is_none()
+            && self.server_handshake_traffic.is_none()
+            && self.client_application_traffic.is_none()
+            && self.server_application_traffic.is_none()
+            && self.exporter.is_none()
+    }
+
     pub(crate) fn forget(&mut self) {
         self.current = SecretVec::new(vec![]);
         self.client_handshake_traffic = None;

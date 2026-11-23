@@ -46,6 +46,14 @@ impl EndpointEvent {
 pub(crate) enum EndpointEventInner {
     /// The association has been drained
     Drained,
+    /// The peer restarted the association (RFC 9260 5.2.4 action A): it has new tags, which
+    /// the endpoint routes by from now on.
+    Retagged {
+        old_local: AssociationId,
+        new_local: AssociationId,
+        old_peer: AssociationId,
+        new_peer: AssociationId,
+    },
     /*// The association needs association identifiers
     NeedIdentifiers(Instant, u64),
     /// Stop routing Association ID for this sequence number to the Association

@@ -50,7 +50,7 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
-    fn new(addr: SocketAddr, server: Option<ServerConfig>) -> Self {
+    pub(crate) fn new(addr: SocketAddr, server: Option<ServerConfig>) -> Self {
         Peer {
             endpoint: Endpoint::new(
                 addr,
@@ -116,9 +116,10 @@ impl Peer {
                 out.extend(contents);
             }
         }
-        let Some((_, conn)) = self.association.as_mut() else {
+        let Some((ch, conn)) = self.association.as_mut() else {
             return out;
         };
+        let ch = *ch;
         if conn.poll_timeout().is_some_and(|at| at <= now) {
             conn.handle_timeout(now);
         }
@@ -138,7 +139,13 @@ impl Peer {
             }
         }
         // A drain notice only matters to a real endpoint's bookkeeping; this link keeps routing.
-        while conn.poll_endpoint_event().is_some() {}
+        // New tags after a restart (RFC 9260 5.2.4) are given to the endpoint, as a real
+        // driver does.
+        while let Some(event) = conn.poll_endpoint_event() {
+            if matches!(event.0, crate::shared::EndpointEventInner::Retagged { .. }) {
+                self.endpoint.handle_event(ch, event);
+            }
+        }
         while let Some(transmit) = conn.poll_transmit(now) {
             if let Payload::RawEncode(contents) = transmit.message {
                 out.extend(contents);
