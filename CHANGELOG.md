@@ -2047,6 +2047,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **The reference driver documented as the crate a first-time user runs** (branch
+  `conf/tcp-15-driver-crate`): `rtc-stream-driver`'s crate documentation states what is the
+  engine's and what is the driver's, with the command table, the loop, the server socket
+  choices and the `dns-records` feature. New example `stream-driver-loopback` (`cargo run
+  --example stream-driver-loopback`): two peer connections over loopback TCP through the driver,
+  UDP blocked, 50 data-channel messages in order; the test environment's env stage runs it. The
+  README's "Driving the Engine" says which parts are engine, driver and application.
+
 - **TURN resolution rules and RFC 8155 discovery** (branch `conf/tcp-14-resolution-rows`; RFC
   5928 section 3, RFC 8656 section 7.4, RFC 8155). A refused Allocate on an engine TURN link
   now fails only that server: a 300 (Try Alternate) is followed to its ALTERNATE-SERVER (up to

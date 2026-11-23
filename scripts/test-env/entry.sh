@@ -97,6 +97,13 @@ stage_env() {
     --no-fail-fast -- --ignored --nocapture > "$A/env.log" 2>&1
   local rc=$?
   echo "## env: $(summarise "$A/env.log") (exit $rc)" >> "$REPORT"
+  # The reference driver end to end: two peer connections over loopback TCP, a data channel
+  # (examples/stream-driver-loopback, what a first-time user runs).
+  if cargo run --quiet --example stream-driver-loopback > "$A/stream-driver-loopback.log" 2>&1; then
+    echo "stream-driver-loopback example: $(tail -1 "$A/stream-driver-loopback.log")" >> "$REPORT"
+  else
+    echo "stream-driver-loopback example FAILED (see stream-driver-loopback.log)" >> "$REPORT"; rc=1
+  fi
   grep -E '^test .* FAILED' "$A/env.log" | sed 's/^/    /' >> "$REPORT"
   { echo; echo '### NAT matrix'; grep -E '^NAT-MATRIX' "$A/env.log" | sort; } >> "$REPORT"
   { echo; echo '### impairment'; grep -E '^(NETEM|RTP over|unreliable:|VP8:|GCC target)' "$A/env.log"; } >> "$REPORT"

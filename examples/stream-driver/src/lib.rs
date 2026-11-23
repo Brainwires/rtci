@@ -1,8 +1,30 @@
-//! A tokio driver for the stream transports of the sans-I/O engine (`rtc_shared::stream`).
+//! The reference driver for the stream half of WebRTC.rs's sans-I/O engine
+//! (`rtc_shared::stream`): it owns the TCP sockets, on tokio, and does what the engine asks.
 //!
-//! The engine decides everything about its TCP connections (ICE-TCP candidates, TURN over TCP
-//! or TLS) and names them by id; this driver only owns the sockets. The loop that runs a peer
-//! connection does four things with it:
+//! # Engine and driver
+//!
+//! The engine (`rtc::peer_connection::RTCPeerConnection`) performs no I/O. For its datagrams
+//! the application reads and writes its own UDP sockets (`handle_read` / `poll_write`). For
+//! TCP it is the engine that **decides** — which ICE-TCP candidates to gather (RFC 6544), which
+//! connections to open and close, the RFC 4571 framing, TURN over TCP, TLS and DTLS, relayed
+//! TCP candidates (RFC 6062), server-reflexive gathering over TCP, the Happy Eyeballs race
+//! (RFC 8305) — and names every listener and connection by id. This driver only **carries
+//! out** what it is told:
+//!
+//! | The engine says ([`StreamCommand`]) | The driver |
+//! | --- | --- |
+//! | `Listen { local, reuse_address }` | binds a listener (port 0: any, or one of [`DriverConfig::tcp_port_range`]), reports `Listening` or `ListenFailed`, then `Accepted` for each connection |
+//! | `Connect { local, remote, reuse_address }` | connects (within [`DriverConfig::connect_timeout`]), reports `Connected` or `ConnectFailed` |
+//! | `Close` / `Reset` | ends the connection with FIN (waiting [`DriverConfig::close_linger`]) or RST |
+//! | `Resolve { host, port }` | looks the name up (both families at once, or AAAA and A apart with the `dns-records` feature) |
+//! | `ResolveRecords { name, kind }` | SRV / NAPTR records with `dns-records`, none without |
+//!
+//! Bytes go both ways untouched: what the engine transmits ([`StreamDriver::write`]) is
+//! already framed and encrypted, and what the socket reads goes back in whatever pieces it
+//! came ([`DriverInput::Read`]); each write is reported with `StreamEvent::Written`, the
+//! engine's back-pressure signal.
+//!
+//! # The loop
 //!
 //! ```text
 //! while let Some(command) = pc.poll_stream_command() { driver.execute(command) }
@@ -18,11 +40,27 @@
 //! }
 //! ```
 //!
-//! Each connection has a reader task, which reports what it reads in whatever pieces the socket
-//! gives (the engine reassembles frames), and a writer task, which writes transmits in order and
-//! reports each with `StreamEvent::Written`, the engine's back-pressure signal. Sockets are
-//! created on the thread that calls [`StreamDriver::execute`] inside a tokio runtime, so a
-//! current-thread runtime on a thread that entered a network namespace keeps them there.
+//! A complete program, two peer connections over loopback TCP with a data channel, is the
+//! `stream-driver-loopback` example of the `rtc` crate (`cargo run --example
+//! stream-driver-loopback`); the test environment runs it.
+//!
+//! # Server choices
+//!
+//! [`sockets`] has what a server decides and the engine does not: port ranges
+//! ([`sockets::PortRange`]), which local addresses get candidates ([`sockets::AddressFilter`]),
+//! one UDP port for many peer connections ([`sockets::UfragMux`]) and one passive ICE-TCP port
+//! for many ([`DriverConfig::shared_passive`], [`sockets::accept_by_ufrag`]).
+//!
+//! # Features
+//!
+//! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
+//!   apart (RFC 8305 section 3), with hickory-resolver (MIT OR Apache-2.0). Without it, names go
+//!   to the system resolver and record queries are answered with none (the engine then uses
+//!   the host and the scheme's default port).
+//!
+//! Each connection has a reader task and a writer task. Sockets are created on the thread that
+//! calls [`StreamDriver::execute`] inside a tokio runtime, so a current-thread runtime on a
+//! thread that entered a network namespace keeps them there.
 
 #![warn(missing_docs)]
 

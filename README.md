@@ -315,8 +315,20 @@ back-pressure signal: the engine holds a window of unacknowledged bytes per conn
 `SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
 application that never polls the stream interface gets no TCP candidate and nothing changes.
 
+**What is engine and what is driver.** The engine (`rtc`) decides and runs every protocol:
+which TCP candidates exist, which connections to open and when to close them, RFC 4571 and
+TURN framing, TLS and DTLS to TURN servers, the TURN client (UDP and TCP allocations), STUN
+Binding requests, the Happy Eyeballs race, NAPTR / SRV resolution order, ICE, DTLS, SCTP and
+SRTP. It names listeners and connections by id and never touches a socket or a clock. The
+driver owns the sockets and nothing else: it binds, connects, accepts, reads, writes, closes
+and resolves names when the engine says so, and reports what happened. The application owns
+its UDP sockets, signalling and the loop.
+
 **The reference driver** (`examples/stream-driver`, crate `rtc-stream-driver`, not published)
-implements the stream half on tokio, plus the socket choices a server makes:
+implements the stream half on tokio; its crate documentation has the command table and the
+loop. `cargo run --example stream-driver-loopback` runs two peer connections over loopback TCP
+through it with a data channel, the smallest complete program (the test environment runs it).
+The driver also has the socket choices a server makes:
 
 | Need | Where |
 | --- | --- |

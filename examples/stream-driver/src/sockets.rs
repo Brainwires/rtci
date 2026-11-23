@@ -291,7 +291,7 @@ pub struct SharedAccept {
     /// The receiver's ufrag of its first Binding request.
     pub ufrag: String,
     /// What was read to find it, to hand to the engine first
-    /// ([`StreamDriver::adopt_stream`](crate::StreamDriver::adopt_stream)).
+    /// ([`StreamDriver::adopt_shared`](crate::StreamDriver::adopt_shared)).
     pub read: Vec<u8>,
 }
 

@@ -92,6 +92,8 @@ variables the tests read.
     And the engine's relayed TCP candidates (RFC 6062): an offerer behind a symmetric NAT with
     only relayed TCP candidates and an answerer in `open-b` with only its ICE-TCP candidates,
     connected through coturn's TCP allocation.
+  - `examples/stream-driver-loopback`: two peer connections over loopback TCP through the
+    reference driver, a data channel, 50 messages in order (the env stage runs the example).
   - `testenv_media_fixtures`: a multi-packet-per-page Ogg file and a four-slices-per-picture
     H.264 file sent over a real connection, checked byte for byte and for the RTP marker, and
     decoded by GStreamer after the trip.
