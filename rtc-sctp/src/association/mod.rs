@@ -19,6 +19,7 @@ use crate::chunk::{
     chunk_i_forward_tsn::ChunkIForwardTsn,
     chunk_init::ChunkInit,
     chunk_init::ChunkInitAck,
+    chunk_padding::ChunkPadding,
     chunk_payload_data::ChunkPayloadData,
     chunk_payload_data::{MessageId, MessageReliability, PayloadProtocolIdentifier},
     chunk_reconfig::ChunkReconfig,
@@ -73,6 +74,8 @@ use thiserror::Error;
 
 pub(crate) mod bundling;
 pub(crate) mod interleaving;
+pub(crate) mod pmtud;
+use pmtud::PathMtuState;
 pub(crate) mod reconfig;
 pub(crate) mod state;
 pub(crate) mod stats;
@@ -448,6 +451,8 @@ pub struct Association {
     path_inactive: bool,
     /// When the association was made: the zero of the time a HEARTBEAT carries.
     created_at: Option<Instant>,
+    /// Path MTU discovery (RFC 8899), when configured.
+    pmtud: Option<pmtud::PathMtuDiscovery>,
 
     pub(crate) payload_queue: PayloadQueue,
     pub(crate) inflight_queue: PayloadQueue,
@@ -648,6 +653,7 @@ impl Default for Association {
             path_error_count: 0,
             path_inactive: false,
             created_at: None,
+            pmtud: None,
 
             payload_queue: PayloadQueue::default(),
             inflight_queue: PayloadQueue::default(),
@@ -771,6 +777,9 @@ impl Association {
             interleaving_enabled: config.message_interleaving(),
             zero_checksum_enabled: config.zero_checksum(),
             heartbeat_interval: config.heartbeat_interval(),
+            pmtud: config
+                .path_mtu_discovery()
+                .map(|pmtud| pmtud::PathMtuDiscovery::new(pmtud, mtu)),
             created_at: Some(now),
             random,
             max_payload_size,
@@ -881,6 +890,14 @@ impl Association {
             "[{}] path change: congestion control starts over",
             self.side
         );
+        // RFC 8261 section 6.1 and RFC 8831 section 5: the path MTU is tested again. The
+        // discovery starts over from BASE_PLPMTU, which is what the packets use until a
+        // probe confirms more.
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            let base = pmtud.base();
+            pmtud.reset(base);
+            self.use_path_mtu(base, true);
+        }
         self.cwnd = Self::initial_cwnd(self.pmdcs, self.remote_addr.is_ipv6());
         // RFC 9260 7.2.1: the initial ssthresh is arbitrarily high; the peer's window is.
         self.ssthresh = self
@@ -909,18 +926,52 @@ impl Association {
     /// Tells the association the largest SCTP packet the path below carries, in bytes: the
     /// path MTU less what lies beneath SCTP (for WebRTC: the DTLS record overhead, the UDP
     /// and IP headers, and TURN framing where a relay is used). The entry point for whatever
-    /// learns the path MTU: the application's own discovery, a transport that probes, or an
-    /// ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261 section 4).
-    /// The association does not probe by itself.
+    /// learns the path MTU: the transport's initial value for a path, the application's own
+    /// discovery, or an ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261
+    /// section 4).
     ///
-    /// From now on packets are bundled up to `mtu`, the Path Maximum DATA Chunk Size of the
-    /// congestion control rules follows it, and messages written from now on are fragmented
-    /// to fit. A message already fragmented keeps its fragments: after a reduction they are
-    /// sent as they are, each alone in a packet larger than the new MTU, and the layer below
-    /// has to fragment or the caller to accept the loss (RFC 9260 section 6.9: SCTP does not
-    /// re-fragment). A value below [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is
-    /// raised to it.
+    /// With path MTU discovery on ([`TransportConfig::with_path_mtu_discovery`]) the value
+    /// is BASE_PLPMTU (RFC 8899 section 5.1.2): the association uses it, confirms it with a
+    /// probe once established and searches above it; a new value starts the discovery over.
+    /// Setting the value in use again changes nothing.
+    ///
+    /// From now on packets are bundled up to the packet size, the Path Maximum DATA Chunk
+    /// Size of the congestion control rules follows it, and messages written from now on are
+    /// fragmented to fit. A message already fragmented keeps its fragments: after a reduction
+    /// they are sent as they are, each alone in a packet larger than the new MTU, and the
+    /// layer below has to fragment or the caller to accept the loss (RFC 9260 section 6.9:
+    /// SCTP does not re-fragment). A value below
+    /// [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is raised to it.
     pub fn set_path_mtu(&mut self, mtu: u32) {
+        let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            if pmtud.base() == mtu {
+                return;
+            }
+            pmtud.reset(mtu);
+        }
+        self.use_path_mtu(mtu, true);
+    }
+
+    /// MAX_PLPMTU of the path MTU discovery (RFC 8899 section 5.1.2): the largest SCTP packet
+    /// the search tries, the local interface MTU less what lies under SCTP. Nothing without
+    /// discovery.
+    pub fn set_max_path_mtu(&mut self, max: u32) {
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.set_max_path_mtu(max)) {
+            self.use_path_mtu(mtu, false);
+        }
+    }
+
+    /// Where the path MTU discovery is (RFC 8899 section 5.2); `None` without discovery.
+    pub fn path_mtu_state(&self) -> Option<PathMtuState> {
+        self.pmtud.as_ref().map(|p| p.state())
+    }
+
+    /// Takes `mtu` as the size of the packets sent from now on. `raise_cwnd`: the congestion
+    /// window grows to one packet if it is smaller (RFC 9260 7.2.1); a PLPMTU found by
+    /// discovery leaves it as it is (RFC 8899 section 3 item 7: "An update to the PLPMTU (or
+    /// MPS) MUST NOT increase the congestion window measured in bytes").
+    fn use_path_mtu(&mut self, mtu: u32, raise_cwnd: bool) {
         let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
         if mtu == self.mtu {
             return;
@@ -933,8 +984,10 @@ impl Association {
             s.max_payload_size = self.max_payload_size;
         }
         self.pending_queue.set_packet_budget(self.pmdcs as usize);
-        // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
-        self.cwnd = self.cwnd.max(self.pmdcs);
+        if raise_cwnd {
+            // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
+            self.cwnd = self.cwnd.max(self.pmdcs);
+        }
     }
 
     /// Returns application-facing event
@@ -974,7 +1027,11 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        self.timers.next_timeout()
+        let pmtud = self.pmtud.as_ref().and_then(|p| p.deadline());
+        match (self.timers.next_timeout(), pmtud) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Returns packets to transmit
@@ -1050,6 +1107,15 @@ impl Association {
                 }
                 self.timers.start(timer, now, self.rto_mgr.get_rto());
             }
+        }
+        if self.state() == AssociationState::Established
+            && self
+                .pmtud
+                .as_ref()
+                .and_then(|p| p.deadline())
+                .is_some_and(|at| now >= at)
+        {
+            self.handle_path_mtu_timeout(now);
         }
     }
 
@@ -1827,6 +1893,10 @@ impl Association {
             self.handle_shutdown_ack(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
             self.handle_shutdown_complete(c)?
+        } else if chunk_any.downcast_ref::<ChunkPadding>().is_some() {
+            // RFC 4820 section 3: the PAD chunk is discarded, and the rest of the packet is
+            // processed.
+            vec![]
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkUnknown>() {
             return Ok(self.handle_unknown_chunk(c));
         } else {
@@ -2537,6 +2607,11 @@ impl Association {
         fresh.timers.stop(Timer::T1Init);
         fresh.timers.stop(Timer::HalfOpen);
         fresh.mtu = self.mtu;
+        // The path is the same: its discovery starts over from the same base.
+        if let Some(pmtud) = &self.pmtud {
+            fresh.pmtud = Some(pmtud::PathMtuDiscovery::new(*pmtud.config(), pmtud.base()));
+            fresh.use_path_mtu(pmtud.base(), true);
+        }
         fresh.cookie_signer = self.cookie_signer.clone();
         let tsn = fields.my_initial_tsn;
         fresh.my_next_tsn = tsn;
@@ -2976,9 +3051,94 @@ impl Association {
         );
     }
 
+    /// RFC 8899 section 6.2: the path MTU probe that is due, if any, as a packet of its own
+    /// that is exactly the size probed: a HEARTBEAT whose Heartbeat Information is the probe
+    /// size, the time it is sent and a nonce, and a PAD chunk (RFC 4820) for the rest. It
+    /// carries no user data and is not held back by the congestion or the receive window
+    /// (section 3, items 7 and 8); it waits for the established association.
+    fn gather_path_mtu_probe(&mut self, raw_packets: &mut Vec<Bytes>, now: Instant) {
+        let Some(pmtud) = self.pmtud.as_mut() else {
+            return;
+        };
+        pmtud.start();
+        let Some(size) = pmtud.poll_probe() else {
+            return;
+        };
+        let nonce = self.random.u64();
+        let sent_ms = self.created_at.map_or(0, |start| {
+            now.saturating_duration_since(start).as_millis() as u64
+        });
+        let mut info = BytesMut::with_capacity(20);
+        info.extend_from_slice(&size.to_be_bytes());
+        info.extend_from_slice(&sent_ms.to_be_bytes());
+        info.extend_from_slice(&nonce.to_be_bytes());
+        let padding_length = size.saturating_sub(pmtud::PROBE_OVERHEAD) as usize;
+        let packet = self.create_packet(vec![
+            Box::new(ChunkHeartbeat {
+                params: vec![Box::new(ParamHeartbeatInfo {
+                    heartbeat_information: info.freeze(),
+                })],
+            }),
+            Box::new(ChunkPadding { padding_length }),
+        ]);
+        match self.marshal_packet(&packet) {
+            Ok(raw) => {
+                debug!("[{}] path MTU probe of {} bytes", self.side, raw.len());
+                raw_packets.push(raw);
+                if let Some(pmtud) = self.pmtud.as_mut() {
+                    pmtud.probe_sent(nonce, size, now);
+                }
+            }
+            Err(err) => warn!(
+                "[{}] failed to serialize a path MTU probe: {err}",
+                self.side
+            ),
+        }
+    }
+
+    /// A HEARTBEAT ACK that echoes a path MTU probe (`gather_path_mtu_probe`): the probe
+    /// crossed the path. A successful probe counts as an answer from the peer (RFC 8899
+    /// section 6.2.1.2: it "updates the association and path counters"). Returns whether the
+    /// acknowledgement was a probe's.
+    fn handle_path_mtu_probe_ack(&mut self, info: &Bytes, now: Instant) -> bool {
+        if info.len() != 20 || self.pmtud.is_none() {
+            return false;
+        }
+        let nonce = u64::from_be_bytes(info[12..20].try_into().unwrap_or_default());
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            if let Some(mtu) = pmtud.on_probe_ack(nonce, now) {
+                self.use_path_mtu(mtu, false);
+            }
+        }
+        self.on_path_success();
+        true
+    }
+
+    /// The path MTU discovery's timers (PROBE_TIMER, PMTU_RAISE_TIMER).
+    fn handle_path_mtu_timeout(&mut self, now: Instant) {
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.on_timeout(now)) {
+            self.use_path_mtu(mtu, false);
+        }
+        if self
+            .pmtud
+            .as_ref()
+            .is_some_and(|p| p.poll_probe().is_some())
+        {
+            self.awake_write_loop();
+        }
+    }
+
     /// RFC 9260 8.3: a HEARTBEAT ACK for the HEARTBEAT outstanding measures the round trip,
     /// clears the error counters and shows the path active. Any other is ignored.
     fn handle_heartbeat_ack(&mut self, c: &ChunkHeartbeatAck, now: Instant) {
+        if let Some(info) = c.params.first().and_then(|p| {
+            p.as_any()
+                .downcast_ref::<ParamHeartbeatInfo>()
+                .map(|info| info.heartbeat_information.clone())
+        }) && self.handle_path_mtu_probe_ack(&info, now)
+        {
+            return;
+        }
         let Some((nonce, sent_at)) = self.heartbeat_outstanding else {
             trace!("[{}] HEARTBEAT ACK for no HEARTBEAT", self.side);
             return;
@@ -3373,6 +3533,9 @@ impl Association {
 
             self.cumulative_tsn_ack_point = d.cumulative_tsn_ack;
             cum_tsn_ack_point_advanced = true;
+            if let Some(pmtud) = self.pmtud.as_mut() {
+                pmtud.on_progress();
+            }
             self.on_cumulative_tsn_ack_point_advanced(now);
         }
         // RFC 9260 7.2.4: the window growth of 7.2.1 and 7.2.2 comes before the adjustments
@@ -4304,6 +4467,7 @@ impl Association {
                 }
                 raw_packets = self.gather_outbound_sack_packets(raw_packets);
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
+                self.gather_path_mtu_probe(&mut raw_packets, now);
                 (raw_packets, true)
             }
             AssociationState::ShutdownPending
@@ -5674,6 +5838,17 @@ impl Association {
                     "[{}] T3-rtx timed out: n_rtos={} cwnd={} ssthresh={}",
                     self.side, n_rtos, self.cwnd, self.ssthresh
                 );
+
+                // RFC 8899 section 4.3: data at the PLPMTU that keeps going unacknowledged
+                // is the sign of a path that no longer carries it.
+                if let Some(mtu) = self
+                    .pmtud
+                    .as_mut()
+                    .and_then(|p| p.on_retransmission_timeout())
+                {
+                    debug!("[{}] path MTU black hole: back to {mtu} bytes", self.side);
+                    self.use_path_mtu(mtu, false);
+                }
 
                 self.inflight_queue.mark_all_to_retrasmit();
                 self.t3_retransmit_pending = true;

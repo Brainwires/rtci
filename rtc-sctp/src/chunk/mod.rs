@@ -11,6 +11,7 @@ pub(crate) mod chunk_heartbeat;
 pub(crate) mod chunk_heartbeat_ack;
 pub(crate) mod chunk_i_forward_tsn;
 pub(crate) mod chunk_init;
+pub(crate) mod chunk_padding;
 pub mod chunk_payload_data;
 pub(crate) mod chunk_reconfig;
 pub(crate) mod chunk_selective_ack;

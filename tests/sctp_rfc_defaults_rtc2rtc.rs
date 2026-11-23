@@ -61,8 +61,11 @@ fn connected_at(
     Ok((pair, local, remote))
 }
 
+/// The engine's defaults but path MTU discovery, which is off: these tests look at the initial
+/// packet size of RFC 8831 section 5, which discovery would grow on the in-memory network
+/// (it carries datagrams of any size). The `path_mtu_discovery_*` tests have it on.
 fn default() -> SettingEngineBuilder {
-    SettingEngineBuilder::new()
+    SettingEngineBuilder::new().with_sctp_path_mtu_discovery(None)
 }
 
 /// `maxMessageSize` of both peers.
@@ -482,5 +485,90 @@ fn a_configured_sctp_mtu_takes_the_place_of_the_paths() -> Result<()> {
             "{dtls}"
         );
     }
+    Ok(())
+}
+
+/// The engine's defaults, path MTU discovery included, under DTLS 1.3 and DTLS 1.2.
+fn with_discovery() -> [(&'static str, Settings); 2] {
+    [
+        ("DTLS 1.3", SettingEngineBuilder::new),
+        ("DTLS 1.2", || {
+            SettingEngineBuilder::new().with_dtls_cipher_suites(vec![
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+            ])
+        }),
+    ]
+}
+
+/// RFC 8261 section 4 and RFC 8831 section 5: SCTP over DTLS discovers the path MTU without
+/// ICMP, by RFC 8899 section 6.2.3 (HEARTBEAT and PAD probes whose size counts the DTLS
+/// record). On a path that carries UDP payloads up to 1400 bytes the association's packets,
+/// which start at what a 1200-byte IPv4 packet leaves, grow until their datagrams nearly fill
+/// 1400 bytes, and never pass it. When the path shrinks to 1250 bytes, the data sent at the
+/// larger size is lost, the association falls back to the initial size and every message
+/// arrives; the next search settles under 1250.
+#[test]
+fn path_mtu_discovery_grows_the_packets_to_the_path_and_back_when_it_shrinks() -> Result<()> {
+    for (dtls, settings) in with_discovery() {
+        let (mut pair, local, remote) = connected_at(OFFERER, settings(), ANSWERER, settings())?;
+        let overhead = negotiated_record_overhead(&mut pair);
+        for peer in [&mut pair.offerer, &mut pair.answerer] {
+            peer.max_datagram = Some(1400);
+        }
+        // The search: confirmations take a round trip, each lost probe a 16-second timer.
+        pair.run_for(std::time::Duration::from_secs(200))?;
+        let largest = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
+        assert!(
+            largest <= 1400 && largest > 1400 - 64,
+            "{dtls}: {largest}-byte datagrams on a path of 1400 (record overhead {overhead})"
+        );
+        assert!(largest > full_datagram(1200 - 20 - 8, overhead), "{dtls}");
+
+        // The path shrinks.
+        for peer in [&mut pair.offerer, &mut pair.answerer] {
+            peer.max_datagram = Some(1250);
+        }
+        let before = pair.answerer.received.len();
+        let now = pair.now;
+        let mut channel = pair.offerer.pc.data_channel(local).expect("the channel");
+        for i in 0..200u8 {
+            channel.send(now, bytes::BytesMut::from(&[i; 200][..]))?;
+        }
+        assert!(
+            pair.run_until(|p| p.answerer.received.len() >= before + 200)?,
+            "{dtls}: {} of 200 messages after the path shrank",
+            pair.answerer.received.len() - before
+        );
+        pair.run_for(std::time::Duration::from_secs(200))?;
+        pair.offerer.written_sizes.clear();
+        pair.answerer.written_sizes.clear();
+        assert!(pair.deliver(false, local, &vec![3u8; 65536])?, "{dtls}");
+        let largest = pair
+            .offerer
+            .written_sizes
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        assert!(largest <= 1250 && largest > 1250 - 64, "{dtls}: {largest}");
+        assert_eq!(
+            pair.offerer.pc.sctp().expect("SCTP").state(),
+            RTCSctpTransportState::Connected,
+            "{dtls}"
+        );
+    }
+    Ok(())
+}
+
+/// With discovery off (`with_sctp_path_mtu_discovery(None)`) the packets keep the initial
+/// size of RFC 8831 section 5 however long the connection runs, on a path that would carry
+/// more.
+#[test]
+fn path_mtu_discovery_can_be_turned_off() -> Result<()> {
+    let (mut pair, local, remote) = connected_at(OFFERER, default(), ANSWERER, default())?;
+    let overhead = negotiated_record_overhead(&mut pair);
+    pair.run_for(std::time::Duration::from_secs(200))?;
+    let largest = largest_datagram_of_a_large_message(&mut pair, local, remote)?;
+    assert_eq!(largest, full_datagram(1200 - 20 - 8, overhead));
     Ok(())
 }

@@ -4,6 +4,7 @@ use crate::util::{
 };
 
 use crate::TimerConfig;
+use crate::association::pmtud::PathMtuDiscoveryConfig;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,6 +112,7 @@ pub struct TransportConfig {
     partial_reliability: bool,
     message_interleaving: bool,
     zero_checksum: bool,
+    path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
 }
 
 impl Default for TransportConfig {
@@ -133,11 +135,31 @@ impl Default for TransportConfig {
             partial_reliability: true,
             message_interleaving: false,
             zero_checksum: false,
+            path_mtu_discovery: Some(PathMtuDiscoveryConfig::default()),
         }
     }
 }
 
 impl TransportConfig {
+    /// Path MTU discovery (DPLPMTUD, RFC 8899 section 6.2, with the PAD chunk of RFC 4820):
+    /// once established, the association confirms its packet size (what
+    /// [`Association::set_path_mtu`](crate::Association::set_path_mtu) set, else the
+    /// default) with a probe, searches for a larger one up to
+    /// [`PathMtuDiscoveryConfig::with_max_path_mtu`], and falls back to it when the path
+    /// stops carrying the larger size. On by default (RFC 8261 section 4: SCTP over DTLS
+    /// "MUST implement and use" a discovery method that works without ICMP; RFC 9260 section
+    /// 7.3). `None` keeps the packet size where the transport sets it.
+    pub fn with_path_mtu_discovery(mut self, value: Option<PathMtuDiscoveryConfig>) -> Self {
+        self.path_mtu_discovery = value;
+        self
+    }
+
+    /// The path MTU discovery settings, see
+    /// [`with_path_mtu_discovery`](Self::with_path_mtu_discovery).
+    pub fn path_mtu_discovery(&self) -> Option<PathMtuDiscoveryConfig> {
+        self.path_mtu_discovery
+    }
+
     /// Sets L of RFC 9260 section 7.2.1: in slow start one SACK grows the congestion window
     /// by at most the bytes it acknowledges and at most L packets (L x PMDCS). The RFC says L
     /// SHOULD be 1 and MAY be larger (RFC 3465 discusses the choice): 1 is the default. A

@@ -273,6 +273,9 @@ impl RTCPeerConnection {
         .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing.unwrap_or(true))
         .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
         .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
+        .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(
+            crate::peer_connection::transport::sctp::SctpPath::DEFAULT_MAX_IP_PACKET,
+        )))
         .with_message_size_limit_without_interleaving(
             setting_engine
                 .sctp_message_size_limit_without_interleaving

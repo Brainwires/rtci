@@ -2212,6 +2212,9 @@ mod untested_rows_test;
 #[path = "rfc9260_rows_test.rs"]
 mod rfc9260_rows_test;
 
+#[path = "pmtud_link_test.rs"]
+mod pmtud_link_test;
+
 #[path = "reconfig_test.rs"]
 mod reconfig_test;
 
