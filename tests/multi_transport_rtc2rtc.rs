@@ -233,7 +233,9 @@ impl World {
     /// (`with_discard_local_candidates_during_ice_restart`, or a new DTLS association: RFC
     /// 8842 section 5.1, a new 3-tuple): every transport of each peer gathers a host
     /// candidate on a new port (`base` plus its index) and trickles it, with its section, to
-    /// the other peer. The previous ports stay open.
+    /// the other peer. The previous ports stay open. (Not from 6000: a remote candidate on
+    /// a bad port, X11's 6000 among them, is administratively prohibited, W3C webrtc-pc
+    /// 4.4.2, and never checked.)
     fn regather(&mut self, base: u16) -> Result<()> {
         for i in 0..2 {
             let sections = self.peers[i].pc.ice_transport_sections();
@@ -2114,7 +2116,7 @@ fn renewing_the_dtls_association_renews_every_transport() -> Result<()> {
     // RFC 8842 section 5.1: each new association runs on a new 3-tuple; the restart that
     // comes with it dropped every transport's local candidates, and the application gathers
     // on new ports.
-    world.regather(6000)?;
+    world.regather(7000)?;
     let after = tls_ids(&offer);
     assert_eq!(after.len(), 3, "{offer}");
     assert!(
@@ -2154,7 +2156,7 @@ fn renewing_the_dtls_association_renews_every_transport() -> Result<()> {
     })?;
     world.run_traced(
         "every transport selected a pair on the new ports",
-        |peers| peers.iter().all(|p| selected_on_new_ports(p, 6000)),
+        |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
     )?;
     media_and_data_arrive(&mut world, &senders, "the new associations")
 }
@@ -2252,10 +2254,10 @@ fn a_restart_that_drops_the_local_candidates_reconnects_every_transport() -> Res
                     );
                 }
             }
-            world.regather(6000)?;
+            world.regather(7000)?;
             world.run_traced(
                 &format!("{what}: every transport selected a pair on the new ports"),
-                |peers| peers.iter().all(|p| selected_on_new_ports(p, 6000)),
+                |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
             )?;
             for (i, peer) in world.peers.iter().enumerate() {
                 let after = transport_ice(peer);
