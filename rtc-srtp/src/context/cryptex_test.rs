@@ -352,6 +352,55 @@ fn shaped(csrcs: u8, profile: Option<u16>, seq: u16) -> Vec<u8> {
     packet
 }
 
+/// RFC 7941 section 6: the SDES header extensions (MID, RID) get protection "of commensurate
+/// strength" with RTCP's. Under Cryptex the CSRC list and the extension elements are encrypted
+/// by the SRTP transform of the payload (RFC 9335 section 6) and are under its authentication
+/// tag: they do not leave in the clear, and a changed octet of either fails authentication,
+/// with the HMAC and with the AEAD.
+#[test]
+fn cryptex_extensions_are_encrypted_and_authenticated_like_the_payload() {
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        // 12 octets of fixed header, one CSRC (12..16), the extension header (16..20), its
+        // element (20..24), the payload.
+        let plain = shaped(1, Some(0xBEDE), 1);
+        let protected = context(profile, SEND).encrypt_rtp(&plain).unwrap();
+        assert_eq!(
+            &protected[16..18],
+            &[0xc0, 0xde],
+            "{profile:?}: marked Cryptex"
+        );
+        assert_ne!(
+            &protected[12..16],
+            &plain[12..16],
+            "{profile:?}: CSRC in clear"
+        );
+        assert_ne!(
+            &protected[20..24],
+            &plain[20..24],
+            "{profile:?}: element in clear"
+        );
+        for at in [13, 21] {
+            let mut forged = protected.to_vec();
+            forged[at] ^= 0x01;
+            assert!(
+                context(profile, Cryptex::default())
+                    .decrypt_rtp(&forged)
+                    .is_err(),
+                "{profile:?}: octet {at} changed and still read"
+            );
+        }
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..20],
+            &plain[..20]
+        );
+    }
+}
+
 /// RFC 9335 sections 5 and 5.1: Cryptex applies to RFC 8285 extensions only, and not to
 /// two-byte headers with non-zero "appbits". When Cryptex is mandatory such a packet must not
 /// leave with its CSRCs or extension in the clear (the receiving side of the same policy
