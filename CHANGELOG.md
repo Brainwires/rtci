@@ -765,7 +765,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gathers when a transport begins gathering, and on `OnLocalCandidatesNeeded` binds new UDP
   ports in its range, adds their candidates for the event's section and ends the generation
   by itself; the previous sockets stay open until a pair on a new one is selected for that
-  transport, or the transport closes. With the opt-out it keeps its sockets and gives their
+  transport and then for `retired_socket_linger` (5 s by default: the peer may still send to
+  the previous address until its own selection switches; closing at once lost a packet on
+  macOS), or until the transport closes. With the opt-out it keeps its sockets and gives their
   candidates to each new generation. Tests (`examples/stream-driver/tests/peer.rs`, no
   gathering in test code): `stop_all_then_add_carries_media_on_new_sockets`,
   `automatic_srtp_re_keying_carries_every_packet_onto_new_sockets`,
@@ -866,6 +868,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
 ### Bug Fixes
+
+- **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
+  dropped the local candidates (a new DTLS association on new ports), the side that selected
+  the new pair first dropped the packets the peer still sent on the previous pair before its
+  own selection switched (the controlled side selects at the nomination request, the
+  controlling one at its response): one packet lost at each renewal, seen through
+  `rtc-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
+  after the new pair is selected (`Agent::retired_media_path`, `RETIRED_MEDIA_PATH_GRACE`),
+  and routed to its transport (`on_address`)
+  (`data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received`).
 
 - **rtc** (engine-run server-reflexive gathering, RFC 8842 section 5.1): after a new DTLS
   association, the probe from a refused UDP base went on; a late answer to it would have been

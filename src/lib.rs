@@ -436,7 +436,8 @@
 //! empty candidate for that mid. Keep the previous sockets open and reading: the selected
 //! pair keeps carrying the transport's packets until a pair on a new socket is selected
 //! (`SelectedCandidatePairChange` on that transport), or until the transport closes; close
-//! them then. The engine's own gathering follows the new host candidates by itself: it asks
+//! them then, after a few seconds more: the peer selects on its own and may still send to
+//! the previous address for a while. The engine's own gathering follows the new host candidates by itself: it asks
 //! the STUN servers from each new base (the probes from a refused base end, so no mapped
 //! address of the previous socket is announced), allocates TURN again from a base that is not
 //! refused, and gives the ICE-TCP candidates of the address again (RFC 8842 section 5.1 asks a

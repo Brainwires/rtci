@@ -146,6 +146,9 @@ struct World {
     paths: HashSet<(SocketAddr, SocketAddr)>,
     /// Addresses whose datagrams, either way, are lost.
     blocked: HashSet<SocketAddr>,
+    /// Datagrams to this address are held back, not delivered (a path slower in one
+    /// direction).
+    held_to: Option<SocketAddr>,
     /// What arrives on peer 0's shared address goes through the reference driver's mux for a
     /// shared port first (`rtc-stream-driver`'s `UfragMux`), as a server routes it.
     mux: Option<(SocketAddr, UfragMux<usize>)>,
@@ -193,6 +196,7 @@ impl World {
             now: Instant::now(),
             paths: HashSet::new(),
             blocked: HashSet::new(),
+            held_to: None,
             mux: None,
             misrouted: 0,
             trickling: vec![],
@@ -504,7 +508,10 @@ impl World {
             if data.len() >= 8 && (128..=191).contains(&data[0]) && (192..=223).contains(&data[1]) {
                 self.rtcp.push((from, to));
             }
-            if self.blocked.contains(&from) || self.blocked.contains(&to) {
+            if self.blocked.contains(&from)
+                || self.blocked.contains(&to)
+                || self.held_to == Some(to)
+            {
                 continue;
             }
             if let Some((shared, mux)) = self.mux.as_mut()
@@ -3374,4 +3381,72 @@ fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_
     assert_eq!(received(&world), (1..=30).collect::<Vec<u16>>());
     assert_eq!(world.peers[0].pc.discarded_rtp_packets(), 0);
     Ok(())
+}
+
+/// RFC 8445 section 9 and 12.2 across the end of an ICE restart for a new DTLS association
+/// (RFC 8842 section 5.1, new ports): each side selects the new pair on its own, the controlled
+/// one when the nomination request reaches it, the controlling one when the response comes
+/// back. In between, the controlling side still sends on the previous pair, and the controlled
+/// side, which has selected the new one, takes that data: the previous path is still taken for
+/// a few seconds after the new pair is selected. Here the response is held back while peer 0
+/// (controlling) sends a packet: peer 1 reads it at once. (Before, it was dropped as data on
+/// an address the transport no longer has a candidate on: one packet lost at each renewal,
+/// seen through `rtc-stream-driver` on real sockets.)
+#[test]
+fn data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::Balanced)?;
+    let (senders, _) = world.negotiate_media(&[RtpCodecKind::Audio], false, |sdp| sdp)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    for seq in 1..=5 {
+        world.send_rtp(senders[0], seq)?;
+        world.advance(Duration::from_millis(20))?;
+    }
+    world.peers[0].pc.renew_dtls_association();
+    world.renegotiate_with(|sdp| sdp)?;
+    world.regather_on_events(7000)?;
+    let selected_port = |peer: &Peer| {
+        peer.pc.dtls_transports()[0]
+            .ice_transport()
+            .get_selected_candidate_pair()
+            .map(|pair| pair.local().port)
+    };
+    let mut steps = 0;
+    while selected_port(&world.peers[1]) < Some(7000) {
+        if !world.step()? {
+            world.now += Duration::from_millis(5);
+            for peer in world.peers.iter_mut() {
+                peer.pc.handle_timeout(world.now)?;
+            }
+        }
+        steps += 1;
+        assert!(
+            steps < 10_000,
+            "peer 1 never selected a new pair\n{}",
+            world.trace()
+        );
+    }
+    // Peer 1 has selected the new pair; its response to the nomination is held back, so peer
+    // 0 still sends on the previous one.
+    world.held_to = Some(SocketAddr::new(world.peers[0].ip, 7000));
+    assert!(
+        selected_port(&world.peers[0]) < Some(7000),
+        "peer 0 has not selected the new pair yet"
+    );
+    let before = world.peers[1].rtp.len();
+    world.send_rtp(senders[0], 6)?;
+    world.step()?;
+    let received: Vec<u16> = world.peers[1].rtp[before..]
+        .iter()
+        .map(|h| h.sequence_number)
+        .collect();
+    assert_eq!(
+        received,
+        vec![6],
+        "the packet on the previous pair, read at once"
+    );
+    world.held_to = None;
+    world.run_traced("both on the new pair", |peers| {
+        peers.iter().all(|p| selected_on_new_ports(p, 7000))
+    })
 }

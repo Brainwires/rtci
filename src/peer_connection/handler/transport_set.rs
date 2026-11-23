@@ -195,7 +195,9 @@ fn agent_of(bundle: &TransportBundle) -> &ice::Agent {
 /// `bundle` sends data from `local`: an ICE restart that dropped the local candidates keeps
 /// the previous selected pair for data until the new generation selects one (RFC 8445 section
 /// 9, RFC 8839 section 4.4.3.1.1: "The agent will continue to send media using this pair"),
-/// and what arrives on that pair's local address is still this transport's.
+/// and what arrives on that pair's local address is still this transport's, for a few seconds
+/// after the new pair is selected too (the peer's packets sent before its own selection
+/// switched, `Agent::retired_media_path`).
 fn on_address(bundle: &TransportBundle, local: SocketAddr) -> bool {
     let agent = agent_of(bundle);
     agent
@@ -204,6 +206,9 @@ fn on_address(bundle: &TransportBundle, local: SocketAddr) -> bool {
         .any(|candidate| candidate.addr() == local || candidate.base_addr() == local)
         || agent
             .media_path()
+            .is_some_and(|path| path.local_addr == local)
+        || agent
+            .retired_media_path()
             .is_some_and(|path| path.local_addr == local)
 }
 

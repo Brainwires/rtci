@@ -99,7 +99,8 @@ impl RTCLocalCandidatesNeededReason {
 /// [`Self::mids`]`[0]`, signals each to the peer (`OnIceCandidateEvent`) and ends the
 /// generation with an empty candidate for the same mid. The previous sockets keep carrying
 /// the transport's packets until a candidate pair on a new one is selected
-/// (`SelectedCandidatePairChange`), or the transport closes: close them then, not before.
+/// (`SelectedCandidatePairChange`), or the transport closes: close them then (a few seconds
+/// after a new selection: the peer selects on its own and may still send to them), not before.
 ///
 /// [`RTCPeerConnection::add_local_candidate`]: crate::peer_connection::RTCPeerConnection::add_local_candidate
 #[derive(Clone, Debug)]
