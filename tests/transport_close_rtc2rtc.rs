@@ -488,8 +488,9 @@ fn an_answer_that_rejects_every_section_closes_the_transport_with_its_events() -
 /// The next offer finds a new transport: a new ICE agent with credentials of a new
 /// generation, a new DTLS association with a new `tls-id`, both with ids of their own. Its
 /// states are announced as the first transport's were, the transport's event before the
-/// connection's, and it carries media and a data channel. The local candidates the
-/// application gathered are the new transport's too: no candidate is added again here.
+/// connection's, and it carries media and a data channel. Its DTLS association runs on a new
+/// 3-tuple (RFC 8842 section 5.1): the closed transport's candidates are not listed, and the
+/// application gathers on new ports.
 #[test]
 fn the_next_offer_sets_up_a_new_transport_that_carries_media_and_data() -> Result<()> {
     let (mut offerer, mut answerer, audio, now) = connected()?;
@@ -529,14 +530,23 @@ fn the_next_offer_sets_up_a_new_transport_that_carries_media_and_data() -> Resul
     assert_ne!(new_credentials.2, old_credentials.2, "a new tls-id");
     assert_eq!(new_credentials.3, old_credentials.3, "the same certificate");
     assert!(
-        offerer
+        !offerer
             .pc
             .local_description()
             .expect("offer")
             .sdp
             .contains("a=candidate:"),
-        "the local description lists the candidates gathered before"
+        "the local description lists none of the candidates gathered before"
     );
+    for peer in [&mut offerer, &mut answerer] {
+        let port = peer.addr.port();
+        peer.addr.set_port(port + 100);
+    }
+    let (offerer_addr, answerer_addr) = (offerer.addr, answerer.addr);
+    offerer.pc.add_local_candidate(host(offerer_addr)?)?;
+    answerer.pc.add_local_candidate(host(answerer_addr)?)?;
+    offerer.pc.add_remote_candidate(host(answerer_addr)?)?;
+    answerer.pc.add_remote_candidate(host(offerer_addr)?)?;
 
     let opened = |p: &Peer, from: usize| {
         p.events[from..].iter().any(|e| {

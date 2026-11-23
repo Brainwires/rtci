@@ -491,6 +491,8 @@ fn a_new_dtls_association_keeps_the_fingerprints_the_identity_covers() -> Result
     let (first_offer, _) = world.connect()?;
     world.peers[0].pc.renew_dtls_association();
     let (offer, _) = world.exchange(0)?;
+    // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+    world.regather()?;
     assert_ne!(
         attribute_values(&offer, "tls-id"),
         attribute_values(&first_offer, "tls-id"),

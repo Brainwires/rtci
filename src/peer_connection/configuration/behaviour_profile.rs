@@ -1490,6 +1490,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556)",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_new_association_on_previous_addresses",
+        class: NotGovernedClass::Same,
+        note: "off in every profile: a new DTLS association over UDP gets a new 3-tuple (RFC 8842 5.1 MUST, 6), so the ICE restart that comes with it drops the local candidates and refuses their addresses, the TURN links allocate again, and the transport set up again after every m= section was rejected gathers on new ports too; `true` is the opt-out for an application with one fixed socket, in no profile. libwebrtc gathers each ICE generation on new sockets as well: p2p/base/p2p_transport_channel.cc::P2PTransportChannel::MaybeStartGathering @ a222406d (lines 842-882) stops the previous allocator session and takes a pooled or new one, and p2p/client/basic_port_allocator.cc binds that session's UDP sockets afresh (AllocationSequence::Init, lines 1261-1266, with the shared socket; AllocationSequence::CreateUDPPorts, lines 1471-1481, without it), port 0 within min_port..max_port",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_inbound_reassembly_limit",
         class: NotGovernedClass::EngineOnly,
         note: "the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow",

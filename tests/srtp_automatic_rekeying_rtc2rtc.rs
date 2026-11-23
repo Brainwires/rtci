@@ -115,13 +115,16 @@ impl Peer {
         Ok(written)
     }
 
-    fn deliver(&mut self, from: SocketAddr, datagrams: Vec<TaggedBytesMut>, now: Instant) {
+    /// The other peer's `datagrams`, on the 5-tuple each was sent on: after a new DTLS
+    /// association moved the peers to new ports, what still leaves on the previous path
+    /// arrives on it.
+    fn deliver(&mut self, datagrams: Vec<TaggedBytesMut>, now: Instant) {
         for datagram in datagrams {
             self.inbox.push(TaggedBytesMut {
                 now,
                 transport: TransportContext {
-                    local_addr: self.addr,
-                    peer_addr: from,
+                    local_addr: datagram.transport.peer_addr,
+                    peer_addr: datagram.transport.local_addr,
                     ecn: None,
                     transport_protocol: TransportProtocol::UDP,
                 },
@@ -199,6 +202,17 @@ fn negotiate(peers: &mut [Peer; 2], offerer: usize, now: Instant) -> Result<()> 
         .set_local_description(now, answer.clone())?;
     peers[offerer].pc.set_remote_description(now, answer)?;
     for i in 0..2 {
+        // A new DTLS association runs on new 3-tuples (RFC 8842 section 5.1): a peer whose
+        // ICE transport dropped its candidates for it gathers on the next port.
+        let holds_none = peers[i]
+            .pc
+            .dtls_transports()
+            .iter()
+            .all(|t| t.ice_transport().get_local_candidates().is_empty());
+        if holds_none {
+            let port = peers[i].addr.port();
+            peers[i].addr.set_port(port + 1);
+        }
         let candidate = host(peers[i].addr)?;
         peers[i].pc.add_local_candidate(candidate.clone())?;
         peers[1 - i].pc.add_remote_candidate(candidate)?;
@@ -237,11 +251,9 @@ fn run(settings: [SettingEngineBuilder; 2]) -> Result<Outcome> {
     let mut renegotiations = 0;
     for _ in 0..1_000_000 {
         let out = peers[0].turn()?;
-        let from = peers[0].addr;
-        peers[1].deliver(from, out, now);
+        peers[1].deliver(out, now);
         let out = peers[1].turn()?;
-        let from = peers[1].addr;
-        peers[0].deliver(from, out, now);
+        peers[0].deliver(out, now);
         if peers
             .iter()
             .any(|p| p.pc.connection_state() == RTCPeerConnectionState::Failed)
@@ -416,11 +428,9 @@ fn renewal(renewer: usize, answering_role: RTCDtlsRole) -> Result<()> {
             p.pc.handle_timeout(now)?;
         }
         let out = peers[0].turn()?;
-        let from = peers[0].addr;
-        peers[1].deliver(from, out, now);
+        peers[1].deliver(out, now);
         let out = peers[1].turn()?;
-        let from = peers[1].addr;
-        peers[0].deliver(from, out, now);
+        peers[0].deliver(out, now);
     }
     assert_eq!(
         peers[1].messages.last().map(Vec::as_slice),

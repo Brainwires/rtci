@@ -192,6 +192,110 @@ fn reads_cut_into_single_bytes_and_slow_writes_change_nothing() -> Result<()> {
     Ok(())
 }
 
+/// RFC 6544 section 9.2: "If an ICE restart occurs for a media stream with TCP candidate
+/// pairs that have been selected by ICE, the agents MUST NOT close the connections after the
+/// restart." Two peers connected over TCP (UDP blocked) restart ICE: no connection open when
+/// the restart starts is closed before each peer's new generation has selected a pair, and
+/// the messages sent across the restart arrive.
+#[test]
+fn an_ice_restart_does_not_close_the_selected_tcp_connection() -> Result<()> {
+    let mut net = Net::new();
+    let mut peers = peers(SettingEngine::default);
+    let channel = negotiate(&mut peers, &net)?;
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &[b"before the restart".to_vec()],
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    // The connections of pairs that were not selected close once ICE has completed (RFC
+    // 6544 section 8); what stays open carries the selected pair.
+    let until = net.elapsed() + Duration::from_secs(3);
+    while net.elapsed() < until {
+        net.step(&mut peers);
+        net.advance(&mut peers);
+    }
+    let now = net.now;
+    for p in peers.iter_mut() {
+        assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
+    }
+    let selected: Vec<(usize, rtc::shared::stream::StreamId)> = net
+        .conns
+        .iter()
+        .filter(|c| c.open)
+        .flat_map(|c| {
+            [
+                Some((c.a.peer, c.a.id)),
+                c.b.as_ref().map(|b| (b.peer, b.id)),
+            ]
+        })
+        .flatten()
+        .collect();
+    assert!(
+        !selected.is_empty(),
+        "a TCP connection carries the selected pair"
+    );
+    let ufrags: Vec<String> = peers
+        .iter()
+        .map(|p| p.pc.local_description().map(|d| d.sdp).unwrap_or_default())
+        .collect();
+
+    let closes = net.closes_seen.len();
+    let marks: Vec<usize> = peers.iter().map(|p| p.events.len()).collect();
+    peers[0].pc.restart_ice();
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    peers[1].pc.set_remote_description(now, offer)?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+    for (i, p) in peers.iter().enumerate() {
+        let sdp = p.pc.local_description().map(|d| d.sdp).unwrap_or_default();
+        let ufrag = |sdp: &str| {
+            sdp.lines()
+                .find_map(|l| l.strip_prefix("a=ice-ufrag:").map(str::to_owned))
+        };
+        assert_ne!(ufrag(&sdp), ufrag(&ufrags[i]), "peer {i}: an ICE restart");
+    }
+
+    let mut closed_early = vec![];
+    let mut seen = closes;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(30),
+        |net, peers| {
+            for &(peer, id) in &net.closes_seen[seen..] {
+                let reselected = peers.iter().zip(&marks).all(|(p, mark)| {
+                    p.events[*mark..].iter().any(|e| {
+                        matches!(e, RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_))
+                    })
+                });
+                if selected.contains(&(peer, id)) && !reselected {
+                    closed_early.push((peer, id));
+                }
+            }
+            seen = net.closes_seen.len();
+        },
+    )?;
+    assert_eq!(
+        closed_early,
+        vec![],
+        "the selected pair's connection was closed during the restart"
+    );
+    assert_eq!(
+        peers[1].received[1..],
+        expected[..],
+        "every message sent across the restart, in order"
+    );
+    Ok(())
+}
+
 #[test]
 fn with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed() -> Result<()> {
     let mut net = Net::new();
