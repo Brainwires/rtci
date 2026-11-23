@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4993 of 5084 (98.2 %).
-- Tested as the default (`tested`): 4971 of 5084 (97.8 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 91: 19 untested, 51 partial, 20 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4994 of 5084 (98.2 %).
+- Tested as the default (`tested`): 4972 of 5084 (97.8 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 90: 19 untested, 50 partial, 20 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 9 | 0 |
-| C | partly implemented | 46 | 26 |
+| C | partly implemented | 45 | 25 |
 | D | not implemented | 21 | 18 |
 | E | cannot be met or observed inside this engine | 17 | 10 |
 | F | stale note: already tested on this tree | 5 | 0 |
-| all | | 113 | 68 |
+| all | | 112 | 67 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 81 rows, 48 of size S, 24 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 80 rows, 47 of size S, 24 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 13 | 1 | 0 | 0 | 14 | 8 | 5 | 1 |
+| jsep (running) | 0 | 12 | 1 | 0 | 0 | 13 | 7 | 5 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
@@ -94,7 +94,6 @@ Sorted by class, then owner, size and ID.
 | RFC7728-6.4-2 | `rfc7728.md` | The local-pause PAUSED is repeated a sufficient number of times | partial | C | Tune the repetitions to the observed loss | S | jsep (running) |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | partial | C | A setting for the RFC form: a changed appdata ends the receiver's track and gives a new one (W3C keeps the transceiver's track; then `conflict`) | S | jsep (running) |
 | RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move one simulcast layer of a several-stream receiver to the section its MID names | S | jsep (running) |
-| RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
 | RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested | S | jsep (running) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |

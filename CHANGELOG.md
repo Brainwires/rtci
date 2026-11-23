@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **rtc-sdp**: `o=` session ids and versions of any length (`conf/jsep-65-origin`, jsep17).
+  `Origin::session_id` and `Origin::session_version` are now `SdpDecimal` (was `u64`): the
+  `1*DIGIT` of RFC 8866 section 9 has no upper bound, and RFC 9429 section 5.8 has a JSEP
+  endpoint accept compliant SDP beyond the 64 bits it generates. `SdpDecimal` keeps the digits
+  as written, compares as a number, has `From<u64>`, `PartialEq<u64>`, `to_u64()` and
+  `incremented()`. RFC9429-5.2.1-58 is `tested`.
+
 - **audit**: small JSEP rows (`conf/jsep-64-small-rows`, jsep17). No engine change.
   - RFC8851-6.3-6 and RFC9429-3.6.2-2 are `n/a` (coordinator decision): they bind the encoder,
     which is the application's; the engine's part of each stays tested. RFC7496-3.2-2 is

@@ -116,7 +116,6 @@ RFC9429-5.2.1-13	A	S	jsep (running)	`setting`: unique transport credentials
 RFC9429-5.2.1-23	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.1-34	A	S	jsep (running)	`setting`: msid without appdata
 RFC9429-5.2.1-40	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9429-5.2.1-58	C	S	jsep (running)	o= ids and versions beyond 64 bits (a public type change of `Origin`)
 RFC9429-5.2.2-10	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.2-27	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella; 5.3.2-5, and 5.3.1-6 `conflict`)
