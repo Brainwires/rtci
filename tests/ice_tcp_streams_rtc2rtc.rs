@@ -21,16 +21,23 @@ use rtc::statistics::report::RTCStatsReportEntry;
 use std::time::{Duration, Instant};
 use stream_net::{Net, Peer, udp_host};
 
-fn pc(settings: SettingEngine) -> RTCPeerConnection {
+fn pc(settings: SettingEngine, now: Instant) -> RTCPeerConnection {
     RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())
         .with_setting_engine(settings)
-        .build(Instant::now())
+        .build(now)
         .unwrap()
 }
 
-fn peers(settings: impl Fn() -> SettingEngine) -> Vec<Peer> {
-    vec![Peer::new(pc(settings()), 0), Peer::new(pc(settings()), 1)]
+/// Both peers, built at the network's virtual start: a peer's ICE agent paces its checks (Ta)
+/// from the instant it is built, so a peer built at `Instant::now()` would start its checks as
+/// much later on the virtual clock as building took in real time, and the course of a run (which
+/// checks happen before the nomination ends them) would depend on the machine's load.
+fn peers(net: &Net, settings: impl Fn() -> SettingEngine) -> Vec<Peer> {
+    vec![
+        Peer::new(pc(settings(), net.start), 0),
+        Peer::new(pc(settings(), net.start), 1),
+    ]
 }
 
 /// Offer from peer 0, answer from peer 1, each adds its UDP host candidate.
@@ -107,7 +114,7 @@ fn nominated_protocol(pc: &mut RTCPeerConnection, now: Instant) -> Option<String
 #[test]
 fn with_udp_blocked_the_engine_gathers_tcp_candidates_and_connects_over_them() -> Result<()> {
     let mut net = Net::new();
-    let mut peers = peers(SettingEngine::default);
+    let mut peers = peers(&net, SettingEngine::default);
     let channel = negotiate(&mut peers, &net)?;
     let expected = messages();
     exchange(
@@ -170,7 +177,7 @@ fn reads_cut_into_single_bytes_and_slow_writes_change_nothing() -> Result<()> {
     net.max_segment = 1;
     net.written_delay = Duration::from_millis(30);
     net.latency = Duration::from_millis(40);
-    let mut peers = peers(|| {
+    let mut peers = peers(&net, || {
         SettingEngineBuilder::new()
             .with_stream_limits(rtc::shared::stream::StreamConfig {
                 window: 4096,
@@ -192,11 +199,17 @@ fn reads_cut_into_single_bytes_and_slow_writes_change_nothing() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed() -> Result<()> {
-    let mut net = Net::new();
-    net.udp = true;
-    let mut peers = peers(SettingEngine::default);
+/// UDP open: the peers connect over the UDP pair and close every TCP connection their checks
+/// opened (RFC 6544 section 8).
+///
+/// The TCP connection whose close this proves exists because the controlled peer (the
+/// answerer, peer 1) starts its check on the active-to-passive TCP pair in its second Ta slot,
+/// 50 ms after its first, before the controlling peer's nomination of the UDP pair reaches it:
+/// RFC 8445 section 8.1.2 then removes every other pair from the checklist, and nothing obliges
+/// an agent to check a lower-priority pair first ("The criteria for stopping the connectivity
+/// checks ... are a matter of local optimization", section 8.1.1). On the virtual clock that
+/// order is fixed, but only because both peers are built at its start (`peers`).
+fn udp_wins_and_the_unused_tcp_connections_close(mut net: Net, mut peers: Vec<Peer>) -> Result<()> {
     let channel = negotiate(&mut peers, &net)?;
     exchange(
         &mut peers,
@@ -216,7 +229,10 @@ fn with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed() -
     for p in peers.iter_mut() {
         assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("udp"));
     }
-    assert!(!net.conns.is_empty(), "TCP pairs were checked too");
+    assert!(
+        !net.conns.is_empty(),
+        "the controlled peer checked the TCP pair before the nomination reached it"
+    );
     assert_eq!(
         net.open_connections(),
         0,
@@ -227,10 +243,38 @@ fn with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed() -
 }
 
 #[test]
+fn with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed() -> Result<()> {
+    let mut net = Net::new();
+    net.udp = true;
+    let peers = peers(&net, SettingEngine::default);
+    udp_wins_and_the_unused_tcp_connections_close(net, peers)
+}
+
+/// The run above does not depend on how long the peers took to build in real time. Built at
+/// `Instant::now()`, a second peer built 11 to 40 ms after the first (a preempted thread on a
+/// loaded Windows runner, whose scheduler quantum is about 15.6 ms) had its Ta slots that much
+/// later on the virtual clock: its second slot came after the nomination, it never checked the
+/// TCP pair, and no connection was opened (seen once on GitHub's windows-latest).
+#[test]
+fn the_course_of_a_run_does_not_depend_on_the_real_time_building_the_peers_took() -> Result<()> {
+    let mut net = Net::new();
+    net.udp = true;
+    let built = std::cell::Cell::new(0);
+    let peers = peers(&net, || {
+        if built.get() == 1 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        built.set(built.get() + 1);
+        SettingEngine::default()
+    });
+    udp_wins_and_the_unused_tcp_connections_close(net, peers)
+}
+
+#[test]
 fn with_the_close_of_unused_connections_off_they_stay_open() -> Result<()> {
     let mut net = Net::new();
     net.udp = true;
-    let mut peers = peers(|| {
+    let mut peers = peers(&net, || {
         SettingEngineBuilder::new()
             .with_tcp_close_unused_connections(false)
             .build()
@@ -257,7 +301,7 @@ fn with_the_close_of_unused_connections_off_they_stay_open() -> Result<()> {
 #[test]
 fn a_broken_selected_connection_is_reopened_by_the_active_side_and_data_resumes() -> Result<()> {
     let mut net = Net::new();
-    let mut peers = peers(SettingEngine::default);
+    let mut peers = peers(&net, SettingEngine::default);
     let channel = negotiate(&mut peers, &net)?;
     exchange(
         &mut peers,
@@ -331,7 +375,7 @@ fn a_broken_selected_connection_is_reopened_by_the_active_side_and_data_resumes(
 fn simultaneous_open_candidates_connect_when_passive_ones_cannot() -> Result<()> {
     let mut net = Net::new();
     net.refuse_plain_listeners = true;
-    let mut peers = peers(SettingEngine::default);
+    let mut peers = peers(&net, SettingEngine::default);
     let channel = negotiate(&mut peers, &net)?;
     exchange(
         &mut peers,
@@ -368,7 +412,7 @@ fn simultaneous_open_candidates_connect_when_passive_ones_cannot() -> Result<()>
 fn a_refused_connection_fails_its_pair_at_once() -> Result<()> {
     let mut net = Net::new();
     net.refuse_plain_listeners = true;
-    let mut peers = peers(|| {
+    let mut peers = peers(&net, || {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
             .build()
@@ -399,7 +443,7 @@ fn a_refused_connection_fails_its_pair_at_once() -> Result<()> {
 #[test]
 fn a_frame_that_is_neither_stun_dtls_nor_rtp_resets_its_connection() -> Result<()> {
     let mut net = Net::new();
-    let mut peers = peers(SettingEngine::default);
+    let mut peers = peers(&net, SettingEngine::default);
     let channel = negotiate(&mut peers, &net)?;
     exchange(
         &mut peers,
@@ -429,7 +473,7 @@ fn no_stream_command_when_tcp_gathering_is_off_or_the_policy_is_relay() -> Resul
     let off = SettingEngineBuilder::new()
         .with_tcp_candidate_gathering(false)
         .build();
-    let mut a = Peer::new(pc(off), 0);
+    let mut a = Peer::new(pc(off, Instant::now()), 0);
     let relay = RTCPeerConnectionBuilder::new()
         .with_configuration(
             RTCConfigurationBuilder::new()
@@ -448,7 +492,7 @@ fn no_stream_command_when_tcp_gathering_is_off_or_the_policy_is_relay() -> Resul
 
 #[test]
 fn end_of_gathering_waits_for_the_listeners_of_a_driver_that_serves_them() -> Result<()> {
-    let mut p = Peer::new(pc(SettingEngine::default()), 0);
+    let mut p = Peer::new(pc(SettingEngine::default(), Instant::now()), 0);
     let c = udp_host(&p);
     p.pc.add_local_candidate(c)?;
     let mut listens = vec![];
@@ -503,7 +547,7 @@ fn end_of_gathering_waits_for_the_listeners_of_a_driver_that_serves_them() -> Re
 #[test]
 fn an_application_that_never_serves_streams_gets_no_tcp_candidate_and_ends_gathering_at_once()
 -> Result<()> {
-    let mut p = Peer::new(pc(SettingEngine::default()), 0);
+    let mut p = Peer::new(pc(SettingEngine::default(), Instant::now()), 0);
     let c = udp_host(&p);
     p.pc.add_local_candidate(c)?;
     p.pc.add_local_candidate(RTCIceCandidateInit::default())?;
@@ -535,7 +579,7 @@ fn nat_1to1_addresses_apply_to_the_engines_tcp_candidates() -> Result<()> {
         let settings = SettingEngineBuilder::new()
             .with_nat_1to1_ips(vec!["203.0.113.7".to_owned()], kind)
             .build();
-        let mut p = Peer::new(pc(settings), 0);
+        let mut p = Peer::new(pc(settings, Instant::now()), 0);
         let c = udp_host(&p);
         p.pc.add_local_candidate(c)?;
         let now = Instant::now();
@@ -636,7 +680,7 @@ fn negotiate_two_transports(
     Ok(channel)
 }
 
-fn max_compat_peers(settings: impl Fn() -> SettingEngine) -> Result<Vec<Peer>> {
+fn max_compat_peers(net: &Net, settings: impl Fn() -> SettingEngine) -> Result<Vec<Peer>> {
     use rtc::peer_connection::configuration::RTCBundlePolicy;
     use rtc::peer_connection::configuration::media_engine::MediaEngine;
     let mut peers = vec![];
@@ -654,7 +698,7 @@ fn max_compat_peers(settings: impl Fn() -> SettingEngine) -> Result<Vec<Peer>> {
             )
             .with_media_engine(media_engine)
             .with_setting_engine(settings())
-            .build(Instant::now())?;
+            .build(net.start)?;
         peers.push(Peer::new(pc, i));
     }
     Ok(peers)
@@ -683,7 +727,7 @@ fn tcp_candidate_mids(p: &Peer) -> std::collections::BTreeSet<String> {
 #[test]
 fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() -> Result<()> {
     let mut net = Net::new();
-    let mut peers = max_compat_peers(SettingEngine::default)?;
+    let mut peers = max_compat_peers(&net, SettingEngine::default)?;
     let channel = negotiate_two_transports(&mut peers, &net)?;
     let expected = messages();
     exchange(
@@ -728,7 +772,7 @@ fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() ->
 fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check() -> Result<()> {
     let mut net = Net::new();
     net.shared_passive_port = Some(7000);
-    let mut peers = max_compat_peers(|| {
+    let mut peers = max_compat_peers(&net, || {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
             // Both sides sharing their credentials leave nothing in a first check on the
@@ -787,7 +831,7 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+            .build(net.start)?;
         peers.push(Peer::new(pc, i));
     }
     let mut senders = vec![];
@@ -910,7 +954,7 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
 fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transport() -> Result<()> {
     let mut net = Net::new();
     net.shared_passive_port = Some(7000);
-    let mut peers = max_compat_peers(|| {
+    let mut peers = max_compat_peers(&net, || {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
             .with_unique_transport_credentials(true)
