@@ -261,6 +261,8 @@ struct World {
     /// the same trace every time.
     start: Instant,
     trace: Vec<(Duration, Traced)>,
+    /// `LOSSY_LINK_TRACE=live`: the virtual time is printed as it advances.
+    live_trace: bool,
 }
 
 /// One entry of [`World::trace`].
@@ -298,6 +300,7 @@ impl World {
             dropped: 0,
             start: now,
             trace: Vec::new(),
+            live_trace: std::env::var("LOSSY_LINK_TRACE").is_ok_and(|v| v == "live"),
         })
     }
 
@@ -433,6 +436,10 @@ impl World {
         }
         let next = next.expect("two peers");
         self.now = next.max(self.now + VIRTUAL_TICK);
+        if self.live_trace {
+            // Anchors the engine's logs (`RUST_LOG`) in virtual time.
+            println!("NOW {:?}", self.now - self.start);
+        }
         for peer in self.peers.iter_mut() {
             peer.pc.handle_timeout(self.now)?;
         }
@@ -777,6 +784,36 @@ fn the_handshake_is_answered_while_the_nominations_responses_are_lost() -> Resul
     Ok(())
 }
 
+/// Seed 715 with the peers' randomness salted 2, at 10 % loss (with ring; a sweep of 1000
+/// seeds by two salts): 124 of 300 messages had arrived 90 seconds after the channel opened,
+/// with ICE and DTLS up. A DATA chunk was lost in the window of a Fast Recovery that had
+/// begun before it; the SACKs that reported it missing did not advance the Cumulative TSN
+/// Ack Point, and the sender counted no miss indications from such SACKs, so it was never
+/// retransmitted on gap reports. It waited for T3-rtx: one packet in flight at an RTO
+/// doubling to 60 seconds, and a few lost SACKs held everything behind it. RFC 9260 section
+/// 7.2.4 counts miss indications below the HTNA of every SACK. The train 8 CI failure (seed
+/// 2, 205 of 300 delivered, ICE flapping only because consent checks went unanswered) had
+/// this shape, in a run whose RTCP timing was not yet seeded and so cannot be replayed.
+#[test]
+fn a_loss_during_fast_recovery_is_retransmitted_on_gap_reports() -> Result<()> {
+    let link = Link {
+        loss: 0.10,
+        delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(2),
+    };
+    session_over_salted(
+        link,
+        715,
+        2,
+        FailedNomination::default(),
+        300,
+        Duration::from_secs(30),
+        Duration::from_secs(90),
+        false,
+    )?;
+    Ok(())
+}
+
 /// 30 % loss each way: about half of all check transactions lose the request or the
 /// response. The session fails only when consent has lapsed, its channel opens or fails with
 /// an error (never closes silently), and what arrives arrives once.
@@ -980,7 +1017,8 @@ fn a_retried_nomination_keeps_the_session_over_heavy_loss() -> Result<()> {
 /// time shows. At 10 % loss nothing may fail (the parameters of
 /// [`a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything`]); from
 /// 20 % on, those of the 30 % test.
-/// `LOSSY_LINK_TRACE` prints each run's trace.
+/// `LOSSY_LINK_TRACE` prints each run's trace (`live`: also the virtual time as it advances,
+/// between the engine's `RUST_LOG` lines).
 /// `cargo test --test lossy_link_rtc2rtc sweep -- --ignored --nocapture`
 #[test]
 #[ignore = "an investigation tool: set LOSSY_LINK_SEEDS, LOSSY_LINK_LOSS, LOSSY_LINK_SALT, LOSSY_LINK_REPEAT"]

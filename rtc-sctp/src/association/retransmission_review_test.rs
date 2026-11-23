@@ -349,9 +349,14 @@ fn exhausted_loss_in_fast_recovery_is_abandoned_without_cumulative_advance() -> 
     Ok(())
 }
 
-/// Reliable DATA keeps RFC 4960's HTNA rule in Fast Recovery.
+/// RFC 9260 7.2.4 (the HTNA algorithm): "for each incoming SACK chunk" miss indications are
+/// counted for the missing TSNs below the highest TSN it newly acknowledges, in Fast Recovery
+/// too, also when the Cumulative TSN Ack Point does not advance. Reliable DATA lost after
+/// Fast Recovery began is then retransmitted as soon as cwnd allows (steps 5 and 6), not left
+/// to T3-rtx, whose one packet at a doubling RTO held a 10 % loss session's messages back
+/// for more than 90 seconds (`tests/lossy_link_rtc2rtc.rs`).
 #[test]
-fn reliable_loss_in_fast_recovery_keeps_htna_miss_indications() -> Result<()> {
+fn reliable_loss_in_fast_recovery_is_retransmitted_by_gap_reports() -> Result<()> {
     use crate::chunk::chunk_selective_ack::GapAckBlock;
     let mut a = timed_test_association();
     let now = Instant::now();
@@ -373,13 +378,33 @@ fn reliable_loss_in_fast_recovery_keeps_htna_miss_indications() -> Result<()> {
             .collect(),
         ..Default::default()
     };
+    // `first` and `first + 2` are lost. Three reports of the first loss enter Fast
+    // Recovery, and `first` is fast retransmitted.
     a.handle_sack(&sack(&[(2, 2)]), now)?;
     a.handle_sack(&sack(&[(2, 2), (4, 4)]), now)?;
     a.handle_sack(&sack(&[(2, 2), (4, 5)]), now)?;
     assert!(a.in_fast_recovery);
-    a.gather_outbound(now);
+    let resent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(
+        vec![first],
+        resent.iter().map(|d| d.tsn).collect::<Vec<_>>()
+    );
+    // The retransmission is still on its way: the next SACK does not advance the cumulative
+    // ack, and newly acknowledges `first + 6`. It is the third report of `first + 2`.
     a.handle_sack(&sack(&[(2, 2), (4, 6)]), now)?;
-    assert_eq!(2, a.inflight_queue.get(first + 2).unwrap().miss_indicator);
-    assert!(!a.inflight_queue.get(first + 2).unwrap().abandoned());
+    assert!(a.in_fast_recovery);
+    let lost = a.inflight_queue.get(first + 2).unwrap();
+    assert_eq!(3, lost.miss_indicator);
+    assert!(!lost.abandoned());
+    assert!(lost.retransmit, "marked for retransmission");
+    assert!(lost.no_fast_retransmit, "and not fast retransmitted again");
+    // Still outstanding, never reported past the HTNA: untouched.
+    assert_eq!(0, a.inflight_queue.get(first + 7).unwrap().miss_indicator);
+    // It goes out with the window, before T3-rtx.
+    let resent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(
+        vec![first + 2],
+        resent.iter().map(|d| d.tsn).collect::<Vec<_>>()
+    );
     Ok(())
 }
