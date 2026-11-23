@@ -747,6 +747,36 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
     Ok(())
 }
 
+/// Seeds of a 2000-seed sweep at 10 % loss where the data channel had not opened after 30
+/// seconds (760, 1629 and 1963 with the aws-lc-rs provider, 992 with ring). The controlled
+/// peer, the DTLS client, selected the pair when the first nomination request reached it and
+/// started its handshake; the responses to the nomination were lost twice, and for those 3.5
+/// seconds the controlling peer, with no pair selected, dropped every datagram that was not
+/// STUN and could send none. Its four ClientHellos lost, the client's retransmission timer
+/// had backed off to 6.4 seconds by the time the controlling peer selected the pair, and two
+/// ordinary losses after that (12.8 seconds more) took the handshake past 30 seconds. The
+/// controlling agent now sends and receives data on the pair it is nominating (RFC 8445
+/// sections 12.1 and 12.2).
+#[test]
+fn the_handshake_is_answered_while_the_nominations_responses_are_lost() -> Result<()> {
+    let link = Link {
+        loss: 0.10,
+        delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(2),
+    };
+    for seed in [760, 992, 1629, 1963] {
+        session_over(
+            link,
+            seed,
+            300,
+            Duration::from_secs(30),
+            Duration::from_secs(90),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
 /// 30 % loss each way: about half of all check transactions lose the request or the
 /// response. The session fails only when consent has lapsed, its channel opens or fails with
 /// an error (never closes silently), and what arrives arrives once.
