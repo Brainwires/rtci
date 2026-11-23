@@ -95,19 +95,8 @@ impl RTCPeerConnection {
             let direction = get_peer_direction(&parsed.media_descriptions[index]);
             transceiver.set_receptive(receives(direction));
             if !matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
-                // RFC 3264 section 5.1: once the offer is sent the offerer "MUST be prepared
-                // to receive media" as it describes; the receive codecs follow the answer.
-                if sdp_type == RTCSdpType::Offer
-                    && let Some(receiver) = transceiver.receiver_mut()
-                {
-                    let offered = parsed.media_descriptions[index]
-                        .media_name
-                        .formats
-                        .iter()
-                        .filter_map(|format| format.parse().ok())
-                        .collect();
-                    receiver.set_offered_payload_types(offered);
-                }
+                // What a local offer prepares the receiver for is set by
+                // `prepare_offered_receive` (RFC 3264 section 5.1).
                 continue;
             }
             if does_not_receive(direction) && transceiver.fired_direction().is_some_and(receives) {

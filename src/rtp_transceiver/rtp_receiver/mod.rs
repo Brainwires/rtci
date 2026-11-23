@@ -538,7 +538,22 @@ impl RTCRtpReceiver<'_> {
                     kind,
                     codec.rtp_codec.clock_rate,
                 ),
-                Err(_) => (String::new(), self.receiver().kind(), 0),
+                // A format only this endpoint's pending offer lists for the section (RFC
+                // 3264 section 5.1: its media may arrive before the answer negotiates it).
+                Err(_) => {
+                    let receiver = self.receiver();
+                    receiver
+                        .receivable_codecs()
+                        .find(|codec| codec.payload_type == first.header.payload_type)
+                        .map(|codec| {
+                            (
+                                codec.rtp_codec.mime_type.clone(),
+                                receiver.kind(),
+                                codec.rtp_codec.clock_rate,
+                            )
+                        })
+                        .unwrap_or_else(|| (String::new(), receiver.kind(), 0))
+                }
             };
         // webrtc-extensions 15: the remote capture timestamp, by the stream's sender reports.
         let remote_capture =

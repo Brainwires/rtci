@@ -102,6 +102,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// them (RFC 5764 section 4.1). Kept while the transport lives, so that a new association
     /// on it (re-keying) does not end the RTP session.
     pub(crate) srtp_keyed: HashSet<usize>,
+    /// The transceiver whose receiver bound a stream for the packet being read
+    /// (`InterceptorHandler::ensure_remote_stream_bound`).
+    newly_bound: Option<usize>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -135,6 +138,7 @@ impl Default for InterceptorHandlerContext {
             rtcp_joined: Default::default(),
             rtcp_leaving: Default::default(),
             srtp_keyed: Default::default(),
+            newly_bound: None,
         }
     }
 }
@@ -246,6 +250,22 @@ impl<'a> InterceptorHandler<'a> {
     /// A no-op for every packet after the first of a stream, which is the overwhelming majority:
     /// the declared-SSRC path finds a codec already set and returns immediately.
     fn ensure_remote_stream_bound(&mut self, now: Instant, rtp_header: &rtp::Header) {
+        self.ctx.newly_bound = None;
+        self.bind_remote_stream_of(now, rtp_header);
+        // RFC 3264 section 5.1: a stream that arrives while this endpoint's offer is pending
+        // is bound with what the offer says; the receiver remembers that, for the answer to
+        // settle and a rollback to undo.
+        if let Some(id) = self.ctx.newly_bound.take()
+            && let Some(receiver) = self
+                .rtp_transceivers
+                .get_mut(id)
+                .and_then(|transceiver| transceiver.receiver_mut().as_mut())
+        {
+            receiver.note_early_streams(self.media_engine);
+        }
+    }
+
+    fn bind_remote_stream_of(&mut self, now: Instant, rtp_header: &rtp::Header) {
         // An RTX packet identifies the stream it repairs, not one of its own. It is resolved back
         // to that stream here, so a stream whose first arrival happens to be a retransmission
         // establishes anyway; `handle_read` de-encapsulates it right after, before the chain.
@@ -284,10 +304,156 @@ impl<'a> InterceptorHandler<'a> {
         {
             return;
         }
+        if owner.is_none() && self.associate_early_repair(ssrc, payload_type, rtp_header) {
+            return;
+        }
         if self.bind_undeclared_ssrc(now, ssrc, payload_type, rtp_header) {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// The m= section an unknown SSRC's packet belongs to by RFC 9143 section 9.2, without a
+    /// RID: the only transceiver's, the one the packet's MID names (on the transport it
+    /// arrived on), or, without a MID, the one section that receives its payload type.
+    fn section_of_undeclared(
+        &self,
+        payload_type: PayloadType,
+        rtp_header: &rtp::Header,
+    ) -> Option<usize> {
+        if self.rtp_transceivers.len() == 1 {
+            return Some(0);
+        }
+        // No MID (RID, RRID) in the packet: the one an RTCP SDES item gave its SSRC.
+        let (mid, rid, rrid) = self.stream_ids(rtp_header);
+        // A RID (or RRID) means simulcast: that is the rid path's.
+        if !rid.is_empty() || !rrid.is_empty() {
+            return None;
+        }
+        if mid.is_empty() {
+            // RFC 9143 section 9.2, the last step of associating an RTP stream with an m=
+            // section: "If the packet's payload type is in the payload type table, update
+            // the outgoing SSRC mapping table to include an entry that maps the packet's
+            // SSRC to the 'm=' section for that payload type", the table holding the
+            // payload types that "uniquely identify an 'm=' section". So: the one
+            // transceiver that is not stopped and receives this payload type. None, or
+            // more than one, and the packet belongs nowhere ("Otherwise, drop the
+            // packet").
+            let arrival = self.ctx.arrival_mids.as_deref();
+            let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
+                !t.stopped()
+                    && arrival
+                        .is_none_or(|mids| t.mid().as_ref().is_some_and(|mid| mids.contains(mid)))
+                    && t.receiver().as_ref().is_some_and(|receiver| {
+                        receiver
+                            .receivable_codecs()
+                            .any(|codec| codec.payload_type == payload_type)
+                    })
+            });
+            match (receiving.next(), receiving.next()) {
+                (Some((index, _)), None) => Some(index),
+                _ => None,
+            }
+        } else {
+            // The MID table of the transport the packet arrived on: a MID of another
+            // BUNDLE group's section names no section here.
+            if self
+                .ctx
+                .arrival_mids
+                .as_ref()
+                .is_some_and(|mids| !mids.contains(&mid))
+            {
+                return None;
+            }
+            self.rtp_transceivers
+                .iter()
+                .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+        }
+    }
+
+    /// A repair packet (RTX, or FEC on an SSRC of its own) that arrives while this endpoint's
+    /// offer is pending, on an SSRC nothing declares yet: the answer's `a=ssrc-group` that
+    /// would name its stream has not arrived. It repairs the one stream its m= section
+    /// receives (RFC 4588 section 5.3: a receiver with a single original stream associates
+    /// the retransmission stream with it), so it becomes that stream's repair flow: RTX
+    /// packets are de-encapsulated to the stream from here on, and the interceptors are told
+    /// of the flow. The answer's groups replace the association if they say otherwise.
+    fn associate_early_repair(
+        &mut self,
+        ssrc: SSRC,
+        payload_type: PayloadType,
+        rtp_header: &rtp::Header,
+    ) -> bool {
+        // The whole of it is for a pending offer: nothing to look at otherwise.
+        if !self.rtp_transceivers.iter().any(|t| {
+            t.receiver()
+                .as_ref()
+                .is_some_and(|receiver| receiver.has_offered())
+        }) {
+            return false;
+        }
+        let Some(index) = self.section_of_undeclared(payload_type, rtp_header) else {
+            return false;
+        };
+        let transceiver = &mut self.rtp_transceivers[index];
+        if transceiver.stopped() {
+            return false;
+        }
+        let Some(receiver) = transceiver.receiver_mut() else {
+            return false;
+        };
+        if !receiver.has_offered() {
+            return false;
+        }
+        let is_rtx = receiver.receivable_codecs().any(|codec| {
+            codec.payload_type == payload_type
+                && codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                )
+        });
+        let parameters = receiver.stream_parameters(self.media_engine);
+        let is_fec = find_receive_fec_format(&parameters.rtp_parameters.codecs)
+            .is_some_and(|format| format.payload_type == payload_type);
+        if !is_rtx && !is_fec {
+            return false;
+        }
+        // One stream, without a rid, that has no repair flow of this kind yet.
+        let primary = match receiver.get_coding_parameters() {
+            [coding]
+                if coding.rid.is_empty()
+                    && coding.ssrc.is_some()
+                    && ((is_rtx && coding.rtx.is_none()) || (is_fec && coding.fec.is_none())) =>
+            {
+                coding.ssrc
+            }
+            _ => None,
+        };
+        let Some(primary) = primary else {
+            return false;
+        };
+        let mut codings = receiver.get_coding_parameters().to_vec();
+        let mut track_codings = receiver.track().codings().to_vec();
+        for parameters in codings.iter_mut().chain(
+            track_codings
+                .iter_mut()
+                .map(|coding| &mut coding.rtp_coding_parameters)
+                .filter(|parameters| parameters.ssrc == Some(primary)),
+        ) {
+            if is_rtx {
+                parameters.rtx = Some(RTCRtpRtxParameters { ssrc });
+            } else {
+                parameters.fec =
+                    Some(crate::rtp_transceiver::rtp_sender::RTCRtpFecParameters { ssrc });
+            }
+        }
+        receiver.set_coding_parameters(codings);
+        receiver.track_mut().set_codings(track_codings);
+        receiver.resync_early_streams(self.media_engine, self.interceptor);
+        if is_rtx {
+            self.stats.update_inbound_rtx_ssrc(primary, ssrc);
+        }
+        debug!("ssrc {ssrc} repairs ssrc {primary}, before the answer says so");
+        true
     }
 
     /// [`Self::ensure_remote_stream_bound`]: unbinds `ssrc` from the receiver of transceiver
@@ -636,7 +802,7 @@ impl<'a> InterceptorHandler<'a> {
             let receiver = transceiver.receiver().as_ref()?;
             resolve_rtx_primary(
                 receiver.get_coding_parameters(),
-                receiver.get_codec_preferences(),
+                receiver.receivable_codecs(),
                 rtx_ssrc,
                 rtx_payload_type,
             )
@@ -676,7 +842,7 @@ impl<'a> InterceptorHandler<'a> {
         // comfort-noise packet that comes first leaves the stream unestablished: the next media
         // packet says what the track's codec is.
         let track_codec = if is_track_codec_empty
-            && let Some(codec) = receiver.get_codec_preferences().iter().find(|codec| {
+            && let Some(codec) = receiver.receivable_codecs().find(|codec| {
                 codec.payload_type == payload_type
                     && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
             }) {
@@ -711,7 +877,7 @@ impl<'a> InterceptorHandler<'a> {
             })
             .unwrap_or((None, None));
 
-        let parameters = receiver.get_parameters(self.media_engine);
+        let parameters = receiver.stream_parameters(self.media_engine);
         // Both halves or neither, per repair flow — see `interceptor_remote_streams_op`. RTX and
         // FEC are handled identically: both repair this stream from a separate SSRC.
         let rtx = rtx_ssrc.zip(find_rtx_payload_type(
@@ -789,6 +955,7 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, rtx_ssrc, fec_ssrc, id);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
+        self.ctx.newly_bound = Some(id);
         self.emit_on_open(now, id, track_id, stream_id, ssrc, None);
         true
     }
@@ -807,62 +974,28 @@ impl<'a> InterceptorHandler<'a> {
         payload_type: PayloadType,
         rtp_header: &rtp::Header,
     ) -> bool {
-        let index = if self.rtp_transceivers.len() == 1 {
-            0
-        } else {
-            // No MID (RID, RRID) in the packet: the one an RTCP SDES item gave its SSRC.
-            let (mid, rid, rrid) = self.stream_ids(rtp_header);
-            // A RID (or RRID) means simulcast: that is the rid path's.
-            if !rid.is_empty() || !rrid.is_empty() {
-                return false;
-            }
-            if mid.is_empty() {
-                // RFC 9143 section 9.2, the last step of associating an RTP stream with an m=
-                // section: "If the packet's payload type is in the payload type table, update
-                // the outgoing SSRC mapping table to include an entry that maps the packet's
-                // SSRC to the 'm=' section for that payload type", the table holding the
-                // payload types that "uniquely identify an 'm=' section". So: the one
-                // transceiver that is not stopped and receives this payload type. None, or
-                // more than one, and the packet belongs nowhere ("Otherwise, drop the
-                // packet").
-                let arrival = self.ctx.arrival_mids.as_deref();
-                let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
-                    !t.stopped()
-                        && arrival.is_none_or(|mids| {
-                            t.mid().as_ref().is_some_and(|mid| mids.contains(mid))
-                        })
-                        && t.receiver().as_ref().is_some_and(|receiver| {
-                            receiver
-                                .get_codec_preferences()
-                                .iter()
-                                .any(|codec| codec.payload_type == payload_type)
-                        })
-                });
-                match (receiving.next(), receiving.next()) {
-                    (Some((index, _)), None) => index,
-                    _ => return false,
-                }
-            } else {
-                // The MID table of the transport the packet arrived on: a MID of another
-                // BUNDLE group's section names no section here.
-                if self
-                    .ctx
-                    .arrival_mids
-                    .as_ref()
-                    .is_some_and(|mids| !mids.contains(&mid))
-                {
-                    return false;
-                }
-                let Some(index) = self
-                    .rtp_transceivers
-                    .iter()
-                    .position(|t| t.mid().as_deref() == Some(mid.as_str()))
-                else {
-                    return false;
-                };
-                index
-            }
+        let Some(index) = self.section_of_undeclared(payload_type, rtp_header) else {
+            return false;
         };
+
+        // RFC 8853 section 5.3.2: where this endpoint's pending offer asks for simulcast, a
+        // stream without a rid is the one stream of an answerer that declined it.
+        let (_, rid, rrid) = self.stream_ids(rtp_header);
+        if rid.is_empty()
+            && rrid.is_empty()
+            && let Some(receiver) = self
+                .rtp_transceivers
+                .get_mut(index)
+                .and_then(|transceiver| transceiver.receiver_mut().as_mut())
+            && receiver.offered_layers_unbound()
+            && receiver.receivable_codecs().any(|codec| {
+                codec.payload_type == payload_type
+                    && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+            })
+        {
+            receiver.drop_offered_layers();
+        }
 
         if let Some(transceiver) = self.rtp_transceivers.get(index)
             && let Some(receiver) = transceiver.receiver()
@@ -883,13 +1016,14 @@ impl<'a> InterceptorHandler<'a> {
             return false;
         };
         // A DTMF or comfort-noise packet does not say what the stream is sent with: the stream
-        // is placed by its first media packet.
+        // is placed by its first media packet. Nor does a repair packet (RTX, FEC): it is
+        // another stream's.
         let Some(codec) = receiver
-            .get_codec_preferences()
-            .iter()
+            .receivable_codecs()
             .find(|codec| {
                 codec.payload_type == payload_type
                     && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_repair_mime_type(&codec.rtp_codec.mime_type)
             })
             .cloned()
         else {
@@ -908,7 +1042,7 @@ impl<'a> InterceptorHandler<'a> {
             self.ctx.placed_ssrcs.insert(ssrc);
         }
 
-        let parameters = receiver.get_parameters(self.media_engine);
+        let parameters = receiver.stream_parameters(self.media_engine);
         // An undeclared SSRC arrived without any `a=ssrc-group` to associate it with, so there is
         // no repair flow to report — the codings above are built with `fec: None`.
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -946,6 +1080,7 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
+        self.ctx.newly_bound = Some(index);
         self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
         true
     }
@@ -963,10 +1098,11 @@ impl<'a> InterceptorHandler<'a> {
         mid: &str,
         rrid: &str,
     ) -> bool {
-        let Some(transceiver) = self
+        let Some((index, transceiver)) = self
             .rtp_transceivers
             .iter_mut()
-            .find(|transceiver| transceiver.mid().as_deref() == Some(mid))
+            .enumerate()
+            .find(|(_, transceiver)| transceiver.mid().as_deref() == Some(mid))
         else {
             return false;
         };
@@ -975,8 +1111,7 @@ impl<'a> InterceptorHandler<'a> {
         };
         // In this branch the packet is the repair flow, so its payload type is the RTX one.
         let Some(codec) = receiver
-            .get_codec_preferences()
-            .iter()
+            .receivable_codecs()
             .find(|codec| codec.payload_type == payload_type)
             .cloned()
         else {
@@ -1005,7 +1140,7 @@ impl<'a> InterceptorHandler<'a> {
             }
         };
 
-        let parameters = receiver.get_parameters(self.media_engine);
+        let parameters = receiver.stream_parameters(self.media_engine);
         // A repair SSRC this one replaces (the sender restarted its RTX stream) is unbound, so
         // interceptors do not keep state for a stream that no longer exists.
         if let Some(replaced) = replaced_ssrc
@@ -1043,6 +1178,7 @@ impl<'a> InterceptorHandler<'a> {
         if let Some(primary_ssrc) = primary_ssrc {
             self.stats.update_inbound_rtx_ssrc(primary_ssrc, ssrc);
         }
+        self.ctx.newly_bound = Some(index);
         true
     }
 
@@ -1086,8 +1222,7 @@ impl<'a> InterceptorHandler<'a> {
             return false;
         };
         let Some(codec) = receiver
-            .get_codec_preferences()
-            .iter()
+            .receivable_codecs()
             // A layer is established by its primary codec; repair flows are associated through
             // the coding's rtx/fec SSRCs (or rrid), not by binding the layer to a repair codec.
             .find(|codec| {
@@ -1128,7 +1263,7 @@ impl<'a> InterceptorHandler<'a> {
         self.ctx.rid_rebinds.insert(key, now);
 
         if let Some(previous_ssrc) = previous_ssrc {
-            let parameters = receiver.get_parameters(self.media_engine);
+            let parameters = receiver.stream_parameters(self.media_engine);
             RTCRtpReceiverInternal::interceptor_remote_stream_op(
                 self.interceptor,
                 false,
@@ -1168,7 +1303,7 @@ impl<'a> InterceptorHandler<'a> {
             })
             .unwrap_or((None, None));
 
-        let parameters = receiver.get_parameters(self.media_engine);
+        let parameters = receiver.stream_parameters(self.media_engine);
         // Both halves or neither, per repair flow — see `interceptor_remote_streams_op`. RTX and
         // FEC are handled identically: both repair this stream from a separate SSRC.
         let rtx = rtx_ssrc.zip(find_rtx_payload_type(
@@ -1247,6 +1382,7 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, rtx_ssrc, fec_ssrc, id);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
+        self.ctx.newly_bound = Some(id);
         self.emit_on_open(now, id, track_id, stream_id, ssrc, Some(rid));
         true
     }
@@ -1397,11 +1533,24 @@ impl<'a> InterceptorHandler<'a> {
                     .flatten()
             })
             .flatten();
+        // The format's clock rate: the engine's, or, for a format only this endpoint's
+        // pending offer lists for the section, the offer's.
         let clock_rate = self
             .media_engine
             .get_codec_by_payload(header.payload_type)
             .ok()
-            .map(|(codec, _)| codec.rtp_codec.clock_rate);
+            .map(|(codec, _)| codec.rtp_codec.clock_rate)
+            .or_else(|| {
+                self.rtp_transceivers[id]
+                    .receiver()
+                    .as_ref()
+                    .and_then(|receiver| {
+                        receiver
+                            .receivable_codecs()
+                            .find(|codec| codec.payload_type == header.payload_type)
+                            .map(|codec| codec.rtp_codec.clock_rate)
+                    })
+            });
         let wall_clock = *self
             .ctx
             .wall_clock
@@ -1487,18 +1636,9 @@ impl<'a> InterceptorHandler<'a> {
 
         // Each of the three extensions is read when it is negotiated, on its own: a session
         // that negotiated MID without RtpStreamId (no simulcast) still associates by MID.
-        let negotiated_id = |uri: &str| -> u16 {
-            let (id, audio_supported, video_supported) =
-                self.media_engine
-                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
-                        uri: uri.to_owned(),
-                    });
-            if audio_supported || video_supported {
-                id
-            } else {
-                0
-            }
-        };
+        // The negotiated id, or the one a pending local offer maps the extension to.
+        let negotiated_id =
+            |uri: &str| -> u16 { self.media_engine.receive_header_extension_id(uri) };
         let mid_extension_id = negotiated_id(::sdp::extmap::SDES_MID_URI);
         let rid_extension_id = negotiated_id(::sdp::extmap::SDES_RTP_STREAM_ID_URI);
         let rrid_extension_id = negotiated_id(::sdp::extmap::SDES_REPAIR_RTP_STREAM_ID_URI);
@@ -1906,6 +2046,10 @@ mod interceptor_association_test;
 #[cfg(test)]
 #[path = "interceptor_session_test.rs"]
 mod interceptor_session_test;
+
+#[cfg(test)]
+#[path = "interceptor_early_media_test.rs"]
+mod interceptor_early_media_test;
 
 /// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
 /// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No
