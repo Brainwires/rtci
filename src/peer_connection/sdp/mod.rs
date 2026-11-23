@@ -1414,6 +1414,56 @@ impl RTCPeerConnection {
                 );
             }
         }
+        // RFC 9429 section 5.3.1: without codec preferences, "Any currently available media
+        // formats that are not present in the current remote description MUST be added after
+        // all existing formats" (RFC 3264 section 6.1 lets an answer list them: the offerer
+        // may use them in a later offer). Media formats only: a repair format (RTX, FEC, RED)
+        // goes with a primary of the answer, and none of them takes feedback (RFC 4585 section
+        // 4.2: the answer adds none). Each keeps its registered payload type unless the
+        // section already uses it, then takes a free dynamic one.
+        if !is_offer
+            && !transceiver.has_application_codec_preferences()
+            && let Some(offered) = &media_section.offered_codecs
+            && !codecs.is_empty()
+        {
+            let mut used: HashSet<u8> = codecs.iter().map(|c| c.payload_type).collect();
+            used.extend(offered.iter().map(|c| c.payload_type));
+            for available in media_engine.registered_codecs_by_kind(transceiver.kind()) {
+                if crate::rtp_transceiver::rtp_sender::rtp_codec::is_repair_codec(
+                    &available.rtp_codec,
+                ) || is_fec_mime_type(&available.rtp_codec.mime_type)
+                    || !matches!(
+                        codec_parameters_fuzzy_search(&available.rtp_codec, offered).1,
+                        CodecMatch::None
+                    )
+                {
+                    continue;
+                }
+                let payload_type = if used.contains(&available.payload_type) {
+                    match (96..=127u8).find(|pt| !used.contains(pt)) {
+                        Some(pt) => pt,
+                        None => break,
+                    }
+                } else {
+                    available.payload_type
+                };
+                used.insert(payload_type);
+                let name = available
+                    .rtp_codec
+                    .mime_type
+                    .trim_start_matches("audio/")
+                    .trim_start_matches("video/")
+                    .trim_start_matches("application/")
+                    .to_owned();
+                media = media.with_codec(
+                    payload_type,
+                    name,
+                    available.rtp_codec.clock_rate,
+                    available.rtp_codec.channels,
+                    media_engine.local_fmtp_line(transceiver.kind(), available, true),
+                );
+            }
+        }
         if ccfb {
             media = media.with_value_attribute(
                 ATTR_KEY_RTCP_FB.to_owned(),

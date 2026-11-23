@@ -713,7 +713,7 @@ impl RTCRtpTransceiver<'_> {
         let codecs = self.peer_connection.rtp_transceivers[self.id]
             .validate_codec_preferences(codecs, &self.peer_connection.media_engine)?;
         self.peer_connection.rtp_transceivers[self.id]
-            .set_codec_preferences(codecs, &self.peer_connection.media_engine)
+            .set_application_codec_preferences(codecs, &self.peer_connection.media_engine)
     }
 }
 

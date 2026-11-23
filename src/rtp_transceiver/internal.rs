@@ -39,6 +39,9 @@ pub(crate) struct RTCRtpTransceiverInternal {
     direction: RTCRtpTransceiverDirection,
     current_direction: RTCRtpTransceiverDirection,
     preferred_codecs: Vec<RTCRtpCodecParameters>,
+    /// The application set codec preferences (`setCodecPreferences` with a non-empty list),
+    /// as opposed to the list a remote description left in `preferred_codecs`.
+    application_codec_preferences: bool,
     /// W3C `[[Stopping]]`: `stop()` was called, or the transceiver is stopped. Its direction
     /// reads "stopped" and offers reject its m= section.
     stopping: bool,
@@ -139,6 +142,7 @@ impl RTCRtpTransceiverInternal {
             direction: init.direction,
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
+            application_codec_preferences: false,
             stopping: false,
             stopped: false,
             receptive: false,
@@ -450,9 +454,9 @@ impl RTCRtpTransceiverInternal {
         media_engine: &MediaEngine,
     ) -> Result<()> {
         for codec in &codecs {
-            let media_engine_codecs = media_engine.get_codecs_by_kind(self.kind());
+            let media_engine_codecs = media_engine.registered_codecs_by_kind(self.kind());
             let (_, match_type) =
-                codec_parameters_fuzzy_search(&codec.rtp_codec, &media_engine_codecs);
+                codec_parameters_fuzzy_search(&codec.rtp_codec, media_engine_codecs);
             if match_type == CodecMatch::None {
                 return Err(Error::ErrRTPTransceiverCodecUnsupported);
             }
@@ -497,7 +501,9 @@ impl RTCRtpTransceiverInternal {
                 unique.push(codec);
             }
         }
-        let capabilities = media_engine.get_codecs_by_kind(self.kind());
+        // The capabilities are what the engine can send or receive (`getCapabilities`), not
+        // what a negotiation narrowed the kind to.
+        let capabilities = media_engine.registered_codecs_by_kind(self.kind());
         for codec in &unique {
             let is_rtx =
                 is_repair_codec(&codec.rtp_codec) && repair_family(&codec.rtp_codec) == "rtx";
@@ -529,6 +535,24 @@ impl RTCRtpTransceiverInternal {
             return Err(Error::InvalidModificationError);
         }
         Ok(unique)
+    }
+
+    /// W3C `setCodecPreferences`: the application's list (empty: none).
+    pub(crate) fn set_application_codec_preferences(
+        &mut self,
+        codecs: Vec<RTCRtpCodecParameters>,
+        media_engine: &MediaEngine,
+    ) -> Result<()> {
+        let set = !codecs.is_empty();
+        self.set_codec_preferences(codecs, media_engine)?;
+        self.application_codec_preferences = set;
+        Ok(())
+    }
+
+    /// Whether the application set codec preferences (RFC 9429 section 5.3.1: an answer then
+    /// lists them, "regardless of what was offered", and no other format).
+    pub(crate) fn has_application_codec_preferences(&self) -> bool {
+        self.application_codec_preferences
     }
 
     pub(crate) fn get_codec_preferences(&self) -> &[RTCRtpCodecParameters] {

@@ -146,7 +146,18 @@ fn a_format_whose_configuration_is_not_supported_is_removed() -> TestResult {
         ),
     )?;
     let section = &media_sections(&sdp)[0];
-    assert_eq!(section[0], "m=video 9 UDP/TLS/RTP/SAVPF 96", "{sdp}");
+    // VP8 first; the formats the offer lacked may follow (RFC 9429 section 5.3.1), but not
+    // the offered H.264 format with its unsupported profile, nor its RTX.
+    assert!(
+        section[0].starts_with("m=video 9 UDP/TLS/RTP/SAVPF 96"),
+        "{sdp}"
+    );
+    assert!(
+        !section.iter().any(|l| l.starts_with("a=rtpmap:100 ")
+            || l.starts_with("a=rtpmap:101 ")
+            || l.contains("profile-level-id=58")),
+        "{sdp}"
+    );
     Ok(())
 }
 

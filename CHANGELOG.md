@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: an answer lists, after the offered formats, the registered media formats the offer
+  lacks (RFC 9429 section 5.3.1: "MUST be added after all existing formats"; RFC 3264 section
+  6.1), without feedback lines, when the transceiver has no codec preferences. Answers differ
+  on the wire; the offerer still sends only formats it offered. On its own branch
+  (`conf/jsep-40-answer-unoffered-formats`) so its browser results can be told apart.
+  `setCodecPreferences` is checked against the registered codecs (W3C 5.4: the union of
+  `getCapabilities`), no longer against what a negotiation narrowed the kind to: preferring a
+  format another section did not negotiate was an InvalidModificationError.
 - **jsep**: a remote answer with a media-level `a=ice-mismatch` is applied, and the stream's
   ICE agent stops (`ice::Agent::stop_for_ice_mismatch`, RFC 8839 sections 4.2.5, 4.3.3, 5.3):
   ICE fails and nothing is sent, since without ICE consent there is no RFC 3264 media path

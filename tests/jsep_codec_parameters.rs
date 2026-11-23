@@ -140,8 +140,9 @@ fn an_opus_answer_states_its_own_parameters_and_only_opus_48000_2_matches() -> T
         "111",
         "a=rtpmap:111 opus/48000/2\na=fmtp:111 stereo=1;usedtx=1;x-unknown=7\n",
     )?;
+    // The offered format; the formats the offer lacked follow it (RFC 9429 5.3.1).
     assert_eq!(
-        formats(&answer),
+        formats(&answer)[..1],
         vec![(
             "111".to_owned(),
             "opus/48000/2".to_owned(),
@@ -154,7 +155,11 @@ fn an_opus_answer_states_its_own_parameters_and_only_opus_48000_2_matches() -> T
         "a=rtpmap:111 opus/48000/1\na=rtpmap:0 PCMU/8000\n",
     )?;
     let answered: Vec<String> = formats(&answer).into_iter().map(|(pt, _, _)| pt).collect();
-    assert_eq!(answered, vec!["0".to_owned()]);
+    // PCMU is the offered format answered; the offered 111 (opus/48000/1) is not. Opus
+    // 48000/2, which the offer lacked, may follow under another payload type (RFC 9429
+    // 5.3.1).
+    assert_eq!(answered[0], "0", "{answered:?}");
+    assert!(!answered.contains(&"111".to_owned()), "{answered:?}");
     Ok(())
 }
 

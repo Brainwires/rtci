@@ -95,9 +95,16 @@ fn a_second_video_section_is_answered_with_its_own_codec() -> Result<(), Box<dyn
         "the second section answers VP9, the one format it offered:\n{}",
         answer.sdp
     );
-    assert!(
-        !second.iter().any(|l| l.contains("VP8/90000")),
-        "the second section offered no VP8:\n{}",
+    // RFC 9429 section 5.3.1: the offered format first; the formats the offer lacked (VP8,
+    // and the other registered ones) may follow it, but never ahead of it.
+    let m_line = second
+        .iter()
+        .find(|l| l.starts_with("m=video "))
+        .expect("an m= line");
+    assert_eq!(
+        m_line.split_whitespace().nth(3),
+        Some("98"),
+        "the offered VP9 comes first:\n{}",
         answer.sdp
     );
     Ok(())

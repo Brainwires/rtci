@@ -1642,6 +1642,16 @@ impl MediaEngine {
         }
     }
 
+    /// The codecs registered for `typ`, whatever negotiation made of them.
+    pub(crate) fn registered_codecs_by_kind(&self, typ: RtpCodecKind) -> &[RTCRtpCodecParameters] {
+        match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            RtpCodecKind::Application => &self.application_codecs,
+            RtpCodecKind::Unspecified => &[],
+        }
+    }
+
     pub(crate) fn get_codecs_by_kind(&self, typ: RtpCodecKind) -> Vec<RTCRtpCodecParameters> {
         if typ == RtpCodecKind::Video {
             if self.negotiated_video {
