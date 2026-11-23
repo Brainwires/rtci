@@ -3915,6 +3915,23 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Asks for a new DTLS association, and with it new SRTP master keys: the re-keying of
+    /// RFC 3711 section 9.2 and RFC 7714 sections 8.4 and 9.4 for DTLS-SRTP (RFC 5764 section
+    /// 4.1.2 has the keys come from the association).
+    ///
+    /// The next offer carries a new `a=tls-id` (RFC 8842 section 5.5); when the answer is
+    /// applied, a new DTLS handshake runs on the same ICE transport, new SRTP keys are exported
+    /// from it, and the SRTP contexts start over with them (their packet counts toward the
+    /// key lifetime included). Nothing changes until an offer is made and answered. Call it
+    /// when `OnSrtpKeyLifetimeExpiring` says a key is near its end: at the end the engine
+    /// refuses to protect more with it and the DTLS transport fails. The peer must take a new
+    /// association on a transport that has one, which an `rtc` peer does; browsers ignore the
+    /// new `tls-id`.
+    pub fn renew_dtls_association(&mut self) {
+        self.dtls_transport_mut().renewal_requested = true;
+        self.trigger_negotiation_needed();
+    }
+
     /// Asks for the SCTP association to be replaced by a new one.
     ///
     /// The next offer carries a new `a=sctp-port` (RFC 8841 section 10.5: "If the offerer

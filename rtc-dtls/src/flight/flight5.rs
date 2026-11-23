@@ -206,6 +206,8 @@ impl Flight for Flight5 {
                             &certificate.certificate,
                             &state.remote_signature_schemes,
                         )
+                        // RFC 5246 7.4.6: the certificate is X.509v3.
+                        && is_x509_v3(&certificate.certificate)
                 });
                 signature_scheme.map(|signature_scheme| (certificate, signature_scheme))
             } else {

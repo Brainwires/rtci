@@ -123,6 +123,9 @@ pub(crate) struct DtlsTransport {
     /// The `tls-id` an offer that asks for a new association carries (`create_offer` has no
     /// side effects): it becomes `local_tls_id` when the answer starts that association.
     pub(crate) staged_local_tls_id: Option<String>,
+    /// The application asked for a new association (`RTCPeerConnection::renew_dtls_association`):
+    /// the next offer carries a new `tls-id` (RFC 8842 section 5.5).
+    pub(crate) renewal_requested: bool,
 
     /// Whether the session has an RTP media section, which needs SRTP keys from the
     /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
@@ -251,6 +254,7 @@ impl DtlsTransport {
             remote_tls_id: None,
             local_tls_id: generate_tls_id(&crypto_provider)?,
             staged_local_tls_id: None,
+            renewal_requested: false,
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
@@ -625,6 +629,7 @@ impl DtlsTransport {
         self.remote_certificates.clear();
         self.srtp_negotiated = None;
         self.srtp_configured = self.offers_use_srtp();
+        self.renewal_requested = false;
         Ok(DtlsAssociationUpdate::New)
     }
 
@@ -712,6 +717,7 @@ impl DtlsTransport {
     /// offer sets one up again), a new value, the same for every such offer until an answer
     /// starts that association.
     pub(crate) fn offer_tls_id(&mut self, new_association: bool) -> Result<String> {
+        let new_association = new_association || self.renewal_requested;
         if !new_association || self.state == RTCDtlsTransportState::New {
             return Ok(self.local_tls_id.clone());
         }

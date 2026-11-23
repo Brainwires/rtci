@@ -1357,6 +1357,43 @@ fn client_without_a_certificate_for_the_requested_algorithms_sends_none() {
     );
 }
 
+/// An X.509 version 1 certificate (made with `openssl req -x509 -x509v1`) and its P-256 key.
+const X509_V1_CERTIFICATE: &str = "-----BEGIN PRIVATE_KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg6+14bt8ExWwuTVQF
+mFQWQaNIUDUNHItv/0PT/eSZxDuhRANCAASxCffFOAud1+ExGQKC9+AwqlN50ezm
+quPd33OhZBdFMvvqbSuUuTKpD+pKNmNJEGKTaiD2gytFTiRnjzfsl+dL
+-----END PRIVATE_KEY-----
+-----BEGIN CERTIFICATE-----
+MIIBJDCBywIUL8+MlzZYcSIdauPKnvmFImVtNS0wCgYIKoZIzj0EAwIwFDESMBAG
+A1UEAwwJdjEtY2xpZW50MCAXDTI2MTEyMzAwNTcyOFoYDzIxMjYxMDMwMDA1NzI4
+WjAUMRIwEAYDVQQDDAl2MS1jbGllbnQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+AASxCffFOAud1+ExGQKC9+AwqlN50ezmquPd33OhZBdFMvvqbSuUuTKpD+pKNmNJ
+EGKTaiD2gytFTiRnjzfsl+dLMAoGCCqGSM49BAMCA0gAMEUCIH9qVw5paD7jRMp7
+LlA/uH5K9cPAqfZ5zgzZ1wJQO4hjAiEAoNgskDSHp0uLkamBtJaTZm+Kag7TXVh7
+2jTqPtYaBEI=
+-----END CERTIFICATE-----
+";
+
+/// RFC 5246 7.4.6: "The certificate type MUST be X.509v3". A client configured with an
+/// X.509v1 certificate, whose key and signature otherwise fit the request, has no suitable
+/// certificate and sends an empty Certificate; the server that only requests one completes
+/// without a client certificate.
+#[test]
+fn a_client_with_an_x509v1_certificate_sends_none() {
+    let v1 = Certificate::from_pem(X509_V1_CERTIFICATE, provider().crypto()).unwrap();
+    let exchange = Exchange::run(
+        client(builder().with_certificates(vec![v1])),
+        server(builder().with_client_auth(ClientAuthType::RequestClientCert)),
+    );
+    assert!(
+        exchange.completed(),
+        "client: {:?}, server: {:?}",
+        exchange.client_err,
+        exchange.server_err
+    );
+    assert!(exchange.server.state.peer_certificates.is_empty());
+}
+
 /// The positive case: a client whose key fits the request signs with a listed pair.
 #[test]
 fn client_signs_certificate_verify_with_an_algorithm_the_request_listed() {
