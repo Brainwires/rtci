@@ -379,7 +379,8 @@ pub use pacing::pacer::{
 };
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
-    PacerBuilder, PacerInterceptor,
+    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerInterceptor,
+    QueueOverflow as PacerQueueOverflow,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;

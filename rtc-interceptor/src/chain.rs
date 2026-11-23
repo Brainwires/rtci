@@ -127,14 +127,26 @@ impl Chain {
     }
 
     fn drain_read(&mut self) {
-        let belt = Self::walk(
-            self.interceptors.iter_mut(),
-            VecDeque::new(),
-            |s, p| s.handle_read(p),
-            |s| s.poll_read(),
-        );
+        // As `walk`, noting whether anything crossed the read leg: a pass that moved nothing
+        // made nothing for the write leg either, and is the common case (every `poll_read`
+        // that finds the chain idle).
+        let mut belt = VecDeque::new();
+        let mut moved = false;
+        for interceptor in self.interceptors.iter_mut() {
+            while let Some(next) = belt.pop_front() {
+                if let Err(err) = interceptor.handle_read(next) {
+                    log::warn!("interceptor handle failed: {err}");
+                }
+            }
+            while let Some(next) = interceptor.poll_read() {
+                moved = true;
+                belt.push_back(next);
+            }
+        }
         self.read_outs.extend(belt);
-        self.collect_read_writes();
+        if moved {
+            self.collect_read_writes();
+        }
     }
 
     /// What the read leg made for the write leg (a retransmission a NACK asks for, a probe

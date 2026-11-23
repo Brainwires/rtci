@@ -346,6 +346,13 @@ pub struct DefaultInterceptorOptions {
     /// default) or holds every packet for its next timeout. See
     /// [`PacerBuilder::with_immediate_release`](interceptor::PacerBuilder::with_immediate_release).
     pub pacer_immediate_release: bool,
+    /// What the pacer does with media the congestion controller's target has no room for
+    /// (the application writing above the target for longer than the pacer's 2 s queue time
+    /// limit): dropped by default, so nothing leaves above the target;
+    /// [`PacerQueueOverflow::Drain`](interceptor::PacerQueueOverflow::Drain) sends it above
+    /// the target as libwebrtc's pacer does. See
+    /// [`PacerBuilder::with_queue_overflow`](interceptor::PacerBuilder::with_queue_overflow).
+    pub pacer_queue_overflow: interceptor::PacerQueueOverflow,
     /// Whether the path is probed for capacity above the target with short clusters of
     /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
     /// congestion controller "adapt as quickly as possible to initial network conditions"
@@ -384,6 +391,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("congestion_feedback", &self.congestion_feedback)
             .field("unnegotiated_tmmbr", &self.unnegotiated_tmmbr)
             .field("pacer_immediate_release", &self.pacer_immediate_release)
+            .field("pacer_queue_overflow", &self.pacer_queue_overflow)
             .field("bandwidth_probing", &self.bandwidth_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field(
@@ -404,6 +412,7 @@ impl Default for DefaultInterceptorOptions {
             congestion_feedback: CongestionFeedback::default(),
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
+            pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             bandwidth_probing: true,
             rapid_synchronisation: true,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
@@ -500,6 +509,7 @@ pub fn register_default_interceptors_with_options(
     let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();
     transports.insert_congestion_control(0, handle.clone());
     let pacer_immediate_release = options.pacer_immediate_release;
+    let pacer_queue_overflow = options.pacer_queue_overflow;
     let registry = registry
         .with_per_rtp_session(
             Slot::CongestionControl,
@@ -526,6 +536,7 @@ pub fn register_default_interceptors_with_options(
                 PacerBuilder::new()
                     .with_target_bitrate(initial_target)
                     .with_immediate_release(pacer_immediate_release)
+                    .with_queue_overflow(pacer_queue_overflow)
                     .build()
             }),
         );

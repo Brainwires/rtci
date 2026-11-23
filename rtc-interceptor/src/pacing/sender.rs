@@ -15,13 +15,41 @@ use std::time::{Duration, Instant};
 /// Rate used when none is configured: 1 Mb/s.
 pub const DEFAULT_BITRATE: f64 = 1_000_000.0;
 
-/// Packets held before the oldest is released over the budget to make room.
+/// Packets held before the queue overflows (see [`QueueOverflow`]).
 pub const DEFAULT_QUEUE_LIMIT: usize = 4096;
 
-/// How long a packet may wait in the queue by default: the pacing rate is raised above the
-/// target as far as it takes to drain the queue within it (libwebrtc's `kMaxExpectedQueueLength`,
-/// 2 s).
+/// How long a packet may wait in the queue by default (libwebrtc's
+/// `kMaxExpectedQueueLength`, 2 s); what happens to one that would wait longer is
+/// [`QueueOverflow`]'s.
 pub const DEFAULT_QUEUE_TIME_LIMIT: Duration = Duration::from_secs(2);
+
+/// What the pacer does with media the target has no room for: a packet that has waited the
+/// queue time limit, or the oldest one when a packet arrives at a full queue. It happens only
+/// when the application writes faster than the congestion controller's target for longer
+/// than the limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum QueueOverflow {
+    /// The packet is dropped here (counted by [`PacerInterceptor::dropped`]): nothing leaves
+    /// above the target. The congestion controller's target is what the path carries (RFC
+    /// 8836 section 2; RFC 8083 section 4 stops a flow that does not keep to it), so a sender
+    /// that put the excess on the path anyway would fill the bottleneck's queue, lose there
+    /// and drive the estimate to its floor: a 2.4 Mbit/s source on a 600 kbit/s link
+    /// (`tests/gcc_rate_limited_link_rtc2rtc.rs`, and netem in
+    /// `testenv_impairment::gcc_follows_a_rate_limited_link`) held a target of 500 to 590
+    /// kbit/s this way, and fell to 100 kbit/s with [`QueueOverflow::Drain`]. The receiver
+    /// counts the dropped packets as lost, which they are.
+    #[default]
+    Drop,
+    /// libwebrtc's pacer (`drain_large_queues`, `MaybeUpdateMediaRateDueToLongQueue`): the
+    /// pacing rate is raised above the target as far as it takes to drain the queue before
+    /// its oldest packet has waited the limit, a packet that has waited it leaves whatever the
+    /// budget says, and a full queue releases its oldest over the budget (counted by
+    /// [`PacerInterceptor::forced`]). Nothing the application wrote is lost here, and a
+    /// source that keeps above the target puts all of it on the path. For an encoder that
+    /// follows the target, as libwebrtc's does.
+    Drain,
+}
 
 /// Builder for [`PacerInterceptor`].
 ///
@@ -39,6 +67,7 @@ pub struct PacerBuilder {
     burst_bits: Option<f64>,
     queue_limit: usize,
     queue_time_limit: Option<Duration>,
+    queue_overflow: QueueOverflow,
     immediate_release: bool,
 }
 
@@ -49,6 +78,7 @@ impl Default for PacerBuilder {
             burst_bits: None,
             queue_limit: DEFAULT_QUEUE_LIMIT,
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
+            queue_overflow: QueueOverflow::default(),
             immediate_release: true,
         }
     }
@@ -75,8 +105,7 @@ impl PacerBuilder {
     }
 
     /// How many packets may be queued. When a packet arrives at a full queue, the oldest one
-    /// leaves at once, over the budget: a packet the application has numbered is never thrown
-    /// away here, since the hole in the sequence would be loss the sender made itself.
+    /// is dropped or leaves over the budget, as [`Self::with_queue_overflow`] says.
     pub fn with_queue_limit(mut self, queue_limit: usize) -> Self {
         self.queue_limit = queue_limit;
         self
@@ -84,14 +113,19 @@ impl PacerBuilder {
 
     /// How long a packet may wait in the queue ([`DEFAULT_QUEUE_TIME_LIMIT`] by default,
     /// `None` for no bound). When the application writes faster than the congestion
-    /// controller's target, the queue grows; the pacing rate is then raised above the target
-    /// to what drains the queued bits before its oldest packet has waited this long
-    /// (libwebrtc's pacer does the same with its expected queue length of 2 s). The
+    /// controller's target, the queue grows; a packet that would wait longer than this is
+    /// dropped or drained above the target, as [`Self::with_queue_overflow`] says. The
     /// application learns that its source is above the target from the target itself
     /// (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`), and from
     /// [`PacerInterceptor::queue_time`].
     pub fn with_queue_time_limit(mut self, limit: Option<Duration>) -> Self {
         self.queue_time_limit = limit;
+        self
+    }
+
+    /// What happens to media the target has no room for ([`QueueOverflow::Drop`] by default).
+    pub fn with_queue_overflow(mut self, overflow: QueueOverflow) -> Self {
+        self.queue_overflow = overflow;
         self
     }
 
@@ -121,6 +155,7 @@ impl PacerBuilder {
         let mut pacer = PacerInterceptor::new(bucket, self.queue_limit);
         pacer.immediate_release = self.immediate_release;
         pacer.queue_time_limit = self.queue_time_limit;
+        pacer.queue_overflow = self.queue_overflow;
         pacer
     }
 }
@@ -156,11 +191,11 @@ impl PacerBuilder {
 ///    wait out. A voice that waits behind a video backlog is the call breaking up.
 /// 2. **Other media** (video, retransmissions, FEC) waits in one queue, in the order it was
 ///    written, and leaves as the budget allows. The **queue time bound** (2 s by default,
-///    [`PacerBuilder::with_queue_time_limit`]) is this queue's: its bits and the age of its
-///    oldest packet raise the pacing rate above the target (libwebrtc's
-///    `MaybeUpdateMediaRateDueToLongQueue`), its head leaves whatever the budget says once it
-///    has waited the bound, and a packet arriving at a full queue makes its oldest packet leave
-///    over the budget rather than being refused.
+///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's: by
+///    default ([`QueueOverflow::Drop`]) a packet that has waited the bound, or the oldest one
+///    when the queue is full, is dropped, so nothing leaves above the target;
+///    [`QueueOverflow::Drain`] raises the pacing rate above the target instead (libwebrtc's
+///    `MaybeUpdateMediaRateDueToLongQueue`) and releases those packets over the budget.
 /// 3. **Padding** (padding-only packets, RFC 3550 section 5.1: the padding bit and no payload,
 ///    which the NACK responder fills a probe cluster with) waits in a queue of its own and leaves
 ///    only when no media waits. A probe cluster is written as a burst of padding the moment it is
@@ -170,9 +205,9 @@ impl PacerBuilder {
 ///    rate and with its mark, so it fills the cluster in place of padding, as in libwebrtc's
 ///    pacer (padding has the lowest priority of its packet queue).
 ///
-/// Padding is outside the queue time bound: it never counts toward raising the pacing rate,
-/// is never released over the budget (neither as overdue nor to make room), and so never goes
-/// ahead of media or past the rate the congestion controller set. Padding older than the bound
+/// Padding is outside the queue time bound: it never counts toward raising the pacing rate
+/// (with [`QueueOverflow::Drain`]), is never dropped as overdue nor released over the budget,
+/// and so never goes ahead of media or past the rate the congestion controller set. Padding older than the bound
 /// is **sent late, not dropped**. Each padding packet already holds the next sequence number
 /// of its RTX stream (the responder numbers it when it fills the cluster), so dropping it
 /// would leave a hole in that stream which a receiver counts as lost (RFC 3550 appendix A.3,
@@ -196,14 +231,17 @@ pub struct PacerInterceptor {
     queued_bits: f64,
     queue_limit: usize,
     queue_time_limit: Option<Duration>,
+    queue_overflow: QueueOverflow,
     /// The SSRCs of the audio streams: their packets are not queued behind others.
     audio: HashSet<u32>,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
     probe: Option<ActiveProbe>,
-    /// Packets released over the budget because the queue was full.
+    /// Packets released over the budget ([`QueueOverflow::Drain`]).
     forced: u64,
+    /// Media packets dropped for want of room in the target ([`QueueOverflow::Drop`]).
+    dropped: u64,
     /// Packets the budget has released, waiting to join the belt.
     released: VecDeque<TaggedPacket>,
     /// Inbound packets ready for the next interceptor.
@@ -227,10 +265,12 @@ impl PacerInterceptor {
             queued_bits: 0.0,
             queue_limit: queue_limit.max(1),
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
+            queue_overflow: QueueOverflow::default(),
             audio: HashSet::new(),
             immediate_release: true,
             probe: None,
             forced: 0,
+            dropped: 0,
         }
     }
 
@@ -254,10 +294,16 @@ impl PacerInterceptor {
         self.padding_discarded
     }
 
-    /// How many packets left over the budget because the queue was full (none is ever
-    /// refused).
+    /// How many packets left over the budget, overdue or to make room in a full queue
+    /// ([`QueueOverflow::Drain`]).
     pub fn forced(&self) -> u64 {
         self.forced
+    }
+
+    /// How many media packets were dropped, overdue or to make room in a full queue
+    /// ([`QueueOverflow::Drop`]).
+    pub fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// How long the oldest queued media packet has waited at `now`, zero with none queued
@@ -274,6 +320,9 @@ impl PacerInterceptor {
     /// reaches the limit, everything queued may leave.
     fn pacing_rate(&self, now: Instant) -> f64 {
         let target = self.target();
+        if self.queue_overflow != QueueOverflow::Drain {
+            return target;
+        }
         let Some(limit) = self.queue_time_limit else {
             return target;
         };
@@ -529,18 +578,21 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             return Ok(());
         }
 
-        if self.queue.len() >= self.queue_limit {
-            // The oldest leaves now, over the budget, to make room. The packets here are
-            // numbered: refusing one, as the pacer once did, put a hole in its stream that no
-            // packet was ever lost to on the path, which the receiver then counted as loss and
-            // asked for again. The queue time limit keeps this a last resort.
-            if let Some(mut oldest) = self.queue.pop_front() {
-                let bits = Self::bits_of(&oldest);
-                self.queued_bits -= bits;
-                self.pacer.consume(bits);
-                oldest.now = msg.now;
-                self.forced += 1;
-                self.release(oldest, bits);
+        if self.queue.len() >= self.queue_limit
+            && let Some(mut oldest) = self.queue.pop_front()
+        {
+            // Room for the arrival: the oldest goes (the newest is the one still worth
+            // sending). Dropped by default; with `Drain` it leaves now, over the budget.
+            let bits = Self::bits_of(&oldest);
+            self.queued_bits -= bits;
+            match self.queue_overflow {
+                QueueOverflow::Drain => {
+                    self.pacer.consume(bits);
+                    oldest.now = msg.now;
+                    self.forced += 1;
+                    self.release(oldest, bits);
+                }
+                QueueOverflow::Drop => self.dropped += 1,
             }
         }
 
@@ -566,12 +618,20 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 
         while let Some(head) = self.queue.front() {
             let bits = Self::bits_of(head);
-            // Past the queue time limit the head leaves whatever the budget says.
+            // Past the queue time limit the head is dropped (`Drop`) or leaves whatever the
+            // budget says (`Drain`).
             let overdue = self
                 .queue_time_limit
                 .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit);
             if overdue {
+                if self.queue_overflow == QueueOverflow::Drop {
+                    self.queue.pop_front();
+                    self.queued_bits = (self.queued_bits - bits).max(0.0);
+                    self.dropped += 1;
+                    continue;
+                }
                 self.pacer.consume(bits);
+                self.forced += 1;
             } else if !self.try_spend(bits) {
                 break;
             }
