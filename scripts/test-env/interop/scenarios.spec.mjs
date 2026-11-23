@@ -571,29 +571,32 @@ async function balancedUnbundledWithRollback(page, unbundle) {
       grouped: /^a=group:BUNDLE/m.test(local),
       offers: s.remoteOffers, ignored: s.ignoredOffers,
       rollbacks: report.rollbacks,
-      rust: { transportsConnected: report.transportsConnected },
+      rust: { transportsConnected: report.transportsConnected, transports: report.stats.transports },
       errors: report.errors.concat(s.errors),
       lastOfferHasGroup: /^a=group:BUNDLE/m.test(offer),
+      descriptions: Interop.transportLines(s.descriptions),
     };
   }, [WS, unbundle]);
 }
 
 function expectBalancedUnbundled(r) {
-  expect(r.before.video.error, JSON.stringify(r.before)).toBeUndefined();
-  expect(r.before.audio.error, JSON.stringify(r.before)).toBeUndefined();
-  if (r.transportsBefore.reported > 0) expect(r.transportsBefore.connected, JSON.stringify(r)).toBe(2);
-  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBeGreaterThanOrEqual(2);
+  // Every message carries the descriptions exchanged and both sides' transports.
+  const ctx = JSON.stringify({ descriptions: r.descriptions, rust: r.rust, transportsBefore: r.transportsBefore, transportsAfter: r.transportsAfter, ignored: r.ignored, offers: r.offers, before: r.before, after: r.after });
+  expect(r.before.video.error, ctx).toBeUndefined();
+  expect(r.before.audio.error, ctx).toBeUndefined();
+  if (r.transportsBefore.reported > 0) expect(r.transportsBefore.connected, ctx).toBe(2);
+  expect(r.rust.transportsConnected, ctx).toBeGreaterThanOrEqual(2);
   expect(r.rollbacks, "Rust (polite) must have rolled its offer back").toBeGreaterThan(0);
   expect(r.ignored, "the browser ignores only Rust's colliding offer").toBe(1);
   expect(r.offers, "Rust offered again after its rollback").toBeGreaterThanOrEqual(3);
-  expect(r.after.video.error, JSON.stringify(r.after)).toBeUndefined();
-  expect(r.after.audio.error, JSON.stringify(r.after)).toBeUndefined();
+  expect(r.after.video.error, ctx).toBeUndefined();
+  expect(r.after.audio.error, ctx).toBeUndefined();
   // The transports are kept: each one connected before still is (the browser's added
   // section may bring one more), and audio and video arrive over the ones they did.
   if (r.transportsAfter.reported > 0) {
-    for (const id of r.transportsBefore.ids) expect(r.transportsAfter.ids, JSON.stringify(r)).toContain(id);
+    for (const id of r.transportsBefore.ids) expect(r.transportsAfter.ids, ctx).toContain(id);
     for (const kind of ["video", "audio"]) {
-      if (r.before[kind].transportId) expect(r.after[kind].transportId, JSON.stringify(r)).toBe(r.before[kind].transportId);
+      if (r.before[kind].transportId) expect(r.after[kind].transportId, ctx).toBe(r.before[kind].transportId);
     }
   }
   expect(r.errors).toEqual([]);
