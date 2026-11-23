@@ -801,6 +801,29 @@ impl Agent {
         }
     }
 
+    /// RFC 8839 Sections 4.2.5, 4.3.3 and 5.3: the answer carries `a=ice-mismatch` for the
+    /// data stream this agent serves (the offer arrived at the peer with a default destination
+    /// that no candidate matched), so "ICE procedures MUST NOT be used for this data stream".
+    /// The agent stops: no more checks or consent requests, no candidates, state `Failed`.
+    /// The RFC 3264 fallback the RFC then calls for (media to the `m=` / `c=` destination
+    /// without checks) is not taken: a WebRTC endpoint sends nothing without consent (RFC
+    /// 7675 Section 5.1), so the stream ends with the agent. Returns whether the agent was
+    /// running.
+    pub fn stop_for_ice_mismatch(&mut self, now: Instant) -> bool {
+        if matches!(
+            self.connection_state,
+            ConnectionState::Failed | ConnectionState::Closed
+        ) {
+            return false;
+        }
+        warn!(
+            "[{}]: the answer says ice-mismatch: ICE is not used for this stream",
+            self.get_name()
+        );
+        self.update_connection_state(Some(now), ConnectionState::Failed);
+        true
+    }
+
     /// Whether the local candidate `id` is held unconveyed (and so unpaired).
     pub fn is_local_candidate_unconveyed(&self, id: &str) -> bool {
         self.local_candidates

@@ -192,3 +192,19 @@ fn test_closing_the_agent_stops_its_checks() {
     assert!(sent(&mut a).is_empty(), "a check after close");
     assert!(a.poll_timeout().is_none());
 }
+
+/// RFC 8839 Section 5.3: with `ice-mismatch` for its stream "ICE procedures MUST NOT be used":
+/// `stop_for_ice_mismatch` ends the checks and leaves the agent `Failed`, with no candidates.
+#[test]
+fn test_ice_mismatch_stops_ice_for_the_stream() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(!requests(&run(&mut a, now, now + Duration::from_millis(60))).is_empty());
+    let later = now + Duration::from_millis(100);
+    assert!(a.stop_for_ice_mismatch(later));
+    assert!(!a.stop_for_ice_mismatch(later), "once");
+    assert_eq!(a.state(), ConnectionState::Failed);
+    assert!(a.get_candidate_pairs().is_empty());
+    let out = run(&mut a, later, later + Duration::from_secs(5));
+    assert!(requests(&out).is_empty(), "a check after ice-mismatch");
+}

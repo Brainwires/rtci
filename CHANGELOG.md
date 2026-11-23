@@ -1262,6 +1262,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A host candidate past the cap of published mDNS names is provided under a `.local` name
   that is not published, instead of being dropped (draft-ietf-mmusic-mdns-ice-candidates
   section 3.1.1).
+- **ice**: new `Agent::stop_for_ice_mismatch` ends ICE for the agent's stream (RFC 8839
+  section 5.3: no checks, state failed), for the SDP layer to call on an answer's
+  `a=ice-mismatch`; no RFC 3264 fallback (nothing is sent without consent, RFC 7675).
 - **mdns**: through `rtc-ice` and the peer connection, the answers to a query of more than one
   question wait 20 to 120 ms even when every question is about the agent's own name (RFC 6762
   section 6.3); `MdnsConfig::with_multi_question_delay`,
