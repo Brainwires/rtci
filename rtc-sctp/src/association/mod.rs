@@ -545,6 +545,9 @@ pub struct Association {
     /// The `bytes_dequeued` of each stream at the moment it was unregistered, until a stream
     /// with the same identifier is created again (see [`Association::stream_bytes_dequeued`]).
     closed_stream_bytes_dequeued: FxHashMap<StreamId, u64>,
+    /// The streams the association held when the peer restarted it (RFC 9260 5.2.4 action
+    /// A), with the application bytes each had sent: see [`Self::streams_lost_in_restart`].
+    streams_lost_in_restart: Vec<(StreamId, u64)>,
     /// Bytes held in every stream's reassembly queue, kept as a running total so the receive
     /// window is not recomputed by walking every stream on each DATA chunk.
     reassembly_bytes: usize,
@@ -562,6 +565,8 @@ pub struct Association {
     /// The cause code (RFC 9260 section 3.3.10) the association was aborted with: the first
     /// cause of the ABORT it received or sent.
     abort_cause_code: Option<u16>,
+    /// The Upper Layer Abort Reason of the peer's User-Initiated Abort (RFC 9260 9.1).
+    peer_abort_reason: Option<Bytes>,
     /// `ended`, as the endpoint that routes to this association sees it: an ended association
     /// takes no more packets and no longer counts against the endpoint's limit.
     ended_flag: Arc<AtomicBool>,
@@ -713,6 +718,7 @@ impl Default for Association {
             next_message_id: 0,
             streams: FxHashMap::default(),
             closed_stream_bytes_dequeued: FxHashMap::default(),
+            streams_lost_in_restart: vec![],
             reassembly_bytes: 0,
             readable_streams: FxHashSet::default(),
             streams_with_data: FxHashSet::default(),
@@ -722,6 +728,7 @@ impl Default for Association {
             error: None,
             ended: false,
             abort_cause_code: None,
+            peer_abort_reason: None,
             ended_flag: Arc::new(AtomicBool::new(false)),
             drained_emitted: false,
             pending_error_causes: vec![],
@@ -1422,6 +1429,29 @@ impl Association {
         self.abort_cause_code
     }
 
+    /// The Upper Layer Abort Reason the peer gave when it aborted the association (RFC 9260
+    /// sections 3.3.10.12 and 9.1: "the Upper Layer Abort Reason ... SHOULD be made available
+    /// to the upper layer"). `None` when the association did not end by the peer's
+    /// User-Initiated Abort; empty when that carried no reason.
+    pub fn peer_abort_reason(&self) -> Option<&[u8]> {
+        self.peer_abort_reason.as_deref()
+    }
+
+    /// As [`abort`](Self::abort), with an Upper Layer Abort Reason in the User-Initiated
+    /// Abort error cause (RFC 9260 section 3.3.10.12) for the peer's application.
+    pub fn abort_with_reason(&mut self, reason: &[u8]) -> Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        self.abort_with(
+            vec![ErrorCause {
+                code: USER_INITIATED_ABORT,
+                raw: Bytes::copy_from_slice(reason),
+            }],
+            AssociationError::LocallyClosed,
+        )
+    }
+
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
         // Keyed on `ended`, not on the CLOSED state: an accepting association is in SCTP's
@@ -1552,6 +1582,15 @@ impl Association {
     /// unregister_stream un-registers a stream from the association
     /// The caller should hold the association write lock.
     fn unregister_stream(&mut self, stream_identifier: StreamId, reason: AssociationError) {
+        if let Some(s) = self.streams.get_mut(&stream_identifier) {
+            // What the stream wrote and has not sent yet still goes, numbered by the stream
+            // it was written to.
+            let generation = s.generation;
+            self.pending_queue
+                .number_messages(stream_identifier, generation, false, |unordered| {
+                    s.next_message_numbers(unordered)
+                });
+        }
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
             self.closed_stream_bytes_dequeued
@@ -1845,6 +1884,7 @@ impl Association {
             for e in &c.error_causes {
                 if matches!(e.code, USER_INITIATED_ABORT) {
                     debug!("User initiated abort received");
+                    self.peer_abort_reason = Some(e.raw.clone());
                     // The peer aborted the association: its streams are lost with it, which
                     // is not the stream reset `Reset` reports for a channel's own close.
                     let _ = self.close(AssociationError::AssociationClosed);
@@ -2656,6 +2696,20 @@ impl Association {
         fresh.sack_packet_immediately = true;
         // What the application has not read of the old association's events stays, and the
         // restart follows it.
+        // The old association's streams are gone: what each had sent is kept, for the
+        // application to settle its own accounts of them (`streams_lost_in_restart`,
+        // `stream_bytes_dequeued`).
+        let mut lost: Vec<(StreamId, u64)> = self
+            .streams
+            .iter()
+            .map(|(id, s)| (*id, s.bytes_dequeued))
+            .collect();
+        lost.sort_unstable();
+        fresh.closed_stream_bytes_dequeued = std::mem::take(&mut self.closed_stream_bytes_dequeued);
+        fresh
+            .closed_stream_bytes_dequeued
+            .extend(lost.iter().copied());
+        fresh.streams_lost_in_restart = lost;
         fresh.events = std::mem::take(&mut self.events);
         fresh.events.push_back(Event::Restarted);
         fresh.endpoint_events = std::mem::take(&mut self.endpoint_events);
@@ -5069,6 +5123,13 @@ impl Association {
         )
     }
 
+    /// The streams of the association before the peer's last restart (`Event::Restarted`),
+    /// each with the application bytes that had left its send queue: what was sent on it
+    /// before it went with the restart.
+    pub fn streams_lost_in_restart(&self) -> &[(StreamId, u64)] {
+        &self.streams_lost_in_restart
+    }
+
     /// Credits a chunk leaving the send queue to its stream's `bytes_dequeued`.
     fn note_dequeued(&mut self, c: &ChunkPayloadData) {
         if !matches!(
@@ -5176,11 +5237,25 @@ impl Association {
         );
         let mut released_per_stream = FxHashMap::default();
         let mut changed = false;
+        let transmitted = !inflight.is_empty();
         let tail = self.pending_queue.drain_message(message.id)?;
+        // The stream the message was written to, if it is still the stream of that id.
+        let stream = tail
+            .first()
+            .or_else(|| {
+                inflight
+                    .first()
+                    .and_then(|tsn| self.inflight_queue.get(*tsn))
+            })
+            .filter(|c| self.is_current_stream_data(c))
+            .map(|c| c.stream_identifier);
+        // A message none of which was sent goes without TSNs, unless it is ordered and has
+        // its Stream Sequence Number already: the peer then waits for that number, and only
+        // a FORWARD TSN past it lets the stream go on.
         let assign_tsns = !inflight.is_empty()
             || tail
                 .first()
-                .is_some_and(|c| !c.beginning_fragment || !c.unordered);
+                .is_some_and(|c| !c.beginning_fragment || (!c.unordered && !c.numbers_pending));
         for mut c in tail {
             self.note_dequeued(&c);
             if assign_tsns {
@@ -5212,6 +5287,14 @@ impl Association {
             }
         }
         self.release_stream_buffers(&released_per_stream);
+        if changed && let Some(id) = stream {
+            // RFC 3758 4.1 TR3: the upper layer is told.
+            self.events
+                .push_back(Event::Stream(StreamEvent::MessageAbandoned {
+                    id,
+                    transmitted,
+                }));
+        }
         Ok(changed)
     }
 
@@ -5256,9 +5339,9 @@ impl Association {
     /// Timed(0) permits first transmissions until an actual retry is considered.
     ///
     /// RFC 3758 4.1 (TR3, TR4): the lifetime is checked before every transmission, the first
-    /// included, of ordered messages too. An ordered message has its stream sequence number
-    /// from the moment it was written, so abandoning it takes a TSN and a FORWARD TSN, which
-    /// `abandon_message` sees to.
+    /// included, of ordered messages too. A message takes its Stream Sequence Number when its
+    /// first fragment is sent, so one that expires before that is dropped without a TSN or a
+    /// FORWARD TSN; one that expires part sent is abandoned by `abandon_message` with them.
     fn pending_message_expired(&self, c: &ChunkPayloadData, now: Instant) -> bool {
         c.reliability.deadline() != c.created_at && self.timed_data_expired(c, now)
     }
@@ -5339,9 +5422,10 @@ impl Association {
                 // allocated, means there is no gap for the peer to reconcile and
                 // no ForwardTSN to send.
                 if self.pending_message_expired(c, now) {
-                    // Abandoning an ordered message takes TSNs: not past what may be
-                    // outstanding (see `MAX_OUTSTANDING_TSNS`).
+                    // Abandoning an ordered message that has its number takes TSNs: not
+                    // past what may be outstanding (see `MAX_OUTSTANDING_TSNS`).
                     if !unordered
+                        && !c.numbers_pending
                         && self.my_next_tsn.wrapping_sub(self.cumulative_tsn_ack_point)
                             > MAX_OUTSTANDING_TSNS
                     {
@@ -5676,12 +5760,35 @@ impl Association {
     }
 
     /// Move the chunk peeked with self.pending_queue.peek() to the inflight_queue.
+    /// The message whose first fragment is about to leave the pending queue takes its Stream
+    /// Sequence Number and Message Identifier now (RFC 3758 4.1 TR3: a message abandoned
+    /// while it waited took none).
+    fn number_next_message(&mut self) {
+        let Some(c) = self.pending_queue.peek() else {
+            return;
+        };
+        if !c.numbers_pending || !c.beginning_fragment {
+            return;
+        }
+        let (id, generation) = (c.stream_identifier, c.stream_generation);
+        let Some(s) = self.streams.get_mut(&id) else {
+            return;
+        };
+        if s.generation == generation {
+            self.pending_queue
+                .number_messages(id, generation, true, |unordered| {
+                    s.next_message_numbers(unordered)
+                });
+        }
+    }
+
     fn move_pending_data_chunk_to_inflight_queue(
         &mut self,
         beginning_fragment: bool,
         unordered: bool,
         now: Instant,
     ) -> Option<ChunkPayloadData> {
+        self.number_next_message();
         if let Some(mut c) = self.pending_queue.pop(beginning_fragment, unordered) {
             // Assign TSN
             c.tsn = self.generate_next_tsn();

@@ -1932,12 +1932,13 @@ fn tls_ids(sdp: &str) -> Vec<String> {
 /// RFC 8842 section 5.5 and RFC 5764 section 4.4 per transport: `renew_dtls_association`
 /// (what the security stack's automatic re-keying calls before an SRTP key's lifetime ends)
 /// gives each of three transports a new association: the next offer carries a new `tls-id` in
-/// each transport's sections, and every transport runs a new handshake ("connecting", then
-/// "connected" again at its own DTLS transport).
+/// each transport's sections, every transport runs a new handshake ("connecting", then
+/// "connected" again at its own DTLS transport), and RTP of both senders goes on under the new
+/// keys (with the security stack's renewal, which also restarts ICE).
 #[test]
 fn renewing_the_dtls_association_renews_every_transport() -> Result<()> {
     let mut world = World::with_credentials(RTCBundlePolicy::MaxCompat, false)?;
-    world.negotiate(without_bundle_group)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
     world.gather()?;
     world.run("connected with a data channel", |peers| {
         peers.iter().all(|p| p.connected && p.channel.is_some())
@@ -1989,7 +1990,24 @@ fn renewing_the_dtls_association_renews_every_transport() -> Result<()> {
             })
         })
     })?;
-    Ok(())
+    // Media written while the remote's side of a new handshake is still finishing is lost (its
+    // SRTP keys are not there yet): a packet per sender every 100 ms, up to two seconds.
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    world.peers[1].rtp.clear();
+    for seq in 30..50u16 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+        world.advance(Duration::from_millis(100))?;
+        if ssrcs
+            .iter()
+            .all(|ssrc| world.peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+        {
+            return Ok(());
+        }
+    }
+    let received: HashSet<u32> = world.peers[1].rtp.iter().map(|h| h.ssrc).collect();
+    bail!("RTP of both senders under the new keys: sent {ssrcs:?}, received {received:?}")
 }
 
 /// RFC 8839 section 4.4.3.1 for a stream with a transport of its own: once the section is

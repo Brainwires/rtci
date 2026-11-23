@@ -213,6 +213,11 @@ pub struct ChunkPayloadData {
     /// Marked for Fast Retransmit when the one packet of that Fast Retransmit was full (RFC
     /// 9260 7.2.4 step 5): not eligible for another, and retransmitted when cwnd allows.
     pub(crate) no_fast_retransmit: bool,
+
+    /// Sender: the message has no Stream Sequence Number or Message Identifier yet. It takes
+    /// them when its first fragment leaves the pending queue, so that an ordered message
+    /// abandoned before that uses up no number and needs no TSN (RFC 3758 4.1 TR3).
+    pub(crate) numbers_pending: bool,
 }
 
 impl Default for ChunkPayloadData {
@@ -243,6 +248,7 @@ impl Default for ChunkPayloadData {
             abandoned: false,
             retransmit: false,
             no_fast_retransmit: false,
+            numbers_pending: false,
         }
     }
 }
@@ -359,6 +365,7 @@ impl Chunk for ChunkPayloadData {
             abandoned: false,
             retransmit: false,
             no_fast_retransmit: false,
+            numbers_pending: false,
         })
     }
 

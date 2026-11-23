@@ -443,7 +443,8 @@ fn cryptex_required_reports_an_authentic_violation_once() {
         let mut sender = context(profile, Cryptex::default());
         let mut receiver = context(profile, required);
 
-        // A forged packet in the clear is refused as a forgery, and reported to nobody.
+        // A forged packet in the clear is refused as a forgery: reported as one (RFC 3711
+        // section 3.3), not as a Cryptex violation.
         let mut forged = sender
             .encrypt_rtp(&shaped(1, Some(0xBEDE), 1))
             .unwrap()
@@ -451,6 +452,13 @@ fn cryptex_required_reports_an_authentic_violation_once() {
         let last = forged.len() - 1;
         forged[last] ^= 1;
         assert!(receiver.decrypt_rtp(&forged).is_err());
+        assert!(matches!(
+            receiver.poll_event(),
+            Some(ContextEvent::PacketDiscarded {
+                reason: DiscardReason::AuthenticationFailed,
+                ..
+            })
+        ));
         assert_eq!(receiver.poll_event(), None);
 
         for seq in 2..5 {

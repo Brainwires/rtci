@@ -4199,11 +4199,18 @@ impl RTCPeerConnection {
     /// The next offer carries a new `a=tls-id` (RFC 8842 section 5.5); when the answer is
     /// applied, a new DTLS handshake runs on the same ICE transport, new SRTP keys are exported
     /// from it, and the SRTP contexts start over with them (their packet counts toward the
-    /// key lifetime included). Nothing changes until an offer is made and answered. Call it
-    /// when `OnSrtpKeyLifetimeExpiring` says a key is near its end: at the end the engine
-    /// refuses to protect more with it and the DTLS transport fails. The peer must take a new
-    /// association on a transport that has one, which an `rtc` peer does; browsers ignore the
-    /// new `tls-id`.
+    /// key lifetime included). Nothing changes until an offer is made and answered. The offer
+    /// also restarts ICE, as [`Self::restart_ice`] does: RFC 9429 section 5.8.3 has a
+    /// description whose `tls-id` differs from the one in use be "part of an ICE restart,
+    /// together with new ufrag and password values" (RFC 8842 section 6 likewise). Until the
+    /// new handshake completes, media goes on under the old keys and on the selected pair.
+    ///
+    /// The connection calls it by itself when `OnSrtpKeyLifetimeExpiring` says a key is near
+    /// its end (RFC 5764 section 4.4), unless
+    /// `SettingEngineBuilder::with_srtp_automatic_rekeying(false)`; at the end the engine
+    /// refuses to protect more with the key and the DTLS transport fails. The peer must take a
+    /// new association on a transport that has one, which an `rtc` peer does; browsers ignore
+    /// the new `tls-id`.
     ///
     /// With several transports (sections outside a BUNDLE group, several groups) every
     /// transport takes a new association: each writes its own new `tls-id` in its sections
@@ -4212,6 +4219,7 @@ impl RTCPeerConnection {
         for id in self.pipeline_context.transports.ids() {
             self.with_transport(id, |pc| pc.dtls_transport_mut().renewal_requested = true);
         }
+        self.ice_credentials_to_replace = self.local_ice_ufrags();
         self.trigger_negotiation_needed();
     }
 
