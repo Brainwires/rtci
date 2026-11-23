@@ -1548,6 +1548,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Licence gate and MSRV** (branch `conf/tcp-7-licence-msrv`). `deny.toml` has a `[licenses]`
+  allow-list of permissive licences only (MIT, Apache-2.0 and its LLVM exception, BSD-2/3,
+  ISC, Zlib, Unicode, CC0, 0BSD, BSL-1.0, and CDLA-Permissive-2.0 for the optional
+  `webpki-roots`); no GPL, LGPL or AGPL, no exceptions needed today (r-efi's LGPL is one arm
+  of an `OR`). The audit workflow runs `cargo deny --all-features check licenses bans
+  sources`. The workspace declares `rust-version = "1.89"` (the lowest that builds: uuid
+  1.29 needs 1.89), every crate inherits it, and cargo.yml's `msrv` job checks the workspace
+  with every feature on that toolchain, resolving dependencies to versions that support it.
+
 - **The peer connection's transports are a set** (mt-1). The ICE, DTLS and SRTP contexts that
   `PipelineContext` held once are now a `TransportSet` of transport bundles keyed by a transport
   id, reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport

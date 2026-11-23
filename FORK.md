@@ -313,6 +313,20 @@ reason. Today there are two:
 | RUSTSEC-2026-0441 (unmaintained, no vulnerability) | `pin-utils` 0.1.1 | Dev-dependency only, interop tests: `webrtc` 0.17.3 -> `webrtc-util` -> `nix` 0.26. `webrtc` 0.17.3 is the last release of the independent implementation the interop tests exercise; 0.20+ is built on the upstream `rtc` crates. |
 | RUSTSEC-2026-0543 (unmaintained, no vulnerability) | `chrono` 0.4 | Dev-dependency only: the examples' and tests' log timestamps (`chrono::Local::now()`). No release fixes it; replacing it in 48 example and test files is not worth a dev-only timestamp. |
 
+The same job then runs `cargo deny --all-features check licenses bans sources` against
+`deny.toml`'s `[licenses]` allow-list: permissive licences only (MIT, Apache-2.0, BSD, ISC,
+Zlib, Unicode, CC0, 0BSD, BSL-1.0, CDLA-Permissive-2.0 for the optional `webpki-roots`), no
+GPL, LGPL or AGPL and no per-crate exception; crates.io is the only source. Upstream has no
+licence gate.
+
+### MSRV (fork only)
+
+The workspace declares `rust-version = "1.89"`, inherited by every crate: the lowest toolchain
+it builds on with every feature (uuid 1.29 needs 1.89; downstream ParolNet's MSRV is 1.91).
+cargo.yml's `msrv` job checks the workspace on that toolchain with
+`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`, so a fresh resolution picks dependency
+versions that support it. Raising it is a deliberate change of the manifest.
+
 ### Defaults the fork widens
 
 - `configure_rtcp_reports` (and so `register_default_interceptors`) registers the RTCP session:

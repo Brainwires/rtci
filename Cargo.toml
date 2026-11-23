@@ -27,6 +27,8 @@ opt-level = 0
 version = "0.22.0+brainwires.5"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
+# The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).
+rust-version = "1.89"
 license = "MIT/Apache-2.0"
 homepage = "https://webrtc.rs"
 repository = "https://github.com/webrtc-rs/rtc"
@@ -128,6 +130,7 @@ name = "rtc"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Sans-I/O WebRTC implementation in Rust"
 license.workspace = true
 documentation = "https://docs.rs/rtc"

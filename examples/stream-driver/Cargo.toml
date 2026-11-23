@@ -3,6 +3,7 @@ name = "rtc-stream-driver"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP / TLS) of WebRTC.rs's sans-I/O engine"
 license.workspace = true
 documentation = "https://docs.rs/rtc-stream-driver"
