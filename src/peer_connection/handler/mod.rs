@@ -35,7 +35,7 @@ use crate::peer_connection::transport::RTCDtlsTransportState;
 use crate::peer_connection::transport::sctp::SctpPath;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
-use log::warn;
+use log::{debug, warn};
 use shared::TaggedBytesMut;
 use shared::error::{Error, flatten_errs};
 use std::collections::VecDeque;
@@ -386,15 +386,43 @@ impl RTCPeerConnection {
         let data = self.pipeline_context.transports.data_transport_id();
         let mut per_transport: Vec<VecDeque<TaggedRTCMessageInternal>> =
             ids.iter().map(|_| VecDeque::new()).collect();
-        while let Some(msg) = intermediate_wouts.pop_front() {
+        while let Some(mut msg) = intermediate_wouts.pop_front() {
+            // RTCP an RTP session's instance wrote goes down that session's transport.
+            let mut named = None;
+            if let RTCMessageInternal::Rtp(RTPMessage::SessionRtcp(session, packets)) = msg.message
+            {
+                named = ids.iter().copied().find(|id| id.0 == session);
+                msg.message = RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(packets)));
+            }
             let id = if ids.len() == 1 {
                 ids[0]
             } else {
-                self.transport_of_write(&msg).unwrap_or(data)
+                named
+                    .or_else(|| self.transport_of_write(&msg))
+                    .unwrap_or(data)
             };
+            // RFC 3550 section 6, RFC 8834 section 4.1: RTCP belongs to an RTP session, and a
+            // transport without a negotiated RTP m= section (and SRTP keys) has none. Whatever
+            // RTCP is written for it (an RTCP session the application built that joins by
+            // itself) does not leave.
+            if matches!(
+                &msg.message,
+                RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtcp(_)))
+            ) && !{
+                let ctx = &self.pipeline_context.interceptor_handler_context;
+                ctx.rtcp_joined.contains(&id.0) || ctx.rtcp_leaving.contains(&id.0)
+            } {
+                debug!("RTCP for a transport without an RTP session dropped");
+                continue;
+            }
             let index = ids.iter().position(|t| *t == id).unwrap_or(0);
             per_transport[index].push_back(msg);
         }
+        // What a session that left had to say (its BYE) has been handed on.
+        self.pipeline_context
+            .interceptor_handler_context
+            .rtcp_leaving
+            .clear();
 
         for (id, mut wouts) in ids.into_iter().zip(per_transport) {
             let previous = self.pipeline_context.transports.active_id();
@@ -498,6 +526,85 @@ impl RTCPeerConnection {
                 .is_some_and(|receiver| receiver.get_coding_parameters().iter().any(&has));
             (sends || receives).then(|| self.pipeline_context.transports.transport_id_for(mid))
         })
+    }
+
+    /// Starts and ends each transport's RTCP session. RFC 3550 section 6: RTCP is the control
+    /// protocol of an RTP session, and a WebRTC endpoint has one per transport that carries
+    /// RTP m= sections (RFC 8834 sections 4.1 and 4.4; RFC 9429 section 5.2.1). A transport's
+    /// session joins once both hold: a negotiated RTP section uses it (not rejected, not
+    /// stopped, with a current direction, `inactive` included: RFC 3264 section 5.1 keeps RTCP
+    /// for every direction) and its DTLS association has given SRTP keys, so that nothing
+    /// leaves unprotected (RFC 3711 section 3.4, RFC 5764 section 4.1). It leaves, saying BYE,
+    /// when the transport's last such section is gone. A data-channel-only connection has no
+    /// RTP session and sends no RTCP at all.
+    pub(crate) fn sync_rtcp_sessions(&mut self, now: Instant) {
+        let ids = self.pipeline_context.transports.ids();
+        let ctx = &mut self.pipeline_context.interceptor_handler_context;
+        ctx.srtp_keyed.retain(|id| ids.iter().any(|t| t.0 == *id));
+        let mut wanted = std::collections::BTreeMap::new();
+        for id in &ids {
+            let Some(bundle) = self.pipeline_context.transports.transport(*id) else {
+                continue;
+            };
+            let context = bundle.srtp_handler_context.local_srtp_context.as_ref();
+            let ctx = &mut self.pipeline_context.interceptor_handler_context;
+            if context.is_some() {
+                ctx.srtp_keyed.insert(id.0);
+            }
+            if !ctx.srtp_keyed.contains(&id.0) {
+                continue;
+            }
+            let carries_rtp = self.rtp_transceivers.iter().any(|transceiver| {
+                !transceiver.stopped()
+                    && transceiver.current_direction()
+                        != crate::rtp_transceiver::RTCRtpTransceiverDirection::Unspecified
+                    && transceiver.mid().as_ref().is_some_and(|mid| {
+                        self.pipeline_context.transports.transport_id_for(mid) == *id
+                    })
+            });
+            if carries_rtp {
+                wanted.insert(id.0, self::interceptor::srtcp_overhead(context));
+            }
+        }
+        let joined = std::mem::take(
+            &mut self
+                .pipeline_context
+                .interceptor_handler_context
+                .rtcp_joined,
+        );
+        let leaving: Vec<usize> = joined
+            .iter()
+            .copied()
+            .filter(|session| !wanted.contains_key(session))
+            .collect();
+        let joining: Vec<(usize, usize)> = wanted
+            .iter()
+            .filter(|(session, _)| !joined.contains(session))
+            .map(|(session, overhead)| (*session, *overhead))
+            .collect();
+        let mut handler = self.get_interceptor_handler();
+        for session in leaving {
+            // A transport that is gone takes its session with it: nothing would carry a BYE.
+            if !ids.iter().any(|id| id.0 == session) {
+                continue;
+            }
+            match handler.leave_rtcp_session(now, session) {
+                Ok(()) => {
+                    handler.ctx_mut().rtcp_leaving.insert(session);
+                }
+                Err(err) => {
+                    warn!("the RTCP session of transport {session} could not leave: {err}")
+                }
+            }
+        }
+        for (session, overhead) in joining {
+            if let Err(err) = handler.join_rtcp_session(now, session, overhead) {
+                warn!("the RTCP session of transport {session} could not join: {err}");
+            }
+        }
+        self.pipeline_context
+            .interceptor_handler_context
+            .rtcp_joined = wanted.into_keys().collect();
     }
 
     /// Runs the pipeline's reads: `msg` up the active transport, or, without one, what every
@@ -638,6 +745,10 @@ impl RTCPeerConnection {
         let mut raised = false;
         for id in self.pipeline_context.transports.ids() {
             raised |= self.with_transport(id, |pc| pc.pump_events_on_active());
+        }
+        // A handshake that completed may have keyed a transport that carries RTP sections.
+        if raised {
+            self.sync_rtcp_sessions(self.pipeline_context.now);
         }
         // The SCTP transport's state follows its association, which any event may have moved;
         // the selected pair is the agent's, whose change event the DTLS handler consumes.

@@ -143,6 +143,8 @@ struct World {
     /// The (from address, SSRC, size) of each SRTP packet that travelled (the RTP header is in
     /// the clear).
     srtp: Vec<(SocketAddr, u32, usize)>,
+    /// The (from, to) addresses of every RTCP datagram written, delivered or lost.
+    rtcp: Vec<(SocketAddr, SocketAddr)>,
 }
 
 impl World {
@@ -182,6 +184,7 @@ impl World {
             misrouted: 0,
             trickling: vec![],
             srtp: vec![],
+            rtcp: vec![],
         })
     }
 
@@ -310,6 +313,11 @@ impl World {
         }
         let delivered = !in_flight.is_empty();
         for (from, to, data) in in_flight {
+            // RFC 7983 / RFC 5761 section 4: a first byte of 128..=191 and a packet type of
+            // 192..=223 is RTCP.
+            if data.len() >= 8 && (128..=191).contains(&data[0]) && (192..=223).contains(&data[1]) {
+                self.rtcp.push((from, to));
+            }
             if self.blocked.contains(&from) || self.blocked.contains(&to) {
                 continue;
             }
@@ -2595,5 +2603,77 @@ fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
         reported_estimates[0], reported_estimates[1],
         "each transport at a limit of its own: {reported_estimates:?}"
     );
+    Ok(())
+}
+
+/// RFC 3550 section 6, RFC 8834 section 4.4: an RTCP session runs on each transport that
+/// carries RTP m= sections, and on no other. Audio, video and data on three transports (the
+/// answer has no BUNDLE group): RTCP flows both ways on the audio and the video transport and
+/// never on the data transport, a receive-only endpoint's reports included (their reporting
+/// SSRC is no section's, and they go down their own session's transport). With the video
+/// transport's path cut, its DTLS association never completes: its RTCP session does not
+/// start, and nothing of it leaves on another transport.
+#[test]
+fn rtcp_runs_on_each_media_transport_and_never_on_the_data_transport() -> Result<()> {
+    for cut_video in [false, true] {
+        let what = format!("video path cut: {cut_video}");
+        let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+        world.negotiate(without_bundle_group)?;
+        world.gather()?;
+        for peer in &world.peers {
+            assert_eq!(3, peer.addrs.len(), "{what}: audio, video and data");
+        }
+        let addr = |world: &World, peer: usize, section: usize| world.peers[peer].addrs[section];
+        let (audio, video, data) = (0, 1, 2);
+        if cut_video {
+            let cut = addr(&world, 1, video);
+            world.blocked.insert(cut);
+            world.advance(Duration::from_secs(8))?;
+        } else {
+            world.run("connected with a data channel", |peers| {
+                peers.iter().all(|p| p.connected && p.channel.is_some())
+            })?;
+            world.advance(Duration::from_secs(8))?;
+        }
+        let on = |world: &World, section: usize| -> [usize; 2] {
+            let mut counts = [0; 2];
+            for (from, to) in &world.rtcp {
+                for (i, count) in counts.iter_mut().enumerate() {
+                    if *from == addr(world, i, section) || *to == addr(world, i, section) {
+                        *count += 1;
+                    }
+                }
+            }
+            counts
+        };
+        let from = |world: &World, peer: usize, section: usize| {
+            world
+                .rtcp
+                .iter()
+                .filter(|(from, _)| *from == addr(world, peer, section))
+                .count()
+        };
+        assert_eq!(
+            [0, 0],
+            on(&world, data),
+            "{what}: RTCP on the data transport"
+        );
+        for peer in 0..2 {
+            assert!(
+                from(&world, peer, audio) >= 2,
+                "{what}: peer {peer} on the audio transport: {:?}",
+                world.rtcp
+            );
+            let video_rtcp = from(&world, peer, video);
+            if cut_video {
+                assert_eq!(0, video_rtcp, "{what}: peer {peer}, video not keyed");
+            } else {
+                assert!(
+                    video_rtcp >= 2,
+                    "{what}: peer {peer} on the video transport"
+                );
+            }
+        }
+    }
     Ok(())
 }

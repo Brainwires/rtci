@@ -1,4 +1,5 @@
-//! The peer connection's side of the RTCP session: it starts when DTLS is up under the
+//! The peer connection's side of the RTCP session: it starts when it is joined (DTLS is up and
+//! the transport carries an RTP section: `RTCPeerConnection::sync_rtcp_sessions`) under the
 //! connection's CNAME, wraps what the application writes, says BYE on close, and is told what
 //! a retransmission was on the wire.
 
@@ -246,6 +247,7 @@ fn the_session_starts_with_dtls_under_the_connections_cname() {
     let base = Instant::now();
     assert!(handler.poll_timeout().is_none());
     handler.handle_event(handshake_complete(base)).unwrap();
+    handler.join_rtcp_session(base, 0, 0).unwrap();
 
     let sent = run(&mut handler, base + Duration::from_secs(3));
     assert!(sent.len() >= 2, "{} RTCP packets", sent.len());
@@ -255,6 +257,41 @@ fn the_session_starts_with_dtls_under_the_connections_cname() {
         assert_eq!(Some(reporter), reporter_of(packets));
         assert_eq!(vec![(reporter, cname.clone())], cname_of(packets));
     }
+}
+
+/// RFC 3550 section 6, RFC 8834 section 4.1: the DTLS handshake alone starts no RTCP session:
+/// a transport with no negotiated RTP section (a data-channel-only connection) has no RTP
+/// session, and nothing is sent until the peer connection joins one.
+#[test]
+fn the_handshake_alone_starts_no_rtcp_session() {
+    let (media_engine, registry) = defaults();
+    let mut chain = registry.build();
+    let mut transceivers = vec![receiver()];
+    let mut stats = RTCStatsAccumulator::new();
+    let mut ctx = InterceptorHandlerContext::default();
+    let mut handler = InterceptorHandler::new(
+        &mut ctx,
+        &mut transceivers,
+        &media_engine,
+        &mut chain,
+        &mut stats,
+        None,
+    );
+    let base = Instant::now();
+    handler.handle_event(handshake_complete(base)).unwrap();
+    assert!(handler.poll_timeout().is_none());
+    assert!(run(&mut handler, base + Duration::from_secs(60)).is_empty());
+
+    let joined = base + Duration::from_secs(60);
+    handler.join_rtcp_session(joined, 0, 0).unwrap();
+    assert!(!run(&mut handler, joined + Duration::from_secs(3)).is_empty());
+    handler
+        .leave_rtcp_session(joined + Duration::from_secs(3), 0)
+        .unwrap();
+    let farewell = run(&mut handler, joined + Duration::from_secs(3));
+    assert_eq!(1, farewell.len());
+    assert!(farewell[0].last().unwrap().as_any().is::<Goodbye>());
+    assert!(run(&mut handler, joined + Duration::from_secs(60)).is_empty());
 }
 
 /// Two connections do not share a CNAME (RFC 7022 section 5: random).
@@ -285,6 +322,7 @@ fn feedback_the_application_writes_leaves_in_a_compound_packet() {
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
+    handler.join_rtcp_session(base, 0, 0).unwrap();
 
     handler
         .handle_write(rtcp(
@@ -327,6 +365,7 @@ fn closing_says_bye() {
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
+    handler.join_rtcp_session(base, 0, 0).unwrap();
     let sent = run(&mut handler, base + Duration::from_secs(1));
     let reporter = reporter_of(&sent[0]).unwrap();
 
@@ -372,6 +411,7 @@ fn a_retransmission_is_reported_on_the_rtx_stream() {
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
+    handler.join_rtcp_session(base, 0, 0).unwrap();
 
     for sequence_number in [1u16, 2, 4] {
         handler
@@ -428,6 +468,7 @@ fn a_remote_cname_is_recorded() {
         );
         let base = Instant::now();
         handler.handle_event(handshake_complete(base)).unwrap();
+        handler.join_rtcp_session(base, 0, 0).unwrap();
         handler
             .handle_read(rtcp(
                 base,
@@ -476,6 +517,7 @@ fn a_collision_with_a_sender_ssrc_reaches_the_application() {
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
+    handler.join_rtcp_session(base, 0, 0).unwrap();
 
     for sequence_number in 1..=3u16 {
         handler
