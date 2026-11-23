@@ -575,8 +575,12 @@ fn reordering_that_the_cumulative_count_takes_back_does_not_trip_the_congestion_
 /// falls to 24 kB/s, and the flow is ceased.
 #[test]
 fn the_packet_size_is_that_of_the_window_the_rate_is_measured_over() {
-    let run = |packet_size: CircuitBreakerPacketSize| {
-        let mut harness = Harness::new(CircuitBreakerBuilder::new().with_packet_size(packet_size));
+    let run = |packet_size: Option<CircuitBreakerPacketSize>| {
+        let builder = match packet_size {
+            Some(packet_size) => CircuitBreakerBuilder::new().with_packet_size(packet_size),
+            None => CircuitBreakerBuilder::new(),
+        };
+        let mut harness = Harness::new(builder);
         harness.handle.report_round_trip_time(ms(100));
         let mut lost = 0;
         for second in 0..12u64 {
@@ -594,11 +598,16 @@ fn the_packet_size_is_that_of_the_window_the_rate_is_measured_over() {
     };
     assert_eq!(
         Some(CircuitBreakerState::Running),
-        run(CircuitBreakerPacketSize::SendingWindow)
+        run(None),
+        "the default is the window's packet size"
+    );
+    assert_eq!(
+        Some(CircuitBreakerState::Running),
+        run(Some(CircuitBreakerPacketSize::SendingWindow))
     );
     assert!(
         matches!(
-            run(CircuitBreakerPacketSize::LastFrames),
+            run(Some(CircuitBreakerPacketSize::LastFrames)),
             Some(CircuitBreakerState::Ceased {
                 reason: CircuitBreakerReason::Congestion,
                 ..
