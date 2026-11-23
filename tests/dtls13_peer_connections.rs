@@ -99,7 +99,7 @@ fn a_media_session_keys_srtp_from_dtls_1_3() -> Result<()> {
             assert_eq!(version, "FEFC", "peer {i}");
             assert_eq!(
                 world.peers[i].srtp_cipher(now),
-                "SRTP_AEAD_AES_128_GCM",
+                "SRTP_AEAD_AES_256_GCM",
                 "peer {i}: use_srtp was answered in EncryptedExtensions"
             );
         }
@@ -134,7 +134,7 @@ fn a_peer_without_tls_1_3_suites_gets_dtls_1_2() -> Result<()> {
                 );
                 assert_eq!(
                     world.peers[i].srtp_cipher(now),
-                    "SRTP_AEAD_AES_128_GCM",
+                    "SRTP_AEAD_AES_256_GCM",
                     "{what}"
                 );
             }

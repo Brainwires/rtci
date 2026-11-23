@@ -185,7 +185,37 @@ pub enum ContextEvent {
         /// The stream the packet belongs to.
         ssrc: u32,
     },
+    /// A received packet was discarded as a replay, or because it failed authentication: the
+    /// events RFC 3711 section 3.3 (steps 2 and 5) says should be logged. At most
+    /// [`MAX_PENDING_DISCARD_EVENTS`] of them wait in the queue: past that a flood of forged
+    /// packets is counted ([`Context::discarded_packets`]) but not queued.
+    ///
+    /// [`Context::discarded_packets`]: crate::context::Context::discarded_packets
+    PacketDiscarded {
+        /// SRTP or SRTCP.
+        kind: PacketKind,
+        /// The SSRC the packet names (not authenticated when `reason` is
+        /// [`DiscardReason::AuthenticationFailed`]).
+        ssrc: u32,
+        /// The packet's sequence number (SRTP) or SRTCP index.
+        index: u64,
+        /// Why it was discarded.
+        reason: DiscardReason,
+    },
 }
+
+/// Why [`ContextEvent::PacketDiscarded`] discarded a packet (RFC 3711 section 3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DiscardReason {
+    /// The replay list holds its index already, or it is behind the replay window (step 2).
+    Replay,
+    /// Its authentication tag does not verify (step 5).
+    AuthenticationFailed,
+}
+
+/// The most [`ContextEvent::PacketDiscarded`] events a context keeps queued.
+pub const MAX_PENDING_DISCARD_EVENTS: usize = 64;
 
 #[cfg(test)]
 mod tests {

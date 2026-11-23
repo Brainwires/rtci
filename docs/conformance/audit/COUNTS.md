@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4759 | 65 | 176 | 36 | 3 | 639 | 5678 |
-| SHOULD | 757 | 53 | 71 | 61 | 6 | 328 | 1276 |
-| MAY | 415 | 30 | 34 | 120 | 0 | 170 | 769 |
+| MUST | 4763 | 61 | 177 | 36 | 2 | 639 | 5678 |
+| SHOULD | 783 | 37 | 67 | 56 | 5 | 328 | 1276 |
+| MAY | 416 | 30 | 34 | 119 | 0 | 170 | 769 |
 | PROC | 58 | 3 | 4 | 2 | 0 | 0 | 67 |
-| all | 5989 | 151 | 285 | 219 | 9 | 1137 | 7790 |
+| all | 6020 | 131 | 282 | 213 | 7 | 1137 | 7790 |
 
 ## Per file
 
@@ -57,10 +57,10 @@ is a procedure step without a keyword.
 | `rfc3611.md` | SHOULD | 11 | 1 | 2 | 2 | 0 | 3 | 19 |
 | `rfc3611.md` | MAY | 6 | 0 | 0 | 2 | 0 | 1 | 9 |
 | `rfc3711.md` | MUST | 86 | 0 | 0 | 0 | 0 | 7 | 93 |
-| `rfc3711.md` | SHOULD | 10 | 2 | 2 | 0 | 0 | 2 | 16 |
+| `rfc3711.md` | SHOULD | 14 | 0 | 0 | 0 | 0 | 2 | 16 |
 | `rfc3711.md` | MAY | 9 | 0 | 0 | 3 | 0 | 3 | 15 |
-| `rfc3758.md` | MUST | 38 | 0 | 1 | 0 | 0 | 4 | 43 |
-| `rfc3758.md` | SHOULD | 10 | 1 | 0 | 1 | 0 | 2 | 14 |
+| `rfc3758.md` | MUST | 39 | 0 | 0 | 0 | 0 | 4 | 43 |
+| `rfc3758.md` | SHOULD | 12 | 0 | 0 | 0 | 0 | 2 | 14 |
 | `rfc3758.md` | MAY | 8 | 0 | 0 | 1 | 0 | 0 | 9 |
 | `rfc4571.md` | MUST | 4 | 0 | 0 | 0 | 0 | 9 | 13 |
 | `rfc4571.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
@@ -86,7 +86,7 @@ is a procedure step without a keyword.
 | `rfc5124.md` | MUST | 3 | 3 | 0 | 2 | 1 | 2 | 11 |
 | `rfc5124.md` | SHOULD | 0 | 2 | 0 | 0 | 0 | 3 | 5 |
 | `rfc5124.md` | MAY | 4 | 0 | 0 | 0 | 0 | 3 | 7 |
-| `rfc5246.md` | MUST | 91 | 0 | 0 | 0 | 1 | 6 | 98 |
+| `rfc5246.md` | MUST | 91 | 0 | 1 | 0 | 0 | 6 | 98 |
 | `rfc5246.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 3 | 8 |
 | `rfc5246.md` | MAY | 10 | 0 | 0 | 0 | 0 | 0 | 10 |
 | `rfc5506.md` | MUST | 13 | 0 | 0 | 0 | 0 | 0 | 13 |
@@ -101,7 +101,7 @@ is a procedure step without a keyword.
 | `rfc5761.md` | SHOULD | 2 | 1 | 0 | 0 | 0 | 3 | 6 |
 | `rfc5761.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | `rfc5764.md` | MUST | 24 | 0 | 1 | 0 | 0 | 9 | 34 |
-| `rfc5764.md` | SHOULD | 5 | 0 | 1 | 2 | 1 | 6 | 15 |
+| `rfc5764.md` | SHOULD | 8 | 0 | 1 | 0 | 0 | 6 | 15 |
 | `rfc5764.md` | MAY | 4 | 0 | 0 | 4 | 0 | 3 | 11 |
 | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `rfc5780.md` | MAY | 1 | 0 | 0 | 2 | 0 | 0 | 3 |
@@ -116,10 +116,10 @@ is a procedure step without a keyword.
 | `rfc6184.md` | SHOULD | 9 | 0 | 4 | 4 | 0 | 12 | 29 |
 | `rfc6184.md` | MAY | 6 | 0 | 2 | 2 | 0 | 5 | 15 |
 | `rfc6188.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 5 |
-| `rfc6188.md` | SHOULD | 3 | 0 | 1 | 0 | 0 | 0 | 4 |
+| `rfc6188.md` | SHOULD | 4 | 0 | 0 | 0 | 0 | 0 | 4 |
 | `rfc6188.md` | MAY | 12 | 0 | 0 | 1 | 0 | 1 | 14 |
 | `rfc6347.md` | MUST | 47 | 0 | 0 | 0 | 0 | 1 | 48 |
-| `rfc6347.md` | SHOULD | 26 | 0 | 0 | 1 | 0 | 3 | 30 |
+| `rfc6347.md` | SHOULD | 26 | 0 | 1 | 0 | 0 | 3 | 30 |
 | `rfc6347.md` | MAY | 8 | 0 | 0 | 0 | 0 | 2 | 10 |
 | `rfc6464.md` | MUST | 8 | 2 | 0 | 1 | 0 | 3 | 14 |
 | `rfc6464.md` | SHOULD | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
@@ -127,7 +127,7 @@ is a procedure step without a keyword.
 | `rfc6465.md` | MUST | 7 | 0 | 0 | 1 | 0 | 2 | 10 |
 | `rfc6465.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 2 | 3 |
 | `rfc6465.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `rfc6525.md` | MUST | 62 | 1 | 0 | 0 | 0 | 0 | 63 |
+| `rfc6525.md` | MUST | 63 | 0 | 0 | 0 | 0 | 0 | 63 |
 | `rfc6525.md` | SHOULD | 11 | 0 | 0 | 0 | 0 | 1 | 12 |
 | `rfc6525.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `rfc6544.md` | MUST | 25 | 3 | 1 | 1 | 0 | 9 | 39 |
@@ -164,7 +164,7 @@ is a procedure step without a keyword.
 | `rfc7675.md` | MUST | 12 | 0 | 0 | 0 | 0 | 1 | 13 |
 | `rfc7675.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `rfc7675.md` | MAY | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
-| `rfc7714.md` | MUST | 33 | 2 | 0 | 0 | 0 | 4 | 39 |
+| `rfc7714.md` | MUST | 34 | 0 | 1 | 0 | 0 | 4 | 39 |
 | `rfc7714.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 1 | 3 |
 | `rfc7714.md` | MAY | 4 | 0 | 0 | 0 | 0 | 1 | 5 |
 | `rfc7741.md` | MUST | 45 | 0 | 0 | 1 | 0 | 2 | 48 |
@@ -211,7 +211,7 @@ is a procedure step without a keyword.
 | `rfc8445.md` | SHOULD | 23 | 0 | 1 | 0 | 0 | 25 | 49 |
 | `rfc8445.md` | MAY | 8 | 0 | 0 | 3 | 0 | 5 | 16 |
 | `rfc8446.md` | MUST | 230 | 0 | 0 | 0 | 0 | 83 | 313 |
-| `rfc8446.md` | SHOULD | 32 | 4 | 3 | 0 | 0 | 34 | 73 |
+| `rfc8446.md` | SHOULD | 36 | 0 | 3 | 0 | 0 | 34 | 73 |
 | `rfc8446.md` | MAY | 16 | 2 | 0 | 0 | 0 | 30 | 48 |
 | `rfc8489.md` | MUST | 105 | 0 | 0 | 0 | 0 | 14 | 119 |
 | `rfc8489.md` | SHOULD | 23 | 0 | 1 | 0 | 0 | 0 | 24 |
@@ -224,8 +224,8 @@ is a procedure step without a keyword.
 | `rfc8656.md` | MAY | 12 | 0 | 0 | 0 | 0 | 12 | 24 |
 | `rfc8656.md` | PROC | 37 | 1 | 1 | 1 | 0 | 0 | 40 |
 | `rfc8826.md` | MUST | 4 | 0 | 1 | 0 | 0 | 2 | 7 |
-| `rfc8826.md` | SHOULD | 6 | 1 | 0 | 0 | 0 | 1 | 8 |
-| `rfc8827.md` | MUST | 34 | 1 | 0 | 0 | 0 | 19 | 54 |
+| `rfc8826.md` | SHOULD | 7 | 0 | 0 | 0 | 0 | 1 | 8 |
+| `rfc8827.md` | MUST | 35 | 0 | 0 | 0 | 0 | 19 | 54 |
 | `rfc8827.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 4 | 6 |
 | `rfc8827.md` | MAY | 3 | 0 | 0 | 0 | 0 | 0 | 3 |
 | `rfc8828.md` | MUST | 0 | 0 | 0 | 0 | 0 | 7 | 7 |
@@ -290,11 +290,11 @@ is a procedure step without a keyword.
 | `rfc9146.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
 | `rfc9146.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9147.md` | MUST | 90 | 0 | 0 | 0 | 0 | 4 | 94 |
-| `rfc9147.md` | SHOULD | 39 | 7 | 6 | 0 | 0 | 8 | 60 |
+| `rfc9147.md` | SHOULD | 48 | 0 | 4 | 0 | 0 | 8 | 60 |
 | `rfc9147.md` | MAY | 17 | 2 | 0 | 0 | 0 | 5 | 24 |
 | `rfc9260.md` | MUST | 287 | 0 | 0 | 0 | 0 | 28 | 315 |
-| `rfc9260.md` | SHOULD | 150 | 5 | 8 | 4 | 0 | 23 | 190 |
-| `rfc9260.md` | MAY | 29 | 0 | 5 | 23 | 0 | 15 | 72 |
+| `rfc9260.md` | SHOULD | 152 | 4 | 8 | 3 | 0 | 23 | 190 |
+| `rfc9260.md` | MAY | 30 | 0 | 5 | 22 | 0 | 15 | 72 |
 | `rfc9335.md` | MUST | 20 | 2 | 1 | 0 | 0 | 0 | 23 |
 | `rfc9335.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9335.md` | MAY | 1 | 1 | 2 | 0 | 0 | 0 | 4 |

@@ -108,10 +108,12 @@ fn forward_tsn_releases_ordered_data_whatever_this_side_sends() -> Result<()> {
     Ok(())
 }
 
-/// RFC 3758 4.1 (TR3, TR4): the lifetime of a message is checked before it is transmitted.
-/// An ordered message whose lifetime ran out while it waited for the window was sent all the
-/// same; only unordered ones were dropped. It is abandoned, and since its stream sequence
-/// number is spoken for, a FORWARD TSN tells the peer to pass over it.
+/// RFC 3758 4.1 (TR3, TR4): the lifetime of a message is checked before it is transmitted,
+/// and an expired message MUST NOT get a TSN. An ordered message whose lifetime ran out while
+/// it waited for the window was sent all the same; later it was abandoned with a TSN and a
+/// FORWARD TSN, because its stream sequence number was given when it was written. A message
+/// now takes its stream sequence number when its first fragment is sent: the expired one is
+/// dropped with neither a TSN nor a number, and the next message takes both.
 #[test]
 fn an_ordered_message_that_expired_in_the_queue_is_not_sent() -> Result<()> {
     let mut a = timed_test_association();
@@ -126,6 +128,7 @@ fn an_ordered_message_that_expired_in_the_queue_is_not_sent() -> Result<()> {
     }
     let sent = transmitted_data(&a.gather_outbound(start).0);
     assert_eq!(vec![first], sent.iter().map(|c| c.tsn).collect::<Vec<_>>());
+    assert_eq!(0, sent[0].stream_sequence_number);
 
     // A second later the window opens. The second message is ten lifetimes old.
     let later = start + Duration::from_secs(1);
@@ -145,25 +148,30 @@ fn an_ordered_message_that_expired_in_the_queue_is_not_sent() -> Result<()> {
     assert_eq!(1, sent.len(), "only the message written just now");
     assert_eq!(2, sent[0].user_data[0]);
     assert_eq!(
-        2, sent[0].stream_sequence_number,
-        "its sequence number is its own"
+        first.wrapping_add(1),
+        sent[0].tsn,
+        "the expired message took no TSN"
     );
-
-    let forward = forward_tsns(&datagrams);
     assert_eq!(
-        1,
-        forward.len(),
-        "the peer is told to pass over the expired message"
+        1, sent[0].stream_sequence_number,
+        "the expired message took no stream sequence number"
     );
-    assert_eq!(first.wrapping_add(1), forward[0].new_cumulative_tsn);
-    assert_eq!(
-        vec![(1, 1)],
-        forward[0]
-            .streams
-            .iter()
-            .map(|s| (s.identifier, s.sequence))
-            .collect::<Vec<_>>()
+    assert!(
+        forward_tsns(&datagrams).is_empty(),
+        "nothing for the peer to pass over"
     );
+    // RFC 3758 4.1 TR3: "SHOULD issue a notification to the upper layer".
+    let abandoned: Vec<(u16, bool)> = a
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Stream(StreamEvent::MessageAbandoned { id, transmitted }) => {
+                Some((*id, *transmitted))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(abandoned, vec![(1, false)], "the upper layer is told");
     Ok(())
 }
 
