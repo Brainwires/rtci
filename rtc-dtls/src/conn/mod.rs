@@ -176,6 +176,9 @@ pub struct DTLSConn {
     /// associations for one address (RFC 6347 4.2.8) reads from it which of them a protected
     /// record belongs to.
     pub(crate) authenticated_records: u64,
+    /// DTLS 1.2: protected records discarded because they failed authentication (RFC 6347
+    /// 4.2.7: a peer that persistently sends bad messages; see `with_invalid_record_limit`).
+    pub(crate) invalid_records: u64,
     /// DTLS 1.3 server: the client's post-handshake authentications verified so far.
     pub(crate) post_handshake_authentications: u64,
     /// DTLS 1.2: the newest (epoch, sequence number) of a record that authenticated. RFC 9146
@@ -313,6 +316,7 @@ impl DTLSConn {
             fatal_alert_sent: None,
             fatal_alert_received: None,
             authenticated_records: 0,
+            invalid_records: 0,
             post_handshake_authentications: 0,
             newest_authenticated_record: None,
 
@@ -686,6 +690,7 @@ impl DTLSConn {
                     );
                     v13.set_next_receive_seq(message_seq);
                     v13.clock = self.state.clock;
+                    v13.continue_retransmit_interval(self.current_retransmit_interval);
                     let server_hello = crate::dtls13::record::plaintext_record(
                         crate::dtls13::record::CONTENT_TYPE_HANDSHAKE,
                         record.sequence_number,
@@ -1807,6 +1812,22 @@ impl DTLSConn {
                                 None,
                             );
                         } else {
+                            // RFC 6347 4.2.7: a peer that keeps sending bad records is given
+                            // up on, where the configuration sets a limit; without an alert,
+                            // since whoever sent them is not known to be the peer.
+                            self.invalid_records += 1;
+                            if self
+                                .handshake_config
+                                .invalid_record_limit
+                                .is_some_and(|limit| self.invalid_records > limit)
+                            {
+                                warn!(
+                                    "{}: {} invalid records, over the configured limit",
+                                    srv_cli_str(self.is_client),
+                                    self.invalid_records
+                                );
+                                self.fail();
+                            }
                             return (false, None, None);
                         }
                     }

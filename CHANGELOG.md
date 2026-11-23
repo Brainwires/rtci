@@ -1475,6 +1475,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **srtp**, **peer_connection**: a replayed SRTP/SRTCP packet and one that fails
+  authentication are reported (RFC 3711 section 3.3: "the event SHOULD be logged"):
+  `srtp::keying::ContextEvent::PacketDiscarded { kind, ssrc, index, reason }` with
+  `DiscardReason::{Replay, AuthenticationFailed}` (at most `MAX_PENDING_DISCARD_EVENTS` = 64
+  queued per context; a flood is counted, `Context::discarded_packets()`), and in the peer
+  connection `RTCPeerConnectionEvent::OnSrtpPacketDiscarded { rtcp, ssrc, index, replay }`,
+  logged at `warn`.
+- **dtls**: `ConfigBuilder::with_invalid_record_limit` applies to DTLS 1.2 too (RFC 6347
+  section 4.2.7): a DTLS 1.2 association that receives more protected records failing
+  authentication than the limit fails, without an alert. Off by default, as for 1.3.
 - **dtls**: DTLS 1.2 CBC records (not in the WebRTC default set) are unprotected in constant
   time for every padding length (RFC 5246 section 6.2.3.2, Lucky Thirteen): the received MAC is
   read through a mask from every offset it could have, and an equalizing HMAC makes the SHA-1
@@ -1522,6 +1532,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls**: a non-empty renegotiation_info in an initial handshake is a fatal handshake_failure on
   both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
   `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
+
+### Testing (sec-10)
+
+- **sctp** interop: `sctp_rfc_defaults_interop::an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent`
+  checks RFC 3758 4.1 TR3 numbering at transmission against the `webrtc` 0.17 SCTP: messages
+  of an ordered lifetime channel that expire unsent take no stream sequence number, and the
+  messages written after them are delivered in order. The browser matrix logs each cell's
+  negotiated `tlsVersion`, `dtlsCipher` and `srtpCipher` and accepts AES-256-GCM suites.
 
 ### Behaviour changes
 
@@ -1589,6 +1607,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `conf/tcp-5-train-fixes`). Each transport's `packetsSent` / `bytesSent` / `packetsReceived` /
   `bytesReceived` / `selectedCandidatePairChanges` is its own (asserted in
   `statistics_have_a_transport_object_per_transport`).
+- **peer_connection** (sec-10, RFC 5764 section 4.4): the connection re-keys SRTP by itself.
+  When a DTLS-SRTP master key, outbound or inbound, has a sixteenth of its lifetime left, it
+  asks for a new DTLS association as `renew_dtls_association()` does and raises
+  negotiation-needed; the application's next offer/answer makes the new association, media goes
+  on under the old keys until its handshake hands over the new ones, and the data channels go
+  on over it. `SettingEngineBuilder::with_srtp_automatic_rekeying(false)` turns it off (the
+  application gets `OnSrtpKeyLifetimeExpiring` only, and the transport fails at the limit, as
+  before). With the default lifetimes (2^31 packets and more) a call does not get there.
+- **peer_connection** (sec-10, RFC 9429 section 5.8.3, RFC 8842 section 6):
+  `renew_dtls_association()` also restarts ICE: the offer with the new `a=tls-id` carries new
+  ICE credentials, as a description that changes the `tls-id` of an association in use must.
+- **peer_connection**: the default DTLS-SRTP profiles put `SRTP_AEAD_AES_256_GCM` first, ahead
+  of `SRTP_AEAD_AES_128_GCM` and `SRTP_AES128_CM_HMAC_SHA1_80` (RFC 3711 section 9.2: keys "as
+  large as possible"; RFC 6188 section 6). Two engine peers now negotiate AES-256-GCM; every
+  browser offers it. `SettingEngineBuilder::with_srtp_protection_profiles` sets another order.
+- **peer_connection**: after a new DTLS association (a new `tls-id`, `renew_dtls_association`)
+  the inbound SRTP keys of the one before are kept for 10 s for its late packets (RFC 5764
+  section 4.3), for each stream until a packet of it has arrived under the new keys. Nothing
+  is sent with them.
+- **sctp**: an outgoing message takes its Stream Sequence Number (and its I-DATA Message
+  Identifier) when its first fragment leaves the send queue, no longer when it is written. An
+  ordered message whose lifetime runs out before it is sent is dropped without a TSN, a stream
+  sequence number or a FORWARD TSN (RFC 3758 section 4.1 TR3, TR4); the next message of the
+  stream takes the number. New `StreamEvent::MessageAbandoned { id, transmitted }` for every
+  abandoned message (TR3: the upper layer is told).
 - **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
   readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
   protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
@@ -2126,6 +2169,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `Association::peer_abort_reason()` (the Upper Layer Abort Reason of the peer's
+  User-Initiated Abort, RFC 9260 sections 3.3.10.12 and 9.1) and
+  `Association::abort_with_reason(&[u8])`.
 - **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
   association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
   new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
@@ -3500,6 +3546,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a later packet of it (the segment began at the first packet to arrive and the earlier ones
   were released as consumed); NAL units now come out in sequence-number order from the start
   (RFC 6184 sections 5.6, 5.8; RFC 7798 section 6).
+- **peer_connection**, **sctp**: a data channel closed by the peer's restart of the SCTP
+  association kept every byte it had been given as its final `bufferedAmount`: what its stream
+  had sent is now reported before the channel closes (`SCTPStreamDequeued`, from the new
+  `Association::streams_lost_in_restart`), so only the unsent bytes remain.
+- **dtls**: a DTLS 1.3 client whose ClientHello was retransmitted kept the backed-off
+  retransmission timer only until the ServerHello: the association that goes on as DTLS 1.3
+  started again from the initial value. It now takes the backed-off value over (RFC 9147
+  section 5.8.2: kept until a flight gets through without retransmission).
 - **sctp**, **datachannel**: a peer that restarts the SCTP association (RFC 9260 5.2.4 action
   A) no longer closes the SCTP transport. The peer connection's SCTP handler took every
   endpoint event of an association for its drain and removed the association, and since the

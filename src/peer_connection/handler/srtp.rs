@@ -7,20 +7,33 @@ use crate::peer_connection::message::internal::{
 
 use crate::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use interceptor::Packet;
-use log::debug;
+use log::{debug, warn};
 use shared::error::{Error, Result};
 use shared::marshal::{Marshal, Unmarshal};
 use shared::util::is_rtcp;
 use srtp::context::Context;
 use srtp::cryptex::Cryptex;
 use srtp::header_extension::EncryptedHeaderExtensions;
-use std::collections::VecDeque;
-use std::time::Instant;
+use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+/// How long the inbound context of the association before a new one is kept, for packets
+/// it protected that arrive late (RFC 5764 section 4.3).
+pub(crate) const PREVIOUS_SRTP_KEYS_LINGER: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub(crate) struct SrtpHandlerContext {
     pub(crate) local_srtp_context: Option<Context>,
     pub(crate) remote_srtp_context: Option<Context>,
+    /// RFC 5764 section 4.3: "DTLS-SRTP implementations SHOULD store multiple SRTP keys sets
+    /// during a rekey in order to avoid the need for receivers to drop packets for which they
+    /// lack a key." The inbound context a new handshake replaced, and until when it is kept.
+    /// It only unprotects: nothing is sent with it.
+    pub(crate) previous_remote_srtp_context: Option<(Context, Instant)>,
+    /// The SSRCs whose packets the current inbound context has authenticated: from then on,
+    /// their packets are not tried with the previous context (it has a later sender's key
+    /// behind it, so an old-key packet now is a replay of the old association, not a late one).
+    pub(crate) ssrcs_under_current_keys: HashSet<u32>,
 
     /// `RTCRtpHeaderEncryptionPolicy` (webrtc-extensions); see `peer_connection::cryptex`.
     pub(crate) rtp_header_encryption_policy: RTCRtpHeaderEncryptionPolicy,
@@ -76,6 +89,54 @@ pub(crate) fn parse_received_rtcp(
 }
 
 impl SrtpHandlerContext {
+    /// Unprotects an inbound SRTP (`rtcp` false) or SRTCP packet with the current keys, or,
+    /// for a packet of a stream the current keys have not authenticated yet, with the keys
+    /// of the association before while they are kept (RFC 5764 section 4.3).
+    fn unprotect(&mut self, now: Instant, message: &[u8], rtcp: bool) -> Result<bytes::BytesMut> {
+        let ssrc_at = if rtcp { 4..8 } else { 8..12 };
+        let ssrc = message
+            .get(ssrc_at)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        if self
+            .previous_remote_srtp_context
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.previous_remote_srtp_context = None;
+        }
+        if let (Some((previous, _)), Some(ssrc)) =
+            (self.previous_remote_srtp_context.as_mut(), ssrc)
+            && !self.ssrcs_under_current_keys.contains(&ssrc)
+        {
+            let late = if rtcp {
+                previous.decrypt_rtcp(message)
+            } else {
+                previous.decrypt_rtp(message)
+            };
+            // What the old context has to say is not the application's concern: a packet it
+            // refuses is tried with the current keys, which report it.
+            while previous.poll_event().is_some() {}
+            if let Ok(plain) = late {
+                return Ok(plain);
+            }
+        }
+        let context = self
+            .remote_srtp_context
+            .as_mut()
+            .ok_or_else(|| Error::Other("no inbound SRTP context".to_owned()))?;
+        let plain = if rtcp {
+            context.decrypt_rtcp(message)?
+        } else {
+            context.decrypt_rtp(message)?
+        };
+        if let Some(ssrc) = ssrc
+            && self.previous_remote_srtp_context.is_some()
+        {
+            self.ssrcs_under_current_keys.insert(ssrc);
+        }
+        Ok(plain)
+    }
+
     /// Records how the SRTP contexts use Cryptex and applies it to the ones in place.
     pub(crate) fn set_cryptex(&mut self, cryptex: Cryptex) {
         self.cryptex = cryptex;
@@ -152,6 +213,23 @@ impl<'a> SrtpHandler<'a> {
                             RTCPeerConnectionEvent::OnCryptexRequiredViolation(ssrc),
                         )
                     }
+                    ContextEvent::PacketDiscarded {
+                        kind,
+                        ssrc,
+                        index,
+                        reason,
+                    } => {
+                        // RFC 3711 section 3.3: logged, and told to the application.
+                        warn!("{kind:?} packet discarded: SSRC {ssrc}, index {index}, {reason:?}");
+                        RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnSrtpPacketDiscarded {
+                                rtcp: kind == PacketKind::Rtcp,
+                                ssrc,
+                                index,
+                                replay: reason == srtp::keying::DiscardReason::Replay,
+                            },
+                        )
+                    }
                     _ => continue,
                 });
             }
@@ -181,8 +259,8 @@ impl<'a>
 
             #[allow(clippy::collapsible_else_if)]
             if is_rtcp(&message) {
-                if let Some(context) = self.ctx.remote_srtp_context.as_mut() {
-                    let decrypted = context.decrypt_rtcp(&message)?;
+                if self.ctx.remote_srtp_context.is_some() {
+                    let decrypted = self.ctx.unprotect(msg.now, &message, true)?;
                     let rtcp_packets = parse_received_rtcp(
                         &decrypted,
                         self.ctx.strict_rtcp_validity,
@@ -203,8 +281,8 @@ impl<'a>
                     )));
                 }
             } else {
-                if let Some(context) = self.ctx.remote_srtp_context.as_mut() {
-                    let mut decrypted = context.decrypt_rtp(&message)?;
+                if self.ctx.remote_srtp_context.is_some() {
+                    let mut decrypted = self.ctx.unprotect(msg.now, &message, false)?;
                     let rtp_packet = rtp::Packet::unmarshal(&mut decrypted)?;
 
                     self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
@@ -320,7 +398,16 @@ impl<'a>
             debug!("srtp recv dtls handshake complete");
 
             self.ctx.local_srtp_context = local_srtp_context.take();
-            self.ctx.remote_srtp_context = remote_srtp_context.take();
+            let previous = std::mem::replace(
+                &mut self.ctx.remote_srtp_context,
+                remote_srtp_context.take(),
+            );
+            // RFC 5764 section 4.3: the keys of the association before are kept a while for
+            // its packets still on their way.
+            self.ctx.previous_remote_srtp_context = previous
+                .filter(|_| self.ctx.remote_srtp_context.is_some())
+                .map(|context| (context, evt.now + PREVIOUS_SRTP_KEYS_LINGER));
+            self.ctx.ssrcs_under_current_keys.clear();
             let cryptex = self.ctx.cryptex;
             self.ctx.set_cryptex(cryptex);
             let encrypted = self.ctx.encrypted_header_extensions;
@@ -518,21 +605,91 @@ mod tests {
             context(1).decrypt_rtp(&second).is_err(),
             "the first association's key no longer protects packets"
         );
-        // Inbound, too: a packet under the old key is refused.
+        // Inbound, too: once the new key has carried a stream's packets, a packet of that
+        // stream under the old key is refused.
+        let mut sender = context(2);
+        read_raw(
+            &mut ctx,
+            sender
+                .encrypt_rtp(&rtp_packet().marshal().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
         let old = context(1)
             .encrypt_rtp(&rtp_packet().marshal().unwrap())
             .unwrap();
-        let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
-            now: Instant::now(),
+        assert!(read_raw(&mut ctx, old).is_err());
+    }
+
+    fn read_raw(ctx: &mut SrtpHandlerContext, raw: BytesMut) -> Result<()> {
+        read_raw_at(ctx, raw, Instant::now())
+    }
+
+    fn read_raw_at(ctx: &mut SrtpHandlerContext, raw: BytesMut, now: Instant) -> Result<()> {
+        SrtpHandler::new(ctx).handle_read(TaggedRTCMessageInternal {
+            now,
             transport: TransportContext::default(),
-            message: RTCMessageInternal::Rtp(RTPMessage::Raw(old)),
-        });
-        assert!(read.is_err());
+            message: RTCMessageInternal::Rtp(RTPMessage::Raw(raw)),
+        })?;
+        SrtpHandler::new(ctx).poll_read();
+        Ok(())
+    }
+
+    fn rtp_with_ssrc(ssrc: u32, sequence_number: u16) -> Vec<u8> {
+        let mut packet = rtp_packet();
+        packet.header.ssrc = ssrc;
+        packet.header.sequence_number = sequence_number;
+        packet.marshal().unwrap().to_vec()
+    }
+
+    /// RFC 5764 section 4.3: "DTLS-SRTP implementations SHOULD store multiple SRTP keys sets
+    /// during a rekey in order to avoid the need for receivers to drop packets for which they
+    /// lack a key." After a new handshake, a packet the peer protected with the old key and
+    /// that arrives late is still read, for a stream the new key has not carried yet and for
+    /// a while; nothing is sent with the old key.
+    #[test]
+    fn a_late_packet_under_the_previous_keys_is_still_read() {
+        let start = Instant::now();
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let mut old_sender = context(1);
+        let late_a = old_sender.encrypt_rtp(&rtp_with_ssrc(0xa, 10)).unwrap();
+        let late_b = old_sender.encrypt_rtp(&rtp_with_ssrc(0xb, 10)).unwrap();
+        let late_c = old_sender.encrypt_rtp(&rtp_with_ssrc(0xc, 10)).unwrap();
+        let late_rtcp = old_sender.encrypt_rtcp(&sender_report()).unwrap();
+
+        SrtpHandler::new(&mut ctx)
+            .handle_event(TaggedRTCEventInternal {
+                now: start,
+                event: RTCEventInternal::DTLSHandshakeComplete(Some(context(2)), Some(context(2))),
+            })
+            .unwrap();
+        assert!(
+            context(2).decrypt_rtp(&protected(&mut ctx, 3)).is_ok(),
+            "sent with the new key only"
+        );
+        read_raw_at(&mut ctx, late_a, start).expect("a late packet under the old key");
+        read_raw_at(&mut ctx, late_rtcp, start).expect("a late SRTCP packet under the old key");
+
+        // Stream 0xb has a packet under the new key: an old-key one after it is refused.
+        let mut new_sender = context(2);
+        read_raw_at(
+            &mut ctx,
+            new_sender.encrypt_rtp(&rtp_with_ssrc(0xb, 11)).unwrap(),
+            start,
+        )
+        .unwrap();
+        assert!(read_raw_at(&mut ctx, late_b, start).is_err());
+
+        // After the old keys' time, nothing under them is read.
+        assert!(read_raw_at(&mut ctx, late_c, start + PREVIOUS_SRTP_KEYS_LINGER).is_err());
+        assert!(ctx.previous_remote_srtp_context.is_none());
     }
 
     /// RFC 5764 section 7.3.1: a packet that fails SRTP authentication produces no DTLS alert
-    /// (and nothing else on the wire): it is an error for the pipeline to log, and the
-    /// contexts go on.
+    /// (and nothing else on the wire): it is an error for the pipeline, and the contexts go
+    /// on. RFC 3711 section 3.3 step 5: the failure is logged and reported to the
+    /// application (`OnSrtpPacketDiscarded`).
     #[test]
     fn an_srtp_failure_sends_nothing() {
         let mut ctx = SrtpHandlerContext::default();
@@ -552,9 +709,23 @@ mod tests {
         assert!(handler.poll_write().is_none());
         assert!(handler.poll_read().is_none());
         assert!(
-            handler.poll_event().is_some(),
-            "only the handshake event itself"
+            matches!(
+                handler.poll_event().map(|e| e.event),
+                Some(RTCEventInternal::DTLSHandshakeComplete(..))
+            ),
+            "the handshake event itself"
         );
+        assert!(matches!(
+            handler.poll_event().map(|e| e.event),
+            Some(RTCEventInternal::RTCPeerConnectionEvent(
+                RTCPeerConnectionEvent::OnSrtpPacketDiscarded {
+                    rtcp: false,
+                    ssrc: 0x1234_5678,
+                    index: 1,
+                    replay: false,
+                }
+            ))
+        ));
         assert!(handler.poll_event().is_none());
         // A genuine packet is still read.
         let genuine = context(1)
@@ -568,6 +739,62 @@ mod tests {
             })
             .unwrap();
         assert!(SrtpHandler::new(&mut ctx).poll_read().is_some());
+    }
+
+    /// RFC 3711 section 3.3 step 2: a replayed packet is discarded, and the event is logged
+    /// and reported to the application (`OnSrtpPacketDiscarded` with `replay`).
+    #[test]
+    fn a_replayed_srtp_packet_is_reported() {
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        let replay_protected = || {
+            Context::new(
+                &[1; 16],
+                &[1; 14],
+                srtp::protection_profile::ProtectionProfile::Aes128CmHmacSha1_80,
+                Some(srtp::option::srtp_replay_protection(64).unwrap()),
+                None,
+                provider.crypto(),
+            )
+            .expect("an SRTP context")
+        };
+        let mut ctx = SrtpHandlerContext::default();
+        SrtpHandler::new(&mut ctx)
+            .handle_event(TaggedRTCEventInternal {
+                now: Instant::now(),
+                event: RTCEventInternal::DTLSHandshakeComplete(
+                    Some(replay_protected()),
+                    Some(replay_protected()),
+                ),
+            })
+            .unwrap();
+        let packet = context(1)
+            .encrypt_rtp(&rtp_packet().marshal().unwrap())
+            .unwrap();
+        for (i, raw) in [packet.clone(), packet].into_iter().enumerate() {
+            let read = SrtpHandler::new(&mut ctx).handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(raw)),
+            });
+            assert_eq!(read.is_ok(), i == 0);
+        }
+        let mut handler = SrtpHandler::new(&mut ctx);
+        let events: Vec<_> = std::iter::from_fn(|| handler.poll_event().map(|e| e.event)).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnSrtpPacketDiscarded {
+                        rtcp: false,
+                        ssrc: 0x1234_5678,
+                        index: 1,
+                        replay: true,
+                    }
+                )
+            )),
+            "{} events, none the replay",
+            events.len()
+        );
     }
 
     /// The RTCP packets read from one protected datagram.

@@ -64,3 +64,19 @@ section 3 trace (the TLS 1.3 key schedule down to a traffic key and IV), RFC 900
 (the AES-128 and ChaCha20 masks) and RSASSA-PSS signatures made with OpenSSL. RFC 9147 itself
 publishes no test vectors; what is specific to DTLS 1.3 is checked against handshakes
 recorded with OpenSSL in `rtc-dtls`.
+
+## RSA PKCS#1 v1.5 DigestInfo without parameters
+
+RFC 5246 section 4.7 (and RFC 8017 section 9.2, note 1) has a verifier of an RSASSA-PKCS1-v1_5
+signature accept the DigestInfo whose AlgorithmIdentifier parameters are NULL and the one
+where they are absent. Both providers accept the NULL form only, and neither exposes the raw
+public operation that would let the engine check the other form itself, so RFC5246-4.7-1 is
+`partial`. The `rsa` crate is not an option (RUSTSEC-2023-0071, Marvin). Text the owner could
+file upstream (ring, and aws-lc-rs / AWS-LC):
+
+> RSA PKCS#1 v1.5 verification accepts only the DigestInfo encoding with NULL parameters.
+> RFC 8017 section 9.2 note 1 and RFC 5246 section 4.7 ask verifiers to accept the encoding
+> with the parameters absent as well (`SEQUENCE { SEQUENCE { OID } , OCTET STRING }`). Could
+> the PKCS#1 v1.5 verification algorithms (`RSA_PKCS1_2048_8192_SHA256` and the others) accept
+> both encodings, or a separate verification algorithm be offered that does? A raw RSA public
+> operation (`s^e mod n`) in the public API would serve as well.

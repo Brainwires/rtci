@@ -24,6 +24,16 @@ impl Context {
         encrypted: &[u8],
         header: &rtp::Header,
     ) -> Result<BytesMut> {
+        let result = self.unprotect_rtp(encrypted, header);
+        self.note_unprotect_result(
+            PacketKind::Rtp,
+            header.ssrc,
+            u64::from(header.sequence_number),
+            result,
+        )
+    }
+
+    fn unprotect_rtp(&mut self, encrypted: &[u8], header: &rtp::Header) -> Result<BytesMut> {
         let auth_tag_len = self.profile.rtp_auth_tag_len();
         let mki_len = self.mki_field_len();
         if encrypted.len() < header.marshal_size() + auth_tag_len + mki_len {

@@ -495,6 +495,41 @@ pub fn assert_key_exchange(crypto: &dyn RTCCrypto) {
             Err(CryptoError::InvalidPublicKey)
         ));
     }
+    assert_x25519_rfc7748(crypto);
+}
+
+/// RFC 8446 section 7.4.2 for X25519: the shared secret is computed as RFC 7748 specifies
+/// (32-byte little-endian u-coordinates, a 32-byte output), and with the check of RFC 7748
+/// section 6.1: a peer key of small order, whose output is all zeros, is refused.
+fn assert_x25519_rfc7748(crypto: &dyn RTCCrypto) {
+    let left = crypto
+        .start_key_exchange(KeyExchangeAlgorithm::X25519)
+        .unwrap();
+    let right = crypto
+        .start_key_exchange(KeyExchangeAlgorithm::X25519)
+        .unwrap();
+    assert_eq!(left.public_key().len(), 32);
+    let right_public = right.public_key().to_vec();
+    assert_eq!(left.complete(&right_public).unwrap().len(), 32);
+
+    // Points of small order (RFC 7748 section 6.1; the list of libsodium and of
+    // "Montgomery curves and their arithmetic"): 0, 1, and a point of order 8.
+    let mut one = [0u8; 32];
+    one[0] = 1;
+    let order_eight: [u8; 32] = [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ];
+    for small in [[0u8; 32], one, order_eight] {
+        let exchange = crypto
+            .start_key_exchange(KeyExchangeAlgorithm::X25519)
+            .unwrap();
+        assert!(
+            exchange.complete(&small).is_err(),
+            "a small-order X25519 key gives the all-zero secret and is refused: {small:02x?}"
+        );
+    }
 }
 
 /// Checks the responder's side of a key exchange, and X25519MLKEM768

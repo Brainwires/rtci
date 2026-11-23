@@ -31,6 +31,7 @@ use crate::peer_connection::message::{
 };
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::RTCDtlsTransportState;
 use crate::peer_connection::transport::sctp::SctpPath;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
@@ -603,6 +604,24 @@ impl RTCPeerConnection {
         }
     }
 
+    /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
+    /// be established". A key of the active transport has a sixteenth of its lifetime left:
+    /// unless the application turned it off, a new association is asked for as
+    /// `renew_dtls_association` does (new `tls-id`, ICE restart, negotiation-needed), once per
+    /// association, and only while the one in use is connected (a renewal under way, or a
+    /// transport that failed or closed, is left alone).
+    fn renew_before_the_key_lifetime_ends(&mut self) {
+        if self.setting_engine.srtp_automatic_rekeying_off || self.is_closed() {
+            return;
+        }
+        let dtls = self.dtls_transport();
+        if dtls.renewal_requested || dtls.state() != RTCDtlsTransportState::Connected {
+            return;
+        }
+        log::debug!("an SRTP master key is near its lifetime: asking for a new DTLS association");
+        self.renew_dtls_association();
+    }
+
     /// Whether the active transport is the one the SCTP association runs over.
     fn active_carries_data(&self) -> bool {
         let transports = &self.pipeline_context.transports;
@@ -733,7 +752,14 @@ impl RTCPeerConnection {
                     RTCTransportEventKind::CandidatePairRemove(pair),
                 ),
                 RTCEventInternal::RTCPeerConnectionEvent(evt) => {
+                    let expiring = matches!(
+                        evt,
+                        RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. }
+                    );
                     self.pipeline_context.event_outs.push_back(evt);
+                    if expiring {
+                        self.renew_before_the_key_lifetime_ends();
+                    }
                 }
                 _ => {}
             }

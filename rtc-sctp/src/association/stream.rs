@@ -72,6 +72,15 @@ pub enum StreamEvent {
         /// User payload bytes released
         n_bytes: usize,
     },
+    /// A message of a partially reliable stream was abandoned (RFC 3758 section 3.5, 4.1):
+    /// its lifetime or its number of retransmissions ran out, and the peer will not get it.
+    MessageAbandoned {
+        /// The stream the message was written to
+        id: StreamId,
+        /// Whether any of it had been sent. A message that expired before its first
+        /// transmission (RFC 3758 4.1 TR3) took no TSN and no stream sequence number.
+        transmitted: bool,
+    },
 }
 
 /// Reliability type for stream
@@ -590,7 +599,7 @@ impl StreamState {
     /// The numbers of the next message of this stream: its Stream Sequence Number (the
     /// stream's current one for an unordered message, which does not use it up) and its
     /// Message Identifier.
-    fn next_message_numbers(&mut self, unordered: bool) -> (u16, u32) {
+    pub(crate) fn next_message_numbers(&mut self, unordered: bool) -> (u16, u32) {
         if unordered {
             let mid = self.unordered_mid;
             self.unordered_mid = self.unordered_mid.wrapping_add(1);
@@ -611,21 +620,6 @@ impl StreamState {
         self.sequence_number = 0;
         self.ordered_mid = 0;
         self.unordered_mid = 0;
-    }
-
-    /// Gives a message that was held for a stream reset its Stream Sequence Number.
-    pub(crate) fn number_held_message(&mut self, chunks: &mut [ChunkPayloadData]) {
-        let Some(first) = chunks.first() else {
-            return;
-        };
-        let unordered = first.unordered;
-        let (ssn, mid) = self.next_message_numbers(unordered);
-        for c in chunks {
-            if !unordered {
-                c.stream_sequence_number = ssn;
-            }
-            c.mid = mid;
-        }
     }
 
     pub(crate) fn handle_data(&mut self, pd: &ChunkPayloadData) -> bool {
@@ -679,13 +673,11 @@ impl StreamState {
         };
 
         let mut chunks = vec![];
-        // While a reset of the stream is pending the message gets its numbers later.
-        let (ssn, mid) = if self.outgoing_reset_pending {
-            (0, 0)
-        } else {
-            self.next_message_numbers(unordered)
-        };
-        let ssn = if unordered { self.sequence_number } else { ssn };
+        // The message takes its Stream Sequence Number and Message Identifier when its first
+        // fragment leaves the pending queue (`Association::number_next_message`): one that is
+        // abandoned before that uses up neither (RFC 3758 4.1 TR3), and one written while a
+        // reset of the stream is pending is numbered after the reset (RFC 6525 5.1.2 A1).
+        let (ssn, mid) = (0, 0);
         let mut fsn = 0u32;
 
         while remaining != 0 {
@@ -713,6 +705,7 @@ impl StreamState {
                 i_data,
                 mid,
                 fsn,
+                numbers_pending: true,
                 ..Default::default()
             };
 
