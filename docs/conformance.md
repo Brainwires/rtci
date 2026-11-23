@@ -44,9 +44,8 @@ The rest of the evidence that the claims hold:
 | # | Claim | What the engine does |
 |---|---|---|
 | D1 | ULPFEC (RFC 5109) | Implemented, opt-in, and not offered by default. `configure_ulpfec` adds the encoder and decoder for ULPFEC carried in RED (RFC 2198), the form browsers negotiate for video; the application registers `video/red` and `MIME_TYPE_ULP_FEC` and passes their payload types. The RED payload format (RFC 2198) is in `rtc-rtp` (`codec::red`); the engine uses it for that carriage only: it neither offers `red` for audio nor wraps or unwraps audio in it. A separate FEC RTP session (RFC 5109 14.1) is not expressible over one transport. |
-| D2 | `bundle_policy` | The engine has one transport, so `balanced` and `max-compat` behave as `max-bundle`. A remote offer without BUNDLE gets a defined error, never a half-working session. |
 | D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. RED is not implemented. |
-| D2 | `bundle_policy` | The engine has one transport. The policy decides what an initial offer marks `a=bundle-only` and which sections of an offer without a BUNDLE group are answered (RFC 9429 4.1.1; `balanced` is the default; `must-bundle` is a policy; `max-bundle`, which W3C webrtc-pc 4.2.5 still defines, is that policy too, unless `with_max_bundle_as_must_bundle(false)` has it ignored as the RFC's SHOULD says), but every section shares the one set of ICE credentials, also under `max-compat`. A remote description whose sections need separate transports (different ICE credentials outside a BUNDLE group) gets a defined error, never a half-working session. |
+| D2 | `bundle_policy` | A section outside a BUNDLE group has a transport of its own (mt-2): a remote offer without a group, or with sections outside it, is answered with a transport per such section, and `max-compat` offers a transport per section; an answer that bundles them closes all but the tagged section's. The policy decides what an initial offer marks `a=bundle-only` and which sections of an offer without a BUNDLE group are answered (RFC 9429 4.1.1; `balanced` is the default; `must-bundle` is a policy; `max-bundle`, which W3C webrtc-pc 4.2.5 still defines, is that policy too, unless `with_max_bundle_as_must_bundle(false)` has it ignored as the RFC's SHOULD says). Still one transport: a `balanced` offer (its first section of each type shares the BUNDLE transport's credentials) and several BUNDLE groups. |
 | D3 | `SettingEngine` options with no effect in a sans-I/O engine (`receive_mtu`, `include_loopback_candidate`, `disable_media_engine_copy`) | `#[deprecated]` with the reason; no option is silently a no-op. `nat_1to1_ips` and `disable_media_engine_multiple_codecs` are implemented. |
 | D4 | FlexFEC draft-03 (`video/flexfec-03`) where libwebrtc departs from the draft's letter | The engine follows libwebrtc, the only draft-03 peer: mask bit j names the packet SN base + j (the draft's text says SN base + j + 1; RFC 8627 4.2.2.1 later wrote down what libwebrtc does), and the coder answers to the subtype `flexfec-03` only (the draft registers `flexfec`, which now means RFC 8627 and selects that coder). Both are pinned by tests (`mask_bit_j_names_sn_base_plus_j_as_libwebrtc_sends_it`, `the_mime_type_match_is_exact`). |
 
@@ -144,6 +143,25 @@ reached through `default()`, `transport(id)`, `transport_for(mid)` and the data 
 SCTP association runs over; `handle_read` routes a datagram to a transport before the pipeline
 reads it; the sender's, receiver's and SCTP transport's `transport()` name their section's
 transport. The set holds one transport, so no row changes with it; the items below fill it.
+
+Done (mt-2): items 1 to 6 and 9 for sections outside a BUNDLE group, in
+`src/peer_connection/transport_layout.rs`. A remote offer's sections outside its group get a
+transport each, started with the answer from their own part of the offer; a `max-compat` offer
+gives every section one; an answer settles the layout (bundled sections move to the tagged
+section's transport, the others close). The default transport keeps the single-transport
+description handling (deferral to the answer, rollback, ICE restart); the others are set up
+through the same `apply_remote_transport` on their part of the description. Datagrams go to
+the transport that gathered on their local address (a transport needs local addresses of its
+own), outgoing RTP and RTCP to the transport of their SSRC's section, SCTP to the data
+section's; the SCTP and data channel handlers see only the data transport's DTLS. The
+application learns what to gather for from `ice_transport_sections()`. Tests:
+`tests/multi_transport_rtc2rtc.rs` (audio, video and data on three transports; a bundling
+answer leaving one), `set_description_atomic_test.rs`, the aggregation tests in
+`transport_set.rs`, and the browser scenario "unbundled: max-compat without a BUNDLE group".
+Left: the transport-level events and statistics of the other transports (the events name no
+transport: an API change), the gathering state aggregate (W3C 4.3.2), `balanced` offers, an
+ICE restart or a new DTLS association of the other transports, a section moved out of a group
+in a later answer (RFC 9143 7.3.2), and several BUNDLE groups.
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts

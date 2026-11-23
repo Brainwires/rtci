@@ -111,10 +111,32 @@ fn a_remote_offer_without_a_fingerprint_changes_nothing() -> Result<()> {
 }
 
 #[test]
-fn a_remote_offer_with_conflicting_ice_credentials_changes_nothing() -> Result<()> {
+fn a_remote_offer_whose_second_transport_has_no_fingerprint_changes_nothing() -> Result<()> {
     let mut pc = peer()?;
-    // Two sections outside any BUNDLE group, each with its own credentials: two transports,
-    // which this engine does not run.
+    // Two sections outside any BUNDLE group: two transports (RFC 9429 section 5.3.1), each
+    // checked on its own (section 5.8.3). The second has no fingerprint.
+    let first = format!("{ICE}{FINGERPRINT}");
+    let second = "a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n";
+    let offer = format!(
+        "{SESSION}{}{}",
+        video("0", &first, ""),
+        video("1", second, "")
+    );
+    let refused = pc.set_remote_description(Instant::now(), description(RTCSdpType::Offer, &offer));
+    assert!(
+        matches!(refused, Err(Error::ErrSessionDescriptionNoFingerprint)),
+        "{refused:?}"
+    );
+    assert_untouched(&pc, "the second transport without a fingerprint");
+    assert_eq!(pc.pipeline_context.transports.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_remote_offer_with_unbundled_sections_gives_each_a_transport() -> Result<()> {
+    let mut pc = peer()?;
+    // Two sections outside any BUNDLE group, each with its own credentials: a transport
+    // each (RFC 9429 section 5.3.1), where the single-transport engine refused the offer.
     let first = format!("{ICE}{FINGERPRINT}");
     let second =
         format!("a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n{FINGERPRINT}");
@@ -123,15 +145,29 @@ fn a_remote_offer_with_conflicting_ice_credentials_changes_nothing() -> Result<(
         video("0", &first, ""),
         video("1", &second, "")
     );
-    let refused = pc.set_remote_description(Instant::now(), description(RTCSdpType::Offer, &offer));
-    assert!(
-        matches!(
-            refused,
-            Err(Error::ErrSessionDescriptionConflictingIceUfrag)
-        ),
-        "{refused:?}"
+    pc.set_remote_description(Instant::now(), description(RTCSdpType::Offer, &offer))?;
+    let transports = &pc.pipeline_context.transports;
+    assert_eq!(transports.len(), 2);
+    assert_ne!(
+        transports.transport_id_for("0"),
+        transports.transport_id_for("1")
     );
-    assert_untouched(&pc, "conflicting ufrag");
+    // Under `balanced` (the default) an answer to an offer without a BUNDLE group rejects
+    // every section but the first of each media type (RFC 9429 section 4.1.1): the second
+    // video section, whose transport closes with the answer.
+    let answer = pc.create_answer(None)?;
+    assert!(!answer.sdp.contains("a=group:BUNDLE"), "{}", answer.sdp);
+    let ports: Vec<&str> = answer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("m=video "))
+        .map(|l| l.split(' ').nth(1).unwrap_or_default())
+        .collect();
+    assert_eq!(ports.len(), 2);
+    assert_ne!(ports[0], "0", "{}", answer.sdp);
+    assert_eq!(ports[1], "0", "{}", answer.sdp);
+    pc.set_local_description(Instant::now(), answer)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 1);
     Ok(())
 }
 
