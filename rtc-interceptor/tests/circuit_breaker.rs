@@ -617,6 +617,36 @@ fn the_packet_size_is_that_of_the_window_the_rate_is_measured_over() {
     );
 }
 
+/// Section 4.3: "a sender that is transmitting at least one RTP packet every max(Tdr, Tr)
+/// seconds" is judged on its rate, not on every report. A video flow sending a frame of 19
+/// packets every 20 ms (1.1 MB/s) whose receiver reports every 10 ms (AVPF compounds) sees no
+/// packet between every other pair of reports; those reports used to clear the samples, so
+/// the breaker never judged the flow. With 25 % loss and a 100 ms round trip (ten times TCP is
+/// 0.3 MB/s) it now trips.
+#[test]
+fn reports_closer_together_than_the_frames_still_judge_the_flow() {
+    let mut harness = Harness::new(CircuitBreakerBuilder::new());
+    harness.handle.report_round_trip_time(ms(100));
+    let mut lost = 0i32;
+    for tick in 0..600u64 {
+        let at = ms(tick * 10);
+        if tick % 2 == 0 {
+            for _ in 0..19 {
+                harness.send(at, VIDEO);
+            }
+            harness.received += 19;
+            lost += 5;
+        }
+        let received = harness.received;
+        let fraction = if tick % 2 == 0 { 67 } else { 0 };
+        harness.report_counts(at + ms(5), VIDEO, fraction, received, lost);
+    }
+    assert_eq!(
+        Some(CircuitBreakerReason::Congestion),
+        harness.reason(VIDEO)
+    );
+}
+
 /// The same loss does not trip a flow within ten times the TCP throughput: 100 packets a second
 /// is 120 kB/s against a bound of 294 kB/s.
 #[test]

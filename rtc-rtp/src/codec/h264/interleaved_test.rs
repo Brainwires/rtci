@@ -458,3 +458,110 @@ fn an_interleaved_stream_is_received_in_decoding_order() -> Result<()> {
     assert_eq!(annex_b(&expected), out.freeze());
     Ok(())
 }
+
+/// RFC 6184 section 7.2.2's order of passing NAL units on, written out as the RFC has it:
+/// PDON starts at 0, the DON distance is `DON - PDON` when DON is larger, else
+/// `65535 - PDON + DON + 1`, units leave in ascending distance, and PDON becomes the DON of
+/// the last one passed on. `arrivals` are (DON, tag) in reception order; `depth` is
+/// `sprop-interleaving-depth` (all units VCL).
+fn rfc_6184_order(depth: usize, arrivals: &[(u16, u8)]) -> Vec<u8> {
+    let distance = |pdon: u16, don: u16| -> u32 {
+        if don > pdon {
+            u32::from(don - pdon)
+        } else {
+            65535 - u32::from(pdon) + u32::from(don) + 1
+        }
+    };
+    let mut pdon = 0u16;
+    let mut buffer: Vec<(u16, u8)> = vec![];
+    let mut out = vec![];
+    let mut pass_on = |buffer: &mut Vec<(u16, u8)>, keep: usize, pdon: &mut u16| {
+        let from = *pdon;
+        while buffer.len() > keep {
+            let next = (0..buffer.len())
+                .min_by_key(|&i| distance(from, buffer[i].0))
+                .unwrap();
+            let (don, tag) = buffer.remove(next);
+            *pdon = don;
+            out.push(tag);
+        }
+    };
+    for arrival in arrivals {
+        buffer.push(*arrival);
+        if buffer.len() > depth {
+            pass_on(&mut buffer, depth, &mut pdon);
+        }
+    }
+    pass_on(&mut buffer, 0, &mut pdon);
+    out
+}
+
+/// RFC 6184 section 7.2.2: the order NAL units are passed on in is the RFC's own procedure,
+/// PDON starting at 0, for an interleaved stream that starts at any DON but 0 (here 1, 1000
+/// and 40000, each sent in an interleaved order and with a depth of 3): the buffer's output
+/// is the RFC procedure's, NAL unit for NAL unit, and is decoding order.
+#[test]
+fn nal_units_leave_in_the_order_of_the_rfc_procedure_from_pdon_0() {
+    for first in [1u16, 1000, 40000] {
+        let sent: Vec<(u16, u8)> = [2u16, 0, 1, 4, 3, 6, 5, 7, 9, 8]
+            .iter()
+            .map(|&n| (first + n, n as u8))
+            .collect();
+        let mut buffer = H264DeinterleavingBuffer::new(3, None);
+        let mut out = vec![];
+        for (don, tag) in &sent {
+            out.extend(buffer.push(unit(*don, slice(*tag))));
+        }
+        out.extend(buffer.flush());
+        assert_eq!(rfc_6184_order(3, &sent), tags(&out), "from DON {first}");
+        assert_eq!((0..10).collect::<Vec<u8>>(), tags(&out), "from DON {first}");
+    }
+}
+
+/// RFC 6184 section 7.2.2 starts PDON at 0, which gives a NAL unit whose DON is 0 the largest
+/// DON distance: taken literally, a stream numbered from DON 0 (section 5.5 lets the first
+/// DON be any value), or one whose first DONs wrap through 0, has those NAL units passed on
+/// after all the others. Until a NAL unit has been passed on the buffer measures from the DON
+/// just before the earliest one buffered, so such a stream leaves in decoding order; the
+/// literal procedure is shown to misorder it.
+#[test]
+fn a_stream_numbered_from_don_0_leaves_in_decoding_order() {
+    for first in [0u16, 65534] {
+        let sent: Vec<(u16, u8)> = [1u16, 0, 3, 2, 5, 4]
+            .iter()
+            .map(|&n| (first.wrapping_add(n), n as u8))
+            .collect();
+        let mut buffer = H264DeinterleavingBuffer::new(2, None);
+        let mut out = vec![];
+        for (don, tag) in &sent {
+            out.extend(buffer.push(unit(*don, slice(*tag))));
+        }
+        out.extend(buffer.flush());
+        assert_eq!(vec![0, 1, 2, 3, 4, 5], tags(&out), "from DON {first}");
+        assert_ne!(
+            rfc_6184_order(2, &sent),
+            tags(&out),
+            "the literal PDON 0 misorders the stream from DON {first}"
+        );
+    }
+}
+
+/// `with_literal_pdon(true)` is RFC 6184 section 7.2.2 as written, PDON initialised to 0: for
+/// a stream numbered from DON 0, and one wrapping through 0, the buffer passes NAL units on
+/// exactly as the RFC procedure does, DON 0 after the others.
+#[test]
+fn with_the_literal_pdon_the_order_is_the_rfc_procedures_from_don_0() {
+    for first in [0u16, 65534] {
+        let sent: Vec<(u16, u8)> = [1u16, 0, 3, 2, 5, 4]
+            .iter()
+            .map(|&n| (first.wrapping_add(n), n as u8))
+            .collect();
+        let mut buffer = H264DeinterleavingBuffer::new(2, None).with_literal_pdon(true);
+        let mut out = vec![];
+        for (don, tag) in &sent {
+            out.extend(buffer.push(unit(*don, slice(*tag))));
+        }
+        out.extend(buffer.flush());
+        assert_eq!(rfc_6184_order(2, &sent), tags(&out), "from DON {first}");
+    }
+}

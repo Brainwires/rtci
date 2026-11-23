@@ -470,6 +470,8 @@ pub struct SettingEngine {
     pub(crate) allow_insecure_verification_algorithm: bool,
     pub(crate) disable_media_engine_copy: bool,
     pub(crate) disable_media_engine_multiple_codecs: bool,
+    /// [`SettingEngineBuilder::with_own_payload_types_in_answers`].
+    pub(crate) own_payload_types_in_answers: bool,
     pub(crate) srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     pub(crate) dtls_cipher_suites: Vec<CipherSuiteId>,
     pub(crate) receive_mtu: usize,
@@ -543,6 +545,9 @@ pub struct SettingEngine {
     /// the stream to a new SSRC (RFC 7160 section 4.1). Off by default: one SSRC across clock
     /// rates, which every browser receiver follows.
     pub(crate) ssrc_per_clock_rate: bool,
+    /// [`SettingEngineBuilder::with_audio_redundancy`]: when an audio stream that negotiated
+    /// RED (RFC 2198) is sent in it.
+    pub(crate) audio_redundancy: interceptor::AudioRedundancy,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -1764,9 +1769,9 @@ impl SettingEngineBuilder {
     /// any packets associated with the new DTLS association from any packets associated with
     /// any other DTLS association") and of an answerer when the offerer did not (section 6:
     /// "a completely new set of ICE candidates that were not recently used for any other DTLS
-    /// association"). The ICE restart that comes with the new association (an offer that sets
-    /// a closed transport up again, `renew_dtls_association`, a data-only association replaced
-    /// for SRTP, or the answer to a remote offer that asks for one) discards the local
+    /// association"). The ICE restart that comes with the new association
+    /// (`renew_dtls_association`, a data-only association replaced for SRTP, or the answer to
+    /// a remote offer that asks for one) discards the local
     /// candidates, even without
     /// [`with_discard_local_candidates_during_ice_restart`](Self::with_discard_local_candidates_during_ice_restart),
     /// and `add_local_candidate` refuses a UDP candidate on a transport address one of them
@@ -2174,6 +2179,31 @@ impl SettingEngineBuilder {
     /// that set.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
+        self
+    }
+
+    /// Whether an answer numbers the formats with this endpoint's own payload types (the ones
+    /// the [`MediaEngine`](crate::peer_connection::configuration::media_engine::MediaEngine)
+    /// registered them with) instead of the offer's. `false` by default.
+    ///
+    /// RFC 3264 section 6.1: "if a particular codec was referenced with a specific payload
+    /// type number in the offer, that same payload type number SHOULD be used for that codec
+    /// in the answer", which is the default. An answerer may number the formats otherwise
+    /// (section 5.1: "the answer might indicate different payload type numbers for the same
+    /// codecs, in which case, the offerer MUST send with the payload type numbers from the
+    /// answer"; a gateway to a system with fixed numbers does), and that is `true`: each
+    /// format of an offer this endpoint negotiates is answered under its registered payload
+    /// type (the one a description of this endpoint already gave it, once it has one), RTX
+    /// (`apt`) and RED (the encodings of its fmtp) following their primaries. The endpoint
+    /// then receives with its own numbers and sends with the offer's (section 6.1: the
+    /// answerer "MUST use the payload type numbers from the offer, even if they differ from
+    /// those in the answer").
+    ///
+    /// Either way each direction of a media section follows the description that governs it:
+    /// what is sent carries the remote description's payload types and what is received is
+    /// read with the local description's (RFC 9429 sections 5.9 to 5.11).
+    pub fn with_own_payload_types_in_answers(mut self, own: bool) -> Self {
+        self.0.own_payload_types_in_answers = own;
         self
     }
 
@@ -2739,6 +2769,35 @@ impl SettingEngineBuilder {
     /// connection does).
     pub fn with_ssrc_per_clock_rate(mut self, ssrc_per_clock_rate: bool) -> Self {
         self.0.ssrc_per_clock_rate = ssrc_per_clock_rate;
+        self
+    }
+
+    /// When a local audio stream whose section negotiated RED (RFC 2198) is sent in RED, each
+    /// packet carrying a copy of the one before. The default is
+    /// [`AudioRedundancy::WhenPreferred`](interceptor::AudioRedundancy::WhenPreferred): only
+    /// when the remote description lists RED ahead of the stream's codec. Received RED is
+    /// taken apart in every case.
+    ///
+    /// RFC 3264 sections 5.1 and 6.1: the formats of an m= line are "listed in order of
+    /// preference", and the sender "SHOULD use the format with the highest preference". The
+    /// default codecs offer RED after Opus, as Chromium and WebKit do, and those browsers
+    /// answer it after Opus too; libwebrtc sends RED only when it precedes the codec it
+    /// protects. So by default a call with them, or with another `rtc` peer connection,
+    /// carries plain Opus: RED is negotiated, not used. RFC 8854 recommends Opus's in-band FEC
+    /// for Opus (section 4.1) and FEC only for the loss observed or when the application asks
+    /// (section 8).
+    ///
+    /// [`AudioRedundancy::Always`](interceptor::AudioRedundancy::Always) is that request: RED
+    /// whenever negotiated, whatever the order. It about doubles the audio bitrate (a copy of
+    /// the previous packet in each). [`AudioRedundancy::Never`](interceptor::AudioRedundancy::Never)
+    /// sends the codec even to a peer that prefers RED.
+    ///
+    /// Applies to the RED interceptor the connection installs
+    /// ([`configure_audio_redundancy_with`](crate::peer_connection::configuration::interceptor_registry::configure_audio_redundancy_with));
+    /// a registry that fills [`Slot::Redundancy`](interceptor::Slot::Redundancy) itself
+    /// decides with its own interceptor.
+    pub fn with_audio_redundancy(mut self, audio_redundancy: interceptor::AudioRedundancy) -> Self {
+        self.0.audio_redundancy = audio_redundancy;
         self
     }
 

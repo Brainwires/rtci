@@ -293,8 +293,12 @@ impl<'a>
             msg.transport.peer_addr = path.peer_addr;
             msg.transport.transport_protocol = path.transport_protocol;
             // Only RTP media is ever ECN-marked (the interceptor handler decides which);
-            // DTLS and SCTP go out Not-ECT whatever context their endpoints carried.
-            if !matches!(msg.message, RTCMessageInternal::Rtp(_)) {
+            // DTLS and SCTP go out Not-ECT whatever context their endpoints carried. RFC 6679
+            // is ECN for RTP over UDP: section 6.1.3, "It MUST NOT be used for RTP sessions
+            // using TCP", so nothing is marked on an ICE-TCP pair (RFC 6544).
+            if !matches!(msg.message, RTCMessageInternal::Rtp(_))
+                || path.transport_protocol != shared::TransportProtocol::UDP
+            {
                 msg.transport.ecn = None;
             }
             debug!("Bypass ice write {:?}", msg.transport.peer_addr);

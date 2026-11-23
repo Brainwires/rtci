@@ -264,7 +264,12 @@ fn the_pacer_follows_the_estimators_starting_rate() {
             CongestionControlBuilder::new(gcc).build(),
         )
         .with(Slot::TwccSender, TwccSenderBuilder::new().build())
-        .with(Slot::Pacer, PacerBuilder::new().build())
+        // Without the queue time limit: the two seconds offered at once below would otherwise be
+        // drained within two seconds whatever the target (`no_packet_waits_longer_than_the_queue_time_limit`).
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new().with_queue_time_limit(None).build(),
+        )
         .build();
     chain.bind_local_stream(&transport_cc(MEDIA_SSRC));
 

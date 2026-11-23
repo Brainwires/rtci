@@ -469,6 +469,9 @@ pub struct MediaEngine {
     pub(crate) negotiated_audio: bool,
     pub(crate) negotiated_application: bool,
     pub(crate) negotiate_multi_codecs: bool,
+    /// `SettingEngineBuilder::with_own_payload_types_in_answers`: an answer numbers the
+    /// formats as this endpoint registered them, not as the offer does.
+    pub(crate) own_payload_types_in_answers: bool,
 
     pub(crate) video_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) audio_codecs: Vec<RTCRtpCodecParameters>,
@@ -1860,7 +1863,7 @@ impl MediaEngine {
         &mut self,
         desc: &SessionDescription,
     ) -> Result<()> {
-        self.update_from_remote_description_merging(desc, false)
+        self.update_from_remote_description_merging(desc, false, None)
     }
 
     /// [`Self::update_from_remote_description`]; with `merge_answer`, the formats of a remote
@@ -1868,12 +1871,27 @@ impl MediaEngine {
     /// later local offer lists every available format (RFC 9429 section 5.2.2,
     /// [`Self::offer_codecs_for_section`]), and the ones the answer accepts are negotiated
     /// (RFC 3264 section 6.1), to be sent and received.
+    ///
+    /// `local_offer` is the offer a remote answer answers. The negotiated lists hold this
+    /// endpoint's numbering: the payload types its own descriptions give the formats, which
+    /// are the ones it receives with (RFC 3264 section 5.1: an offer's numbers "indicate the
+    /// value of the payload type field the offerer expects to receive"; RFC 9429 section 5.9).
+    /// An answer "might indicate different payload type numbers for the same codecs" (RFC 3264
+    /// section 5.1), which are the numbers to send with and are kept by each section's sender
+    /// (`RTCRtpTransceiverInternal::set_codec_preferences_from_remote_description`), so the
+    /// formats an answer accepts are entered here under the numbers `local_offer` gave them
+    /// ([`number_as_described`]). The formats of a remote offer keep the offer's numbers, the
+    /// ones the answer then uses (RFC 3264 section 6.1: "that same payload type number SHOULD
+    /// be used for that codec in the answer"), unless
+    /// `SettingEngineBuilder::with_own_payload_types_in_answers` has the answer use this
+    /// endpoint's.
     pub(crate) fn update_from_remote_description_merging(
         &mut self,
         desc: &SessionDescription,
         merge_answer: bool,
+        local_offer: Option<&SessionDescription>,
     ) -> Result<()> {
-        for media in &desc.media_descriptions {
+        for (index, media) in desc.media_descriptions.iter().enumerate() {
             // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
             // 8841 `DTLS/SCTP` data section): no codecs to read.
             if media.is_webrtc_datachannel() || is_unknown_media_protocol(media) {
@@ -2044,14 +2062,43 @@ impl MediaEngine {
             // An SFrame section's formats are numbered apart from the plain ones
             // (draft-ietf-avtcore-rtp-sframe-03 section 6).
             let sframe = media.has_attribute(ATTR_KEY_SFRAME);
-            if !exact_matches.is_empty() {
-                self.push_section_codecs(exact_matches, typ, sframe);
+            let accepted = if !exact_matches.is_empty() {
+                exact_matches
             } else if !partial_matches.is_empty() {
-                self.push_section_codecs(partial_matches, typ, sframe);
+                partial_matches
             } else {
                 // no match, not negotiated
                 continue;
+            };
+            // This endpoint's numbers for the formats: those of the offer a remote answer
+            // answers; with `own_payload_types_in_answers`, for a remote offer, those this
+            // endpoint would offer them with.
+            let reference = match local_offer {
+                Some(offer) => {
+                    let mid = crate::peer_connection::sdp::get_mid_value(media);
+                    offer
+                        .media_descriptions
+                        .iter()
+                        .find(|offered| {
+                            mid.is_some()
+                                && crate::peer_connection::sdp::get_mid_value(offered) == mid
+                        })
+                        .or_else(|| offer.media_descriptions.get(index))
+                        .and_then(|offered| codecs_from_media_description(offered).ok())
+                }
+                None if self.own_payload_types_in_answers && !sframe => {
+                    Some(self.offer_codecs_for_section(typ))
+                }
+                None => None,
+            };
+            let accepted = match &reference {
+                Some(reference) => number_as_described(accepted, reference),
+                None => accepted,
+            };
+            if accepted.is_empty() {
+                continue;
             }
+            self.push_section_codecs(accepted, typ, sframe);
 
             self.update_header_extension_from_media_section(media)?;
         }
@@ -2257,6 +2304,10 @@ impl MediaEngine {
                     });
                 }
             }
+            // By id: the negotiated mappings are kept in a map, whose order is not the same
+            // from one run to the next, and these are what a description's `a=extmap` lines
+            // are written from.
+            header_extensions.sort_by_key(|extension| (extension.id, extension.encrypted));
         } else {
             // Each registered extension in each form its encryption setting offers (RFC 6904
             // section 4.1), with the id it was negotiated with or the first free one.
@@ -2367,6 +2418,231 @@ impl MediaEngine {
                 )
             })
     }
+}
+
+/// The payload types a RED format's fmtp names (RFC 2198 section 5: `<primary>/<redundant>...`);
+/// `None` for an empty line or one that is not such a list.
+pub(crate) fn red_block_payload_types(sdp_fmtp_line: &str) -> Option<Vec<PayloadType>> {
+    let line = sdp_fmtp_line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    line.split('/')
+        .map(|block| block.trim().parse::<PayloadType>().ok())
+        .collect()
+}
+
+/// `sdp_fmtp_line` of an RTX format with its `apt` set to `apt`, the other parameters
+/// (`rtx-time`) kept.
+pub(crate) fn rtx_fmtp_with_apt(sdp_fmtp_line: &str, apt: PayloadType) -> String {
+    std::iter::once(format!("apt={apt}"))
+        .chain(
+            sdp_fmtp_line
+                .split(';')
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && !p.to_ascii_lowercase().starts_with("apt="))
+                .map(str::to_owned),
+        )
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// The formats `accepted` (those of a remote media section this endpoint negotiates, with the
+/// remote description's payload types) under the payload types `reference` gives them:
+/// `reference` is this endpoint's description of the section (the offer a remote answer
+/// answers) or what it would describe it with.
+///
+/// RFC 3264 section 5.1: "the answer might indicate different payload type numbers for the
+/// same codecs, in which case, the offerer MUST send with the payload type numbers from the
+/// answer", while what it receives keeps the numbers of its own description. So the two
+/// directions of a section are numbered apart, and this is the receive side's numbering (the
+/// one this endpoint's descriptions go on using: section 8.3.2, a payload type's format "MUST
+/// NOT change for the duration of a session").
+///
+/// - A media or FEC format keeps its number when `reference` has the same encoding under it,
+///   and otherwise takes the number of the `reference` format it matches (its parameters
+///   first, then its name, as formats are matched everywhere; a format whose parameters are
+///   its configuration is never matched by name alone).
+/// - An RTX format follows its primary (RFC 4588 section 8.6): it takes the number of the
+///   `reference` RTX format whose `apt` is the primary's number there, and that `apt`.
+/// - A RED format takes the number of a `reference` RED format of its clock rate, and its
+///   fmtp names the encodings by their numbers in `reference` (RFC 2198 section 5).
+/// - A format `reference` does not have (RFC 3264 section 6.1 lets an answer add formats)
+///   keeps its number when `reference` has not given it to another format, and is left out
+///   otherwise; so is a repair format whose primary was.
+///
+/// The order of `accepted` is kept.
+pub(crate) fn number_as_described(
+    accepted: Vec<RTCRtpCodecParameters>,
+    reference: &[RTCRtpCodecParameters],
+) -> Vec<RTCRtpCodecParameters> {
+    let family = |codec: &RTCRtpCodecParameters| repair_family(&codec.rtp_codec);
+    let independent = |codec: &RTCRtpCodecParameters| !matches!(family(codec), "rtx" | "red");
+    let same_encoding = |a: &RTCRtpCodec, b: &RTCRtpCodec| {
+        a.mime_type.eq_ignore_ascii_case(&b.mime_type)
+            && a.clock_rate == b.clock_rate
+            && (a.channels == b.channels || a.channels == 0 || b.channels == 0)
+    };
+    let same_parameters = |a: &RTCRtpCodec, b: &RTCRtpCodec| {
+        fmtp::parse(&a.mime_type, &a.sdp_fmtp_line)
+            .match_fmtp(&*fmtp::parse(&b.mime_type, &b.sdp_fmtp_line))
+    };
+    let described = |payload_type: PayloadType| {
+        reference
+            .iter()
+            .any(|codec| codec.payload_type == payload_type)
+    };
+
+    // Remote payload type -> this endpoint's, for the media and FEC formats.
+    let mut numbers: Vec<(PayloadType, PayloadType)> = vec![];
+    let mut taken: Vec<PayloadType> = vec![];
+    // The same number, when it names the same encoding here (the usual answer), unless the
+    // parameters say it is another of the reference's formats of that encoding.
+    for codec in accepted.iter().filter(|codec| independent(codec)) {
+        let Some(same) = reference.iter().find(|r| {
+            r.payload_type == codec.payload_type
+                && independent(r)
+                && same_encoding(&r.rtp_codec, &codec.rtp_codec)
+        }) else {
+            continue;
+        };
+        let another = !same_parameters(&same.rtp_codec, &codec.rtp_codec)
+            && reference.iter().any(|r| {
+                r.payload_type != same.payload_type
+                    && independent(r)
+                    && same_encoding(&r.rtp_codec, &codec.rtp_codec)
+                    && same_parameters(&r.rtp_codec, &codec.rtp_codec)
+            });
+        if !another {
+            numbers.push((codec.payload_type, codec.payload_type));
+            taken.push(codec.payload_type);
+        }
+    }
+    // Otherwise the number of the format it matches.
+    for codec in accepted.iter().filter(|codec| independent(codec)) {
+        if numbers
+            .iter()
+            .any(|(remote, _)| *remote == codec.payload_type)
+        {
+            continue;
+        }
+        let free: Vec<RTCRtpCodecParameters> = reference
+            .iter()
+            .filter(|r| independent(r) && !taken.contains(&r.payload_type))
+            .cloned()
+            .collect();
+        let local = match codec_parameters_fuzzy_search(&codec.rtp_codec, &free) {
+            (_, CodecMatch::None) => None,
+            (local, CodecMatch::Partial)
+                if has_symmetric_configuration(&codec.rtp_codec)
+                    && !local.rtp_codec.sdp_fmtp_line.trim().is_empty() =>
+            {
+                None
+            }
+            (local, _) => Some(local.payload_type),
+        };
+        // A format the reference does not have keeps a number the reference left free.
+        let local = local.or_else(|| {
+            (!described(codec.payload_type) && !taken.contains(&codec.payload_type))
+                .then_some(codec.payload_type)
+        });
+        if let Some(local) = local {
+            numbers.push((codec.payload_type, local));
+            taken.push(local);
+        }
+    }
+    let number_of = |remote: PayloadType| {
+        numbers
+            .iter()
+            .find(|(r, _)| *r == remote)
+            .map(|(_, local)| *local)
+    };
+
+    let mut out: Vec<RTCRtpCodecParameters> = Vec::with_capacity(accepted.len());
+    let mut repair_taken: Vec<PayloadType> = vec![];
+    for mut codec in accepted {
+        match family(&codec) {
+            "rtx" => {
+                let Some(apt) = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).and_then(number_of)
+                else {
+                    continue;
+                };
+                let local = reference
+                    .iter()
+                    .find(|r| {
+                        family(r) == "rtx" && parse_rtx_apt(&r.rtp_codec.sdp_fmtp_line) == Some(apt)
+                    })
+                    .map(|r| r.payload_type)
+                    .or_else(|| {
+                        (!described(codec.payload_type) && !taken.contains(&codec.payload_type))
+                            .then_some(codec.payload_type)
+                    });
+                let Some(local) = local.filter(|local| !repair_taken.contains(local)) else {
+                    continue;
+                };
+                repair_taken.push(local);
+                codec.payload_type = local;
+                codec.rtp_codec.sdp_fmtp_line =
+                    rtx_fmtp_with_apt(&codec.rtp_codec.sdp_fmtp_line, apt);
+            }
+            "red" => {
+                let blocks = red_block_payload_types(&codec.rtp_codec.sdp_fmtp_line);
+                let local_blocks: Option<Vec<PayloadType>> = match &blocks {
+                    Some(blocks) => {
+                        let Some(local) = blocks
+                            .iter()
+                            .map(|block| number_of(*block))
+                            .collect::<Option<Vec<_>>>()
+                        else {
+                            continue;
+                        };
+                        Some(local)
+                    }
+                    None => None,
+                };
+                let candidates = || {
+                    reference.iter().filter(|r| {
+                        family(r) == "red"
+                            && same_encoding(&r.rtp_codec, &codec.rtp_codec)
+                            && !repair_taken.contains(&r.payload_type)
+                    })
+                };
+                let local = candidates()
+                    .find(|r| r.payload_type == codec.payload_type)
+                    .or_else(|| {
+                        candidates().find(|r| {
+                            red_block_payload_types(&r.rtp_codec.sdp_fmtp_line) == local_blocks
+                        })
+                    })
+                    .or_else(|| candidates().next())
+                    .map(|r| r.payload_type)
+                    .or_else(|| {
+                        (!described(codec.payload_type) && !taken.contains(&codec.payload_type))
+                            .then_some(codec.payload_type)
+                    });
+                let Some(local) = local else {
+                    continue;
+                };
+                repair_taken.push(local);
+                codec.payload_type = local;
+                if let Some(local_blocks) = local_blocks {
+                    codec.rtp_codec.sdp_fmtp_line = local_blocks
+                        .iter()
+                        .map(|block| block.to_string())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                }
+            }
+            _ => {
+                let Some(local) = number_of(codec.payload_type) else {
+                    continue;
+                };
+                codec.payload_type = local;
+            }
+        }
+        out.push(codec);
+    }
+    out
 }
 
 /// The parameters of an `a=fmtp` line as a set: keys and values compared without case, and

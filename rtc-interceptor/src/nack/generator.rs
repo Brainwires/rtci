@@ -44,12 +44,12 @@ pub struct NackGeneratorBuilder {
     round_trip_time: Option<Duration>,
 }
 
-/// The default of [`NackGeneratorBuilder::with_max_nacks_per_packet`]: a packet that ten
-/// requests did not bring is not coming.
-pub const DEFAULT_MAX_NACKS_PER_PACKET: u16 = 10;
-/// The default of [`NackGeneratorBuilder::with_max_packet_age`]: past two seconds a
-/// retransmission is of no use to an interactive stream.
-pub const DEFAULT_MAX_PACKET_AGE: Duration = Duration::from_secs(2);
+/// A limit for [`NackGeneratorBuilder::with_max_nacks_per_packet`]: libwebrtc's
+/// `kMaxNackRetries`. Not the default (see the method).
+pub const SUGGESTED_MAX_NACKS_PER_PACKET: u16 = 10;
+/// A limit for [`NackGeneratorBuilder::with_max_packet_age`], for a receiver that plays a
+/// packet out within two seconds of its loss. Not the default (see the method).
+pub const SUGGESTED_MAX_PACKET_AGE: Duration = Duration::from_secs(2);
 
 /// How far back the reordering a stream showed is remembered for its allowance.
 const REORDERING_WINDOW: Duration = Duration::from_secs(10);
@@ -126,8 +126,8 @@ impl Default for NackGeneratorBuilder {
             size: 512,
             interval: Duration::from_millis(100),
             skip_last_n: 0,
-            max_nacks_per_packet: DEFAULT_MAX_NACKS_PER_PACKET,
-            max_packet_age: Some(DEFAULT_MAX_PACKET_AGE),
+            max_nacks_per_packet: 0,
+            max_packet_age: None,
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
         }
@@ -166,7 +166,15 @@ impl NackGeneratorBuilder {
     /// Set the maximum number of NACKs to send per missing packet (RFC 4588 Appendix A: a
     /// receiver limits how often it asks again).
     ///
-    /// Default: [`DEFAULT_MAX_NACKS_PER_PACKET`]. 0 is unlimited.
+    /// Default: 0, unlimited: a missing packet is asked for again a round trip after each
+    /// request (RFC 4588 6.3) for as long as it is missing and the receive log holds it. RFC
+    /// 4588 gives no number ("the absolute minimum should be one", Appendix A). A limit makes a
+    /// packet that the limit's requests did not bring lost for good, and a receiver that holds
+    /// later frames back for it (a sample builder, a jitter buffer) freezes until it gives the
+    /// packet up as well: in `tests/capacity_cap_video_rtc2rtc.rs`, with retransmissions not held
+    /// to the target, ten requests (and no age limit) left the picture frozen for 4.8 to 5.4 s on
+    /// every seed, against 1.0 to 1.6 s without a limit. [`SUGGESTED_MAX_NACKS_PER_PACKET`] is
+    /// libwebrtc's.
     pub fn with_max_nacks_per_packet(mut self, max: u16) -> Self {
         self.max_nacks_per_packet = max;
         self
@@ -176,7 +184,13 @@ impl NackGeneratorBuilder {
     /// requested while it can still be of use). Give the sender's `rtx-time` (RFC 4588 8.1)
     /// when it signals one: past it the sender no longer has the packet.
     ///
-    /// Default: [`DEFAULT_MAX_PACKET_AGE`]. `None` is unlimited.
+    /// Default: `None`, unlimited, unless the sender signals `rtx-time`. How long a packet stays
+    /// useful is the receiving application's playout (RFC 4588 6.3), which this interceptor
+    /// does not know: a fixed two seconds left a call frozen for 5.9 to 6.8 s after a capacity
+    /// drop in `tests/capacity_cap_video_rtc2rtc.rs`, packets whose requests stopped at two
+    /// seconds staying lost while the receiver still waited for them. An application that plays
+    /// out within a known time gives that time here ([`SUGGESTED_MAX_PACKET_AGE`] is two
+    /// seconds).
     pub fn with_max_packet_age(mut self, max_packet_age: Option<Duration>) -> Self {
         self.max_packet_age = max_packet_age;
         self
@@ -272,7 +286,7 @@ impl NackGeneratorInterceptor {
             next_timeout: None,
             sender_ssrc: rand::random(),
             receive_logs: HashMap::new(),
-            max_packet_age: Some(DEFAULT_MAX_PACKET_AGE),
+            max_packet_age: None,
             rtx_payload_types: HashMap::new(),
             remote_rtx_times: HashMap::new(),
             reorder_delay: Duration::ZERO,

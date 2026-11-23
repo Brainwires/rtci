@@ -68,6 +68,9 @@ pub(crate) struct Chain {
     interceptors: Vec<Box<dyn Interceptor>>,
     read_outs: VecDeque<TaggedPacket>,
     write_outs: VecDeque<TaggedPacket>,
+    /// While packets the read leg made wait in `write_outs`: the earliest instant one of them
+    /// was made, which `poll_timeout` reports (see [`Chain::collect_read_writes`]).
+    read_made_due: Option<Instant>,
 }
 
 impl Chain {
@@ -124,13 +127,47 @@ impl Chain {
     }
 
     fn drain_read(&mut self) {
-        let belt = Self::walk(
-            self.interceptors.iter_mut(),
-            VecDeque::new(),
-            |s, p| s.handle_read(p),
-            |s| s.poll_read(),
-        );
+        // As `walk`, noting whether anything crossed the read leg: a pass that moved nothing
+        // made nothing for the write leg either, and is the common case (every `poll_read`
+        // that finds the chain idle).
+        let mut belt = VecDeque::new();
+        let mut moved = false;
+        for interceptor in self.interceptors.iter_mut() {
+            while let Some(next) = belt.pop_front() {
+                if let Err(err) = interceptor.handle_read(next) {
+                    log::warn!("interceptor handle failed: {err}");
+                }
+            }
+            while let Some(next) = interceptor.poll_read() {
+                moved = true;
+                belt.push_back(next);
+            }
+        }
         self.read_outs.extend(belt);
+        if moved {
+            self.collect_read_writes();
+        }
+    }
+
+    /// What the read leg made for the write leg (a retransmission a NACK asks for, a probe
+    /// cluster's padding, an Early RTCP packet, a PAUSED answer) goes down the write leg now,
+    /// into `write_outs`, where [`Protocol::poll_timeout`] reports it as due.
+    ///
+    /// A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+    /// `poll_timeout` and sleep): left in the interceptor that made it, a packet would wait
+    /// for whatever wakes the driver next, since no interceptor's own deadline covers what it
+    /// has queued for `poll_write`.
+    fn collect_read_writes(&mut self) {
+        let belt = Self::walk(
+            self.interceptors.iter_mut().rev(),
+            VecDeque::new(),
+            |s, p| s.handle_write(p),
+            |s| s.poll_write(),
+        );
+        if let Some(made) = belt.iter().map(|packet| packet.now).min() {
+            self.read_made_due = Some(self.read_made_due.map_or(made, |due| due.min(made)));
+        }
+        self.write_outs.extend(belt);
     }
 
     fn drain_write(&mut self) {
@@ -159,6 +196,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
             |s| s.poll_read(),
         );
         self.read_outs.extend(belt);
+        self.collect_read_writes();
         Ok(())
     }
 
@@ -188,7 +226,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
         if self.write_outs.is_empty() {
             self.drain_write();
         }
-        self.write_outs.pop_front()
+        let packet = self.write_outs.pop_front();
+        if self.write_outs.is_empty() {
+            self.read_made_due = None;
+        }
+        packet
     }
 
     fn handle_timeout(&mut self, now: Self::Time) -> Result<(), Self::Error> {
@@ -198,10 +240,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
         Ok(())
     }
 
+    /// The earliest deadline of the interceptors, and at once (the instant it was made) while
+    /// a packet the read leg made waits in `write_outs` for `poll_write`. What `handle_write`
+    /// put there is not counted: a driver calls `poll_write` after writing.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
+        let waiting = self.read_made_due;
         self.interceptors
             .iter_mut()
             .filter_map(|interceptor| interceptor.poll_timeout())
+            .chain(waiting)
             .min()
     }
 
