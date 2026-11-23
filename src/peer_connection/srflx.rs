@@ -291,13 +291,22 @@ impl EngineSrflx {
     }
 }
 
-/// A Binding request (RFC 8489 section 6; no attribute an RFC 5389 server would not know).
-fn binding_request() -> shared::error::Result<Message> {
+/// A Binding request (RFC 8489 section 6; no attribute an RFC 5389 server would not know),
+/// with the SOFTWARE attribute when `software` is given (RFC 8489 section 14.14: "This
+/// attribute SHOULD be used by clients ... in all Binding requests"; RFC 5389 section 15.10
+/// knows it too).
+fn binding_request(software: Option<&str>) -> shared::error::Result<Message> {
     let mut message = Message::new();
-    let setters: Vec<Box<dyn Setter>> = vec![
+    let mut setters: Vec<Box<dyn Setter>> = vec![
         Box::new(stun::message::TransactionId::new()),
         Box::new(BINDING_REQUEST),
     ];
+    if let Some(software) = software {
+        setters.push(Box::new(stun::textattrs::Software::new(
+            stun::attributes::ATTR_SOFTWARE,
+            software.to_owned(),
+        )));
+    }
     message.build(&setters)?;
     Ok(message)
 }
@@ -559,9 +568,10 @@ impl RTCPeerConnection {
         } else {
             TransportProtocol::TCP
         };
+        let software = self.setting_engine.srflx_software();
         let started = (|| -> shared::error::Result<Attempt> {
             let mut client = ClientBuilder::new().build(now, base, server, protocol)?;
-            let request = binding_request()?;
+            let request = binding_request(software.as_deref())?;
             let transaction = request.transaction_id.0;
             client.handle_write(TaggedMessage {
                 now,
@@ -1383,5 +1393,73 @@ mod tests {
         pair.connect().unwrap();
         drain(&mut pair.offerer, &mut commands);
         assert!(closed(&commands), "closed once ICE has completed");
+    }
+
+    /// The SOFTWARE attribute of the first server-reflexive Binding request the engine's
+    /// gatherer sends over UDP from a host candidate to the configured STUN server, under
+    /// `software` (`None`: `with_ice_software` not called).
+    fn srflx_request_software(software: Option<Option<String>>) -> Option<String> {
+        let now = Instant::now();
+        let server: SocketAddr = "192.0.2.10:3478".parse().unwrap();
+        let mut setting_engine = SettingEngineBuilder::new();
+        if let Some(software) = software {
+            setting_engine = setting_engine.with_ice_software(software);
+        }
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(vec![RTCIceServer {
+                        urls: vec![format!("stun:{server}")],
+                        ..Default::default()
+                    }])
+                    .build(),
+            )
+            .with_setting_engine(setting_engine.build())
+            .build(now)
+            .unwrap();
+        pc.create_data_channel("software", None).unwrap();
+        pc.add_local_candidate(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        for step in 0..10u32 {
+            while let Some(t) = pc.poll_write() {
+                if t.transport.peer_addr != server {
+                    continue;
+                }
+                let mut m = Message::new();
+                m.unmarshal_binary(&t.message).unwrap();
+                assert_eq!(m.typ, BINDING_REQUEST);
+                return stun::textattrs::Software::get_from_as(&m, stun::attributes::ATTR_SOFTWARE)
+                    .ok()
+                    .map(|s| s.to_string());
+            }
+            pc.handle_timeout(now + TA * step).unwrap();
+        }
+        panic!("no Binding request reached the STUN server");
+    }
+
+    /// RFC 8489 section 14.14: "This attribute SHOULD be used by clients and servers. ... in
+    /// all Binding requests". By default the gatherer's request carries the ICE agent's
+    /// SOFTWARE, as the connectivity checks do.
+    #[test]
+    fn by_default_the_srflx_binding_request_carries_the_rtc_ice_software() {
+        assert_eq!(
+            srflx_request_software(None).as_deref(),
+            Some(ice::agent::DEFAULT_SOFTWARE)
+        );
+    }
+
+    /// RFC 8489 section 16.1.2: SOFTWARE is a configurable option. `with_ice_software(None)`
+    /// takes it off the gatherer's request too; `Some(text)` sends that text.
+    #[test]
+    fn with_ice_software_the_srflx_binding_request_carries_that_text_or_none() {
+        assert_eq!(srflx_request_software(Some(None)), None);
+        assert_eq!(
+            srflx_request_software(Some(Some("probe 1.0".to_owned()))).as_deref(),
+            Some("probe 1.0")
+        );
+        assert_eq!(srflx_request_software(Some(Some(String::new()))), None);
     }
 }

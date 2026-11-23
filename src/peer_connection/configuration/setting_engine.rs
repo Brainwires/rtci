@@ -610,6 +610,18 @@ impl SettingEngine {
             .map(|software| software.clone().unwrap_or_default())
     }
 
+    /// The SOFTWARE of the server-reflexive Binding requests the engine's gatherer sends (RFC
+    /// 8489 section 14.14: a request SHOULD carry it), resolved: the ICE agent's default
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) unless [`SettingEngineBuilder::with_ice_software`]
+    /// says otherwise, and `None` (no attribute) for `with_ice_software(None)` or an empty text.
+    pub(crate) fn srflx_software(&self) -> Option<String> {
+        match &self.ice.software {
+            None => Some(ice::agent::DEFAULT_SOFTWARE.to_owned()),
+            Some(Some(software)) if !software.is_empty() => Some(software.clone()),
+            Some(_) => None,
+        }
+    }
+
     /// The SOFTWARE of the requests of the TURN clients the engine runs, in the form of
     /// [`turn::client::ClientConfig::software`] (empty: none); see
     /// [`SettingEngineBuilder::with_ice_software`].
@@ -1607,9 +1619,11 @@ impl SettingEngineBuilder {
 
     /// The SOFTWARE attribute (RFC 8489 section 14.14) of the STUN messages the peer
     /// connection sends: the ICE agent's connectivity checks (consent checks and nominations
-    /// included) and its success responses to the peer's, and the requests of the TURN
-    /// clients the engine runs for the configuration's `turn:` / `turns:` servers, over UDP,
-    /// TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind, ConnectionBind).
+    /// included) and its success responses to the peer's, the server-reflexive Binding
+    /// requests the engine's gatherer sends to the configuration's `stun:` / `stuns:` servers,
+    /// and the requests of the TURN clients the engine runs for its `turn:` / `turns:`
+    /// servers, over UDP, TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind,
+    /// ConnectionBind).
     ///
     /// Without this call the ICE agent sends `rtc-ice` and its version
     /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
@@ -1617,8 +1631,8 @@ impl SettingEngineBuilder {
     /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
     /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
     /// an implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD
-    /// make usage of the SOFTWARE attribute a configurable option"). The engine's server-reflexive Binding requests, the agent's error
-    /// responses, the consent checks it keeps up on the previous generation's path during a
+    /// make usage of the SOFTWARE attribute a configurable option"). The gatherer's Binding
+    /// requests carry the ICE agent's text. The agent's error responses, the consent checks it keeps up on the previous generation's path during a
     /// restart, keepalive indications and TURN Send indications carry none in any case.
     ///
     /// `text` is fewer than 128 characters and at most 509 bytes (section 14.14); building the

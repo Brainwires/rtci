@@ -283,7 +283,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
   nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
   characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
-  engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
+  server-reflexive Binding requests of the engine's gatherer carry the ICE agent's SOFTWARE
+  too (RFC 8489 sections 6.1 and 14.14: requests SHOULD; they carried none before), under the
+  same setting. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
 ### Bug Fixes
