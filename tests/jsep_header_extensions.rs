@@ -408,6 +408,43 @@ fn the_peers_vad_attribute_is_in_the_negotiated_parameters() -> TestResult {
     Ok(())
 }
 
+/// RFC 6464 section 4: "the semantics chosen for a header extension element (including its vad
+/// setting) for a particular extension identifier value MUST NOT be changed within an RTP
+/// session". A peer offers the audio level as id 3 with `vad=off`: the answer maps id 3 with
+/// `vad=off` too, and so does the engine's own later offer (without the attribute it would mean
+/// `vad=on`, the default), in the clear and encrypted forms alike; an id offered without one
+/// stays without one.
+#[test]
+fn the_vad_of_an_audio_level_id_is_kept_through_the_session() -> TestResult {
+    for encrypted in [false, true] {
+        let mut pc = default_interceptor_peer()?;
+        let line = if encrypted {
+            format!("3 {ENCRYPT} {AUDIO_LEVEL} vad=off")
+        } else {
+            format!("3 {AUDIO_LEVEL} vad=off")
+        };
+        let sdp = answer(
+            &mut pc,
+            offer(
+                &format!("a=extmap:{line}\na=extmap:4 {CSRC_AUDIO_LEVEL}\n"),
+                "",
+            ),
+        )?;
+        assert!(extmaps(&sdp)[0].contains(&line), "the answer: {sdp}");
+        let reoffer = pc.create_offer(None)?;
+        let audio = &extmaps(&reoffer.sdp)[0];
+        assert!(audio.contains(&line), "the later offer: {audio:?}");
+        assert!(
+            audio
+                .iter()
+                .filter(|l| l.starts_with("4 ") || l.starts_with("4/"))
+                .all(|l| !l.contains("vad")),
+            "{audio:?}"
+        );
+    }
+    Ok(())
+}
+
 /// RFC 8285 section 6: the attribute may be at media level; offered there, it is answered.
 #[test]
 fn extmap_allow_mixed_at_media_level_is_answered() -> TestResult {
