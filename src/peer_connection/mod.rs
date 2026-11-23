@@ -2253,9 +2253,19 @@ impl RTCPeerConnection {
             }
 
             if lite_update {
+                // RFC 8839 section 4.4.2.2: the pair's local candidate is the transport
+                // address `a=remote-candidates` names (the offerer's remote is this agent).
+                let pinned = remote_candidates(parsed_remote_description)?
+                    .into_iter()
+                    .find_map(|(address, port)| {
+                        address
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .map(|ip| std::net::SocketAddr::new(ip, port))
+                    });
                 self.ice_transport_mut()
                     .agent
-                    .replace_remote_candidates(now, candidates);
+                    .replace_remote_candidates_pinning(now, candidates, pinned);
             } else {
                 // The description's candidate lines: candidates the application supplied, as
                 // much as those it trickles.

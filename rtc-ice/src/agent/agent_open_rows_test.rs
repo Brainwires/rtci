@@ -172,6 +172,44 @@ fn test_two_lite_agents_with_several_pairs_select_by_rfc6724_and_update() {
     assert_eq!(full.get_remote_candidates().len(), 1);
 }
 
+/// RFC 8839 Section 4.4.2.2: a lite answerer offered `a=remote-candidates` forms its pair
+/// with the local candidate the attribute names, even where the RFC 6724 preference would
+/// take another local candidate (here the one on the remote's own network).
+#[test]
+fn test_a_lite_answerer_takes_the_local_candidate_remote_candidates_names() {
+    let now = Instant::now();
+    let remote = udp("192.168.0.9", 5000, 1000);
+    let mut b = lite_agent(now, false, &[remote.clone()]);
+    b.add_local_candidate(udp("10.0.0.2", 1000, 500)).unwrap();
+    run(&mut b, now, now + Duration::from_secs(1));
+    let local = |a: &Agent| a.get_selected_candidate_pair().map(|(l, _)| l.addr());
+    assert_eq!(
+        local(&b),
+        Some(addr(LOCAL)),
+        "the preference: the same network"
+    );
+
+    let later = now + Duration::from_secs(1);
+    assert!(b.replace_remote_candidates_pinning(
+        later,
+        vec![remote.clone()],
+        Some(addr("10.0.0.2:1000"))
+    ));
+    run(&mut b, later, later + Duration::from_secs(1));
+    assert_eq!(
+        local(&b),
+        Some(addr("10.0.0.2:1000")),
+        "the named local candidate"
+    );
+    assert_eq!(selected(&b), Some(addr("192.168.0.9:5000")));
+
+    // Without a name, the preference decides again.
+    let later = later + Duration::from_secs(1);
+    assert!(b.replace_remote_candidates(later, vec![remote]));
+    run(&mut b, later, later + Duration::from_secs(1));
+    assert_eq!(local(&b), Some(addr(LOCAL)));
+}
+
 /// A lite agent whose peer is full still waits for the nomination (Section 8.2): the pair is
 /// not selected from the candidate exchange.
 #[test]

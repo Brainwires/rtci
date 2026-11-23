@@ -466,6 +466,10 @@ pub struct Agent {
     pub(crate) remote_lite: bool,
     /// The `LiteCandidateUpdate` event of this generation was raised.
     pub(crate) lite_update_raised: bool,
+    /// Two lite agents, controlled: the local transport address an updated candidate
+    /// exchange named in `a=remote-candidates` (RFC 8839 Section 4.4.2.2), which the pair
+    /// takes as its local candidate. See [`Agent::replace_remote_candidates_pinning`].
+    pub(crate) pinned_local_addr: Option<SocketAddr>,
     /// Ta as configured, before the peer's proposal (Section 14.2).
     pub(crate) configured_ta: Option<Duration>,
     /// Which of several nominations the controlled agent uses.
@@ -748,6 +752,7 @@ impl Agent {
 
             remote_lite: false,
             lite_update_raised: false,
+            pinned_local_addr: None,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
             failed_nomination: config.failed_nomination,
@@ -1868,9 +1873,25 @@ impl Agent {
     /// is complete after and only after the updated candidate exchange is complete"), and
     /// selects again. Returns `false`, and changes nothing, unless both agents are lite.
     pub fn replace_remote_candidates(&mut self, now: Instant, candidates: Vec<Candidate>) -> bool {
+        self.replace_remote_candidates_pinning(now, candidates, None)
+    }
+
+    /// [`Agent::replace_remote_candidates`], with the local side of the pair given: RFC 8839
+    /// Section 4.4.2.2, a lite answerer offered `a=remote-candidates` forms the pair from the
+    /// offer's default destination and, as its local candidate, the transport address the
+    /// attribute names (the controlling agent's remote candidate is this agent's local one).
+    /// A pair with a local candidate at `local` is chosen over any other; `None` (or an
+    /// address no local candidate has) leaves the choice to the RFC 6724 preference.
+    pub fn replace_remote_candidates_pinning(
+        &mut self,
+        now: Instant,
+        candidates: Vec<Candidate>,
+        local: Option<SocketAddr>,
+    ) -> bool {
         if !(self.lite && self.remote_lite) {
             return false;
         }
+        self.pinned_local_addr = local;
         self.set_selected_pair(Some(now), None);
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
@@ -2249,6 +2270,7 @@ impl Agent {
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
         self.lite_update_raised = false;
+        self.pinned_local_addr = None;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;
 

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     later packet's MID names (when that section's receiver has no stream), as one the engine
     placed already did (RFC 9143 section 9.2); a MID from a packet older than the one that
     moved the stream is not applied (RFC 7941 section 4.2.6).
+  - rtc-ice: new `Agent::replace_remote_candidates_pinning(now, candidates, local)`: two lite
+    agents, the controlled one takes the local candidate an updated exchange names in
+    `a=remote-candidates` (RFC 8839 section 4.4.2.2); the peer connection passes it.
   - Audit only: RFC8830-3.2.2-1 tested (stale note), 3.2.5-1 `conflict` (as 3-7),
     RFC9429-5.8-1 `setting` (trailing white space, for webrtc-rs 0.17), RFC9429-5.2.1-28
     tested by the MUST of RFC 8854 section 7 (Opus `useinbandfec=1`).
