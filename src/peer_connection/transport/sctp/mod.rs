@@ -585,13 +585,13 @@ impl SctpTransport {
         }
     }
 
-    /// W3C webrtc 6.1.1.2, "update the data max message size", for a running association:
-    /// `[[MaxMessageSize]]` from the remote's `max-message-size` and `canSendSize`, and the
-    /// association's send limit with it.
+    /// W3C webrtc 6.1.1.2, "update the data max message size": `[[MaxMessageSize]]` from the
+    /// remote's `max-message-size` and `canSendSize`, and a running association's send limit
+    /// with it. Also before the association is started: W3C 4.4.1.4 updates it for an answer
+    /// or a provisional answer "If description initiates the establishment of a new SCTP
+    /// association ... or an SCTP association already exists", and a provisional answer does
+    /// not start the association (the final answer does, and sets the size again).
     pub(crate) fn update_max_message_size(&mut self, remote_max_message_size: u32) {
-        if !self.is_started {
-            return;
-        }
         let max_message_size =
             SctpTransport::calc_message_size(remote_max_message_size, self.can_send_size());
         self.negotiated_max_message_size = Some(max_message_size);

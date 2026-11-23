@@ -466,6 +466,8 @@ pub struct SettingEngine {
     pub(crate) allow_insecure_verification_algorithm: bool,
     pub(crate) disable_media_engine_copy: bool,
     pub(crate) disable_media_engine_multiple_codecs: bool,
+    /// [`SettingEngineBuilder::with_own_payload_types_in_answers`].
+    pub(crate) own_payload_types_in_answers: bool,
     pub(crate) srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     pub(crate) dtls_cipher_suites: Vec<CipherSuiteId>,
     pub(crate) receive_mtu: usize,
@@ -2109,6 +2111,31 @@ impl SettingEngineBuilder {
     /// that set.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
+        self
+    }
+
+    /// Whether an answer numbers the formats with this endpoint's own payload types (the ones
+    /// the [`MediaEngine`](crate::peer_connection::configuration::media_engine::MediaEngine)
+    /// registered them with) instead of the offer's. `false` by default.
+    ///
+    /// RFC 3264 section 6.1: "if a particular codec was referenced with a specific payload
+    /// type number in the offer, that same payload type number SHOULD be used for that codec
+    /// in the answer", which is the default. An answerer may number the formats otherwise
+    /// (section 5.1: "the answer might indicate different payload type numbers for the same
+    /// codecs, in which case, the offerer MUST send with the payload type numbers from the
+    /// answer"; a gateway to a system with fixed numbers does), and that is `true`: each
+    /// format of an offer this endpoint negotiates is answered under its registered payload
+    /// type (the one a description of this endpoint already gave it, once it has one), RTX
+    /// (`apt`) and RED (the encodings of its fmtp) following their primaries. The endpoint
+    /// then receives with its own numbers and sends with the offer's (section 6.1: the
+    /// answerer "MUST use the payload type numbers from the offer, even if they differ from
+    /// those in the answer").
+    ///
+    /// Either way each direction of a media section follows the description that governs it:
+    /// what is sent carries the remote description's payload types and what is received is
+    /// read with the local description's (RFC 9429 sections 5.9 to 5.11).
+    pub fn with_own_payload_types_in_answers(mut self, own: bool) -> Self {
+        self.0.own_payload_types_in_answers = own;
         self
     }
 

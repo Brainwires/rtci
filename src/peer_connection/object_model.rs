@@ -94,13 +94,18 @@ impl RTCPeerConnection {
             transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
         }
         let preferences = transceiver.get_codec_preferences().to_vec();
+        // Codecs a remote description gave the sender carry its payload types (RFC 9429
+        // section 5.10) and stay; the transceiver's preferences carry this endpoint's.
+        let send_codecs_from_remote = transceiver.send_codecs_from_remote();
         let streams = crate::rtp_transceiver::rtp_sender::internal::track_streams(&track);
         if let Some(sender) = transceiver.sender_mut() {
             if !sender.has_send_encodings() || !sender.is_negotiated() {
                 sender.set_send_encodings(send_encodings);
             }
             sender.attach_track(track, streams);
-            sender.set_codec_preferences(preferences);
+            if !send_codecs_from_remote {
+                sender.set_codec_preferences(preferences);
+            }
         }
         transceiver.set_direction(RTCRtpTransceiverDirection::from_send_recv(
             true,

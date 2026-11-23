@@ -68,6 +68,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RFC6184-7.2.2-1 stays `partial`, owner decision).
   - FLEXFEC03-4.2-17 and FLEXFEC03-5.1-5 are `n/a`: superseded by RFC 8627. Open MUST rows
     67 to 45.
+- **jsep**: follow-ups to the payload type stack (`conf/jsep-74-followups`). The `a=extmap`
+  lines of negotiated header extensions are written in id order; they were written in the
+  order of a hash map, different from one run to the next (the ids and URIs are unchanged).
+  The engine's answer to every recorded offer
+  (`tests/fixtures/browser-sdp/`: Chromium, Firefox, WebKit, webrtc-rs 0.17; 38 offers) is
+  pinned line by line in `tests/fixtures/browser-sdp-answers/`
+  (`tests/browser_offer_answers_pinned.rs`; `RTC_UPDATE_ANSWER_FIXTURES=1` rewrites them):
+  compared with the train head before the payload type stack (`conf/train-11` daf14463), the
+  38 answers are the same line for line, the payload type numbers included, once the `a=extmap`
+  lines are in id order. The umbrella RFC9429-5.1-1 is `setting` (every child is `tested`,
+  `setting` or `conflict`).
+
+- **jsep**: the events a description causes are queued when it is applied, in the W3C order,
+  data channels included (`conf/jsep-73-dc-error-order`). W3C webrtc-pc 4.4.1.4 fires
+  `signalingstatechange`, then `error` at each channel of errorList (a channel that got no id),
+  then the mutes, the stream changes and the track events; what the description closes is
+  announced in tasks queued after that ("When an RTCDataChannel object's underlying data
+  transport has been closed, the user agent MUST queue a task": `error` if it closed with an
+  error, then `close`). Changed: (1) `OnSctpTransportStateChange(Closed)` for an answer that
+  closes the SCTP association (a rejected data section, `a=sctp-port:0`) was queued before
+  `OnSignalingStateChangeEvent`; it now follows the description's events and the `OnClose` of
+  the association's channels. (2) Those channel events (`OnClose`; `OnError` then `OnClose`
+  for a channel that never opened) were produced by a later `poll_event`, behind whatever was
+  queued in between (the next description's `signalingstatechange`, say); they are now queued
+  with the description, channel by channel in the order the channels were created. An
+  application that relied on the SCTP event arriving first has to wait for it after the
+  channels'. Row WEBRTC-4.4.1.4-91 `tested`.
+- **sctp**: assigning data channel ids with every id of this side's parity taken no longer
+  overflows (a panic in debug builds for the DTLS client). The update of the data max message
+  size on answers and provisional answers is `conf/audit-5-sctp-w3c`'s
+  (`SctpTransport::update_max_message_size`, `update_sctp_max_message_size`); this branch
+  extends it to a provisional answer that initiates the association (W3C: "If description
+  initiates the establishment of a new SCTP association ... or an SCTP association already
+  exists"): `RTCSctpTransport::max_message_size` was null until the final answer then. Test:
+  `tests/sctp_transport_by_description.rs::the_max_message_size_follows_every_answer_and_provisional_answer`. The umbrella WEBRTC-4.5.1-1 is `tested`.
+
+- **jsep**: an answer that rejects every m= section closes the transports
+  (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state
+  stable: the transports "no longer referenced by a non-stopped transceiver" are closed, "the
+  RTCDtlsTransports and their associated RTCIceTransports. This results in events firing on
+  these objects in a queued task"; RFC 9429 section 5.11: the ICE components of a rejected
+  section are discarded "unless a non-rejected "m=" section is bundled with" it. With one
+  transport this was only remembered (the next offer restarted ICE on the same agent and asked
+  for a new DTLS association), with no close and no event; with several, the layout of such an
+  answer was not applied at all. Now each transport is closed when the answer is applied, local
+  or remote: its DTLS `statechange` to "closed", then its ICE one (the legacy variants for the
+  default transport and `OnTransportEvent` with the transport's ids), after the description's
+  own events; the connection's states follow (`iceGatheringState`, `iceConnectionState` and
+  `connectionState` "new"), the ICE agent is closed and nothing more is sent. The last
+  transport is replaced in its place by a new one, not started: a new ICE agent with
+  credentials of its own, a new DTLS transport (a new `a=tls-id`, the same certificate), new
+  transport ids, the ICE role undetermined. The next description that sets a section up
+  starts it as the first was (no ICE restart: `a=ice-ufrag` / `a=ice-pwd` are a new
+  generation's). The local candidates the application added are the new agent's too, unless
+  `with_discard_local_candidates_during_ice_restart(true)`; they are announced again when the
+  application adds them for the new generation. Applications that waited for the state events
+  of an ICE restart after such an exchange now see a closed transport and then a new one
+  connecting. Row WEBRTC-4.4.1.4-82 `tested`.
+
+- **jsep**: payload types are kept per direction of each m= section
+  (`conf/jsep-71-pt-numbering`). RFC 3264 section 5.1: "the answer might indicate different
+  payload type numbers for the same codecs, in which case, the offerer MUST send with the
+  payload type numbers from the answer"; section 6.1: the answerer "MUST use the payload type
+  numbers from the offer, even if they differ from those in the answer"; RFC 9429 sections 5.10
+  and 5.11: "The payload type mapping from the remote description is used to determine payload
+  types for the outgoing RTP streams". A sender's codecs (`RTCRtpSender::get_parameters`, what
+  `write_rtp` accepts and the streams the interceptors are bound with) are now the remote
+  section's, with its numbers, RTX `apt` and RED's encodings in that numbering; the receiver's
+  (`RTCRtpReceiver::get_parameters`, demultiplexing, RTX and RED association, statistics) and
+  the formats of this endpoint's own descriptions keep the numbers its descriptions gave them:
+  a remote answer's formats are entered under the payload types of the local offer, not the
+  answer's, and later offers keep them (RFC 3264 section 8.3.2). Behaviour changes only towards
+  a peer that numbers a format otherwise than this endpoint: before, the first remote
+  description's numbers were used for both directions and for every later description, so an
+  answer that renumbered a format was sent to correctly, and what the peer then sent (with the
+  offer's numbers) was read under the wrong ones; a later offer of the peer's with new numbers
+  was answered and sent to with the old ones. New:
+  `SettingEngineBuilder::with_own_payload_types_in_answers(true)` has an answer number the
+  formats as this endpoint registered them (RFC 3264 section 6.1 has "SHOULD" for the offer's
+  numbers, which stays the default). Not covered: `configure_ulpfec` takes one RED and one
+  ULPFEC payload type for both directions, and an `a=rid` `pt=` list is compared by number with
+  this endpoint's formats. Row RFC3264-5.1-8 `tested`; RFC3264-6.1-23 now has a test that sends.
+
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT

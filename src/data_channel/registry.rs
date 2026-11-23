@@ -244,14 +244,16 @@ impl DataChannelRegistry {
             // restarting the scan keeps this a single pass.
             // Ids run from 0 to `max - 1` (W3C 6.1.1.3: an id "equal to or greater than"
             // [[MaxChannels]] is unusable); 65535 is never one (`SCTP_MAX_CHANNELS`).
+            // (Saturating: with every id of this side's parity in use the cursor would pass
+            // 65534 and overflow.)
             while next < max && self.stream_id_in_use(&next) {
-                next += 2;
+                next = next.saturating_add(2);
             }
             if next >= max {
                 return Err(Error::ErrMaxDataChannelID);
             }
             self.assign_stream_id(handle, next);
-            next += 2;
+            next = next.saturating_add(2);
         }
 
         Ok(())
