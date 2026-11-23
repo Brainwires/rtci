@@ -2457,7 +2457,26 @@ fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<
         for sender in &senders {
             world.send_rtp(*sender, seq)?;
         }
-        world.advance(Duration::from_millis(20))?;
+        if let Err(err) = world.advance(Duration::from_millis(20)) {
+            let events: Vec<String> = world.peers[0]
+                .events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. }
+                            | RTCPeerConnectionEvent::OnNegotiationNeededEvent
+                            | RTCPeerConnectionEvent::OnConnectionStateChangeEvent(_)
+                            | RTCPeerConnectionEvent::OnTransportEvent(_)
+                    )
+                })
+                .map(|e| format!("{e:?}"))
+                .collect();
+            bail!(
+                "{err} at packet {seq} after {renegotiations} renegotiations\n{}\npeer 0 events: {events:#?}",
+                world.trace()
+            );
+        }
         let raised = world.peers[0].events[seen..]
             .iter()
             .any(|e| matches!(e, RTCPeerConnectionEvent::OnNegotiationNeededEvent));
