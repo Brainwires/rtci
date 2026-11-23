@@ -482,6 +482,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **turn**: `Client::update_credentials` with a new username no longer re-keys live
+  allocations: they keep the username (and password) that created them, as RFC 8656 section 5
+  asks of every request about an allocation; the new username is for the next `allocate`.
+  Before, the next Refresh went under the new username and was answered 441.
 - **stun**, **ice**: a `stuns` URI whose host is an IP address is refused by default (RFC 8489
   section 8.1: "MUST be rejected"): `stun::uri::Uri::parse_uri` and `ice::url::Url::parse_url`
   (and so the peer connection's ICE servers) return `ErrHost`; the new `parse_uri_lenient` /
