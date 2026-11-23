@@ -186,7 +186,19 @@ fn with_dtls_new_association_on_previous_addresses_the_candidates_are_kept() -> 
 /// candidates again until an ICE restart causes it to restart").
 #[test]
 fn a_new_association_tells_the_application_to_gather_on_new_addresses() -> Result<()> {
-    let mut world = renewed(|| SettingEngineBuilder::new().build())?;
+    let mut world = World::new(
+        Peer::new(A, SettingEngineBuilder::new().build())?,
+        Peer::new(B, SettingEngineBuilder::new().build())?,
+    );
+    world.connect()?;
+    // The first generation ends ("complete"), so that the new one's start is a change.
+    for p in &mut world.peers {
+        p.pc.add_local_candidate(RTCIceCandidateInit::default())?;
+        assert_eq!(p.pc.ice_gathering_state(), RTCIceGatheringState::Complete);
+    }
+    world.run("the first generation ended", |_| true)?;
+    world.peers[0].pc.renew_dtls_association();
+    world.exchange(0)?;
     for (i, who) in ["the offerer", "the answerer"].into_iter().enumerate() {
         let peer = &mut world.peers[i];
         let events = take_events(&mut peer.pc);
