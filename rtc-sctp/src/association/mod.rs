@@ -524,6 +524,13 @@ pub struct Association {
     /// The TSNs marked for Fast Retransmit (their third miss indication) since the last
     /// Fast Retransmit packet. What of them does not fit that packet waits for cwnd.
     fast_retransmit_marked: Vec<u32>,
+    /// RFC 9260 6.1 A: when the peer's SACK closed its window (a_rwnd 0), the first zero
+    /// window probe waits one RTO from then.
+    zero_window_probe_at: Option<Instant>,
+    /// The DATA chunk length (header and padding included) of chunks the Cumulative TSN Ack
+    /// recently covered, for the Duplicate TSNs a later SACK reports (RFC 9260 7.2.2: their
+    /// bytes count in partial_bytes_acked).
+    recently_acked_sizes: VecDeque<(u32, u32)>,
     /// The TSNs the last SACK showed the peer reneged on: they got their one miss indication
     /// there (RFC 9260 6.2.1 D iii), not another from the same SACK's Fast Retransmit count.
     reneged_in_last_sack: Vec<u32>,
@@ -706,6 +713,8 @@ impl Default for Association {
             last_data_sent: None,
             t3_single_packet: false,
             fast_retransmit_marked: vec![],
+            zero_window_probe_at: None,
+            recently_acked_sizes: VecDeque::new(),
             reneged_in_last_sack: vec![],
             acknowledging_by_shutdown: false,
             last_advertised_window: 0,
@@ -1048,10 +1057,14 @@ impl Association {
             .as_ref()
             .filter(|_| self.state() == AssociationState::Established)
             .and_then(|p| p.deadline());
-        match (self.timers.next_timeout(), pmtud) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // The first zero window probe's time, while there is DATA to probe with.
+        let probe = self
+            .zero_window_probe_at
+            .filter(|_| self.inflight_queue.is_empty() && !self.pending_queue.is_empty());
+        [self.timers.next_timeout(), pmtud, probe]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Returns packets to transmit
@@ -3590,11 +3603,17 @@ impl Association {
 
         // The bytes outstanding before this SACK: the congestion window may grow only when
         // it was in full use (RFC 9260 7.2.1, 7.2.2).
-        let flight_before = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+        // Counted, as cwnd is, in DATA chunk lengths with header and padding (RFC 9260 7.2).
+        let flight_before =
+            u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
+        let marked_before = self.fast_retransmit_marked.len();
 
         // Process selective ack
         let (bytes_acked_per_stream, total_bytes_acked, htna) =
             self.process_selective_ack(d, now)?;
+        // RFC 9260 7.2.2: partial_bytes_acked counts "the number of bytes of duplicated chunks
+        // reported in Duplicate TSNs" too; 7.2: chunk lengths with header and padding.
+        let total_bytes_acked = total_bytes_acked + self.duplicate_bytes(&d.duplicate_tsn);
 
         let mut cum_tsn_ack_point_advanced = false;
         if sna32lt(self.cumulative_tsn_ack_point, d.cumulative_tsn_ack) {
@@ -3630,6 +3649,19 @@ impl Association {
         } else {
             self.rwnd = d.advertised_receiver_window_credit - bytes_outstanding;
         }
+        // RFC 9260 6.1 A: the receiver closed its window. The first zero window probe goes one
+        // RTO from now, and the probes sent while SACKs keep coming do not count as errors: the
+        // receiver may keep its window closed for as long as it likes.
+        if d.advertised_receiver_window_credit == 0 {
+            if self.zero_window_probe_at.is_none() {
+                self.zero_window_probe_at =
+                    Some(now + Duration::from_millis(self.rto_mgr.get_rto()));
+            }
+            self.timers.reset_retrans(Timer::T3RTX);
+            self.on_path_success();
+        } else {
+            self.zero_window_probe_at = None;
+        }
 
         // The highest TSN this SACK acknowledges: every outstanding TSN below it is one the
         // SACK reports missing (RFC 9260 7.2.4).
@@ -3664,6 +3696,17 @@ impl Association {
             self.advance_peer_ack_point();
             self.awake_write_loop();
         }
+
+        // RFC 9260 6.2.1 C: the chunks this SACK marked for retransmission go back to rwnd.
+        let marked: usize = self.fast_retransmit_marked
+            [marked_before.min(self.fast_retransmit_marked.len())..]
+            .iter()
+            .filter_map(|tsn| self.inflight_queue.get(*tsn))
+            .map(|c| c.user_data.len())
+            .sum();
+        self.rwnd = self
+            .rwnd
+            .saturating_add(u32::try_from(marked).unwrap_or(u32::MAX));
 
         self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
 
@@ -3940,7 +3983,8 @@ impl Association {
                     newly_acked_data |= c.nsent > 0;
 
                     let n_bytes_acked = c.user_data.len() as i64;
-                    total_bytes_acked += n_bytes_acked;
+                    total_bytes_acked += c.wire_size() as i64;
+                    self.remember_acked_size(c.tsn, c.wire_size());
                     // A late SACK for a retired stream must not release bytes
                     // belonging to a new channel that reused its SID.
                     if self.is_current_stream_data(&c) {
@@ -4044,7 +4088,8 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get(tsn) {
                     if newly_acknowledged {
                         newly_acked_data |= c.nsent > 0;
-                        total_bytes_acked += n_bytes_acked;
+                        // Congestion control counts the DATA chunk length (RFC 9260 7.2).
+                        total_bytes_acked += c.wire_size() as i64;
                         if self.is_current_stream_data(c) {
                             *bytes_acked_per_stream
                                 .entry(c.stream_identifier)
@@ -4176,6 +4221,35 @@ impl Association {
         if self.inflight_queue.is_empty() {
             self.partial_bytes_acked = 0;
         }
+    }
+
+    /// How many recently acknowledged chunk sizes are kept for Duplicate TSNs.
+    const RECENTLY_ACKED: usize = 1024;
+
+    /// Keeps the DATA chunk length of a chunk the Cumulative TSN Ack covers, for a Duplicate
+    /// TSN a later SACK may report.
+    fn remember_acked_size(&mut self, tsn: u32, wire_size: usize) {
+        if self.recently_acked_sizes.len() == Self::RECENTLY_ACKED {
+            self.recently_acked_sizes.pop_front();
+        }
+        self.recently_acked_sizes
+            .push_back((tsn, u32::try_from(wire_size).unwrap_or(u32::MAX)));
+    }
+
+    /// RFC 9260 7.2.2: the bytes of the duplicated chunks a SACK reports in Duplicate TSNs,
+    /// for partial_bytes_acked. A TSN this side never sent, or one acknowledged too long ago
+    /// to be remembered, counts nothing.
+    fn duplicate_bytes(&self, duplicates: &[u32]) -> i64 {
+        duplicates
+            .iter()
+            .filter_map(|tsn| {
+                self.recently_acked_sizes
+                    .iter()
+                    .rev()
+                    .find(|(t, _)| t == tsn)
+                    .map(|(_, size)| i64::from(*size))
+            })
+            .sum()
     }
 
     /// RFC 9260 7.2.1: a congestion window that is not used decays, to max(cwnd / 2,
@@ -4805,6 +4879,10 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
                     chunk.nsent = c.nsent;
+                    // RFC 9260 6.2.1 B, for a Fast Retransmit too.
+                    self.rwnd = self
+                        .rwnd
+                        .saturating_sub(u32::try_from(c.user_data.len()).unwrap_or(u32::MAX));
                     self.stats.inc_fast_retrans();
                     trace!(
                         "[{}] fast-retransmit: tsn={} sent={} htna={}",
@@ -4939,7 +5017,6 @@ impl Association {
         now: Instant,
         raw_packets: &mut Vec<Bytes>,
     ) -> Result<()> {
-        let awnd = std::cmp::min(self.cwnd, self.rwnd);
         // RFC 9260 6.3.3 E3, 7.2.3: the retransmission that follows a T3-rtx expiry is the
         // earliest outstanding chunks that fit one packet, and that packet is alone in flight
         // until it is acknowledged. cwnd (one PMDCS) is counted in user bytes, which a second
@@ -4950,10 +5027,14 @@ impl Association {
         // retransmission is taken as lost, not as in flight; each chunk retransmitted is in
         // flight again. Counting only the bytes of one call, as this did, retransmitted a
         // window's worth on every poll, the whole of what was outstanding in the end.
+        // Counted, as cwnd is, in DATA chunk lengths with header and padding (RFC 9260 7.2).
         let mut in_flight = self
             .inflight_queue
-            .get_num_bytes()
-            .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes());
+            .get_num_wire_bytes()
+            .saturating_sub(self.inflight_queue.marked_for_retransmission_wire_bytes());
+        // What this call retransmits, against rwnd (6.2.1 B: rwnd is the peer's buffer
+        // space, the bytes outstanding already taken out of it).
+        let mut retransmitted = 0usize;
         let mut chunks: Vec<ChunkPayloadData> = vec![];
         let mut done = false;
         let mut i = 0;
@@ -4978,11 +5059,11 @@ impl Association {
                             .is_some_and(|c| !c.abandoned())
                     });
                     // The abandonment released payload and cleared marks: count again.
-                    in_flight = self
-                        .inflight_queue
-                        .get_num_bytes()
-                        .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
-                        + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
+                    in_flight =
+                        self.inflight_queue.get_num_wire_bytes().saturating_sub(
+                            self.inflight_queue.marked_for_retransmission_wire_bytes(),
+                        ) + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
+                    retransmitted = chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     packet_size = COMMON_HEADER_SIZE as usize
                         + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
                     i += 1;
@@ -5003,13 +5084,17 @@ impl Association {
                     // Send it as a zero window probe
                     done = true;
                     chunks_remaining = true;
-                } else if in_flight + c.user_data.len() > awnd as usize && in_flight > 0 {
+                } else if (in_flight + wire > self.cwnd as usize && in_flight > 0)
+                    || (retransmitted + c.user_data.len() > self.rwnd as usize
+                        && !chunks.is_empty())
+                {
                     // With nothing in flight one chunk always goes, whatever its size.
                     chunks_remaining = true;
                     break;
                 }
 
-                in_flight += c.user_data.len();
+                in_flight += wire;
+                retransmitted += c.user_data.len();
             } else {
                 break; // end of pending data
             }
@@ -5038,6 +5123,10 @@ impl Association {
                 c.retransmit = false;
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
+                // RFC 9260 6.2.1 B: a retransmitted chunk takes its size from rwnd again.
+                self.rwnd = self
+                    .rwnd
+                    .saturating_sub(u32::try_from(c.user_data.len()).unwrap_or(u32::MAX));
                 trace!(
                     "[{}] retransmitting tsn={} ssn={} sent={}",
                     self.side, c.tsn, c.stream_sequence_number, c.nsent
@@ -5376,7 +5465,8 @@ impl Association {
             // plus Max.Burst packets before DATA is sent, so that a SACK for many chunks at
             // once does not release them all at once.
             if let Some(max_burst) = self.max_burst {
-                let flight = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+                let flight =
+                    u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
                 let limit = flight.saturating_add(max_burst.saturating_mul(self.pmdcs));
                 if limit < self.cwnd {
                     self.cwnd = limit;
@@ -5449,7 +5539,9 @@ impl Association {
                 // chunk that crosses cwnd is still sent (by less than one PMDCS), and it is
                 // the last: a window that the next chunk does not fit exactly would
                 // otherwise never be in full use, and so never grow.
-                if self.inflight_queue.get_num_bytes() >= self.cwnd as usize {
+                // The flight size counts DATA chunk lengths with header and padding, as cwnd
+                // does (RFC 9260 7.2).
+                if self.inflight_queue.get_num_wire_bytes() >= self.cwnd as usize {
                     break; // cwnd is in full use
                 }
 
@@ -5478,10 +5570,12 @@ impl Association {
                 }
             }
 
-            // the data sender can always have one DATA chunk in flight to the receiver
+            // the data sender can always have one DATA chunk in flight to the receiver; after
+            // the receiver closed its window, from one RTO on (RFC 9260 6.1 A)
             if chunks.is_empty()
                 && self.inflight_queue.is_empty()
                 && !(suspended && !self.pending_queue.is_mid_message())
+                && self.zero_window_probe_at.is_none_or(|at| now >= at)
             {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
@@ -5984,7 +6078,11 @@ impl Association {
                     self.use_path_mtu(mtu, false);
                 }
 
-                self.inflight_queue.mark_all_to_retrasmit();
+                // RFC 9260 6.2.1 C: what is marked for retransmission goes back to rwnd.
+                let marked = self.inflight_queue.mark_all_for_retransmission();
+                self.rwnd = self
+                    .rwnd
+                    .saturating_add(u32::try_from(marked).unwrap_or(u32::MAX));
                 self.t3_retransmit_pending = true;
                 self.awake_write_loop();
             }

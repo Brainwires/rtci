@@ -79,6 +79,10 @@ pub(crate) struct PayloadQueue {
     pub(crate) sorted: VecDeque<u32>,
     dup_tsn: Vec<u32>,
     n_bytes: usize,
+    /// The same chunks' lengths with their DATA chunk headers and padding: what congestion
+    /// control counts (RFC 9260 7.2: "the length of the DATA chunk, including the padding,
+    /// SHOULD be used").
+    n_wire_bytes: usize,
     /// Sent fragments of messages eligible for abandonment. A whole message
     /// uses its candidate TSN directly; only fragmented messages need a group.
     message_tsns: FxHashMap<MessageId, MessageTsns>,
@@ -127,6 +131,7 @@ impl PayloadQueue {
                 .or_insert(MessageTsns::One(p.tsn));
         }
         self.n_bytes += p.user_data.len();
+        self.n_wire_bytes += counted_wire_size(&p);
         self.insert_sorted(p.tsn);
         self.chunk_map.insert(p.tsn, p);
         //self.length += 1;
@@ -166,6 +171,7 @@ impl PayloadQueue {
         self.sorted.pop_front();
         if !c.payload_held {
             self.n_bytes -= c.user_data.len();
+            self.n_wire_bytes -= counted_wire_size(&c);
         }
         Some(c)
     }
@@ -260,6 +266,7 @@ impl PayloadQueue {
                 return 0;
             }
             self.n_bytes -= n;
+            self.n_wire_bytes -= counted_wire_size(c);
             c.user_data.clear();
             n
         } else {
@@ -275,6 +282,7 @@ impl PayloadQueue {
             Some(c) if !c.payload_held => {
                 let n = c.user_data.len();
                 self.n_bytes -= n;
+                self.n_wire_bytes -= counted_wire_size(c);
                 c.payload_held = true;
                 n
             }
@@ -291,6 +299,7 @@ impl PayloadQueue {
                 if c.payload_held {
                     c.payload_held = false;
                     self.n_bytes += c.user_data.len();
+                    self.n_wire_bytes += counted_wire_size(c);
                 }
                 true
             }
@@ -337,6 +346,35 @@ impl PayloadQueue {
 
     pub(crate) fn get_num_bytes(&self) -> usize {
         self.n_bytes
+    }
+
+    /// The outstanding chunks' DATA chunk lengths, header and padding included: the flight
+    /// size congestion control compares with cwnd (RFC 9260 7.2).
+    pub(crate) fn get_num_wire_bytes(&self) -> usize {
+        self.n_wire_bytes
+    }
+
+    /// [`Self::marked_for_retransmission_bytes`] counted as [`Self::get_num_wire_bytes`] is.
+    pub(crate) fn marked_for_retransmission_wire_bytes(&self) -> usize {
+        self.chunk_map
+            .values()
+            .filter(|c| c.retransmit)
+            .map(counted_wire_size)
+            .sum()
+    }
+
+    /// Marks every outstanding chunk for retransmission (RFC 9260 6.3.3 E3). Returns the
+    /// bytes of user data newly marked, which go back to the peer's rwnd (6.2.1 C).
+    pub(crate) fn mark_all_for_retransmission(&mut self) -> usize {
+        let mut newly = 0;
+        for c in self.chunk_map.values_mut() {
+            if !c.is_outstanding() || c.retransmit {
+                continue;
+            }
+            c.retransmit = true;
+            newly += c.user_data.len();
+        }
+        newly
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -402,5 +440,15 @@ mod tests {
             assert!(queue.message_tsns(id).is_empty());
             assert_eq!(0, queue.get_num_bytes());
         }
+    }
+}
+
+/// What a chunk adds to [`PayloadQueue::get_num_wire_bytes`]: its DATA chunk length with
+/// header and padding while it has its payload, nothing once that was released.
+fn counted_wire_size(c: &ChunkPayloadData) -> usize {
+    if c.user_data.is_empty() {
+        0
+    } else {
+        c.wire_size()
     }
 }
