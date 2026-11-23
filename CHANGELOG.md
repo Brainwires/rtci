@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **data channels** (pc-26, W3C webrtc-pc 6.2 `send()`): `send()` / `send_text()` on an in-band
+  channel still "connecting" (its DATA_CHANNEL_ACK not yet received) fails with
+  `ErrDataChannelNotOpen` (InvalidStateError), as on any channel that is not "open"; it used to
+  be accepted. RFC 8832 section 6's early send is
+  `SettingEngineBuilder::with_data_channel_send_before_ack(true)`.
+- **encoded-transform** (pc-26): `RTCEncodedVideoFrameMetadata` has a new public field,
+  `corruption_detection`; struct literals add it (or `..Default::default()`).
+
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): `RTCIceCandidateInit` has a new public field,
+  `relay_protocol: Option<RTCIceServerTransportProtocol>` (`relayProtocol` of
+  RTCLocalIceCandidateInit); struct literals without `..Default::default()` add
+  `relay_protocol: None`.
+
 - **sctp**: RFC 9260 section 6.2: once a SACK advertised a closed window (a_rwnd 0), new DATA
   above the largest TSN received is dropped, the in-sequence chunk included. Taking that chunk
   when nothing is readable (the deadlock escape of webrtc-rs/webrtc#822, up to one message
@@ -1372,6 +1385,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address no response brought within ten seconds; an address other hosts' queries ask for in
   vain (two or more in ten seconds) is flushed without a query of our own. New
   `Mdns::is_reconfirming` (`mdns_stale_test.rs`).
+- **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
+  readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
+  protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
+  low threshold), for the last 64 closed channels. rtc-sctp: `stream_bytes_dequeued` of a
+  stream that was closed returns its count at the close until the id is opened again.
+- **rtp** (pc-26, webrtc-extensions 4.2): `setHeaderExtensionsToNegotiate` restricts each
+  direction to what the media engine registered the extension for (its allowed direction):
+  "sendrecv" asked of a receive-only extension is stored as "recvonly".
+- **stats** (pc-26, webrtc-stats 8.5): an inbound video stream that received a packet with
+  the negotiated corruption-detection extension reports `corruptionMeasurements`,
+  `totalCorruptionProbability` and `totalSquaredCorruptionProbability` (0 until the
+  application supplies measurements).
+
+- **data channels** (pc-25, RFC 8832 section 6, W3C webrtc-pc 6.2.8): user data that reaches
+  the opener of an in-band channel before its DATA_CHANNEL_ACK completes the handshake as the
+  ACK would ("the DATA_CHANNEL_ACK or any other message"): the channel is announced open, then
+  the data is delivered. It used to be held until the ACK and dropped if the handshake
+  deadline passed first.
+- **ice** (pc-25, W3C webrtc-pc 4.8.1): an exposed remote candidate (candidate pairs, the
+  selected pair, the pair events) has an empty `address` until the application supplied that
+  address in a description or with `add_remote_candidate`: a peer-reflexive candidate learned
+  only from checks no longer shows the peer's address.
+
+- **rtp** (pc-24, W3C webrtc-pc 5.2, 5.3): `getParameters().rtp_parameters.header_extensions`
+  of a sender (receiver) lists only the extensions its transceiver's m= section negotiated in
+  a sending (receiving) direction (`[[NegotiatedHeaderExtensions]]`), and none before an answer
+  was applied; it listed every extension of the kind negotiated anywhere on the connection, or
+  every registered one before negotiation. Video senders drop whole frames above an
+  encoding's `max_framerate` (W3C 5.2.5), judged by RTP timestamp.
+- **data channels** (pc-24, W3C webrtc-pc 6.1, 6.1.2, 6.2.3): a channel the peer opens in-band
+  raises `RTCDataChannelEvent::OnDataChannel(id)` (the `datachannel` event) before its
+  `OnOpen`. `create_data_channel` with no id left (DTLS role known) fails with
+  `ErrMaxDataChannelID` and registers nothing; the channel used to stay registered. An answer
+  that closes the SCTP association fires `OnSctpTransportStateChange(Closed)`.
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): a surfaced local relay candidate has
+  `relay_protocol` (from `RTCIceCandidateInit::relay_protocol`, else its TURN `url`) and `url`;
+  other candidates have neither.
+
+- **sctp / data channels** (pc-22, W3C webrtc-pc 4.4.1.6): `RTCPeerConnection::sctp()` is the
+  transport from the first applied offer (local or remote) that describes an SCTP association,
+  in state "connecting" until the association is up; it was `None` until the association
+  started. An answer that closes the association (rejected data section, `a=sctp-port:0`)
+  makes it `None`, and a rollback brings back the last stable state's
+  (`[[LastStableStateSctpTransport]]`). An in-band data channel that gets no id when an
+  answer settles the DTLS role is closed: `OnError` (`data_channel_error`:
+  data-channel-failure), then `OnClose`; it used to stay connecting without an id.
+- **crypto** (pc-22): the aws-lc-rs provider generates RSA keys (`SignatureScheme::RsaPkcs1Sha256`:
+  2048 bits, exponent 65537), so `RTCCertificate::generate` makes RSA certificates with
+  `crypto-aws-lc-rs` (W3C webrtc-pc 4.9). ring still cannot (no RSA key generation in ring).
+- **bandwidth** (pc-21): `maxBitrate` is enforced and the congestion controller's target is
+  divided among the senders (W3C webrtc 5.2.5, webrtc-priority 3.2, RFC 8835 section 4.1).
+  Every active encoding of a sending transceiver gets a share by `priority` (very-low : low :
+  medium : high = 1 : 2 : 4 : 8), capped at its `maxBitrate` with the rest going to the
+  others; `RTCRtpSender::target_bitrates()` returns the shares by SSRC, and each outbound
+  stream's `targetBitrate` reports its share (also with several streams). `setParameters`
+  divides again. An encoding with a `maxBitrate` has whole frames (the packets of one RTP
+  timestamp) dropped while they would take it above the maximum, counted as TIAS; one frame
+  always goes. A sender that wrote above its `maxBitrate` now loses frames.
+- **jitter buffer** (pc-21): `RTCRtpReceiver::set_jitter_buffer_target` reaches the chain's
+  adaptive jitter buffer (`AdaptiveJitterBufferInterceptor`), which holds the receiver's
+  streams for the target clamped to its minimum and maximum delay (W3C webrtc 5.3);
+  `None` returns to the adaptive delay. rtc-interceptor: `JitterBufferControl` (additive).
 - **peer connection** (mt-2): a remote description whose sections have different ICE
   credentials outside a BUNDLE group is applied, a transport per section, instead of refused
   with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
@@ -1896,6 +1971,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors `ErrUnknownStream`, `ErrStreamConnectionClosed`, `ErrStreamMessageTooLong`.
   `examples/stream-driver` (`rtc-stream-driver`, not published) is a tokio driver for it,
   tested over loopback sockets. RFC 4571 audit: `docs/conformance/audit/rfc4571.md`.
+- **pc** (pc-26): `SettingEngineBuilder::with_sctp_rto(initial, min, max)` (RFC 9260 RTO.Initial,
+  RTO.Min, RTO.Max) and `with_sctp_max_retransmissions` (Association.Max.Retrans), so an
+  unanswering peer fails the association (data channels: `sctp-failure`) within a chosen time;
+  `with_data_channel_send_before_ack`; `RTCRtpSender::set_configured_scalability_mode` (the
+  encoder's configured webrtc-svc mode, returned by `getParameters`). rtc-sctp: `RtoConfig`
+  and `TransportConfig::{with_rto_config, rto_config}`; the timers' backoff stops at the
+  configured RTO.Max.
+- **rtp** (pc-26): `rtp::extension::corruption_detection_extension::CorruptionDetectionExtension`
+  and `CORRUPTION_DETECTION_URI`: the libwebrtc corruption-detection header extension (sequence
+  index with the B flag and its 14-bit extension, std dev, luma / chroma thresholds, up to 13
+  samples, synchronization messages); a received video frame's message is
+  `RTCEncodedVideoFrameMetadata::corruption_detection`.
+
+- **encoded-transform** (pc-25, webrtc-extensions 15): `RTCEncodedFrameMetadata::remote_capture_time`,
+  a received frame's capture time on this side's clock, by the stream's RTCP sender reports
+  (RFC 3550 section 6.4.1) less half the round trip time.
+
+- **pc** (pc-24): `RTCPeerConnection::data_channel_ids()` (W3C `[[DataChannels]]`);
+  `SettingEngineBuilder::with_sctp_max_streams` (the SCTP stream count asked for and accepted,
+  hence `maxChannels`); `RTCCertificate::{serialize, deserialize}` with
+  `RTCSerializedCertificate` and `RTCCertificateKeyHandle` (W3C webrtc-pc 4.9.2: expires, the
+  chain, the origin and a handle to the key, never the key's bytes);
+  `RTCCertificate::{export_pem, import_pem}` (not part of any W3C specification): the key and
+  certificate as standard `PRIVATE KEY` / `CERTIFICATE` PEM blocks with an `EXPIRES` block, so
+  a server keeps its DTLS fingerprint across restarts; the import checks that the key is the
+  certificate's, that the certificate is valid and not expired at the given time, and
+  optionally that it has an expected fingerprint. It also takes PEM from other tools, which is
+  how an RSA certificate is brought to the ring provider.
+
+- **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
+  webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
+  packets of one frame as `poll_read` delivered them and returns
+  `RTCEncodedFrameMetadataKind::{Video, Audio}`: SSRC, payload type, CSRCs, RTP timestamp,
+  MIME type, `receive_time` (the arrival of the frame's last packet, recorded by the
+  receiver), capture time and sender offset (abs-capture-time, or interpolated); for video the
+  frame type (key / delta / empty), `frame_id` and `dependencies` from the Dependency
+  Descriptor (read with the stream's structure as packets arrive, frame numbers unwrapped to
+  64 bits), width / height (descriptor resolution, VP8 key frame header, VP9 scalability
+  structure, H.264 SPS with cropping, AV1 sequence header; a delta frame keeps its stream's
+  last size) and the spatial / temporal indices; for audio the sequence number and the RFC 6464
+  level as linear `audioLevel`. `RTCRtpSender::write_rtp_with_audio_level` writes a locally
+  sourced frame's level as the RFC 6464 element. `RTCRtpReceiver::send_key_frame_request`
+  sends a FIR (RFC 5104 4.3.1, sequence number per request) when receiving with `ccm fir`
+  negotiated, an InvalidStateError on audio. `RTCPeerConnectionEvent::OnKeyFrameRequest {
+  sender, rid }` for each PLI / FIR naming a sender's SSRC (6.4 `keyframerequest`).
 
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a

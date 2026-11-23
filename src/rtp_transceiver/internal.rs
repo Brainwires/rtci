@@ -251,7 +251,18 @@ impl RTCRtpTransceiverInternal {
         negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
     ) {
         self.header_extensions_to_negotiate = Some(negotiated.clone());
+        if self.negotiated_header_extensions == negotiated {
+            return;
+        }
         self.negotiated_header_extensions = negotiated;
+        // W3C 5.2 / 5.3 getParameters: the header extensions are those negotiated for each
+        // way, so what an earlier call returned is stale.
+        if let Some(sender) = self.sender.as_mut() {
+            sender.invalidate_parameters();
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.invalidate_parameters();
+        }
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.
@@ -638,6 +649,36 @@ impl RTCRtpTransceiverInternal {
     pub(crate) fn set_extmap_allow_mixed(&mut self, mixed: bool) {
         if let Some(sender) = self.sender.as_mut() {
             sender.set_extmap_allow_mixed(mixed);
+        }
+    }
+
+    /// W3C webrtc-pc 5.2.9: a sender's codecs take their `sdpFmtpLine` from the remote
+    /// description. `remote` is this transceiver's section of it: each send codec of the
+    /// same payload type there takes that format's parameters.
+    pub(crate) fn take_send_fmtp_from_remote(&mut self, remote: &MediaDescription) {
+        let Ok(remote_codecs) = crate::peer_connection::sdp::codecs_from_media_description(remote)
+        else {
+            return;
+        };
+        if let Some(sender) = self.sender.as_mut() {
+            sender.take_send_fmtp(&remote_codecs);
+        }
+    }
+
+    /// W3C webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from the local
+    /// description; `local` is this transceiver's section of it.
+    pub(crate) fn take_receive_fmtp_from_local(&mut self, local: &MediaDescription) {
+        let Ok(local_codecs) = crate::peer_connection::sdp::codecs_from_media_description(local)
+        else {
+            return;
+        };
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_local_fmtp(
+                local_codecs
+                    .into_iter()
+                    .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line))
+                    .collect(),
+            );
         }
     }
 

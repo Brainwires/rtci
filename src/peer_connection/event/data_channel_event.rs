@@ -83,6 +83,12 @@ use crate::data_channel::RTCDataChannelId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RTCDataChannelEvent {
+    /// W3C `RTCPeerConnection` `datachannel` event (webrtc-pc 6.2.3, "announce the data
+    /// channel instance"): the peer opened this channel in-band (a DCEP DATA_CHANNEL_OPEN),
+    /// and the connection now holds it. It comes right before the channel's
+    /// [`OnOpen`](Self::OnOpen). A channel this side created, or a negotiated one, has none.
+    OnDataChannel(RTCDataChannelId),
+
     /// Data channel has opened and is ready to send/receive data.
     ///
     /// This event is fired when the data channel transitions to the "open" state.

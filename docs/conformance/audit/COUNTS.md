@@ -9,9 +9,9 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4434 | 145 | 262 | 112 | 22 | 615 | 5590 |
+| MUST | 4514 | 117 | 215 | 105 | 22 | 617 | 5590 |
 | SHOULD | 683 | 75 | 73 | 72 | 6 | 328 | 1237 |
-| MAY | 391 | 33 | 36 | 128 | 0 | 168 | 756 |
+| MAY | 395 | 31 | 36 | 126 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
 | all | 5566 | 256 | 374 | 315 | 28 | 1111 | 7650 |
 | MUST | 4332 | 233 | 278 | 134 | 22 | 624 | 5623 |
@@ -19,6 +19,7 @@ is a procedure step without a keyword.
 | MAY | 395 | 31 | 35 | 129 | 0 | 172 | 762 |
 | PROC | 58 | 3 | 4 | 2 | 0 | 0 | 67 |
 | all | 5481 | 340 | 390 | 340 | 28 | 1125 | 7704 |
+| all | 5650 | 226 | 327 | 306 | 28 | 1113 | 7650 |
 
 ## Per file
 
@@ -30,7 +31,7 @@ is a procedure step without a keyword.
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MUST | 35 | 0 | 1 | 0 | 0 | 0 | 36 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 0 | 2 | 0 | 0 | 0 | 3 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `draft-ietf-avtcore-rtp-sframe.md` | MUST | 24 | 3 | 1 | 1 | 1 | 0 | 30 |
+| `draft-ietf-avtcore-rtp-sframe.md` | MUST | 28 | 0 | 0 | 1 | 1 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 1 | 0 | 0 | 1 | 0 | 2 | 4 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MAY | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 1 | 0 | 0 | 0 | 12 |
@@ -322,19 +323,19 @@ is a procedure step without a keyword.
 | `rfc9653.md` | MUST | 10 | 1 | 0 | 0 | 0 | 4 | 15 |
 | `rfc9653.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9653.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
-| `w3c-mediacapture-main.md` | MUST | 25 | 1 | 1 | 0 | 0 | 1 | 28 |
-| `w3c-webrtc-encoded-transform.md` | MUST | 23 | 5 | 10 | 3 | 0 | 12 | 53 |
+| `w3c-mediacapture-main.md` | MUST | 26 | 0 | 0 | 0 | 0 | 2 | 28 |
+| `w3c-webrtc-encoded-transform.md` | MUST | 41 | 0 | 0 | 0 | 0 | 12 | 53 |
 | `w3c-webrtc-encoded-transform.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `w3c-webrtc-extensions.md` | MUST | 57 | 1 | 1 | 0 | 0 | 14 | 73 |
+| `w3c-webrtc-extensions.md` | MUST | 59 | 0 | 0 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
-| `w3c-webrtc-extensions.md` | MAY | 0 | 0 | 0 | 1 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 779 | 17 | 53 | 20 | 0 | 60 | 929 |
+| `w3c-webrtc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
+| `w3c-webrtc-pc.md` | MUST | 830 | 1 | 20 | 17 | 0 | 61 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 1 | 0 | 0 | 5 | 10 |
-| `w3c-webrtc-pc.md` | MAY | 3 | 2 | 0 | 0 | 0 | 13 | 18 |
-| `w3c-webrtc-priority.md` | MUST | 13 | 0 | 0 | 1 | 0 | 0 | 14 |
+| `w3c-webrtc-pc.md` | MAY | 5 | 0 | 0 | 0 | 0 | 13 | 18 |
+| `w3c-webrtc-priority.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 14 |
 | `w3c-webrtc-priority.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `w3c-webrtc-stats.md` | MUST | 254 | 2 | 1 | 0 | 0 | 1 | 258 |
+| `w3c-webrtc-stats.md` | MUST | 257 | 0 | 0 | 0 | 0 | 1 | 258 |
 | `w3c-webrtc-stats.md` | SHOULD | 4 | 0 | 0 | 0 | 0 | 1 | 5 |
 | `w3c-webrtc-svc.md` | MUST | 51 | 0 | 0 | 0 | 0 | 1 | 52 |
 | `w3c-webrtc-svc.md` | SHOULD | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `w3c-webrtc-svc.md` | MAY | 1 | 0 | 0 | 1 | 0 | 1 | 3 |
+| `w3c-webrtc-svc.md` | MAY | 2 | 0 | 0 | 0 | 0 | 1 | 3 |

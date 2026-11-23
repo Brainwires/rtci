@@ -36,7 +36,7 @@ pub(crate) struct AnnouncedStates {
     selected_pair: Option<RTCIceCandidatePair>,
     dtls: RTCDtlsTransportState,
     /// `None` while there is no SCTP transport (W3C `sctp` is null).
-    sctp: Option<RTCSctpTransportState>,
+    pub(crate) sctp: Option<RTCSctpTransportState>,
     /// The server URLs an `icecandidateerror` with code 701 was fired for in the current
     /// gathering (W3C 4.8.3: once per URL while gathering).
     unreachable_servers: HashSet<String>,

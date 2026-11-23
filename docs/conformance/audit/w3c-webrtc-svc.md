@@ -10,7 +10,7 @@ Totals:
 
 - MUST: tested 51 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
-- MAY: tested 1 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 1
+- MAY: tested 2 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -27,7 +27,7 @@ Totals:
 | SVC-3.2.2-5 | 3.2.2 | MUST | "L1T1" set through setParameters turns SVC off and is returned by getParameters | tested | src/rtp_transceiver/rtp_sender/internal.rs (validate_scalability_modes) | set_parameters_checks_the_scalability_mode |  |
 | SVC-3.2.3-1 | 3.2.3 | MUST | getParameters before negotiation returns each encoding's mode as last set; none if not set or not accepted | tested | src/rtp_transceiver/rtp_sender/internal.rs (get_parameters) | add_transceiver_checks_the_scalability_mode, set_parameters_checks_the_scalability_mode |  |
 | SVC-3.2.3-2 | 3.2.3 | MUST | getParameters after negotiation returns the currently configured mode for encodings that had one | tested | src/rtp_transceiver/rtp_sender/internal.rs (get_parameters) | get_parameters_after_negotiation_returns_the_configured_mode | the mode set is returned; after negotiation not asserted |
-| SVC-3.2.3-3 | 3.2.3 | MAY | The configured mode may differ from the requested one if the negotiated codec cannot do it | missing | - | - | Needs the application's encoder to report back; no path for it |
+| SVC-3.2.3-3 | 3.2.3 | MAY | The configured mode may differ from the requested one if the negotiated codec cannot do it | tested | `src/rtp_transceiver/rtp_sender/mod.rs` (`set_configured_scalability_mode`) | `get_parameters_returns_the_mode_the_encoder_configured` | the application's encoder reports the mode it configured (the engine does not encode); getParameters returns it; TypeError for a mode outside the table or the codec, RangeError for a missing encoding (pc-26) |
 | SVC-3.2.3-4 | 3.2.3 | MUST | With no mode provided, getParameters returns none after negotiation | tested | src/rtp_transceiver/rtp_sender/internal.rs (get_parameters) | get_parameters_after_negotiation_returns_the_configured_mode | `None` when none was set; not asserted after negotiation |
 | SVC-3.2.3-5 | 3.2.3 | SHOULD | The codec's default mode is a temporal scalability mode | n/a | - | - | Encoder default, the application's |
 | SVC-4-1 | 4 | MAY | Discovery of supported modes through Media Capabilities | n/a | - | - | Media Capabilities is not WebRTC |

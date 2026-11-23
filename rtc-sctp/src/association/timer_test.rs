@@ -90,12 +90,55 @@ fn test_rto_manager_rto_calculation_large_rtt() {
 
 #[test]
 fn test_rto_manager_calculate_next_timeout() {
-    assert_eq!(1, calculate_next_timeout(1, 0));
-    assert_eq!(2, calculate_next_timeout(1, 1));
-    assert_eq!(4, calculate_next_timeout(1, 2));
-    assert_eq!(60000, calculate_next_timeout(1, 30));
-    assert_eq!(60000, calculate_next_timeout(1, 63));
-    assert_eq!(60000, calculate_next_timeout(1, 64));
+    assert_eq!(1, calculate_next_timeout(1, 0, RTO_MAX));
+    assert_eq!(2, calculate_next_timeout(1, 1, RTO_MAX));
+    assert_eq!(4, calculate_next_timeout(1, 2, RTO_MAX));
+    assert_eq!(60000, calculate_next_timeout(1, 30, RTO_MAX));
+    assert_eq!(60000, calculate_next_timeout(1, 63, RTO_MAX));
+    assert_eq!(60000, calculate_next_timeout(1, 64, RTO_MAX));
+}
+
+/// RFC 9260 section 16: RTO.Initial, RTO.Min and RTO.Max are protocol parameters. Configured,
+/// the RTO starts at the initial value, a measurement is clamped to the minimum and the
+/// maximum, backoff stops at the maximum, and a reset goes back to the initial value; the
+/// timers that back off by themselves stop at the maximum too.
+#[test]
+fn test_rto_manager_takes_configured_bounds() {
+    let config = RtoConfig {
+        initial: Duration::from_millis(300),
+        min: Duration::from_millis(100),
+        max: Duration::from_millis(400),
+    };
+    let mut m = RtoManager::with_config(config);
+    assert_eq!(300, m.get_rto());
+    m.set_new_rtt(10);
+    assert_eq!(100, m.get_rto(), "RTO.Min");
+    for _ in 0..4 {
+        m.backoff();
+    }
+    assert_eq!(400, m.get_rto(), "RTO.Max");
+    m.set_new_rtt(5000);
+    assert_eq!(400, m.get_rto(), "a measurement stays under RTO.Max");
+    m.reset();
+    assert_eq!(300, m.get_rto(), "RTO.Initial");
+
+    let now = Instant::now();
+    let mut t = TimerTable::new(TimerConfig::default()).with_rto_config(config);
+    t.start(T1, now, 300);
+    for _ in 0..5 {
+        let at = t.get(T1).expect("armed");
+        t.is_expired(T1, at);
+        t.start(T1, at, 300);
+    }
+    let at = t.get(T1).expect("armed");
+    let gap = t.get(T1).unwrap();
+    t.is_expired(T1, at);
+    t.start(T1, at, 300);
+    assert_eq!(
+        t.get(T1).unwrap() - gap,
+        Duration::from_millis(400),
+        "the backoff stops at RTO.Max"
+    );
 }
 
 #[test]

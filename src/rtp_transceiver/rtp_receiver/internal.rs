@@ -7,6 +7,7 @@ use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
 };
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
@@ -77,6 +78,9 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// What the public `getParameters` returns while the negotiated direction does not
     /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
     not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+    /// The `a=fmtp` parameters of each format of the local description's section (W3C
+    /// webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from it).
+    local_fmtp: Vec<(PayloadType, String)>,
     /// The last absolute capture time each synchronization source sent (webrtc-extensions
     /// 8), what packets without one are interpolated from.
     capture_references: Vec<CaptureReference>,
@@ -97,6 +101,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     received_frames: std::collections::VecDeque<Instant>,
     /// The SSRC and the CSRCs of the last packet received (webrtc-extensions 11).
     last_frame_sources: Option<(SSRC, Vec<SSRC>)>,
+    /// The arrival, capture time and Dependency Descriptor of the frames delivered lately
+    /// (webrtc-encoded-transform 4, `encoded_frame_metadata`).
+    frames: super::frame_metadata::FrameRecords,
+    /// The sequence number of the next Full Intra Request (RFC 5104 4.3.1.2).
+    fir_sequence_number: u8,
 }
 
 impl RTCRtpReceiverInternal {
@@ -114,6 +123,7 @@ impl RTCRtpReceiverInternal {
             rtcp_reduced_size: false,
             last_returned_parameters: None,
             not_receiving_parameters: None,
+            local_fmtp: Vec::new(),
             capture_references: vec![],
             remote_track_id: String::new(),
             remote_streams: vec![],
@@ -121,6 +131,8 @@ impl RTCRtpReceiverInternal {
             end_unannounced: false,
             received_frames: Default::default(),
             last_frame_sources: None,
+            frames: Default::default(),
+            fir_sequence_number: 0,
         }
         .with_own_track()
     }
@@ -223,6 +235,18 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    /// The local description's formats of this receiver's section, with their parameters.
+    pub(crate) fn set_local_fmtp(&mut self, local: Vec<(PayloadType, String)>) {
+        self.local_fmtp = local;
+    }
+
+    /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
+    /// negotiated state again.
+    pub(crate) fn invalidate_parameters(&mut self) {
+        self.last_returned_parameters = None;
+        self.not_receiving_parameters = None;
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         if self.rtcp_reduced_size != reduced_size {
             self.rtcp_reduced_size = reduced_size;
@@ -286,17 +310,33 @@ impl RTCRtpReceiverInternal {
     }
 
     /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
-    /// direction does not receive (`receiving` false).
+    /// direction does not receive (`receiving` false), and with only the header extensions
+    /// this transceiver's m= section negotiated for receiving (`negotiated_header_extensions`
+    /// is its `[[NegotiatedHeaderExtensions]]`; none before an answer was applied).
     pub(crate) fn get_public_parameters(
         &mut self,
         media_engine: &MediaEngine,
+        negotiated_header_extensions: &[RTCRtpHeaderExtensionToNegotiate],
         receiving: bool,
     ) -> &RTCRtpReceiveParameters {
-        if receiving {
-            return self.get_parameters(media_engine);
-        }
         let mut parameters = self.get_parameters(media_engine).clone();
-        parameters.rtp_parameters.codecs.clear();
+        if !receiving {
+            parameters.rtp_parameters.codecs.clear();
+        }
+        crate::rtp_transceiver::header_extension_control::retain_negotiated(
+            &mut parameters.rtp_parameters.header_extensions,
+            negotiated_header_extensions,
+            false,
+        );
+        for codec in &mut parameters.rtp_parameters.codecs {
+            if let Some((_, fmtp)) = self
+                .local_fmtp
+                .iter()
+                .find(|(payload_type, _)| *payload_type == codec.payload_type)
+            {
+                codec.rtp_codec.sdp_fmtp_line = fmtp.clone();
+            }
+        }
         self.not_receiving_parameters.insert(parameters)
     }
 
@@ -319,6 +359,7 @@ impl RTCRtpReceiverInternal {
         vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
+        dependency_descriptor: Option<&[u8]>,
     ) -> (bool, bool) {
         // webrtc-extensions 11: whether the SSRC, and the CSRCs, of the last frame changed.
         let changes = match &self.last_frame_sources {
@@ -351,6 +392,12 @@ impl RTCRtpReceiverInternal {
         };
         synchronization.capture_timestamp = capture_timestamp;
         synchronization.sender_capture_time_offset = sender_capture_time_offset;
+        self.frames.record(
+            now,
+            header,
+            (capture_timestamp, sender_capture_time_offset),
+            dependency_descriptor,
+        );
         self.synchronization_sources.push(synchronization);
         let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
@@ -420,6 +467,23 @@ impl RTCRtpReceiverInternal {
             reference.capture_ms + f64::from(elapsed) * 1000.0 / f64::from(rate)
         });
         (interpolated, reference.offset_ms)
+    }
+
+    /// The sequence number for a new Full Intra Request, one more than the last (RFC 5104
+    /// 4.3.1.2: "incremented by 1 modulo 256" for each new request).
+    pub(crate) fn next_fir_sequence_number(&mut self) -> u8 {
+        let number = self.fir_sequence_number;
+        self.fir_sequence_number = number.wrapping_add(1);
+        number
+    }
+
+    /// What the receiver recorded of the frames it delivered.
+    pub(crate) fn frame_records(&self) -> &super::frame_metadata::FrameRecords {
+        &self.frames
+    }
+
+    pub(crate) fn frame_records_mut(&mut self) -> &mut super::frame_metadata::FrameRecords {
+        &mut self.frames
     }
 
     /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.
