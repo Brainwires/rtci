@@ -733,7 +733,10 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
     {
         registry
     } else {
-        configuration::interceptor_registry::configure_rtcp_reports(registry)
+        configuration::interceptor_registry::configure_rtcp_reports_from(
+            registry,
+            setting_engine.crypto_provider(),
+        )
     };
     // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to
     // receive it and act on it, and RFC 4585 section 6.3.1 the same of PLI: only the

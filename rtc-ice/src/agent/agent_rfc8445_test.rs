@@ -1613,6 +1613,59 @@ fn test_data_is_accepted_from_every_valid_pair() {
     assert_eq!(a.media_path().unwrap().peer_addr, addr(REMOTE_A));
 }
 
+/// Sections 12.1 and 12.2, controlling agent: while the responses to its nomination are lost,
+/// the nominated pair (valid, and selected by the peer when the first request reached it)
+/// carries data both ways: the peer's DTLS handshake is received and answered, not dropped
+/// until a response comes. When the nomination fails, so does the path.
+#[test]
+fn test_data_flows_on_the_pair_being_nominated_until_its_response_comes() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.media_path().is_none(), "nothing is valid yet");
+
+    // The ordinary check is answered; no response to the nomination's requests comes.
+    let out = run_answering(&mut a, now, now + Duration::from_secs(1), |m, _| {
+        !m.contains(ATTR_USE_CANDIDATE)
+    });
+    assert!(
+        requests(&out)
+            .iter()
+            .any(|(m, to)| m.contains(ATTR_USE_CANDIDATE) && *to == addr(REMOTE_A)),
+        "the pair is being nominated"
+    );
+    assert!(a.get_selected_candidate_pair().is_none());
+    let path = a.media_path().expect("the nominated pair's path");
+    assert_eq!(path.local_addr, addr(LOCAL));
+    assert_eq!(path.peer_addr, addr(REMOTE_A));
+    assert!(matches!(
+        a.data_path(datagram(LOCAL, REMOTE_A)),
+        Some(DataPath::InUse)
+    ));
+
+    // 30 seconds after the last success response consent has expired (RFC 7675 Section
+    // 5.1): no data, although the nomination's transaction (39.5 seconds) is still open.
+    let _ = run(
+        &mut a,
+        now + Duration::from_secs(1),
+        now + Duration::from_secs(31),
+    );
+    assert_eq!(
+        a.nominated_pair,
+        Some(0),
+        "the nomination is still in flight"
+    );
+    assert!(a.media_path().is_none());
+    assert!(!a.accepts_data(datagram(LOCAL, REMOTE_A)));
+
+    // The nomination's transaction ends unanswered (Section 7.2.5.3.4): no path either.
+    let _ = run(
+        &mut a,
+        now + Duration::from_secs(31),
+        now + Duration::from_secs(60),
+    );
+    assert!(a.media_path().is_none());
+}
+
 /// `data_from_selected_pair_only`, the fork's hardening: the selected pair's remote address
 /// and no other.
 #[test]
