@@ -1247,3 +1247,21 @@ fn sender_fmtp_follows_the_remote_description_and_receiver_fmtp_the_local() -> T
     );
     Ok(())
 }
+
+/// W3C 4.7.3: the negotiation-needed update runs in a queued task, so several changes made
+/// before the application gets back to its event loop raise one `negotiationneeded`: the
+/// event is fired when the queue is read, once, however many changes came before.
+#[test]
+fn several_changes_before_the_events_are_read_raise_one_negotiation_needed() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.create_data_channel("a", None)?;
+    pc.create_data_channel("b", None)?;
+    assert_eq!(negotiation_needed(&mut pc), 1);
+    // Nothing negotiated since: a further change raises no second event while the first is
+    // not yet answered by an offer.
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    assert_eq!(negotiation_needed(&mut pc), 0);
+    Ok(())
+}

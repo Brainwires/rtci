@@ -259,3 +259,82 @@ fn a_reimported_pem_certificate_keeps_its_fingerprint_and_completes_dtls() -> Re
     );
     Ok(())
 }
+
+/// W3C 4.8.1 `address`: an exposed remote candidate's address stays null until the
+/// application supplied it. The answerer signals no candidate of its own (it is stripped from
+/// the answer and never trickled), so the offerer learns it only as a peer-reflexive candidate
+/// from its checks: that pair's remote address is null in `getCandidatePairs`, the
+/// selected pair and the pair events. Once the application adds the candidate, the address
+/// shows.
+#[test]
+fn a_remote_address_the_application_never_gave_stays_null() -> Result<()> {
+    let mut pair = Pair::new(RTCDtlsRole::Client)?;
+    pair.offerer.pc.create_data_channel("data", None)?;
+    pair.exchange_with(
+        false,
+        |offer| offer.to_owned(),
+        |answer| {
+            answer
+                .split("\r\n")
+                .filter(|l| !l.starts_with("a=candidate:"))
+                .collect::<Vec<_>>()
+                .join("\r\n")
+        },
+    )?;
+    assert!(pair.run_until(|p| p.offerer.connected() && p.answerer.connected())?);
+    let answerer_addr = pair.answerer.addr.ip().to_string();
+
+    let selected = pair
+        .offerer
+        .pc
+        .sctp()
+        .expect("sctp")
+        .transport()
+        .ice_transport()
+        .get_selected_candidate_pair()
+        .expect("a selected pair");
+    assert_eq!(selected.remote().address, "", "{selected:?}");
+    let pairs = pair
+        .offerer
+        .pc
+        .sctp()
+        .expect("sctp")
+        .transport()
+        .ice_transport()
+        .get_candidate_pairs();
+    assert!(!pairs.is_empty());
+    assert!(
+        pairs.iter().all(|p| p.remote().address != answerer_addr),
+        "{pairs:?}"
+    );
+    let announced: Vec<String> = pair
+        .offerer
+        .other_events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidatePairAdd(p) => Some(p.remote().address.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        announced.iter().all(|a| *a != answerer_addr),
+        "{announced:?}"
+    );
+
+    // The application supplies the address: it is exposed from then on.
+    let candidate = pair.answerer.candidate()?;
+    pair.offerer.pc.add_remote_candidate(candidate)?;
+    let pairs = pair
+        .offerer
+        .pc
+        .sctp()
+        .expect("sctp")
+        .transport()
+        .ice_transport()
+        .get_candidate_pairs();
+    assert!(
+        pairs.iter().any(|p| p.remote().address == answerer_addr),
+        "{pairs:?}"
+    );
+    Ok(())
+}

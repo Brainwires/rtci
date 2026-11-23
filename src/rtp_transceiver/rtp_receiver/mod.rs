@@ -513,10 +513,29 @@ impl RTCRtpReceiver<'_> {
             ));
         }
         let media_engine = &self.peer_connection.media_engine;
-        let (mime_type, kind) = match media_engine.get_codec_by_payload(first.header.payload_type) {
-            Ok((codec, kind)) => (codec.rtp_codec.mime_type.clone(), kind),
-            Err(_) => (String::new(), self.receiver().kind()),
-        };
+        let (mime_type, kind, clock_rate) =
+            match media_engine.get_codec_by_payload(first.header.payload_type) {
+                Ok((codec, kind)) => (
+                    codec.rtp_codec.mime_type.clone(),
+                    kind,
+                    codec.rtp_codec.clock_rate,
+                ),
+                Err(_) => (String::new(), self.receiver().kind(), 0),
+            };
+        // webrtc-extensions 15: the remote capture timestamp, by the stream's sender reports.
+        let remote_capture =
+            |frame: &mut frame_metadata::RTCEncodedFrameMetadata,
+             stats: &crate::statistics::accumulator::RTCStatsAccumulator| {
+                let capture_ntp = frame
+                    .capture_time
+                    .map(|ms| (ms + frame.sender_capture_time_offset.unwrap_or(0.0)) / 1000.0);
+                frame.remote_capture_time = stats
+                    .inbound_rtp_streams
+                    .get(&frame.synchronization_source)
+                    .and_then(|stream| {
+                        stream.remote_capture_instant(frame.rtp_timestamp, clock_rate, capture_ntp)
+                    });
+            };
         let extension_payloads = |uri: &str| -> Vec<bytes::Bytes> {
             let (id, audio, video) = media_engine.get_header_extension_id(
                 crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
@@ -537,10 +556,11 @@ impl RTCRtpReceiver<'_> {
                 .last()
                 .and_then(|payload| payload.first().copied())
                 .map(internal::linear_audio_level);
-            let frame = self
+            let mut frame = self
                 .receiver()
                 .frame_records()
                 .common(&first.header, mime_type);
+            remote_capture(&mut frame, &self.peer_connection.pipeline_context.stats);
             return Ok(RTCEncodedFrameMetadataKind::Audio(
                 RTCEncodedAudioFrameMetadata {
                     frame,
@@ -568,7 +588,7 @@ impl RTCRtpReceiver<'_> {
                 receiver.frame_records().described_frame(ssrc, frame_number)
             })
             .cloned();
-        let frame = receiver.frame_records().common(&first.header, mime_type);
+        let mut frame = receiver.frame_records().common(&first.header, mime_type);
         let spatial_index = described
             .as_ref()
             .map(|d| d.spatial_id)
@@ -591,6 +611,7 @@ impl RTCRtpReceiver<'_> {
                 _ => RTCEncodedVideoFrameType::Delta,
             }
         };
+        remote_capture(&mut frame, &self.peer_connection.pipeline_context.stats);
         Ok(RTCEncodedFrameMetadataKind::Video(
             RTCEncodedVideoFrameMetadata {
                 frame,

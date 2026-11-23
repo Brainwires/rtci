@@ -168,6 +168,9 @@ pub struct InboundRtpStreamAccumulator {
     /// The NTP timestamp the latest remote sender report carried, the remote clock's reading:
     /// the remote-outbound object's `remoteTimestamp`.
     pub remote_ntp_time: Option<u64>,
+    /// The RTP timestamp the latest remote sender report carried, the same instant as
+    /// `remote_ntp_time` on the stream's media clock (RFC 3550 section 6.4.1).
+    pub remote_rtp_time: Option<u32>,
     /// Number of RTCP SR reports received.
     pub reports_received: u64,
 
@@ -259,6 +262,46 @@ impl InboundRtpStreamAccumulator {
         // datagram of the sender's burst it travelled.
         if self.remote_rtt_measured_at != Some(now) {
             self.remote_round_trip_time = None;
+        }
+    }
+
+    /// The RTP timestamp of the sender report `on_rtcp_sr_received` took.
+    pub fn on_rtcp_sr_rtp_time(&mut self, rtp_time: u32) {
+        self.remote_rtp_time = Some(rtp_time);
+    }
+
+    /// webrtc-extensions 15 "remote capture timestamp": when a frame of this stream was
+    /// captured, on this side's clock, by the latest sender report (RFC 3550 section 6.4.1).
+    /// `capture_ntp` is the capture time on the sender's NTP clock in seconds when the frame
+    /// said it (abs-capture-time with the sender's offset), else the frame's RTP timestamp is
+    /// placed by the report's NTP / RTP pair at `clock_rate`. The sender's clock is brought to
+    /// this one by the report's arrival less half the round trip time (webrtc-extensions 8:
+    /// `senderReceiverTimeOffset`), 0 while no round trip is known. `None` before a report.
+    pub fn remote_capture_instant(
+        &self,
+        rtp_timestamp: u32,
+        clock_rate: u32,
+        capture_ntp: Option<f64>,
+    ) -> Option<Instant> {
+        let received_at = self.remote_report_received_at?;
+        let report_ntp = self.remote_ntp_time? as f64 / 4_294_967_296.0;
+        let capture_ntp = match capture_ntp {
+            Some(ntp) => ntp,
+            None => {
+                if clock_rate == 0 {
+                    return None;
+                }
+                let report_rtp = self.remote_rtp_time?;
+                let elapsed = rtp_timestamp.wrapping_sub(report_rtp) as i32;
+                report_ntp + f64::from(elapsed) / f64::from(clock_rate)
+            }
+        };
+        let one_way = self.remote_round_trip_time.unwrap_or(0.0) / 2.0;
+        let offset = capture_ntp - report_ntp - one_way;
+        if offset >= 0.0 {
+            received_at.checked_add(Duration::from_secs_f64(offset))
+        } else {
+            received_at.checked_sub(Duration::from_secs_f64(-offset))
         }
     }
 

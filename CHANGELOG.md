@@ -1188,6 +1188,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **data channels** (pc-25, RFC 8832 section 6, W3C webrtc-pc 6.2.8): user data that reaches
+  the opener of an in-band channel before its DATA_CHANNEL_ACK completes the handshake as the
+  ACK would ("the DATA_CHANNEL_ACK or any other message"): the channel is announced open, then
+  the data is delivered. It used to be held until the ACK and dropped if the handshake
+  deadline passed first.
+- **ice** (pc-25, W3C webrtc-pc 4.8.1): an exposed remote candidate (candidate pairs, the
+  selected pair, the pair events) has an empty `address` until the application supplied that
+  address in a description or with `add_remote_candidate`: a peer-reflexive candidate learned
+  only from checks no longer shows the peer's address.
+
 - **rtp** (pc-24, W3C webrtc-pc 5.2, 5.3): `getParameters().rtp_parameters.header_extensions`
   of a sender (receiver) lists only the extensions its transceiver's m= section negotiated in
   a sending (receiving) direction (`[[NegotiatedHeaderExtensions]]`), and none before an answer
@@ -1610,6 +1620,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **encoded-transform** (pc-25, webrtc-extensions 15): `RTCEncodedFrameMetadata::remote_capture_time`,
+  a received frame's capture time on this side's clock, by the stream's RTCP sender reports
+  (RFC 3550 section 6.4.1) less half the round trip time.
 
 - **pc** (pc-24): `RTCPeerConnection::data_channel_ids()` (W3C `[[DataChannels]]`);
   `SettingEngineBuilder::with_sctp_max_streams` (the SCTP stream count asked for and accepted,

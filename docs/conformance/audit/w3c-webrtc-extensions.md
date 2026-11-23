@@ -8,7 +8,7 @@ The draft's section numbers are generated when it is rendered; this file numbers
 
 Totals:
 
-- MUST: tested 58 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 14
+- MUST: tested 59 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 14
 - SHOULD: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
@@ -83,7 +83,7 @@ Totals:
 | WEBRTC-EXT-13.3-1 | 13.3 | MUST | Initial offer: with the preference set, a data m= section is generated before the transceivers' sections | tested | `src/peer_connection/internal.rs:308` | `the_data_section_is_offered_first_without_a_channel` | - |
 | WEBRTC-EXT-13.3-2 | 13.3 | MUST | A data section is generated for a created channel only if none was generated already | tested | `src/peer_connection/internal.rs` | `always_negotiated_data_channels_need_no_negotiation_for_the_first_channel` |  |
 | WEBRTC-EXT-13.3-3 | 13.3 | MUST | The always-negotiated data section is the offerer-tagged m= section of the BUNDLE group | tested | `src/peer_connection/internal.rs` | `always_negotiated_data_channels_need_no_negotiation_for_the_first_channel` | reads a=group |
-| WEBRTC-EXT-15-1 | 15 | MUST | A received frame's capture timestamp is the remote capture time translated to the receiver clock, when computable | partial | `src/peer_connection/message/mod.rs:420` | - | The application sees every RTCP SR and RTP timestamp and can compute it; the engine offers no helper and no abs-capture-time |
+| WEBRTC-EXT-15-1 | 15 | MUST | A received frame's capture timestamp is the remote capture time translated to the receiver clock, when computable | tested | `src/statistics/accumulator/rtp_stream/inbound.rs` (`remote_capture_instant`), `src/rtp_transceiver/rtp_receiver/mod.rs` (`encoded_frame_metadata`) | `a_frames_remote_capture_time_is_on_the_receivers_clock` | `remote_capture_time`: the capture time (abs-capture-time with the sender's offset, else the RTP timestamp through the latest sender report's NTP / RTP pair) translated to the receiver's clock by the report's arrival less half the round trip time; `None` before a report (pc-25) |
 | WEBRTC-EXT-15-2 | 15 | MUST | A received video frame's RTP timestamp is that of its packets | tested | `src/peer_connection/handler/endpoint.rs:264` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | Packets are delivered with their headers intact; frames are the application's |
 | WEBRTC-EXT-15-3 | 15 | MUST | A received frame's receive timestamp is when its last packet arrived | tested | `src/rtp_transceiver/rtp_receiver/frame_metadata.rs` (FrameRecords::record), `src/rtp_transceiver/rtp_receiver/mod.rs` (encoded_frame_metadata) | `a_frames_receive_time_is_its_last_packets_arrival`, `received_video_frames_carry_their_metadata` | `receive_time`: the instant the datagram carrying the frame's last packet was given to the engine |
 | WEBRTC-EXT-16-1 | 16 | MUST | RTCConfiguration.targetLatency ("lowest" default, "none") | n/a | - | - | Network link setup is the application's |

@@ -142,12 +142,39 @@ impl IceTransport {
         RTCIceComponent::Rtp
     }
 
+    /// A remote candidate as the application may see it (W3C 4.8.1 `address`: "By default,
+    /// the user agent MUST leave the address attribute as null for any exposed remote
+    /// candidate", until the application supplied that address with a description or
+    /// addIceCandidate). A peer-reflexive candidate the agent learned from a connectivity
+    /// check, on an address no signalled candidate has, has an empty (null) address.
+    pub(crate) fn exposed_remote(&self, remote: &ice::candidate::Candidate) -> RTCIceCandidate {
+        let mut exposed = RTCIceCandidate::from(remote);
+        let supplied = self.agent.get_remote_candidates().iter().any(|known| {
+            known.candidate_type() != ice::candidate::CandidateType::PeerReflexive
+                && known.address() == remote.address()
+        });
+        if !supplied {
+            exposed.address = String::new();
+        }
+        exposed
+    }
+
+    /// A pair of the agent's candidates as the application sees it: the remote one through
+    /// [`Self::exposed_remote`].
+    pub(crate) fn exposed_pair(
+        &self,
+        local: &ice::candidate::Candidate,
+        remote: &ice::candidate::Candidate,
+    ) -> RTCIceCandidatePair {
+        RTCIceCandidatePair::new(local.into(), self.exposed_remote(remote))
+    }
+
     /// webrtc-extensions 7 `[[CandidatePairs]]`: the agent's candidate pairs.
     pub(crate) fn get_candidate_pairs(&self) -> Vec<RTCIceCandidatePair> {
         self.agent
             .get_candidate_pairs()
             .iter()
-            .map(|(local, remote)| RTCIceCandidatePair::new(local.into(), remote.into()))
+            .map(|(local, remote)| self.exposed_pair(local, remote))
             .collect()
     }
 
@@ -158,8 +185,18 @@ impl IceTransport {
         &self,
         pair: &RTCIceCandidatePair,
     ) -> Option<(ice::candidate::Candidate, ice::candidate::Candidate)> {
+        // The candidate string's members (its address as the application sees it).
         fn matches(ours: &RTCIceCandidate, theirs: &RTCIceCandidate) -> bool {
-            ours.candidate().ok() == theirs.candidate().ok()
+            ours.foundation == theirs.foundation
+                && ours.component == theirs.component
+                && ours.protocol == theirs.protocol
+                && ours.priority == theirs.priority
+                && ours.address == theirs.address
+                && ours.port == theirs.port
+                && ours.typ == theirs.typ
+                && ours.related_address == theirs.related_address
+                && ours.related_port == theirs.related_port
+                && ours.tcp_type == theirs.tcp_type
                 && ours.sdp_mid == theirs.sdp_mid
                 && ours.sdp_mline_index == theirs.sdp_mline_index
                 && ours.username_fragment == theirs.username_fragment
@@ -168,7 +205,7 @@ impl IceTransport {
             .get_candidate_pairs()
             .into_iter()
             .find(|(local, remote)| {
-                let candidate = RTCIceCandidatePair::new(local.into(), remote.into());
+                let candidate = self.exposed_pair(local, remote);
                 matches(candidate.local(), pair.local())
                     && matches(candidate.remote(), pair.remote())
             })
@@ -179,7 +216,7 @@ impl IceTransport {
     /// `None` until ICE has nominated a pair.
     pub(crate) fn get_selected_candidate_pair(&self) -> Option<RTCIceCandidatePair> {
         let (local, remote) = self.agent.get_selected_candidate_pair()?;
-        Some(RTCIceCandidatePair::new(local.into(), remote.into()))
+        Some(self.exposed_pair(local, remote))
     }
 
     /// W3C `IceTransport.getRemoteCandidates()`: the remote candidates received so far.

@@ -900,3 +900,77 @@ fn each_spatial_layer_of_an_svc_picture_is_its_own_frame() -> Result<()> {
     );
     Ok(())
 }
+
+/// webrtc-extensions 15 "remote capture timestamp": a received frame's capture time
+/// translated to the receiver's clock by the stream's RTCP sender reports (RFC 3550 section
+/// 6.4.1). Frames the sender wrote at 30 frame/s for three seconds, with RTP timestamps on
+/// the 90 kHz clock that run with the sender's clock: once a sender report has arrived, each
+/// frame's remote capture time is the instant it was written (the link has no delay), within
+/// a few milliseconds; before the first report there is none.
+#[test]
+fn a_frames_remote_capture_time_is_on_the_receivers_clock() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtc::rtp::extension::SDES_MID_URI);
+    let start = world.now;
+    let base = 90_000u32;
+    let mut written = vec![];
+    for frame in 0..90u32 {
+        let now = world.now;
+        let timestamp =
+            base.wrapping_add((now.duration_since(start).as_secs_f64() * 90_000.0) as u32);
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: 500 + frame as u16,
+                        timestamp,
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: vp8_payload(true, None),
+                },
+            )?;
+        written.push((timestamp, now));
+        world.pump()?;
+        world.run_until(now + Duration::from_micros(33_333))?;
+    }
+    let mut before_report = 0;
+    let mut placed = 0;
+    for (timestamp, at) in written {
+        let packets = read_frame(&world, timestamp);
+        if packets.is_empty() {
+            continue;
+        }
+        let RTCEncodedFrameMetadataKind::Video(video) = receiver_metadata(&mut world, &packets)?
+        else {
+            panic!("a video frame");
+        };
+        match video.frame.remote_capture_time {
+            None => before_report += 1,
+            Some(remote) => {
+                let error = if remote > at {
+                    remote - at
+                } else {
+                    at - remote
+                };
+                assert!(
+                    error < Duration::from_millis(5),
+                    "frame {timestamp}: {error:?} off"
+                );
+                placed += 1;
+            }
+        }
+    }
+    assert!(
+        placed > 30,
+        "{placed} frames placed, {before_report} before a report"
+    );
+    Ok(())
+}

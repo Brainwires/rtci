@@ -60,6 +60,13 @@ pub struct RTCEncodedFrameMetadata {
     pub capture_time: Option<f64>,
     /// `senderCaptureTimeOffset`, in milliseconds.
     pub sender_capture_time_offset: Option<f64>,
+    /// The frame's capture timestamp as webrtc-extensions 15 requires it: the remote capture
+    /// timestamp, the capture time translated to this side's clock (the engine's `Instant`s,
+    /// as `receive_time`), by the stream's latest RTCP sender report (RFC 3550 section 6.4.1)
+    /// less half the round trip time when one is known. From `capture_time` and
+    /// `sender_capture_time_offset` when the frame had abs-capture-time, else from its RTP
+    /// timestamp. `None` before the first sender report of the stream.
+    pub remote_capture_time: Option<Instant>,
     /// `mimeType`, the negotiated codec's (e.g. `video/VP8`).
     pub mime_type: String,
 }
@@ -304,6 +311,7 @@ impl FrameRecords {
             receive_time: arrival.map(|a| a.last_receive),
             capture_time: arrival.and_then(|a| a.capture_time),
             sender_capture_time_offset: arrival.and_then(|a| a.sender_capture_time_offset),
+            remote_capture_time: None,
             mime_type,
         }
     }

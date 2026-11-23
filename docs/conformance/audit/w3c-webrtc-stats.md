@@ -8,7 +8,7 @@ How members were judged. The Note column of every member row starts with one of:
 
 Totals (all rows):
 
-- MUST: tested 254 / untested 2 / partial 1 / missing 0 / violated 0 / n-a 1
+- MUST: tested 256 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
 - SHOULD: tested 4 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -273,10 +273,10 @@ Members by source:
 | STATS-8.20-consentRequestsSent | 8.20 | MUST | consentRequestsSent | tested | `src/statistics/accumulator/mod.rs:1004`, `rtc-ice/src/agent/mod.rs:1288` | `a_candidate_pairs_counters_are_the_checks_and_the_payload_on_the_wire` | measured in rtc-ice |
 | STATS-8.20-packetsDiscardedOnSend | 8.20 | MUST | packetsDiscardedOnSend: packets dropped by socket errors | tested | `src/statistics/feed.rs:125` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to`, `audio_without_rtx_has_no_video_or_rtx_members_and_no_send_discards` | app feed: the socket is the application's; left out until it reports a discard |
 | STATS-8.20-bytesDiscardedOnSend | 8.20 | MUST | bytesDiscardedOnSend: bytes dropped by socket errors | tested | `src/statistics/feed.rs:125` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to`, `test_on_packet_discarded` | app feed; 64-bit |
-| STATS-8.21-frozen | 8.21 | MUST | RTCStatsIceCandidatePairState "frozen" | untested | `src/statistics/stats/ice_candidate_pair.rs:20` | - | Not reached by an rtc-to-rtc call here |
+| STATS-8.21-frozen | 8.21 | MUST | RTCStatsIceCandidatePairState "frozen" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_agent_pair_state_is_reported_by_its_stats_value` | the agent's frozen state is reported "frozen"; an rtc-to-rtc call does not reach it (pc-25) |
 | STATS-8.21-waiting | 8.21 | MUST | "waiting" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `test_ice_candidate_pair_state_transitions` | - |
 | STATS-8.21-in-progress | 8.21 | MUST | "in-progress" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `test_ice_candidate_pair_state_transitions` | - |
-| STATS-8.21-failed | 8.21 | MUST | "failed" | untested | `src/statistics/stats/ice_candidate_pair.rs:20` | - | Not reached rtc-to-rtc: once a pair is nominated the agent stops checking the others, which stay waiting |
+| STATS-8.21-failed | 8.21 | MUST | "failed" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_agent_pair_state_is_reported_by_its_stats_value` | the agent's failed state is reported "failed"; an rtc-to-rtc call does not reach it once a pair is nominated (pc-25) |
 | STATS-8.21-succeeded | 8.21 | MUST | "succeeded" | tested | `src/statistics/stats/ice_candidate_pair.rs:20` | `every_candidate_pair_is_reported_with_its_state` | - |
 | STATS-8.22-fingerprint | 8.22 | MUST | fingerprint: the RFC 4572 fingerprint value | tested | `src/peer_connection/handler/dtls.rs:147` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | measured |
 | STATS-8.22-fingerprintAlgorithm | 8.22 | MUST | fingerprintAlgorithm, such as "sha-256" | tested | `src/peer_connection/handler/dtls.rs:147` | `a_connection_reports_dtls_state_channel_state_and_every_pair` | measured |
@@ -299,7 +299,7 @@ Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9; of gap 6, `totalPacketSendD
 Still open:
 
 - `STATS-8.5-corruptionMeasurements` (partial): the corruption-detection header extension is not parsed.
-- `STATS-8.21-frozen`, `STATS-8.21-failed` (untested): no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
+- `STATS-8.21-frozen`, `STATS-8.21-failed`: tested by the state mapping (pc-25); no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
 - Gap 6, the rest: `fecPacketsDiscarded` (the FlexFEC-03 decoder does not report unused repair packets), `packetsDiscarded` and the jitter-buffer members (the jitter-buffer interceptors do not feed the report), `framesReceived` and the assembly members, `scalabilityMode`, in-band FEC: all reach the report from the application feed only.
 
 ## Gaps, in order of importance
