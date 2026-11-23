@@ -57,12 +57,15 @@ fn the_rfc_profile_is_the_engines_defaults_unchanged() {
     }
 }
 
-/// `Default` everywhere is the build's default profile: `Rfc`, or `Chrome` with the
-/// `chrome-defaults` feature.
+/// `Default` everywhere is the build's default profile: `Rfc`, `Chrome` with the
+/// `chrome-defaults` feature, `Performance` with `performance-defaults` alone (with both,
+/// `Chrome`).
 #[test]
 fn the_defaults_follow_the_compiled_default_profile() {
     let expected = if cfg!(feature = "chrome-defaults") {
         BehaviourProfile::Chrome
+    } else if cfg!(feature = "performance-defaults") {
+        BehaviourProfile::Performance
     } else {
         BehaviourProfile::Rfc
     };
@@ -370,7 +373,7 @@ fn the_rendered_table_lists_every_governed_behaviour() {
 fn every_governed_row_differs_somewhere() {
     for row in GOVERNED {
         assert!(
-            row.rfc != row.chrome || row.rfc != row.strict_rfc,
+            row.rfc != row.chrome || row.rfc != row.strict_rfc || row.rfc != row.performance,
             "{} is the same in every profile",
             row.id
         );
@@ -389,4 +392,26 @@ fn profile_names_round_trip() {
         Some(BehaviourProfile::StrictRfc)
     );
     assert_eq!(BehaviourProfile::from_name("firefox"), None);
+}
+
+/// The `Performance` profile changes only the rows that say what it saves: every other row
+/// keeps the engine's (`Rfc`) value, so it never turns a capability off or takes a form
+/// outside the RFCs that `Rfc` does not already take.
+#[test]
+fn the_performance_profile_differs_from_rfc_only_where_it_saves() {
+    let changed: Vec<&str> = GOVERNED
+        .iter()
+        .filter(|row| row.performance != row.rfc)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(
+        changed,
+        [
+            "rtcp.t-rr-interval",
+            "rtcp.congestion-feedback-in-budget",
+            "rtcp.minimum-session-bandwidth",
+            "cc.feedback-share",
+            "cc.feedback-max-interval",
+        ]
+    );
 }

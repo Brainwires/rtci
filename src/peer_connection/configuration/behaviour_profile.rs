@@ -20,6 +20,12 @@
 //!   interoperable one (the audit's `setting` rows and a few RFC SHOULDs). For conformance
 //!   testing: it does **not** interoperate with browsers (Chromium, Firefox and WebKit refuse a
 //!   bundled section without `a=rtcp-mux`, and ignore a new `a=tls-id`).
+//! - [`BehaviourProfile::Performance`]: the engine's defaults, with each behaviour where an
+//!   RFC offers a form that does the same thing at lower cost (a parameter such as
+//!   `T_rr_interval`, a MAY) set to it: fewer regular RTCP reports, congestion control
+//!   feedback and reports together inside RFC 3550's 5%. It never turns a capability off and
+//!   never leaves what the RFCs permit; a cheaper libwebrtc value outside an RFC belongs to
+//!   `Chrome`. The table gives each value's measured saving and cost.
 //!
 //! # One entry point
 //!
@@ -55,6 +61,12 @@
 //! explicit [`SettingEngineBuilder::with_behaviour_profile`] call; read
 //! [`BehaviourProfile::compiled_default`] to see which default a build has.
 //!
+//! # The `performance-defaults` cargo feature
+//!
+//! The same for [`BehaviourProfile::Performance`]. With both features on, `chrome-defaults`
+//! wins and the build prints a deprecation warning naming both, so the choice is never
+//! silent ([`BehaviourProfile::compiled_default`]).
+//!
 //! The table of every governed behaviour, with its clause, its value in each profile and the
 //! source of each Chrome value, is `docs/behaviour-profiles.md`, rendered from the tables of
 //! this module by `scripts/behaviour-profiles.py` (a gate of CI) and checked against the code by
@@ -86,30 +98,46 @@ pub enum BehaviourProfile {
     /// The RFC form everywhere, including where browsers cannot interoperate with it. For
     /// conformance testing; it does not interoperate with browsers.
     StrictRfc,
+    /// The engine's defaults, with each governed behaviour where the RFCs offer a form that
+    /// does the same thing at lower cost (a parameter, a MAY) set to it. It never turns a
+    /// capability off and never leaves what the RFCs permit; libwebrtc's cheaper values that
+    /// lie outside an RFC stay in [`BehaviourProfile::Chrome`]. Each value carries its
+    /// measured saving and cost (`docs/behaviour-profiles.md`).
+    Performance,
 }
 
 impl BehaviourProfile {
     /// Every profile, in the order of the table.
-    pub const ALL: [BehaviourProfile; 3] = [Self::Rfc, Self::Chrome, Self::StrictRfc];
+    pub const ALL: [BehaviourProfile; 4] =
+        [Self::Rfc, Self::Chrome, Self::StrictRfc, Self::Performance];
 
     /// The profile `Default` gives in this build: [`BehaviourProfile::Chrome`] when the
     /// `chrome-defaults` cargo feature of `rtc` is on anywhere in the build's dependency graph,
-    /// [`BehaviourProfile::Rfc`] otherwise.
+    /// [`BehaviourProfile::Performance`] when `performance-defaults` is (and `chrome-defaults`
+    /// is not), [`BehaviourProfile::Rfc`] otherwise.
+    ///
+    /// With both features on, `chrome-defaults` wins: it is the one that changes what goes on
+    /// the wire to match a peer, while `performance-defaults` only trims cost within the RFCs,
+    /// and the build says so with a compile-time warning (a deprecated item used under that
+    /// feature combination), not silently.
     pub const fn compiled_default() -> Self {
         if cfg!(feature = "chrome-defaults") {
             Self::Chrome
+        } else if cfg!(feature = "performance-defaults") {
+            Self::Performance
         } else {
             Self::Rfc
         }
     }
 
     /// The profile's name as the table and the interop peer write it: `rfc`, `chrome`,
-    /// `strict-rfc`.
+    /// `strict-rfc`, `performance`.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Rfc => "rfc",
             Self::Chrome => "chrome",
             Self::StrictRfc => "strict-rfc",
+            Self::Performance => "performance",
         }
     }
 
@@ -119,6 +147,20 @@ impl BehaviourProfile {
         Self::ALL.into_iter().find(|profile| profile.name() == name)
     }
 }
+
+/// Both `chrome-defaults` and `performance-defaults` are on: the build's default profile is
+/// `Chrome` ([`BehaviourProfile::compiled_default`]). Using this item is what makes the
+/// compiler say so.
+#[cfg(all(feature = "chrome-defaults", feature = "performance-defaults"))]
+#[deprecated(
+    note = "both the `chrome-defaults` and the `performance-defaults` features of `rtc` are on: \
+            the default behaviour profile is `Chrome`, `performance-defaults` has no effect"
+)]
+const BOTH_DEFAULT_PROFILE_FEATURES: () = ();
+
+#[cfg(all(feature = "chrome-defaults", feature = "performance-defaults"))]
+#[allow(clippy::let_unit_value)]
+const _: () = BOTH_DEFAULT_PROFILE_FEATURES;
 
 impl Default for BehaviourProfile {
     fn default() -> Self {
@@ -179,6 +221,9 @@ pub(crate) struct GovernedBehaviour {
     pub(crate) chrome: &'static str,
     /// The value under [`BehaviourProfile::StrictRfc`].
     pub(crate) strict_rfc: &'static str,
+    /// The value under [`BehaviourProfile::Performance`] (the `Rfc` value unless the row
+    /// names one).
+    pub(crate) performance: &'static str,
     /// Where the Chrome value comes from.
     pub(crate) chrome_source: &'static str,
     pub(crate) evidence: Evidence,
@@ -192,6 +237,7 @@ impl GovernedBehaviour {
             BehaviourProfile::Rfc => self.rfc,
             BehaviourProfile::Chrome => self.chrome,
             BehaviourProfile::StrictRfc => self.strict_rfc,
+            BehaviourProfile::Performance => self.performance,
         }
     }
 }
@@ -260,6 +306,8 @@ macro_rules! governed_behaviours {
         rfc: $rfc:expr => $rfc_text:literal,
         chrome: $chrome:expr => $chrome_text:literal,
         strict_rfc: $strict:expr => $strict_text:literal,
+        $(performance: $perf:expr => $perf_text:literal,
+        performance_note: $perf_note:literal,)?
         chrome_source: $source:literal,
         evidence: $evidence:ident,
         $target:ident: $apply:expr,
@@ -273,45 +321,53 @@ macro_rules! governed_behaviours {
                 rfc: $rfc_text,
                 chrome: $chrome_text,
                 strict_rfc: $strict_text,
+                performance: governed_behaviours!(@or [$($perf_text)?] $rfc_text),
                 chrome_source: $source,
                 evidence: Evidence::$evidence,
-                hook: governed_behaviours!(@hook $target, $apply, $read, $rfc, $chrome, $strict),
+                hook: governed_behaviours!(
+                    @hook $target, $apply, $read, $rfc, $chrome, $strict, [$($perf)?]
+                ),
             }
         ),* ];
     };
-    (@hook apply_setting, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+    (@or [$value:expr] $fallback:expr) => { $value };
+    (@or [] $fallback:expr) => { $fallback };
+    (@hook apply_setting, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr, [$($perf:expr)?]) => {
         Hook::Setting {
             apply: |builder, profile| {
                 let value = match profile {
                     BehaviourProfile::Rfc => $rfc,
                     BehaviourProfile::Chrome => $chrome,
                     BehaviourProfile::StrictRfc => $strict,
+                    BehaviourProfile::Performance => governed_behaviours!(@or [$($perf)?] $rfc),
                 };
                 ($apply)(builder, value)
             },
             read: |engine| format!("{:?}", ($read)(engine)),
         }
     };
-    (@hook apply_media, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+    (@hook apply_media, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr, [$($perf:expr)?]) => {
         Hook::Media {
             apply: |media_engine, profile| {
                 let value = match profile {
                     BehaviourProfile::Rfc => $rfc,
                     BehaviourProfile::Chrome => $chrome,
                     BehaviourProfile::StrictRfc => $strict,
+                    BehaviourProfile::Performance => governed_behaviours!(@or [$($perf)?] $rfc),
                 };
                 ($apply)(media_engine, value)
             },
             read: |media_engine| format!("{:?}", ($read)(media_engine)),
         }
     };
-    (@hook apply_interceptors, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+    (@hook apply_interceptors, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr, [$($perf:expr)?]) => {
         Hook::Interceptors {
             apply: |options, profile| {
                 let value = match profile {
                     BehaviourProfile::Rfc => $rfc,
                     BehaviourProfile::Chrome => $chrome,
                     BehaviourProfile::StrictRfc => $strict,
+                    BehaviourProfile::Performance => governed_behaviours!(@or [$($perf)?] $rfc),
                 };
                 ($apply)(options, value)
             },
@@ -728,6 +784,8 @@ governed_behaviours! {
         rfc: Duration::ZERO => "0ns",
         chrome: Duration::from_secs(1) => "1s",
         strict_rfc: Duration::ZERO => "0ns",
+        performance: Duration::from_secs(1) => "1s",
+        performance_note: "RFC 4585 3.4 (m): T_rr_interval is \"an OPTIONAL minimal interval\" between Regular RTCP packets, set by the application; 3.5.3 suppresses regular packets inside it and holds no feedback; RFC 5506 3.3 names trr-int as the remedy for regular reports \"of higher density\" than needed. Kept local, not announced as a=rtcp-fb:* trr-int: it states only this endpoint's own minimum (RFC 4585 4.2), and no browser fixture carries the line. Measured (tests/rtcp_rate_trace_rtc2rtc.rs, 30 s, a=rtcp-rsize): 1 Mbit/s one way, sender 13.2 -> 1.4 regular packets/s, 27.3 -> 3.8 SR/s, RTCP 4.20% -> 1.45% of the media; both ways 19.4 -> 1.5 regular/s, 4.91% -> 1.44%; without rsize both ways 5.03% -> 2.25%. Cost: report blocks to the sender (RTT from LSR/DLSR, RR loss, the RTP circuit breaker's input) 12.2/s -> 1.2/s, longest gap 214 ms -> 1.36 s; the breaker counts its windows in reports (MEDIA_TIMEOUT 5, CB_INTERVAL at least 3), so it reacts in seconds instead of under one. Unchanged: the NACK (120 ms -> 114-120 ms from loss to request), the congestion control feedback (20/s, 50 ms apart), and Gcc's loss and RTT, which come from that feedback whenever transport-cc or RFC 8888 is negotiated",
         chrome_source: "libwebrtc modules/rtp_rtcp/source/rtp_rtcp_impl2.cc (RTCPSender configuration) @ a222406d: rtcp_report_interval 5 s for audio, 1 s for video (media/base/media_config.h rtcp_report_interval_ms), drawn from [0.5, 1.5] of it, and for video sent above 72 kbit/s min(360 s / kbit/s, 1 s) (rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport); 1 s is the video value, see \"not expressible\" for audio",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_t_rr_interval = v,
@@ -744,6 +802,62 @@ governed_behaviours! {
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_immediate_congestion_feedback = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_immediate_congestion_feedback,
+    },
+    {
+        id: "rtcp.congestion-feedback-in-budget",
+        setting: "DefaultInterceptorOptions::rtcp_congestion_feedback_in_budget",
+        clause: "RFC 3550 6.2, RFC 4585 3.5.3",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: false => "false",
+        performance: true => "true",
+        performance_note: "RFC 3550 6.2: RTCP, feedback included, is 5% of the session bandwidth; the regular interval computed with what the congestion control feedback (sent and received, last 2 s) leaves is applied as a T_rr_interval (RFC 4585 3.5.3: suppression only), at most 5 s (RFC 4585 5). Measured with the next three rows, 30 s, a=rtcp-rsize: 24 kbit/s audio (38.5 kbit/s on the wire) RTCP 12.15% -> 4.49% of the media, without rsize 14.34% -> 6.06% (the minimal compound around each feedback packet is larger than the cadence counts); 100 kbit/s audio and video (203 kbit/s on the wire) 5.96% -> 2.75%. Cost: at 24 kbit/s one regular report every 5 s (report blocks 1.9/s -> 0.2/s, longest gap 657 ms -> 5.2 s); the circuit breaker's RTCP timeout (3 Td, Td at most 5 s) still holds",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: transport feedback is sized to 5% of the send estimate on its own, and rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport spaces the reports by their fixed interval whatever the feedback takes",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_congestion_feedback_in_budget = v,
+        read: |o: &DefaultInterceptorOptions| o.rtcp_congestion_feedback_in_budget,
+    },
+    {
+        id: "rtcp.minimum-session-bandwidth",
+        setting: "DefaultInterceptorOptions::rtcp_minimum_session_bandwidth",
+        clause: "RFC 3550 6.2",
+        rfc: 64_000 => "64000",
+        chrome: 64_000 => "64000",
+        strict_rfc: 64_000 => "64000",
+        performance: 16_000 => "16000",
+        performance_note: "RFC 3550 6.2 takes the session bandwidth as what the session expects; the media measured both ways is used down to 16 kbit/s instead of 64 kbit/s, so a 24 kbit/s call's RTCP is 5% of 24 kbit/s, not of 64. Alone (rtc-interceptor tests/rtcp_session_timing.rs::the_minimum_session_bandwidth_lets_rtcp_follow_low_media): a 27 kbit/s sender sends 0.3 to 0.6 times the default's regular reports. In the profile it sizes the budget of rtcp.congestion-feedback-in-budget",
+        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: the report interval is fixed (1 s video, 5 s audio, min(360 s / kbit/s, 1 s) above 72 kbit/s), no RTCP bandwidth is computed, so there is no floor to differ: the engine's value stands",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_minimum_session_bandwidth = v,
+        read: |o: &DefaultInterceptorOptions| o.rtcp_minimum_session_bandwidth,
+    },
+    {
+        id: "cc.feedback-share",
+        setting: "DefaultInterceptorOptions::congestion_feedback_share",
+        clause: "RFC 8888 4, RFC 3550 6.2",
+        rfc: 0.05 => "0.05",
+        chrome: 0.05 => "0.05",
+        strict_rfc: 0.05 => "0.05",
+        performance: 0.025 => "0.025",
+        performance_note: "RFC 8888 4 leaves the interval to \"the acceptable feedback overhead\"; half of the 5% goes to the feedback, the rest to the reports. Measured: 100 kbit/s audio and video 12.2 -> 4.3 feedback packets/s (longest gap 137 -> 399 ms); 24 kbit/s audio 4.0 -> 2.0/s (250 -> 500 ms); 1 Mbit/s unchanged (20/s, the 50 ms floor). Cost (rtc-interceptor tests/gcc_feedback_rate.rs, 500 ms against 250 ms): Gcc settles in 0.5 s either way on a 150 kbit/s path, 6.0 s against 5.5 s on a 500 kbit/s one; a Gcc sender with probing fed by a Performance receiver reaches 2 Mbit/s from 300 kbit/s in 0.62 s (default 0.49 s; tests/congestion_feedback_rate.rs::a_gcc_sender_fed_by_a_performance_receiver_ramps_within_a_second)",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: \"Let TWCC reports occupy 5% of total bandwidth\", twcc_bitrate = 0.05 * estimate",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_share = v,
+        read: |o: &DefaultInterceptorOptions| o.congestion_feedback_share,
+    },
+    {
+        id: "cc.feedback-max-interval",
+        setting: "DefaultInterceptorOptions::congestion_feedback_max_interval",
+        clause: "RFC 8888 4, draft-holmer-rmcat-transport-wide-cc-extensions-01 3",
+        rfc: Duration::from_millis(250) => "250ms",
+        chrome: Duration::from_millis(250) => "250ms",
+        strict_rfc: Duration::from_millis(250) => "250ms",
+        performance: Duration::from_millis(500) => "500ms",
+        performance_note: "draft-holmer-rmcat-transport-wide-cc-extensions-01 3: \"in cases of low uplink bandwidth it is acceptable to send them less frequently, e.g., for instance once per RTT\"; RFC 8888 4 sets no bound (its 50-200 ms is a measured range of some algorithms, not a requirement). Takes effect only below about 270 kbit/s of media (where 2.5% no longer holds a packet in 250 ms); figures and cost with cc.feedback-share",
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc @ a222406d: kMaxInterval = TimeDelta::Millis(250), the interval kTwccReportSize / twcc_bitrate held between kMinInterval 50 ms and it",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_max_interval = v,
+        read: |o: &DefaultInterceptorOptions| o.congestion_feedback_max_interval,
     },
     {
         id: "rtcp.report-from-every-ssrc",

@@ -34,6 +34,11 @@ def field(block, key, value=STRING):
     return unescape(match.group(1))
 
 
+def optional(block, key, value=STRING):
+    match = re.search(r"^\s*" + key + r":\s*" + value + r",?\s*$", block, re.M)
+    return unescape(match.group(1)) if match else None
+
+
 def strip_comments(code):
     code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
     return "\n".join("" if line.lstrip().startswith("//") else line for line in code.split("\n"))
@@ -48,8 +53,12 @@ def governed(source):
         hook = re.search(r"^\s*apply_(setting|media|interceptors):", block, re.M)
         if not hook:
             raise SystemExit(f"behaviour-profiles: no apply_* hook in\n{block}")
+        rfc = field(block, "rfc", r".*?=>\s*" + STRING)
+        performance = optional(block, "performance", r".*?=>\s*" + STRING)
         rows.append(
             {
+                "performance": rfc if performance is None else performance,
+                "performance_note": optional(block, "performance_note"),
                 "id": field(block, "id"),
                 "setting": field(block, "setting"),
                 "clause": field(block, "clause"),
@@ -122,7 +131,9 @@ def check_completeness(rows, not_governed):
     if len(set(ids)) != len(ids):
         errors.append("an id is used twice")
     for row in rows:
-        if row["rfc"] == row["chrome"] == row["strict_rfc"]:
+        if (row["performance"] != row["rfc"]) != (row["performance_note"] is not None):
+            errors.append(f"{row['id']}: a Performance value and its performance_note go together")
+        if row["rfc"] == row["chrome"] == row["strict_rfc"] == row["performance"]:
             errors.append(f"{row['id']} is the same in every profile (move it to NOT_GOVERNED)")
         if row["evidence"] not in ("Observed", "Source", "Unverified"):
             errors.append(f"{row['id']}: evidence {row['evidence']}")
@@ -164,6 +175,7 @@ def render(rows, not_governed, not_expressible):
     n = counts(rows)
     differs = sum(1 for row in rows if row["chrome"] != row["rfc"])
     strict = sum(1 for row in rows if row["strict_rfc"] != row["rfc"])
+    perf = [row for row in rows if row["performance"] != row["rfc"]]
     out = []
     w = out.append
     w("# Behaviour profiles")
@@ -190,6 +202,11 @@ def render(rows, not_governed, not_expressible):
     w("  conformance testing only: **it does not interoperate with browsers** (Chromium, Firefox")
     w("  and WebKit refuse an answer whose bundled sections lack `a=rtcp-mux`; a data-only")
     w("  association without `use_srtp` cannot gain media with a browser).")
+    w("- **`Performance`**: the engine's defaults, with each behaviour where an RFC offers a form")
+    w("  that does the same thing at lower cost (a parameter, a MAY, a negotiated extension) set")
+    w("  to it. It never turns a capability off and never leaves what the RFCs permit; a cheaper")
+    w("  libwebrtc value that lies outside an RFC belongs to `Chrome`, not here. Each value is")
+    w("  measured: section 1a.")
     w("")
     w("```rust")
     w("let profile = BehaviourProfile::Chrome;")
@@ -214,10 +231,18 @@ def render(rows, not_governed, not_expressible):
     w("that never asked for it included. Prefer the explicit `with_behaviour_profile` call;")
     w("`BehaviourProfile::compiled_default()` tells which default a build has.")
     w("")
+    w("## The `performance-defaults` cargo feature")
+    w("")
+    w("The same for `Performance`: with the `performance-defaults` feature every default above")
+    w("is `Performance`. With both features on, `chrome-defaults` wins (it is the one that")
+    w("changes the wire to match a peer) and the build prints a deprecation warning naming the")
+    w("two features, so the pick is never silent.")
+    w("")
     w(f"## 1. Defaults that differ: governed by the profile ({len(rows)})")
     w("")
     w(f"{len(rows)} governed behaviours: the `Chrome` value differs from `Rfc` in {differs}, the")
-    w(f"`StrictRfc` value in {strict}. Chrome values: {n['Observed']} observed, {n['Source']} from")
+    w(f"`StrictRfc` value in {strict}, the `Performance` value in {len(perf)}. Chrome values:")
+    w(f"{n['Observed']} observed, {n['Source']} from")
     w(f"the source, {n['Unverified']} unverified.")
     w("")
     w("A value is what `{:?}` of the setting writes; the crate's tests compare each with the")
@@ -234,14 +259,44 @@ def render(rows, not_governed, not_expressible):
     w(f"`{BORINGSSL_REVISION[:8]}` (`{BORINGSSL_REVISION}`). **Unverified** values were")
     w("established neither way; each says why.")
     w("")
-    w("| Behaviour | Setting | Clause | `Rfc` | `Chrome` | `StrictRfc` | Source of the Chrome value |")
-    w("|---|---|---|---|---|---|---|")
+    w("| Behaviour | Setting | Clause | `Rfc` | `Chrome` | `StrictRfc` | `Performance` | Source of the Chrome value |")
+    w("|---|---|---|---|---|---|---|---|")
     for row in rows:
         source = EVIDENCE_PREFIX[row["evidence"]] + row["source"]
         w(
             f"| {code(row['id'])} | {code(row['setting'])} | {cell(row['clause'])} | "
-            f"{code(row['rfc'])} | {code(row['chrome'])} | {code(row['strict_rfc'])} | {cell(source)} |"
+            f"{code(row['rfc'])} | {code(row['chrome'])} | {code(row['strict_rfc'])} | "
+            f"{code(row['performance'])} | {cell(source)} |"
         )
+    w("")
+    w(f"## 1a. What `Performance` changes, and what it was measured to save ({len(perf)})")
+    w("")
+    w("Each row: the RFC clause that permits the value, the saving and the cost, measured by")
+    w("`tests/rtcp_rate_trace_rtc2rtc.rs` (two `rtc` peer connections, virtual time, 20 ms")
+    w("each way; run with `-- --ignored --nocapture`) and the interceptor tests named.")
+    w("")
+    w("| Behaviour | `Rfc` | `Performance` | Why it is within the RFCs, saving, cost |")
+    w("|---|---|---|---|")
+    for row in perf:
+        w(
+            f"| {code(row['id'])} | {code(row['rfc'])} | {code(row['performance'])} | "
+            f"{cell(row['performance_note'])} |"
+        )
+    w("")
+    w("Other overhead the trace showed, left as it is because `Performance` already covers it")
+    w("or no RFC-permitted setting changes it:")
+    w("")
+    w("- The start-up value of the session bandwidth (1 Mbit/s with video, 64 kbit/s with audio,")
+    w("  for the first two seconds of media): 13.5 to 14.5 regular packets/s in those two seconds")
+    w("  against 2.5/s after them at 100 kbit/s. Under `Performance` `T_rr_interval` holds them")
+    w("  to about one a second; no setting of its own.")
+    w("- The peer's reduced-size feedback pulls `avg_rtcp_size` down (RFC 5506 3.4 expects it),")
+    w("  so regular reports speed up: 19.4 regular packets/s each way at 1 Mbit/s both ways")
+    w("  with `a=rtcp-rsize`, 15.9/s without. Under `Performance` 1.5 and 1.4/s.")
+    w("- Not in `Performance` because they are outside an RFC: libwebrtc's 5 s audio report")
+    w("  interval whatever the bandwidth (section 3) and congestion control feedback outside")
+    w("  the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an")
+    w("  audit row for the owner).")
     w("")
     for klass in ["EngineOnly", "Same", "Input", "Deprecated"]:
         entries = [entry for entry in not_governed if entry["class"] == klass]

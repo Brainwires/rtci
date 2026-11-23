@@ -5,31 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.22.0+brainwires.6] - 2026-11-23
-
-The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
-specification set (ICE, STUN, TURN, mDNS, DTLS 1.2 and 1.3, SRTP, SCTP and data channels, RTP /
-RTCP, congestion control and FEC, SDP and JSEP, W3C webrtc-pc and webrtc-extensions, stats),
-with every closed clause proved by a test (see `docs/conformance/audit/COUNTS.md`), interop runs
-against Chromium, Firefox and WebKit and, new in this release, against Pion, str0m and aiortc
-(`docs/interop.md`).
-
-- **Breaking changes** (listed below, by area): defaults now follow the RFC where browsers
-  interoperate with it, with the browser-compatible form kept as a setting where they do not
-  (for example one SSRC across clock rates by default, `with_ssrc_per_clock_rate(true)` for RFC
-  7160 section 4.1); many public types gained fields or variants (header-extension control,
-  candidate-pair events, transport events, `OnSrtpPacketDiscarded`, `OnEcnFailure`), and several
-  builder methods and errors changed (JSEP, SCTP, ICE, DTLS, TURN, STUN, SDP, SRTP).
-- **Several transports per peer connection**: sections outside a BUNDLE group, several BUNDLE
-  groups and `bundlePolicy` balanced get real transports of their own.
-- **Stream transports**: ICE-TCP (RFC 6544), TURN over TCP, TLS and DTLS, engine-run UDP TURN and
-  server-reflexive gathering, SRV / NAPTR discovery, with the `rtc-stream-driver` example driver.
-- **DTLS 1.3** (RFC 9147) beside DTLS 1.2, connection ids, session resumption, automatic SRTP
-  re-keying by a new association before the key lifetime ends.
-- **Robustness**: SCTP fast recovery and handshake-state fixes under loss, RTCP only where an RTP
-  session exists, and the RTP circuit breaker no longer stops a lossless reordered flow.
+## [Unreleased]
 
 ### Breaking changes
+
+- **peer connection, interceptors**: the `Performance` behaviour profile and the
+  `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
+  RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
+  offers, never turns a capability off and never leaves what the RFCs permit (a libwebrtc value
+  outside an RFC stays in `Chrome`). Measured with `tests/rtcp_rate_trace_rtc2rtc.rs` (two rtc
+  peer connections, virtual time, 30 s):
+  - `rtcp.t-rr-interval` 1 s (RFC 4585 3.4 / 3.5.3; RFC 5506 3.3 names `trr-int` as the remedy;
+    kept local, not announced): at 1 Mbit/s one way the sender's regular reports fall from 13.2
+    to 1.4 a second (27.3 to 3.8 SR/s) and RTCP from 4.20% to 1.45% of the media; both ways
+    4.91% to 1.44%. Cost: report blocks reach the sender 1.2 times a second instead of 12.2
+    (longest gap 1.36 s instead of 214 ms), which slows the RTP circuit breaker and RR-based
+    RTT; NACK and congestion control feedback are untouched (120 ms to the NACK either way).
+  - `rtcp.congestion-feedback-in-budget`, `rtcp.minimum-session-bandwidth` 16 kbit/s,
+    `cc.feedback-share` 2.5%, `cc.feedback-max-interval` 500 ms: congestion control feedback and
+    regular reports share RFC 3550's 5%. 24 kbit/s audio: 12.15% to 4.49% of the media (6.06%
+    without `a=rtcp-rsize`); 100 kbit/s audio and video: 5.96% to 2.75%. Cost: at those rates
+    feedback every 500 / 400 ms instead of 250 / 137 ms (Gcc settles 0.5 s either way at
+    150 kbit/s, 6.0 s against 5.5 s at 500 kbit/s; a Gcc sender with probing fed by a
+    `Performance` receiver reaches 2 Mbit/s in 0.62 s against 0.49 s), and a regular report
+    only every 5 s at 24 kbit/s.
+  - New settings: `RtcpSessionBuilder::with_congestion_feedback_in_budget`,
+    `with_minimum_session_bandwidth`; `TwccReceiverBuilder` / `Rfc8888Builder`
+    `with_feedback_share`, `with_max_adaptive_interval`; `DefaultInterceptorOptions` fields
+    `rtcp_congestion_feedback_in_budget`, `rtcp_minimum_session_bandwidth`,
+    `congestion_feedback_share`, `congestion_feedback_max_interval`. `BehaviourProfile` gains
+    `Performance` (the enum is `#[non_exhaustive]`; `ALL` has four entries).
+  - Cargo feature `performance-defaults`: `BehaviourProfile::default()` is `Performance`. With
+    `chrome-defaults` also on, `Chrome` wins and the build prints a deprecation warning naming
+    both. CI: a `performance_defaults` job like `chrome_defaults`.
+  - Audit: RFC4585-3.5.4-2 is `partial` (was `tested`: the congestion control feedback sent at
+    once is not added to `avg_rtcp_size`); RFC5506-4.2.1-1's note names the feedback that does
+    travel reduced-size (transport-cc and RFC 8888 included).
+  - Test environment: the RTCP cell logs the media rate it ran at (a few hundred kbit/s, not a
+    video call's) and no longer claims the stacks report every second; the Pion peer counts each
+    RTCP datagram once (its SRTCP session hands one datagram to every stream it names, which
+    counted SRs several times).
+  - The merge with master: `rtp.ssrc-per-clock-rate` follows master's default (one SSRC across
+    clock rates, `Rfc` `false`, `StrictRfc` `true`); `circuit_breaker_packet_size` is listed as
+    engine-only.
 
 - **peer connection**: behaviour profile values verified against libwebrtc's source
   (`conf/profile-2-verified-values`). The 26 unverified Chrome values were read in libwebrtc's
@@ -111,6 +129,32 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
     to 100 %. It fails on an open row without a class.
   - Breaking for other branches: a totals line or a COUNTS.md made by the old script is
     regenerated by `python3 scripts/audit-count.py`.
+## [0.22.0+brainwires.6] - 2026-11-23
+
+The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
+specification set (ICE, STUN, TURN, mDNS, DTLS 1.2 and 1.3, SRTP, SCTP and data channels, RTP /
+RTCP, congestion control and FEC, SDP and JSEP, W3C webrtc-pc and webrtc-extensions, stats),
+with every closed clause proved by a test (see `docs/conformance/audit/COUNTS.md`), interop runs
+against Chromium, Firefox and WebKit and, new in this release, against Pion, str0m and aiortc
+(`docs/interop.md`).
+
+- **Breaking changes** (listed below, by area): defaults now follow the RFC where browsers
+  interoperate with it, with the browser-compatible form kept as a setting where they do not
+  (for example one SSRC across clock rates by default, `with_ssrc_per_clock_rate(true)` for RFC
+  7160 section 4.1); many public types gained fields or variants (header-extension control,
+  candidate-pair events, transport events, `OnSrtpPacketDiscarded`, `OnEcnFailure`), and several
+  builder methods and errors changed (JSEP, SCTP, ICE, DTLS, TURN, STUN, SDP, SRTP).
+- **Several transports per peer connection**: sections outside a BUNDLE group, several BUNDLE
+  groups and `bundlePolicy` balanced get real transports of their own.
+- **Stream transports**: ICE-TCP (RFC 6544), TURN over TCP, TLS and DTLS, engine-run UDP TURN and
+  server-reflexive gathering, SRV / NAPTR discovery, with the `rtc-stream-driver` example driver.
+- **DTLS 1.3** (RFC 9147) beside DTLS 1.2, connection ids, session resumption, automatic SRTP
+  re-keying by a new association before the key lifetime ends.
+- **Robustness**: SCTP fast recovery and handshake-state fixes under loss, RTCP only where an RTP
+  session exists, and the RTP circuit breaker no longer stops a lossless reordered flow.
+
+### Breaking changes
+
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
   times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech

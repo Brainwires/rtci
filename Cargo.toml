@@ -159,6 +159,9 @@ turn-tls-webpki-roots = ["dep:webpki-roots"]
 # a build that turns this on changes the defaults of every user of `rtc` in that build. Prefer
 # `SettingEngineBuilder::with_behaviour_profile`.
 chrome-defaults = []
+# BehaviourProfile::Performance as the default profile (docs/behaviour-profiles.md). With
+# chrome-defaults also on, Chrome is the default and the build warns.
+performance-defaults = []
 crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "dtls/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "ice/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs", "srtp/crypto-aws-lc-rs", "turn/crypto-aws-lc-rs", "sframe/crypto-aws-lc-rs"]
 
 [dependencies]

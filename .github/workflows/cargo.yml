@@ -194,6 +194,27 @@ jobs:
           cargo test --package rtc --features chrome-defaults --lib behaviour_profile --verbose
           cargo test --package rtc --features chrome-defaults --test behaviour_profiles --verbose
 
+  # The same for `performance-defaults` (BehaviourProfile::Performance as the default).
+  performance_defaults:
+    name: Feature performance-defaults (check, profile tests)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Check the workspace with the feature
+        run: cargo check --workspace --all-targets --features rtc/performance-defaults --verbose
+      - name: The profile's tests with the feature
+        run: |
+          cargo test --package rtc --features performance-defaults --lib behaviour_profile --verbose
+          cargo test --package rtc --features performance-defaults --test behaviour_profiles --verbose
+
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
     runs-on: ubuntu-latest

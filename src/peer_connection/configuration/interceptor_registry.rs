@@ -403,6 +403,23 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Whether congestion control feedback that leaves at once counts against the RTCP
+    /// bandwidth of the regular reports, which then space out to keep both inside it. `false`
+    /// by default. See
+    /// [`RtcpSessionBuilder::with_congestion_feedback_in_budget`](interceptor::RtcpSessionBuilder::with_congestion_feedback_in_budget).
+    pub rtcp_congestion_feedback_in_budget: bool,
+    /// The least session bandwidth, bits per second, the RTCP bandwidth is computed from when
+    /// the media is measured. 64 kbit/s by default. See
+    /// [`RtcpSessionBuilder::with_minimum_session_bandwidth`](interceptor::RtcpSessionBuilder::with_minimum_session_bandwidth).
+    pub rtcp_minimum_session_bandwidth: u64,
+    /// The share of the media received that congestion control feedback (transport-wide and
+    /// RFC 8888) is sized to. 0.05 by default. See
+    /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
+    pub congestion_feedback_share: f64,
+    /// The longest interval between two congestion control feedback packets while media
+    /// arrives. 250 ms by default. See
+    /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
+    pub congestion_feedback_max_interval: Duration,
 }
 
 impl DefaultInterceptorOptions {
@@ -423,6 +440,10 @@ impl DefaultInterceptorOptions {
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            rtcp_congestion_feedback_in_budget: false,
+            rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
+            congestion_feedback_share: 0.05,
+            congestion_feedback_max_interval: Duration::from_millis(250),
         }
     }
 
@@ -466,6 +487,8 @@ impl DefaultInterceptorOptions {
             .with_t_rr_interval(self.rtcp_t_rr_interval)
             .with_immediate_congestion_feedback(self.rtcp_immediate_congestion_feedback)
             .with_report_from_every_ssrc(self.rtcp_report_from_every_ssrc)
+            .with_congestion_feedback_in_budget(self.rtcp_congestion_feedback_in_budget)
+            .with_minimum_session_bandwidth(self.rtcp_minimum_session_bandwidth)
     }
 }
 
@@ -513,11 +536,8 @@ pub fn register_default_interceptors_with_options(
     // Per transport, with the congestion controller below: each transport numbers its
     // packets and is estimated on its own (the remote reports each transport's sequence).
     let registry = with_congestion_feedback_senders(registry, options.congestion_feedback, true);
-    let registry = with_congestion_feedback_recorders(
-        registry,
-        options.congestion_feedback,
-        options.twcc_rereport_received,
-    );
+    let registry =
+        with_congestion_feedback_recorders(registry, options.congestion_feedback, options);
 
     // A media sender implements TMMBR (RFC 8834 section 5.1.6), and it is in use where the
     // session names it (RFC 5104 section 7.1).
@@ -653,8 +673,7 @@ pub fn register_default_interceptors_without_congestion_control(
     let options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
     let feedback = options.congestion_feedback;
     register_congestion_feedback(media_engine, feedback)?;
-    let registry =
-        with_congestion_feedback_recorders(registry, feedback, options.twcc_rereport_received);
+    let registry = with_congestion_feedback_recorders(registry, feedback, &options);
 
     let registry = configure_rtcp_reports_with(registry, options.rtcp_session());
     let registry = configure_extended_reports(registry);
@@ -890,8 +909,11 @@ fn with_congestion_feedback_senders(
 fn with_congestion_feedback_recorders(
     registry: Registry,
     feedback: CongestionFeedback,
-    rereport_received: bool,
+    options: &DefaultInterceptorOptions,
 ) -> Registry {
+    let rereport_received = options.twcc_rereport_received;
+    let share = options.congestion_feedback_share;
+    let max_interval = options.congestion_feedback_max_interval;
     // Each transport's arrivals are reported on that transport (the remote numbers each
     // transport on its own).
     let registry = if feedback.offers_twcc() {
@@ -900,6 +922,8 @@ fn with_congestion_feedback_recorders(
             PerRtpSession::new(move || {
                 TwccReceiverBuilder::new()
                     .with_rereport_received(rereport_received)
+                    .with_feedback_share(share)
+                    .with_max_adaptive_interval(max_interval)
                     .build()
             }),
         )
@@ -909,7 +933,12 @@ fn with_congestion_feedback_recorders(
     if feedback.offers_rfc8888() {
         registry.with_per_rtp_session(
             Slot::Rfc8888,
-            PerRtpSession::new(|| Rfc8888Builder::new().build()),
+            PerRtpSession::new(move || {
+                Rfc8888Builder::new()
+                    .with_feedback_share(share)
+                    .with_max_adaptive_interval(max_interval)
+                    .build()
+            }),
         )
     } else {
         registry
@@ -1718,13 +1747,9 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
     // something to work with. A stream is reported by one recorder, never both.
     // One estimator for the connection (`estimator` is one instance), so one numbering.
     let registry = with_congestion_feedback_senders(registry, feedback, false);
-    let rereport_received =
-        DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile())
-            .twcc_rereport_received;
+    let options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
     Ok(with_congestion_feedback_recorders(
-        registry,
-        feedback,
-        rereport_received,
+        registry, feedback, &options,
     ))
 }
 
