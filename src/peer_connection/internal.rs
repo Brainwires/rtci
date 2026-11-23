@@ -3442,7 +3442,11 @@ impl RTCPeerConnection {
     /// Applies the ICE restart every transport has staged (`set_local_description`); a
     /// transport with none staged is left alone. A local offer's (`revertible`) can be taken
     /// back by its rollback ([`Self::revert_local_ice_restart`]).
-    pub(super) fn apply_staged_ice_restarts(&mut self, now: Instant, revertible: bool) -> Result<()> {
+    pub(super) fn apply_staged_ice_restarts(
+        &mut self,
+        now: Instant,
+        revertible: bool,
+    ) -> Result<()> {
         for id in self.pipeline_context.transports.ids() {
             self.with_transport(id, |pc| {
                 if !pc.ice_transport().has_pending_restart() {
