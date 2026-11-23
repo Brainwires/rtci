@@ -78,6 +78,10 @@ fn nothing_written_while_serving_events_or_reads_waits_for_a_later_wake() -> Res
             ..Default::default()
         }],
     ))?;
+    run.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
     run.peers[0].pc.create_data_channel("data", None)?;
     let offer = run.peers[0].pc.create_offer(None)?;
     run.peers[0]
