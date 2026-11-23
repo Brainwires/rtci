@@ -6,19 +6,6 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5745; `n/a` (the clause does not bind this engine): 663; rows that
-  apply: 5082.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5015 of 5082 (98.7 %).
-- Tested as the default (`tested`): 4992 of 5082 (98.2 %); `setting`: 16; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 67: 8 untested, 41 partial, 18 missing, 0 violated.
-
-| Class | Meaning | Rows | of them owned by a running agent |
-|---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 16 | 14 |
-| B | implemented, lacking a test that fails without it | 3 | 2 |
-| C | partly implemented | 41 | 18 |
-| D | not implemented | 14 | 11 |
-| E | cannot be met or observed inside this engine | 15 | 11 |
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 665; rows that
   apply: 5081.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5035 of 5081 (99.1 %).
@@ -138,8 +125,6 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC2198-5-4 | `rfc2198.md` | A receiver that lists RED is prepared to receive the listed encodings ... | partial | E | RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream | S | media (running) |
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |
-| RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | missing | E | The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds | S | media (running) |
-| RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | untested | E | Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate | S | sctp |
 | RFC7874-3-11 | `rfc7874.md` | Gap between events is at least 30 ms (default 70 ms) | missing | F | Stale note: the 30 ms minimum gap is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes` (10 ms asked, 40 + 30 ms between tone changes); mutation-check and cite | S | media (running) |
 
 ## Closed since classified
