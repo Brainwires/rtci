@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is now applied when the options are given, keeping silence suppression only where the
     offer had it.
   - A remote description listing a mid in two BUNDLE groups is refused (RFC 9143 section 5).
+  - A remote offer that keeps the ICE credentials but changes `ice-lite`, `ice-options` or
+    `ice-pacing` is refused (RFC 8839 section 4.4.2.1).
   - New `SettingEngineBuilder::with_nominated_candidates_only(true)`: once ICE selected a
     pair, later offers list its local candidate alone (RFC 8839 section 4.4.1.2.2). The
     default keeps every candidate of the most recent gathering, as RFC 9429 section 5.2.2

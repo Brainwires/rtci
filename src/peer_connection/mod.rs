@@ -1750,6 +1750,20 @@ impl RTCPeerConnection {
             validate_application_media_section(&parsed)?;
             // RFC 9429 section 5.10: an RTX format whose primary is not on the m= line.
             check_repair_primaries(&parsed)?;
+            // RFC 8839 section 4.4.2.1: an offer that is not an ICE restart keeps the ICE
+            // attributes of the session.
+            if remote_description.sdp_type == RTCSdpType::Offer
+                && let Some(previous) = self
+                    .current_remote_description
+                    .as_ref()
+                    .and_then(|d| d.parsed.as_ref())
+                && let (Ok(Some(old)), Ok(Some(new))) =
+                    (extract_ice_details(previous), extract_ice_details(&parsed))
+                && old.ufrag == new.ufrag
+                && old.pwd == new.pwd
+            {
+                crate::peer_connection::sdp::check_ice_attributes_unchanged(previous, &parsed)?;
+            }
             // RFC 9143 section 5: "an "m=" section MUST NOT be associated with more than one
             // BUNDLE group".
             let groups = crate::peer_connection::sdp::bundle_groups(&parsed);

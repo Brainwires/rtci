@@ -3498,6 +3498,44 @@ pub(crate) fn extract_ice_details(desc: &SessionDescription) -> Result<Option<Re
     }))
 }
 
+/// RFC 8839 section 4.4.2.1: "If any of the SDP attributes [`ice-options`, `ice-pacing`,
+/// `ice-lite`] have been modified in a subsequent offer that is not used to request an ICE
+/// restart, the answerer MUST reject the offer." `previous` is the current remote
+/// description; `offer` keeps its ICE credentials (no restart). The attributes are read at
+/// session level and in the first live section, where this engine and browsers write them.
+pub(crate) fn check_ice_attributes_unchanged(
+    previous: &SessionDescription,
+    offer: &SessionDescription,
+) -> Result<()> {
+    fn of(desc: &SessionDescription) -> (bool, Vec<String>, Option<String>) {
+        let first = desc
+            .media_descriptions
+            .iter()
+            .find(|m| !is_rejected_media(m));
+        let value = |key: &str| {
+            desc.attribute(key)
+                .map(String::as_str)
+                .or_else(|| first.and_then(|m| m.attribute(key).flatten()))
+                .map(str::to_owned)
+        };
+        let mut options: Vec<String> = value(ATTR_KEY_ICE_OPTIONS)
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
+        options.sort();
+        (is_lite_set(desc), options, value(ATTR_KEY_ICE_PACING))
+    }
+    let (before, after) = (of(previous), of(offer));
+    if before != after {
+        return Err(Error::SdpInvalidValue(format!(
+            "an offer without an ICE restart changed ice-lite / ice-options / ice-pacing \
+             ({before:?} to {after:?}; RFC 8839 section 4.4.2.1)"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_lite_set(desc: &SessionDescription) -> bool {
     for a in &desc.attributes {
         if a.key.trim() == ATTR_KEY_ICELITE {

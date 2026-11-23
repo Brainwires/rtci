@@ -98,3 +98,40 @@ fn a_mid_in_two_bundle_groups_refuses_the_description() -> TestResult {
     pc.set_remote_description(Instant::now(), offer("a=group:BUNDLE 0 1\n")?)?;
     Ok(())
 }
+
+/// RFC 8839 section 4.4.2.1: "If any of the SDP attributes [ice-options, ice-pacing,
+/// ice-lite] have been modified in a subsequent offer that is not used to request an ICE
+/// restart, the answerer MUST reject the offer." With new credentials (a restart) the same
+/// change is taken.
+#[test]
+fn a_subsequent_offer_without_a_restart_keeps_the_ice_attributes() -> TestResult {
+    let offer = |session: &str, transport: &str| {
+        RTCSessionDescription::offer(crlf(&format!(
+            "{SESSION}{session}a=group:BUNDLE 0\n\
+             m=video 9 UDP/TLS/RTP/SAVPF 96\n{transport}a=mid:0\na=sendrecv\na=rtpmap:96 VP8/90000\n"
+        )))
+    };
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), offer("a=ice-options:trickle\n", TRANSPORT)?)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(Instant::now(), answer)?;
+
+    for changed in [
+        "a=ice-lite\na=ice-options:trickle\n",
+        "a=ice-options:trickle ice2\n",
+    ] {
+        let refused = pc.set_remote_description(Instant::now(), offer(changed, TRANSPORT)?);
+        assert!(refused.is_err(), "{changed:?}: {refused:?}");
+    }
+    let restarted = TRANSPORT
+        .replace("a=ice-ufrag:4ZcD", "a=ice-ufrag:R3st")
+        .replace(
+            "a=ice-pwd:2/1muCWoOi3uLifh0NuRHlkwz",
+            "a=ice-pwd:anotherpasswordof22chars",
+        );
+    pc.set_remote_description(
+        Instant::now(),
+        offer("a=ice-options:trickle ice2\n", &restarted)?,
+    )?;
+    Ok(())
+}
