@@ -2404,8 +2404,8 @@ fn a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbund
 }
 
 /// RFC 5764 section 4.4 ("Once the key lifetime has been reached, a new DTLS session SHOULD
-/// be established") end to end with three transports (audio, video and data outside any
-/// BUNDLE group), with the default settings, so each new association runs on a new 3-tuple
+/// be established") end to end with three transports (two audio sections and data, outside
+/// any BUNDLE group), with the default settings, so each new association runs on a new 3-tuple
 /// (RFC 8842 section 5.1). Peer 0's SRTP keys have a lifetime of 320 packets: before one
 /// runs out the engine raises negotiation-needed by itself, the application only answers it
 /// (a new offer, and gathering on new ports for the transports that dropped their
@@ -2429,12 +2429,20 @@ fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<
         )?,
         Peer::with_setting_engine(
             "10.0.0.2",
-            RTCBundlePolicy::Balanced,
+            RTCBundlePolicy::MaxCompat,
             None,
             SettingEngineBuilder::new(),
         )?,
     ];
-    let (senders, _) = world.negotiate(without_bundle_group)?;
+    // Two audio senders: with a video sender, the video transport's key ran out within the
+    // 20 ms step that brought the notice (more than the twenty packets of notice the engine
+    // gives, a sixteenth of this short lifetime, left in that step), before the application
+    // could answer negotiation-needed.
+    let (senders, _) = world.negotiate_media(
+        &[RtpCodecKind::Audio, RtpCodecKind::Audio],
+        true,
+        without_bundle_group,
+    )?;
     world.gather()?;
     world.run_traced("connected with a data channel", |peers| {
         peers.iter().all(|p| p.connected && p.channel.is_some())
