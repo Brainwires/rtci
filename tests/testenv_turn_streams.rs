@@ -7,6 +7,10 @@
 //! (`examples/stream-driver`), whose sockets live in each peer's namespace. The engine connects,
 //! runs TLS (verified against the environment's CA, ALPN `stun.turn`), allocates, announces the
 //! relayed candidate with its `relayProtocol` and relays every packet.
+//!
+//! Over DTLS (`turns:...?transport=udp`, RFC 7350) each application binds one UDP socket and
+//! adds its host candidate (which the relay policy keeps from the peer): the engine runs its
+//! DTLS association to coturn from that socket, and every datagram on it is to or from coturn.
 
 mod common;
 mod testenv;
@@ -54,6 +58,7 @@ fn roots(env: &Env) -> Arc<rustls::RootCertStore> {
     Arc::new(roots)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn peer(
     offerer: bool,
     url: String,
@@ -61,11 +66,23 @@ fn peer(
     tx: Sender<Signal>,
     rx: Receiver<Signal>,
     messages: Vec<Vec<u8>>,
+    udp: Option<std::net::IpAddr>,
 ) -> io::Result<Outcome> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // Over DTLS: the application's UDP socket, the engine's DTLS association on it.
+        let socket = match udp {
+            Some(ip) => Some(tokio::net::UdpSocket::bind((ip, 0)).await?),
+            None => None,
+        };
+        let turn_server: std::net::SocketAddr = url
+            .trim_start_matches("turns:")
+            .trim_end_matches("?transport=udp")
+            .parse()
+            .unwrap_or(env.turn_tls);
+        let mut buf = vec![0u8; 2048];
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
                 RTCConfigurationBuilder::new()
@@ -96,6 +113,22 @@ fn peer(
                 .unwrap();
             let _ = tx.send(Signal::Description(serde_json::to_string(&offer).unwrap()));
         }
+        let add_host = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+            if let Some(local) = socket.as_ref().and_then(|s| s.local_addr().ok()) {
+                pc.add_local_candidate(RTCIceCandidateInit {
+                    candidate: format!(
+                        "candidate:1 1 udp 2130706431 {} {} typ host",
+                        local.ip(),
+                        local.port()
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+        };
+        if offerer {
+            add_host(&mut pc);
+        }
         let mut out = Outcome {
             connected: false,
             received: vec![],
@@ -114,6 +147,7 @@ fn peer(
                             let answer = pc.create_answer(None).unwrap();
                             pc.set_local_description(Instant::now(), answer.clone())
                                 .unwrap();
+                            add_host(&mut pc);
                             let _ = tx
                                 .send(Signal::Description(serde_json::to_string(&answer).unwrap()));
                         }
@@ -131,9 +165,33 @@ fn peer(
             while let Some(transmit) = pc.poll_stream_transmit() {
                 driver.write(transmit);
             }
-            // Everything goes through the relay: nothing is left for the application's sockets.
-            while pc.poll_write().is_some() {
-                out.only_relay = false;
+            // Everything goes through the relay: nothing is left for the application's sockets
+            // but, over DTLS, the association to the TURN server.
+            while let Some(w) = pc.poll_write() {
+                match socket.as_ref() {
+                    Some(s) if w.transport.peer_addr == turn_server => {
+                        let _ = s.send_to(&w.message, w.transport.peer_addr).await;
+                    }
+                    _ => out.only_relay = false,
+                }
+            }
+            if let Some(s) = socket.as_ref() {
+                while let Ok((n, from)) = s.try_recv_from(&mut buf) {
+                    if from != turn_server {
+                        out.only_relay = false;
+                    }
+                    let local = s.local_addr()?;
+                    let _ = pc.handle_read(rtc::shared::TaggedBytesMut {
+                        now: Instant::now(),
+                        transport: rtc::shared::TransportContext {
+                            local_addr: local,
+                            peer_addr: from,
+                            transport_protocol: rtc::shared::TransportProtocol::UDP,
+                            ecn: None,
+                        },
+                        message: BytesMut::from(&buf[..n]),
+                    });
+                }
             }
             while let Some(e) = pc.poll_event() {
                 match e {
@@ -216,17 +274,30 @@ fn peer(
 fn relay_through_engine_turn(url: &str, expected: RTCIceServerTransportProtocol) {
     common::install_crypto_provider();
     let env = Env::get();
+    let dtls = expected == RTCIceServerTransportProtocol::Dtls;
+    let (ip_a, ip_b) = if dtls {
+        (
+            Some(testenv::source_ip("h-symmetric-a", env.turn_tls).unwrap()),
+            Some(testenv::source_ip("h-symmetric-b", env.turn_tls).unwrap()),
+        )
+    } else {
+        (None, None)
+    };
     let mut messages = vec![b"relayed by the engine".to_vec(), vec![9u8; 30_000]];
     messages.extend((0..30u8).map(|i| vec![i; 200]));
     let (a_tx, b_rx) = std::sync::mpsc::channel();
     let (b_tx, a_rx) = std::sync::mpsc::channel();
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let offerer = std::thread::spawn(move || {
-        in_netns("h-symmetric-a", move || peer(true, u, e, a_tx, a_rx, m))
+        in_netns("h-symmetric-a", move || {
+            peer(true, u, e, a_tx, a_rx, m, ip_a)
+        })
     });
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let answerer = std::thread::spawn(move || {
-        in_netns("h-symmetric-b", move || peer(false, u, e, b_tx, b_rx, m))
+        in_netns("h-symmetric-b", move || {
+            peer(false, u, e, b_tx, b_rx, m, ip_b)
+        })
     });
     let b = answerer.join().unwrap().unwrap();
     let a = offerer.join().unwrap().unwrap();
@@ -271,5 +342,18 @@ fn the_engine_relays_through_turn_over_tls() {
     relay_through_engine_turn(
         &format!("turns:{}?transport=tcp", env.turn_tls),
         RTCIceServerTransportProtocol::Tls,
+    );
+}
+
+/// RFC 7350 and RFC 8656 section 3.1: TURN over DTLS, the engine's DTLS client on each
+/// application's UDP socket, coturn's certificate checked against the environment's CA for the
+/// URI's host (its certificate names 203.0.113.10); `relayProtocol` "dtls".
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn the_engine_relays_through_turn_over_dtls() {
+    let env = Env::get();
+    relay_through_engine_turn(
+        &format!("turns:{}?transport=udp", env.turn_tls),
+        RTCIceServerTransportProtocol::Dtls,
     );
 }

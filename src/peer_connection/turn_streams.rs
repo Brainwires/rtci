@@ -10,6 +10,14 @@
 //! RFC 8656 section 12.5), allocates, announces the relayed candidate with its
 //! `relayProtocol` (`tcp` or `tls`), creates permissions as the agent sends, and relays the
 //! agent's datagrams both ways. The relayed transport itself is UDP (RFC 8656).
+//!
+//! A `turns:...?transport=udp` server is reached over DTLS (RFC 7350): a client-role
+//! `rtc-dtls` association from a UDP host candidate's base, on the application's socket. Its
+//! records leave through `poll_write` and are taken out of `handle_read` before ICE sees them
+//! (by the server's address on that base); the server's certificate is checked against the
+//! URI's host with the same roots or verifier as TLS. The TURN client runs over it with UDP's
+//! retransmissions (RFC 7350 section 4), and the relayed candidate's `relayProtocol` is
+//! `dtls`.
 
 use super::RTCPeerConnection;
 use super::streams::{TURN, tcp_context};
@@ -25,6 +33,7 @@ use shared::stream::{Framing, StreamId, StreamLayer};
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Datagrams held per peer address while their permission is being created.
@@ -42,9 +51,38 @@ enum LinkState {
     Connecting,
     /// Connected; the TURN client runs on it.
     Open(StreamId),
+    /// The DTLS association is up (`TurnLink::dtls`); the TURN client runs on it.
+    OpenDtls,
     /// Given up: no address connected, TLS failed, the allocation failed or the connection
     /// ended.
     Failed,
+}
+
+/// What carries a link's TURN messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carrier {
+    /// TCP (`turn:...?transport=tcp`).
+    Tcp,
+    /// TLS over TCP (`turns:`).
+    Tls,
+    /// DTLS over the application's UDP socket (`turns:...?transport=udp`, RFC 7350).
+    Dtls,
+}
+
+/// A DTLS association to one address of a `turns:...?transport=udp` server, from a UDP base.
+pub(crate) struct DtlsAttempt {
+    remote: SocketAddr,
+    base: SocketAddr,
+    endpoint: dtls::endpoint::Endpoint,
+}
+
+impl DtlsAttempt {
+    /// Moves the association's records onto the application's socket (`poll_write`).
+    fn flush(&mut self, out: &mut std::collections::VecDeque<TaggedBytesMut>) {
+        while let Some(t) = self.endpoint.poll_transmit() {
+            out.push_back(t);
+        }
+    }
 }
 
 pub(crate) struct TurnLink {
@@ -52,7 +90,11 @@ pub(crate) struct TurnLink {
     /// own (RFC 9429 section 5.2.1).
     transport: TransportId,
     url: Url,
-    tls: bool,
+    carrier: Carrier,
+    /// Over DTLS: the handshakes racing, one per server address.
+    dtls_attempts: Vec<DtlsAttempt>,
+    /// Over DTLS: the association that won.
+    dtls: Option<DtlsAttempt>,
     state: LinkState,
     race: Option<HappyEyeballs>,
     attempts: Vec<StreamId>,
@@ -75,27 +117,36 @@ impl TurnLink {
     }
 
     fn url_string(&self) -> String {
-        if self.tls {
-            format!(
-                "turns:{}:{}?transport=tcp",
-                host_for_url(&self.url.host),
-                self.url.port
-            )
-        } else {
-            format!(
-                "turn:{}:{}?transport=tcp",
-                host_for_url(&self.url.host),
-                self.url.port
-            )
-        }
+        let (scheme, transport) = match self.carrier {
+            Carrier::Tcp => ("turn", "tcp"),
+            Carrier::Tls => ("turns", "tcp"),
+            Carrier::Dtls => ("turns", "udp"),
+        };
+        format!(
+            "{scheme}:{}:{}?transport={transport}",
+            host_for_url(&self.url.host),
+            self.url.port
+        )
     }
 
     fn protocol(&self) -> RTCIceServerTransportProtocol {
-        if self.tls {
-            RTCIceServerTransportProtocol::Tls
-        } else {
-            RTCIceServerTransportProtocol::Tcp
+        match self.carrier {
+            Carrier::Tcp => RTCIceServerTransportProtocol::Tcp,
+            Carrier::Tls => RTCIceServerTransportProtocol::Tls,
+            Carrier::Dtls => RTCIceServerTransportProtocol::Dtls,
         }
+    }
+
+    fn tls(&self) -> bool {
+        self.carrier == Carrier::Tls
+    }
+
+    /// The DTLS association (racing or won) to `remote` from `base`.
+    fn dtls_to(&mut self, base: SocketAddr, remote: SocketAddr) -> Option<&mut DtlsAttempt> {
+        self.dtls
+            .iter_mut()
+            .chain(self.dtls_attempts.iter_mut())
+            .find(|a| a.base == base && a.remote == remote)
     }
 }
 
@@ -109,8 +160,11 @@ fn host_for_url(host: &str) -> String {
 
 /// The engine's TURN-over-stream links.
 pub(crate) struct EngineTurn {
-    /// The servers each transport allocates on: `turn:...?transport=tcp` and `turns:` URLs.
+    /// The servers each transport allocates on: `turn:...?transport=tcp` and `turns:` URLs
+    /// (`turns:...?transport=udp` over DTLS).
     servers: Vec<Url>,
+    /// The bases of the UDP host candidates of each transport: where a DTLS link starts.
+    udp_bases: Vec<(TransportId, SocketAddr)>,
     /// The transports whose links were made (once each, failed ones are not made again).
     made_for: HashSet<TransportId>,
     links: Vec<TurnLink>,
@@ -124,17 +178,19 @@ impl EngineTurn {
     pub(crate) fn new(urls: &[Url], enabled: bool, tls: TurnTlsConfig) -> Self {
         let servers = urls
             .iter()
-            // `turns:` over UDP is DTLS (RFC 7350 section 4), which this does not run: such a
-            // server is left alone (its resolution "MUST stop with an error").
+            // `turn:` over UDP stays the application's; `turns:` over UDP is DTLS (RFC 7350
+            // section 4).
             .filter(|u| {
-                matches!(u.scheme, SchemeType::Turn | SchemeType::Turns)
-                    && u.proto == ProtoType::Tcp
+                (matches!(u.scheme, SchemeType::Turn | SchemeType::Turns)
+                    && u.proto == ProtoType::Tcp)
+                    || (u.scheme == SchemeType::Turns && u.proto == ProtoType::Udp)
             })
             .cloned()
             .collect();
         let tls_config = tls.client_config().ok().flatten();
         Self {
             servers,
+            udp_bases: vec![],
             made_for: HashSet::new(),
             links: vec![],
             enabled,
@@ -149,10 +205,17 @@ impl EngineTurn {
             return;
         }
         for url in &self.servers {
+            let carrier = match (url.scheme, url.proto) {
+                (SchemeType::Turns, ProtoType::Udp) => Carrier::Dtls,
+                (SchemeType::Turns, _) => Carrier::Tls,
+                _ => Carrier::Tcp,
+            };
             self.links.push(TurnLink {
                 transport,
                 url: url.clone(),
-                tls: url.scheme == SchemeType::Turns,
+                carrier,
+                dtls_attempts: vec![],
+                dtls: None,
                 state: LinkState::Pending,
                 race: None,
                 attempts: vec![],
@@ -168,13 +231,47 @@ impl EngineTurn {
         }
     }
 
-    /// Whether a link of `transport` is still on its way to a relayed candidate.
-    pub(crate) fn pending(&self, transport: TransportId) -> bool {
+    /// Whether a link of `transport` is still on its way to a relayed candidate. A link over
+    /// a stream waits for the driver (`driver`: one serves the stream interface); a DTLS link
+    /// needs it only to resolve a name.
+    pub(crate) fn pending(&self, transport: TransportId, driver: bool) -> bool {
         self.enabled
-            && self
-                .links
+            && self.links.iter().any(|l| {
+                l.transport == transport
+                    && l.state != LinkState::Pending
+                    && !l.settled()
+                    && (driver
+                        || (l.carrier == Carrier::Dtls
+                            && !matches!(
+                                l.state,
+                                LinkState::Resolving(_) | LinkState::Discovering(_)
+                            )))
+            })
+    }
+
+    /// A UDP host candidate's base of `transport`: DTLS links of the transport can start.
+    pub(crate) fn note_udp_base(&mut self, transport: TransportId, base: SocketAddr) {
+        if !self.udp_bases.contains(&(transport, base)) {
+            self.udp_bases.push((transport, base));
+        }
+    }
+
+    /// The first UDP base of `transport` of the family of `server`.
+    fn udp_base(&self, transport: TransportId, server: SocketAddr) -> Option<SocketAddr> {
+        self.udp_bases
+            .iter()
+            .find(|(t, b)| *t == transport && b.is_ipv4() == server.is_ipv4())
+            .map(|(_, b)| *b)
+    }
+
+    /// The DTLS link (and whether its association has won) that `(base, remote)` is one of.
+    fn link_of_dtls(&self, base: SocketAddr, remote: SocketAddr) -> Option<usize> {
+        self.links.iter().position(|l| {
+            l.dtls
                 .iter()
-                .any(|l| l.transport == transport && l.state != LinkState::Pending && !l.settled())
+                .chain(l.dtls_attempts.iter())
+                .any(|a| a.base == base && a.remote == remote)
+        })
     }
 
     fn link_of_stream(&self, id: StreamId) -> Option<usize> {
@@ -217,11 +314,24 @@ impl RTCPeerConnection {
             self.streams.turn.make_links(transport);
         }
         let now = self.pipeline_context.now;
+        let driver = self.streams.driver_seen;
         for index in 0..self.streams.turn.links.len() {
-            let link = &mut self.streams.turn.links[index];
-            if link.state != LinkState::Pending {
+            let link = &self.streams.turn.links[index];
+            // A link over a stream starts for a driver that serves the stream interface; a
+            // DTLS link from a UDP host candidate's base, once the transport has one.
+            if link.state != LinkState::Pending
+                || (link.carrier != Carrier::Dtls && !driver)
+                || (link.carrier == Carrier::Dtls
+                    && !self
+                        .streams
+                        .turn
+                        .udp_bases
+                        .iter()
+                        .any(|(t, _)| *t == link.transport))
+            {
                 continue;
             }
+            let link = &mut self.streams.turn.links[index];
             match link.url.host.parse::<IpAddr>() {
                 Ok(ip) => {
                     let addr = SocketAddr::new(ip, link.url.port);
@@ -230,10 +340,12 @@ impl RTCPeerConnection {
                 }
                 // RFC 5928 section 3: without a port, S-NAPTR and SRV find the server.
                 Err(_) if !link.url.explicit_port => {
-                    let (tag, srv) = if link.tls {
-                        ("turn.tls", "_turns._tcp")
-                    } else {
-                        ("turn.tcp", "_turn._tcp")
+                    // RFC 5928 section 3 and RFC 7350 section 4.2: the S-NAPTR tag and SRV
+                    // service of the transport.
+                    let (tag, srv) = match link.carrier {
+                        Carrier::Tcp => ("turn.tcp", "_turn._tcp"),
+                        Carrier::Tls => ("turn.tls", "_turns._tcp"),
+                        Carrier::Dtls => ("turn.dtls", "_turns._udp"),
                     };
                     let discovery = crate::peer_connection::dns_discovery::Discovery::new(
                         &link.url.host,
@@ -289,7 +401,18 @@ impl RTCPeerConnection {
                 .as_mut()
                 .and_then(|r| r.next_attempt(now))
             {
-                let tls = self.streams.turn.links[index].tls;
+                if self.streams.turn.links[index].carrier == Carrier::Dtls {
+                    if !self.start_dtls_attempt(now, index, addr)
+                        && let Some(r) = self.streams.turn.links[index].race.as_mut()
+                    {
+                        r.failed();
+                    }
+                    if self.streams.turn.links[index].state == LinkState::Failed {
+                        break;
+                    }
+                    continue;
+                }
+                let tls = self.streams.turn.links[index].tls();
                 let layer: Option<Box<dyn StreamLayer>> = if tls {
                     let Some(config) = self.streams.turn.tls_config.clone() else {
                         debug!("turns: server without roots or a verifier to check it: not used");
@@ -577,8 +700,10 @@ impl RTCPeerConnection {
         let mut announce = vec![];
         for index in 0..self.streams.turn.links.len() {
             let link = &mut self.streams.turn.links[index];
-            let LinkState::Open(id) = link.state else {
-                continue;
+            let id = match link.state {
+                LinkState::Open(id) => Some(id),
+                LinkState::OpenDtls => None,
+                _ => continue,
             };
             let Some(client) = link.client.as_mut() else {
                 continue;
@@ -624,7 +749,19 @@ impl RTCPeerConnection {
             }
             if let Some(client) = link.client.as_mut() {
                 while let Some(transmit) = client.poll_write() {
-                    let _ = self.streams.table.send(id, &transmit.message);
+                    match (id, link.dtls.as_mut()) {
+                        (Some(id), _) => {
+                            let _ = self.streams.table.send(id, &transmit.message);
+                        }
+                        (None, Some(dtls)) => {
+                            let remote = dtls.remote;
+                            if let Err(err) = dtls.endpoint.write(now, remote, &transmit.message) {
+                                debug!("TURN over DTLS to {remote}: {err}");
+                            }
+                            dtls.flush(&mut self.pipeline_context.write_outs);
+                        }
+                        (None, None) => {}
+                    }
                 }
             }
         }
@@ -728,14 +865,22 @@ impl RTCPeerConnection {
     pub(crate) fn release_removed_turn_links(&mut self) {
         let ids = self.pipeline_context.transports.ids();
         let mut ended = vec![];
-        self.streams.turn.links.retain(|l| {
+        let now = self.pipeline_context.now;
+        let out = &mut self.pipeline_context.write_outs;
+        self.streams.turn.links.retain_mut(|l| {
             let kept = ids.contains(&l.transport);
             if !kept {
                 ended.extend(l.attempts.iter().copied());
+                // A DTLS association says close_notify.
+                for a in l.dtls.iter_mut().chain(l.dtls_attempts.iter_mut()) {
+                    let _ = a.endpoint.close(now);
+                    a.flush(out);
+                }
             }
             kept
         });
         self.streams.turn.made_for.retain(|t| ids.contains(t));
+        self.streams.turn.udp_bases.retain(|(t, _)| ids.contains(t));
         for id in ended {
             self.streams.table.close(id);
         }
@@ -747,8 +892,29 @@ impl RTCPeerConnection {
         for link in self.streams.turn.links.iter_mut() {
             let t = match link.state {
                 LinkState::Discovering(_) => link.discovery.as_ref().and_then(|d| d.poll_timeout()),
-                LinkState::Connecting => link.race.as_ref().and_then(HappyEyeballs::poll_timeout),
+                LinkState::Connecting => link
+                    .race
+                    .as_ref()
+                    .and_then(HappyEyeballs::poll_timeout)
+                    .into_iter()
+                    .chain(
+                        link.dtls_attempts
+                            .iter()
+                            .filter_map(|a| a.endpoint.poll_timeout(&a.remote)),
+                    )
+                    .min(),
                 LinkState::Open(_) => link.client.as_mut().and_then(|c| c.poll_timeout()),
+                LinkState::OpenDtls => link
+                    .client
+                    .as_mut()
+                    .and_then(|c| c.poll_timeout())
+                    .into_iter()
+                    .chain(
+                        link.dtls
+                            .as_ref()
+                            .and_then(|a| a.endpoint.poll_timeout(&a.remote)),
+                    )
+                    .min(),
                 _ => None,
             };
             if let Some(t) = t {
@@ -760,16 +926,20 @@ impl RTCPeerConnection {
 
     /// Fires the TURN clients' and races' timers.
     pub(crate) fn turn_handle_timeout(&mut self, now: Instant) {
+        // A DTLS link whose base was added before the local description starts now.
+        self.start_turn_links();
         if self.streams.turn.links.is_empty() {
             return;
         }
         for link in self.streams.turn.links.iter_mut() {
-            if let (LinkState::Open(_), Some(client)) = (link.state, link.client.as_mut())
+            if let (LinkState::Open(_) | LinkState::OpenDtls, Some(client)) =
+                (link.state, link.client.as_mut())
                 && let Err(err) = client.handle_timeout(now)
             {
                 debug!("TURN client timer: {err}");
             }
         }
+        self.turn_dtls_timeouts(now);
         // A records query the driver did not answer counts as empty.
         let unanswered: Vec<u64> = self
             .streams
@@ -793,12 +963,319 @@ impl RTCPeerConnection {
     }
 }
 
+impl RTCPeerConnection {
+    /// A UDP host candidate the application added (`candidate_value`), on the active
+    /// transport: its base is where that transport's DTLS links start (RFC 7350). Whether ICE
+    /// took the candidate does not matter (with the `relay` policy it does not): the socket is
+    /// the application's either way.
+    pub(crate) fn note_udp_base_for_turn(&mut self, candidate_value: &str) {
+        if !self.streams.turn.enabled || self.is_closed() {
+            return;
+        }
+        let Ok(candidate) = ice::candidate::unmarshal_candidate(candidate_value) else {
+            return;
+        };
+        if candidate.candidate_type() != ice::candidate::CandidateType::Host
+            || candidate.network_type().is_tcp()
+        {
+            return;
+        }
+        let Ok(ip) = candidate.address().parse::<IpAddr>() else {
+            return;
+        };
+        let on = self.pipeline_context.transports.active_id();
+        self.streams
+            .turn
+            .note_udp_base(on, SocketAddr::new(ip, candidate.port()));
+        self.start_turn_links();
+    }
+
+    /// The DTLS client configuration of a link to `host` (RFC 7350 section 4, RFC 8656
+    /// section 3.1): the server's certificate is checked against the URI's host with the roots
+    /// or the verifier of `with_turn_tls`; only forward-secret AEAD suites (BCP 195, RFC 7350
+    /// 4-2: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 among them). `None` when nothing could
+    /// verify a server.
+    fn turn_dtls_config(&self, host: &str) -> Option<Arc<dtls::config::HandshakeConfig>> {
+        use dtls::cipher_suite::CipherSuiteId;
+        let provider = self.setting_engine.crypto_provider.clone()?;
+        let tls = self.streams.turn.tls_config();
+        let mut builder = dtls::config::ConfigBuilder::default()
+            .with_crypto_provider(provider)
+            .with_server_name(host.to_owned())
+            .with_cipher_suites(vec![
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+                CipherSuiteId::Tls_Ecdhe_Rsa_With_Aes_128_Gcm_Sha256,
+                CipherSuiteId::Tls_Ecdhe_Ecdsa_With_ChaCha20_Poly1305_Sha256,
+                CipherSuiteId::Tls_Ecdhe_Rsa_With_ChaCha20_Poly1305_Sha256,
+                CipherSuiteId::Tls_Aes_128_Gcm_Sha256,
+                CipherSuiteId::Tls_Aes_256_Gcm_Sha384,
+                CipherSuiteId::Tls_ChaCha20_Poly1305_Sha256,
+            ])
+            .with_extended_master_secret(dtls::config::ExtendedMasterSecretType::Request);
+        if let Some(verifier) = &tls.verifier {
+            builder = builder.with_server_cert_verifier(verifier.clone());
+        } else if let Some(roots) = &tls.roots {
+            builder = builder.with_roots_cas((**roots).clone());
+        } else if tls.webpki_roots {
+            #[cfg(feature = "turn-tls-webpki-roots")]
+            {
+                builder = builder.with_roots_cas(rustls::RootCertStore {
+                    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+                });
+            }
+            #[cfg(not(feature = "turn-tls-webpki-roots"))]
+            {
+                return None;
+            }
+        } else {
+            return None;
+        }
+        if tls.disable_tls12 {
+            builder = builder.with_protocol_versions(
+                dtls::config::DtlsVersion::Dtls1_3,
+                dtls::config::DtlsVersion::Dtls1_3,
+            );
+        }
+        match builder.build(true, None) {
+            Ok(config) => Some(Arc::new(config)),
+            Err(err) => {
+                debug!("TURN DTLS configuration: {err}");
+                None
+            }
+        }
+    }
+
+    /// Starts a DTLS handshake to `addr` for link `index`, from the transport's UDP base of
+    /// that family. Returns whether it started; a link nothing can verify has failed.
+    fn start_dtls_attempt(&mut self, now: Instant, index: usize, addr: SocketAddr) -> bool {
+        let (transport, host) = {
+            let l = &self.streams.turn.links[index];
+            (l.transport, l.url.host.clone())
+        };
+        let Some(base) = self.streams.turn.udp_base(transport, addr) else {
+            debug!("TURN over DTLS to {addr}: no UDP base of that family");
+            return false;
+        };
+        let Some(config) = self.turn_dtls_config(&host) else {
+            debug!("turns: DTLS server without roots or a verifier to check it: not used");
+            self.streams.turn.links[index].state = LinkState::Failed;
+            return false;
+        };
+        let mut endpoint = dtls::endpoint::Endpoint::new(base, TransportProtocol::UDP, None);
+        if let Err(err) = endpoint.connect(now, addr, config, None) {
+            debug!("TURN over DTLS to {addr}: {err}");
+            return false;
+        }
+        let mut attempt = DtlsAttempt {
+            remote: addr,
+            base,
+            endpoint,
+        };
+        attempt.flush(&mut self.pipeline_context.write_outs);
+        self.streams.turn.links[index].dtls_attempts.push(attempt);
+        true
+    }
+
+    /// Takes a datagram of a DTLS link (from a server's address to the base an association
+    /// runs on) before ICE sees it; returns anything else.
+    pub(crate) fn take_turn_dtls(&mut self, msg: TaggedBytesMut) -> Option<TaggedBytesMut> {
+        if msg.transport.transport_protocol != TransportProtocol::UDP
+            || !msg.message.first().is_some_and(|b| (20..=63).contains(b))
+        {
+            return Some(msg);
+        }
+        let (base, remote) = (msg.transport.local_addr, msg.transport.peer_addr);
+        let Some(index) = self.streams.turn.link_of_dtls(base, remote) else {
+            return Some(msg);
+        };
+        let now = msg.now;
+        let won = self.streams.turn.links[index]
+            .dtls
+            .as_ref()
+            .is_some_and(|a| a.base == base && a.remote == remote);
+        let link = &mut self.streams.turn.links[index];
+        let Some(attempt) = link.dtls_to(base, remote) else {
+            return Some(msg);
+        };
+        let result = attempt
+            .endpoint
+            .read(now, remote, msg.transport.ecn, msg.message);
+        attempt.flush(&mut self.pipeline_context.write_outs);
+        match result {
+            Err(err) => {
+                debug!("TURN over DTLS from {remote}: {err}");
+                let failed = attempt.endpoint.is_connection_failed(&remote)
+                    || attempt.endpoint.get_connection_state(remote).is_none();
+                if failed {
+                    self.turn_dtls_ended(now, index, base, remote, won);
+                }
+            }
+            Ok(events) => {
+                for event in events {
+                    match event {
+                        dtls::endpoint::EndpointEvent::HandshakeComplete if !won => {
+                            self.turn_dtls_won(now, index, base, remote);
+                        }
+                        dtls::endpoint::EndpointEvent::ApplicationData(data) => {
+                            let link = &mut self.streams.turn.links[index];
+                            if let Some(client) = link.client.as_mut()
+                                && let Err(err) = client.handle_read(TaggedBytesMut {
+                                    now,
+                                    transport: TransportContext {
+                                        local_addr: base,
+                                        peer_addr: remote,
+                                        transport_protocol: TransportProtocol::UDP,
+                                        ecn: None,
+                                    },
+                                    message: data,
+                                })
+                            {
+                                debug!("TURN message from {remote}: {err}");
+                            }
+                        }
+                        dtls::endpoint::EndpointEvent::PeerClosed => {
+                            self.turn_dtls_ended(now, index, base, remote, won);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.pump_turn(now);
+        None
+    }
+
+    /// A DTLS handshake of link `index` completed: the race is won, the TURN client starts
+    /// over the association, with UDP's retransmissions (RFC 7350 section 4).
+    fn turn_dtls_won(&mut self, now: Instant, index: usize, base: SocketAddr, remote: SocketAddr) {
+        let link = &mut self.streams.turn.links[index];
+        if link.state != LinkState::Connecting {
+            return;
+        }
+        let Some(position) = link
+            .dtls_attempts
+            .iter()
+            .position(|a| a.base == base && a.remote == remote)
+        else {
+            return;
+        };
+        let winner = link.dtls_attempts.remove(position);
+        for mut loser in std::mem::take(&mut link.dtls_attempts) {
+            let r = loser.remote;
+            let _ = loser.endpoint.stop(now, r);
+            loser.flush(&mut self.pipeline_context.write_outs);
+        }
+        if let Some(race) = link.race.as_mut() {
+            race.succeeded();
+        }
+        link.dtls = Some(winner);
+        link.state = LinkState::OpenDtls;
+        link.server = Some(remote);
+        link.link_local = Some(base);
+        let Some(provider) = self.setting_engine.crypto_provider.clone() else {
+            link.state = LinkState::Failed;
+            return;
+        };
+        let config = turn::client::ClientConfig {
+            stun_serv_addr: remote.to_string(),
+            turn_serv_addr: remote.to_string(),
+            local_addr: base,
+            transport_protocol: TransportProtocol::UDP,
+            username: link.url.username.clone(),
+            password: link.url.password.clone(),
+            realm: String::new(),
+            rto_in_ms: 0,
+            allocation_refresh_interval_cap: self
+                .setting_engine
+                .turn_allocation_refresh_interval_cap,
+            ..Default::default()
+        };
+        match turn::client::Client::new(config, provider).and_then(|mut client| {
+            client.allocate(now)?;
+            Ok(client)
+        }) {
+            Ok(client) => link.client = Some(client),
+            Err(err) => {
+                debug!("TURN client for {}: {err}", link.url);
+                link.state = LinkState::Failed;
+            }
+        }
+    }
+
+    /// A DTLS association of link `index` failed or was closed: a racing one fails its
+    /// address; the one that won takes the allocation with it.
+    fn turn_dtls_ended(
+        &mut self,
+        now: Instant,
+        index: usize,
+        base: SocketAddr,
+        remote: SocketAddr,
+        won: bool,
+    ) {
+        let link = &mut self.streams.turn.links[index];
+        if won {
+            debug!("TURN over DTLS to {remote} ended: its allocation is gone");
+            link.dtls = None;
+            link.state = LinkState::Failed;
+            link.client = None;
+            link.relay = None;
+            return;
+        }
+        link.dtls_attempts
+            .retain(|a| !(a.base == base && a.remote == remote));
+        if link.state == LinkState::Connecting {
+            if let Some(race) = link.race.as_mut() {
+                race.failed();
+            }
+            self.drive_turn_races(now);
+        }
+    }
+
+    /// The DTLS associations' timers: handshake retransmissions and give-up.
+    fn turn_dtls_timeouts(&mut self, now: Instant) {
+        let mut ended = vec![];
+        for (index, link) in self.streams.turn.links.iter_mut().enumerate() {
+            let won = link.dtls.as_mut().map(|a| (a, true));
+            let racing = link.dtls_attempts.iter_mut().map(|a| (a, false));
+            for (a, won) in won.into_iter().chain(racing) {
+                let remote = a.remote;
+                if !a.endpoint.poll_timeout(&remote).is_some_and(|t| t <= now) {
+                    continue;
+                }
+                let result = a.endpoint.handle_timeout(remote, now);
+                a.flush(&mut self.pipeline_context.write_outs);
+                if let Err(err) = result {
+                    debug!("TURN over DTLS to {remote}: {err}");
+                    ended.push((index, a.base, remote, won));
+                }
+            }
+        }
+        for (index, base, remote, won) in ended {
+            self.turn_dtls_ended(now, index, base, remote, won);
+        }
+    }
+
+    /// `close()`: every DTLS association says close_notify.
+    pub(crate) fn close_turn_dtls(&mut self) {
+        let now = self.pipeline_context.now;
+        for link in self.streams.turn.links.iter_mut() {
+            for a in link.dtls.iter_mut().chain(link.dtls_attempts.iter_mut()) {
+                let _ = a.endpoint.close(now);
+                a.flush(&mut self.pipeline_context.write_outs);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// RFC 8656 section 3.1, RFC 7350 section 4.1: `turn:...?transport=tcp` (TCP), `turns:`
+    /// (TLS over TCP) and `turns:...?transport=udp` (DTLS) servers get a link per transport;
+    /// a `turn:` server over UDP stays the application's.
     #[test]
-    fn only_turn_over_tcp_and_turns_over_tcp_servers_get_a_link() {
+    fn turn_servers_over_tcp_tls_and_dtls_get_a_link_and_over_udp_none() {
         let urls: Vec<Url> = [
             "turn:192.0.2.1:3478?transport=tcp",
             "turns:turn.example:5349",
@@ -818,25 +1295,39 @@ mod tests {
         let first = TransportId::default();
         turn.make_links(first);
         turn.make_links(first);
-        let links: Vec<(String, bool)> =
-            turn.links.iter().map(|l| (l.url_string(), l.tls)).collect();
+        let links: Vec<(String, RTCIceServerTransportProtocol)> = turn
+            .links
+            .iter()
+            .map(|l| (l.url_string(), l.protocol()))
+            .collect();
         assert_eq!(
             links,
             vec![
-                ("turn:192.0.2.1:3478?transport=tcp".to_owned(), false),
-                ("turns:turn.example:5349?transport=tcp".to_owned(), true),
-                ("turns:192.0.2.1:5349?transport=tcp".to_owned(), true),
+                (
+                    "turn:192.0.2.1:3478?transport=tcp".to_owned(),
+                    RTCIceServerTransportProtocol::Tcp
+                ),
+                (
+                    "turns:turn.example:5349?transport=tcp".to_owned(),
+                    RTCIceServerTransportProtocol::Tls
+                ),
+                (
+                    "turns:192.0.2.1:5349?transport=tcp".to_owned(),
+                    RTCIceServerTransportProtocol::Tls
+                ),
+                (
+                    "turns:192.0.2.1:5349?transport=udp".to_owned(),
+                    RTCIceServerTransportProtocol::Dtls
+                ),
             ]
         );
-        assert_eq!(turn.links[0].protocol(), RTCIceServerTransportProtocol::Tcp);
-        assert_eq!(turn.links[1].protocol(), RTCIceServerTransportProtocol::Tls);
         // Nothing started: nothing pending for the end of gathering.
-        assert!(!turn.pending(first));
+        assert!(!turn.pending(first, true));
         // Another transport gets links of its own, once.
         turn.make_links(TransportId(1));
-        assert_eq!(turn.links.len(), 6);
+        assert_eq!(turn.links.len(), 8);
         assert!(
-            turn.links[3..]
+            turn.links[4..]
                 .iter()
                 .all(|l| l.transport == TransportId(1))
         );

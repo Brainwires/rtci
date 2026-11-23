@@ -111,7 +111,7 @@ pub(crate) struct EngineStreams {
     pub(crate) settings: StreamSettings,
     pub(crate) table: StreamTable,
     /// The application has used the stream interface: it drives streams.
-    driver_seen: bool,
+    pub(crate) driver_seen: bool,
     gathers: Vec<TcpGather>,
     /// Addresses of the active candidates the engine added (port 9).
     active: HashSet<IpAddr>,
@@ -166,10 +166,12 @@ impl EngineStreams {
     }
 
     /// Whether the end of gathering of `transport` waits: for listeners and TURN links a
-    /// driver serves, and for the server-reflexive probes (over UDP whatever the driver).
+    /// driver serves, for TURN-over-DTLS links and for the server-reflexive probes (over UDP
+    /// whatever the driver, a name only with one).
     fn end_of_gathering_waits(&self, transport: TransportId) -> bool {
         let driver = self.driver_seen;
-        (driver && (self.pending_listeners(transport) || self.turn.pending(transport)))
+        (driver && self.pending_listeners(transport))
+            || self.turn.pending(transport, driver)
             || self.srflx.pending(transport, driver)
     }
 

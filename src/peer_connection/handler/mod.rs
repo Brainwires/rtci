@@ -765,6 +765,10 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
+        // A record of one of the engine's DTLS associations to a TURN server (RFC 7350).
+        let Some(msg) = self.take_turn_dtls(msg) else {
+            return Ok(());
+        };
         // The answer to one of the engine's own Binding requests to a STUN server.
         let Some(msg) = self.take_srflx_response(msg) else {
             return Ok(());
@@ -975,6 +979,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         self.flush_writes();
         // The engine's TCP connections carry what was just queued, then close.
         self.close_streams();
+        // Its DTLS associations to TURN servers say close_notify.
+        self.close_turn_dtls();
 
         // Close handlers in reverse order (Endpoint→Interceptor→SRTP→DataChannel→SCTP→
         // DTLS→ICE→Demuxer) so that higher-level protocols (DataChannels, SCTP) shut down

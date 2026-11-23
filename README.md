@@ -294,7 +294,10 @@ Once the application serves this interface, the engine gathers a passive, a simu
 and an active TCP candidate for each UDP host address it is given (RFC 6544; per transport when
 sections are not bundled), frames with RFC 4571, connects to `turn:...?transport=tcp` and
 `turns:` servers (names resolved through `StreamCommand::Resolve`, Happy Eyeballs across the
-addresses) and closes the connections ICE no longer needs. With `stun:` / `stuns:` servers
+addresses) and closes the connections ICE no longer needs. A `turns:...?transport=udp` server is reached over DTLS
+(RFC 7350) from a UDP host candidate's base without the stream interface: its records go out
+through `poll_write` and come back through `handle_read` like any datagram (a name still needs
+`Resolve`). With `stun:` / `stuns:` servers
 configured it also gathers the server-reflexive candidates: a Binding request from each UDP host
 candidate (out of `poll_write`, the answer taken out of `handle_read`; this needs no stream
 interface for a server given by address) and over TCP / TLS from its ICE-TCP listeners

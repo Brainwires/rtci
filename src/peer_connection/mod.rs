@@ -3247,6 +3247,8 @@ impl RTCPeerConnection {
             self.gather_tcp_candidates(candidate_value);
             // RFC 8445 section 5.1.1.2: its server-reflexive candidates.
             self.gather_srflx_for(candidate_value);
+            // Its base carries the transport's TURN-over-DTLS links (RFC 7350).
+            self.note_udp_base_for_turn(candidate_value);
         } else {
             self.finish_local_gathering_after_streams();
         }

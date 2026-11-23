@@ -150,6 +150,8 @@ pub struct ConfigBuilder {
     roots_cas: rustls::RootCertStore,
     client_cas: rustls::RootCertStore,
     verifier_adapter: Option<RustlsVerifierAdapter>,
+    /// A client's verifier of the server's chain and name, used instead of `roots_cas`.
+    server_cert_verifier: Option<Arc<dyn ServerCertVerifier>>,
     server_name: String,
     mtu: usize,
     replay_protection_window: usize,
@@ -196,6 +198,7 @@ impl Default for ConfigBuilder {
             roots_cas: rustls::RootCertStore::empty(),
             client_cas: rustls::RootCertStore::empty(),
             verifier_adapter: default_verifier_adapter(),
+            server_cert_verifier: None,
             server_name: String::default(),
             mtu: 0,
             replay_protection_window: 0,
@@ -597,6 +600,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// A client verifies the server's certificate chain and name with `verifier` (a rustls
+    /// [`ServerCertVerifier`] of the application's) instead of the roots of
+    /// [`Self::with_roots_cas`]. As with the roots, the handshake's CertificateVerify is still
+    /// checked by the DTLS layer itself; `insecure_skip_verify` skips this verifier too.
+    pub fn with_server_cert_verifier(mut self, verifier: Arc<dyn ServerCertVerifier>) -> Self {
+        self.server_cert_verifier = Some(verifier);
+        self
+    }
+
     /// server_name is used to verify the hostname on the returned
     /// certificates unless insecure_skip_verify is given.
     pub fn with_server_name(mut self, server_name: String) -> Self {
@@ -951,6 +963,8 @@ impl ConfigBuilder {
 
         let server_cert_verifier = if self.insecure_skip_verify {
             None
+        } else if let Some(verifier) = self.server_cert_verifier.take() {
+            Some(verifier)
         } else {
             let adapter = self.verifier_adapter.as_ref().ok_or_else(|| {
                 Error::Crypto("CA-chain verification requires a RustlsVerifierAdapter".to_owned())
