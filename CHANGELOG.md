@@ -2560,7 +2560,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client's server check). The test environment's coturn now listens for DTLS on 5349/udp;
   `testenv_turn_streams.rs::the_engine_relays_through_turn_over_dtls`.
 
-
 - **Decoding dependencies** (RFC 5583; RFC 7798 section 7.2.5; branch `conf/jsep-47-depend`).
   `sdp::attribute::{Depend, Dependency, DependencyType}` parse and write `a=depend` (one
   dependency per format; `lay`, `mdc` or another token). `RTCPeerConnection::
