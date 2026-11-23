@@ -102,7 +102,16 @@
       // Edits an offer from Rust before it is applied (an answerer that does not bundle).
       mungeRemoteOffer: null,
     };
-    const send = (m) => ws.send(JSON.stringify(m));
+    // The scenario goes with the first offer or request for one, whichever this side sends
+    // first: the Rust side applies it before it sets any description (its header encryption
+    // policy, say, cannot change once one is set).
+    const send = (m) => {
+      if ((m.type === "offer" || m.type === "request-offer") && !s.sentScenario) {
+        m = { ...m, scenario };
+        s.sentScenario = true;
+      }
+      ws.send(JSON.stringify(m));
+    };
     // Trickled candidates follow the description they belong to (RFC 8838 section 4): one is
     // sent only once the Rust side has the description whose media section (mid) and ICE
     // ufrag it names. Until then it waits; one of a description that was never sent (a local
@@ -122,12 +131,7 @@
       held = keep;
     };
     const sendDescription = (type, sdp) => {
-      const msg = { type, sdp };
-      if (type === "offer" && !s.sentScenario) {
-        msg.scenario = scenario;
-        s.sentScenario = true;
-      }
-      send(msg);
+      send({ type, sdp });
       sentSdp = sdp;
       flushCandidates();
     };

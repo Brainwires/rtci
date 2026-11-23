@@ -13,7 +13,8 @@
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
 //!   connection state, its W3C stats counters and per-stream sequence coverage.
 //!
-//! The scenario (sent with the first offer) chooses what the peer does with media:
+//! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
+//! what the peer does with media:
 //! `{"media":"reflect","video":"VP8|VP9|H264|H265|AV1","audio":true}` sends back what it
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
@@ -628,10 +629,7 @@ impl Session {
     fn on_signal(&mut self, v: Value) -> Result<()> {
         match v["type"].as_str().unwrap_or_default() {
             "offer" => {
-                if self.scenario.is_null() && !v["scenario"].is_null() {
-                    self.scenario = v["scenario"].clone();
-                    self.setup_scenario()?;
-                }
+                self.take_scenario(&v)?;
                 self.add_candidates()?;
                 // Glare: as the polite peer (RFC 9429 4.1.8.2, perfect negotiation), roll our
                 // own offer back, answer theirs, then offer again.
@@ -671,6 +669,7 @@ impl Session {
                 self.pc.add_remote_candidate(c)?;
             }
             "request-offer" => {
+                self.take_scenario(&v)?;
                 let tracks: Vec<String> = v["tracks"]
                     .as_array()
                     .map(|a| {
@@ -799,6 +798,18 @@ impl Session {
             "remoteCandidates": remote_candidates,
             "candidatePairs": candidate_pairs,
         })
+    }
+
+    /// The scenario, from the first message that carries one: the browser's first offer, or
+    /// its first request for an offer of ours when this side offers first. It is set up
+    /// before this side sets any description, since some of it (the header encryption policy)
+    /// cannot change afterwards.
+    fn take_scenario(&mut self, v: &Value) -> Result<()> {
+        if self.scenario.is_null() && !v["scenario"].is_null() {
+            self.scenario = v["scenario"].clone();
+            self.setup_scenario()?;
+        }
+        Ok(())
     }
 
     fn setup_scenario(&mut self) -> Result<()> {
