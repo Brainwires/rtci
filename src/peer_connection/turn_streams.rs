@@ -904,6 +904,7 @@ impl RTCPeerConnection {
             allocation_refresh_interval_cap: self
                 .setting_engine
                 .turn_allocation_refresh_interval_cap,
+            software: self.setting_engine.turn_software(),
             ..Default::default()
         };
         let tcp = link.relay_tcp;
@@ -1718,6 +1719,7 @@ impl RTCPeerConnection {
             allocation_refresh_interval_cap: self
                 .setting_engine
                 .turn_allocation_refresh_interval_cap,
+            software: self.setting_engine.turn_software(),
             ..Default::default()
         };
         match turn::client::Client::new(config, provider).and_then(|mut client| {
@@ -1821,6 +1823,7 @@ impl RTCPeerConnection {
             allocation_refresh_interval_cap: self
                 .setting_engine
                 .turn_allocation_refresh_interval_cap,
+            software: self.setting_engine.turn_software(),
             ..Default::default()
         };
         let mut client = match turn::client::Client::new(config, provider).and_then(|mut c| {

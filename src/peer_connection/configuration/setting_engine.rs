@@ -304,6 +304,9 @@ pub struct IceBehaviour {
     pub send_data_before_nomination: bool,
     /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
     pub pair_before_conveyed: bool,
+    /// See [`SettingEngineBuilder::with_ice_software`]: `None` until it is called (each
+    /// stack's own SOFTWARE), then the value it was given.
+    pub software: Option<Option<String>>,
 }
 
 /// Replay attack protection window sizes.
@@ -595,6 +598,26 @@ impl SettingEngine {
     /// the server.
     pub fn turn_allocation_refresh_interval_cap(&self) -> Option<Duration> {
         self.turn_allocation_refresh_interval_cap
+    }
+
+    /// The SOFTWARE of the ICE agent's STUN messages, in the form of
+    /// [`ice::agent::agent_config::AgentConfig::software`] (`None`: its default, empty: none);
+    /// see [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn ice_agent_software(&self) -> Option<String> {
+        self.ice
+            .software
+            .as_ref()
+            .map(|software| software.clone().unwrap_or_default())
+    }
+
+    /// The SOFTWARE of the requests of the TURN clients the engine runs, in the form of
+    /// [`turn::client::ClientConfig::software`] (empty: none); see
+    /// [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn turn_software(&self) -> String {
+        match &self.ice.software {
+            None => turn::client::DEFAULT_SOFTWARE.to_owned(),
+            Some(software) => software.clone().unwrap_or_default(),
+        }
     }
 
     /// Whether an ICE restart discards the local candidates gathered by the previous generation.
@@ -1332,6 +1355,12 @@ impl SettingEngineBuilder {
     /// are then written for a local address with no socket behind it and silently go nowhere, so
     /// the restarted generation exchanges credentials successfully and never leaves `Checking`.
     ///
+    /// Only the previous generation's candidates are discarded. Those added while the restart
+    /// is staged (an answerer's between `set_remote_description` of the restart offer and
+    /// `set_local_description` of its answer, an offerer's between `create_offer` and its
+    /// `set_local_description`) are the new generation's: the restart keeps them and the
+    /// answer lists them (see [`RTCPeerConnection::add_local_candidate`](crate::peer_connection::RTCPeerConnection::add_local_candidate)).
+    ///
     /// # Parameters
     ///
     /// * `discard` - `true` to drop local candidates on restart, `false` (default) to keep them
@@ -1573,6 +1602,38 @@ impl SettingEngineBuilder {
     /// heard of yet, which it then learns as peer-reflexive.
     pub fn with_ice_pairing_before_candidates_are_conveyed(mut self, enabled: bool) -> Self {
         self.0.ice.pair_before_conveyed = enabled;
+        self
+    }
+
+    /// The SOFTWARE attribute (RFC 8489 section 14.14) of the STUN messages the peer
+    /// connection sends: the ICE agent's connectivity checks (consent checks and nominations
+    /// included) and its success responses to the peer's, and the requests of the TURN
+    /// clients the engine runs for the configuration's `turn:` / `turns:` servers, over UDP,
+    /// TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind, ConnectionBind).
+    ///
+    /// Without this call the ICE agent sends `rtc-ice` and its version
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
+    /// ([`turn::client::DEFAULT_SOFTWARE`]): RFC 8489 sections 6.1 and 6.3.1.1, requests and
+    /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
+    /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
+    /// an implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD
+    /// make usage of the SOFTWARE attribute a configurable option"). The engine's server-reflexive Binding requests, the agent's error
+    /// responses, the consent checks it keeps up on the previous generation's path during a
+    /// restart, keepalive indications and TURN Send indications carry none in any case.
+    ///
+    /// `text` is fewer than 128 characters and at most 509 bytes (section 14.14); building the
+    /// peer connection with a longer one fails with `ErrAttributeSizeOverflow`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// // No SOFTWARE attribute in any STUN message of the peer connection.
+    /// let _setting_engine = SettingEngineBuilder::new().with_ice_software(None).build();
+    /// ```
+    pub fn with_ice_software(mut self, software: Option<String>) -> Self {
+        self.0.ice.software = Some(software);
         self
     }
 

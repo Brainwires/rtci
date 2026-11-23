@@ -875,7 +875,7 @@ impl Agent {
 
     /// Pairs a conveyed local candidate with every remote candidate it can be paired with.
     fn pair_local_candidate(&mut self, local_index: usize) {
-        if self.local_candidates[local_index].unconveyed {
+        if self.local_candidates[local_index].held_from_pairing() {
             return;
         }
         for remote_index in 0..self.remote_candidates.len() {
@@ -955,9 +955,17 @@ impl Agent {
         // server-reflexive candidate on, the external address of its local one.
         let nat_srflx = self.apply_nat_1to1(&mut c);
 
+        // A candidate gathered while an ICE restart is staged (the remote restart offer is
+        // applied, the answer not yet; or the restart offer is created, not yet applied) is
+        // the new generation's: the peer connection announces it with the new credentials
+        // (W3C webrtc-pc 5.6: a candidate gathered for a generation whose description is not
+        // applied yet waits for it, it is not dropped). The rules below that bind the current
+        // session do not apply to it, and the restart keeps it (`apply_restart`).
+        let staged = self.has_pending_restart();
+
         // RFC 8838 Section 13: no candidate follows the end-of-candidates indication of its
         // generation.
-        if self.local_gathering_complete {
+        if self.local_gathering_complete && !staged {
             warn!(
                 "[{}]: ignoring local candidate {}: gathering was declared complete",
                 self.get_name(),
@@ -967,8 +975,10 @@ impl Agent {
         }
         // RFC 8838 Section 13: "In all cases, an agent MUST NOT trickle any new candidates
         // within an ICE session after nomination of a candidate pair". A candidate gathered
-        // after it is not taken (so not announced either); an ICE restart takes it.
-        if self.selected_pair.is_some() {
+        // after it is not taken (so not announced either); an ICE restart takes it. One
+        // gathered for a staged restart is taken but not paired before the restart.
+        let awaiting_restart = self.selected_pair.is_some();
+        if awaiting_restart && !staged {
             debug!(
                 "[{}]: ignoring local candidate {}: a pair has been nominated",
                 self.get_name(),
@@ -995,30 +1005,37 @@ impl Agent {
             return Ok(false);
         }
 
-        for cand in &self.local_candidates {
-            if cand.equal(&c) {
-                return Ok(false);
-            }
+        for index in 0..self.local_candidates.len() {
+            let cand = &self.local_candidates[index];
+            let equal = cand.equal(&c);
             // RFC 8445 Section 5.1.3: "A candidate is redundant if and only if its transport
             // address and base equal those of another candidate" (a server-reflexive candidate
             // equal to its host candidate, a relayed one identical to a host candidate). An
             // mDNS host candidate hides its address: a reflexive candidate on that address is
             // not redundant with it (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2).
-            if cand.network_type() == c.network_type()
+            let redundant = !equal
+                && cand.network_type() == c.network_type()
                 && cand.tcp_type() == c.tcp_type()
                 && cand.addr() == c.addr()
                 && cand.base_addr() == c.base_addr()
                 && !cand.addr().ip().is_unspecified()
                 && !cand.address().ends_with(".local")
                 && !c.address().ends_with(".local")
-                && cand.address() == c.address()
-            {
-                debug!(
-                    "[{}]: ignoring redundant local candidate {} (same address and base as {})",
-                    self.get_name(),
-                    c,
-                    cand
-                );
+                && cand.address() == c.address();
+            if equal || redundant {
+                if redundant {
+                    debug!(
+                        "[{}]: ignoring redundant local candidate {} (same address and base as {})",
+                        self.get_name(),
+                        c,
+                        cand
+                    );
+                }
+                // Gathered again for a staged restart: the candidate held is the new
+                // generation's too.
+                if staged {
+                    self.local_candidates[index].restart_generation = true;
+                }
                 return Ok(false);
             }
         }
@@ -1039,6 +1056,8 @@ impl Agent {
         }
 
         c.unconveyed = unconveyed;
+        c.restart_generation = staged;
+        c.awaiting_restart = staged && awaiting_restart;
         self.local_candidates.push(c);
         let local_index = self.local_candidates.len() - 1;
 
@@ -1390,7 +1409,7 @@ impl Agent {
                 let remote_index = self.remote_candidates.len() - 1;
 
                 for local_index in 0..self.local_candidates.len() {
-                    if !self.local_candidates[local_index].unconveyed
+                    if !self.local_candidates[local_index].held_from_pairing()
                         && self.local_candidates[local_index]
                             .can_pair_with(&self.remote_candidates[remote_index])
                     {
@@ -1434,7 +1453,7 @@ impl Agent {
             }
         }
         for local_index in 0..self.local_candidates.len() {
-            if !self.local_candidates[local_index].unconveyed
+            if !self.local_candidates[local_index].held_from_pairing()
                 && self.local_candidates[local_index]
                     .can_pair_with(&self.remote_candidates[remote_index])
             {
@@ -2212,6 +2231,22 @@ impl Agent {
     /// remote offer, RFC 9429 section 5.7). The live session is untouched.
     pub fn discard_restart_credentials(&mut self) {
         self.ufrag_pwd.pending_local_credentials = None;
+        // What was gathered for it belongs to no generation now; a candidate that could not
+        // join the current session (it had nominated) still does not.
+        for c in &mut self.local_candidates {
+            c.restart_generation = false;
+        }
+    }
+
+    /// The local candidates gathered for the staged ICE restart (see
+    /// [`Agent::generate_restart_credentials`]): added, or added again, since it was staged.
+    /// The restart keeps them whether or not it keeps the others.
+    pub fn get_restart_generation_local_candidates(&self) -> Vec<Candidate> {
+        self.local_candidates
+            .iter()
+            .filter(|c| c.restart_generation)
+            .cloned()
+            .collect()
     }
 
     /// Applies a staged ICE restart, tearing down the old session and starting a new one at `now`.
@@ -2277,7 +2312,16 @@ impl Agent {
         self.candidate_pairs = Vec::new();
 
         self.set_selected_pair(Some(now), None);
-        self.delete_all_candidates(keep_local_candidates);
+        // The local candidates gathered while the restart was staged are the new
+        // generation's: they stay when the previous generation's are discarded.
+        if !keep_local_candidates {
+            self.local_candidates.retain(|c| c.restart_generation);
+        }
+        self.delete_all_candidates(true);
+        for c in &mut self.local_candidates {
+            c.restart_generation = false;
+            c.awaiting_restart = false;
+        }
         self.previous_media_path = previous_media_path;
         self.previous_generation = previous_media_path.and(previous_generation);
         self.start(now);
