@@ -176,6 +176,12 @@ pub struct InboundRtpStreamAccumulator {
     pub remote_rtp_time: Option<u32>,
     /// Number of RTCP SR reports received.
     pub reports_received: u64,
+    /// RFC 6051 section 3.3: the latest in-band NTP-format timestamp (`ntp-64` or `ntp-56`)
+    /// the stream carried, the RTP timestamp of the packet that carried it, and when that
+    /// packet arrived: a mapping of the stream's RTP clock to the sender's NTP clock taken "in
+    /// exactly the same way as if an additional RTCP SR packet had been received". It is not
+    /// a report: the remote-outbound members stay those of the SRs.
+    pub in_band_ntp: Option<(u64, u32, Instant)>,
 
     // Round trip time from RTCP XR (RFC 3611 sections 4.4, 4.5)
     /// The SSRC our receiver reports about this stream are sent from, which our XR receiver
@@ -286,15 +292,25 @@ impl InboundRtpStreamAccumulator {
         clock_rate: u32,
         capture_ntp: Option<f64>,
     ) -> Option<Instant> {
-        let received_at = self.remote_report_received_at?;
-        let report_ntp = self.remote_ntp_time? as f64 / 4_294_967_296.0;
+        // The newer of the latest sender report and the latest in-band timestamp (RFC 6051
+        // section 3.3), which stands in for a report until one arrives.
+        let report = match (self.remote_report_received_at, self.in_band_ntp) {
+            (Some(at), Some((_, _, in_band_at))) if in_band_at <= at => {
+                Some((at, self.remote_ntp_time?, self.remote_rtp_time))
+            }
+            (_, Some((ntp, rtp, at))) => Some((at, ntp, Some(rtp))),
+            (Some(at), None) => Some((at, self.remote_ntp_time?, self.remote_rtp_time)),
+            (None, None) => None,
+        };
+        let (received_at, report_ntp, report_rtp) = report?;
+        let report_ntp = report_ntp as f64 / 4_294_967_296.0;
         let capture_ntp = match capture_ntp {
             Some(ntp) => ntp,
             None => {
                 if clock_rate == 0 {
                     return None;
                 }
-                let report_rtp = self.remote_rtp_time?;
+                let report_rtp = report_rtp?;
                 let elapsed = rtp_timestamp.wrapping_sub(report_rtp) as i32;
                 report_ntp + f64::from(elapsed) / f64::from(clock_rate)
             }

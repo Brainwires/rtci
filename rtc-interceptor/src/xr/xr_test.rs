@@ -357,3 +357,55 @@ fn the_first_receipt_time_is_random() {
     let distinct: std::collections::HashSet<u32> = firsts.iter().copied().collect();
     assert_eq!(distinct.len(), firsts.len(), "{firsts:?}");
 }
+
+/// RFC 3611 section 4.7.4: "signal level ... measured only for packets containing speech
+/// energy" and "noise level ... measured during periods of silence", in dBm0, 127 when not
+/// available. From the RFC 6464 audio level the stream carries: 30 packets with voice at 20
+/// -dBov and 20 without it at 70 -dBov give a signal level of -17 dBm0 and a noise level of
+/// -67; a stream without the extension reports both as 127. RERL and the call quality
+/// figures (section 4.7.5) are the application's: 127.
+#[test]
+fn voip_metrics_carry_the_signal_and_noise_levels_of_the_audio_level_extension() {
+    use rtp::extension::audio_level_extension::AudioLevelExtension;
+    use shared::marshal::Marshal;
+    let base = Instant::now();
+    let levels = |with_extension: bool| {
+        let mut xr = XrReportBuilder::new()
+            .with_formats(["voip-metrics"])
+            .build();
+        let mut info = stream(&[]);
+        if with_extension {
+            info.rtp_header_extensions = vec![crate::RTPHeaderExtension {
+                uri: rtp::extension::AUDIO_LEVEL_URI.to_owned(),
+                id: 3,
+            }];
+        }
+        xr.bind_remote_stream(&info);
+        for seq in 0u16..50 {
+            let mut packet = rtp(base + ms(u64::from(seq) * 20), seq, u32::from(seq) * 160);
+            if let Packet::Rtp(rtp_packet) = &mut packet.message.packet {
+                let voice = seq < 30;
+                let level = AudioLevelExtension {
+                    level: if voice { 20 } else { 70 },
+                    voice,
+                };
+                rtp_packet
+                    .header
+                    .set_extension(3, level.marshal().unwrap().freeze())
+                    .unwrap();
+            }
+            xr.handle_read(packet).unwrap();
+            while xr.poll_read().is_some() {}
+        }
+        let report = report(&mut xr, base + ms(1_000)).expect("an XR");
+        let block = &block::<VoIPMetricsReportBlock>(&report)[0];
+        (
+            block.signal_level as i8,
+            block.noise_level as i8,
+            block.rerl,
+            block.rfactor,
+        )
+    };
+    assert_eq!((-17, -67, 127, 127), levels(true));
+    assert_eq!((127, 127, 127, 127), levels(false));
+}

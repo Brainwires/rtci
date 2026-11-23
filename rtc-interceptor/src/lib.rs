@@ -237,6 +237,7 @@ pub(crate) mod intervalpli;
 pub(crate) mod jitterbuffer;
 pub(crate) mod keyframe;
 pub(crate) mod nack;
+pub(crate) mod ntp_timestamp;
 pub(crate) mod pacing;
 pub(crate) mod packet;
 pub(crate) mod pause_resume;
@@ -360,6 +361,10 @@ pub use nack::generator::{
 };
 pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS};
 pub use noop::NoopInterceptor;
+pub use ntp_timestamp::{
+    NTP_TIMESTAMP_INITIAL_WINDOW, NTP_TIMESTAMP_INTERVAL, NTP_TIMESTAMP_SLOT, NtpTimestampBuilder,
+    NtpTimestampInterceptor,
+};
 pub use pacing::pacer::{
     BURST_TIME as PACER_BURST_TIME, MIN_BURST_BITS as PACER_MIN_BURST_BITS, Pacer,
 };

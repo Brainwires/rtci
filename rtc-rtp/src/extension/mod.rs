@@ -19,6 +19,10 @@ pub mod corruption_detection_extension;
 ///
 /// [RFC 6465]: https://datatracker.ietf.org/doc/html/rfc6465
 pub mod csrc_audio_level_extension;
+/// In-band NTP-format timestamps for rapid synchronisation ([RFC 6051] section 3.3).
+///
+/// [RFC 6051]: https://datatracker.ietf.org/doc/html/rfc6051
+pub mod ntp_timestamp_extension;
 /// A requested playout-delay range, for latency/smoothness trade-offs.
 pub mod playout_delay_extension;
 /// SDES items in header extensions: MID, RtpStreamId, RepairedRtpStreamId ([RFC 7941],
@@ -48,6 +52,10 @@ pub const CORRUPTION_DETECTION_URI: &str =
 pub const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
 /// The URI of the mixer-to-client audio level extension (RFC 6465).
 pub const CSRC_AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+/// The URI of the 64-bit NTP timestamp extension (RFC 6051 section 3.3).
+pub const NTP_64_URI: &str = ntp_timestamp_extension::NTP_64_URI;
+/// The URI of the 56-bit NTP timestamp extension (RFC 6051 section 3.3).
+pub const NTP_56_URI: &str = ntp_timestamp_extension::NTP_56_URI;
 /// The URI of the playout-delay extension.
 pub const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 /// The URI of the transport-wide sequence number extension.

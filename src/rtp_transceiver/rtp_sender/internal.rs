@@ -102,6 +102,9 @@ pub(crate) struct RTCRtpSenderInternal {
     /// (`admit_under_max_framerate`): the RTP timestamp of the last frame admitted, and the
     /// frame being sent with whether it was admitted.
     max_framerate_limiters: Vec<MaxFramerateLimiter>,
+    /// RFC 7741 section 6.1 `max-fs`: by SSRC, whether the VP8 key frame that started the
+    /// stream's current run of frames fits the receiver's frame size (`admit_under_max_fs`).
+    vp8_frame_size_fits: Vec<(SSRC, bool)>,
     /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
     /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
     /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
@@ -255,6 +258,47 @@ impl RTCRtpSenderInternal {
                 admitted
             }
         }
+    }
+
+    /// RFC 7741 section 6.1 and RFC 9628 section 6: a sender does not send frames larger
+    /// than the receiver's `max-fs`, "the maximum frame size in units of macroblocks" (16 by
+    /// 16 pixels), which it decodes "as long as the width and height of the frame in
+    /// macroblocks are less than int(sqrt(max-fs * 8))". The engine has no encoder: it reads
+    /// the size each key picture states (`key_size`: a VP8 key frame's header, RFC 6386
+    /// section 9.1; a VP9 key picture's scalability structure, RFC 9628 section 4.2.1) and
+    /// drops, from one larger than `max_fs` up to the next that fits, every packet of the
+    /// stream (a delta frame needs the key frame it follows). Without a limit everything
+    /// passes.
+    pub(crate) fn admit_under_max_fs(
+        &mut self,
+        ssrc: SSRC,
+        key_size: Option<(u16, u16)>,
+        max_fs: Option<u32>,
+    ) -> bool {
+        let Some(max_fs) = max_fs else {
+            self.vp8_frame_size_fits.retain(|(s, _)| *s != ssrc);
+            return true;
+        };
+        if let Some((width, height)) = key_size {
+            let (columns, rows) = (
+                u32::from(width).div_ceil(16),
+                u32::from(height).div_ceil(16),
+            );
+            let side = f64::from(max_fs * 8).sqrt() as u32;
+            let fits = columns * rows <= max_fs && columns < side && rows < side;
+            match self
+                .vp8_frame_size_fits
+                .iter_mut()
+                .find(|(s, _)| *s == ssrc)
+            {
+                Some(entry) => entry.1 = fits,
+                None => self.vp8_frame_size_fits.push((ssrc, fits)),
+            }
+        }
+        self.vp8_frame_size_fits
+            .iter()
+            .find(|(s, _)| *s == ssrc)
+            .is_none_or(|(_, fits)| *fits)
     }
 
     /// Creates a new RTP sender internal state.
@@ -1247,6 +1291,69 @@ impl RTCRtpSenderInternal {
                 .flat_map(|info| std::iter::once(info.ssrc).chain(info.ssrc_rtx))
         })
     }
+}
+
+/// The width and height of the VP8 key frame whose first packet `payload` is (RFC 7741
+/// section 4.2 payload descriptor, then the key frame header of RFC 6386 section 9.1: frame
+/// tag with P = 0, start code 9d 01 2a, 14-bit width and height), `None` for any other packet.
+pub(crate) fn vp8_key_frame_size(payload: &[u8]) -> Option<(u16, u16)> {
+    let first = *payload.first()?;
+    // S (start of a partition) with partition index 0: the first packet of a frame.
+    if first & 0x10 == 0 || first & 0x07 != 0 {
+        return None;
+    }
+    let mut offset = 1;
+    if first & 0x80 != 0 {
+        let extension = *payload.get(1)?;
+        offset = 2;
+        if extension & 0x80 != 0 {
+            // PictureID: one octet, two with M set.
+            offset += if payload.get(offset)? & 0x80 != 0 {
+                2
+            } else {
+                1
+            };
+        }
+        if extension & 0x40 != 0 {
+            offset += 1; // TL0PICIDX
+        }
+        if extension & 0x30 != 0 {
+            offset += 1; // TID / Y / KEYIDX
+        }
+    }
+    let header = payload.get(offset..offset + 10)?;
+    if header[0] & 0x01 != 0 || header[3..6] != [0x9d, 0x01, 0x2a] {
+        return None;
+    }
+    let width = u16::from_le_bytes([header[6], header[7]]) & 0x3fff;
+    let height = u16::from_le_bytes([header[8], header[9]]) & 0x3fff;
+    Some((width, height))
+}
+
+/// The largest frame size the scalability structure of a VP9 packet that starts a frame states
+/// (RFC 9628 section 4.2.1, on a key picture's first packet), `None` for any other packet.
+pub(crate) fn vp9_key_picture_size(payload: &bytes::Bytes) -> Option<(u16, u16)> {
+    use rtp::packetizer::Depacketizer;
+    let mut packet = rtp::codec::vp9::Vp9Packet::default();
+    packet.depacketize(payload).ok()?;
+    if !(packet.b && packet.v) {
+        return None;
+    }
+    let width = packet.width.iter().copied().max()?;
+    let height = packet.height.iter().copied().max()?;
+    Some((width, height))
+}
+
+/// A numeric parameter of an `a=fmtp` line (`max-fs=3600;max-fr=30`), by its name in any
+/// case.
+pub(crate) fn fmtp_number(fmtp: &str, name: &str) -> Option<u32> {
+    fmtp.split(';').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
 }
 
 /// webrtc-extensions 5: `scaleResolutionDownTo` is removed from audio encodings; when one

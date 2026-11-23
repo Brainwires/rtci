@@ -942,6 +942,43 @@ impl<'a> InterceptorHandler<'a> {
         true
     }
 
+    /// RFC 6051 section 3.3: the `ntp-64` or `ntp-56` timestamp `packet` carries, if its
+    /// stream negotiated either, as the stream's newest RTP-to-NTP mapping.
+    fn record_in_band_ntp(&mut self, packet: &rtp::Packet, now: Instant) {
+        use shared::marshal::Unmarshal;
+        let id = |uri: &str| {
+            let (id, audio, video) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    });
+            ((audio || video) && id != 0).then_some(id as u8)
+        };
+        let Some(stream) = self.stats.inbound_rtp_streams.get_mut(&packet.header.ssrc) else {
+            return;
+        };
+        let ntp = if let Some(value) =
+            id(rtp::extension::NTP_64_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            rtp::extension::ntp_timestamp_extension::Ntp64Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .map(|extension| extension.ntp_time)
+        } else if let Some(value) =
+            id(rtp::extension::NTP_56_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            let report = stream.remote_ntp_time;
+            rtp::extension::ntp_timestamp_extension::Ntp56Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .zip(report)
+                .map(|(extension, report)| extension.ntp_time(report))
+        } else {
+            None
+        };
+        if let Some(ntp) = ntp.filter(|ntp| *ntp != 0) {
+            stream.in_band_ntp = Some((ntp, packet.header.timestamp, now));
+        }
+    }
+
     /// RFC 4588 section 5.3: "Upon reception of original RTP packets with a new SSRC, the
     /// receiver MUST perform the SSRC association again". An RTX packet from an SSRC no
     /// description or header extension associates, whose payload type is an RTX format of
@@ -1705,6 +1742,14 @@ impl<'a>
                         {
                             stream.corruption_detection_received = true;
                         }
+                    }
+
+                    // RFC 6051 section 3.3: an in-band NTP-format timestamp is taken "in exactly
+                    // the same way as if an additional RTCP SR packet had been received". The
+                    // 56-bit variant's upper eight bits of seconds come from the stream's SRs,
+                    // so it counts only after one.
+                    if rtp_packet.header.extension && retransmitted.is_none() {
+                        self.record_in_band_ntp(rtp_packet, msg.now);
                     }
 
                     // The ECN codepoint the datagram arrived with (from the application's socket

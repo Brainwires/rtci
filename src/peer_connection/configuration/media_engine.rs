@@ -938,6 +938,19 @@ impl MediaEngine {
                 codec.payload_type, codec.rtp_codec.mime_type
             )));
         }
+        // RFC 5109 sections 14.1 and 14.2: ULPFEC has "a dynamic payload type number" (an
+        // rtpmap line gives it, in either carriage). 0 to 34 are RFC 3551's static and reserved
+        // numbers (Tables 4 and 5).
+        if crate::rtp_transceiver::rtp_sender::rtp_codec::repair_family(&codec.rtp_codec)
+            == "ulpfec"
+            && codec.payload_type < 35
+        {
+            return Err(Error::SdpInvalidValue(format!(
+                "payload type {} of {}: ULPFEC takes a dynamic payload type (RFC 5109 section \
+                 14.1), not one of RFC 3551's static numbers",
+                codec.payload_type, codec.rtp_codec.mime_type
+            )));
+        }
         // RFC 8627 section 5.1 (draft-03 section 5.1): `repair-window` is required. A FlexFEC
         // format registered without one is offered with the window its receiver uses when a
         // line has none (`interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW`, 10 s).
@@ -1798,6 +1811,20 @@ impl MediaEngine {
                 matches.retain(|codec| red_encodings_negotiated(codec, &negotiated));
             }
 
+            // RFC 5109 section 13: a `ulpfec` format's rate "SHALL be the same as the primary
+            // encoding it is used to protect" when it is sent as redundant data, and "larger
+            // than 1000 Hz" in a stream of its own. One whose clock rate no media format of the
+            // section has, or of 1000 Hz or less, cannot protect anything here and is not
+            // negotiated (nor a RED format naming it, by the rule above).
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                let negotiated = matches.clone();
+                matches.retain(|codec| ulpfec_rate_fits(codec, &negotiated));
+            }
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                let negotiated = matches.clone();
+                matches.retain(|codec| red_encodings_negotiated(codec, &negotiated));
+            }
+
             // use exact matches when they exist, otherwise fall back to partial
             // An SFrame section's formats are numbered apart from the plain ones
             // (draft-ietf-avtcore-rtp-sframe-03 section 6).
@@ -2481,6 +2508,26 @@ mod register_feedback_test {
         assert_eq!(1, count(&me, "transport-cc", ""));
         assert!(me.audio_codecs[0].rtp_codec.rtcp_feedback.is_empty());
     }
+}
+
+/// Whether `codec`, when it is a ULPFEC format (RFC 5109), has a clock rate above 1000 Hz that
+/// a media format of `negotiated` has too (section 13). Any other format passes.
+pub(crate) fn ulpfec_rate_fits(
+    codec: &RTCRtpCodecParameters,
+    negotiated: &[RTCRtpCodecParameters],
+) -> bool {
+    if repair_family(&codec.rtp_codec) != "ulpfec" {
+        return true;
+    }
+    let rate = codec.rtp_codec.clock_rate;
+    rate > 1000
+        && negotiated.iter().any(|media| {
+            !is_repair_codec(&media.rtp_codec)
+                && !crate::peer_connection::handler::endpoint::is_auxiliary_mime_type(
+                    &media.rtp_codec.mime_type,
+                )
+                && media.rtp_codec.clock_rate == rate
+        })
 }
 
 /// Whether `codec`, when it is a RED format (RFC 2198), names in its fmtp only formats of

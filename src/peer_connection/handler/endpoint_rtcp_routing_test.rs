@@ -244,6 +244,31 @@ fn a_fir_for_two_senders_reaches_both() {
     assert_eq!(vec!["local-audio", "local-video"], tracks);
 }
 
+/// RFC 5104 4.3.1 and the AV1 RTP specification 8.1: a FIR asks each sender its FCI names
+/// for a decoder refresh. It reaches the encoder of the local video sender it names and of no
+/// other: not the audio sender, not a sender for an SSRC this side does not have.
+#[test]
+fn a_fir_reaches_only_the_senders_its_fci_names() {
+    let out = delivered(vec![Box::new(FullIntraRequest {
+        sender_ssrc: REMOTE,
+        media_ssrc: 0,
+        fir: vec![
+            FirEntry {
+                ssrc: 424242,
+                sequence_number: 3,
+            },
+            FirEntry {
+                ssrc: LOCAL_VIDEO,
+                sequence_number: 3,
+            },
+        ],
+    })]);
+
+    let tracks: Vec<&str> = out.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(vec!["local-video"], tracks, "{out:?}");
+    assert!(is::<FullIntraRequest>(out[0].1[0].as_ref()));
+}
+
 #[test]
 fn a_compound_packet_about_no_known_stream_is_not_delivered() {
     let out = delivered(vec![

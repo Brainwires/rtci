@@ -38,6 +38,33 @@ pub struct SliceLossIndication {
     pub sli_entries: Vec<SliEntry>,
 }
 
+impl SliceLossIndication {
+    /// An SLI for a VP8 frame (RFC 7741 section 5.2) that the receiver cannot say more of: the
+    /// whole frame lost ("First ... 0, and the Number parameter to the total number of
+    /// macroblocks per frame", for a frame of `width` by `height` pixels in 16 by 16
+    /// macroblocks), in the picture whose VP8 PictureID is `picture_id`; a receiver whose
+    /// current frame had none passes the last PictureID received plus one. The entry carries
+    /// the six least significant bits. Number is cut to its 13 bits.
+    pub fn vp8_frame(
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        picture_id: u16,
+        width: u16,
+        height: u16,
+    ) -> Self {
+        let macroblocks = u32::from(width).div_ceil(16) * u32::from(height).div_ceil(16);
+        Self {
+            sender_ssrc,
+            media_ssrc,
+            sli_entries: vec![SliEntry {
+                first: 0,
+                number: macroblocks.min(0x1fff) as u16,
+                picture: (picture_id & 0x3f) as u8,
+            }],
+        }
+    }
+}
+
 impl fmt::Display for SliceLossIndication {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

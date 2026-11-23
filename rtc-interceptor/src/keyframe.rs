@@ -72,15 +72,26 @@ impl KeyFrameRequestInterceptor {
 /// FIR, and also an SLI or an RPSI (RFC 4585 sections 6.3.2, 6.3.3; RFC 8834 sections 5.1.3,
 /// 5.1.4: a sender "SHOULD" try to repair the slice, and act on a reference picture
 /// selection), which the encoder needs as much as a key-frame request.
+///
+/// The other codec control messages that only the encoder can act on go with them: a TSTR
+/// (RFC 5104 section 4.3.2.2: "the encoder SHOULD take [it] into account" when it chooses its
+/// trade-off; the TSTN that acknowledges it is the engine's), a VBCM (section 4.3.4, a
+/// payload for the codec) and an LRR (RFC 9627, a layer refresh).
 fn asks_for_key_frame(packets: &[Box<dyn rtcp::Packet>]) -> bool {
+    use rtcp::payload_feedbacks::layer_refresh_request::LayerRefreshRequest;
     use rtcp::payload_feedbacks::reference_picture_selection_indication::ReferencePictureSelectionIndication;
     use rtcp::payload_feedbacks::slice_loss_indication::SliceLossIndication;
+    use rtcp::payload_feedbacks::temporal_spatial_tradeoff::TemporalSpatialTradeoffRequest;
+    use rtcp::payload_feedbacks::video_back_channel_message::VideoBackChannelMessage;
     packets.iter().any(|p| {
         let p = p.as_any();
         p.is::<PictureLossIndication>()
             || p.is::<FullIntraRequest>()
             || p.is::<SliceLossIndication>()
             || p.is::<ReferencePictureSelectionIndication>()
+            || p.is::<TemporalSpatialTradeoffRequest>()
+            || p.is::<VideoBackChannelMessage>()
+            || p.is::<LayerRefreshRequest>()
     })
 }
 
@@ -330,6 +341,59 @@ mod tests {
         });
         assert_eq!(delivered(true, vec![rr(), sli]), 1);
         assert_eq!(delivered(true, vec![rpsi]), 1);
+    }
+
+    /// RFC 5104 section 4.3.2.2 (the encoder "SHOULD take [a TSTR] into account"), section
+    /// 4.3.4 (a VBCM is a message for the codec) and RFC 9627 (a layer refresh): the requests
+    /// only the encoder can act on reach the application, which owns it; without the
+    /// interceptor the terminus would end them.
+    #[test]
+    fn tstr_vbcm_and_lrr_reach_the_application() {
+        use rtcp::payload_feedbacks::layer_refresh_request::{LayerRefreshRequest, LrrEntry};
+        use rtcp::payload_feedbacks::temporal_spatial_tradeoff::{
+            TemporalSpatialTradeoffRequest, TstEntry,
+        };
+        use rtcp::payload_feedbacks::video_back_channel_message::{
+            VbcmEntry, VideoBackChannelMessage,
+        };
+        let tstr = || -> Box<dyn rtcp::Packet> {
+            Box::new(TemporalSpatialTradeoffRequest {
+                sender_ssrc: 1,
+                entries: vec![TstEntry {
+                    ssrc: 2,
+                    sequence_number: 0,
+                    index: 31,
+                }],
+            })
+        };
+        let vbcm = || -> Box<dyn rtcp::Packet> {
+            Box::new(VideoBackChannelMessage {
+                sender_ssrc: 1,
+                entries: vec![VbcmEntry {
+                    ssrc: 2,
+                    sequence_number: 0,
+                    payload_type: 96,
+                    octet_string: bytes::Bytes::from_static(&[1, 2]),
+                }],
+            })
+        };
+        let lrr = || -> Box<dyn rtcp::Packet> {
+            Box::new(LayerRefreshRequest {
+                sender_ssrc: 1,
+                entries: vec![LrrEntry {
+                    ssrc: 2,
+                    sequence_number: 0,
+                    payload_type: 96,
+                    target_temporal_layer_id: 0,
+                    target_layer_id: 1,
+                    ..Default::default()
+                }],
+            })
+        };
+        for packet in [tstr, vbcm, lrr] {
+            assert_eq!(delivered(true, vec![rr(), packet()]), 1);
+            assert_eq!(delivered(false, vec![rr(), packet()]), 0);
+        }
     }
 
     #[test]

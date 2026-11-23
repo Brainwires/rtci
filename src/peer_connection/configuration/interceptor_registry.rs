@@ -356,6 +356,11 @@ pub struct DefaultInterceptorOptions {
     /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
+    /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
+    /// extension on audio and video, stamped on a stream's first packets and a frame a
+    /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
+    /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
+    pub rapid_synchronisation: bool,
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -365,6 +370,7 @@ impl Default for DefaultInterceptorOptions {
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
             bandwidth_probing: true,
+            rapid_synchronisation: true,
         }
     }
 }
@@ -493,6 +499,11 @@ pub fn register_default_interceptors_with_options(
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
+    let registry = if options.rapid_synchronisation {
+        configure_rapid_synchronisation(registry, media_engine)?
+    } else {
+        registry
+    };
 
     Ok((
         registry,
@@ -652,6 +663,38 @@ pub fn configure_abs_send_time(media_engine: &mut MediaEngine) -> Result<()> {
         None,
     )?;
     Ok(())
+}
+
+/// RFC 6051 rapid synchronisation, as RFC 8834 section 5.2.1 recommends: registers the
+/// 64-bit NTP timestamp header extension (`urn:ietf:params:rtp-hdrext:ntp-64`, section 3.3)
+/// on audio and video, so it is offered and answered, and adds the interceptor that stamps it
+/// on a local stream that negotiated it (or `ntp-56`): every packet of the stream's first five
+/// seconds, then a frame a second ([`NtpTimestampInterceptor`](interceptor::NtpTimestampInterceptor)).
+/// A receiving stream that carries either extension is synchronised from it as from a sender
+/// report (the capture times of its frames, before the first SR has arrived). Part of
+/// [`register_default_interceptors`]; registered after the other extensions, so their ids
+/// stay as they were.
+///
+/// # Errors
+///
+/// As [`MediaEngine::register_header_extension`].
+pub fn configure_rapid_synchronisation(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<Registry> {
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: rtp::extension::NTP_64_URI.to_owned(),
+            },
+            kind,
+            None,
+        )?;
+    }
+    Ok(registry.with(
+        Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
+        interceptor::NtpTimestampInterceptor::new(),
+    ))
 }
 
 /// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).
@@ -1583,6 +1626,10 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
+        section_fmtp_lines: section_codecs
+            .iter()
+            .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
+            .collect(),
     }
 }
 
@@ -1666,6 +1713,50 @@ mod ulpfec_tests {
             names
         );
     }
+
+    /// RFC 5109 section 13: the ULPFEC interceptors read `onelevelonly` from the negotiated
+    /// `ulpfec` format, which is not the stream's own: a stream's information carries the
+    /// fmtp of every format of its section, the repair and redundancy formats with them.
+    #[test]
+    fn a_stream_carries_the_fmtp_of_every_format_of_its_section() {
+        let format = |payload_type: PayloadType, mime_type: &str, fmtp: &str| {
+            crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: mime_type.to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: fmtp.to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type,
+                ..Default::default()
+            }
+        };
+        let section = [
+            format(96, "video/VP8", ""),
+            format(116, "video/red", "96/117"),
+            format(117, "video/ulpfec", "onelevelonly=1"),
+        ];
+        let info = create_stream_info(
+            1,
+            None,
+            None,
+            96,
+            None,
+            None,
+            &section[0].rtp_codec,
+            &[],
+            &section,
+        );
+        assert_eq!(
+            vec![
+                (96, String::new()),
+                (116, "96/117".to_owned()),
+                (117, "onelevelonly=1".to_owned())
+            ],
+            info.section_fmtp_lines
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1714,6 +1805,7 @@ mod slot_order_tests {
             vec![
                 Slot::RtcpSession,
                 Slot::CongestionControl,
+                Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
                 Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
                 Slot::TwccSender,
                 Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
@@ -1881,6 +1973,10 @@ mod slot_order_tests {
                 (
                     Slot::CongestionControl,
                     "CongestionControlInterceptor<Gcc>".to_owned()
+                ),
+                (
+                    Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
+                    "NtpTimestampInterceptor".to_owned()
                 ),
                 (
                     Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),

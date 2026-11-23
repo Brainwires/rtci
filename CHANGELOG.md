@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection / interceptor**: media-21 (MUST rows, rapid synchronisation).
+  - The default offer has the RFC 6051 64-bit NTP timestamp header extension
+    (`a=extmap:<id> urn:ietf:params:rtp-hdrext:ntp-64`) on audio and video, and the default
+    chain an `NtpTimestampInterceptor` at `Slot::Custom(NTP_TIMESTAMP_SLOT)` (1_850).
+    `DefaultInterceptorOptions` has a new public field, `rapid_synchronisation` (`true`):
+    a struct literal must name it.
+  - `StreamInfo` has a new public field, `section_fmtp_lines`: a struct literal outside the
+    crate must name it (or use `..Default::default()`).
+  - `MediaEngine::register_codec` refuses a ULPFEC format with a payload type of 0 to 34
+    (RFC 5109 sections 14.1, 14.2), and a remote `ulpfec` format at a clock rate no media
+    format of its section has, or of 1000 Hz or less, is not negotiated (section 13).
+  - TSTR and TSTN no longer leave in an Early RTCP packet of their own (RFC 5104 4.3.2.3,
+    4.3.3.3), and an inbound TSTR, VBCM or LRR is delivered to the application.
+  - A VP8 or VP9 sender holds a stream to the receiver's negotiated `max-fr` and `max-fs`
+    (RFC 7741 section 6.1, RFC 9628 section 6): frames above the rate, and the frames from a
+    key picture larger than the size to the next one that fits, are dropped.
+
 - **peer connection**: by default a sender's stream moves to a new SSRC when the application
   writes a packet with a negotiated codec of another clock rate (RFC 7160 section 4.1): Opus at
   48 kHz, then PCMU at 8 kHz, on one audio sender is two SSRCs, and the encoding's SSRC
@@ -2402,6 +2419,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **media conformance**: the open MUST rows, rapid synchronisation, and two SHOULD tests
+  (media-21).
+  - RFC 6051 rapid synchronisation, as RFC 8834 section 5.2.1 recommends:
+    `rtp::extension::ntp_timestamp_extension` (`Ntp64Extension`, `Ntp56Extension`, the
+    `ntp-64` and `ntp-56` URIs); `NtpTimestampInterceptor` stamps a local stream that
+    negotiated either with the NTP time of the packet's departure, on the clock SRs use, on
+    every packet of its first five seconds and then a frame a second; a receiving stream that
+    carries one maps its RTP clock from it as from a sender report (frame capture times before
+    the first SR); an RTCP-SR-REQ naming a local sender is answered with an SR in an Early
+    packet (RFC 4585 3.5.2). `configure_rapid_synchronisation`.
+  - RFC 5109 section 13 `onelevelonly` from the negotiated `ulpfec` format: the peer connection
+    gives each stream the fmtp of every format of its section (`StreamInfo::section_fmtp_lines`)
+    and both ULPFEC interceptors read it there.
+  - RFC 9628 section 4.1: `Payloader::set_next_frame_info` / `Packetizer::set_next_frame_info`
+    (defaulted) pass a `Vp9FrameInfo` through the generic packetizer, and the VP9 payloader
+    sets the marker only on the last packet of a picture.
+  - Tests for rows that held untested: a FIR reaches only the senders its FCI names; minted
+    FEC SSRCs are random; feedback in an SRTCP packet with a forged tag is not read (RFC 4585
+    section 8); RTCP from 5000 unknown SSRCs leaves bounded state (RFC 8834 section 13).
+  - RFC 5104 sections 4.3.2.3 and 4.3.3.3: TSTR and TSTN wait for the next regular RTCP
+    packet instead of asking for an Early one. An inbound TSTR, VBCM or LRR reaches the
+    application (the encoder's owner) like a PLI or FIR (section 4.3.2.2).
+  - RFC 3611 section 4.7.4: the VoIP Metrics block's signal and noise levels come from the RFC
+    6464 audio level of the stream (127 without it); the call quality figures stay 127.
+  - `ReferencePictureSelectionIndication::picture_id` / `vp8_vp9_picture_id`: the VP8 and VP9
+    native RPSI bit string (RFC 7741 section 5.1, RFC 9628 section 5.1).
+  - `SliceLossIndication::vp8_frame`: the whole-frame VP8 SLI of RFC 7741 section 5.2.
+  - Tests: a VP9 LRR's layer index (RFC 9628 5.3), an `a=rtpmap` rebinding a payload type below
+    96 (RFC 3551 3), an offer of only other H.265 configurations answered without H.265 (RFC
+    7798 7.2.2).
 
 - **browser matrix**: the media defaults no browser had seen (media-20). A codec of another
   clock rate mid-stream (Rust streams Opus, then a PCMU tone, then Opus again) with the default

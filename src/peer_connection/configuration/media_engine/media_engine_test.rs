@@ -716,3 +716,65 @@ fn red_naming_a_format_of_another_clock_rate_is_not_negotiated() -> Result<()> {
     assert_eq!(vec!["audio/pcmu".to_owned()], negotiated_audio_names(&m));
     Ok(())
 }
+
+/// VP8, RED naming VP8 and ULPFEC, and ULPFEC at `ulpfec_rate`, registered and offered.
+fn negotiated_with_ulpfec_at(ulpfec_rate: u32) -> Result<Vec<String>> {
+    let mut m = MediaEngine::default();
+    for (payload_type, mime_type, rate, fmtp) in [
+        (96, MIME_TYPE_VP8, 90000, ""),
+        (116, "video/red", 90000, ""),
+        (117, MIME_TYPE_ULP_FEC, ulpfec_rate, ""),
+    ] {
+        m.register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: codec(mime_type, rate, 0, fmtp),
+                payload_type,
+            },
+            RtpCodecKind::Video,
+        )?;
+    }
+    m.update_from_remote_description(&remote(&format!(
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 116 117\r\n\
+         a=rtpmap:96 VP8/90000\r\n\
+         a=rtpmap:116 red/90000\r\n\
+         a=rtpmap:117 ulpfec/{ulpfec_rate}\r\n"
+    )))?;
+    Ok(negotiated_video_names(&m))
+}
+
+/// RFC 5109 section 13: "In cases in which it is sent as redundant data to another stream, the
+/// rate SHALL be the same as the primary encoding it is used to protect." A `ulpfec` format at
+/// a rate no media format of the section has (8 kHz beside VP8's 90 kHz, a registration and an
+/// offer that agree on the mistake) is not negotiated; at the media's rate it is.
+#[test]
+fn a_ulpfec_format_at_another_rate_than_the_media_is_not_negotiated() -> Result<()> {
+    assert_eq!(
+        vec!["video/vp8".to_owned(), "video/red".to_owned()],
+        negotiated_with_ulpfec_at(8000)?,
+        "ULPFEC at 8000 Hz protects no 90000 Hz format"
+    );
+    assert_eq!(
+        vec![
+            "video/vp8".to_owned(),
+            "video/red".to_owned(),
+            "video/ulpfec".to_owned()
+        ],
+        negotiated_with_ulpfec_at(90000)?,
+    );
+    Ok(())
+}
+
+/// RFC 5109 sections 14.1 and 14.2: ULPFEC has "a dynamic payload type number". A ULPFEC
+/// format registered with one of RFC 3551's static numbers is refused; a dynamic one is taken.
+#[test]
+fn ulpfec_with_a_static_payload_type_is_refused() {
+    let ulpfec = |payload_type| RTCRtpCodecParameters {
+        rtp_codec: codec(MIME_TYPE_ULP_FEC, 90000, 0, ""),
+        payload_type,
+    };
+    let mut m = MediaEngine::default();
+    assert!(m.register_codec(ulpfec(26), RtpCodecKind::Video).is_err());
+    assert!(m.register_codec(ulpfec(0), RtpCodecKind::Video).is_err());
+    assert!(m.register_codec(ulpfec(117), RtpCodecKind::Video).is_ok());
+    assert!(m.register_codec(ulpfec(35), RtpCodecKind::Video).is_ok());
+}
