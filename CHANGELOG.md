@@ -331,6 +331,29 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   way: interop-peer took the number before the answer and kept it in its packetizer (it now also
   puts the current number on every packet), and the cells check the format each phase was
   decoded as.
+- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
+  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
+  1.3 (it was `handshake_failure` / `certificate_required`). New
+  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
+  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
+  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
+- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
+  engine change; new tests, each checked by mutation in the container.
+  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
+    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
+    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
+    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
+    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
+    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
+    dependency structure (RFC 5583 section 5.2.1).
+  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
+    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
+    received gracefully, SRTP re-keying, PR-SCTP).
+  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
+    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
+    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
+    `n/a`: it binds the script-facing API.
+  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
 
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429

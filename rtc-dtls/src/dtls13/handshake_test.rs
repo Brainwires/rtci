@@ -765,6 +765,28 @@ fn a_client_certificate_is_requested_and_verified() -> Result<()> {
     ));
     // The alert reached the client, protected, and failed its association too.
     assert!(pair.client.is_connection_failed(&server_addr()));
+    assert_eq!(
+        pair.client_conn().fatal_alerts().1,
+        Some(alert::CERTIFICATE_REQUIRED)
+    );
+
+    // RFC 8122 section 6.2 (the SDP offer/answer model, as the peer connection sets it):
+    // bad_certificate instead.
+    let mut pair = Pair::new(
+        client_builder(),
+        server_builder()
+            .with_client_auth(ClientAuthType::RequireAnyClientCert)
+            .with_bad_certificate_for_a_missing_client_certificate(true),
+    )?;
+    pair.run();
+    assert!(matches!(
+        pair.server_error,
+        Some(Error::ErrClientCertificateRequired)
+    ));
+    assert_eq!(
+        pair.client_conn().fatal_alerts().1,
+        Some(alert::BAD_CERTIFICATE)
+    );
     Ok(())
 }
 

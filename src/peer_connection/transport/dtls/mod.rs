@@ -455,6 +455,9 @@ impl DtlsTransport {
                     self.dtls_cipher_suites.clone()
                 })
                 .with_client_auth(ClientAuthType::RequireAnyClientCert)
+                // RFC 8122 section 6.2: no client certificate ends the handshake with
+                // bad_certificate.
+                .with_bad_certificate_for_a_missing_client_certificate(true)
                 .with_insecure_skip_verify(true)
                 .with_insecure_verification(self.allow_insecure_verification_algorithm)
                 .with_verify_peer_certificate(verify_peer_certificate)
@@ -1086,6 +1089,18 @@ mod tests {
         assert!(result.is_err());
         // State must remain unchanged on error.
         assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+    }
+
+    /// RFC 8122 section 6.2: the peer connection's DTLS server ends a handshake whose client
+    /// sends no certificate with bad_certificate (the DTLS option, tested in
+    /// `conn_conformance_test.rs::client_without_a_certificate_for_the_requested_algorithms_sends_none`).
+    #[test]
+    fn the_handshake_config_ends_a_missing_client_certificate_with_bad_certificate() {
+        let t = auto_role_transport();
+        let config = t
+            .make_handshake_config(&dummy_params(RTCDtlsRole::Auto))
+            .unwrap();
+        assert!(config.bad_certificate_for_a_missing_client_certificate());
     }
 
     #[test]
