@@ -44,7 +44,6 @@ mod agent_proto;
 pub mod agent_selector;
 /// Snapshot statistics for an agent's candidates and pairs.
 pub mod agent_stats;
-/// Where connectivity checks may be sent (RFC 8445 §5.1.1.1 address rules).
 pub mod remote_policy;
 #[cfg(test)]
 mod remote_policy_test;
@@ -1056,7 +1055,7 @@ impl Agent {
     /// Adds local candidates gathered together: those without a priority or a rank of their
     /// own are ranked first as RFC 8421 Section 4 recommends for a dual-stack host (an IPv6
     /// head start, then the families alternating; see
-    /// [`rank_local_candidates`](crate::candidate::rank_local_candidates)), around the ranks
+    /// [`rank_local_candidates`]), around the ranks
     /// of the candidates the agent holds, and then each is added as by
     /// [`Agent::add_local_candidate`], whose results are returned in order.
     pub fn add_local_candidates(&mut self, mut candidates: Vec<Candidate>) -> Result<Vec<bool>> {

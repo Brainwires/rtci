@@ -1,6 +1,6 @@
 //! Cryptographic primitives for DTLS.
 //!
-//! The record ciphers ([`crypto_gcm`](crate::crypto::crypto_gcm), [`crypto_ccm`](crate::crypto::crypto_ccm), [`crypto_chacha20`](crate::crypto::crypto_chacha20), [`crypto_cbc`](crate::crypto::crypto_cbc)), plus
+//! The record ciphers ([`crypto_gcm`], [`crypto_ccm`], [`crypto_chacha20`], [`crypto_cbc`]), plus
 //! the certificate and signature handling the handshake needs. Which cipher is used is decided by
 //! the negotiated cipher suite, so a caller normally reaches these only through
 //! [`CipherSuite`](crate::cipher_suite::CipherSuite).

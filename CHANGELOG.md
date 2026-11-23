@@ -272,6 +272,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
 
+### Publishing readiness (crates.io)
+
+- **Manifests**: every publishable crate has a one-line description of what it implements,
+  `license = "MIT OR Apache-2.0"` (SPDX; was the deprecated `MIT/Apache-2.0`), its own keywords
+  and crates.io categories, a README and `[package.metadata.docs.rs]` (both crypto backends,
+  which are additive; not `openssl`, which needs a system library). Upstream's `homepage`
+  (`https://webrtc.rs`, not this project) and the explicit `documentation` URLs (docs.rs is the
+  default) are removed. Each crate directory has the licence texts (`LICENSE-MIT`,
+  `LICENSE-APACHE`, copies of the root files with upstream's copyright line), which cargo did
+  not package before.
+- **What is published**: `rtc-stream-driver`, the reference tokio driver for the engine's
+  stream transports, is now a publishable crate with a README (it was `publish = false`, which
+  blocked publishing `rtc`: its versioned dev-dependency on the driver stays in the published
+  manifest). `rtc-signal`, the examples' signalling helper, is `publish = false` and the root
+  crate's dev-dependency on it is path-only, so `cargo publish` drops it. The root crate's
+  package holds `src/`, the two test files its unit tests include, the README and the licence
+  texts (`include`): 222 files and 4.9 MB uncompressed, from 848 files and 21.7 MB (the
+  examples' media fixtures, the test environment, documentation and CI files).
+- **READMEs**: `rtc-interceptor`, `rtc-interceptor-derive`, `rtc-mdns`, `rtc-media` and
+  `rtc-stream-driver` have one; the other crates' READMEs, which were upstream's logo and
+  upstream's CI / crates.io / docs.rs / Discord badges, are rewritten: what the crate is, the
+  specifications it implements (with links to their clause audits), how it is used, the sans-I/O
+  note, the licence and the lineage. `rtc-sframe`'s README no longer says the engine has no SFrame
+  RTP payload format. The root README drops upstream's logo, badges and sponsors, the "What's New
+  in 0.21" section and the links into upstream's tree; it gains a status section (the audit
+  counts as of 2026-11-23, where the open rows and known issues are), the MSRV, the crypto and
+  other features and a crate table; its Rust examples are compiled as doctests
+  (`#[cfg(doctest)]` in `src/lib.rs`).
+- **docs.rs**: `cargo doc --workspace --no-deps` has no warnings (90 before, 84 distinct): module docs given
+  both on the `pub mod` line and inside the module resolved the inner links in the parent's
+  scope; the outer copy is removed. Unresolved paths, links to private items and W3C slot
+  names in brackets (`[[SignalingState]]`) are fixed or escaped.
+- **Release tooling**: `docs/releasing.md` is the manual procedure (dry runs, the publication
+  order, the wait for the index, what to do when a publish fails midway, tagging, release
+  notes); release.yml's commented publish step lists every crate in order. `semver.yml`
+  compares with the last release tag of the current line through
+  `cargo semver-checks --baseline-rev` instead of crates.io, and skips (with a notice) until a
+  plain `vX.Y.Z` tag exists. `cliff.toml` writes a release body without the file header:
+  breaking changes first, then one section per kind in a fixed order, each capped
+  (breaking changes at most 30, the other sections at most 15) with a link to `CHANGELOG.md`,
+  commit links into this repository; the 0.22.0+brainwires.6 body renders at 24 KB instead of
+  90 KB.
+- **Housekeeping**: `rtc-rtp`'s `header_extensions` fuzz target compiles again (it called
+  `marshal_size` without the `MarshalSize` trait in scope); every fuzz workspace checks with
+  `--cfg fuzzing`. `SECURITY.md`'s supported-versions table describes the current line.
+  `oss-fuzz/project.yaml` (upstream's homepage and security address) is removed: the project is
+  not enrolled in OSS-Fuzz; `oss-fuzz/README.md` says what the remaining files are for. FORK.md
+  loses 25 table rows that merges had duplicated and a blank line that split its feature table.
+  cargo.yml's packaging comment no longer names rtc-crypto 0.21.0.
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC

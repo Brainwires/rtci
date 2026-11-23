@@ -80,7 +80,6 @@ pub mod extension;
 /// supported API.
 #[cfg(fuzzing)]
 pub mod fuzzing;
-/// The RTP header, its extensions, and the bit masks that encode it.
 pub mod header;
 /// A whole RTP packet: header plus payload.
 pub mod packet;

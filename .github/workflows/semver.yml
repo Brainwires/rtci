@@ -16,20 +16,56 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The baseline is a release tag, so the history and tags are needed.
+          fetch-depth: 0
+
+      # The baseline is the last release of the current line, from git, not crates.io: the
+      # crates were renamed at 0.1.0 (docs/rename.md), so crates.io has no earlier version of
+      # them. The last release is the newest tag reachable from HEAD; it counts only when it is
+      # a plain `vX.Y.Z` (the `v0.22.0+brainwires.N` tags are the earlier line, under the old
+      # crate names). Until the first such tag exists the job reports that and succeeds.
+      - name: Find the baseline release
+        id: baseline
+        run: |
+          tag=$(git tag --merged HEAD --sort=-creatordate --list 'v*' | head -n 1)
+          if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice title=SemVer Check::No release of this line yet (newest tag: '${tag:-none}'); nothing to compare with, skipped."
+            exit 0
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
+        if: steps.baseline.outputs.tag != ''
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
 
       - name: Cache cargo registry and build artifacts
+        if: steps.baseline.outputs.tag != ''
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-semver-checks
+        if: steps.baseline.outputs.tag != ''
         run: cargo install cargo-semver-checks --locked
 
-      # rtc-sframe has no release on crates.io yet, so it has no baseline to compare with and
-      # cargo-semver-checks fails on it ("not found in registry"). Drop the exclusion once it
-      # has been published.
-      - name: Run cargo-semver-checks
-        run: cargo semver-checks --workspace --default-features --exclude rtc-sframe
+      # Only the publishable crates that the baseline release also has are compared: a crate
+      # new since the release has nothing to be compared with.
+      - name: Run cargo-semver-checks against the baseline tag
+        if: steps.baseline.outputs.tag != ''
+        env:
+          BASELINE: ${{ steps.baseline.outputs.tag }}
+        run: |
+          git worktree add --detach ../semver-baseline "$BASELINE"
+          names() {
+            cargo metadata --no-deps --format-version 1 --manifest-path "$1" |
+              python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p.get("publish") != [])))'
+          }
+          packages=$(comm -12 <(names Cargo.toml) <(names ../semver-baseline/Cargo.toml))
+          if [ -z "$packages" ]; then
+            echo "::notice title=SemVer Check::No crate in common with $BASELINE; skipped."
+            exit 0
+          fi
+          args=()
+          for p in $packages; do args+=(--package "$p"); done
+          cargo semver-checks --baseline-rev "$BASELINE" --default-features "${args[@]}"

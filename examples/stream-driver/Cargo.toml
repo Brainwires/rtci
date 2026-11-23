@@ -4,14 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP / TLS) of WebRTC.rs's sans-I/O engine"
+description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP and TLS) of a sans-I/O WebRTC engine"
 license.workspace = true
-documentation = "https://docs.rs/rtc-stream-driver"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
-publish = false
+keywords = ["webrtc", "tokio", "tcp", "ice-tcp", "turn"]
+categories = ["network-programming", "asynchronous"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # SRV and NAPTR lookups for `StreamCommand::ResolveRecords` (RFC 5928, RFC 8489 section 8)
