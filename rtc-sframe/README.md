@@ -46,7 +46,15 @@ Every test vector of RFC 9605 Appendix C is checked byte for byte.
 
 That a base key has one sender and a (base key, KID) pair is installed for sending once; the key
 exchange and when keys change; what goes into the metadata; packetizing a ciphertext and
-reassembling it. There is no SFrame RTP payload format or SDP signalling in the engine yet.
+reassembling it, unless it lets the engine do so: the SFrame RTP payload format
+(draft-ietf-avtcore-rtp-sframe-03) is in `rtc-rtp` (`codec::sframe`), and the root crate (`rtc`)
+negotiates it (`a=sframe`) and applies it to a transceiver's packets.
+
+## Specifications
+
+RFC 9605 and the SFrame parts of draft-ietf-avtcore-rtp-sframe-03; clause-by-clause status in
+[rfc9605](../docs/conformance/audit/rfc9605.md) and
+[draft-ietf-avtcore-rtp-sframe](../docs/conformance/audit/draft-ietf-avtcore-rtp-sframe.md).
 
 ## Cryptography
 
@@ -54,3 +62,13 @@ All of it goes through `rtc-crypto`'s provider (`crypto-ring` by default, `crypt
 AES-CTR, AES-GCM and HMAC from the provider, HKDF built on its HMAC. Tags are compared in
 constant time, and this crate's copies of base keys and derived key material are erased when
 dropped.
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+This crate is part of the [`rtc`](../README.md) workspace, which descends from
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
+[FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
+notices are retained.

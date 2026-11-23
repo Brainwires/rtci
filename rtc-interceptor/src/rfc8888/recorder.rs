@@ -63,7 +63,7 @@ impl CcFeedbackRecorder {
     ///
     /// The first report carries a block for every stream, the ones with nothing new included;
     /// the following ones only the streams that still have something to say. At most
-    /// [`MAX_REPORTS_PER_CALL`] reports are built: what is left after that goes out next time.
+    /// `MAX_REPORTS_PER_CALL` reports are built: what is left after that goes out next time.
     pub fn build_reports(
         &mut self,
         now: Instant,

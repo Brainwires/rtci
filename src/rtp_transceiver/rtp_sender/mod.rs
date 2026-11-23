@@ -735,7 +735,7 @@ impl RTCRtpSender<'_> {
 
     /// [`Self::write_rtp`] of an audio frame with the level of its source
     /// (webrtc-encoded-transform 4.4.1: a locally sourced frame's `audioLevel` "MUST be taken
-    /// directly from the source and used as input to generate the [RFC6464] header extension
+    /// directly from the source and used as input to generate the \[RFC6464\] header extension
     /// if negotiated"). `audio_level` is linear, 0 (silence) to 1 (0 dBov), as
     /// `audioLevel`; it is written as the RFC 6464 level, `-20 log10(audio_level)` dBov
     /// rounded and clamped to 0..=127 (0 and below is 127), with the voice activity flag

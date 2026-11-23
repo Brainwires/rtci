@@ -1559,8 +1559,8 @@ mod repair_association_test {
         receiver.interceptor_remote_streams_op(media_engine, &mut interceptor, is_binding);
 
         let recorded = if is_binding { bound } else { unbound };
-        let recorded = recorded.lock().unwrap().clone();
-        recorded
+
+        recorded.lock().unwrap().clone()
     }
 
     /// RFC 7160 section 4.3 and RFC 8834 section 4.3: a remote stream is bound with the clock

@@ -1175,7 +1175,7 @@ fn a_remote_candidate_with_grammar_extensions_is_added_and_checked() -> Result<(
     let remote: SocketAddr = "127.0.0.1:6004".parse()?;
     let sent = destinations(&mut answerer.pc, start, Duration::from_secs(5))?;
     assert!(
-        sent.iter().any(|a| *a == remote),
+        sent.contains(&remote),
         "the extended candidate is checked: {sent:?}"
     );
     Ok(())

@@ -118,15 +118,15 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    if let Some(video_path) = &video_file {
-        if !Path::new(video_path).exists() {
-            return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
-        }
+    if let Some(video_path) = &video_file
+        && !Path::new(video_path).exists()
+    {
+        return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
     }
-    if let Some(audio_path) = &audio_file {
-        if !Path::new(audio_path).exists() {
-            return Err(anyhow::anyhow!("audio file: '{}' not exist", audio_path));
-        }
+    if let Some(audio_path) = &audio_file
+        && !Path::new(audio_path).exists()
+    {
+        return Err(anyhow::anyhow!("audio file: '{}' not exist", audio_path));
     }
 
     let (stop_tx, stop_rx) = channel::<()>(1);
@@ -194,7 +194,6 @@ async fn run(
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -214,7 +213,6 @@ async fn run(
             rtcp_feedback: vec![],
         },
         payload_type: if is_hevc { 98 } else { 102 },
-        ..Default::default()
     };
 
     // Setup the codecs you want to use.
@@ -491,7 +489,7 @@ async fn run(
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event })?;
                     }
                     None => {
                         eprintln!("event_rx.recv() is closed");

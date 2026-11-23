@@ -1,16 +1,16 @@
 //! Handshake configuration.
 //!
-//! [`ConfigBuilder`](crate::config::ConfigBuilder) is what a caller supplies: certificates, the client/server role, which cipher
+//! [`ConfigBuilder`] is what a caller supplies: certificates, the client/server role, which cipher
 //! suites and curves to offer, the SRTP protection profiles to negotiate through `use_srtp`,
 //! and how strictly to require the extended master secret
-//! ([`ExtendedMasterSecretType`](crate::config::ExtendedMasterSecretType)).
+//! ([`ExtendedMasterSecretType`]).
 //!
 //! WebRTC authenticates peers by comparing the certificate fingerprint against the one
 //! signalled in SDP, not against a CA chain — so certificates here are normally self-signed
-//! (see [`gen_self_signed_root_cert`](crate::config::gen_self_signed_root_cert)) and the check is implemented by supplying a
-//! [`VerifyPeerCertificateFn`](crate::config::VerifyPeerCertificateFn).
+//! (see [`gen_self_signed_root_cert`]) and the check is implemented by supplying a
+//! [`VerifyPeerCertificateFn`].
 //!
-//! [`HandshakeConfig`](crate::config::HandshakeConfig) is the resolved form the handshake
+//! [`HandshakeConfig`] is the resolved form the handshake
 //! actually runs with, produced by [`ConfigBuilder::build`](crate::config::ConfigBuilder::build).
 
 #[cfg(test)]

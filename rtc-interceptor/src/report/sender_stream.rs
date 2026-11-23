@@ -206,7 +206,6 @@ mod tests {
                 ..Default::default()
             },
             payload: vec![0u8; payload_len].into(),
-            ..Default::default()
         }
     }
 
@@ -363,11 +362,11 @@ mod tests {
 
     #[test]
     fn test_counters_wrapping() {
-        let mut counters = Counters::default();
-
         // Set to max - 1
-        counters.packets = u32::MAX - 1;
-        counters.octets = u32::MAX - 1;
+        let mut counters = Counters {
+            packets: u32::MAX - 1,
+            octets: u32::MAX - 1,
+        };
 
         // Increment should wrap
         counters.increment_packets();

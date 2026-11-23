@@ -58,10 +58,31 @@ jobs:
           body_path: RELEASE_NOTES.md
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Uncomment and configure when ready to publish to crates.io:
+      # Publishing to crates.io stays manual for now: docs/releasing.md has the procedure (dry
+      # runs, the order, what to do when a publish fails midway; crates.io versions are
+      # permanent). When it moves here, uncomment the step below and add the CRATES_IO_TOKEN
+      # secret. The order is dependencies first (normal, build and versioned dev-dependencies);
+      # `cargo publish` waits until each crate is in the index before it returns, so the next
+      # one resolves. A failure stops the step: fix, then publish the rest of the list from the
+      # crate that failed (a published version cannot be published again).
       # - name: Publish crates
       #   run: |
+      #     cargo publish -p rtc-crypto --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-interceptor-derive --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-sframe --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-shared --token ${{ secrets.CRATES_IO_TOKEN }}
-      #     cargo publish -p rtc-rtp --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-dtls --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-mdns --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-rtcp --token ${{ secrets.CRATES_IO_TOKEN }}
-      #     # ... remaining crates in dependency order
+      #     cargo publish -p rtc-rtp --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-interceptor --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-media --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-sctp --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-datachannel --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-sdp --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-srtp --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-stream-driver --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-stun --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-ice --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-turn --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc --token ${{ secrets.CRATES_IO_TOKEN }}

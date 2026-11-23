@@ -112,7 +112,7 @@ fn duplicate(msg: &TaggedPacket) -> TaggedPacket {
 
 type Factory<T> = Box<dyn FnMut(usize) -> T + Send + Sync>;
 
-/// An interceptor instance per RTP session; see the [module documentation](self).
+/// An interceptor instance per RTP session; see the `rtp_session` module's source documentation.
 pub struct PerRtpSession<T: Interceptor> {
     factory: Factory<T>,
     instances: BTreeMap<usize, T>,

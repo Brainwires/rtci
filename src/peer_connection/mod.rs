@@ -263,12 +263,10 @@ pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
-/// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
 pub mod turn_discovery;
 /// The TURN clients the engine runs itself (RFC 8656, RFC 7350, RFC 6062): who gathers from
 /// `turn:` servers over UDP, [`turn_streams::RelayGathering`].
 pub mod turn_streams;
-/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
@@ -1768,7 +1766,7 @@ impl RTCPeerConnection {
     ///
     /// How many RTP packets were discarded because no media section or track could take them
     /// (RFC 8830 section 3.1: the engine buffers no unassociated media, and says so; see
-    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`]). Not a W3C attribute: a fork
+    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`](crate::peer_connection::event::RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded)). Not a W3C attribute: a fork
     /// addition.
     pub fn discarded_rtp_packets(&self) -> u64 {
         self.pipeline_context
@@ -4686,7 +4684,7 @@ impl RTCPeerConnection {
     ///
     /// The send encodings are otherwise taken as W3C `addTransceiver` takes them: for audio
     /// `scale_resolution_down_by` and `max_framerate` are removed; at most
-    /// [`MAX_SEND_ENCODINGS`] are kept; video encodings without `scale_resolution_down_by`
+    /// [`MAX_SEND_ENCODINGS`](crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS) are kept; video encodings without `scale_resolution_down_by`
     /// get 1.0 when another has one and otherwise halve per layer from the last (4, 2, 1);
     /// a single encoding loses its rid. Without send encodings the sender has one, which the
     /// engine fills in.

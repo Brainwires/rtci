@@ -1829,7 +1829,7 @@ impl SettingEngineBuilder {
     }
 
     /// RFC 8830 section 3: "if the application ... receives an msid with a new msid-appdata
-    /// value, it SHOULD [learn] that a new MediaStreamTrack has been added" (section 3, the
+    /// value, it SHOULD \[learn\] that a new MediaStreamTrack has been added" (section 3, the
     /// recipient "MUST" learn of a new track for new appdata in the RFC's model). In this API
     /// the W3C webrtc-pc object model governs: a receiver has one track for its lifetime
     /// (webrtc-pc 5.3), with an id the engine generates, and RFC 9429 section 5.2.1 has
@@ -2013,8 +2013,8 @@ impl SettingEngineBuilder {
     /// offer back and is applied, in one `set_remote_description` call. The default is `true`.
     ///
     /// W3C webrtc-pc section 4.4.2, the `setRemoteDescription` steps: a description of type
-    /// "offer" that "is invalid for the current connection.[[SignalingState]] as described in
-    /// [RFC9429]" has the local description set to `{type: "rollback"}` first, and is then
+    /// "offer" that "is invalid for the current connection.\[\[SignalingState\]\] as described in
+    /// \[RFC9429\]" has the local description set to `{type: "rollback"}` first, and is then
     /// set. This engine's
     /// `set_remote_description` is that operation, browsers perform it and "perfect
     /// negotiation" relies on it. RFC 9429 does not forbid it: its state machine (section
@@ -2400,7 +2400,7 @@ impl SettingEngineBuilder {
     /// 3.6), each channel's share of the bytes in proportion to its priority. On by default:
     /// RFC 8831 section 6.4 says the priorities of data channels "MUST be interpreted as
     /// weighted-fair-queuing scheduling priorities per the definition of the corresponding
-    /// stream scheduler supporting interleaving in [RFC8260]". `false` sends the messages in
+    /// stream scheduler supporting interleaving in \[RFC8260\]". `false` sends the messages in
     /// the order they were written, whatever their channel, and the priority of a channel is
     /// then carried to the peer and not otherwise used.
     pub fn with_sctp_weighted_fair_queueing(mut self, enabled: bool) -> Self {
@@ -2497,7 +2497,7 @@ impl SettingEngineBuilder {
 
     /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
     /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
-    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.\[\[ReadyState\]\] is not "open",
     /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
     ///
     /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
@@ -2596,7 +2596,7 @@ impl SettingEngineBuilder {
     /// and for a stream the offer being answered marks. The default is `false`.
     ///
     /// RFC 8853 section 5.2: "The use of [the pause mark] MUST be accompanied by support
-    /// for RTP stream pause/resume [RFC7728] ... signaled under the same 'm=' line", and
+    /// for RTP stream pause/resume \[RFC7728\] ... signaled under the same 'm=' line", and
     /// section 5.3.2: an answerer "MUST NOT" mark a stream paused when the offer shows no
     /// such support. The engine does not implement RFC 7728 and never signals it, so by
     /// default it writes no `~`: an inactive encoding is listed and not sent, and an offered
@@ -2941,8 +2941,8 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
-    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::write_rtcp) send
     /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
     /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
     /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.

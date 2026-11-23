@@ -9,7 +9,6 @@ pub mod dlrr;
 pub mod ecn;
 /// Packet Receipt Times blocks.
 pub mod prt;
-/// Loss and Duplicate RLE blocks, which run-length encode per-packet receipt.
 pub mod rle;
 /// Receiver Reference Time blocks, which anchor DLRR round-trip calculations.
 pub mod rrt;

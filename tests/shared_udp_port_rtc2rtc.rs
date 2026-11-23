@@ -57,7 +57,7 @@ fn host(addr: SocketAddr) -> RTCIceCandidateInit {
 #[test]
 fn two_peer_connections_share_one_udp_port_routed_by_ufrag() -> Result<()> {
     // 0 and 1 share 10.0.0.1:4000; 2 talks to 0, 3 to 1.
-    let mut nodes = vec![
+    let mut nodes = [
         node("10.0.0.1:4000"),
         node("10.0.0.1:4000"),
         node("10.0.0.2:4000"),

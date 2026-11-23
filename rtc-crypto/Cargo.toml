@@ -4,14 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Provider-neutral cryptography for the webrtc-rs RTC stack"
+description = "Provider-neutral cryptography interface of a sans-I/O WebRTC stack, with ring and aws-lc-rs providers"
 license.workspace = true
-documentation = "https://docs.rs/rtc-crypto"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "crypto", "dtls", "srtp", "sans-io"]
+categories = ["cryptography", "network-programming"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs", "test-support"]
 
 [features]
 default = ["crypto-ring"]
