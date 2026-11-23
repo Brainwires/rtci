@@ -11,6 +11,8 @@ mod keying_test;
 #[cfg(test)]
 mod profiles_test;
 #[cfg(test)]
+mod rfc3711_rows_test;
+#[cfg(test)]
 mod rfc7714_test;
 #[cfg(test)]
 mod srtcp_test;
