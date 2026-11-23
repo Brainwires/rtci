@@ -44,6 +44,7 @@ fn client_hello_record(
     }
 
     let mut h = Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+        session_id: vec![],
         version: PROTOCOL_VERSION1_2,
         random: HandshakeRandom::default(),
         cookie,
@@ -742,6 +743,7 @@ fn test_a_wrong_cookie_does_not_end_the_flight() {
 
     let mut handshake =
         Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+            session_id: vec![],
             version: PROTOCOL_VERSION1_2,
             random: HandshakeRandom::default(),
             cookie: vec![2; COOKIE_LENGTH],

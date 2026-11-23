@@ -418,6 +418,7 @@ impl RtcpSessionBuilder {
             early_at: None,
             compound_sent: false,
             reference_times: HashMap::new(),
+            dlrr_limits: HashMap::new(),
             wall_clock: None,
             reduced_size_failed: false,
             unanswered_reduced_nacks: 0,
@@ -666,6 +667,9 @@ pub struct RtcpSessionInterceptor {
     compound_sent: bool,
     /// The receiver reference times received and not yet answered, by sender SSRC.
     reference_times: HashMap<u32, (u32, Instant)>,
+    /// The largest DLRR block each bound stream's `rcvr-rtt=<mode>:<max>` allows, in octets
+    /// (RFC 3611 section 5.1), by SSRC.
+    dlrr_limits: HashMap<u32, usize>,
     wall_clock: Option<SystemInstant>,
     reduced_size_failed: bool,
     unanswered_reduced_nacks: u32,
@@ -780,6 +784,16 @@ fn delivery_shows(packet: &dyn rtcp::Packet) -> bool {
         || any.is::<FullIntraRequest>()
         || any.is::<TransportLayerCc>()
         || any.is::<CcFeedbackReport>()
+}
+
+/// The maximum DLRR size in `rcvr-rtt=<mode>:<max>` (RFC 3611 section 5.1), `None` without
+/// one.
+fn dlrr_limit(format: &str) -> Option<usize> {
+    let (name, value) = format.split_once('=')?;
+    if name != "rcvr-rtt" {
+        return None;
+    }
+    value.split_once(':')?.1.parse().ok()
 }
 
 impl RtcpSessionInterceptor {
@@ -1598,6 +1612,21 @@ impl RtcpSessionInterceptor {
             .collect()
     }
 
+    /// RFC 3611 section 5.1: the maximum DLRR size a stream's `rcvr-rtt=<mode>:<max>` names
+    /// (an `rrtr` feedback whose parameter is the `xr-format` as signalled).
+    fn record_dlrr_limit(&mut self, info: &StreamInfo) {
+        let limit = info
+            .rtcp_feedback
+            .iter()
+            .filter(|feedback| feedback.typ == crate::RTCP_FB_RRTR)
+            .filter_map(|feedback| dlrr_limit(&feedback.parameter))
+            .min();
+        match limit {
+            Some(limit) => self.dlrr_limits.insert(info.ssrc, limit),
+            None => self.dlrr_limits.remove(&info.ssrc),
+        };
+    }
+
     /// The XR packet of a regular report: a receiver reference time when a bound stream
     /// negotiated it, and a DLRR block answering the reference times received (RFC 3611 4.4,
     /// 4.5) when a local SSRC sends.
@@ -1620,15 +1649,32 @@ impl RtcpSessionInterceptor {
                 ntp_timestamp: wall_clock.ntp(now),
             }));
         }
+        // RFC 3611 section 5.1: "non RTP senders SHALL NOT send DLRR blocks" under
+        // `rcvr-rtt=sender`; under `all` they MAY, and this endpoint does not. A DLRR block is
+        // no larger than the signalled maximum: the reference times that do not fit wait for
+        // the next report, oldest first ("in a round robin fashion across several report
+        // intervals").
         if any_sender && !self.reference_times.is_empty() {
-            let reports = self
-                .reference_times
-                .drain()
-                .map(|(ssrc, (last_rr, arrived))| DLRRReport {
-                    ssrc,
-                    last_rr,
-                    dlrr: (now.saturating_duration_since(arrived).as_secs_f64() * 65536.0) as u64
-                        as u32,
+            let fit = self
+                .dlrr_limits
+                .values()
+                .min()
+                .map_or(usize::MAX, |octets| octets.saturating_sub(4) / 12)
+                .max(1);
+            let mut waiting: Vec<(u32, (u32, Instant))> =
+                self.reference_times.iter().map(|(k, v)| (*k, *v)).collect();
+            waiting.sort_by_key(|(ssrc, (_, arrived))| (*arrived, *ssrc));
+            let reports = waiting
+                .into_iter()
+                .take(fit)
+                .map(|(ssrc, (last_rr, arrived))| {
+                    self.reference_times.remove(&ssrc);
+                    DLRRReport {
+                        ssrc,
+                        last_rr,
+                        dlrr: (now.saturating_duration_since(arrived).as_secs_f64() * 65536.0)
+                            as u64 as u32,
+                    }
                 })
                 .collect();
             blocks.push(Box::new(DLRRReportBlock { reports }));
@@ -2293,6 +2339,7 @@ impl Interceptor for RtcpSessionInterceptor {
     /// from their first packet. A stream unbound a moment ago and bound again with the same
     /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept.
     fn bind_local_stream(&mut self, info: &StreamInfo) {
+        self.record_dlrr_limit(info);
         let kind = Kind::of(&info.mime_type);
         let sources = std::iter::once((info.ssrc, Role::Media))
             .chain(info.ssrc_rtx.map(|ssrc| (ssrc, Role::Repair)))
@@ -2320,6 +2367,7 @@ impl Interceptor for RtcpSessionInterceptor {
     /// The stream stopped: its SSRCs say BYE the next time the chain is driven, unless they
     /// are bound again first.
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.dlrr_limits.remove(&info.ssrc);
         for ssrc in std::iter::once(info.ssrc)
             .chain(info.ssrc_rtx)
             .chain(info.ssrc_fec)
@@ -2332,6 +2380,7 @@ impl Interceptor for RtcpSessionInterceptor {
     }
 
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
+        self.record_dlrr_limit(info);
         let rrtr = info
             .rtcp_feedback
             .iter()
@@ -2339,6 +2388,9 @@ impl Interceptor for RtcpSessionInterceptor {
         match self.remotes.get_mut(&info.ssrc) {
             Some(remote) => {
                 remote.stream.set_clock_rate(info.clock_rate);
+                remote
+                    .stream
+                    .set_payload_clock_rates(&info.payload_clock_rates);
                 remote.rrtr = rrtr;
                 remote.kind = Kind::of(&info.mime_type);
             }
@@ -2346,7 +2398,11 @@ impl Interceptor for RtcpSessionInterceptor {
                 self.remotes.insert(
                     info.ssrc,
                     Remote {
-                        stream: ReceiverStream::new(info.ssrc, info.clock_rate),
+                        stream: {
+                            let mut stream = ReceiverStream::new(info.ssrc, info.clock_rate);
+                            stream.set_payload_clock_rates(&info.payload_clock_rates);
+                            stream
+                        },
                         kind: Kind::of(&info.mime_type),
                         rrtr,
                         gone: false,
@@ -2358,6 +2414,7 @@ impl Interceptor for RtcpSessionInterceptor {
     }
 
     fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+        self.dlrr_limits.remove(&info.ssrc);
         self.remotes.remove(&info.ssrc);
         self.remote_order.retain(|ssrc| *ssrc != info.ssrc);
     }

@@ -150,6 +150,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in `get_parameters`. `close()` sets every data channel's state to closed without an
     event. `iceCandidatePoolSize` is fixed once `set_local_description` has been called,
     after a rollback too.
+- **media conformance**: FEC and congestion control signalling.
+  - A FlexFEC answer (`video/flexfec`, `video/flexfec-03`) states this endpoint's registered
+    fmtp; it repeated the offer's line, unknown options included (RFC 8627 section 5.2.1).
+  - `StreamInfo` has a new public field `payload_clock_rates` (the clock rate of each payload
+    type a remote source may switch to, RFC 7160 section 4.3); the receiver report jitter uses
+    the earlier packet's rate across a switch. Struct literals without `..Default::default()`
+    need the field. The peer connection leaves it empty for now.
+- **media conformance**: payload formats.
+  - `MediaEngine::set_vp9_receiver_limits(true)` has the default VP9 formats state
+    `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6: a receiver "MUST" provide
+    both); new `media_engine::VP9_RECEIVER_LIMITS`. Off by default: in the browser matrix a
+    WebKit sender answered with the limits sent no VP9 (train 5, "reflect video VP9"), so the
+    default VP9 fmtp stays `profile-id=<n>`.
+  - Two VP8 formats that differ only in `max-fr` / `max-fs` match (RFC 7741 section 6.2.2:
+    receiver capabilities, declarative); they were a mismatch.
+- **media conformance**: RTCP feedback and extended reports.
+  - The TWCC receiver follows draft-holmer-rmcat-transport-wide-cc-extensions-01 section
+    3.1.1 when a late packet moves the base sequence number back: packets an earlier feedback
+    reported as received are "not received" now, with no delta; they were reported received
+    again. `TwccReceiverBuilder::with_rereport_received(true)` is libwebrtc's form (a
+    libwebrtc sender drops a packet from its history once it is reported received, so it
+    ignores the later "not received" either way).
+  - A DLRR block keeps to the size `rcvr-rtt=<mode>:<max>` names (RFC 3611 section 5.1); the
+    reference times that do not fit wait for the next report, oldest first. The RTCP session
+    reads the maximum from an `rrtr` feedback whose parameter is the format as signalled.
+  - The default interceptor set gains `Slot::ExtendedReports` (`XrReportInterceptor`) and
+    `Slot::TradeoffNotifications` (`TstnResponderInterceptor`); both act only for streams
+    that negotiated them.
+- **media conformance**: RTP usage (RFC 8834).
+  - Received RTCP is parsed with `rtcp::packet::unmarshal_lenient`: of a compound packet, a
+    packet of a known type that does not parse is delivered as a `RawPacket` and the others
+    are processed (RFC 8834 section 4.1, RFC 3550 section 6.1); the whole datagram used to be
+    dropped. A datagram whose framing is broken is still dropped.
+  - New `scripts/audit-count.py` (in the Python gates of `cargo.yml`, with `--check`): counts
+    the clause audit's tables by level and verdict, fails on an unknown level or verdict or a
+    totals line that disagrees with its table, and writes `docs/conformance/audit/COUNTS.md`.
 - **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
   5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
   answer (or provisional answer) is applied, not when the offer is: the first offer starts
@@ -503,6 +539,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **ice**: `ice::PacingGroup`, `AgentConfig::pacing_group` and
+  `SettingEngineBuilder::with_ice_pacing_group`: agents that share one start at most one
+  transaction per 5 ms together (RFC 8445 section 14.2). `AgentConfig` has a new field: a
+  struct literal without `..Default::default()` no longer compiles.
+- **mdns**: `Mdns::handle_datagram(msg, destination)`: a datagram with the destination of its
+  IP header, for drivers that read it. Then RFC 6762 sections 6 and 11 apply as written: a
+  unicast response is taken only for a recent QU question, and one that arrived at the mDNS
+  multicast address is on-link whatever its source.
+- **turn**: `Client::update_credentials` with a new username no longer re-keys live
+  allocations: they keep the username (and password) that created them, as RFC 8656 section 5
+  asks of every request about an allocation; the new username is for the next `allocate`.
+  Before, the next Refresh went under the new username and was answered 441.
+- **stun**, **ice**: a `stuns` URI whose host is an IP address is refused by default (RFC 8489
+  section 8.1: "MUST be rejected"): `stun::uri::Uri::parse_uri` and `ice::url::Url::parse_url`
+  (and so the peer connection's ICE servers) return `ErrHost`; the new `parse_uri_lenient` /
+  `parse_url_lenient` accept it, as browsers do. `parse_uri_strict` is now the same as
+  `parse_uri`.
+- **ice**: an authenticated error response with an unknown comprehension-required attribute
+  fails its transaction and pair at once (RFC 8489 section 6.3.4); a Binding indication with
+  one, or with a wrong FINGERPRINT, is discarded (section 6.3.2). A lite agent takes only
+  host candidates, one per IP address (RFC 8445 section 5.2).
+- **pc**: `RTCIceCandidateInit` has a new member `relay_protocol` (W3C
+  `RTCLocalIceCandidateInit.relayProtocol`, serialized `relayProtocol`); a struct literal
+  without `..Default::default()` no longer compiles. A local relay candidate's `RTCIceCandidate`
+  carries it (else the protocol its TURN URL names) and its `url`; other types have none (W3C
+  webrtc-pc 4.8.1).
+- **pc**: a peer-reflexive remote candidate at an address the application did not signal is
+  exposed with an empty (null) `address` in the selected candidate pair, `get_candidate_pairs`
+  and the candidate-pair events (W3C webrtc-pc 4.8.1: "the user agent MUST leave the address
+  attribute as null for any exposed remote candidate").
+- **ice**: an ICE restart begun in connected or completed reports connected, not checking: the
+  path is kept until the new generation selects a pair (W3C webrtc-pc 5.6.4; RFC 8445 section
+  9). From disconnected or failed it is checking, and so when the kept path's consent expires
+  before a new pair.
+- **dtls**: ticket keys rotate every ticket lifetime, the previous one kept to open the tickets
+  it sealed (RFC 5077 section 5.5); DTLS 1.3 tickets included.
+- **ice**: a controlled agent whose check triggered by a received USE-CANDIDATE fails (timeout,
+  error response, non-symmetric response) fails the pair and the checklist by default, while no
+  pair is selected (RFC 8445 sections 7.2.5.3.4 and 7.3.1.5: "If the triggered request fails,
+  the agent MUST [...] set the checklist state to Failed"). `FailedNomination::Retry` keeps
+  the earlier behaviour, the pair alone failing, on both sides.
+- **ice**: a controlling agent's failed nomination fails the pair and the checklist by default
+  (RFC 8445 section 7.2.5.3.4: "the agent MUST remove the candidate pair from the valid list,
+  set the candidate pair state to Failed, and set the checklist state to Failed"):
+  `FailedNomination::FailChecklist` is now the default of `AgentConfig::failed_nomination` and
+  `SettingEngineBuilder::with_ice_failed_nomination`, and `FailedNomination::Retry` (send the
+  nomination again while the peer is heard from) the setting. The nomination fails as a
+  request does (section 7.2.5.2): at the end of its transaction (Rc requests, 39.5 s at an RTO
+  of 500 ms, section 14.3), on an unrecoverable error response, or on a response from another
+  address; with `FailChecklist` the 30 s silence bound of `Retry` does not end it earlier, and
+  an error or non-symmetric response fails the checklist instead of moving to the next valid
+  pair. Every ICE default is now the RFC's.
 - **turn**: the client's Binding request (`send_binding_request`, `send_binding_request_to`)
   ends with FINGERPRINT, as every other message it sends does (RFC 8489 section 7).
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
@@ -1256,6 +1344,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept until the Cumulative TSN Ack covers it (it was dropped at the gap acknowledgement), and
   a SACK that no longer acknowledges it makes it outstanding again with a miss indication and
   T3-rtx; a SHUTDOWN is no renege.
+- **peer connection** (mt-2): a remote description whose sections have different ICE
+  credentials outside a BUNDLE group is applied, a transport per section, instead of refused
+  with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
+  the BUNDLE group on its own transport instead of rejecting it with port 0 (it still does under
+  `must-bundle`). `iceConnectionState` is the W3C 4.3.4 aggregate: a connection whose only
+  transport was closed by a description now reports `new`, as the aggregate of closed
+  transports is, where it reported `closed`.
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound
@@ -1645,6 +1740,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
   RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
   the new association, browsers ignore a new `tls-id`.
+- **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
+  RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
+  BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
+  DTLS association (fingerprint check, role) and SRTP keys.
+  - A remote offer without a BUNDLE group, or with sections outside it, is answered with a
+    transport per such section (the bundle policy still decides which sections an answer to
+    an offer without a group accepts: `balanced` the first of each media type, `max-compat`
+    every one, `must-bundle` the first).
+  - `bundlePolicy: max-compat` offers a transport per m= section, each with its own
+    credentials; an answer that bundles them moves the sections to the tagged section's
+    transport and closes the others (RFC 9143 section 7.4, RFC 5888 section 9.2), one without
+    a group keeps them.
+  - The application gathers per transport: `RTCPeerConnection::ice_transport_sections()` lists
+    each transport's first section; `add_local_candidate` and `add_remote_candidate` give a
+    candidate to the transport of its `sdp_mid` / `sdp_mline_index` (the default transport
+    without either; an end-of-candidates without either is for every transport). Datagrams go
+    to the transport that gathered on their local address; packets go out on the transport
+    of their SSRC's section, SCTP on the data section's.
+  - `iceConnectionState` and `connectionState` aggregate every transport (W3C webrtc-pc 4.3.3,
+    4.3.4); `RTCRtpSender/Receiver::transport` and `RTCSctpTransport::transport` name their
+    section's transport.
+  - The browser interop matrix has a scenario for it ("unbundled: max-compat without a BUNDLE
+    group, a transport per section"); `examples/interop-peer` gathers per transport.
+  - Not yet: transport-level events (`OnIceTransportStateChange`, `OnDtlsTransportStateChange`,
+    `OnSelectedCandidatePairChange`, gathering events) and statistics for any transport but the
+    first; `balanced` offers (a transport per media type); several BUNDLE groups; an ICE restart
+    of the other transports.
+- **media conformance**: `rtp::codec::tone` (`Tone`, `ToneSender`): the `audio/tone` payload
+  of RFC 4733 section 4 and its sending rule.
+- **media conformance**: RFC 3611 report blocks, RFC 5104 trade-off and back channel,
+  RPSI and LRR helpers.
+  - `XrReportInterceptor` / `XrReportBuilder` (`Slot::ExtendedReports`,
+    `configure_extended_reports`): Loss RLE, Duplicate RLE, Packet Receipt Times, Statistics
+    Summary and VoIP Metrics blocks about each remote stream that negotiated them (an `xr`
+    feedback per `a=rtcp-xr` format, `RTCP_FB_XR`), with the sequence accounting of RFC 3611
+    section 4.1 and Appendix A.1, thinning to a signalled size, the burst and gap metrics of
+    section 4.7.2 and the round trip time the RTCP session measures. `with_formats` sends
+    blocks without negotiation; `with_jitter_buffer` describes the application's jitter
+    buffer (`JitterBufferMetrics`).
+  - `RLEReportBlock::from_flags` / `flags` and `reported_sequence_numbers` (rtc-rtcp): RLE
+    chunks from per-packet flags and back, with the trailing bits of a bit vector zero and
+    ignored.
+  - `TstnResponderInterceptor` (`Slot::TradeoffNotifications`,
+    `configure_tradeoff_notifications`): a TSTN for each TSTR a local media sender that
+    negotiated `ccm tstr` receives (RFC 5104 section 4.3.3). `TstrCommands` and
+    `VbcmCommands` number an application's TSTR and VBCM commands (sections 4.3.2.1,
+    4.3.4.1).
+  - `ReferencePictureSelectionIndication::hevc` / `hevc_picture` (RFC 7798 section 8.3) and
+    `LrrEntry::vp9` / `LrrEntry::av1` / `target_spatial_id` (RFC 9628 section 5.3, AV1 RTP
+    section 8.2).
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
@@ -1783,11 +1928,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
 - **ice**: `AgentConfig::failed_nomination` / `SettingEngineBuilder::with_ice_failed_nomination`
-  (`FailedNomination::{Retry, FailChecklist}`): what a controlling agent does when its
-  nomination times out. `Retry`, the default, nominates the pair again while the peer is heard
-  from; `FailChecklist` is RFC 8445 section 7.2.5.3.4 to the letter (the pair and the checklist
-  fail). The one ICE default that is not the RFC's; see `docs/conformance/audit/rfc8445.md`
-  ("Decisions").
+  (`FailedNomination::{FailChecklist, Retry}`): what a controlling agent does when its
+  nomination fails. `FailChecklist`, the default, is RFC 8445 section 7.2.5.3.4 (the pair and
+  the checklist fail); `Retry` nominates the pair again while the peer is heard from (see
+  `docs/conformance/audit/rfc8445.md`, "Decisions").
 - **ice**: `rank_local_candidates` and `Agent::add_local_candidates` rank candidates gathered
   together as RFC 8421 section 4 recommends for a dual-stack host: the IPv6 candidates of a type
   get a head start of (N4 + N6) / N4 places, then the families alternate. Candidates added one
@@ -2572,6 +2716,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from entering checking) failed the agent with a pair in progress. Tests:
   `agent_checklist_test.rs::test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`
   and `tests/lossy_link_rtc2rtc.rs::ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss`.
+- **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
+  a later packet of it (the segment began at the first packet to arrive and the earlier ones
+  were released as consumed); NAL units now come out in sequence-number order from the start
+  (RFC 6184 sections 5.6, 5.8; RFC 7798 section 6).
 - **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
   `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
   randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course
@@ -3190,6 +3338,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a provider that wraps another and leaves `new_header_mask` at its default gets DTLS 1.2
   instead of failing every record (`isolates_crypto_providers_across_simultaneous_peer_connections`
   failed on the train).
+
+### DTLS 1.2 session resumption
+
+- **dtls**: DTLS 1.2 session resumption (RFC 5246 section 7.3, RFC 6347 section 4.2.4 figure
+  2), off unless configured, and off in the peer connection. A server resumes by session id from
+  a `session::SessionCache` (`ConfigBuilder::with_session_cache`, `MemorySessionCache`) and by
+  RFC 5077 ticket when `with_session_tickets` is above 0 (sealed by the DTLS 1.3 ticket key,
+  with a version and additional data of their own, each accepted once); a client keeps its
+  `Dtls12Session`s in its `SessionStore` (new provided methods `put_dtls12`, `take_dtls12`,
+  `forget_dtls12`, which keep nothing by default; `MemorySessionStore` implements them, and
+  `len_dtls12`). The abbreviated handshake is two new flights: the server's ServerHello,
+  NewSessionTicket, ChangeCipherSpec and Finished, the client's ChangeCipherSpec and Finished
+  as the last flight. Only sessions made with the extended master secret are kept, and RFC 7627
+  section 5.3 applies on both sides; a session is not resumed for another server name (RFC 6066
+  section 3), a suite the ClientHello does not offer, or a configured client authentication it
+  would not have met; it is kept once its handshake completes and forgotten when a connection
+  that used it fails (RFC 5246 sections 7.2, 7.2.2). `State::resumed` also reports a DTLS 1.2
+  resumption. New handshake message `HandshakeMessageNewSessionTicket` (type 4) and
+  `HandshakeType::NewSessionTicket`; the hellos carry their `session_id`. Interop with OpenSSL
+  3.5.4, both roles, by session id (`-no_ticket`) and by ticket.
+
+- **dtls**: `examples/dtls_interop.rs` takes `DTLS_CID=<n>` (ask for an n-byte connection id,
+  count the `tls12_cid` records each way) and `DTLS_SRTP_OPTIONAL=1`. With them, DTLS 1.2
+  connection ids (RFC 9146) interoperate with Mbed TLS 3.6.2 in both roles.
 
 ### DTLS 1.3 pre-shared keys
 

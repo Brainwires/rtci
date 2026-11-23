@@ -97,6 +97,11 @@ impl Flight for Flight2 {
             // Negotiate from the cookie-verified ClientHello, which the handshake transcript
             // covers, not from the first one, which anyone on the path could have sent.
             negotiate_client_hello(state, client_hello, cfg)?;
+            // RFC 5246 7.3: a session this server can resume gets the abbreviated handshake,
+            // which needs no key pair.
+            if crate::resumption::server_resume(state, client_hello, cfg)? {
+                return Ok(Box::new(super::flight4b::Flight4b {}));
+            }
             ensure_local_keypair(state, cfg)?;
 
             Ok(Box::new(Flight4 {}))
@@ -164,6 +169,7 @@ mod tests {
         random.random_bytes = [random_byte; 28];
         let mut handshake =
             Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+                session_id: vec![],
                 version: PROTOCOL_VERSION1_2,
                 random,
                 cookie,

@@ -73,7 +73,30 @@ impl Flight for Flight6 {
         cache: &HandshakeCache,
         cfg: &HandshakeConfig,
     ) -> Result<Vec<Packet>, (Option<Alert>, Option<Error>)> {
-        let mut pkts = vec![Packet {
+        // RFC 5077 section 3.3: the NewSessionTicket the ServerHello announced goes ahead of
+        // the ChangeCipherSpec, and the Finished covers it. It is not in the cache before it is
+        // sent, so it is put in as it will go, with the message sequence `prepare` gives it.
+        let mut pkts = vec![];
+        let mut ticket_raw = vec![];
+        if state.new_session_ticket {
+            let ticket = HandshakeMessage::NewSessionTicket(crate::resumption::new_session_ticket(
+                state, cfg,
+            )?);
+            ticket_raw = crate::resumption::marshal_handshake(
+                ticket.clone(),
+                state.handshake_send_sequence,
+            )?;
+            pkts.push(Packet {
+                record: RecordLayer::new(
+                    PROTOCOL_VERSION1_2,
+                    0,
+                    Content::Handshake(Handshake::new(ticket)),
+                ),
+                should_encrypt: false,
+                reset_local_sequence_number: false,
+            });
+        }
+        pkts.push(Packet {
             record: RecordLayer::new(
                 PROTOCOL_VERSION1_2,
                 0,
@@ -81,10 +104,10 @@ impl Flight for Flight6 {
             ),
             should_encrypt: false,
             reset_local_sequence_number: false,
-        }];
+        });
 
         if state.local_verify_data.is_empty() {
-            let plain_text = cache.pull_and_merge(&[
+            let mut plain_text = cache.pull_and_merge(&[
                 HandshakeCachePullRule {
                     typ: HandshakeType::ClientHello,
                     epoch: cfg.initial_epoch,
@@ -146,6 +169,7 @@ impl Flight for Flight6 {
                     optional: false,
                 },
             ]);
+            plain_text.extend_from_slice(&ticket_raw);
 
             if let Some(cipher_suite) = &state.cipher_suite {
                 state.local_verify_data = match prf_verify_data_server(

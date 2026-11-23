@@ -17,10 +17,17 @@
 //!   handshake (DTLS 1.3).
 //! * `DTLS_SECONDS`: how long to run after starting (default 6).
 //! * `DTLS_TICKETS=<n>`: a server that sends `n` session tickets after each handshake
-//!   (DTLS 1.3), and takes them back in later ones.
-//! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent and, 1.5 s after its first
-//!   handshake, closes the association and makes a second one from the same port, which
-//!   offers one of them.
+//!   (DTLS 1.3; one RFC 5077 ticket in DTLS 1.2), and takes them back in later ones.
+//! * `DTLS_DUMP=1`: print every datagram sent (`out <hex>`) and received (`in <hex>`).
+//! * `DTLS_SRTP_OPTIONAL=1`: a client that goes on when the server leaves `use_srtp` out.
+//! * `DTLS_CID=<n>`: ask the peer for an `n`-byte connection id (RFC 9146 for DTLS 1.2,
+//!   RFC 9147 section 9 for 1.3); at the end the count of `tls12_cid` records (content type
+//!   25) sent and received is printed.
+//! * `DTLS_SESSION_CACHE=1`: a DTLS 1.2 server that gives each handshake a session id and
+//!   resumes it (RFC 5246 section 7.3).
+//! * `DTLS_RESUME=1`: a client that keeps the tickets it is sent (and its DTLS 1.2 sessions)
+//!   and, 1.5 s after its first handshake, closes the association and makes a second one
+//!   from the same port, which offers one of them.
 //! * `DTLS_MAX_EARLY_DATA=<n>`: a server whose tickets allow `n` bytes of 0-RTT data (it
 //!   takes them only without the cookie exchange: `DTLS_COOKIE=0`).
 //! * `DTLS_EARLY_DATA=<text>`: with `DTLS_RESUME=1`, the second association sends `text` as
@@ -94,6 +101,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_max_early_data(size);
     }
     let early_data = std::env::var("DTLS_EARLY_DATA").unwrap_or_default();
+    if std::env::var("DTLS_SRTP_OPTIONAL").as_deref() == Ok("1") {
+        builder = builder.with_use_srtp_optional(true);
+    }
+    if let Some(length) = std::env::var("DTLS_CID")
+        .ok()
+        .and_then(|length| length.parse().ok())
+    {
+        builder = builder.with_connection_id(Some(length));
+    }
+    if !is_client && std::env::var("DTLS_SESSION_CACHE").as_deref() == Ok("1") {
+        builder = builder.with_session_cache(Some(Arc::new(
+            rtc_dtls::session::MemorySessionCache::default(),
+        )));
+    }
     if let Some(tickets) = std::env::var("DTLS_TICKETS")
         .ok()
         .and_then(|count| count.parse().ok())
@@ -144,10 +165,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut key_update_sent = false;
     let mut after_key_update_sent = false;
     let mut buffer = vec![0u8; 65536];
+    // RFC 9146 section 4: the content type of a DTLS 1.2 record with a connection id.
+    const TLS12_CID: u8 = 25;
+    let mut cid_sent = 0usize;
+    let mut cid_received = 0usize;
+    let dump = std::env::var("DTLS_DUMP").as_deref() == Ok("1");
 
     loop {
         while let Some(transmit) = endpoint.poll_transmit() {
             socket.send_to(&transmit.message, transmit.transport.peer_addr)?;
+            cid_sent += usize::from(transmit.message.first() == Some(&TLS12_CID));
+            if dump {
+                println!("out {}", hex(&transmit.message));
+            }
         }
         let now = Instant::now();
         if now >= deadline {
@@ -231,6 +261,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     remote = Some(from);
                 }
+                cid_received += usize::from(buffer[0] == TLS12_CID);
+                if dump {
+                    println!("in {}", hex(&buffer[..length]));
+                }
                 match endpoint.read(
                     Instant::now(),
                     from,
@@ -313,6 +347,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             break;
         }
+    }
+    if std::env::var("DTLS_CID").is_ok() {
+        println!("tls12_cid records sent={cid_sent} received={cid_received}");
     }
     endpoint.close(Instant::now())?;
     while let Some(transmit) = endpoint.poll_transmit() {

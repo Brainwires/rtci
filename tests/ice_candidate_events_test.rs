@@ -27,6 +27,7 @@ fn test_host_candidate_event_emission() {
         sdp_mline_index: Some(0),
         username_fragment: Some("test".to_string()),
         url: None,
+        relay_protocol: None,
     };
 
     println!("🔍 Adding host candidate: {}", host_candidate.candidate);
@@ -85,6 +86,7 @@ fn test_srflx_candidate_event_emission() {
         sdp_mline_index: Some(0),
         username_fragment: Some("test".to_string()),
         url: Some("stun:stun.example.com:3478".to_string()),
+        relay_protocol: None,
     };
 
     println!("🔍 Adding srflx candidate: {}", srflx_candidate.candidate);
@@ -146,6 +148,7 @@ fn test_multiple_candidates_events() {
             sdp_mline_index: Some(0),
             username_fragment: Some("test".to_string()),
             url: None,
+            relay_protocol: None,
         },
         RTCIceCandidateInit {
             candidate: "candidate:2 1 udp 1694498815 203.0.113.1 12345 typ srflx raddr 192.168.1.100 rport 54321".to_string(),
@@ -153,6 +156,7 @@ fn test_multiple_candidates_events() {
             sdp_mline_index: Some(0),
             username_fragment: Some("test".to_string()),
             url: Some("stun:stun.example.com:3478".to_string()),
+            relay_protocol: None,
         },
     ];
 

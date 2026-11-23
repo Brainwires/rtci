@@ -170,3 +170,15 @@ fn retransmission_formats_that_differ_in_rtx_time_match() {
     let other = |line: &str| parse("video/other", line);
     assert!(!other("rtx-time=3000").match_fmtp(&*other("rtx-time=1500")));
 }
+
+/// RFC 7741 section 6.2.2: "max-fs and max-fr ... are declarative" receiver capabilities: two
+/// VP8 formats that state different ones are the same format. Another format's parameters of
+/// those names still have to agree.
+#[test]
+fn vp8_formats_that_differ_in_their_receiver_limits_match() {
+    let vp8 = |line: &str| parse("video/VP8", line);
+    assert!(vp8("max-fr=30;max-fs=3600").match_fmtp(&*vp8("max-fr=60;max-fs=12288")));
+    assert!(vp8("max-fs=3600").match_fmtp(&*vp8("")));
+    let other = |line: &str| parse("video/other", line);
+    assert!(!other("max-fs=3600").match_fmtp(&*other("max-fs=12288")));
+}
