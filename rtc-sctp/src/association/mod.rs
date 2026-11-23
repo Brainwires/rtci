@@ -3457,10 +3457,20 @@ impl Association {
                     // RFC 9260 6.2: once the window has been advertised as closed, a new DATA
                     // chunk above the largest TSN received MUST be dropped; the escape then
                     // needs `TransportConfig::with_zero_window_overcommit`.
+                    //
+                    // With user message interleaving (I-DATA) negotiated it is taken whatever
+                    // the setting. Several part-received messages, each smaller than the
+                    // buffer, can fill it together with none of them complete, so no
+                    // message size makes the buffer large enough; RFC 8260 section 6 has the
+                    // receiver provide "a reassembly buffer for each incoming stream". The
+                    // sender's zero window probes finish one message at a time, so the
+                    // headroom of one message below is enough.
                     let window_advertised_closed = self.last_advertised_window == 0;
                     let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
                         && !self.has_readable_data()
-                        && (!window_advertised_closed || self.zero_window_overcommit);
+                        && (!window_advertised_closed
+                            || self.zero_window_overcommit
+                            || self.use_interleaving);
 
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But

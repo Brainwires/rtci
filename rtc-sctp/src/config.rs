@@ -154,7 +154,10 @@ impl TransportConfig {
     /// messages stays full: what is written must fit the buffer, which it does when the
     /// largest message accepted (`with_max_receive_message_size`) is not larger than the
     /// receive buffer. While the advertised window is open, a full buffer takes that chunk
-    /// either way (the RFC rule binds a closed advertised window only).
+    /// either way (the RFC rule binds a closed advertised window only), and so does an
+    /// association that negotiated user message interleaving (RFC 8260), whatever this
+    /// setting: several part-received I-DATA messages, each smaller than the buffer, can fill
+    /// it together with none of them complete.
     pub fn with_zero_window_overcommit(mut self, value: bool) -> Self {
         self.zero_window_overcommit = value;
         self

@@ -121,7 +121,8 @@ fn a_chunk_taken_through_a_closed_window_is_acknowledged_at_once() -> Result<()>
 
 /// Builds the receiver of the link tests: a receive buffer of `buffer` bytes that accepts
 /// messages up to `message` bytes, with the zero window overcommit where the peer connection
-/// enables it (the message it accepts is larger than its buffer).
+/// enables it (the message it accepts is larger than its buffer). With I-DATA negotiated the
+/// association takes the chunk that unblocks reassembly whatever the setting.
 fn receiver(buffer: u32, message: u32, interleaving: bool) -> TransportConfig {
     TransportConfig::default()
         .with_max_receive_buffer_size(buffer)
@@ -130,10 +131,14 @@ fn receiver(buffer: u32, message: u32, interleaving: bool) -> TransportConfig {
         .with_zero_window_overcommit(message > buffer)
 }
 
+/// Builds the sender of the link tests. Weighted fair queueing is the peer connection's
+/// default; with I-DATA it interleaves the streams chunk by chunk (first come, first served
+/// would finish each message before the next).
 fn sender(message: u32, interleaving: bool) -> TransportConfig {
     TransportConfig::default()
         .with_max_message_size(message)
         .with_message_interleaving(interleaving)
+        .with_stream_scheduler(crate::StreamScheduler::WeightedFairQueueing)
 }
 
 /// A message's bytes: its number, then a pattern that depends on it, so a delivered message
@@ -228,6 +233,51 @@ fn interleaved_messages_that_fill_the_buffer_together_complete_one_at_a_time() -
     for (id, m) in &link.server.received {
         assert_eq!(*m, message(u32::from(*id), SIZE));
     }
+    Ok(())
+}
+
+/// RFC 9260 6.2 and RFC 8260 section 6: six interleaved 16 KiB messages to a receiver with
+/// a 16 KiB buffer and the zero window overcommit off. Each message fits the buffer, so no
+/// message size calls for the overcommit, but the six part-received messages fill the buffer
+/// together with none of them complete. Dropping the next in-sequence chunk then (the RFC drop
+/// after a closed window) is a deadlock: nothing becomes readable, so the window never
+/// reopens. With I-DATA negotiated the receiver takes it, and everything arrives.
+#[test]
+fn interleaved_messages_that_each_fit_the_buffer_arrive_without_the_overcommit() -> Result<()> {
+    const SIZE: usize = 16 * 1024;
+    const STREAMS: u16 = 6;
+    let mut link = Link::new(
+        sender(SIZE as u32, true),
+        receiver(SIZE as u32, SIZE as u32, true).with_zero_window_overcommit(false),
+        5,
+    );
+    link.connect();
+    assert!(link.server.conn().use_interleaving, "I-DATA negotiated");
+    let start = link.now;
+    let ppi = PayloadProtocolIdentifier::Binary;
+    for s in 1..=STREAMS {
+        link.client.conn().open_stream(s, ppi)?;
+    }
+    for i in 0..4u32 {
+        for s in 1..=STREAMS {
+            link.client.conn().stream(s)?.write_sctp(
+                start,
+                &message(u32::from(s) * 1000 + i, SIZE),
+                ppi,
+            )?;
+        }
+    }
+    let total = 4 * usize::from(STREAMS);
+    let delivered = link.run_until(start + Duration::from_secs(120), |l| {
+        l.server.received.len() == total
+    });
+    assert!(
+        delivered,
+        "{} of {total} messages after {:?}; {} bytes in reassembly",
+        link.server.received.len(),
+        link.now - start,
+        link.server.conn().bytes_in_reassembly_queues()
+    );
     Ok(())
 }
 

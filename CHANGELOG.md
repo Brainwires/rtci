@@ -2034,7 +2034,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receiver acknowledges a chunk it takes through its closed window at once instead of after
   the SACK delay (the test's message arrives in 1.6 s, 9.4 s on master). With I-DATA the
   probes finish a part-sent message before another is started, so several interleaved
-  messages that together fill the buffer still complete one at a time.
+  messages that together fill the buffer still complete one at a time; and an association
+  that negotiated I-DATA takes the in-sequence chunk that unblocks reassembly through a closed
+  window whatever `with_zero_window_overcommit` says (RFC 8260 section 6). Without that,
+  interleaved messages that each fit the buffer but fill it together (six 16 KiB messages,
+  16 KiB buffer, weighted fair queueing) deadlocked: the RFC 9260 6.2 drop refused the chunk
+  that would complete one of them, for ever. Toward peers without I-DATA (browsers) the drop
+  is unchanged.
 - **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
   waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
   expiry count and the path error count, so probes the receiver keeps answering never end the
