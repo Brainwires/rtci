@@ -7,17 +7,37 @@ use anyhow::Result;
 use bytes::BytesMut;
 use dc_common::Pair;
 use rtc::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::transport::RTCDtlsRole;
 
 /// RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY start sending
 /// messages containing user data without waiting for the reception of the corresponding
 /// DATA_CHANNEL_ACK message." On an unordered channel that data used to leave unordered and
-/// could overtake the OPEN; sent ordered, it arrives behind it, complete and in order.
+/// could overtake the OPEN; sent ordered, it arrives behind it, complete and in order. The
+/// early send is the `with_data_channel_send_before_ack` setting (W3C `send()` refuses a
+/// "connecting" channel by default).
 #[test]
 fn data_sent_before_the_ack_arrives_on_an_unordered_channel() -> Result<()> {
     for answerer_role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
-        let (mut pair, _first) = Pair::connected(answerer_role, "first")?;
+        let offerer_role = match answerer_role {
+            RTCDtlsRole::Client => RTCDtlsRole::Server,
+            _ => RTCDtlsRole::Client,
+        };
+        let mut pair = Pair::with_setting_engines(
+            "127.0.0.1:50010",
+            SettingEngineBuilder::new()
+                .with_answering_dtls_role(offerer_role)
+                .with_data_channel_send_before_ack(true),
+            "127.0.0.1:50011",
+            SettingEngineBuilder::new().with_answering_dtls_role(answerer_role),
+        )?;
+        pair.offerer.pc.create_data_channel("first", None)?;
+        pair.negotiate()?;
+        assert!(
+            pair.run_until(|p| !p.offerer.opened().is_empty() && !p.answerer.opened().is_empty())?,
+            "the first channel never opened"
+        );
 
         // The association is up, so the channel is dialed at once and `send` is allowed
         // although no ACK can have arrived.

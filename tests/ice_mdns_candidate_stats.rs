@@ -71,6 +71,9 @@ fn a_remote_mdns_candidate_has_its_statistics_before_and_after_its_name_resolves
     }
     .new_candidate_host()?;
     pc.add_local_candidate(RTCIceCandidate::from(&local).to_json()?)?;
+    // The application takes its candidate's event to trickle it: only then is it paired (RFC
+    // 8838 section 10).
+    while pc.poll_event().is_some() {}
     pc.add_remote_candidate(RTCIceCandidateInit {
         sdp_mline_index: Some(0),
         candidate: format!("candidate:1114572465 1 udp 2113939711 {NAME} 61163 typ host"),
@@ -193,6 +196,10 @@ fn a_learned_candidate_that_a_resolved_name_replaces_shows_the_name() -> Result<
     };
     pc.add_local_candidate(host(pc_addr)?)?;
     browser.add_local_candidate(host(owner_ice)?)?;
+    // The application takes the candidates' events to trickle it: only then is it paired (RFC
+    // 8838 section 10).
+    while pc.poll_event().is_some() {}
+    while browser.poll_event().is_some() {}
     browser.add_remote_candidate(host(pc_addr)?)?;
     // The browser signals its candidate under its name only.
     pc.add_remote_candidate(RTCIceCandidateInit {

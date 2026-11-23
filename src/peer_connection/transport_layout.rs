@@ -30,7 +30,7 @@ use crate::peer_connection::sdp::{
 };
 use crate::peer_connection::transport::ice::IceTransport;
 use crate::peer_connection::transport::ice::candidate::{
-    RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
+    RTCIceCandidate, RTCIceServerTransportProtocol, rtc_ice_candidates_from_ice_candidates,
 };
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use ::sdp::description::common::Attribute;
@@ -559,6 +559,11 @@ impl RTCPeerConnection {
             if self.ice_transport().ice_gathering_state == RTCIceGatheringState::Complete {
                 return Ok(());
             }
+            // Held back while the engine's TCP listeners or TURN allocations of this
+            // transport are being made (RFC 8838 section 13), as on the default transport.
+            if self.defer_end_of_gathering() {
+                return Ok(());
+            }
             let mut end = RTCIceCandidate::end_of_candidates_for(None, None, None);
             self.ice_transport().describe_local_candidate(&mut end);
             self.ice_transport_mut()
@@ -589,6 +594,20 @@ impl RTCPeerConnection {
         for mut rtc_candidate in added {
             self.ice_transport()
                 .describe_local_candidate(&mut rtc_candidate);
+            // As on the default transport (W3C webrtc-pc 4.8.1): a relay candidate names the
+            // protocol to its TURN server.
+            if rtc_candidate.typ == crate::peer_connection::transport::RTCIceCandidateType::Relay {
+                let url = local_candidate.url.as_deref();
+                if rtc_candidate.url.is_none() {
+                    rtc_candidate.url = url.map(str::to_owned);
+                }
+                rtc_candidate.relay_protocol = local_candidate
+                    .relay_protocol
+                    .filter(|protocol| *protocol != RTCIceServerTransportProtocol::Unspecified)
+                    .unwrap_or_else(|| {
+                        url.map_or_else(Default::default, internal::relay_protocol_of_turn_url)
+                    });
+            }
             self.pipeline_context.event_outs.push_back(
                 RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
                     candidate: Some(rtc_candidate),
@@ -596,6 +615,9 @@ impl RTCPeerConnection {
                 }),
             );
         }
+        // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own,
+        // for this transport.
+        self.gather_tcp_candidates(value);
         Ok(())
     }
 

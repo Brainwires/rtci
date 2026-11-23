@@ -1016,3 +1016,252 @@ fn current_descriptions_carry_the_candidates_added_since() -> TestResult {
     assert!(remote.contains("192.0.2.10 50000 typ host"), "{remote}");
     Ok(())
 }
+
+/// W3C 4.4.1.1 constructor: `[[DataChannels]]` starts as an empty ordered set; each channel
+/// created joins it in order.
+#[test]
+fn data_channels_start_empty_and_are_kept_in_creation_order() -> TestResult {
+    let mut pc = default_peer()?;
+    assert!(pc.data_channel_ids().is_empty());
+    let first = pc.create_data_channel("first", None)?.id();
+    let second = pc.create_data_channel("second", None)?.id();
+    assert_eq!(pc.data_channel_ids(), vec![first, second]);
+    Ok(())
+}
+
+/// The lines of `sdp` with the per-connection random values left out: the origin line (its
+/// session id), the ICE credentials and the DTLS `tls-id`.
+fn without_random_lines(sdp: &str) -> Vec<&str> {
+    sdp.lines()
+        .filter(|l| {
+            !["o=", "a=ice-ufrag:", "a=ice-pwd:", "a=tls-id:"]
+                .iter()
+                .any(|p| l.starts_with(p))
+        })
+        .collect()
+}
+
+/// W3C 4.2.6: RTCAnswerOptions has no members, so the engine's extra
+/// `voice_activity_detection` member changes nothing in the answer.
+#[test]
+fn answer_options_leave_the_answer_unchanged() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let offer = offerer.create_offer(None)?;
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let plain = answerer.create_answer(None)?;
+    let with_vad = answerer.create_answer(Some(
+        rtc::peer_connection::configuration::RTCAnswerOptions {
+            voice_activity_detection: true,
+        },
+    ))?;
+    assert_eq!(
+        without_random_lines(&plain.sdp),
+        without_random_lines(&with_vad.sdp)
+    );
+    Ok(())
+}
+
+/// W3C 4.2.1: no member outside the RTCConfiguration dictionary changes behaviour. The
+/// engine's `peer_identity` (webrtc-identity's member, removed from webrtc-pc) leaves the
+/// offer as it is.
+#[test]
+fn the_peer_identity_member_changes_no_offer() -> TestResult {
+    let provider = rtc::crypto::default_provider()?;
+    let certificate = RTCCertificate::generate_certificate(
+        provider.crypto(),
+        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        None,
+        SystemTime::now(),
+    )?;
+    let peer = |identity: Option<&str>| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine =
+            rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let mut configuration =
+            RTCConfigurationBuilder::new().with_certificates(vec![certificate.clone()]);
+        if let Some(identity) = identity {
+            configuration = configuration.with_peer_identitys(identity.to_owned());
+        }
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_configuration(configuration.build())
+            .build(Instant::now())?;
+        pc.create_data_channel("d", None)?;
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        Ok(pc)
+    };
+    let plain = peer(None)?.create_offer(None)?;
+    let with_identity = peer(Some("alice@example.org"))?.create_offer(None)?;
+    assert_eq!(
+        without_random_lines(&plain.sdp)
+            .into_iter()
+            .filter(|l| !l.starts_with("a=ssrc:") && !l.starts_with("a=msid:"))
+            .collect::<Vec<_>>(),
+        without_random_lines(&with_identity.sdp)
+            .into_iter()
+            .filter(|l| !l.starts_with("a=ssrc:") && !l.starts_with("a=msid:"))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+/// The four description slots, as SDP.
+fn slots(pc: &RTCPeerConnection) -> [Option<String>; 4] {
+    [
+        pc.current_local_description().map(|d| d.sdp),
+        pc.pending_local_description().map(|d| d.sdp),
+        pc.current_remote_description().map(|d| d.sdp.clone()),
+        pc.pending_remote_description().map(|d| d.sdp.clone()),
+    ]
+}
+
+/// W3C 4.4.1: the description slots change only in setLocalDescription,
+/// setRemoteDescription, addIceCandidate and when a candidate is surfaced. Creating offers,
+/// transceivers and channels, changing directions, the configuration, an ICE restart request
+/// and reading statistics leave them as they are.
+#[test]
+fn only_descriptions_and_candidates_change_the_description_slots() -> TestResult {
+    let mut offerer = peer_with_data()?;
+    let mut answerer = default_peer()?;
+    exchange(&mut offerer, &mut answerer)?;
+    let before = slots(&offerer);
+    assert!(before[0].is_some() && before[2].is_some());
+
+    offerer.create_offer(None)?;
+    let id = offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Recvonly)?;
+    offerer.create_data_channel("another", None)?;
+    let configuration = offerer.get_configuration().clone();
+    offerer.set_configuration(configuration)?;
+    offerer.restart_ice();
+    offerer.get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+    offerer.create_offer(None)?;
+    assert_eq!(slots(&offerer), before, "no slot changed");
+
+    offerer.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:1 1 udp 2130706431 192.0.2.10 50000 typ host".to_owned(),
+        ..Default::default()
+    })?;
+    let surfaced = slots(&offerer);
+    assert_ne!(
+        surfaced[0], before[0],
+        "a surfaced candidate joins the local description"
+    );
+    assert_eq!(surfaced[2], before[2]);
+    Ok(())
+}
+
+/// W3C 4.4.1: every description-slot change of an operation is complete before any event it
+/// raises fires: when the application reads the first event of setRemoteDescription, the
+/// pending remote description and the signaling state already are the final ones.
+#[test]
+fn the_description_slots_are_set_before_the_first_event() -> TestResult {
+    let mut offerer = peer_with_data()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let offer = offerer.create_offer(None)?;
+    let mut answerer = default_peer()?;
+    events(&mut answerer);
+    answerer.set_remote_description(Instant::now(), offer.clone())?;
+    let mut seen = 0;
+    while let Some(_event) = answerer.poll_event() {
+        seen += 1;
+        assert_eq!(
+            answerer.pending_remote_description().map(|d| d.sdp.clone()),
+            Some(offer.sdp.clone())
+        );
+        assert_eq!(
+            answerer.signaling_state(),
+            RTCSignalingState::HaveRemoteOffer
+        );
+        assert!(answerer.get_transceivers().count() >= 1);
+    }
+    assert!(seen > 0, "setRemoteDescription raised events");
+    Ok(())
+}
+
+/// W3C 5.2.9: a sender's codec `sdpFmtpLine` is the one of the current remote description,
+/// a receiver's the one of the local description. The answer adds `stereo=1` to Opus.
+#[test]
+fn sender_fmtp_follows_the_remote_description_and_receiver_fmtp_the_local() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let id = offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer.clone())?;
+    // The answerer sends too, so that the offerer's receiver receives.
+    let answered = answerer.get_transceivers().next().expect("a transceiver");
+    answerer
+        .rtp_transceiver(answered)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    let opus_fmtp = answer
+        .sdp
+        .lines()
+        .find(|l| l.starts_with("a=fmtp:") && l.contains("useinbandfec=1"))
+        .expect("an Opus fmtp line")
+        .to_owned();
+    let munged = answer
+        .sdp
+        .replace(&opus_fmtp, &format!("{opus_fmtp};stereo=1"));
+    offerer.set_remote_description(now, RTCSessionDescription::answer(munged)?)?;
+
+    let opus = |codecs: &[rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters]| {
+        codecs
+            .iter()
+            .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
+            .map(|c| c.rtp_codec.sdp_fmtp_line.clone())
+            .unwrap_or_else(|| panic!("no Opus in {codecs:?}"))
+    };
+    let sent = opus(
+        &offerer
+            .rtp_sender(id.into())
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .codecs,
+    );
+    let received = opus(
+        &offerer
+            .rtp_receiver(id.into())
+            .expect("receiver")
+            .get_parameters()
+            .rtp_parameters
+            .codecs,
+    );
+    assert!(
+        sent.contains("stereo=1"),
+        "the remote description's: {sent}"
+    );
+    assert!(
+        !received.contains("stereo=1"),
+        "the local description's: {received}"
+    );
+    Ok(())
+}
+
+/// W3C 4.7.3: the negotiation-needed update runs in a queued task, so several changes made
+/// before the application gets back to its event loop raise one `negotiationneeded`: the
+/// event is fired when the queue is read, once, however many changes came before.
+#[test]
+fn several_changes_before_the_events_are_read_raise_one_negotiation_needed() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    pc.create_data_channel("a", None)?;
+    pc.create_data_channel("b", None)?;
+    assert_eq!(negotiation_needed(&mut pc), 1);
+    // Nothing negotiated since: a further change raises no second event while the first is
+    // not yet answered by an offer.
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    assert_eq!(negotiation_needed(&mut pc), 0);
+    Ok(())
+}

@@ -66,6 +66,9 @@ fn a_first_answer_that_is_not_stun_fails_the_pair_of_an_active_tcp_candidate() -
     }
     .new_candidate_host()?;
     pc.add_local_candidate(RTCIceCandidate::from(&active).to_json()?)?;
+    // The application takes the candidate's event to trickle it: only then is it paired (RFC
+    // 8838 section 10).
+    while pc.poll_event().is_some() {}
     pc.add_remote_candidate(RTCIceCandidateInit {
         sdp_mline_index: Some(0),
         candidate: "candidate:1 1 tcp 2128609279 127.0.0.2 6002 typ host tcptype passive"

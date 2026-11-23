@@ -256,7 +256,11 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
+pub(crate) mod streams;
 mod transport_layout;
+mod turn_streams;
+/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
+pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -847,6 +851,8 @@ pub struct RTCPeerConnection {
     /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
     /// congestion control; `priority.rs`).
     pub(crate) last_data_dscp: Option<u8>,
+    /// The engine's stream transports: its ICE-TCP candidates and their connections.
+    pub(crate) streams: streams::EngineStreams,
 }
 
 impl RTCPeerConnection {
@@ -1367,6 +1373,18 @@ impl RTCPeerConnection {
         } else {
             self.local_description_was_set = true;
             self.after_local_description(sdp_type);
+            // The local description lists the candidates gathered so far, and it is the one
+            // the application sends: they are conveyed with it (RFC 8838 section 10).
+            if sdp_type != RTCSdpType::Rollback {
+                // Every transport's: the description lists the candidates of each.
+                for bundle in self.pipeline_context.transports.iter_mut() {
+                    bundle
+                        .ice_handler_context
+                        .ice_transport
+                        .agent
+                        .all_local_candidates_conveyed();
+                }
+            }
         }
         applied
     }
@@ -3059,8 +3077,10 @@ impl RTCPeerConnection {
                 local_candidate.url.as_deref(),
                 local_candidate.relay_protocol,
             )?;
+            // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own.
+            self.gather_tcp_candidates(candidate_value);
         } else {
-            self.finish_local_gathering();
+            self.finish_local_gathering_after_streams();
         }
 
         Ok(())
@@ -3086,6 +3106,38 @@ impl RTCPeerConnection {
             .assign_stream_ids(dtls_role, max_channels)
         {
             log::debug!("data channel ids not assigned: {err}");
+            // W3C 4.4.1.6: "If no available ID could be generated, set channel's
+            // [[ReadyState]] to "closed", and add channel to errorList"; each channel of
+            // errorList then gets an `error` event (`data-channel-failure`, 4.4.1.6 step
+            // "fire an event named error") and is closed.
+            let mut error_list: Vec<RTCDataChannelId> = self
+                .data_channels
+                .values()
+                .filter(|dc| dc.stream_id.is_none() && !dc.negotiated)
+                .map(|dc| dc.id)
+                .collect();
+            error_list.sort_unstable();
+            for id in error_list {
+                if self.data_channels.remove(&id).is_none() {
+                    continue;
+                }
+                self.data_channels.record_error(
+                    id,
+                    crate::peer_connection::rtc_error::RTCError::new(
+                        crate::peer_connection::rtc_error::RTCErrorDetailType::DataChannelFailure,
+                        "no data channel id is available",
+                    ),
+                );
+                self.pipeline_context.stats.on_data_channel_gone(id);
+                for event in [
+                    crate::peer_connection::event::RTCDataChannelEvent::OnError(id),
+                    crate::peer_connection::event::RTCDataChannelEvent::OnClose(id),
+                ] {
+                    self.pipeline_context.event_outs.push_back(
+                        crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event),
+                    );
+                }
+            }
         }
     }
 
@@ -3468,8 +3520,22 @@ impl RTCPeerConnection {
         let dtls_role = self.dtls_transport().role();
         if matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
             let max_channels = self.sctp_transport().max_channels();
-            self.data_channels
-                .assign_stream_ids(dtls_role, max_channels)?;
+            if let Err(err) = self
+                .data_channels
+                .assign_stream_ids(dtls_role, max_channels)
+            {
+                // W3C createDataChannel: "If there is no available ID, throw an
+                // OperationError", and the channel does not exist: it is not left in
+                // [[DataChannels]].
+                if self
+                    .data_channels
+                    .get(&id)
+                    .is_some_and(|dc| dc.stream_id.is_none())
+                {
+                    self.data_channels.remove(&id);
+                }
+                return Err(err);
+            }
         }
         // Only an association that is up. One still in its handshake (both sides initiate
         // when DTLS connects, so there is always such a moment) dials every waiting channel
@@ -3929,6 +3995,15 @@ impl RTCPeerConnection {
         Ok(self.add_rtp_transceiver(transceiver))
     }
 
+    /// W3C `[[DataChannels]]` (webrtc-pc 4.4.1.1, an ordered set that starts empty): the
+    /// handles of the data channels this connection holds and has not closed, in the order
+    /// they were created or announced.
+    pub fn data_channel_ids(&self) -> Vec<RTCDataChannelId> {
+        let mut ids: Vec<RTCDataChannelId> = self.data_channels.values().map(|c| c.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Returns a handle to the [`RTCDataChannel`] with the given id, or `None` if no such
     /// channel exists on this peer connection.
     ///
@@ -3942,6 +4017,23 @@ impl RTCPeerConnection {
         } else {
             None
         }
+    }
+
+    /// The final attributes of the closed data channel `id` (W3C webrtc-pc 6.2: a closed
+    /// `RTCDataChannel` still answers `bufferedAmount`, "not reset to zero once the channel
+    /// closes", and its other attributes), once [`Self::data_channel`] returns `None` for it;
+    /// `None` for a channel that is not closed, or one closed so long ago that its record went
+    /// (the last [`MAX_KEPT_CLOSED_DATA_CHANNELS`] are kept).
+    ///
+    /// [`MAX_KEPT_CLOSED_DATA_CHANNELS`]: crate::data_channel::MAX_KEPT_CLOSED_DATA_CHANNELS
+    pub fn closed_data_channel(
+        &self,
+        id: RTCDataChannelId,
+    ) -> Option<&crate::data_channel::RTCClosedDataChannel> {
+        if self.data_channels.contains(&id) {
+            return None;
+        }
+        self.data_channels.closed(id)
     }
 
     /// The SCTP transport over which data channels are carried.
@@ -3962,7 +4054,7 @@ impl RTCPeerConnection {
     ///
     /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-sctp)
     pub fn sctp(&self) -> Option<RTCSctpTransport<'_>> {
-        if self.sctp_transport().is_started {
+        if self.sctp_transport().described {
             Some(RTCSctpTransport {
                 peer_connection: self,
             })

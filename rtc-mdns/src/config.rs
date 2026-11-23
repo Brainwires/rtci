@@ -72,12 +72,14 @@ pub enum MdnsProbePolicy {
 /// - `local_addr`: IP address to advertise in responses (required for server mode)
 ///
 /// The other settings have builder methods only: [`with_first_query_delay`],
+/// [`with_multi_question_delay`],
 /// [`with_destination_reported`], [`with_unicast_response`], [`with_unicast_replies`],
 /// [`with_multiple_addresses`],
 /// [`with_probe_policy`], [`with_announce_count`], [`with_rate_limit`],
 /// [`with_on_link_subnets`], [`with_jitter_seed`].
 ///
 /// [`with_first_query_delay`]: MdnsConfig::with_first_query_delay
+/// [`with_multi_question_delay`]: MdnsConfig::with_multi_question_delay
 /// [`with_destination_reported`]: MdnsConfig::with_destination_reported
 /// [`with_unicast_response`]: MdnsConfig::with_unicast_response
 /// [`with_unicast_replies`]: MdnsConfig::with_unicast_replies
@@ -231,6 +233,7 @@ pub struct MdnsConfig {
     pub local_ip: Option<IpAddr>,
 
     pub(crate) first_query_delay: bool,
+    pub(crate) multi_question_delay: bool,
     pub(crate) unicast_response: bool,
     pub(crate) unicast_replies: bool,
     pub(crate) destination_reported: bool,
@@ -250,6 +253,7 @@ impl Default for MdnsConfig {
             local_names: Vec::new(),
             local_ip: None,
             first_query_delay: false,
+            multi_question_delay: false,
             unicast_response: false,
             unicast_replies: true,
             destination_reported: false,
@@ -352,6 +356,17 @@ impl MdnsConfig {
     /// `poll_write` right after the `handle_timeout` that started it.
     pub fn with_first_query_delay(mut self, delay: bool) -> Self {
         self.first_query_delay = delay;
+        self
+    }
+
+    /// Whether the answers to a query of more than one question wait a random 20 to 120 ms
+    /// even when every question is about a name of ours (RFC 6762 section 6.3: "for query
+    /// messages containing more than one question, all (non-defensive) answers SHOULD be
+    /// randomly delayed"). Off by default here: a message that asks only about our own
+    /// unique names (an A and an AAAA question for one name, as browsers and this crate ask)
+    /// is answered at once, as section 6 allows for unique records. `rtc-ice` turns it on.
+    pub fn with_multi_question_delay(mut self, delay: bool) -> Self {
+        self.multi_question_delay = delay;
         self
     }
 

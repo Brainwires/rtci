@@ -197,6 +197,8 @@ pub struct MulticastDNS {
     pub local_ip: Option<IpAddr>,
     /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
     pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_multi_question_delay`]. `None`: on.
+    pub multi_question_delay: Option<bool>,
     /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
     pub destination_reported: bool,
     /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
@@ -219,6 +221,7 @@ impl Default for MulticastDNS {
             local_name: "".to_string(),
             local_ip: None,
             first_query_delay: None,
+            multi_question_delay: None,
             destination_reported: false,
             unicast_response: false,
             rate_limit: None,
@@ -299,6 +302,8 @@ pub struct IceBehaviour {
     pub data_from_selected_pair_only: bool,
     /// See [`SettingEngineBuilder::with_ice_data_before_nomination`].
     pub send_data_before_nomination: bool,
+    /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
+    pub pair_before_conveyed: bool,
 }
 
 /// Replay attack protection window sizes.
@@ -455,11 +460,19 @@ pub struct SettingEngine {
     /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
     /// on.
     pub(crate) sctp_zero_checksum: Option<bool>,
+    /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
+    pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
+    pub(crate) sctp_rto: Option<sctp::RtoConfig>,
+    /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
+    pub(crate) sctp_max_retransmissions: Option<usize>,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
     pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_data_channel_send_before_ack`].
+    pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
@@ -476,6 +489,12 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
+    /// and the methods after it).
+    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
+    /// How the engine's TURN-over-TLS connections verify their server
+    /// ([`SettingEngineBuilder::with_turn_tls`]).
+    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
 }
 
 impl SettingEngine {
@@ -1311,6 +1330,15 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the mDNS answers to a query of more than one question (an A and an AAAA
+    /// question for a published name, as browsers ask) wait a random 20 to 120 ms (RFC 6762
+    /// section 6.3). On by default; `false` answers a query about the engine's own names only
+    /// at once.
+    pub fn with_multicast_dns_multi_question_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.multi_question_delay = Some(delay);
+        self
+    }
+
     /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
     /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
     /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
@@ -1465,6 +1493,19 @@ impl SettingEngineBuilder {
     /// arrives before the nomination does.
     pub fn with_ice_data_before_nomination(mut self, enabled: bool) -> Self {
         self.0.ice.send_data_before_nomination = enabled;
+        self
+    }
+
+    /// Pairs a local candidate as soon as it is added, before the application has it to
+    /// trickle. Off by default: RFC 8838 section 10 ("A Trickle ICE agent MUST NOT pair a local
+    /// candidate until it has been trickled to the remote party"), so a local candidate is
+    /// paired once the application has taken its `OnIceCandidateEvent` from
+    /// [`poll_event`](crate::sansio::Protocol::poll_event), or once a local description is
+    /// set (it lists the candidates gathered so far), whichever comes first. Turning this on
+    /// restores the earlier behaviour: checks may leave on a candidate the peer has not
+    /// heard of yet, which it then learns as peer-reflexive.
+    pub fn with_ice_pairing_before_candidates_are_conveyed(mut self, enabled: bool) -> Self {
+        self.0.ice.pair_before_conveyed = enabled;
         self
     }
 
@@ -2009,6 +2050,40 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The number of SCTP streams this endpoint asks for and accepts in each direction
+    /// (the OS and MIS of its INIT or INIT ACK, RFC 9260 section 3.3.2). The association has
+    /// the smaller of both sides' counts, which is W3C `RTCSctpTransport.maxChannels`
+    /// (webrtc-pc 6.1.1): a data channel id at or above it cannot be used. Unset, the default,
+    /// is 65535, as browsers ask for; a value of 0 is raised to 1.
+    pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
+        self.0.sctp_max_streams = Some(streams.max(1));
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the SCTP association (RFC 9260 sections 6.3.1 and
+    /// 16): the retransmission timeout before a round trip is measured, and its bounds. Unset,
+    /// the default, is the RFC's recommendation: 1, 1 and 60 seconds. A minimum or maximum of
+    /// zero is raised to a millisecond, a maximum below the minimum to the minimum.
+    ///
+    /// With [`Self::with_sctp_max_retransmissions`] this bounds how long the association keeps
+    /// retransmitting to a peer that does not answer before it fails (W3C webrtc-pc 6.2: the
+    /// data channels then fail with `sctp-failure`). At the defaults that is minutes, longer
+    /// than ICE consent (30 seconds) takes to fail the path: an application that wants SCTP
+    /// itself to report an unreachable peer sooner (a path ICE still thinks alive) lowers it.
+    pub fn with_sctp_rto(mut self, initial: Duration, min: Duration, max: Duration) -> Self {
+        self.0.sctp_rto = Some(sctp::RtoConfig { initial, min, max });
+        self
+    }
+
+    /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
+    /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
+    /// takes before it declares the peer unreachable and fails. Unset, the default, is the
+    /// RFC's 10. See [`Self::with_sctp_rto`].
+    pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
+        self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
     /// Whether a message over 16 KB is refused when the SCTP association does not interleave
     /// user messages. On by default: RFC 8831 section 6.6 says "As long as message
     /// interleaving is not supported, the sender SHOULD limit the maximum message size to
@@ -2038,6 +2113,22 @@ impl SettingEngineBuilder {
     /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
+    /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
+    ///
+    /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
+    /// start sending messages containing user data without waiting for the reception of the
+    /// corresponding DATA_CHANNEL_ACK message". The data goes out ordered behind the OPEN, and
+    /// a peer that implements RFC 8832 (any browser, this engine) takes it as the ACK would.
+    ///
+    /// [`Error::ErrDataChannelNotOpen`]: shared::error::Error::ErrDataChannelNotOpen
+    pub fn with_data_channel_send_before_ack(mut self, enabled: bool) -> Self {
+        self.0.data_channel_send_before_ack = enabled;
         self
     }
 
@@ -2157,6 +2248,61 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Whether the engine gathers TCP host candidates itself (RFC 6544 section 4.1 says it
+    /// should be configurable; browsers gather them by default). On by default: for the
+    /// address of each UDP host candidate the application adds, the engine asks its driver
+    /// for listeners (`RTCPeerConnection::poll_stream_command`) and adds a passive and a
+    /// simultaneous-open candidate on them and an active one (port 9), whose connections it
+    /// opens itself. A driver that never serves the stream interface gets no TCP candidate.
+    /// `false`: no TCP candidate but those the application adds.
+    pub fn with_tcp_candidate_gathering(mut self, gather: bool) -> Self {
+        self.0.streams.tcp_candidates = gather;
+        self
+    }
+
+    /// Whether the gathered TCP candidates include a simultaneous-open one (RFC 6544 section
+    /// 5.1: one passive and one S-O host candidate per interface). On by default; its
+    /// listener and its connections bind with `reuse_address`. Browsers neither gather nor
+    /// pair them (they connect to one as to a passive candidate, which works).
+    pub fn with_tcp_simultaneous_open(mut self, simultaneous_open: bool) -> Self {
+        self.0.streams.simultaneous_open = simultaneous_open;
+        self
+    }
+
+    /// Whether the engine closes its ICE-TCP connections that carry no selected pair once ICE
+    /// has completed (RFC 6544 section 8, SHOULD). On by default.
+    pub fn with_tcp_close_unused_connections(mut self, close: bool) -> Self {
+        self.0.streams.close_unused_connections = close;
+        self
+    }
+
+    /// The limits of the engine's stream transports: the bytes of a connection the driver may
+    /// hold unwritten, the bytes queued beyond which a packet is dropped whole, and the number
+    /// of connections. See [`StreamConfig`](shared::stream::StreamConfig).
+    pub fn with_stream_limits(mut self, limits: shared::stream::StreamConfig) -> Self {
+        self.0.streams.limits = limits;
+        self
+    }
+
+    /// Whether the engine runs the configuration's `turns:` and `turn:...?transport=tcp`
+    /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
+    /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
+    /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
+    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
+    /// application's.
+    pub fn with_turn_over_streams(mut self, run: bool) -> Self {
+        self.0.streams.turn = run;
+        self
+    }
+
+    /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
+    /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
+    /// server is used.
+    pub fn with_turn_tls(mut self, tls: crate::peer_connection::turn_tls::TurnTlsConfig) -> Self {
+        self.0.turn_tls = tls;
         self
     }
 

@@ -3,6 +3,7 @@ name = "rtc-rtp"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "RTC RTP in Rust"
 license.workspace = true
 documentation = "https://docs.rs/rtc-rtp"

@@ -349,7 +349,7 @@ impl Client {
         } else {
             TransactionType::AllocateAttempt(Box::new(state))
         };
-        self.perform_transaction(now, &msg, to, transaction_type, Some(credential));
+        self.perform_transaction(now, &msg, to, transaction_type, Some(credential))?;
         Ok(())
     }
 

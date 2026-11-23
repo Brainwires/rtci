@@ -652,12 +652,12 @@ fn target_bitrate_is_the_streams_own_target() {
 
     stats.get_or_create_outbound_rtp_streams(10, RtpCodecKind::Video, "0", "", 0, None, 0);
     assert_eq!(targets(&stats), [(10, None)], "no estimate yet");
-    stats.on_target_bitrate(800_000.0);
+    stats.on_target_bitrate(800_000.0, &std::collections::HashMap::new());
     assert_eq!(targets(&stats), [(10, Some(800_000.0))]);
 
     // A second stream: the estimate is the connection's, not either stream's.
     stats.get_or_create_outbound_rtp_streams(11, RtpCodecKind::Video, "1", "", 0, None, 1);
-    stats.on_target_bitrate(900_000.0);
+    stats.on_target_bitrate(900_000.0, &std::collections::HashMap::new());
     assert_eq!(targets(&stats), [(10, None), (11, None)]);
 
     // The encoder says what it aims at for one of them.

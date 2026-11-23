@@ -142,6 +142,14 @@ pub(crate) struct SctpTransport {
     // so we need a dedicated field
     pub(crate) is_started: bool,
 
+    /// W3C `[[SctpTransport]]` is not null: an applied offer described an SCTP association
+    /// (RFC 8841 section 10.2), and no answer has closed it since (sections 10.3, 10.4). The
+    /// transport is exposed ("connecting" until its association is up) from then on.
+    pub(crate) described: bool,
+    /// W3C `[[LastStableStateSctpTransport]]`: `described` in the last stable state, what a
+    /// rollback brings back.
+    pub(crate) last_stable_described: bool,
+
     // The *configured* ceiling from SettingEngine — an input to the negotiation below, not the
     // value W3C `maxMessageSize` reports. See `negotiated_max_message_size`.
     pub(crate) max_message_size: SctpMaxMessageSize,
@@ -178,6 +186,18 @@ pub(crate) struct SctpTransport {
     // it too: the association runs over DTLS, which is the alternate error detection method
     // the RFC defines (section 6). On by default.
     pub(crate) zero_checksum: bool,
+
+    // The stream count asked for and accepted in each direction
+    // (`SettingEngineBuilder::with_sctp_max_streams`); `None` keeps the association's 65535.
+    pub(crate) max_streams: Option<u16>,
+
+    // RTO.Initial / RTO.Min / RTO.Max (`SettingEngineBuilder::with_sctp_rto`); `None` keeps
+    // RFC 9260's.
+    pub(crate) rto: Option<::sctp::RtoConfig>,
+
+    // Association.Max.Retrans (`SettingEngineBuilder::with_sctp_max_retransmissions`); `None`
+    // keeps RFC 9260's 10.
+    pub(crate) max_retransmissions: Option<usize>,
 
     // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
     // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
@@ -252,6 +272,8 @@ impl SctpTransport {
             sctp_associations: HashMap::new(),
 
             is_started: false,
+            described: false,
+            last_stable_described: false,
             max_message_size,
             negotiated_max_message_size: None,
             negotiated_max_buffer_size: None,
@@ -261,6 +283,9 @@ impl SctpTransport {
             weighted_fair_queueing: true,
             message_interleaving: true,
             zero_checksum: true,
+            max_streams: None,
+            rto: None,
+            max_retransmissions: None,
             limit_message_size_without_interleaving: true,
             cookie_provider: None,
             path_mtu: None,
@@ -445,6 +470,26 @@ impl SctpTransport {
     /// (RFC 9653).
     pub(crate) fn with_zero_checksum(mut self, enabled: bool) -> Self {
         self.zero_checksum = enabled;
+        self
+    }
+
+    /// The stream count the association `start()` builds asks for and accepts in each
+    /// direction; `None` keeps the default.
+    pub(crate) fn with_max_streams(mut self, streams: Option<u16>) -> Self {
+        self.max_streams = streams;
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the association `start()` builds; `None` keeps
+    /// the defaults.
+    pub(crate) fn with_rto(mut self, rto: Option<::sctp::RtoConfig>) -> Self {
+        self.rto = rto;
+        self
+    }
+
+    /// Association.Max.Retrans of the association `start()` builds; `None` keeps the default.
+    pub(crate) fn with_max_retransmissions(mut self, limit: Option<usize>) -> Self {
+        self.max_retransmissions = limit;
         self
     }
 
@@ -671,6 +716,8 @@ impl SctpTransport {
             return Ok(());
         }
         self.is_started = true;
+        // A started association is a transport that exists (`described`).
+        self.described = true;
         self.local_port = local_port;
         self.negotiated_ports = Some((local_port, remote_port));
         self.lost = false;
@@ -750,6 +797,19 @@ impl SctpTransport {
             }));
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
+        }
+        if let Some(streams) = self.max_streams {
+            sctp_transport_config = sctp_transport_config
+                .with_max_num_outbound_streams(streams)
+                .with_max_num_inbound_streams(streams);
+        }
+        if let Some(rto) = self.rto {
+            sctp_transport_config = sctp_transport_config.with_rto_config(rto);
+        }
+        if let Some(limit) = self.max_retransmissions {
+            let mut timers = sctp_transport_config.timer_config();
+            timers.max_t3_rtx_retrans = limit;
+            sctp_transport_config = sctp_transport_config.with_timer_config(timers);
         }
         // RFC 9260 6.2 drops new DATA once a closed window was advertised, so a message larger
         // than the receive buffer could never arrive. Where the `max-message-size` this side
