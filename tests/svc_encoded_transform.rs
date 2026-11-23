@@ -310,3 +310,50 @@ fn get_parameters_after_negotiation_returns_the_configured_mode() -> Result<()> 
     assert_eq!(mode(&mut offerer, without), None);
     Ok(())
 }
+
+/// webrtc-svc 3.2.3: "the user agent MAY configure a different scalability mode" than the one
+/// requested when the codec cannot carry it, and getParameters returns the configured one. The
+/// application's encoder reports the mode it configured; getParameters returns it from then
+/// on. A mode outside the table is a TypeError, an encoding the sender does not have a
+/// RangeError.
+#[test]
+fn get_parameters_returns_the_mode_the_encoder_configured() -> Result<()> {
+    let mut offerer = peer()?;
+    let mut answerer = peer()?;
+    let sender = add(
+        &mut offerer,
+        RtpCodecKind::Video,
+        vec![encoding("", Some("L3T3"), "")],
+    )?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+    let mode = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+        pc.rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .encodings[0]
+            .scalability_mode
+            .clone()
+    };
+    assert_eq!(mode(&mut offerer).as_deref(), Some("L3T3"), "as requested");
+    offerer
+        .rtp_sender(sender)
+        .expect("sender")
+        .set_configured_scalability_mode(0, Some("L1T3"))?;
+    assert_eq!(mode(&mut offerer).as_deref(), Some("L1T3"), "as configured");
+    let mut handle = offerer.rtp_sender(sender).expect("sender");
+    assert!(matches!(
+        handle.set_configured_scalability_mode(0, Some("L9T9")),
+        Err(Error::TypeError(_))
+    ));
+    assert!(matches!(
+        handle.set_configured_scalability_mode(3, Some("L1T1")),
+        Err(Error::RangeError(_))
+    ));
+    Ok(())
+}

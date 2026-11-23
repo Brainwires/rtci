@@ -22,20 +22,20 @@ MUST-level rows (algorithm steps, members, attributes and enum values count as M
 
 | Spec | Rows | tested | untested | partial | missing | violated | n/a |
 |---|---|---|---|---|---|---|---|
-| webrtc-pc | 957 | 767 | 22 | 57 | 22 | 0 | 61 |
-| webrtc-stats | 263 | 254 | 2 | 1 | 0 | 0 | 1 |
-| webrtc-extensions | 76 | 57 | 1 | 1 | 0 | 0 | 14 |
-| webrtc-priority | 15 | 13 | 0 | 0 | 1 | 0 | 0 |
-| webrtc-encoded-transform | 54 | 23 | 5 | 10 | 3 | 0 | 12 |
+| webrtc-pc | 957 | 830 | 1 | 20 | 17 | 0 | 61 |
+| webrtc-stats | 263 | 257 | 0 | 0 | 0 | 0 | 1 |
+| webrtc-extensions | 76 | 59 | 0 | 0 | 0 | 0 | 14 |
+| webrtc-priority | 15 | 14 | 0 | 0 | 0 | 0 | 0 |
+| webrtc-encoded-transform | 54 | 41 | 0 | 0 | 0 | 0 | 12 |
 | RFC 9605 | 40 | 25 | 1 | 0 | 3 | 0 | 3 |
 | webrtc-svc | 56 | 51 | 0 | 0 | 0 | 0 | 1 |
-| mediacapture-main (section 4) | 28 | 25 | 1 | 1 | 0 | 0 | 1 |
-| draft-ietf-avtcore-rtp-sframe-03 | 36 | 24 | 3 | 1 | 1 | 1 | 0 |
-| **All** | **1525** | **1239** | **35** | **71** | **30** | **1** | **93** |
+| mediacapture-main (section 4) | 28 | 26 | 0 | 0 | 0 | 0 | 2 |
+| draft-ietf-avtcore-rtp-sframe-03 | 36 | 28 | 0 | 0 | 1 | 1 | 0 |
+| **All** | **1525** | **1331** | **2** | **20** | **21** | **1** | **94** |
 
-The Rows column counts all levels; the verdict columns count MUST rows. SHOULD rows, all specs: tested 11 / untested 0 / partial 1 / missing 1 / violated 0 / n-a 11. MAY rows: tested 10 / untested 2 / partial 2 / missing 2 / violated 0 / n-a 16. Recounted from the tables on branch `conf/pc-18-sframe-transform` (2026-11-22).
+The Rows column counts all levels; the verdict columns count MUST rows. SHOULD rows, all specs: tested 11 / untested 0 / partial 1 / missing 1 / violated 0 / n-a 11. MAY rows: tested 14 / untested 0 / partial 2 / missing 0 / violated 0 / n-a 16. Recounted from the tables on branch `conf/pc-26-train-fixes`.
 
-Of the MUST rows that bind the engine (1376 after `n/a`), 1239 (90%) are implemented and tested, 35 (3%) implemented without a test that would catch a regression, 71 (5%) partial, 30 (2%) missing and 1 (0%) violated.
+Of the MUST rows that bind the engine (1375 after `n/a`), 1331 (97%) are implemented and tested, 2 (0%) implemented without a test that would catch a regression, 20 (1%) partial, 21 (2%) missing and 1 (0%) violated.
 
 Statistics members (webrtc-stats, 206 member rows): 126 measured by the engine, 69 present only from the application feed, 11 absent.
 

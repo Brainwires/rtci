@@ -1917,11 +1917,15 @@ impl RTCPeerConnection {
         let cname = media_engine.rtcp_cname.as_str();
         // Every transceiver has a sender; one that has neither a track nor a sending
         // direction is not described (RFC 9429 section 5.2.1).
+        let negotiated_header_extensions = transceiver.negotiated_header_extensions().to_vec();
         if transceiver.describes_sender()
             && let Some(sender) = transceiver.sender_mut()
         {
             let (encodings, track) = (
-                sender.get_parameters(media_engine).encodings.clone(),
+                sender
+                    .get_parameters(media_engine, &negotiated_header_extensions)
+                    .encodings
+                    .clone(),
                 sender.track(),
             );
 

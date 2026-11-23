@@ -176,3 +176,46 @@ pub struct RTCIceCandidatePairStats {
     /// by the ICE controlling agent.
     pub nominated: bool,
 }
+
+#[cfg(test)]
+mod pair_state_tests {
+    use super::*;
+
+    /// webrtc-stats 8.21: every ICE agent pair state (RFC 8445 6.1.2.6) is reported as the
+    /// enum value of the same name, "frozen" and "failed" included, which a call between two
+    /// engines does not reach (the agent stops checking once a pair is nominated).
+    #[test]
+    fn every_agent_pair_state_is_reported_by_its_stats_value() {
+        for (agent, stats, json) in [
+            (
+                CandidatePairState::Frozen,
+                RTCStatsIceCandidatePairState::Frozen,
+                "\"frozen\"",
+            ),
+            (
+                CandidatePairState::Waiting,
+                RTCStatsIceCandidatePairState::Waiting,
+                "\"waiting\"",
+            ),
+            (
+                CandidatePairState::InProgress,
+                RTCStatsIceCandidatePairState::InProgress,
+                "\"in-progress\"",
+            ),
+            (
+                CandidatePairState::Failed,
+                RTCStatsIceCandidatePairState::Failed,
+                "\"failed\"",
+            ),
+            (
+                CandidatePairState::Succeeded,
+                RTCStatsIceCandidatePairState::Succeeded,
+                "\"succeeded\"",
+            ),
+        ] {
+            let reported = RTCStatsIceCandidatePairState::from(agent);
+            assert_eq!(reported, stats);
+            assert_eq!(serde_json::to_string(&reported).unwrap(), json);
+        }
+    }
+}

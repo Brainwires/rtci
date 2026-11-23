@@ -277,3 +277,229 @@ fn the_identity_assertion_is_carried_in_offers_and_answers() -> Result<()> {
     assert!(attribute_values(&offer, "identity").is_empty());
     Ok(())
 }
+
+/// RFC 8827 section 6.3: the local ICE username fragment and password are the engine's, not
+/// the application's: every peer connection draws its own, random (at least 24 bits of
+/// ufrag and 128 bits of password in the ice-char alphabet, RFC 8445 section 5.3), and the
+/// configuration (`RTCConfiguration`) has no way to set them. Setting them is a
+/// `SettingEngine` option for native applications, off unless called, which a script-facing
+/// binding must not expose.
+#[test]
+fn the_local_ice_credentials_are_drawn_by_the_engine() -> Result<()> {
+    let ice_char = |c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/';
+    let mut seen = HashSet::new();
+    for _ in 0..20 {
+        let mut offerer = peer("10.0.0.1:5000")?;
+        offerer.pc.create_data_channel("data", None)?;
+        let offer = offerer.pc.create_offer(None)?.sdp;
+        let ufrag = attribute_values(&offer, "ice-ufrag").remove(0);
+        let pwd = attribute_values(&offer, "ice-pwd").remove(0);
+        assert!(ufrag.len() >= 4 && ufrag.chars().all(ice_char), "{ufrag}");
+        assert!(pwd.len() >= 22 && pwd.chars().all(ice_char), "{pwd}");
+        assert!(seen.insert(ufrag.clone()), "ufrag {ufrag} twice");
+        assert!(seen.insert(pwd.clone()), "pwd {pwd} twice");
+    }
+    // Only the native option sets them.
+    let mut chosen = Peer::new(
+        "10.0.0.1:5000",
+        SettingEngineBuilder::new()
+            .with_ice_credentials("abcd".to_owned(), "a".repeat(22))
+            .build(),
+    )?;
+    chosen.pc.create_data_channel("data", None)?;
+    let offer = chosen.pc.create_offer(None)?.sdp;
+    assert_eq!(
+        attribute_values(&offer, "ice-ufrag"),
+        vec!["abcd".to_owned()]
+    );
+    Ok(())
+}
+
+/// The `a=fingerprint` values of an SDP, as fingerprints.
+fn fingerprints_of(sdp: &str) -> Vec<rtc::peer_connection::transport::RTCDtlsFingerprint> {
+    attribute_values(sdp, "fingerprint")
+        .into_iter()
+        .map(|value| {
+            let (algorithm, value) = value.split_once(' ').expect("algorithm and value");
+            rtc::peer_connection::transport::RTCDtlsFingerprint {
+                algorithm: algorithm.to_owned(),
+                value: value.to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// RFC 8827 sections 5.1.4 and 7.4: the identity the application established (from its
+/// identity provider's verification of the peer's assertion) covers every fingerprint of the
+/// remote description and the certificate the DTLS association authenticated; it holds for
+/// the associations made with those fingerprints, a newly established one replaces it, and
+/// it is discarded when the remote description's fingerprints change.
+#[test]
+fn the_peer_identity_is_bound_to_the_fingerprints_and_the_certificate_in_use() -> Result<()> {
+    use rtc::peer_connection::identity::RTCPeerIdentity;
+    const ASSERTION: &str = "YWxpY2U=";
+    let mut world = world()?;
+    world.peers[0]
+        .pc
+        .set_identity_assertion(Some(ASSERTION.to_owned()))?;
+    let verified = |identity: &str, fingerprints| RTCPeerIdentity {
+        identity: identity.to_owned(),
+        fingerprints,
+    };
+
+    // Nothing to verify yet.
+    assert_eq!(
+        world.peers[1]
+            .pc
+            .set_peer_identity(verified("alice@example.org", vec![])),
+        Err(Error::ErrNoRemoteIdentityAssertion)
+    );
+    let (offer, _) = world.connect()?;
+    let described = fingerprints_of(&offer);
+    assert!(!described.is_empty());
+    let bob = &mut world.peers[1].pc;
+    assert_eq!(bob.peer_identity(), None);
+
+    // Section 7.4: an identity that covers fewer fingerprints than the description has is
+    // refused; one that covers them all, and so the certificate in use, is the peer's.
+    let mut fewer = described.clone();
+    fewer[0].value = fewer[0].value.replace(|c: char| c.is_ascii_hexdigit(), "0");
+    assert_eq!(
+        bob.set_peer_identity(verified("alice@example.org", fewer)),
+        Err(Error::ErrIdentityFingerprintsNotCovered)
+    );
+    bob.set_peer_identity(verified("alice@example.org", described.clone()))?;
+    assert_eq!(bob.peer_identity(), Some("alice@example.org"));
+
+    // Section 5.1.4: a newly received identity applies to the existing association.
+    bob.set_peer_identity(verified("alice@example.net", described.clone()))?;
+    assert_eq!(bob.peer_identity(), Some("alice@example.net"));
+
+    // A renegotiation with the same fingerprints keeps it.
+    world.exchange(0)?;
+    assert_eq!(world.peers[1].pc.peer_identity(), Some("alice@example.net"));
+
+    // Fingerprints that change discard it: here a description that names another certificate
+    // (the answerer does not verify fingerprints, so the association carries on).
+    let other = "sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF";
+    let line = format!("a=fingerprint:{other}");
+    let changed = |sdp: &str| replace_lines(sdp, "a=fingerprint:", Some(&line));
+    let _ = world.exchange_with(0, changed, keep);
+    assert_eq!(world.peers[1].pc.peer_identity(), None);
+    Ok(())
+}
+
+/// RFC 8827 section 7.4: "The RP browser MUST verify that the in-use certificate for a DTLS
+/// connection is in the set of fingerprints returned from the IdP". With fingerprint checks
+/// off at the answerer, the offerer's certificate is not the one its description names: an
+/// identity that covers the description, and not that certificate, is refused once the
+/// association is up.
+#[test]
+fn an_identity_that_does_not_cover_the_certificate_in_use_is_refused() -> Result<()> {
+    use rtc::peer_connection::identity::RTCPeerIdentity;
+    let unverified = Peer::new(
+        "10.0.0.2:5000",
+        SettingEngineBuilder::new()
+            .with_disable_certificate_fingerprint_verification(true)
+            .build(),
+    )?;
+    let mut world = World::new(peer("10.0.0.1:5000")?, unverified);
+    world.peers[0]
+        .pc
+        .set_identity_assertion(Some("YWxpY2U=".to_owned()))?;
+    let named = "sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF";
+    let line = format!("a=fingerprint:{named}");
+    world.peers[0].pc.create_data_channel("data", None)?;
+    world.exchange_with(
+        0,
+        |sdp| replace_lines(sdp, "a=fingerprint:", Some(&line)),
+        keep,
+    )?;
+    world.trickle()?;
+    world.run("the connection", |peers| {
+        peers.iter().all(|p| p.connected() && p.channel.is_some())
+    })?;
+    let described = vec![rtc::peer_connection::transport::RTCDtlsFingerprint {
+        algorithm: "sha-256".to_owned(),
+        value: named.split_once(' ').unwrap().1.to_owned(),
+    }];
+    assert_eq!(
+        world.peers[1].pc.set_peer_identity(RTCPeerIdentity {
+            identity: "alice@example.org".to_owned(),
+            fingerprints: described,
+        }),
+        Err(Error::ErrIdentityCertificateNotCovered)
+    );
+    assert_eq!(world.peers[1].pc.peer_identity(), None);
+    Ok(())
+}
+
+/// The bytes of `needle` in the forms a `Debug` string could carry them: a byte list, and hex.
+fn debug_forms(needle: &[u8]) -> Vec<String> {
+    let list = format!("{needle:?}");
+    let hex: String = needle.iter().map(|b| format!("{b:02x}")).collect();
+    let hex_upper = hex.to_uppercase();
+    vec![list[1..list.len() - 1].to_owned(), hex, hex_upper]
+}
+
+/// RFC 8827 section 6.3 and RFC 8826 section 4.2.1: the ICE (STUN) transaction ids are not
+/// available to the application, diagnostics included. Two peers connect; the transaction id
+/// of every Binding request either wrote appears in none of the events either raised and in
+/// neither's statistics.
+#[test]
+fn stun_transaction_ids_reach_neither_events_nor_statistics() -> Result<()> {
+    let mut world = world()?;
+    world.connect()?;
+    world.run_for(Duration::from_secs(10), |_| false);
+    let now = world.now;
+    let mut ids = HashSet::new();
+    for peer in &world.peers {
+        for datagram in &peer.written {
+            // A STUN Binding request or response (RFC 8489 section 5): type 0x0001 / 0x0101,
+            // the magic cookie, then the 96-bit transaction id.
+            if datagram.len() >= 20 && datagram[0] < 2 && datagram[4..8] == [0x21, 0x12, 0xA4, 0x42]
+            {
+                ids.insert(datagram[8..20].to_vec());
+            }
+        }
+    }
+    assert!(!ids.is_empty(), "the peers ran connectivity checks");
+    for peer in world.peers.iter_mut() {
+        let stats = format!(
+            "{:?}",
+            peer.pc.get_stats(now, rtc::statistics::StatsSelector::None)
+        );
+        let events = peer.events.join("\n");
+        for id in &ids {
+            for form in debug_forms(id) {
+                assert!(!stats.contains(&form), "a transaction id in the statistics");
+                assert!(!events.contains(&form), "a transaction id in an event");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8827 section 5.1.4: when the fingerprints change, the next description carries a new
+/// identity assertion or none. A connection's certificates are fixed when it is built, so its
+/// fingerprints never change: not across renegotiations, and not when it asks for a new DTLS
+/// association (`renew_dtls_association`, which changes the `tls-id` only). The assertion
+/// set for the connection stays the one that covers them.
+#[test]
+fn a_new_dtls_association_keeps_the_fingerprints_the_identity_covers() -> Result<()> {
+    let mut world = world()?;
+    let (first_offer, _) = world.connect()?;
+    world.peers[0].pc.renew_dtls_association();
+    let (offer, _) = world.exchange(0)?;
+    assert_ne!(
+        attribute_values(&offer, "tls-id"),
+        attribute_values(&first_offer, "tls-id"),
+        "a new association is asked for"
+    );
+    assert_eq!(fingerprints_of(&offer), fingerprints_of(&first_offer));
+    world.run("the new association", |peers| {
+        peers.iter().all(|p| p.connected())
+    })?;
+    world.ping_pong("after the new association")?;
+    Ok(())
+}

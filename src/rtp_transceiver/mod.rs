@@ -116,6 +116,7 @@ pub mod rtp_receiver;
 pub mod rtp_sender;
 #[cfg(test)]
 mod rtp_transceiver_test;
+pub mod sframe_transform;
 
 /// SSRC (Synchronization Source) identifier.
 ///
@@ -520,6 +521,12 @@ impl RTCRtpTransceiver<'_> {
     ) -> Result<()> {
         let current = self.get_header_extensions_to_negotiate();
         crate::rtp_transceiver::header_extension_control::validate(&current, &extensions)?;
+        let mut extensions = extensions;
+        crate::rtp_transceiver::header_extension_control::restrict_to_capabilities(
+            &self.peer_connection.media_engine,
+            self.peer_connection.rtp_transceivers[self.id].kind(),
+            &mut extensions,
+        );
         self.peer_connection.rtp_transceivers[self.id]
             .set_header_extensions_to_negotiate(extensions);
         Ok(())

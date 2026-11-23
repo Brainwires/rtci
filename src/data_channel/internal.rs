@@ -50,6 +50,10 @@ pub(crate) struct RTCDataChannelInternal {
     /// this less what SCTP has taken from the stream's queue.
     pub(crate) bytes_queued: u64,
 
+    /// What SCTP had taken from the stream's queue when the stream was closed or lost
+    /// (`SCTPStreamDequeued`); `None` while the stream is live or before it had one.
+    pub(crate) bytes_dequeued_at_close: Option<u64>,
+
     /// Deadline by which an in-band channel's DCEP handshake must complete.
     /// Set when the channel is dialed; cleared on handshake completion or close.
     pub(crate) handshake_deadline: Option<Instant>,
@@ -82,6 +86,7 @@ impl Default for RTCDataChannelInternal {
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,
             bytes_queued: 0,
+            bytes_dequeued_at_close: None,
             handshake_deadline: None,
             close_emitted: false,
             failed: false,
@@ -115,6 +120,7 @@ impl RTCDataChannelInternal {
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,
             bytes_queued: 0,
+            bytes_dequeued_at_close: None,
             handshake_deadline: None,
             close_emitted: false,
             failed: false,

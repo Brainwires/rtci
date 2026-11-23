@@ -1,6 +1,7 @@
 //! The TLS 1.3 handshake messages DTLS 1.3 carries (RFC 8446 section 4, RFC 9147 sections 5.2
 //! to 5.4 and 9), as bodies: what follows the handshake header.
 
+use super::certificate_checks::{OidFilter, parse_oid_filters};
 use super::codec::*;
 use super::{DTLS1_2_WIRE_VERSION, DTLS1_3_WIRE_VERSION};
 use shared::error::{Error, Result};
@@ -432,14 +433,19 @@ pub(crate) fn certificate_request(context: &[u8], signature_schemes: &[u16]) -> 
     body
 }
 
-/// Reads a CertificateRequest: its context and the signature schemes it lists.
+/// A CertificateRequest as read: its context, signature schemes and oid_filters.
+pub(crate) type CertificateRequestParts<'a> = (&'a [u8], Vec<u16>, Vec<OidFilter>);
+
+/// Reads a CertificateRequest: its context, the signature schemes it lists and its
+/// oid_filters (RFC 8446 section 4.2.5; empty without the extension). Other extensions are
+/// ignored (section 4.3.2).
 ///
 /// # Errors
 ///
 /// decode_error when malformed, missing_extension without signature_algorithms.
 pub(crate) fn parse_certificate_request(
     body: &[u8],
-) -> std::result::Result<(&[u8], Vec<u16>), Refusal> {
+) -> std::result::Result<CertificateRequestParts<'_>, Refusal> {
     let mut reader = Reader::new(body);
     let context = reader.vec8().map_err(decode_error)?;
     let block = reader.vec16().map_err(decode_error)?;
@@ -451,7 +457,15 @@ pub(crate) fn parse_certificate_request(
             Error::ErrNoAvailableSignatureSchemes,
         ));
     };
-    Ok((context, parse_u16_list(schemes).map_err(decode_error)?))
+    let oid_filters = match find_extension(&extensions, EXT_OID_FILTERS) {
+        Some(data) => parse_oid_filters(data).map_err(decode_error)?,
+        None => vec![],
+    };
+    Ok((
+        context,
+        parse_u16_list(schemes).map_err(decode_error)?,
+        oid_filters,
+    ))
 }
 
 /// A KeyUpdate message (RFC 8446 section 4.6.3).

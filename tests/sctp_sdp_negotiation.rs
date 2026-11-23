@@ -164,7 +164,12 @@ fn a_data_section_without_a_valid_sctp_port_is_refused() -> TestResult {
             .err(),
         Some(Error::ErrSDPSctpPortInvalid)
     );
-    assert!(offerer.sctp().is_none());
+    // Nothing of the refused answer applied: the transport the offer created (W3C 4.4.1.6)
+    // is still connecting.
+    assert_eq!(
+        offerer.sctp().map(|sctp| sctp.state()),
+        Some(rtc::peer_connection::transport::RTCSctpTransportState::Connecting)
+    );
     Ok(())
 }
 

@@ -6,7 +6,7 @@ The engine is the layer under the JS API: an `RTCPriorityType` string is the bin
 
 Totals:
 
-- MUST: tested 13 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
+- MUST: tested 14 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 
@@ -17,7 +17,7 @@ Totals:
 | PRIO-3.1-3 | 3.1 | MUST | RTCPriorityType "medium" (DCEP "high", 512) | tested | src/peer_connection/priority.rs (RTCPriorityType) | priority_classes_map_to_and_from_dcep_values | medium, 512 |
 | PRIO-3.1-4 | 3.1 | MUST | RTCPriorityType "high" (DCEP "extra high", 1024) | tested | src/peer_connection/priority.rs (RTCPriorityType) | priority_classes_map_to_and_from_dcep_values | high, 1024 |
 | PRIO-3.2-1 | 3.2 | MUST | RTCRtpEncodingParameters.priority member, default "low" | tested | src/rtp_transceiver/rtp_sender/rtp_encoding_parameters.rs (priority) | datagrams_are_marked_by_their_flows_priority | `RTCRtpEncodingParameters::priority`, `low` by default, set with setParameters |
-| PRIO-3.2-2 | 3.2 | MUST | priority influences bandwidth allocation among senders (rtcweb-transports 4.1) | missing | src/rtp_transceiver/rtp_sender/rtp_encoding_parameters.rs (priority) | - | the engine neither encodes nor paces media and has one bandwidth estimate with no per-sender share; an application that allocates reads priority from the parameters |
+| PRIO-3.2-2 | 3.2 | MUST | priority influences bandwidth allocation among senders (rtcweb-transports 4.1) | tested | `src/peer_connection/priority.rs` (bandwidth_weight, allocate_bandwidth, allocate_target_bitrate), `src/peer_connection/handler/interceptor.rs` (TargetBitrateChanged), `src/rtp_transceiver/rtp_sender/mod.rs` (target_bitrates) | `each_priority_level_gets_twice_the_share_of_the_level_below`, `the_target_is_divided_among_the_senders_by_priority_and_max_bitrate`, `the_congestion_target_reaches_the_sender_capped_at_max_bitrate` | the congestion controller's target is divided among the sending encodings 1 : 2 : 4 : 8 by priority (RFC 8835 section 4.1), each capped at its maxBitrate with the rest shared out; each sender reads its encodings' shares (`target_bitrates`, the streams' `targetBitrate`); data channels are not in the division (SCTP has its own congestion control) |
 | PRIO-3.2-3 | 3.2 | MUST | RTCRtpEncodingParameters.networkPriority member | tested | src/rtp_transceiver/rtp_sender/rtp_encoding_parameters.rs (network_priority) | datagrams_are_marked_by_their_flows_priority |  |
 | PRIO-3.2-4 | 3.2 | MUST | networkPriority sets the DSCP marking of the encoding's packets (rtcweb-transports 4.2) | tested | src/peer_connection/priority.rs (RTCPeerConnection::dscp) | datagrams_are_marked_by_their_flows_priority | the engine performs no I/O: `dscp(&datagram)` gives the socket layer the codepoint of each datagram poll_write returned |
 | PRIO-3.2-5 | 3.2 | MUST | With networkPriority unset, priority controls the DSCP marking | tested | src/peer_connection/priority.rs (rtp_dscp) | datagrams_are_marked_by_their_flows_priority |  |

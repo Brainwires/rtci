@@ -311,6 +311,12 @@ impl RTCPeerConnection {
         .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing.unwrap_or(true))
         .with_message_interleaving(setting_engine.sctp_message_interleaving.unwrap_or(true))
         .with_zero_checksum(setting_engine.sctp_zero_checksum.unwrap_or(true))
+        .with_max_streams(setting_engine.sctp_max_streams)
+        .with_rto(setting_engine.sctp_rto)
+        .with_max_retransmissions(setting_engine.sctp_max_retransmissions)
+        .with_path_mtu_discovery(setting_engine.sctp_path_mtu_discovery.unwrap_or(Some(
+            crate::peer_connection::transport::sctp::SctpPath::DEFAULT_MAX_IP_PACKET,
+        )))
         .with_message_size_limit_without_interleaving(
             setting_engine
                 .sctp_message_size_limit_without_interleaving
@@ -395,6 +401,7 @@ impl RTCPeerConnection {
             transport_closed: false,
             seen_selected_pair_changes: 0,
             identity_assertion: None,
+            peer_identity: None,
             last_stable_state: None,
             pending_remote_transport: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
@@ -1428,6 +1435,45 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
         }
 
+        // W3C 4.4.1.6 [[SctpTransport]]: an offer that describes an SCTP association creates
+        // the transport ("connecting") when there is none; an answer that closes the
+        // association (a rejected data section, `a=sctp-port:0`) makes it null; a rollback
+        // brings back [[LastStableStateSctpTransport]], which every stable state records.
+        let (describes, closes) = describes_sctp_association(sd);
+        match sd.sdp_type {
+            RTCSdpType::Offer if describes => self.sctp_transport_mut().described = true,
+            RTCSdpType::Answer if closes => {
+                // W3C 6.1.2 "closed": the association is closed intentionally by "applying a
+                // remote description that rejects data or changes the SCTP port", so the
+                // transport the application holds goes to "closed" and fires statechange,
+                // although `sctp()` is null from now on.
+                let was = self.sctp().map(|sctp| sctp.state());
+                self.sctp_transport_mut().described = false;
+                if was.is_some_and(|state| {
+                    state != crate::peer_connection::transport::RTCSctpTransportState::Closed
+                }) {
+                    self.announced.sctp = None;
+                    self.pipeline_context.event_outs.push_back(
+                        RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                            crate::peer_connection::transport::RTCSctpTransportState::Closed,
+                        ),
+                    );
+                }
+            }
+            RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
+                self.sctp_transport_mut().described = true;
+            }
+            RTCSdpType::Rollback => {
+                let last = self.sctp_transport().last_stable_described;
+                self.sctp_transport_mut().described = last;
+            }
+            _ => {}
+        }
+        if next_state == RTCSignalingState::Stable {
+            let described = self.sctp_transport().described;
+            self.sctp_transport_mut().last_stable_described = described;
+        }
+
         if matches!(sd.sdp_type, RTCSdpType::Answer) {
             // W3C "set a session description": an answer resets [[LastCreatedOffer]] and
             // [[LastCreatedAnswer]], so a description created for an exchange that is over
@@ -1874,6 +1920,17 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+            // W3C 5.2.9: the send codecs' parameters are the remote description's, the
+            // receive codecs' the local description's.
+            if !is_rejected_media(answered) {
+                let (local, remote) = if we_offered {
+                    (offered, answered)
+                } else {
+                    (answered, offered)
+                };
+                self.rtp_transceivers[i].take_send_fmtp_from_remote(remote);
+                self.rtp_transceivers[i].take_receive_fmtp_from_local(local);
+            }
             // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
             // the offer and the answer both have `a=extmap-allow-mixed`.
             let mixed = !is_rejected_media(answered)
@@ -3447,27 +3504,30 @@ impl RTCPeerConnection {
             // also names the media section of the transport (W3C "surface the candidate").
             self.ice_transport()
                 .describe_local_candidate(&mut rtc_candidate);
-            // W3C webrtc-pc 4.8.1 (RTCIceCandidate constructor, RTCLocalIceCandidateInit):
-            // a local candidate carries the url of the server it was gathered from, and a
-            // relay candidate the protocol to its TURN server: the one the application gave,
-            // else the one its TURN URL names. Any other candidate has no relayProtocol.
-            if rtc_candidate.url.is_none()
-                && matches!(
-                    rtc_candidate.typ,
-                    RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay
-                )
-            {
-                rtc_candidate.url = url.map(str::to_owned);
+            // W3C 4.8.1 `url` and `relayProtocol`: the server a local server-reflexive or
+            // relay candidate was gathered from, and for a relay candidate the protocol to
+            // the TURN server (RTCLocalIceCandidateInit; the application gathers, so it
+            // supplies them). Null for every other candidate.
+            match rtc_candidate.typ {
+                RTCIceCandidateType::Srflx | RTCIceCandidateType::Relay => {
+                    if rtc_candidate.url.is_none() {
+                        rtc_candidate.url = url.map(str::to_owned);
+                    }
+                }
+                _ => rtc_candidate.url = None,
             }
-            rtc_candidate.relay_protocol = if rtc_candidate.typ == RTCIceCandidateType::Relay {
-                relay_protocol
+            if rtc_candidate.typ == RTCIceCandidateType::Relay {
+                rtc_candidate.relay_protocol = relay_protocol
                     .filter(|protocol| *protocol != RTCIceServerTransportProtocol::Unspecified)
                     .unwrap_or_else(|| {
-                        url.map_or_else(Default::default, relay_protocol_of_turn_url)
-                    })
-            } else {
-                RTCIceServerTransportProtocol::Unspecified
-            };
+                        rtc_candidate
+                            .url
+                            .as_deref()
+                            .map_or(RTCIceServerTransportProtocol::Unspecified, |u| {
+                                relay_protocol_of_turn_url(u)
+                            })
+                    });
+            }
             let (ufrag, _) = self.ice_transport().get_local_user_credentials();
             let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
             self.stats_mut()
@@ -4004,6 +4064,44 @@ impl RTCPeerConnection {
         }
 
         Ok(codec_preferences)
+    }
+
+    /// RFC 3711 sections 8 and 9.1, RFC 5764 section 3: the local streams of a connection are
+    /// all protected under one SRTP master key, so no two may have the same SSRC (a two-time
+    /// pad). The SSRCs `encodings` name (media, RTX, FEC) are distinct, and no other sender
+    /// has them; `replacing` is the transceiver whose sender's encodings they replace.
+    pub(super) fn refuse_taken_ssrcs(
+        &self,
+        encodings: &[RTCRtpEncodingParameters],
+        replacing: Option<crate::rtp_transceiver::RTCRtpTransceiverId>,
+    ) -> Result<()> {
+        let ssrcs = |encoding: &RTCRtpEncodingParameters| {
+            let coding = &encoding.rtp_coding_parameters;
+            [
+                coding.ssrc,
+                coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+                coding.fec.as_ref().map(|fec| fec.ssrc),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<SSRC>>()
+        };
+        let mut taken: HashSet<SSRC> = HashSet::new();
+        for (id, transceiver) in self.rtp_transceivers.iter().enumerate() {
+            if Some(id) == replacing || transceiver.stopped() {
+                continue;
+            }
+            if let Some(sender) = transceiver.sender() {
+                taken.extend(sender.send_encodings().iter().flat_map(ssrcs));
+            }
+        }
+        let mut given = HashSet::new();
+        for ssrc in encodings.iter().flat_map(ssrcs) {
+            if taken.contains(&ssrc) || !given.insert(ssrc) {
+                return Err(Error::ErrRTPSenderSsrcTaken(ssrc));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn normalize_sender_track(
@@ -4625,4 +4723,19 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
         assert_eq!(11, unused_ssrc_from([7, 0, 9, 11, 13], &taken));
         assert_eq!(7, unused_ssrc_from([7], &HashSet::new()));
     }
+}
+
+/// Whether `sd` describes an SCTP association (RFC 8841 section 10.2: a data section that is
+/// not rejected, with a non-zero `a=sctp-port`), and whether it closes one (sections 10.3,
+/// 10.4: its data section is rejected or has `a=sctp-port:0`).
+fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
+    let Some(section) = have_data_channel(sd) else {
+        return (false, false);
+    };
+    let zero_port = section
+        .attributes
+        .iter()
+        .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
+    let closed = section.media_name.port.value == 0 || zero_port;
+    (!closed, closed)
 }

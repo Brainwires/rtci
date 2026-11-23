@@ -306,6 +306,18 @@ fn certificate_signature_pair(der: &[u8]) -> Option<SignatureHashAlgorithm> {
     Some(SignatureHashAlgorithm { hash, signature })
 }
 
+/// Whether the end-entity certificate of `chain` is an X.509 version 3 certificate. RFC 5246
+/// section 7.4.6: "The certificate type MUST be X.509v3, unless explicitly negotiated
+/// otherwise"; no other certificate type is negotiated here. A certificate that does not parse
+/// is not one.
+pub(crate) fn is_x509_v3(chain: &[CertificateDer<'static>]) -> bool {
+    chain.first().is_some_and(|leaf| {
+        x509_parser::parse_x509_certificate(leaf.as_ref()).is_ok_and(|(_, certificate)| {
+            certificate.tbs_certificate.version == x509_parser::x509::X509Version::V3
+        })
+    })
+}
+
 /// Whether every certificate of `chain` is signed with a pair in `schemes`: RFC 5246 7.4.2
 /// asks it of the certificates a server sends (against the client's signature_algorithms) and
 /// 7.4.4 of the ones a client sends (against the CertificateRequest).

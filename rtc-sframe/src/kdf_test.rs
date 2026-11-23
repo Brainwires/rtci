@@ -202,3 +202,198 @@ fn the_per_ssrc_key_is_hkdf_of_the_base_key_salted_with_the_ssrc() {
         Err(Error::EmptyBaseKey)
     ));
 }
+
+/// draft-ietf-avtcore-rtp-sframe-03 Appendix A: (cipher suite, base_key, SSRC a, SSRC b, the
+/// keys of a after the derivation and after one and two ratchet steps, the same for b).
+type PerSsrcVector = (
+    u16,
+    &'static str,
+    u32,
+    u32,
+    [&'static str; 3],
+    [&'static str; 3],
+);
+
+const PER_SSRC_VECTORS: &[PerSsrcVector] = &[
+    (
+        0x0001,
+        "000102030405060708090a0b0c0d0e0f",
+        0x12345678,
+        0x98765432,
+        [
+            "f309f118aecdacfbc165cc080022b297100bbb55e483b002d762000a0faa684d",
+            "a8c48a47a6536eda200b4e94e8eaa6602f4f2266bd66284490229540f93127ab",
+            "1141095c432877af08c314e0e2936ce4389d697c74769fb2db911ea467f984dc",
+        ],
+        [
+            "06e5d1b8c6e01f10b592bd2e13ff4b37182b895ec8330d5cc6ec690704043b5f",
+            "7aa3bf333dde545fe56daaf2449fbff1774f6df78ce0b593b59f05f3d1f505dd",
+            "4aa1c3f077b45d4d76cb470690529534721b21eda62bceaa8ec73e59926d25c4",
+        ],
+    ),
+    (
+        0x0002,
+        "000102030405060708090a0b0c0d0e0f",
+        0x12345678,
+        0x98765432,
+        [
+            "f309f118aecdacfbc165cc080022b297100bbb55e483b002d762000a0faa684d",
+            "a8c48a47a6536eda200b4e94e8eaa6602f4f2266bd66284490229540f93127ab",
+            "1141095c432877af08c314e0e2936ce4389d697c74769fb2db911ea467f984dc",
+        ],
+        [
+            "06e5d1b8c6e01f10b592bd2e13ff4b37182b895ec8330d5cc6ec690704043b5f",
+            "7aa3bf333dde545fe56daaf2449fbff1774f6df78ce0b593b59f05f3d1f505dd",
+            "4aa1c3f077b45d4d76cb470690529534721b21eda62bceaa8ec73e59926d25c4",
+        ],
+    ),
+    (
+        0x0003,
+        "000102030405060708090a0b0c0d0e0f",
+        0x12345678,
+        0x98765432,
+        [
+            "f309f118aecdacfbc165cc080022b297100bbb55e483b002d762000a0faa684d",
+            "a8c48a47a6536eda200b4e94e8eaa6602f4f2266bd66284490229540f93127ab",
+            "1141095c432877af08c314e0e2936ce4389d697c74769fb2db911ea467f984dc",
+        ],
+        [
+            "06e5d1b8c6e01f10b592bd2e13ff4b37182b895ec8330d5cc6ec690704043b5f",
+            "7aa3bf333dde545fe56daaf2449fbff1774f6df78ce0b593b59f05f3d1f505dd",
+            "4aa1c3f077b45d4d76cb470690529534721b21eda62bceaa8ec73e59926d25c4",
+        ],
+    ),
+    (
+        0x0004,
+        "000102030405060708090a0b0c0d0e0f",
+        0x12345678,
+        0x98765432,
+        [
+            "f309f118aecdacfbc165cc080022b297100bbb55e483b002d762000a0faa684d",
+            "a8c48a47a6536eda200b4e94e8eaa6602f4f2266bd66284490229540f93127ab",
+            "1141095c432877af08c314e0e2936ce4389d697c74769fb2db911ea467f984dc",
+        ],
+        [
+            "06e5d1b8c6e01f10b592bd2e13ff4b37182b895ec8330d5cc6ec690704043b5f",
+            "7aa3bf333dde545fe56daaf2449fbff1774f6df78ce0b593b59f05f3d1f505dd",
+            "4aa1c3f077b45d4d76cb470690529534721b21eda62bceaa8ec73e59926d25c4",
+        ],
+    ),
+    (
+        0x0005,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        0x12345678,
+        0x98765432,
+        [
+            "4715e2a3e3ecb408c83135a30b8e660c75a3488dbd4d9dd3553a01b39df76bc43a5a0b130159edd90353b09c810e849db7398182ac7c1dea072a2c1b6bac7dda",
+            "9f0f48590c721b61733d1021212d6b92953e8aa73e9fac510e33113be7abb3a1230daf15bc5c5247ffeab88f745ca59eba608e832e8e9b5a50cd05c5b866e604",
+            "b10d573c2a0447596d8a162093d7c0aa0fe0eb84a598d06174b24e8ab2ca73a81dedb3158a6ea9a734e5544769524766325a4248e585c8231a323f2093afc118",
+        ],
+        [
+            "f7891c6b18d88a93ba7638875b87146df4cb9693ca3837b480e9221539e86c1c98391cb1273423b33f94abe7f67c1070997a588084a54391ebda18b3d6ff92f1",
+            "686debc361271a29bb6e908ca4cbae6a8d2512ba73b89bbb883a81d6aceab6bf69e24064ae2758803ac4f2ff0aab2bd8cf1b4eab1e608892e816e4b4d6374b71",
+            "ab9a74c7040713e8d1c3aa4ab5c6b22e214c81d571c182b7d83b480364e86c9cd99bff7af9e1abc9e6ef772460835aa420b30d9329b9f686558e6e601eb4615c",
+        ],
+    ),
+    (
+        0x0006,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        0x12345678,
+        0x98765432,
+        [
+            "4715e2a3e3ecb408c83135a30b8e660c75a3488dbd4d9dd3553a01b39df76bc43a5a0b130159edd90353b09c810e849db7398182ac7c1dea072a2c1b6bac7dda",
+            "9f0f48590c721b61733d1021212d6b92953e8aa73e9fac510e33113be7abb3a1230daf15bc5c5247ffeab88f745ca59eba608e832e8e9b5a50cd05c5b866e604",
+            "b10d573c2a0447596d8a162093d7c0aa0fe0eb84a598d06174b24e8ab2ca73a81dedb3158a6ea9a734e5544769524766325a4248e585c8231a323f2093afc118",
+        ],
+        [
+            "f7891c6b18d88a93ba7638875b87146df4cb9693ca3837b480e9221539e86c1c98391cb1273423b33f94abe7f67c1070997a588084a54391ebda18b3d6ff92f1",
+            "686debc361271a29bb6e908ca4cbae6a8d2512ba73b89bbb883a81d6aceab6bf69e24064ae2758803ac4f2ff0aab2bd8cf1b4eab1e608892e816e4b4d6374b71",
+            "ab9a74c7040713e8d1c3aa4ab5c6b22e214c81d571c182b7d83b480364e86c9cd99bff7af9e1abc9e6ef772460835aa420b30d9329b9f686558e6e601eb4615c",
+        ],
+    ),
+    (
+        0x0007,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        0x12345678,
+        0x98765432,
+        [
+            "4715e2a3e3ecb408c83135a30b8e660c75a3488dbd4d9dd3553a01b39df76bc43a5a0b130159edd90353b09c810e849db7398182ac7c1dea072a2c1b6bac7dda",
+            "9f0f48590c721b61733d1021212d6b92953e8aa73e9fac510e33113be7abb3a1230daf15bc5c5247ffeab88f745ca59eba608e832e8e9b5a50cd05c5b866e604",
+            "b10d573c2a0447596d8a162093d7c0aa0fe0eb84a598d06174b24e8ab2ca73a81dedb3158a6ea9a734e5544769524766325a4248e585c8231a323f2093afc118",
+        ],
+        [
+            "f7891c6b18d88a93ba7638875b87146df4cb9693ca3837b480e9221539e86c1c98391cb1273423b33f94abe7f67c1070997a588084a54391ebda18b3d6ff92f1",
+            "686debc361271a29bb6e908ca4cbae6a8d2512ba73b89bbb883a81d6aceab6bf69e24064ae2758803ac4f2ff0aab2bd8cf1b4eab1e608892e816e4b4d6374b71",
+            "ab9a74c7040713e8d1c3aa4ab5c6b22e214c81d571c182b7d83b480364e86c9cd99bff7af9e1abc9e6ef772460835aa420b30d9329b9f686558e6e601eb4615c",
+        ],
+    ),
+    (
+        0x0008,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        0x12345678,
+        0x98765432,
+        [
+            "4715e2a3e3ecb408c83135a30b8e660c75a3488dbd4d9dd3553a01b39df76bc43a5a0b130159edd90353b09c810e849db7398182ac7c1dea072a2c1b6bac7dda",
+            "9f0f48590c721b61733d1021212d6b92953e8aa73e9fac510e33113be7abb3a1230daf15bc5c5247ffeab88f745ca59eba608e832e8e9b5a50cd05c5b866e604",
+            "b10d573c2a0447596d8a162093d7c0aa0fe0eb84a598d06174b24e8ab2ca73a81dedb3158a6ea9a734e5544769524766325a4248e585c8231a323f2093afc118",
+        ],
+        [
+            "f7891c6b18d88a93ba7638875b87146df4cb9693ca3837b480e9221539e86c1c98391cb1273423b33f94abe7f67c1070997a588084a54391ebda18b3d6ff92f1",
+            "686debc361271a29bb6e908ca4cbae6a8d2512ba73b89bbb883a81d6aceab6bf69e24064ae2758803ac4f2ff0aab2bd8cf1b4eab1e608892e816e4b4d6374b71",
+            "ab9a74c7040713e8d1c3aa4ab5c6b22e214c81d571c182b7d83b480364e86c9cd99bff7af9e1abc9e6ef772460835aa420b30d9329b9f686558e6e601eb4615c",
+        ],
+    ),
+];
+
+/// draft-ietf-avtcore-rtp-sframe-03 sections 7 and 8 with the Appendix A vectors: the per-SSRC
+/// key is derived once from the base key, and each ratchet step (RFC 9605 5.1) runs on the
+/// per-SSRC key (`ratchet_base_key(derive_ssrc_key(..))`), never the other way round; the KID
+/// is RFC 9605's, from the key generation and the ratchet steps alone, so both streams share it.
+#[test]
+fn per_ssrc_keys_and_their_ratchets_match_the_draft_vectors() {
+    let provider = provider();
+    let mut checked = 0;
+    for &(suite, base_key, ssrc_a, ssrc_b, keys_a, keys_b) in PER_SSRC_VECTORS {
+        let Ok(suite) = CipherSuite::try_from(suite) else {
+            continue;
+        };
+        if !provider
+            .crypto()
+            .supports(crypto::CryptoAlgorithm::Hmac(suite.hmac()))
+        {
+            continue;
+        }
+        let base_key = hex(base_key);
+        for (ssrc, keys) in [(ssrc_a, keys_a), (ssrc_b, keys_b)] {
+            let mut key = derive_ssrc_key(provider.crypto(), suite, &base_key, ssrc).unwrap();
+            assert_eq!(
+                key.as_ref(),
+                hex(keys[0]).as_slice(),
+                "{suite} {ssrc:#x}: ssrc_key"
+            );
+            for (step, expected) in keys.iter().enumerate().skip(1) {
+                key = ratchet_base_key(provider.crypto(), suite, key.as_ref()).unwrap();
+                assert_eq!(
+                    key.as_ref(),
+                    hex(expected).as_slice(),
+                    "{suite} {ssrc:#x}: ratchet {step}"
+                );
+            }
+            // The other order (ratchet the base key, then derive) is not what the draft does.
+            let ratcheted_base = ratchet_base_key(provider.crypto(), suite, &base_key).unwrap();
+            let wrong =
+                derive_ssrc_key(provider.crypto(), suite, ratcheted_base.as_ref(), ssrc).unwrap();
+            assert_ne!(wrong.as_ref(), hex(keys[1]).as_slice());
+        }
+        // RFC 9605 5.1 KIDs: the same for every stream at a given generation and step.
+        let layout = crate::SenderKeyIdLayout::new(8).unwrap();
+        assert_eq!(layout.key_id(3, 2).unwrap(), (3 << 8) | 2);
+        let split = layout.split(layout.key_id(3, 2).unwrap());
+        assert_eq!((split.key_generation, split.ratchet_step), (3, 2));
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "the vectors of at least two suites were checked"
+    );
+}

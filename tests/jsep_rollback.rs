@@ -182,10 +182,11 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
     let offer = a.create_offer(None)?;
     assert!(offer.sdp.contains("m=application"), "{}", offer.sdp);
 
-    // The first offer, abandoned: no SCTP transport before, during or after.
+    // The first offer, abandoned: the offer creates a connecting SCTP transport (W3C
+    // 4.4.1.6), the rollback brings back the last stable state's, none.
     assert!(b.sctp().is_none());
     b.set_remote_description(Instant::now(), offer)?;
-    assert!(b.sctp().is_none());
+    assert!(b.sctp().is_some());
     b.set_remote_description(Instant::now(), rollback())?;
     assert!(b.sctp().is_none());
 
@@ -225,12 +226,12 @@ fn a_rollback_leaves_the_sctp_transport_of_the_last_stable_state() -> TestResult
     assert_eq!(b.sctp().expect("renegotiated").id(), transport);
     assert_eq!(a.sctp().expect("negotiated").id(), a_transport);
 
-    // The offerer's side: its own offer, applied and rolled back, creates no transport.
+    // The offerer's side: its own offer creates one, and its rollback takes it away.
     let mut c = default_peer()?;
     c.create_data_channel("data", None)?;
     let offer = c.create_offer(None)?;
     c.set_local_description(Instant::now(), offer)?;
-    assert!(c.sctp().is_none());
+    assert!(c.sctp().is_some(), "connecting from the offer");
     c.set_local_description(Instant::now(), rollback())?;
     assert!(c.sctp().is_none());
     Ok(())

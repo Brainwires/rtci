@@ -388,3 +388,115 @@ fn an_extension_the_section_direction_cannot_use_is_stopped() -> TestResult {
     );
     Ok(())
 }
+
+/// The URIs of the header extensions a sender's or a receiver's `getParameters` reports,
+/// sorted.
+fn parameter_uris(
+    pc: &mut RTCPeerConnection,
+    id: RTCRtpTransceiverId,
+    sender: bool,
+) -> Vec<String> {
+    let mut uris: Vec<String> = if sender {
+        pc.rtp_sender(id.into())
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .map(|e| e.uri.clone())
+            .collect()
+    } else {
+        pc.rtp_receiver(id.into())
+            .expect("receiver")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .map(|e| e.uri.clone())
+            .collect()
+    };
+    uris.sort();
+    uris
+}
+
+/// W3C webrtc-pc 5.2.7 (an extension's direction is seen as its presence in the sender's
+/// and the receiver's `getParameters`), 5.2 and 5.3 getParameters (`headerExtensions` are
+/// those this m= section negotiated for sending, resp. receiving; none before the answer):
+/// the offerer sends the orientation only, so it is in the offerer's sender parameters and
+/// the answerer's receiver parameters, and in neither of the others; the mid is in all four,
+/// the stopped abs-send-time in none.
+#[test]
+fn a_header_extensions_direction_shows_in_sender_and_receiver_parameters() -> TestResult {
+    let mut offerer = peer()?;
+    let mut answerer = peer()?;
+    let v = video(&mut offerer)?;
+    set(
+        &mut offerer,
+        v,
+        &[(MID, Sendrecv), (ABS, Stopped), (ORIENTATION, Sendonly)],
+    )?;
+    assert!(
+        parameter_uris(&mut offerer, v, true).is_empty(),
+        "nothing negotiated yet"
+    );
+    assert!(
+        parameter_uris(&mut offerer, v, false).is_empty(),
+        "nothing negotiated yet"
+    );
+    exchange(&mut offerer, &mut answerer)?;
+    let w = answerer.get_transceivers().next().expect("a transceiver");
+
+    let both = vec![MID.to_owned()];
+    let with_orientation = sorted(vec![MID.to_owned(), ORIENTATION.to_owned()]);
+    assert_eq!(parameter_uris(&mut offerer, v, true), with_orientation);
+    assert_eq!(parameter_uris(&mut offerer, v, false), both);
+    assert_eq!(parameter_uris(&mut answerer, w, true), both);
+    assert_eq!(parameter_uris(&mut answerer, w, false), with_orientation);
+    Ok(())
+}
+
+/// webrtc-extensions 4.2 setHeaderExtensionsToNegotiate: "If necessary, restrict
+/// extension.direction as to not exceed the user agent's capabilities for this extension."
+/// An extension the media engine registered receive-only (or send-only) keeps only that half
+/// of what the application asks; "stopped" and an allowed direction are kept as given.
+#[test]
+fn set_header_extensions_to_negotiate_restricts_directions_to_the_capability() -> TestResult {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    for (uri, direction) in [
+        (MID, None),
+        (ABS, Some(Recvonly)),
+        (ORIENTATION, Some(Sendonly)),
+    ] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: uri.to_owned(),
+            },
+            RtpCodecKind::Video,
+            direction,
+        )?;
+    }
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    let v = video(&mut pc)?;
+    set(
+        &mut pc,
+        v,
+        &[(MID, Sendrecv), (ABS, Sendrecv), (ORIENTATION, Recvonly)],
+    )?;
+    assert_eq!(
+        to_negotiate(&mut pc, v),
+        owned(&[(MID, Sendrecv), (ABS, Recvonly), (ORIENTATION, Inactive)])
+    );
+    set(
+        &mut pc,
+        v,
+        &[(MID, Sendrecv), (ABS, Stopped), (ORIENTATION, Sendonly)],
+    )?;
+    assert_eq!(
+        to_negotiate(&mut pc, v),
+        owned(&[(MID, Sendrecv), (ABS, Stopped), (ORIENTATION, Sendonly)])
+    );
+    Ok(())
+}

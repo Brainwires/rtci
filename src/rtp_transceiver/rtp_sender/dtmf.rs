@@ -376,11 +376,12 @@ impl crate::peer_connection::RTCPeerConnection {
         {
             return None;
         }
+        let negotiated_header_extensions = transceiver.negotiated_header_extensions().to_vec();
         let sender = transceiver.sender_mut().as_mut()?;
         if sender.kind() != super::RtpCodecKind::Audio || sender.attached_track().is_none() {
             return None;
         }
-        let parameters = sender.get_parameters(media_engine);
+        let parameters = sender.get_parameters(media_engine, &negotiated_header_extensions);
         let encoding = parameters.encodings.first()?;
         if !encoding.active {
             return None;

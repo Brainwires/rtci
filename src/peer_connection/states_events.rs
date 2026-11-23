@@ -37,7 +37,7 @@ pub const ICE_SERVER_UNREACHABLE: u16 = 701;
 #[derive(Debug, Default)]
 pub(crate) struct AnnouncedStates {
     /// `None` while there is no SCTP transport (W3C `sctp` is null).
-    sctp: Option<RTCSctpTransportState>,
+    pub(crate) sctp: Option<RTCSctpTransportState>,
     /// The server URLs an `icecandidateerror` with code 701 was fired for in the current
     /// gathering (W3C 4.8.3: once per URL while gathering).
     unreachable_servers: HashSet<String>,

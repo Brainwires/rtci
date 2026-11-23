@@ -384,3 +384,25 @@ fn test_reopened_tcp_connection_becomes_the_media_path() {
     );
     assert_eq!(a.media_path().unwrap().peer_addr, addr("192.168.0.3:40002"));
 }
+
+/// RFC 8827 section 6.4: when only relayed candidates are gathered (the "relay" ICE transport
+/// policy), a relayed candidate does not give away the address it was allocated from: its
+/// raddr / rport are suppressed. With every candidate type they are signalled.
+#[test]
+fn a_relay_only_agent_suppresses_the_related_address() {
+    for (candidate_types, hidden) in [(vec![CandidateType::Relay], true), (vec![], false)] {
+        let cfg = AgentConfig {
+            candidate_types,
+            ..config(true)
+        };
+        let mut a = Agent::new(Instant::now(), Arc::new(cfg), provider()).unwrap();
+        a.add_local_candidate(relay("203.0.113.9")).unwrap();
+        let line = a.local_candidates[0].marshal();
+        if hidden {
+            assert!(line.contains("typ relay raddr 0.0.0.0 rport 9"), "{line}");
+            assert!(!line.contains("192.168.0.2"), "{line}");
+        } else {
+            assert!(line.contains("raddr 192.168.0.2 rport 1000"), "{line}");
+        }
+    }
+}
