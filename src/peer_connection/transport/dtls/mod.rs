@@ -572,62 +572,26 @@ impl DtlsTransport {
         remote_tls_id: Option<String>,
         update: DtlsRemoteUpdate,
     ) -> Result<DtlsAssociationUpdate> {
-        if self.state == RTCDtlsTransportState::New {
-            // Not started yet: the initial start_transports handles this path.
-            return Ok(DtlsAssociationUpdate::Kept);
-        }
-
-        let healthy = matches!(
-            self.state,
-            RTCDtlsTransportState::Connected | RTCDtlsTransportState::Connecting
-        );
-        let same_fingerprints = self
-            .remote_dtls_parameters
-            .as_ref()
-            .is_some_and(|previous| {
-                same_fingerprints(&previous.fingerprints, &remote_dtls_parameters.fingerprints)
-            });
-        // A peer that sends no `tls-id` (now, or before) signals nothing with it (RFC 8842
-        // section 4).
-        let same_tls_id = match (&self.remote_tls_id, &remote_tls_id) {
-            (Some(previous), Some(new)) => previous == new,
-            _ => true,
-        };
-        let same_roles = match remote_dtls_parameters.role {
-            RTCDtlsRole::Client => self.dtls_role == RTCDtlsRole::Server,
-            RTCDtlsRole::Server => self.dtls_role == RTCDtlsRole::Client,
-            _ => matches!(self.dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server),
-        };
-        // A session that gained a media section on an association without SRTP keys needs
-        // one that has them.
-        let needs_srtp = self.srtp_required && !self.can_key_srtp();
-        if !update.transport_closed
-            && !needs_srtp
-            && same_fingerprints
-            && same_tls_id
-            && same_roles
-            && (healthy || !update.ice_restart)
-        {
-            // Nothing DTLS depends on changed: keep the association (over the restarted ICE
-            // path, if ICE restarts).
-            if remote_tls_id.is_some() {
+        let Some(new_role) = self.planned_association(
+            local_ice_role,
+            &remote_dtls_parameters,
+            remote_tls_id.as_deref(),
+            update,
+            self.srtp_required,
+        ) else {
+            // Nothing DTLS depends on changed (or the transport is not started yet: the
+            // initial start_transports handles that path): keep the association (over the
+            // restarted ICE path, if ICE restarts).
+            if self.state != RTCDtlsTransportState::New && remote_tls_id.is_some() {
                 self.remote_tls_id = remote_tls_id;
             }
             return Ok(DtlsAssociationUpdate::Kept);
-        }
+        };
 
         // The roles of the new association, committed only once its handshake config has been
         // built.
         let previous_role = self.dtls_role;
-        // An `actpass` description leaves the choice here: the roles the endpoints have are
-        // kept, so what runs over DTLS (SCTP takes its role from it) is not turned around.
-        // Only a transport that was closed chooses anew.
-        if update.transport_closed
-            || remote_dtls_parameters.role != RTCDtlsRole::Auto
-            || !matches!(previous_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
-        {
-            self.dtls_role = self.derive_role(local_ice_role, remote_dtls_parameters.role);
-        }
+        self.dtls_role = new_role;
         let dtls_handshake_config = match self.make_handshake_config(&remote_dtls_parameters) {
             Ok(config) => config,
             Err(err) => {
@@ -635,8 +599,12 @@ impl DtlsTransport {
                 return Err(err);
             }
         };
+        // The offerer's `tls-id` is the one its offer carried; the answerer's is new (RFC 8842
+        // section 5.3), the one its answer carried when `create_answer` staged it.
         let local_tls_id = if update.we_offer {
             self.staged_local_tls_id.take()
+        } else if let Some(staged) = self.staged_local_tls_id.take() {
+            Some(staged)
         } else {
             match generate_tls_id(&self.crypto_provider) {
                 Ok(tls_id) => Some(tls_id),
@@ -658,6 +626,85 @@ impl DtlsTransport {
         self.srtp_negotiated = None;
         self.srtp_configured = self.offers_use_srtp();
         Ok(DtlsAssociationUpdate::New)
+    }
+
+    /// What [`Self::update_remote`] decides for these parameters, without doing it: `None`
+    /// keeps the association (or leaves a transport that is not started to `start`),
+    /// `Some(role)` is the DTLS role of the new association that replaces it. `srtp_required`
+    /// is whether the session the description sets up has a media section.
+    ///
+    /// The answerer decides this when it applies the remote offer, so that its answer states
+    /// the new association's role and `tls-id`, and makes the change when it applies that
+    /// answer (a rolled-back offer changes nothing, RFC 9429 section 5.7).
+    pub(crate) fn planned_association(
+        &self,
+        local_ice_role: RTCIceRole,
+        remote_dtls_parameters: &RTCDtlsParameters,
+        remote_tls_id: Option<&str>,
+        update: DtlsRemoteUpdate,
+        srtp_required: bool,
+    ) -> Option<RTCDtlsRole> {
+        if self.state == RTCDtlsTransportState::New {
+            return None;
+        }
+        let healthy = matches!(
+            self.state,
+            RTCDtlsTransportState::Connected | RTCDtlsTransportState::Connecting
+        );
+        let same_fingerprints = self
+            .remote_dtls_parameters
+            .as_ref()
+            .is_some_and(|previous| {
+                same_fingerprints(&previous.fingerprints, &remote_dtls_parameters.fingerprints)
+            });
+        // A peer that sends no `tls-id` (now, or before) signals nothing with it (RFC 8842
+        // section 4).
+        let same_tls_id = match (self.remote_tls_id.as_deref(), remote_tls_id) {
+            (Some(previous), Some(new)) => previous == new,
+            _ => true,
+        };
+        let same_roles = match remote_dtls_parameters.role {
+            RTCDtlsRole::Client => self.dtls_role == RTCDtlsRole::Server,
+            RTCDtlsRole::Server => self.dtls_role == RTCDtlsRole::Client,
+            _ => matches!(self.dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server),
+        };
+        // A session that gained a media section on an association without SRTP keys needs
+        // one that has them.
+        let needs_srtp = srtp_required && !self.can_key_srtp();
+        if !update.transport_closed
+            && !needs_srtp
+            && same_fingerprints
+            && same_tls_id
+            && same_roles
+            && (healthy || !update.ice_restart)
+        {
+            return None;
+        }
+        // An `actpass` description leaves the choice here: the roles the endpoints have are
+        // kept, so what runs over DTLS (SCTP takes its role from it) is not turned around.
+        // Only a transport that was closed chooses anew.
+        let previous_role = self.dtls_role;
+        Some(
+            if update.transport_closed
+                || remote_dtls_parameters.role != RTCDtlsRole::Auto
+                || !matches!(previous_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
+            {
+                self.derive_role(local_ice_role, remote_dtls_parameters.role)
+            } else {
+                previous_role
+            },
+        )
+    }
+
+    /// Stages the `tls-id` the answer to an offer that asks for a new association carries
+    /// (RFC 8842 section 5.3), the one [`Self::update_remote`] then takes. `false` when one was
+    /// already staged (it is kept).
+    pub(crate) fn stage_answer_tls_id(&mut self) -> Result<bool> {
+        if self.staged_local_tls_id.is_some() {
+            return Ok(false);
+        }
+        self.staged_local_tls_id = Some(generate_tls_id(&self.crypto_provider)?);
+        Ok(true)
     }
 
     /// The `tls-id` an offer carries (RFC 8842 section 5.5): the association's, or, when the
