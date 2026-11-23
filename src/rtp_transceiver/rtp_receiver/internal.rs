@@ -7,10 +7,11 @@ use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::rtp_contributing_source::{
     RTCRtpContributingSource, RTCRtpSynchronizationSource,
 };
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::internal::rtp_capabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
-    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_fec_format,
+    CodecMatch, FecFormat, RtpCodecKind, codec_parameters_fuzzy_search, find_receive_fec_format,
     find_rtx_payload_type, is_repair_codec, parse_rtx_apt, repair_family,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -67,6 +68,10 @@ pub(crate) struct RTCRtpReceiverInternal {
 
     receive_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
+    /// The payload types this endpoint's pending offer listed for the section, which it must
+    /// be ready to receive before the answer arrives (RFC 3264 section 5.1); cleared when the
+    /// receive codecs are set again.
+    offered_payload_types: Vec<PayloadType>,
     /// The ids of the remote MediaStreams the track is in, as the remote description's
     /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
     associated_media_stream_ids: Vec<MediaStreamId>,
@@ -77,6 +82,9 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// What the public `getParameters` returns while the negotiated direction does not
     /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
     not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+    /// The `a=fmtp` parameters of each format of the local description's section (W3C
+    /// webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from it).
+    local_fmtp: Vec<(PayloadType, String)>,
     /// The last absolute capture time each synchronization source sent (webrtc-extensions
     /// 8), what packets without one are interpolated from.
     capture_references: Vec<CaptureReference>,
@@ -97,6 +105,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     received_frames: std::collections::VecDeque<Instant>,
     /// The SSRC and the CSRCs of the last packet received (webrtc-extensions 11).
     last_frame_sources: Option<(SSRC, Vec<SSRC>)>,
+    /// The arrival, capture time and Dependency Descriptor of the frames delivered lately
+    /// (webrtc-encoded-transform 4, `encoded_frame_metadata`).
+    frames: super::frame_metadata::FrameRecords,
+    /// The sequence number of the next Full Intra Request (RFC 5104 4.3.1.2).
+    fir_sequence_number: u8,
 }
 
 impl RTCRtpReceiverInternal {
@@ -110,10 +123,12 @@ impl RTCRtpReceiverInternal {
             receive_codings,
 
             receive_codecs: vec![],
+            offered_payload_types: vec![],
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
             last_returned_parameters: None,
             not_receiving_parameters: None,
+            local_fmtp: Vec::new(),
             capture_references: vec![],
             remote_track_id: String::new(),
             remote_streams: vec![],
@@ -121,6 +136,8 @@ impl RTCRtpReceiverInternal {
             end_unannounced: false,
             received_frames: Default::default(),
             last_frame_sources: None,
+            frames: Default::default(),
+            fir_sequence_number: 0,
         }
         .with_own_track()
     }
@@ -223,6 +240,18 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    /// The local description's formats of this receiver's section, with their parameters.
+    pub(crate) fn set_local_fmtp(&mut self, local: Vec<(PayloadType, String)>) {
+        self.local_fmtp = local;
+    }
+
+    /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
+    /// negotiated state again.
+    pub(crate) fn invalidate_parameters(&mut self) {
+        self.last_returned_parameters = None;
+        self.not_receiving_parameters = None;
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         if self.rtcp_reduced_size != reduced_size {
             self.rtcp_reduced_size = reduced_size;
@@ -286,17 +315,33 @@ impl RTCRtpReceiverInternal {
     }
 
     /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
-    /// direction does not receive (`receiving` false).
+    /// direction does not receive (`receiving` false), and with only the header extensions
+    /// this transceiver's m= section negotiated for receiving (`negotiated_header_extensions`
+    /// is its `[[NegotiatedHeaderExtensions]]`; none before an answer was applied).
     pub(crate) fn get_public_parameters(
         &mut self,
         media_engine: &MediaEngine,
+        negotiated_header_extensions: &[RTCRtpHeaderExtensionToNegotiate],
         receiving: bool,
     ) -> &RTCRtpReceiveParameters {
-        if receiving {
-            return self.get_parameters(media_engine);
-        }
         let mut parameters = self.get_parameters(media_engine).clone();
-        parameters.rtp_parameters.codecs.clear();
+        if !receiving {
+            parameters.rtp_parameters.codecs.clear();
+        }
+        crate::rtp_transceiver::header_extension_control::retain_negotiated(
+            &mut parameters.rtp_parameters.header_extensions,
+            negotiated_header_extensions,
+            false,
+        );
+        for codec in &mut parameters.rtp_parameters.codecs {
+            if let Some((_, fmtp)) = self
+                .local_fmtp
+                .iter()
+                .find(|(payload_type, _)| *payload_type == codec.payload_type)
+            {
+                codec.rtp_codec.sdp_fmtp_line = fmtp.clone();
+            }
+        }
         self.not_receiving_parameters.insert(parameters)
     }
 
@@ -319,6 +364,7 @@ impl RTCRtpReceiverInternal {
         vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
+        dependency_descriptor: Option<&[u8]>,
     ) -> (bool, bool) {
         // webrtc-extensions 11: whether the SSRC, and the CSRCs, of the last frame changed.
         let changes = match &self.last_frame_sources {
@@ -351,6 +397,12 @@ impl RTCRtpReceiverInternal {
         };
         synchronization.capture_timestamp = capture_timestamp;
         synchronization.sender_capture_time_offset = sender_capture_time_offset;
+        self.frames.record(
+            now,
+            header,
+            (capture_timestamp, sender_capture_time_offset),
+            dependency_descriptor,
+        );
         self.synchronization_sources.push(synchronization);
         let csrc_levels = csrc_levels.filter(|levels| levels.len() == header.csrc.len());
 
@@ -420,6 +472,23 @@ impl RTCRtpReceiverInternal {
             reference.capture_ms + f64::from(elapsed) * 1000.0 / f64::from(rate)
         });
         (interpolated, reference.offset_ms)
+    }
+
+    /// The sequence number for a new Full Intra Request, one more than the last (RFC 5104
+    /// 4.3.1.2: "incremented by 1 modulo 256" for each new request).
+    pub(crate) fn next_fir_sequence_number(&mut self) -> u8 {
+        let number = self.fir_sequence_number;
+        self.fir_sequence_number = number.wrapping_add(1);
+        number
+    }
+
+    /// What the receiver recorded of the frames it delivered.
+    pub(crate) fn frame_records(&self) -> &super::frame_metadata::FrameRecords {
+        &self.frames
+    }
+
+    pub(crate) fn frame_records_mut(&mut self) -> &mut super::frame_metadata::FrameRecords {
+        &mut self.frames
     }
 
     /// A source said BYE (RFC 3550 6.6): it is no longer a source of this receiver.
@@ -555,8 +624,22 @@ impl RTCRtpReceiverInternal {
         &self.receive_codecs
     }
 
+    /// Records the payload types a local offer lists for the section
+    /// ([`offered_payload_types`](Self::offered_payload_types)).
+    pub(crate) fn set_offered_payload_types(&mut self, payload_types: Vec<PayloadType>) {
+        self.offered_payload_types = payload_types;
+    }
+
+    /// The payload types of the pending local offer's section, accepted on receive until the
+    /// answer sets the receive codecs (RFC 3264 section 5.1: "the offerer MUST be prepared to
+    /// receive media" as the offer describes it once the offer is sent).
+    pub(crate) fn offered_payload_types(&self) -> &[PayloadType] {
+        &self.offered_payload_types
+    }
+
     pub(crate) fn set_codec_preferences(&mut self, codecs: Vec<RTCRtpCodecParameters>) {
         self.receive_codecs = codecs;
+        self.offered_payload_types.clear();
         self.last_returned_parameters = None;
     }
 
@@ -564,6 +647,8 @@ impl RTCRtpReceiverInternal {
     /// `[[LastStableStateReceiveCodecs]]`).
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpReceiverInternal) {
         self.receive_codecs.clone_from(&saved.receive_codecs);
+        self.offered_payload_types
+            .clone_from(&saved.offered_payload_types);
         self.last_returned_parameters = None;
     }
 
@@ -648,6 +733,7 @@ impl RTCRtpReceiverInternal {
         fec_format: Option<&FecFormat>,
         rtp_codec: &RTCRtpCodec,
         header_extensions: &[RTCRtpHeaderExtensionParameters],
+        section_codecs: &[RTCRtpCodecParameters],
     ) {
         let stream_info = create_stream_info(
             ssrc,
@@ -658,6 +744,7 @@ impl RTCRtpReceiverInternal {
             fec_format,
             rtp_codec,
             header_extensions,
+            section_codecs,
         );
 
         if is_binding {
@@ -689,7 +776,7 @@ impl RTCRtpReceiverInternal {
                         .map(|payload_type| (rtx.ssrc, payload_type))
                 });
                 let fec = coding.rtp_coding_parameters.fec.as_ref().and_then(|fec| {
-                    find_fec_format(&parameters.rtp_parameters.codecs)
+                    find_receive_fec_format(&parameters.rtp_parameters.codecs)
                         .map(|fec_format| (fec.ssrc, fec_format))
                 });
 
@@ -704,6 +791,7 @@ impl RTCRtpReceiverInternal {
                     fec.as_ref().map(|(_, fec_format)| fec_format),
                     &codec.rtp_codec,
                     &parameters.rtp_parameters.header_extensions,
+                    &parameters.rtp_parameters.codecs,
                 );
 
                 // Each repair flow is also bound in its own right, as it has been: it is a real
@@ -722,6 +810,7 @@ impl RTCRtpReceiverInternal {
                         None,
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
+                        &[],
                     );
                 }
 
@@ -737,6 +826,7 @@ impl RTCRtpReceiverInternal {
                         None,
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
+                        &[],
                     );
                 }
             }
@@ -925,6 +1015,29 @@ mod repair_association_test {
         let recorded = if is_binding { bound } else { unbound };
         let recorded = recorded.lock().unwrap().clone();
         recorded
+    }
+
+    /// RFC 7160 section 4.3 and RFC 8834 section 4.3: a remote stream is bound with the clock
+    /// rate of every other media format its m= section negotiated, so a source that switches
+    /// payload type is timed with each one's rate; the repair formats (RTX, FEC) are not media
+    /// formats of the stream and stay out.
+    #[test]
+    fn a_remote_stream_carries_the_clock_rates_of_the_sections_other_formats() {
+        let mut media_engine = media_engine();
+        let mut other = codec(100, "video/H264", "");
+        other.rtp_codec.clock_rate = 45_000;
+        media_engine
+            .register_codec(other, RtpCodecKind::Video)
+            .expect("h264");
+        let streams = run(
+            &media_engine,
+            vec![encoding("", 1000, Some(2000), None)],
+            true,
+        );
+        assert_eq!(
+            vec![(100, 45_000)],
+            primary(&streams, 1000).payload_clock_rates
+        );
     }
 
     fn primary(streams: &[StreamInfo], ssrc: SSRC) -> &StreamInfo {

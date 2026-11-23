@@ -5,6 +5,7 @@ use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
+use crate::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     RTCRtpCodec, RtpCodecKind, codec_dictionary_match, encoding_send_codec, find_fec_format,
@@ -89,6 +90,15 @@ pub(crate) struct RTCRtpSenderInternal {
     /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
     /// one-byte headers or only two-byte headers").
     two_byte_ssrcs: Vec<SSRC>,
+    /// Each encoding's share of the congestion controller's target (`allocate_bandwidth`):
+    /// what its encoder is to aim for, by SSRC.
+    allocated_bitrates: Vec<(SSRC, f64)>,
+    /// The `maxBitrate` budget of each encoding that has one (`admit_under_max_bitrate`).
+    max_bitrate_limiters: Vec<MaxBitrateLimiter>,
+    /// The `maxFramerate` state of each video encoding that has one
+    /// (`admit_under_max_framerate`): the RTP timestamp of the last frame admitted, and the
+    /// frame being sent with whether it was admitted.
+    max_framerate_limiters: Vec<MaxFramerateLimiter>,
     /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
     /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
     /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
@@ -96,7 +106,128 @@ pub(crate) struct RTCRtpSenderInternal {
     previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
 }
 
+/// An encoding's `maxFramerate` state: its SSRC, the RTP timestamp of the last frame
+/// admitted, and the frame being sent with whether it was admitted.
+type MaxFramerateLimiter = (SSRC, u32, Option<(u32, bool)>);
+
+/// W3C webrtc 5.2.5 `maxBitrate` on the wire: "a frame will always be sent as fast as
+/// possible, but frames may be dropped until bitrate is low enough. Thus, even a bitrate of
+/// zero will allow sending one frame." A budget that fills at `maxBitrate` (up to one second
+/// of it) and is charged for every packet sent (RTP header and payload: TIAS, RFC 3890
+/// 6.2.2); a frame (the packets of one RTP timestamp) that starts while the budget is spent
+/// is dropped whole.
+#[derive(Debug, Clone)]
+struct MaxBitrateLimiter {
+    ssrc: SSRC,
+    budget_bits: f64,
+    refilled: std::time::Instant,
+    /// The frame being sent: its RTP timestamp and whether it was admitted.
+    frame: Option<(u32, bool)>,
+}
+
 impl RTCRtpSenderInternal {
+    /// The share of the congestion controller's target allocated to the encoding sending on
+    /// `ssrc`, once there is a target.
+    pub(crate) fn allocated_bitrates(&self) -> &[(SSRC, f64)] {
+        &self.allocated_bitrates
+    }
+
+    pub(crate) fn set_allocated_bitrates(&mut self, shares: Vec<(SSRC, f64)>) {
+        self.allocated_bitrates = shares;
+    }
+
+    /// Whether a packet of `bits` on `ssrc` with RTP timestamp `timestamp`, written at `now`,
+    /// fits the encoding's `max_bitrate` (bits per second; 0 is no limit): see
+    /// [`MaxBitrateLimiter`].
+    pub(crate) fn admit_under_max_bitrate(
+        &mut self,
+        now: std::time::Instant,
+        ssrc: SSRC,
+        timestamp: u32,
+        bits: f64,
+        max_bitrate: u32,
+    ) -> bool {
+        if max_bitrate == 0 {
+            self.max_bitrate_limiters.retain(|l| l.ssrc != ssrc);
+            return true;
+        }
+        let rate = f64::from(max_bitrate);
+        let index = match self
+            .max_bitrate_limiters
+            .iter()
+            .position(|l| l.ssrc == ssrc)
+        {
+            Some(index) => index,
+            None => {
+                self.max_bitrate_limiters.push(MaxBitrateLimiter {
+                    ssrc,
+                    budget_bits: 0.0,
+                    refilled: now,
+                    frame: None,
+                });
+                self.max_bitrate_limiters.len() - 1
+            }
+        };
+        let limiter = &mut self.max_bitrate_limiters[index];
+        let elapsed = now
+            .saturating_duration_since(limiter.refilled)
+            .as_secs_f64();
+        limiter.budget_bits = (limiter.budget_bits + elapsed * rate).min(rate);
+        limiter.refilled = limiter.refilled.max(now);
+        let admitted = match limiter.frame {
+            Some((frame_timestamp, admitted)) if frame_timestamp == timestamp => admitted,
+            _ => {
+                let admitted = limiter.budget_bits >= 0.0;
+                limiter.frame = Some((timestamp, admitted));
+                admitted
+            }
+        };
+        if admitted {
+            limiter.budget_bits -= bits;
+        }
+        admitted
+    }
+
+    /// W3C webrtc 5.2.5 `maxFramerate` on the wire: the engine has no encoder, so of the frames
+    /// the application writes (the packets of one RTP timestamp) the sender drops those that
+    /// would take the encoding above `max_framerate` frames per second. Frames are spaced by
+    /// their RTP timestamps (video's 90 kHz clock, RFC 3551 section 5): a frame goes when at
+    /// least `1 / max_framerate` (less 1 %, for timestamps rounded by the source) has passed
+    /// since the last frame that went, so a source at that rate or below is untouched.
+    pub(crate) fn admit_under_max_framerate(
+        &mut self,
+        ssrc: SSRC,
+        timestamp: u32,
+        max_framerate: Option<f64>,
+    ) -> bool {
+        const VIDEO_CLOCK_RATE: f64 = 90_000.0;
+        let Some(max_framerate) = max_framerate.filter(|rate| *rate > 0.0) else {
+            self.max_framerate_limiters.retain(|(s, _, _)| *s != ssrc);
+            return true;
+        };
+        let interval = (VIDEO_CLOCK_RATE / max_framerate * 0.99) as u32;
+        let Some(limiter) = self
+            .max_framerate_limiters
+            .iter_mut()
+            .find(|(s, _, _)| *s == ssrc)
+        else {
+            self.max_framerate_limiters
+                .push((ssrc, timestamp, Some((timestamp, true))));
+            return true;
+        };
+        match limiter.2 {
+            Some((frame, admitted)) if frame == timestamp => admitted,
+            _ => {
+                let admitted = timestamp.wrapping_sub(limiter.1) >= interval;
+                if admitted {
+                    limiter.1 = timestamp;
+                }
+                limiter.2 = Some((timestamp, admitted));
+                admitted
+            }
+        }
+    }
+
     /// Creates a new RTP sender internal state.
     ///
     /// # Parameters
@@ -204,8 +335,50 @@ impl RTCRtpSenderInternal {
     }
 
     /// Whether the sender has encodings with SSRCs to describe and send with.
+    /// Each send codec whose payload type `remote` (the remote description's codecs of the
+    /// section) has takes that codec's `sdp_fmtp_line` (W3C webrtc-pc 5.2.9).
+    pub(crate) fn take_send_fmtp(&mut self, remote: &[RTCRtpCodecParameters]) {
+        let mut changed = false;
+        for codec in &mut self.send_codecs {
+            if let Some(remote) = remote.iter().find(|r| {
+                r.payload_type == codec.payload_type
+                    && r.rtp_codec
+                        .mime_type
+                        .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+            }) && remote.rtp_codec.sdp_fmtp_line != codec.rtp_codec.sdp_fmtp_line
+            {
+                codec.rtp_codec.sdp_fmtp_line = remote.rtp_codec.sdp_fmtp_line.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.last_returned_parameters = None;
+        }
+    }
+
+    /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
+    /// negotiated state again.
+    pub(crate) fn invalidate_parameters(&mut self) {
+        self.last_returned_parameters = None;
+    }
+
     pub(crate) fn has_send_encodings(&self) -> bool {
         !self.send_encodings.is_empty()
+    }
+
+    /// webrtc-svc 3.2.3: the scalability mode the encoder of encoding `index` is configured
+    /// with, which may differ from the one requested; `getParameters` returns it.
+    pub(crate) fn set_configured_scalability_mode(
+        &mut self,
+        index: usize,
+        mode: Option<String>,
+    ) -> Result<()> {
+        let encoding = self.send_encodings.get_mut(index).ok_or_else(|| {
+            Error::RangeError(format!("the sender has no encoding at index {index}"))
+        })?;
+        encoding.scalability_mode = mode;
+        self.last_returned_parameters = None;
+        Ok(())
     }
 
     /// Gives a sender that has none its encodings (SSRCs allocated by the caller).
@@ -443,10 +616,22 @@ impl RTCRtpSenderInternal {
     /// # Parameters
     ///
     /// * `media_engine` - The media engine containing codec and extension information
-    pub(crate) fn get_parameters(&mut self, media_engine: &MediaEngine) -> &RTCRtpSendParameters {
+    pub(crate) fn get_parameters(
+        &mut self,
+        media_engine: &MediaEngine,
+        negotiated_header_extensions: &[RTCRtpHeaderExtensionToNegotiate],
+    ) -> &RTCRtpSendParameters {
         if self.last_returned_parameters.is_none() {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
+            // W3C 5.2 getParameters: "headerExtensions ... negotiated for sending" by this
+            // transceiver's m= section (webrtc-extensions [[NegotiatedHeaderExtensions]]), not
+            // every extension of the kind: none before an answer was applied.
+            crate::rtp_transceiver::header_extension_control::retain_negotiated(
+                &mut rtp_parameters.header_extensions,
+                negotiated_header_extensions,
+                true,
+            );
 
             rtp_parameters.codecs = if self.negotiated_not_sending {
                 vec![]
@@ -783,6 +968,7 @@ impl RTCRtpSenderInternal {
                     fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
+                    codecs,
                 ));
             }
         }
@@ -1100,5 +1286,60 @@ pub(crate) fn restore_repair_ssrcs(
         if parameters.fec.is_none() {
             parameters.fec.clone_from(&saved.fec);
         }
+    }
+}
+
+#[cfg(test)]
+mod repair_ssrc_collision_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
+        RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
+    };
+
+    /// RFC 3550 section 8.2 for a repair flow (draft-ietf-payload-flexible-fec-scheme-03 4.2,
+    /// RFC 8627 4.2.1: "SSRC collisions ... resolved as in RFC 3550"; RFC 4588 section 4: only
+    /// the colliding stream picks a new SSRC): a collision on the FEC or the RTX SSRC moves
+    /// that SSRC alone, and names the primary stream whose streams are bound again.
+    #[test]
+    fn a_colliding_repair_ssrc_alone_moves_to_the_replacement() {
+        let encoding = RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(1000),
+                rtx: Some(RTCRtpRtxParameters { ssrc: 2000 }),
+                fec: Some(RTCRtpFecParameters { ssrc: 3000 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Video,
+            vec![encoding.clone()],
+        );
+        let mut sender =
+            RTCRtpSenderInternal::new(RtpCodecKind::Video, track, vec![], vec![encoding]);
+
+        assert_eq!(
+            Some(1000),
+            sender.replace_ssrc(3000, 3333),
+            "the primary is named"
+        );
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(1000), coding.ssrc);
+        assert_eq!(Some(2000), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(3333), coding.fec.as_ref().map(|fec| fec.ssrc));
+
+        assert_eq!(Some(1000), sender.replace_ssrc(2000, 2222));
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(2222), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(1000), coding.ssrc, "the media SSRC stays");
+        assert_eq!(
+            None,
+            sender.replace_ssrc(9999, 1),
+            "an SSRC the sender does not have"
+        );
     }
 }

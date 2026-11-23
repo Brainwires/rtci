@@ -10,8 +10,9 @@
 //! gives a deadline, and after `handle_timeout` at each deadline `poll_read()` is still
 //! `None` and the connection is still connected.
 //!
-//! Two `rtc` peers on a simulated network, virtual time, no sockets, no interceptors (so no
-//! RTCP reports are generated: the only RTCP a sender could read would be invented).
+//! Two `rtc` peers on a simulated network, virtual time, no sockets, no interceptors beyond
+//! the RTCP session every connection runs (RFC 8834 4.1): the reports it exchanges are its own
+//! and never reach `poll_read`, so any RTCP a sender read would be invented.
 
 use anyhow::{Result, bail};
 use rtc::media_stream::MediaStreamTrack;

@@ -2,6 +2,8 @@
 
 use super::encoder::BASE_RTP_HEADER_SIZE;
 use shared::marshal::{Marshal, MarshalSize, Unmarshal};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 #[path = "decoder_order_test.rs"]
@@ -58,6 +60,8 @@ struct RepairState {
     packet: rtp::Packet,
     header: RepairHeader,
     protected: Vec<ProtectedPacket>,
+    /// When it arrived, for the repair window ([`FlexFec03Decoder::decode_at`]).
+    arrived: Option<Instant>,
 }
 
 impl RepairState {
@@ -88,6 +92,13 @@ pub struct FlexFec03Decoder {
     /// Media packets seen or recovered, ordered oldest first.
     recovered: Vec<rtp::Packet>,
     repair_packets: Vec<RepairState>,
+    /// The signalled `repair-window` (draft section 5.1): how long a packet is held for
+    /// recovery after it arrived.
+    repair_window: Option<Duration>,
+    /// When each held media packet arrived, by sequence number.
+    media_arrivals: HashMap<u16, Instant>,
+    /// The arrival instant of the packet being decoded.
+    now: Option<Instant>,
 }
 
 impl FlexFec03Decoder {
@@ -98,7 +109,56 @@ impl FlexFec03Decoder {
             media_ssrc,
             recovered: Vec::new(),
             repair_packets: Vec::new(),
+            repair_window: None,
+            media_arrivals: HashMap::new(),
+            now: None,
         }
+    }
+
+    /// Holds packets for recovery no longer than `repair_window` after they arrived
+    /// (draft-ietf-payload-flexible-fec-scheme-03 section 5.1: `repair-window` is "the time
+    /// that spans the source packets and the corresponding repair packets"; section 5.2.1: the
+    /// receiver "must" take it into account for its buffering), on top of the packet-count
+    /// limits. Applies to [`decode_at`](Self::decode_at).
+    pub fn with_repair_window(mut self, repair_window: Duration) -> Self {
+        self.repair_window = Some(repair_window);
+        self
+    }
+
+    /// [`decode`](Self::decode) for a packet that arrived at `now`: media and repair packets
+    /// that arrived longer than the repair window ago are dropped first, so a repair packet
+    /// never rebuilds media from outside the window and the buffers hold no more than it spans.
+    pub fn decode_at(&mut self, now: Instant, packet: rtp::Packet) -> Vec<rtp::Packet> {
+        if let Some(window) = self.repair_window
+            && let Some(cutoff) = now.checked_sub(window)
+        {
+            let expired: Vec<u16> = self
+                .media_arrivals
+                .iter()
+                .filter(|(_, at)| **at < cutoff)
+                .map(|(sequence_number, _)| *sequence_number)
+                .collect();
+            if !expired.is_empty() {
+                self.recovered
+                    .retain(|held| !expired.contains(&held.header.sequence_number));
+                self.media_arrivals.retain(|_, at| *at >= cutoff);
+                // A repair packet that names media from outside the window spans more than
+                // the window: it goes too, so it can neither rebuild that media nor take a
+                // packet it no longer sees for lost.
+                self.repair_packets.retain(|state| {
+                    !state
+                        .protected
+                        .iter()
+                        .any(|protected| expired.contains(&protected.sequence_number))
+                });
+            }
+            self.repair_packets
+                .retain(|state| state.arrived.is_none_or(|at| at >= cutoff));
+        }
+        self.now = Some(now);
+        let recovered = self.decode(packet);
+        self.now = None;
+        recovered
     }
 
     /// Offer a packet from either stream, returning any media packets it made recoverable.
@@ -210,6 +270,7 @@ impl FlexFec03Decoder {
             packet,
             header,
             protected,
+            arrived: self.now,
         });
         self.repair_packets
             .sort_by_key(|state| sequence_key(newest, state.packet.header.sequence_number));
@@ -228,6 +289,9 @@ impl FlexFec03Decoder {
             }
         }
         let newest = packet.header.sequence_number;
+        if let Some(now) = self.now {
+            self.media_arrivals.insert(newest, now);
+        }
         self.recovered.push(packet);
         self.recovered
             .sort_by_key(|held| sequence_key(newest, held.header.sequence_number));

@@ -115,3 +115,32 @@ fn test_h26x_writer_h265_fragment_buffer_is_bounded() {
     writer.write_rtp(&fragment(0x41)).unwrap();
     assert!(writer.writer.is_empty());
 }
+
+/// RFC 7798 section 4.4.3: an incomplete NAL unit is not passed on with forbidden_zero_bit 0.
+/// The writer gives the depacketizer each packet's sequence number: with the middle fragment
+/// of a NAL unit lost, nothing of that NAL unit is written; the next whole one is.
+#[test]
+fn test_h26x_writer_h265_drops_a_nal_unit_whose_middle_fragment_was_lost() {
+    let mut writer = H26xWriter::new(Vec::<u8>::new(), true);
+    let packet = |sequence_number: u16, payload: &[u8]| Packet {
+        header: rtp::header::Header {
+            sequence_number,
+            ..Default::default()
+        },
+        payload: Bytes::copy_from_slice(payload),
+    };
+    // FU start (10), middle (11, lost), end (12): type 1.
+    writer
+        .write_rtp(&packet(10, &[0x62, 0x01, 0x81, 0xAA]))
+        .unwrap();
+    writer
+        .write_rtp(&packet(12, &[0x62, 0x01, 0x41, 0xCC]))
+        .unwrap();
+    assert!(
+        writer.writer.is_empty(),
+        "a NAL unit with a hole is not written"
+    );
+
+    writer.write_rtp(&packet(13, &[0x28, 0x01, 0xDD])).unwrap();
+    assert_eq!(vec![0, 0, 0, 1, 0x28, 0x01, 0xDD], writer.writer);
+}

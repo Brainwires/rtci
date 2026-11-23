@@ -465,7 +465,8 @@ impl RTCPeerConnectionBuilder {
     /// - Empty ICE server list
     /// - Default MediaEngine (no codecs registered)
     /// - Default SettingEngine (standard timeouts and limits)
-    /// - NoopInterceptor (no RTP/RTCP processing)
+    /// - An empty interceptor registry, to which `build` adds the RTCP session (RFC 8834 4.1;
+    ///   see `SettingEngineBuilder::with_rtcp_session_omitted`)
     ///
     /// Use `with_*` methods to customize configuration before calling `build()`.
     ///
@@ -693,14 +694,48 @@ impl RTCPeerConnectionBuilder {
         if let Some(lifetime) = self.setting_engine.srtp_key_lifetime {
             ::srtp::keying::validate_key_lifetime(lifetime)?;
         }
+        let interceptor =
+            with_rtcp_session(self.interceptor_registry, &self.setting_engine).build();
         RTCPeerConnection::new(
             now,
             self.configuration,
             self.media_engine,
             self.setting_engine,
             // The registry is a list until here; `build` freezes it into the chain.
-            Box::new(self.interceptor_registry.build()),
+            Box::new(interceptor),
         )
+    }
+}
+
+/// RFC 8834 section 4.1: "The RTP Control Protocol (RTCP) ... MUST be implemented and used
+/// by all WebRTC endpoints", and the key-frame requests a section signals reach the
+/// application. A registry that brings no RTCP session (an empty one, or a chain
+/// built by hand) gets the one [`configure_rtcp_reports`] installs, unless it reports by itself
+/// through the older report interceptors or the application opted out
+/// ([`with_rtcp_session_omitted`](configuration::setting_engine::SettingEngineBuilder::with_rtcp_session_omitted)).
+///
+/// [`configure_rtcp_reports`]: configuration::interceptor_registry::configure_rtcp_reports
+fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Registry {
+    let reports_by_itself = registry
+        .slots()
+        .iter()
+        .any(|(_, name)| name == "SenderReportInterceptor" || name == "ReceiverReportInterceptor");
+    let registry = if setting_engine.rtcp_session_omitted
+        || registry.holds(interceptor::Slot::RtcpSession)
+        || reports_by_itself
+    {
+        registry
+    } else {
+        configuration::interceptor_registry::configure_rtcp_reports(registry)
+    };
+    // RFC 5104 section 7.2: a party that signals a codec control message "must" be able to
+    // receive it and act on it, and RFC 4585 section 6.3.1 the same of PLI: only the
+    // application's encoder can answer a key-frame request, so a chain without the
+    // interceptor that delivers them (which the chain's terminus would otherwise end) gets it.
+    if registry.holds(interceptor::Slot::KeyFrameRequests) {
+        registry
+    } else {
+        configuration::interceptor_registry::configure_key_frame_requests(registry)
     }
 }
 
@@ -2883,7 +2918,10 @@ impl RTCPeerConnection {
     /// peer-reflexive candidate the ICE agent learned from a connectivity check is not in the
     /// description and is not listed (webrtc-pc 5.6: "will not expose peer reflexive
     /// candidates since they are not in the remote description").
-    pub(crate) fn remote_description_candidates(&self) -> Vec<transport::RTCIceCandidate> {
+    pub(crate) fn remote_description_candidates(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Vec<transport::RTCIceCandidate> {
         let Some(parsed) = self
             .pending_remote_description
             .as_ref()
@@ -2894,7 +2932,13 @@ impl RTCPeerConnection {
         };
         let mut seen: Vec<&str> = vec![];
         let mut candidates = vec![];
+        let transports = &self.pipeline_context.transports;
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            // The sections of the transport `on` (each transport has candidates of its own,
+            // RFC 9429 section 5.2.1).
+            if get_mid_value(media).is_some_and(|mid| transports.transport_id_for(mid) != on) {
+                continue;
+            }
             for value in media
                 .attributes
                 .iter()
@@ -2921,17 +2965,24 @@ impl RTCPeerConnection {
 
     /// W3C `RTCIceTransport.getLocalParameters()`: the ICE parameters of the local description
     /// (pending, else current), `None` while there is none. Read from the description's first
-    /// media section, the section of the one (BUNDLE) transport.
-    pub(crate) fn local_description_ice_parameters(&self) -> Option<transport::RTCIceParameters> {
+    /// media section on the transport `on`.
+    pub(crate) fn local_description_ice_parameters(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Option<transport::RTCIceParameters> {
         let parsed = self
             .pending_local_description
             .as_ref()
             .or(self.current_local_description.as_ref())?
             .parsed
             .as_ref()?;
+        let transports = &self.pipeline_context.transports;
         let (ufrag, pwd) = parsed
             .media_descriptions
-            .first()
+            .iter()
+            .find(|media| {
+                get_mid_value(media).is_none_or(|mid| transports.transport_id_for(mid) == on)
+            })
             .map(|media| media_ice_credentials(parsed, media))?;
         Some(transport::RTCIceParameters {
             username_fragment: ufrag?.to_owned(),
@@ -3031,7 +3082,8 @@ impl RTCPeerConnection {
     /// # Parameters
     ///
     /// - `local_candidate`: The ICE candidate initialization data, or a value whose `candidate`
-    ///   field is empty to signal end-of-gathering. For candidates of type `srflx` (server
+    ///   field is empty to signal end-of-gathering: of the transport of the section its
+    ///   `sdp_mid` / `sdp_mline_index` names, or of every transport when it names none. For candidates of type `srflx` (server
     ///   reflexive) or `relay`, set `url` to the STUN/TURN server the candidate was gathered
     ///   from, so that `getStats` attributes it correctly.
     ///
@@ -3046,6 +3098,30 @@ impl RTCPeerConnection {
         // A candidate is gathered for the transport of the section its `sdp_mid` (or
         // `sdp_mline_index`) names, the default transport without either. Each transport
         // needs candidates on a local address of its own.
+        let is_end_of_candidates = local_candidate
+            .candidate
+            .strip_prefix("candidate:")
+            .unwrap_or(&local_candidate.candidate)
+            .is_empty();
+        if self.pipeline_context.transports.len() > 1
+            && is_end_of_candidates
+            && local_candidate.sdp_mid.is_none()
+            && local_candidate.sdp_mline_index.is_none()
+        {
+            // The end of gathering that names no section is every transport's, as a remote
+            // end-of-candidates without `sdpMid` and `sdpMLineIndex` is for every media
+            // description (W3C webrtc-pc 4.4.1.6 addIceCandidate). An application that
+            // gathers on one socket for the default transport only finishes the others too:
+            // the connection's gathering state completes (W3C 4.3.2) instead of staying
+            // "gathering" until an answer closes them.
+            if self.is_closed() {
+                return Err(Error::ErrConnectionClosed);
+            }
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.finish_local_gathering_after_streams());
+            }
+            return Ok(());
+        }
         if self.pipeline_context.transports.len() > 1 {
             let local = self.local_description().and_then(|l| l.parsed);
             let id = self.transport_of_candidate(
@@ -3054,12 +3130,15 @@ impl RTCPeerConnection {
                 local.as_ref(),
             );
             if id != self.pipeline_context.transports.default_id() {
-                return self.with_transport(id, |pc| pc.add_other_local_candidate(local_candidate));
+                return self
+                    .with_transport(id, |pc| pc.add_local_candidate_on_default(local_candidate));
             }
         }
         self.add_local_candidate_on_default(local_candidate)
     }
 
+    /// `add_local_candidate` on the active transport (the default one, unless the candidate
+    /// is for another).
     fn add_local_candidate_on_default(
         &mut self,
         local_candidate: RTCIceCandidateInit,
@@ -3110,6 +3189,38 @@ impl RTCPeerConnection {
             .assign_stream_ids(dtls_role, max_channels)
         {
             log::debug!("data channel ids not assigned: {err}");
+            // W3C 4.4.1.6: "If no available ID could be generated, set channel's
+            // [[ReadyState]] to "closed", and add channel to errorList"; each channel of
+            // errorList then gets an `error` event (`data-channel-failure`, 4.4.1.6 step
+            // "fire an event named error") and is closed.
+            let mut error_list: Vec<RTCDataChannelId> = self
+                .data_channels
+                .values()
+                .filter(|dc| dc.stream_id.is_none() && !dc.negotiated)
+                .map(|dc| dc.id)
+                .collect();
+            error_list.sort_unstable();
+            for id in error_list {
+                if self.data_channels.remove(&id).is_none() {
+                    continue;
+                }
+                self.data_channels.record_error(
+                    id,
+                    crate::peer_connection::rtc_error::RTCError::new(
+                        crate::peer_connection::rtc_error::RTCErrorDetailType::DataChannelFailure,
+                        "no data channel id is available",
+                    ),
+                );
+                self.pipeline_context.stats.on_data_channel_gone(id);
+                for event in [
+                    crate::peer_connection::event::RTCDataChannelEvent::OnError(id),
+                    crate::peer_connection::event::RTCDataChannelEvent::OnClose(id),
+                ] {
+                    self.pipeline_context.event_outs.push_back(
+                        crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event),
+                    );
+                }
+            }
         }
     }
 
@@ -3492,8 +3603,22 @@ impl RTCPeerConnection {
         let dtls_role = self.dtls_transport().role();
         if matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
             let max_channels = self.sctp_transport().max_channels();
-            self.data_channels
-                .assign_stream_ids(dtls_role, max_channels)?;
+            if let Err(err) = self
+                .data_channels
+                .assign_stream_ids(dtls_role, max_channels)
+            {
+                // W3C createDataChannel: "If there is no available ID, throw an
+                // OperationError", and the channel does not exist: it is not left in
+                // [[DataChannels]].
+                if self
+                    .data_channels
+                    .get(&id)
+                    .is_some_and(|dc| dc.stream_id.is_none())
+                {
+                    self.data_channels.remove(&id);
+                }
+                return Err(err);
+            }
         }
         // Only an association that is up. One still in its handshake (both sides initiate
         // when DTLS connects, so there is always such a moment) dials every waiting channel
@@ -3953,6 +4078,15 @@ impl RTCPeerConnection {
         Ok(self.add_rtp_transceiver(transceiver))
     }
 
+    /// W3C `[[DataChannels]]` (webrtc-pc 4.4.1.1, an ordered set that starts empty): the
+    /// handles of the data channels this connection holds and has not closed, in the order
+    /// they were created or announced.
+    pub fn data_channel_ids(&self) -> Vec<RTCDataChannelId> {
+        let mut ids: Vec<RTCDataChannelId> = self.data_channels.values().map(|c| c.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Returns a handle to the [`RTCDataChannel`] with the given id, or `None` if no such
     /// channel exists on this peer connection.
     ///
@@ -3966,6 +4100,23 @@ impl RTCPeerConnection {
         } else {
             None
         }
+    }
+
+    /// The final attributes of the closed data channel `id` (W3C webrtc-pc 6.2: a closed
+    /// `RTCDataChannel` still answers `bufferedAmount`, "not reset to zero once the channel
+    /// closes", and its other attributes), once [`Self::data_channel`] returns `None` for it;
+    /// `None` for a channel that is not closed, or one closed so long ago that its record went
+    /// (the last [`MAX_KEPT_CLOSED_DATA_CHANNELS`] are kept).
+    ///
+    /// [`MAX_KEPT_CLOSED_DATA_CHANNELS`]: crate::data_channel::MAX_KEPT_CLOSED_DATA_CHANNELS
+    pub fn closed_data_channel(
+        &self,
+        id: RTCDataChannelId,
+    ) -> Option<&crate::data_channel::RTCClosedDataChannel> {
+        if self.data_channels.contains(&id) {
+            return None;
+        }
+        self.data_channels.closed(id)
     }
 
     /// The SCTP transport over which data channels are carried.
@@ -3986,7 +4137,7 @@ impl RTCPeerConnection {
     ///
     /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-sctp)
     pub fn sctp(&self) -> Option<RTCSctpTransport<'_>> {
-        if self.sctp_transport().is_started {
+        if self.sctp_transport().described {
             Some(RTCSctpTransport {
                 peer_connection: self,
             })

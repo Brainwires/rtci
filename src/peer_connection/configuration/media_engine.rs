@@ -1525,6 +1525,12 @@ impl MediaEngine {
             }
 
             let mut codecs = codecs_from_media_description(media)?;
+            // RFC 4585 section 4.1: no feedback outside an AVPF-based profile.
+            if !crate::peer_connection::sdp::is_avpf_section(media) {
+                for codec in &mut codecs {
+                    codec.rtp_codec.rtcp_feedback.clear();
+                }
+            }
 
             let add_if_new = |existing_codecs: &mut Vec<RTCRtpCodecParameters>,
                               codec: &RTCRtpCodecParameters| {
@@ -1613,6 +1619,17 @@ impl MediaEngine {
                         matches.retain(|codec| repair_family(&codec.rtp_codec) != "rtx");
                     }
                 }
+            }
+
+            // RFC 2198 section 5: the encodings a RED format names in its fmtp
+            // (`<primary>/<redundant>...`) "MUST" be formats of the m= line too, and section
+            // 3: of RED's own clock rate. A RED format naming one that is not, or one this
+            // endpoint did not negotiate, carries blocks that cannot be decoded, and is not
+            // negotiated. A RED format without an fmtp line (libwebrtc's `video/red`) names
+            // none.
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                let negotiated = matches.clone();
+                matches.retain(|codec| red_encodings_negotiated(codec, &negotiated));
             }
 
             // use exact matches when they exist, otherwise fall back to partial
@@ -2159,4 +2176,28 @@ mod register_feedback_test {
         assert_eq!(1, count(&me, "transport-cc", ""));
         assert!(me.audio_codecs[0].rtp_codec.rtcp_feedback.is_empty());
     }
+}
+
+/// Whether `codec`, when it is a RED format (RFC 2198), names in its fmtp only formats of
+/// `negotiated` with its own clock rate. Any other format, and a RED format without an fmtp
+/// line, passes.
+pub(crate) fn red_encodings_negotiated(
+    codec: &RTCRtpCodecParameters,
+    negotiated: &[RTCRtpCodecParameters],
+) -> bool {
+    let red = &codec.rtp_codec;
+    if !red.mime_type.to_ascii_lowercase().ends_with("/red") {
+        return true;
+    }
+    let fmtp = red.sdp_fmtp_line.trim();
+    if fmtp.is_empty() {
+        return true;
+    }
+    rtp::codec::red::parse_red_fmtp(fmtp).is_ok_and(|payload_types| {
+        payload_types.iter().all(|pt| {
+            negotiated.iter().any(|named| {
+                named.payload_type == *pt && named.rtp_codec.clock_rate == red.clock_rate
+            })
+        })
+    })
 }

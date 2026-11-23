@@ -1,5 +1,7 @@
 /// RFC 8888 congestion control feedback: per-packet arrival, ECN and arrival-time offsets.
 pub mod cc_feedback_report;
+/// RFC 6679 ECN feedback: cumulative ECT, ECN-CE, not-ECT, loss and duplicate counters.
+pub mod ecn_feedback;
 /// RRR: asks a sender to resynchronize as quickly as it can.
 pub mod rapid_resynchronization_request;
 /// TMMBR and TMMBN: a temporary bit rate limit, asked and announced.

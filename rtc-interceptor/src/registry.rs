@@ -455,6 +455,11 @@ impl Registry {
             .collect()
     }
 
+    /// Whether an interceptor sits at `slot`.
+    pub fn holds(&self, slot: Slot) -> bool {
+        self.names.contains_key(&slot)
+    }
+
     /// Assemble the interceptor chain.
     ///
     /// [`NoopInterceptor`] is appended last, so every chain ends the inbound RTCP path. That is a

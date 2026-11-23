@@ -87,3 +87,24 @@ fn the_fec_format_carries_its_fmtp_line() {
         find_fec_format(&[codec(96, "video/VP8"), codec(97, "video/rtx")])
     );
 }
+
+/// RFC 5109 section 14.1 with RFC 5956 section 4.3: a remote `FEC-FR` repair flow in a section
+/// with `video/ulpfec` and no FlexFEC is ULPFEC as a stream of its own; FlexFEC still wins
+/// where both are listed. The send side's lookup is unchanged (ULPFEC is sent in RED).
+#[test]
+fn a_receive_fec_flow_falls_back_to_ulpfec_as_a_separate_stream() {
+    let ulpfec_only = [codec(96, "video/VP8"), codec(117, "video/ulpfec")];
+    assert_eq!(None, find_fec_format(&ulpfec_only));
+    let format = find_receive_fec_format(&ulpfec_only).expect("ULPFEC");
+    assert_eq!(
+        (117, "video/ulpfec"),
+        (format.payload_type, format.mime_type.as_str())
+    );
+
+    let both = [
+        codec(96, "video/VP8"),
+        codec(117, "video/ulpfec"),
+        codec(118, "video/flexfec-03"),
+    ];
+    assert_eq!(118, find_receive_fec_format(&both).unwrap().payload_type);
+}

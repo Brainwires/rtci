@@ -17,8 +17,6 @@
 
 use super::RTCPeerConnection;
 use crate::peer_connection::handler::transport_set::TransportId;
-use crate::peer_connection::state::RTCIceGatheringState;
-use crate::peer_connection::transport::RTCIceCandidateInit;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use bytes::BytesMut;
 use ice::TransportError;
@@ -579,18 +577,9 @@ impl RTCPeerConnection {
         {
             return Ok(());
         }
-        let default = self.pipeline_context.transports.default_id();
+        // One path for every transport (mt-4): the candidate is the active transport's.
         self.with_transport(transport, |pc| {
-            if transport == default {
-                pc.add_ice_local_candidate(value, url, relay_protocol)
-            } else {
-                pc.add_other_local_candidate(RTCIceCandidateInit {
-                    candidate: format!("candidate:{value}"),
-                    url: url.map(str::to_owned),
-                    relay_protocol,
-                    ..Default::default()
-                })
-            }
+            pc.add_ice_local_candidate(value, url, relay_protocol)
         })
     }
 
@@ -795,17 +784,8 @@ impl RTCPeerConnection {
             if self.pipeline_context.transports.transport(t).is_none() {
                 continue;
             }
-            if t == self.pipeline_context.transports.default_id() {
-                self.with_transport(t, |pc| {
-                    if pc.ice_gathering_state() != RTCIceGatheringState::Complete {
-                        pc.finish_local_gathering();
-                    }
-                });
-            } else if let Err(err) = self.with_transport(t, |pc| {
-                pc.add_other_local_candidate(RTCIceCandidateInit::default())
-            }) {
-                debug!("end of gathering of {t:?}: {err}");
-            }
+            // `finish_local_gathering` does nothing for a transport that has finished.
+            self.with_transport(t, |pc| pc.finish_local_gathering());
         }
     }
 
@@ -1059,6 +1039,11 @@ mod tests {
     fn a_frame_before_a_check_on_a_shared_port_ties_the_connection_to_no_transport() {
         let now = Instant::now();
         let mut pc = RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                    .with_unique_transport_credentials(true)
+                    .build(),
+            )
             .build(now)
             .expect("a default peer connection builds");
         let default = pc.pipeline_context.transports.default_id();

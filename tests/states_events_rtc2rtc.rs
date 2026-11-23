@@ -793,6 +793,7 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
         url: "stun:stun.example.org".to_owned(),
         error_code: ICE_SERVER_UNREACHABLE,
         error_text: "unreachable".to_owned(),
+        ..Default::default()
     };
     pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
     pc.report_ice_candidate_error(unreachable("10.0.0.1"))?;
@@ -802,6 +803,7 @@ fn ice_candidate_errors_follow_the_spec_rules() -> Result<()> {
         url: "turn:turn.example.org".to_owned(),
         error_code: 401,
         error_text: "Unauthorized".to_owned(),
+        ..Default::default()
     })?;
     let errors: Vec<RTCPeerConnectionIceErrorEvent> = std::iter::from_fn(|| pc.poll_event())
         .filter_map(|e| match e {
@@ -1130,6 +1132,9 @@ fn destinations(
     let mut now = start;
     let mut sent = vec![];
     while now < start + span {
+        // The application reads its events: a local candidate's `icecandidate` is what
+        // conveys it, and the agent pairs it from then on (RFC 8838 section 10).
+        while pc.poll_event().is_some() {}
         while let Some(datagram) = pc.poll_write() {
             sent.push(datagram.transport.peer_addr);
         }
@@ -1138,6 +1143,82 @@ fn destinations(
         pc.handle_timeout(now)?;
     }
     Ok(sent)
+}
+
+/// W3C 4.8.1.1: the candidate-attribute grammar "MAY be extended" (RFC 8839 section 5.1:
+/// extension attributes are name / value pairs, and an unknown one is ignored). A remote
+/// candidate with the extensions browsers send (`generation`, `network-id`,
+/// `network-cost`) and one no specification defines is added and checked like the bare one.
+#[test]
+fn a_remote_candidate_with_grammar_extensions_is_added_and_checked() -> Result<()> {
+    let start = Instant::now();
+    let mut offerer = Peer::new("127.0.0.1:51099".parse()?, RTCDtlsRole::Client, start)?;
+    let mut answerer = Peer::new("127.0.0.1:51100".parse()?, RTCDtlsRole::Server, start)?;
+    offerer.pc.create_data_channel("probe", None)?;
+    let offer = offerer.pc.create_offer(None)?;
+    offerer.pc.set_local_description(start, offer.clone())?;
+    answerer.pc.set_remote_description(start, offer)?;
+    let answer = answerer.pc.create_answer(None)?;
+    answerer.pc.set_local_description(start, answer)?;
+    answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+    let mut extended = host("127.0.0.1:6004".parse()?)?;
+    extended.username_fragment = None;
+    extended.candidate = format!(
+        "{} generation 0 network-id 1 network-cost 10 x-unknown-extension yes",
+        extended.candidate
+    );
+    answerer.pc.add_remote_candidate(extended)?;
+
+    let remote: SocketAddr = "127.0.0.1:6004".parse()?;
+    let sent = destinations(&mut answerer.pc, start, Duration::from_secs(5))?;
+    assert!(
+        sent.iter().any(|a| *a == remote),
+        "the extended candidate is checked: {sent:?}"
+    );
+    Ok(())
+}
+
+/// W3C 4.4.2: "The user agent MAY also choose to prohibit connections to other addresses".
+/// The application's policy (`SettingEngineBuilder::with_remote_address_filter`) is that
+/// choice: a remote candidate whose address it refuses is never checked, one it accepts is.
+#[test]
+fn a_remote_address_the_filter_refuses_is_never_checked() -> Result<()> {
+    let start = Instant::now();
+    for (port, refused) in [(6002u16, true), (6003, false)] {
+        let mut offerer = Peer::new("127.0.0.1:51097".parse()?, RTCDtlsRole::Client, start)?;
+        let mut answerer = Peer::new("127.0.0.1:51098".parse()?, RTCDtlsRole::Server, start)?;
+        answerer.pc = RTCPeerConnectionBuilder::new()
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_answering_dtls_role(RTCDtlsRole::Server)
+                    .with_remote_address_filter(std::sync::Arc::new(|addr: SocketAddr| {
+                        addr.port() != 6002
+                    }))
+                    .build(),
+            )
+            .build(start)?;
+        offerer.pc.create_data_channel("probe", None)?;
+        let offer = offerer.pc.create_offer(None)?;
+        offerer.pc.set_local_description(start, offer.clone())?;
+        answerer.pc.set_remote_description(start, offer)?;
+        let answer = answerer.pc.create_answer(None)?;
+        answerer.pc.set_local_description(start, answer)?;
+        answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+        let remote: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+        let _ = answerer.pc.add_remote_candidate(host(remote)?);
+
+        let sent = destinations(&mut answerer.pc, start, Duration::from_secs(5))?;
+        let to_candidate = sent.iter().filter(|a| **a == remote).count();
+        if refused {
+            assert_eq!(
+                to_candidate, 0,
+                "nothing is sent where the filter refuses: {sent:?}"
+            );
+        } else {
+            assert!(to_candidate > 0, "the candidate is checked: {sent:?}");
+        }
+    }
+    Ok(())
 }
 
 /// W3C 4.4.2 "administratively prohibited": the ICE agent never connects to a remote

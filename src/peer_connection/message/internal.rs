@@ -10,6 +10,9 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DataChannelEvent {
+    /// The peer opened the channel in-band (W3C 6.2.3 "announce the data channel instance"):
+    /// the application's `datachannel` event, right before `Open`.
+    Announced,
     Open,
     Message(RTCDataChannelMessage),
     Close,
@@ -64,7 +67,9 @@ impl RTCMessageInternal {
                 DTLSMessage::Raw(bytes) => bytes.len(),
                 DTLSMessage::Sctp(dcm) => dcm.payload.len(),
                 DTLSMessage::DataChannel(app_msg) => match &app_msg.data_channel_event {
-                    DataChannelEvent::Open | DataChannelEvent::Close => 0,
+                    DataChannelEvent::Announced
+                    | DataChannelEvent::Open
+                    | DataChannelEvent::Close => 0,
                     DataChannelEvent::Message(rtc_dcm) => rtc_dcm.data.len(),
                 },
             },

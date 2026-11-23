@@ -3,8 +3,8 @@ use crate::util::{
     SourcedAssociationIdGenerator,
 };
 
-use crate::TimerConfig;
 use crate::association::pmtud::PathMtuDiscoveryConfig;
+use crate::{RtoConfig, TimerConfig};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,6 +103,7 @@ pub struct TransportConfig {
     max_num_outbound_streams: u16,
     max_num_inbound_streams: u16,
     timer_config: TimerConfig,
+    rto_config: RtoConfig,
     stream_scheduler: StreamScheduler,
     valid_cookie_life: Duration,
     heartbeat_interval: Option<Duration>,
@@ -127,6 +128,7 @@ impl Default for TransportConfig {
             max_num_outbound_streams: u16::MAX,
             max_num_inbound_streams: u16::MAX,
             timer_config: TimerConfig::default(),
+            rto_config: RtoConfig::default(),
             stream_scheduler: StreamScheduler::default(),
             valid_cookie_life: Duration::from_secs(60),
             heartbeat_interval: Some(Duration::from_secs(30)),
@@ -371,6 +373,15 @@ impl TransportConfig {
         self
     }
 
+    /// Sets RTO.Initial, RTO.Min and RTO.Max (RFC 9260 sections 6.3.1 and 16); see
+    /// [`RtoConfig`]. The defaults are the RFC's: 1, 1 and 60 seconds. With
+    /// [`TimerConfig::max_t3_rtx_retrans`] (Association.Max.Retrans) they bound how long an
+    /// unanswered peer is retransmitted to before the association fails.
+    pub fn with_rto_config(mut self, value: RtoConfig) -> Self {
+        self.rto_config = value;
+        self
+    }
+
     /// Chooses how the next message to send is picked among the streams.
     pub fn with_stream_scheduler(mut self, value: StreamScheduler) -> Self {
         self.stream_scheduler = value;
@@ -417,6 +428,11 @@ impl TransportConfig {
     /// The configured retransmission limits.
     pub fn timer_config(&self) -> TimerConfig {
         self.timer_config
+    }
+
+    /// The configured RTO bounds.
+    pub fn rto_config(&self) -> RtoConfig {
+        self.rto_config
     }
 
     /// The configured stream scheduler.

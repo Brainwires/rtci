@@ -5,8 +5,8 @@
 mod rtcp_session_common;
 
 use rtc_interceptor::{
-    AttributedPacket, Interceptor, Packet, RTPHeaderExtension, Registry, RtcpSessionControl, Slot,
-    StreamInfo, TaggedPacket, TwccReceiverBuilder,
+    AttributedPacket, Interceptor, Packet, RTCPFeedback, RTPHeaderExtension, Registry,
+    RtcpSessionControl, Slot, StreamInfo, TaggedPacket, TwccReceiverBuilder,
 };
 use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use rtcp_session_common::*;
@@ -28,6 +28,10 @@ fn stream(ssrc: u32) -> StreamInfo {
         rtp_header_extensions: vec![RTPHeaderExtension {
             uri: TRANSPORT_CC_URI.to_string(),
             id: u16::from(EXT_ID),
+        }],
+        rtcp_feedback: vec![RTCPFeedback {
+            typ: "transport-cc".to_string(),
+            parameter: String::new(),
         }],
         ..Default::default()
     }

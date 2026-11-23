@@ -428,6 +428,10 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
+    /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
+    /// connection gets ICE credentials of its own. The derived default `false` shares the first
+    /// transport's.
+    pub(crate) unique_transport_credentials: bool,
     /// [`SettingEngineBuilder::with_implicit_rollback`].
     /// Inverted so that the derived default is "implicit rollback on".
     pub(crate) explicit_rollback_only: bool,
@@ -460,11 +464,19 @@ pub struct SettingEngine {
     /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
     /// on.
     pub(crate) sctp_zero_checksum: Option<bool>,
+    /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
+    pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
+    pub(crate) sctp_rto: Option<sctp::RtoConfig>,
+    /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
+    pub(crate) sctp_max_retransmissions: Option<usize>,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
     pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_data_channel_send_before_ack`].
+    pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
@@ -481,6 +493,15 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The connection runs without the RTCP session the builder otherwise installs
+    /// ([`SettingEngineBuilder::with_rtcp_session_omitted`]); a departure from RFC 8834 4.1.
+    pub(crate) rtcp_session_omitted: bool,
+    /// Received RTCP is held to RFC 3550 Appendix A.2 and section 6.4.1
+    /// ([`SettingEngineBuilder::with_strict_rtcp_validity`]).
+    pub(crate) strict_rtcp_validity: bool,
+    /// RTCP feedback the application writes is sent whether or not its section negotiated
+    /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
+    pub(crate) unnegotiated_rtcp_feedback: bool,
     /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
     /// and the methods after it).
     pub(crate) streams: crate::peer_connection::streams::StreamSettings,
@@ -1690,6 +1711,31 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether each transport of the connection has ICE credentials of its own (RFC 9429
+    /// section 5.2.1: "Each "m=" section, provided it is not marked as bundle-only, MUST
+    /// contain a unique set of ICE credentials"). The default is `false`: the transports an
+    /// offer or answer adds beside the first one (the first section of each media type in a
+    /// `balanced` initial offer, every section under `max-compat`, every section answered
+    /// outside a BUNDLE group) take the first transport's `ice-ufrag` and `ice-pwd`, and an ICE
+    /// restart gives them all one new pair. Each transport keeps its own candidates, DTLS
+    /// association and SRTP keys.
+    ///
+    /// The default is what the browsers write (Chrome and Firefox put one `ice-ufrag` /
+    /// `ice-pwd` pair in every m= section of a session, bundled or not) and RFC 8839 section
+    /// 5.4 allows ("If two data streams have identical "ice-ufrag"s, they MUST have identical
+    /// "ice-pwd"s"). Pion and webrtc-rs 0.17 refuse a description whose sections carry
+    /// different credentials (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so
+    /// the RFC 9429 form cannot reach them: with `true` an initial `balanced` offer with audio
+    /// and video, or media and a data channel, is refused by them.
+    ///
+    /// With shared credentials the transports are told apart by their local addresses only:
+    /// several transports on one local socket need `true`, since the ICE username of a STUN
+    /// request is then the same for each.
+    pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
+        self.0.unique_transport_credentials = unique;
+        self
+    }
+
     // SetICETCPMux enables ICE-TCP when set to a non-nil value. Make sure that
     // NetworkTypeTCP4 or NetworkTypeTCP6 is enabled as well.
     //pub fn SetICETCPMux(&mut self, tcpMux ice.TCPMux) {
@@ -2042,6 +2088,40 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The number of SCTP streams this endpoint asks for and accepts in each direction
+    /// (the OS and MIS of its INIT or INIT ACK, RFC 9260 section 3.3.2). The association has
+    /// the smaller of both sides' counts, which is W3C `RTCSctpTransport.maxChannels`
+    /// (webrtc-pc 6.1.1): a data channel id at or above it cannot be used. Unset, the default,
+    /// is 65535, as browsers ask for; a value of 0 is raised to 1.
+    pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
+        self.0.sctp_max_streams = Some(streams.max(1));
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the SCTP association (RFC 9260 sections 6.3.1 and
+    /// 16): the retransmission timeout before a round trip is measured, and its bounds. Unset,
+    /// the default, is the RFC's recommendation: 1, 1 and 60 seconds. A minimum or maximum of
+    /// zero is raised to a millisecond, a maximum below the minimum to the minimum.
+    ///
+    /// With [`Self::with_sctp_max_retransmissions`] this bounds how long the association keeps
+    /// retransmitting to a peer that does not answer before it fails (W3C webrtc-pc 6.2: the
+    /// data channels then fail with `sctp-failure`). At the defaults that is minutes, longer
+    /// than ICE consent (30 seconds) takes to fail the path: an application that wants SCTP
+    /// itself to report an unreachable peer sooner (a path ICE still thinks alive) lowers it.
+    pub fn with_sctp_rto(mut self, initial: Duration, min: Duration, max: Duration) -> Self {
+        self.0.sctp_rto = Some(sctp::RtoConfig { initial, min, max });
+        self
+    }
+
+    /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
+    /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
+    /// takes before it declares the peer unreachable and fails. Unset, the default, is the
+    /// RFC's 10. See [`Self::with_sctp_rto`].
+    pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
+        self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
     /// Whether a message over 16 KB is refused when the SCTP association does not interleave
     /// user messages. On by default: RFC 8831 section 6.6 says "As long as message
     /// interleaving is not supported, the sender SHOULD limit the maximum message size to
@@ -2071,6 +2151,22 @@ impl SettingEngineBuilder {
     /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
+    /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
+    ///
+    /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
+    /// start sending messages containing user data without waiting for the reception of the
+    /// corresponding DATA_CHANNEL_ACK message". The data goes out ordered behind the OPEN, and
+    /// a peer that implements RFC 8832 (any browser, this engine) takes it as the ACK would.
+    ///
+    /// [`Error::ErrDataChannelNotOpen`]: shared::error::Error::ErrDataChannelNotOpen
+    pub fn with_data_channel_send_before_ack(mut self, enabled: bool) -> Self {
+        self.0.data_channel_send_before_ack = enabled;
         self
     }
 
@@ -2190,6 +2286,47 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
+    /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
+    /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.
+    pub fn with_unnegotiated_rtcp_feedback(mut self, allowed: bool) -> Self {
+        self.0.unnegotiated_rtcp_feedback = allowed;
+        self
+    }
+
+    /// Builds the connection without an RTCP session: a departure from RFC 8834 section 4.1
+    /// ("RTCP ... MUST be implemented and used by all WebRTC endpoints").
+    ///
+    /// Every peer connection sends RTCP: when the interceptor registry given to
+    /// [`RTCPeerConnectionBuilder::with_interceptor_registry`](crate::peer_connection::RTCPeerConnectionBuilder::with_interceptor_registry)
+    /// has nothing at [`Slot::RtcpSession`](interceptor::Slot::RtcpSession) and no
+    /// `SenderReportInterceptor` / `ReceiverReportInterceptor` of its own,
+    /// [`RTCPeerConnectionBuilder::build`](crate::peer_connection::RTCPeerConnectionBuilder::build)
+    /// installs the session of
+    /// [`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports)
+    /// (an empty registry included). With this on it does not, and a registry without an RTCP
+    /// session sends only the RTCP the application writes. Off by default.
+    pub fn with_rtcp_session_omitted(mut self, omitted: bool) -> Self {
+        self.0.rtcp_session_omitted = omitted;
+        self
+    }
+
+    /// Holds received RTCP to the validity checks of RFC 3550 Appendix A.2 and section 6.4.1:
+    /// a datagram whose first packet is not an SR or RR (unless reduced-size RTCP, RFC 5506,
+    /// was negotiated), whose first packet has its padding bit set, or with padding on a
+    /// packet that is not the last, is discarded whole.
+    ///
+    /// Off by default: libwebrtc sends padding on a packet in the middle of a compound packet
+    /// (its transport-wide congestion control feedback, padded to a multiple of four), so the
+    /// default accepts any datagram whose version and lengths hold, and processes every packet
+    /// in it that parses (RFC 8834 section 4.1).
+    pub fn with_strict_rtcp_validity(mut self, strict: bool) -> Self {
+        self.0.strict_rtcp_validity = strict;
         self
     }
 

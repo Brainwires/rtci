@@ -1,4 +1,5 @@
 use crate::data_channel::RTCDataChannelId;
+use crate::data_channel::closed::{MAX_KEPT_CLOSED_DATA_CHANNELS, RTCClosedDataChannel};
 use crate::data_channel::internal::RTCDataChannelInternal;
 use crate::peer_connection::rtc_error::RTCError;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
@@ -41,6 +42,10 @@ pub(crate) struct DataChannelRegistry {
 
     /// The SCTP cause code of the association's failure, once it was aborted with one.
     pub(crate) sctp_failure_cause: Option<u16>,
+
+    /// The final attributes of the channels removed (closed), newest last, at most
+    /// [`MAX_KEPT_CLOSED_DATA_CHANNELS`].
+    closed: std::collections::VecDeque<RTCClosedDataChannel>,
 }
 
 /// How many data channel errors [`DataChannelRegistry`] keeps.
@@ -54,6 +59,7 @@ impl DataChannelRegistry {
             next_handle: 0,
             errors: std::collections::VecDeque::new(),
             sctp_failure_cause: None,
+            closed: std::collections::VecDeque::new(),
         }
     }
 
@@ -65,6 +71,18 @@ impl DataChannelRegistry {
             self.errors.pop_front();
         }
         self.errors.push_back((id, error));
+    }
+
+    /// The final attributes of channel `id`, once it was removed and while the record is kept.
+    pub(crate) fn closed(&self, id: RTCDataChannelId) -> Option<&RTCClosedDataChannel> {
+        self.closed.iter().find(|channel| channel.id() == id)
+    }
+
+    fn keep_closed(&mut self, channel: &RTCDataChannelInternal) {
+        if self.closed.len() == MAX_KEPT_CLOSED_DATA_CHANNELS {
+            self.closed.pop_front();
+        }
+        self.closed.push_back(RTCClosedDataChannel::of(channel));
     }
 
     /// The error channel `id` failed with, if it did and the record is still kept.
@@ -139,7 +157,9 @@ impl DataChannelRegistry {
         stream_id: &StreamId,
     ) -> Option<RTCDataChannelInternal> {
         let handle = self.by_stream.remove(stream_id)?;
-        self.channels.remove(&handle)
+        let channel = self.channels.remove(&handle)?;
+        self.keep_closed(&channel);
+        Some(channel)
     }
 
     /// Removes channel `handle`, freeing its stream id if it has one.
@@ -150,6 +170,7 @@ impl DataChannelRegistry {
         {
             self.by_stream.remove(&stream_id);
         }
+        self.keep_closed(&channel);
         Some(channel)
     }
 

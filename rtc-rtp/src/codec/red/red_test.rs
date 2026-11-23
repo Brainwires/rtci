@@ -549,3 +549,67 @@ fn red_fmtp_rejects_bad_entries() {
     let max = vec!["1"; RED_MAX_BLOCKS].join("/");
     assert_eq!(parse_red_fmtp(&max).unwrap().len(), RED_MAX_BLOCKS);
 }
+
+fn media_packet(
+    sequence_number: u16,
+    timestamp: u32,
+    marker: bool,
+    data: &[u8],
+) -> crate::packet::Packet {
+    crate::packet::Packet {
+        header: crate::header::Header {
+            version: 2,
+            marker,
+            payload_type: 111,
+            sequence_number,
+            timestamp,
+            ssrc: 0x1234_5678,
+            csrc: vec![7, 8],
+            ..Default::default()
+        },
+        payload: b(data),
+    }
+}
+
+/// RFC 2198 section 3: a RED packet has a standard RTP header whose payload type is RED's;
+/// sequence number, timestamp, marker, SSRC and CSRCs are those of the primary.
+#[test]
+fn the_red_rtp_header_is_the_primarys_with_the_red_payload_type() {
+    let mut encoder = RedEncoder::new(1, 1200);
+    encoder
+        .encode_rtp(63, &media_packet(1, 0, false, b"one"))
+        .unwrap();
+    let primary = media_packet(2, 960, true, b"two");
+    let red = encoder.encode_rtp(63, &primary).unwrap();
+
+    let mut expected = primary.header.clone();
+    expected.payload_type = 63;
+    assert_eq!(expected, red.header);
+    let parsed = RedPacket::parse(&red.payload).unwrap();
+    assert_eq!(&b(b"two"), &parsed.primary().data);
+    assert_eq!(111, parsed.primary().payload_type);
+    assert_eq!(960, parsed.redundant()[0].timestamp_offset);
+}
+
+/// RFC 2198 section 4: recovered data gets the RED packet's CSRC list, and no marker bit (it
+/// was lost with its packet); the primary keeps the packet's marker.
+#[test]
+fn recovered_data_carries_the_red_packets_csrcs_and_no_marker() {
+    let mut encoder = RedEncoder::new(1, 1200);
+    encoder
+        .encode_rtp(63, &media_packet(1, 0, true, b"one"))
+        .unwrap();
+    let red = encoder
+        .encode_rtp(63, &media_packet(2, 960, true, b"two"))
+        .unwrap();
+
+    // The packet carrying "one" was lost: "two"'s RED packet recovers it.
+    let delivered = RedDecoder::default().decode_rtp(&red).unwrap();
+    assert_eq!(2, delivered.len());
+    assert_eq!(&b(b"one"), &delivered[0].block.data);
+    assert!(!delivered[0].marker);
+    assert_eq!(vec![7, 8], delivered[0].csrc);
+    assert_eq!(&b(b"two"), &delivered[1].block.data);
+    assert!(delivered[1].marker);
+    assert_eq!(vec![7, 8], delivered[1].csrc);
+}

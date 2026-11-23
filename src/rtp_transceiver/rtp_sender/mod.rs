@@ -388,7 +388,74 @@ impl RTCRtpSender<'_> {
                 parameters,
                 set_parameter_options,
                 &self.peer_connection.media_engine,
-            )
+            )?;
+        // The encodings' priority, maxBitrate or active flag may have changed: the target is
+        // divided again (W3C webrtc-priority 3.2, webrtc 5.2.5).
+        self.peer_connection.reallocate_target_bitrate();
+        Ok(())
+    }
+
+    /// The share of the congestion controller's target each of the sender's encodings is
+    /// given, by SSRC, in bits per second: what its encoder is to aim for. The target is
+    /// divided among the active encodings of every sending transceiver by `priority` (each
+    /// level twice the share of the level below, RFC 8835 section 4.1, W3C webrtc-priority
+    /// 3.2) and capped at each one's `max_bitrate` (W3C webrtc 5.2.5), the rest going to the
+    /// others. Empty until the congestion controller (the default interceptors) set a target,
+    /// and for a sender that does not send. Each outbound stream's `targetBitrate` statistic
+    /// reports the same share.
+    pub fn target_bitrates(&self) -> Vec<(crate::rtp_transceiver::SSRC, f64)> {
+        self.sender().allocated_bitrates().to_vec()
+    }
+
+    /// webrtc-svc 3.2.3: "the user agent MAY configure a different scalability mode" than
+    /// the one requested, when the negotiated codec cannot carry it, and `getParameters` after
+    /// negotiation returns "the currently configured" mode. The engine does not encode: the
+    /// application's encoder reports the mode it configured for encoding `encoding` (its index
+    /// in `getParameters().encodings`) here, `None` for none, and `getParameters` returns it
+    /// from then on.
+    ///
+    /// # Errors
+    ///
+    /// - `TypeError` for a mode that is not in the webrtc-svc table, or one the encoding's
+    ///   negotiated codec (or, with none chosen, no send codec) cannot carry
+    /// - `RangeError` for an index past the sender's encodings
+    /// - `InvalidStateError` on an audio sender, which has no scalability mode
+    pub fn set_configured_scalability_mode(
+        &mut self,
+        encoding: usize,
+        mode: Option<&str>,
+    ) -> Result<()> {
+        use rtp::codec::svc::ScalabilityMode;
+        use std::str::FromStr;
+        let sender = self.sender();
+        if sender.kind() != RtpCodecKind::Video {
+            return Err(Error::InvalidStateError);
+        }
+        if let Some(name) = mode {
+            let parsed = ScalabilityMode::from_str(name)
+                .map_err(|_| Error::TypeError(format!("{name:?} is not a scalability mode")))?;
+            let codec = sender
+                .send_encodings()
+                .get(encoding)
+                .map(|e| e.codec.mime_type.clone())
+                .unwrap_or_default();
+            let carried = if codec.is_empty() {
+                let codecs = &self.peer_connection.media_engine;
+                codecs
+                    .get_codecs_by_kind(RtpCodecKind::Video)
+                    .iter()
+                    .any(|c| parsed.supported_by(&c.rtp_codec.mime_type))
+            } else {
+                parsed.supported_by(&codec)
+            };
+            if !carried {
+                return Err(Error::TypeError(format!(
+                    "no codec of the encoding can carry scalability mode {name}"
+                )));
+            }
+        }
+        self.sender_mut()
+            .set_configured_scalability_mode(encoding, mode.map(str::to_owned))
     }
 
     /// Returns the sender's current RTP send parameters.
@@ -408,7 +475,13 @@ impl RTCRtpSender<'_> {
             .as_mut()
             .expect("every transceiver has a sender");
         sender.set_negotiated_not_sending(negotiated_not_sending);
-        sender.get_parameters(&self.peer_connection.media_engine)
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let negotiated = transceiver.negotiated_header_extensions().to_vec();
+        transceiver
+            .sender_mut()
+            .as_mut()
+            .expect("every transceiver has a sender")
+            .get_parameters(&self.peer_connection.media_engine, &negotiated)
     }
 
     /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
@@ -527,6 +600,39 @@ impl RTCRtpSender<'_> {
         self.write_rtp(now, packet)
     }
 
+    /// [`Self::write_rtp`] of an audio frame with the level of its source
+    /// (webrtc-encoded-transform 4.4.1: a locally sourced frame's `audioLevel` "MUST be taken
+    /// directly from the source and used as input to generate the [RFC6464] header extension
+    /// if negotiated"). `audio_level` is linear, 0 (silence) to 1 (0 dBov), as
+    /// `audioLevel`; it is written as the RFC 6464 level, `-20 log10(audio_level)` dBov
+    /// rounded and clamped to 0..=127 (0 and below is 127), with the voice activity flag
+    /// from `voice_activity` (0 when unknown). The element goes in only on an audio sender
+    /// that negotiated the extension; the packet is sent either way.
+    pub fn write_rtp_with_audio_level(
+        &mut self,
+        now: Instant,
+        mut packet: rtp::Packet,
+        audio_level: f64,
+        voice_activity: Option<bool>,
+    ) -> Result<()> {
+        let id = (self.sender().kind() == RtpCodecKind::Audio)
+            .then(|| {
+                self.get_parameters()
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .find(|e| e.uri == ::sdp::extmap::AUDIO_LEVEL_URI)
+                    .map(|e| e.id)
+            })
+            .flatten();
+        if let Some(id) = id.and_then(|id| u8::try_from(id).ok()) {
+            packet
+                .header
+                .set_extension_upgrading(id, rfc6464_element(audio_level, voice_activity))?;
+        }
+        self.write_rtp(now, packet)
+    }
+
     /// W3C `RTCRtpSender.dtmf`: the DTMF sender of an audio sender, `None` for a video one.
     pub fn dtmf(&mut self) -> Option<dtmf::RTCDTMFSender<'_>> {
         if self.sender().kind() != RtpCodecKind::Audio {
@@ -562,6 +668,9 @@ impl RTCRtpSender<'_> {
             .peer_connection
             .setting_engine
             .unnegotiated_header_extensions;
+        let negotiated_header_extensions = self.peer_connection.rtp_transceivers[self.id.0]
+            .negotiated_header_extensions()
+            .to_vec();
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
@@ -595,6 +704,51 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // W3C webrtc 5.2.5 maxFramerate (video): frames above the encoding's maximum rate are
+        // dropped whole.
+        if sender.kind() == RtpCodecKind::Video {
+            let max_framerate = sender
+                .send_encodings()
+                .iter()
+                .find(|e| e.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
+                .and_then(|e| e.max_framerate);
+            if !sender.admit_under_max_framerate(
+                packet.header.ssrc,
+                packet.header.timestamp,
+                max_framerate,
+            ) {
+                trace!(
+                    "rtp_sender {:?} drops RTP ssrc {} ts {}: above maxFramerate {:?}",
+                    self.id, packet.header.ssrc, packet.header.timestamp, max_framerate
+                );
+                return Ok(());
+            }
+        }
+
+        // W3C webrtc 5.2.5 maxBitrate: the encoding's frames are dropped while they would
+        // take it above its maximum (one frame always goes).
+        let max_bitrate = sender
+            .send_encodings()
+            .iter()
+            .find(|e| e.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
+            .map_or(0, |e| e.max_bitrate);
+        let bits = {
+            use shared::marshal::MarshalSize;
+            (packet.marshal_size() * 8) as f64
+        };
+        if !sender.admit_under_max_bitrate(
+            now,
+            packet.header.ssrc,
+            packet.header.timestamp,
+            bits,
+            max_bitrate,
+        ) {
+            trace!(
+                "rtp_sender {:?} drops RTP ssrc {} ts {}: the frame would exceed maxBitrate {}",
+                self.id, packet.header.ssrc, packet.header.timestamp, max_bitrate
+            );
+            return Ok(());
+        }
         // The payload types of comfort noise (13, and any the application registered) and of
         // telephone events: formats that ride an audio stream and are not media.
         let auxiliary_payload_types: Vec<u8> = std::iter::once(13)
@@ -615,7 +769,7 @@ impl RTCRtpSender<'_> {
             .collect();
         let mixed = sender.extmap_allow_mixed();
         let two_byte_stream = sender.is_two_byte_stream(packet.header.ssrc);
-        let parameters = sender.get_parameters(media_engine);
+        let parameters = sender.get_parameters(media_engine, &negotiated_header_extensions);
         let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
         //From SSRC, find the encoding
@@ -808,10 +962,45 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        // RFC 4585 section 4.2, RFC 5104 section 7.2: only the feedback the section negotiated.
+        let codecs = self.sender().get_send_codecs();
+        if !self
+            .peer_connection
+            .setting_engine
+            .unnegotiated_rtcp_feedback
+            && !codecs.is_empty()
+            && let Some((typ, parameter)) =
+                crate::rtp_transceiver::rtp_sender::rtp_codec::unnegotiated_feedback(
+                    &packets, codecs,
+                )
+        {
+            return Err(Error::ErrRTCPFeedbackNotNegotiated(
+                typ.to_owned(),
+                parameter.to_owned(),
+            ));
+        }
+
         let track_id = self.sender().track().track_id().to_string();
         self.peer_connection.handle_write(TaggedRTCMessage {
             now,
             message: RTCMessage::RtcpPacket(track_id, packets),
         })
     }
+}
+
+/// The RFC 6464 element of a linear level (0..1): `V` and the level in -dBov.
+fn rfc6464_element(audio_level: f64, voice_activity: Option<bool>) -> bytes::Bytes {
+    let dbov = if audio_level.is_nan() || audio_level <= 0.0 {
+        127
+    } else {
+        (-20.0 * audio_level.min(1.0).log10())
+            .round()
+            .clamp(0.0, 127.0) as u8
+    };
+    let v = if voice_activity == Some(true) {
+        0x80
+    } else {
+        0
+    };
+    bytes::Bytes::from(vec![v | dbov])
 }

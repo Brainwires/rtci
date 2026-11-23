@@ -251,7 +251,18 @@ impl RTCRtpTransceiverInternal {
         negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
     ) {
         self.header_extensions_to_negotiate = Some(negotiated.clone());
+        if self.negotiated_header_extensions == negotiated {
+            return;
+        }
         self.negotiated_header_extensions = negotiated;
+        // W3C 5.2 / 5.3 getParameters: the header extensions are those negotiated for each
+        // way, so what an earlier call returned is stale.
+        if let Some(sender) = self.sender.as_mut() {
+            sender.invalidate_parameters();
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.invalidate_parameters();
+        }
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.
@@ -489,7 +500,20 @@ impl RTCRtpTransceiverInternal {
 
     /// Codecs returns list of supported codecs
     pub(crate) fn get_codecs(&self, media_engine: &MediaEngine) -> Vec<RTCRtpCodecParameters> {
-        RTCRtpReceiverInternal::get_codecs(&self.preferred_codecs, self.kind(), media_engine)
+        let codecs =
+            RTCRtpReceiverInternal::get_codecs(&self.preferred_codecs, self.kind(), media_engine);
+        // RFC 2198 section 5: the encodings a RED format names "MUST" also be formats of the
+        // m= line (and of RED's clock rate, section 3): a RED format whose fmtp names one the
+        // section does not list is left out of what this section offers and matches.
+        let all = codecs.clone();
+        codecs
+            .into_iter()
+            .filter(|codec| {
+                crate::peer_connection::configuration::media_engine::red_encodings_negotiated(
+                    codec, &all,
+                )
+            })
+            .collect()
     }
 
     /// set_mid sets the RTPTransceiver's mid. If it was already set, will return an error.
@@ -641,6 +665,36 @@ impl RTCRtpTransceiverInternal {
         }
     }
 
+    /// W3C webrtc-pc 5.2.9: a sender's codecs take their `sdpFmtpLine` from the remote
+    /// description. `remote` is this transceiver's section of it: each send codec of the
+    /// same payload type there takes that format's parameters.
+    pub(crate) fn take_send_fmtp_from_remote(&mut self, remote: &MediaDescription) {
+        let Ok(remote_codecs) = crate::peer_connection::sdp::codecs_from_media_description(remote)
+        else {
+            return;
+        };
+        if let Some(sender) = self.sender.as_mut() {
+            sender.take_send_fmtp(&remote_codecs);
+        }
+    }
+
+    /// W3C webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from the local
+    /// description; `local` is this transceiver's section of it.
+    pub(crate) fn take_receive_fmtp_from_local(&mut self, local: &MediaDescription) {
+        let Ok(local_codecs) = crate::peer_connection::sdp::codecs_from_media_description(local)
+        else {
+            return;
+        };
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_local_fmtp(
+                local_codecs
+                    .into_iter()
+                    .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line))
+                    .collect(),
+            );
+        }
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         self.rtcp_reduced_size = reduced_size;
         if let Some(sender) = self.sender.as_mut() {
@@ -668,7 +722,15 @@ impl RTCRtpTransceiverInternal {
         media: &MediaDescription,
         media_engine: &MediaEngine,
     ) -> Result<()> {
-        let remote_codecs = codecs_from_media_description(media)?;
+        let mut remote_codecs = codecs_from_media_description(media)?;
+        // RFC 4585 section 4.1: the feedback of `a=rtcp-fb` is used only in a session whose
+        // profile is AVPF (or one inheriting it); a section offered or answered as `RTP/AVP` or
+        // `RTP/SAVP` negotiates none, whatever `a=rtcp-fb` lines it carries.
+        if !crate::peer_connection::sdp::is_avpf_section(media) {
+            for codec in &mut remote_codecs {
+                codec.rtp_codec.rtcp_feedback.clear();
+            }
+        }
 
         // Codec preferences the application set (W3C `setCodecPreferences`) constrain what is
         // negotiated (JSEP RFC 8829 §5.3.1), so they are matched first; the remote codecs then
@@ -779,8 +841,22 @@ impl RTCRtpTransceiverInternal {
 
         // find RTX associations and add those
         for (remote_payload_type, media_engine_payload_type) in payload_mapping {
-            let remote_rtx = find_rtx_payload_type(remote_payload_type, &remote_codecs);
-            if remote_rtx.is_none() {
+            let Some(remote_rtx) = find_rtx_payload_type(remote_payload_type, &remote_codecs)
+            else {
+                continue;
+            };
+            // RFC 4588 section 4: "the retransmission payload type ... MUST use the same clock
+            // rate as the original payload type": an `rtx` format of another rate than the one
+            // it repairs is not negotiated.
+            let rtx_rate = remote_codecs
+                .iter()
+                .find(|codec| codec.payload_type == remote_rtx)
+                .map(|codec| codec.rtp_codec.clock_rate);
+            let primary_rate = filtered_codecs
+                .iter()
+                .find(|codec| codec.payload_type == media_engine_payload_type)
+                .map(|codec| codec.rtp_codec.clock_rate);
+            if rtx_rate.is_some() && primary_rate.is_some() && rtx_rate != primary_rate {
                 continue;
             }
 

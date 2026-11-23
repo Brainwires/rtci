@@ -253,7 +253,7 @@ pub(crate) mod xr;
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
 pub use adaptive_jitter_buffer::{
-    JitterBufferBuilder as AdaptiveJitterBufferBuilder,
+    JitterBufferBuilder as AdaptiveJitterBufferBuilder, JitterBufferControl,
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
@@ -406,7 +406,7 @@ pub use ulpfec::{
 pub use wire_image::{MAX_HELD_WIRE_IMAGES, WireImageTap, WireImages, wire_image_tap};
 pub use xr::{
     DEFAULT_GMIN as XR_DEFAULT_GMIN, DEFAULT_INTERVAL as XR_DEFAULT_INTERVAL, JitterBufferMetrics,
-    RTCP_FB_XR, XrReportBuilder, XrReportInterceptor,
+    RTCP_FB_NACK_ECN, RTCP_FB_XR, RTCP_XR_ECN_SUMMARY, XrReportBuilder, XrReportInterceptor,
 };
 
 /// One interceptor of packet processing.

@@ -38,6 +38,9 @@ pub struct TwccReceiverBuilder {
     adaptive_interval: bool,
     /// Whether packets already reported received are reported again (libwebrtc).
     rereport_received: bool,
+    /// Whether the header extension alone, without `transport-cc` feedback, makes a stream
+    /// reported.
+    extension_alone: bool,
 }
 
 impl Default for TwccReceiverBuilder {
@@ -46,6 +49,7 @@ impl Default for TwccReceiverBuilder {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
             rereport_received: false,
+            extension_alone: false,
         }
     }
 }
@@ -90,10 +94,23 @@ impl TwccReceiverBuilder {
         self
     }
 
+    /// Whether a remote stream whose packets carry the transport-wide sequence number header
+    /// extension is reported on although `a=rtcp-fb:<pt> transport-cc` was not negotiated for
+    /// it. Off by default: the feedback is an RTCP feedback message, sent only where the
+    /// session negotiated it (RFC 4585 section 4.2: "MUST NOT" use feedback other than the
+    /// listed types), and libwebrtc too reports only when the feedback is negotiated beside
+    /// the extension. On is the fork's earlier behaviour, for a peer that signals the
+    /// extension alone.
+    pub fn with_feedback_on_extension_alone(mut self, extension_alone: bool) -> Self {
+        self.extension_alone = extension_alone;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> TwccReceiverInterceptor {
         let mut interceptor = TwccReceiverInterceptor::new(self.interval, self.adaptive_interval);
         interceptor.rereport_received = self.rereport_received;
+        interceptor.extension_alone = self.extension_alone;
         interceptor
     }
 }
@@ -144,6 +161,8 @@ pub struct TwccReceiverInterceptor {
     read_queue: VecDeque<TaggedPacket>,
     /// See [`TwccReceiverBuilder::with_rereport_received`].
     rereport_received: bool,
+    /// See [`TwccReceiverBuilder::with_feedback_on_extension_alone`].
+    extension_alone: bool,
 }
 
 impl TwccReceiverInterceptor {
@@ -158,6 +177,7 @@ impl TwccReceiverInterceptor {
             transport_hdr_ext_id: None,
             write_queue: VecDeque::new(),
             rereport_received: false,
+            extension_alone: false,
             next_timeout: None,
         }
     }
@@ -284,7 +304,15 @@ impl Interceptor for TwccReceiverInterceptor {
         for ssrc in flow_ssrcs(info) {
             self.rfc8888_ssrcs.remove(&ssrc);
         }
-        if let Some(hdr_ext_id) = stream_supports_twcc(info) {
+        // draft-holmer-rmcat-transport-wide-cc-extensions-01 section 2.3 / RFC 4585 section
+        // 4.2: the feedback is sent where `transport-cc` was negotiated, not on the header
+        // extension alone.
+        let feedback_negotiated = self.extension_alone
+            || info
+                .rtcp_feedback
+                .iter()
+                .any(|fb| fb.typ == "transport-cc" && fb.parameter.is_empty());
+        if feedback_negotiated && let Some(hdr_ext_id) = stream_supports_twcc(info) {
             // Don't track if ID is 0 (invalid)
             if hdr_ext_id != 0 {
                 self.streams.insert(info.ssrc, RemoteStream { hdr_ext_id });

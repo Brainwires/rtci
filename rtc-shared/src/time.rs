@@ -5,6 +5,7 @@
 //! NTP format. [`SystemInstant`](crate::time::SystemInstant) captures both once, so either can be derived from the other later
 //! without re-reading a clock that may have been adjusted in between.
 use std::ops::Add;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,6 +28,21 @@ impl SystemInstant {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_else(|_| Duration::from_secs(0)),
         }
+    }
+
+    /// The process's one wall-clock anchor, taken at the first call (with `now` as its
+    /// monotonic half) and the same for every later caller.
+    ///
+    /// RTCP fields that compare NTP times written by different parts of an endpoint use it:
+    /// RFC 8888 section 3.1 derives the report timestamp "from the same clock used to generate
+    /// the NTP timestamp field in RTCP SR packets", and RFC 3550 section 6.4.1 has every
+    /// sender report of a participant on one wallclock. Each taking its own
+    /// [`now`](Self::now) at a different moment would pair a different wall-clock reading with
+    /// each anchor instant: under a clock the caller drives (virtual time) the two differ by
+    /// however far that clock ran ahead of the machine's.
+    pub fn shared(now: Instant) -> Self {
+        static SHARED: OnceLock<SystemInstant> = OnceLock::new();
+        *SHARED.get_or_init(|| Self::now(now))
     }
 
     /// Pairs a monotonic instant with the wall-clock time the caller says it corresponds to.
@@ -69,9 +85,15 @@ impl SystemInstant {
     }
 
     /// Converts the monotonic `now` into wall-clock time as a duration since the Unix epoch.
+    /// An instant before the anchor's maps to as much before its wall-clock time (saturating
+    /// at the Unix epoch).
     pub fn unix(&self, now: Instant) -> Duration {
-        now.duration_since(self.instant)
-            .add(self.duration_since_unix_epoch)
+        match now.checked_duration_since(self.instant) {
+            Some(after) => after.add(self.duration_since_unix_epoch),
+            None => self
+                .duration_since_unix_epoch
+                .saturating_sub(self.instant.duration_since(now)),
+        }
     }
 
     /// Converts the monotonic `now` into a 64-bit NTP timestamp, as RTCP Sender Reports carry.
@@ -109,5 +131,36 @@ impl SystemInstant {
 
         /*let duration_since_unix_epoch =*/
         Duration::new(u / 1_000_000_000, (u % 1_000_000_000) as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An instant before the anchor is as far before its wall-clock time; it used to stop at
+    /// the anchor's.
+    #[test]
+    fn an_instant_before_the_anchor_maps_to_an_earlier_wall_clock_time() {
+        let at = Instant::now() + Duration::from_secs(10);
+        let anchor = SystemInstant::at(at, Duration::from_secs(1_000));
+        assert_eq!(
+            Duration::from_secs(997),
+            anchor.unix(at - Duration::from_secs(3))
+        );
+        assert_eq!(
+            Duration::from_secs(1_002),
+            anchor.unix(at + Duration::from_secs(2))
+        );
+    }
+
+    /// Every caller of `shared` gets the one anchor, whatever instant it passes.
+    #[test]
+    fn the_shared_anchor_is_one_for_every_caller() {
+        let now = Instant::now();
+        let first = SystemInstant::shared(now);
+        let second = SystemInstant::shared(now + Duration::from_secs(60));
+        assert_eq!(first, second);
+        assert_eq!(first.ntp(now), second.ntp(now));
     }
 }

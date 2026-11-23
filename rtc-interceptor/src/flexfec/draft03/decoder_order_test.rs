@@ -39,3 +39,42 @@ fn media_spread_over_the_whole_space_is_held_without_panicking() {
     }
     assert_eq!(count as usize, decoder.recovered_len());
 }
+
+/// Draft-03 sections 5.1 and 5.2.1: with a `repair-window`, media held longer than the window
+/// is not used to rebuild a loss, and the buffers hold only what the window spans. Without the
+/// window the same late repair packet recovers.
+#[test]
+fn the_repair_window_bounds_what_is_held_for_recovery() {
+    let block: Vec<rtp::Packet> = (10..14).map(media).collect();
+    let repair = super::super::encoder::FlexFec03Encoder::new(118, REPAIR_SSRC)
+        .encode(&block, 1, 0)
+        .remove(0);
+    let epoch = Instant::now();
+    let run = |window: Option<Duration>, repair_after: Duration| {
+        let mut decoder = FlexFec03Decoder::new(REPAIR_SSRC, MEDIA_SSRC);
+        if let Some(window) = window {
+            decoder = decoder.with_repair_window(window);
+        }
+        // 12 is lost.
+        for packet in block.iter().filter(|p| p.header.sequence_number != 12) {
+            assert!(decoder.decode_at(epoch, packet.clone()).is_empty());
+        }
+        let recovered = decoder.decode_at(epoch + repair_after, repair.clone());
+        (recovered, decoder.recovered_len())
+    };
+
+    let (recovered, _) = run(Some(Duration::from_millis(200)), Duration::from_millis(100));
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|p| p.header.sequence_number)
+            .collect::<Vec<_>>(),
+        vec![12],
+        "inside the window"
+    );
+    let (recovered, held) = run(Some(Duration::from_millis(200)), Duration::from_millis(300));
+    assert!(recovered.is_empty(), "the media is older than the window");
+    assert_eq!(held, 0, "nothing older than the window is held");
+    let (recovered, _) = run(None, Duration::from_millis(300));
+    assert_eq!(recovered.len(), 1, "no window: the count limits only");
+}
