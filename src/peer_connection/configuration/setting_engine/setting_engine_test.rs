@@ -45,7 +45,10 @@ fn test_setting_engine_defaults() {
     let s = SettingEngine::default();
     assert!(!s.candidates.ice_lite);
     assert!(s.candidates.nat_1to1_ips.is_empty());
-    assert!(!s.sdp_media_level_fingerprints);
+    assert!(
+        !s.sdp_session_level_fingerprints,
+        "media-level fingerprints by default"
+    );
     assert!(!s.disable_certificate_fingerprint_verification);
     assert!(!s.allow_insecure_verification_algorithm);
     assert_eq!(s.answering_dtls_role, RTCDtlsRole::Unspecified);
@@ -300,26 +303,27 @@ fn test_set_mid_generator() {
     assert_eq!(generator(4), "custom_5");
 }
 
-/// `with_sdp_media_level_fingerprints` moves the DTLS fingerprint from the session into every
-/// media section.
+/// RFC 9429 section 5.2.1: attributes allowed at both levels "SHOULD generally be at the
+/// media level": by default every media section has the DTLS fingerprint;
+/// `with_sdp_media_level_fingerprints(false)` puts one at session level.
 #[test]
 fn test_sdp_media_level_fingerprints() {
-    let session_level = offer_with(SettingEngine::default());
-    assert_eq!(
-        session_level.matches("a=fingerprint:").count(),
-        1,
-        "{session_level}"
-    );
-
-    let media_level = offer_with(
-        SettingEngineBuilder::new()
-            .with_sdp_media_level_fingerprints(true)
-            .build(),
-    );
+    let media_level = offer_with(SettingEngine::default());
     assert_eq!(
         media_level.matches("a=fingerprint:").count(),
         2,
         "{media_level}"
+    );
+
+    let session_level = offer_with(
+        SettingEngineBuilder::new()
+            .with_sdp_media_level_fingerprints(false)
+            .build(),
+    );
+    assert_eq!(
+        session_level.matches("a=fingerprint:").count(),
+        1,
+        "{session_level}"
     );
 }
 
@@ -329,10 +333,13 @@ fn test_set_lite() {
     let full = offer_with(SettingEngine::default());
     assert!(!full.contains("a=ice-lite"), "{full}");
     assert!(full.contains("a=ice-options:trickle"), "{full}");
+    // RFC 8839 section 4.3.1: a full implementation SHOULD state its Ta, a lite one MUST NOT.
+    assert!(full.contains("a=ice-pacing:50\r\n"), "{full}");
 
     let lite = offer_with(SettingEngineBuilder::new().with_lite(true).build());
     assert!(lite.contains("a=ice-lite"), "{lite}");
     assert!(!lite.contains("a=ice-options:trickle"), "{lite}");
+    assert!(!lite.contains("a=ice-pacing"), "{lite}");
 }
 
 /// Fixed ICE credentials are the ones the offer carries.

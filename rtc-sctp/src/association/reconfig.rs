@@ -1342,11 +1342,9 @@ impl Association {
             }
             s.outgoing_reset_pending = false;
             let held = std::mem::take(&mut s.held_writes);
-            for mut chunks in held {
-                let Some(s) = self.streams.get_mut(&id) else {
-                    break;
-                };
-                s.number_held_message(&mut chunks);
+            // They are numbered as they leave the queue, from the numbers just reset (or
+            // kept, when the peer did not perform the reset).
+            for chunks in held {
                 self.held_write_count = self.held_write_count.saturating_sub(1);
                 self.pending_queue.push_message(chunks);
             }

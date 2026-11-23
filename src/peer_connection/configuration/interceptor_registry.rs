@@ -492,6 +492,7 @@ pub fn register_default_interceptors_with_options(
 
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
+    configure_abs_send_time(media_engine)?;
 
     Ok((
         registry,
@@ -620,9 +621,8 @@ pub fn configure_default_header_extensions(media_engine: &mut MediaEngine) -> Re
 /// congestion control nor RFC 8888, so a sender that only understands REMB still hears what
 /// the path carries; and the abs-send-time header extension stamped on the packets of every
 /// local stream that negotiated it, as they leave the pacer. Part of
-/// [`register_default_interceptors`]. The default media engine offers `goog-remb` on video but
-/// does not register abs-send-time: a peer's offer of it is answered only when the
-/// application registers it.
+/// [`register_default_interceptors`], which also registers abs-send-time on video
+/// ([`configure_abs_send_time`]).
 pub fn configure_remb(registry: Registry) -> Registry {
     registry
         .with(
@@ -633,6 +633,25 @@ pub fn configure_remb(registry: Registry) -> Registry {
             Slot::Custom(interceptor::ABS_SEND_TIME_SLOT),
             interceptor::AbsSendTimeInterceptor::new(),
         )
+}
+
+/// Registers the abs-send-time header extension
+/// (`http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time`) on video, so that it is
+/// offered beside transport-wide congestion control and `ack ccfb`, and answered when a peer
+/// offers it: a peer that runs neither (REMB with abs-send-time, the receive-side variant of
+/// draft-ietf-rmcat-gcc-02 section 3) gets its send times, stamped by the
+/// [`configure_remb`] interceptor, and REMB from this side. Part of
+/// [`register_default_interceptors`]; registered after the other extensions, so their ids
+/// stay as they were.
+pub fn configure_abs_send_time(media_engine: &mut MediaEngine) -> Result<()> {
+    media_engine.register_header_extension(
+        RTCRtpHeaderExtensionCapability {
+            uri: sdp::extmap::ABS_SEND_TIME_URI.to_owned(),
+        },
+        RtpCodecKind::Video,
+        None,
+    )?;
+    Ok(())
 }
 
 /// Offers TMMBR for audio and video: `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.1).
@@ -938,6 +957,62 @@ pub fn configure_tradeoff_notifications(registry: Registry) -> Registry {
         Slot::TradeoffNotifications,
         TstnResponderBuilder::new().build(),
     )
+}
+
+/// Adds RTP stream pause and resume (RFC 7728) and offers it for audio and video:
+/// `a=rtcp-fb:<pt> ccm pause` (section 9; the full implementation, `config=1`, without
+/// `nowait`). Returns the handle through which the application asks a remote stream to pause
+/// or resume, pauses its own streams by local decision and reads where each stream is.
+///
+/// The interceptor sits at [`Slot::PauseResume`] and acts for the streams whose section
+/// negotiated `ccm pause`; answers follow section 9.1 (the complementary `config`, `nowait`
+/// only when offered). Not part of [`register_default_interceptors`]: no browser implements it.
+///
+/// # Examples
+///
+/// ```
+/// use rtc::interceptor::Registry;
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_pause_resume;
+/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+///
+/// let mut media_engine = MediaEngine::default();
+/// let (registry, handle) = configure_pause_resume(Registry::new(), &mut media_engine);
+/// assert_eq!(handle.state(0x1234), None);
+/// # let _ = registry;
+/// ```
+pub fn configure_pause_resume(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> (Registry, interceptor::PauseResumeHandle) {
+    configure_pause_resume_with(
+        registry,
+        media_engine,
+        interceptor::PauseResumeBuilder::new(),
+        false,
+    )
+}
+
+/// [`configure_pause_resume`] with the interceptor's parameters and, with `nowait`, the
+/// `nowait` attribute in offers (RFC 7728 section 9.1: "If the offerer believes that itself
+/// and the intended answerer are likely the only endpoints in the RTP session").
+pub fn configure_pause_resume_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    builder: interceptor::PauseResumeBuilder,
+    nowait: bool,
+) -> (Registry, interceptor::PauseResumeHandle) {
+    let parameter = interceptor::PauseCapability { nowait, config: 1 }.parameter();
+    for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+        media_engine.register_feedback(
+            RTCPFeedback {
+                typ: TYPE_RTCP_FB_CCM.to_owned(),
+                parameter: parameter.clone(),
+            },
+            kind,
+        );
+    }
+    let (pause_resume, handle) = builder.build();
+    (registry.with(Slot::PauseResume, pause_resume), handle)
 }
 
 /// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,

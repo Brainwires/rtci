@@ -16,6 +16,29 @@ impl Context {
     /// master key the context does not have, or with [`Error::ErrExceededMaxPackets`] once the
     /// master key reached its lifetime (RFC 3711 section 9.2).
     pub fn decrypt_rtcp(&mut self, encrypted: &[u8]) -> Result<BytesMut> {
+        let result = self.unprotect_rtcp(encrypted);
+        let (ssrc, index) = match &result {
+            Err(Error::SrtcpSsrcDuplicated(ssrc, index)) => (*ssrc, *index as u64),
+            _ => {
+                // The SSRC and the SRTCP index (E flag cleared) as the packet gives them.
+                let ssrc = encrypted
+                    .get(4..8)
+                    .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                let tail = self.profile.rtcp_auth_tag_len() + self.mki_field_len();
+                let index = encrypted
+                    .len()
+                    .checked_sub(tail + SRTCP_INDEX_SIZE)
+                    .and_then(|at| encrypted.get(at..at + SRTCP_INDEX_SIZE))
+                    .map_or(0, |b| {
+                        u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) & 0x7fff_ffff)
+                    });
+                (ssrc, index)
+            }
+        };
+        self.note_unprotect_result(PacketKind::Rtcp, ssrc, index, result)
+    }
+
+    fn unprotect_rtcp(&mut self, encrypted: &[u8]) -> Result<BytesMut> {
         // A received SRTCP packet must be at least the minimum valid size for the
         // negotiated profile: the RTCP header through the SSRC (read at bytes
         // 4..8), the trailing SRTCP index, the MKI when the context uses one, and the

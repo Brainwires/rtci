@@ -158,3 +158,115 @@ impl fmt::Display for MsidSemantic {
         Ok(())
     }
 }
+
+/// A dependency type of `a=depend` (RFC 5583 section 5.2.2): `lay` (layered), `mdc`
+/// (multiple description), or another token ("dependency types MUST be defined in a
+/// Standards-Track document").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencyType {
+    /// `lay`: Media Partitions of a layered Media Bitstream.
+    Lay,
+    /// `mdc`: part of a multi-description Media Bitstream.
+    Mdc,
+    /// Any other token.
+    Other(String),
+}
+
+impl fmt::Display for DependencyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lay => f.write_str("lay"),
+            Self::Mdc => f.write_str("mdc"),
+            Self::Other(token) => f.write_str(token),
+        }
+    }
+}
+
+/// One `dependent-fmt SP dependency-tag` of `a=depend` (RFC 5583 section 5.2.2): the format
+/// of this media description, its dependency type, and at most one identification tag with
+/// the formats of that media description it depends on (any of them suffices).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+    /// `dependent-fmt`.
+    pub fmt: String,
+    /// `dependency-type`.
+    pub typ: DependencyType,
+    /// `identification-tag ":" fmt-dependency *("," fmt-dependency)`, when present.
+    pub on: Option<(String, Vec<String>)>,
+}
+
+/// `a=depend:<dependent-fmt> <dependency-tag> *(";" SP <dependent-fmt> <dependency-tag>)`
+/// (RFC 5583 section 5.2.2, the ABNF of the section's code block). "There MUST be exactly one
+/// dependency-tag indicated per dependent-fmt": a value naming a format twice is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Depend {
+    /// The dependencies, in order.
+    pub dependencies: Vec<Dependency>,
+}
+
+impl Depend {
+    /// The dependency of `fmt`, if the attribute names it.
+    pub fn of(&self, fmt: &str) -> Option<&Dependency> {
+        self.dependencies.iter().find(|d| d.fmt == fmt)
+    }
+}
+
+impl TypedAttribute for Depend {
+    const NAME: &'static str = "depend";
+
+    fn parse(value: &str) -> Result<Self> {
+        let mut dependencies: Vec<Dependency> = vec![];
+        for part in value.split("; ") {
+            let fields = grammar::fields("a=depend", part)?;
+            let (fmt, typ, on) = match fields.as_slice() {
+                [fmt, typ] => (*fmt, *typ, None),
+                [fmt, typ, on] => (*fmt, *typ, Some(*on)),
+                _ => return Err(syntax("a=depend", value)),
+            };
+            if !grammar::is_token(fmt) || !grammar::is_token(typ) {
+                return Err(syntax("a=depend", value));
+            }
+            let on = match on {
+                None => None,
+                Some(on) => {
+                    let (mid, fmts) = on
+                        .split_once(':')
+                        .ok_or_else(|| syntax("a=depend", value))?;
+                    let fmts: Vec<String> = fmts.split(',').map(str::to_owned).collect();
+                    if !grammar::is_token(mid) || !fmts.iter().all(|f| grammar::is_token(f)) {
+                        return Err(syntax("a=depend", value));
+                    }
+                    Some((mid.to_owned(), fmts))
+                }
+            };
+            if dependencies.iter().any(|d| d.fmt == fmt) {
+                return Err(syntax("a=depend", value));
+            }
+            dependencies.push(Dependency {
+                fmt: fmt.to_owned(),
+                typ: match typ {
+                    "lay" => DependencyType::Lay,
+                    "mdc" => DependencyType::Mdc,
+                    other => DependencyType::Other(other.to_owned()),
+                },
+                on,
+            });
+        }
+        Ok(Depend { dependencies })
+    }
+}
+
+impl fmt::Display for Depend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, d) in self.dependencies.iter().enumerate() {
+            if i > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{} {}", d.fmt, d.typ)?;
+            if let Some((mid, fmts)) = &d.on {
+                write!(f, " {mid}:{}", fmts.join(","))?;
+            }
+        }
+        Ok(())
+    }
+}

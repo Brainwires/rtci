@@ -1117,14 +1117,24 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback; with
-    /// ECN on, its packets are then sent ECT(1).
-    pub(crate) fn set_outbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
-        let ecn = self.ecn;
-        let initiation = self.ecn_initiation;
+    /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback, and
+    /// whether its section negotiated ECN (`ecn`: the initiation and the codepoint the receiver
+    /// asks for, RFC 6679 section 6.1.1, `a=ecn-capable-rtp`); with ECN on and both
+    /// negotiated, its packets are sent ECT. A stream that is not reported in RFC 8888 marks
+    /// when it negotiated RFC 6679's own reports
+    /// ([`set_outbound_rfc6679`](Self::set_outbound_rfc6679)), ECN negotiated too.
+    pub(crate) fn set_outbound_ccfb(
+        &mut self,
+        ssrc: SSRC,
+        negotiated: bool,
+        ecn_negotiated: Option<crate::peer_connection::sdp::ecn::NegotiatedEcn>,
+    ) {
+        let ecn = self.ecn && ecn_negotiated.is_some();
+        let initiation = ecn_negotiated.map_or(self.ecn_initiation, |n| n.initiation);
         let l4s = self.ecn_marking == interceptor::EcnMarking::L4s;
         let remote_cnames = &self.remote_cnames;
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.ect_preference = ecn_negotiated.and_then(|n| n.preference);
             stream.sends_ect1 =
                 l4s || stream.ect_preference == Some(interceptor::EctPreference::Ect1);
             stream.ccfb_negotiated = negotiated;

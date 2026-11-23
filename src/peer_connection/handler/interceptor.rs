@@ -69,6 +69,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
     /// SSRC no description declares.
     pub(crate) sdes_mids: HashMap<SSRC, String>,
+    /// The SSRCs `bind_undeclared_ssrc` placed by itself (no description declares them): only
+    /// these move when a later MID names another section (RFC 9143 section 9.2).
+    pub(crate) placed_ssrcs: HashSet<SSRC>,
     /// A sender moved to another SSRC after a collision, and the negotiation-needed flag is
     /// still to be updated for the description that signals it.
     pub(crate) ssrcs_replaced: bool,
@@ -117,6 +120,7 @@ impl Default for InterceptorHandlerContext {
             remote_cnames: Default::default(),
             sdes_mids: Default::default(),
             ssrcs_replaced: false,
+            placed_ssrcs: Default::default(),
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
@@ -248,11 +252,22 @@ impl<'a> InterceptorHandler<'a> {
             self.rtx_primary_for(rtp_header.ssrc, rtp_header.payload_type)
                 .unwrap_or((rtp_header.ssrc, rtp_header.payload_type))
         };
-        let owner = known.or_else(|| {
+        let mut owner = known.or_else(|| {
             self.ctx
                 .ssrc_owners
                 .find(ssrc, self.rtp_transceivers, receiver_declares_ssrc)
         });
+        // RFC 9143 section 9.2: a packet whose MID header extension names another m= section
+        // "update[s] the incoming SSRC mapping table" for its SSRC. A stream the engine bound
+        // by itself (an SSRC no description declares, the receiver's only one) moves to the
+        // section the MID names when that section's receiver has none yet.
+        if let Some(current) = owner {
+            self.reassociate_by_mid(current, ssrc, rtp_header);
+            owner =
+                self.ctx
+                    .ssrc_owners
+                    .cached(ssrc, self.rtp_transceivers, receiver_declares_ssrc);
+        }
 
         // Same order the endpoint's `find_track_id` used: a declared SSRC settles it, otherwise
         // the single-media-section shortcut, otherwise mid/rid.
@@ -265,6 +280,55 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// [`Self::ensure_remote_stream_bound`]: unbinds `ssrc` from the receiver of transceiver
+    /// `current` when the packet's MID header extension names another m= section whose
+    /// receiver is free, so that the SSRC is bound there instead (RFC 9143 section 9.2). Only
+    /// a stream the engine placed by itself moves: one the remote description declares for
+    /// `current`, or one of several streams (simulcast layers) of its receiver, stays.
+    fn reassociate_by_mid(&mut self, current: usize, ssrc: SSRC, rtp_header: &rtp::Header) {
+        let Some((mid, _, _)) = self.get_rtp_header_extension_ids(rtp_header) else {
+            return;
+        };
+        if mid.is_empty() {
+            return;
+        }
+        let Some(target) = self
+            .rtp_transceivers
+            .iter()
+            .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+        else {
+            return;
+        };
+        let placed = self.ctx.placed_ssrcs.contains(&ssrc);
+        let movable = |t: &RTCRtpTransceiverInternal| {
+            placed
+                && t.receiver().as_ref().is_some_and(|receiver| {
+                    let codings = receiver.track().codings();
+                    codings.len() == 1 && codings[0].rtp_coding_parameters.ssrc == Some(ssrc)
+                })
+        };
+        let free = |t: &RTCRtpTransceiverInternal| {
+            !t.stopped()
+                && t.receiver()
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.track().codings().is_empty())
+        };
+        if target == current
+            || !movable(&self.rtp_transceivers[current])
+            || !free(&self.rtp_transceivers[target])
+        {
+            return;
+        }
+        debug!("ssrc {ssrc} moves to the m= section with mid {mid} (RFC 9143 section 9.2)");
+        if let Some(receiver) = self.rtp_transceivers[current].receiver_mut() {
+            receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+            receiver.set_coding_parameters(vec![]);
+            receiver.track_mut().set_codings(vec![]);
+        }
+        self.ctx.ssrc_owners.remove(ssrc);
+        self.ctx.placed_ssrcs.remove(&ssrc);
     }
 
     /// RFC 9143 section 9.2: "If the RTCP packet is an SDES packet containing a MID item,
@@ -794,6 +858,9 @@ impl<'a> InterceptorHandler<'a> {
             ..Default::default()
         }];
         receiver.set_coding_parameters(receive_codings);
+        if self.ctx.placed_ssrcs.len() < MAX_REMOTE_CNAMES {
+            self.ctx.placed_ssrcs.insert(ssrc);
+        }
 
         let parameters = receiver.get_parameters(self.media_engine);
         // An undeclared SSRC arrived without any `a=ssrc-group` to associate it with, so there is

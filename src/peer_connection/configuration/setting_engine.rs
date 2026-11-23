@@ -414,8 +414,19 @@ pub struct SettingEngine {
     pub(crate) ice: IceBehaviour,
     pub(crate) multicast_dns: MulticastDNS,
     pub(crate) replay_protection: ReplayProtection,
-    pub(crate) sdp_media_level_fingerprints: bool,
+    /// Fingerprints at session level (`with_sdp_media_level_fingerprints(false)`); inverted
+    /// so that the derived `Default` is media level.
+    pub(crate) sdp_session_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
+    /// A remote description may ask for a new DTLS association without an ICE restart (RFC
+    /// 8842 section 3.1 read without its section 6); off by default (RFC 9429 sections 5.8.3
+    /// and 5.11).
+    pub(crate) dtls_new_association_without_ice_restart: bool,
+    /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
+    pub(crate) msid_removal_ends_track: bool,
+    /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
+    /// the offer arrived.
+    pub(crate) stopping_transceiver_rejected_in_answer: bool,
     /// `use_srtp` only on an association that carries SRTP media (RFC 5764 section 4.1);
     /// inverted so that the derived `Default` is the browsers' form, the default.
     pub(crate) dtls_use_srtp_only_with_media: bool,
@@ -481,9 +492,23 @@ pub struct SettingEngine {
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
+    pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
+    pub(crate) w3c_simulcast_answer: bool,
+    /// [`SettingEngineBuilder::with_nominated_candidates_only`].
+    pub(crate) nominated_candidates_only: bool,
+    /// [`SettingEngineBuilder::with_msid_appdata`]`(false)`: `a=msid` lines without the
+    /// track id (inverted so that the derived default writes it).
+    pub(crate) msid_appdata_omitted: bool,
+    /// [`SettingEngineBuilder::with_video_receive_limits`].
+    pub(crate) video_receive_limits: Option<crate::peer_connection::sdp::RTCVideoResolutionRange>,
+    /// [`SettingEngineBuilder::with_codec_video_receive_limits`], by MIME type.
+    pub(crate) codec_video_receive_limits:
+        Vec<(String, crate::peer_connection::sdp::RTCVideoResolutionRange)>,
     /// Whether `write_rtp` sends header extension elements whose id is not negotiated; see
     /// [`SettingEngineBuilder::with_unnegotiated_header_extensions`].
     pub(crate) unnegotiated_header_extensions: bool,
@@ -493,6 +518,15 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// ECN is used on `ack ccfb` alone, without `a=ecn-capable-rtp`
+    /// ([`SettingEngineBuilder::with_ecn_without_signalling`]).
+    pub(crate) ecn_without_signalling: bool,
+    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
+    /// and the methods after it).
+    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
+    /// How the engine's TURN-over-TLS connections verify their server
+    /// ([`SettingEngineBuilder::with_turn_tls`]).
+    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
     /// Which ECT codepoint marked packets carry ([`SettingEngineBuilder::with_ecn_marking`]).
     pub(crate) ecn_marking: interceptor::EcnMarking,
     /// The connection runs without the RTCP session the builder otherwise installs
@@ -504,12 +538,6 @@ pub struct SettingEngine {
     /// RTCP feedback the application writes is sent whether or not its section negotiated
     /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
     pub(crate) unnegotiated_rtcp_feedback: bool,
-    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
-    /// and the methods after it).
-    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
-    /// How the engine's TURN-over-TLS connections verify their server
-    /// ([`SettingEngineBuilder::with_turn_tls`]).
-    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
 }
 
 impl SettingEngine {
@@ -1548,9 +1576,11 @@ impl SettingEngineBuilder {
 
     /// Controls where DTLS fingerprints are placed in SDP.
     ///
-    /// By default, fingerprints are placed at the session level. Setting this
-    /// to `true` places them at the media level instead, which improves
-    /// compatibility with some WebRTC implementations.
+    /// By default (`true`) they are in every media section, as RFC 9429 section 5.2.1 has it:
+    /// "Attributes that SDP permits to be at either the session level or the media level
+    /// SHOULD generally be at the media level even if they are identical" (browsers write
+    /// them there too). `false` puts one at session level, which the same section allows
+    /// ("implementations MAY choose to aggregate attributes at the session level").
     ///
     /// # Parameters
     ///
@@ -1562,15 +1592,15 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Use media-level fingerprints for better compatibility
+    /// // One fingerprint at session level
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_sdp_media_level_fingerprints(true)
+    ///     .with_sdp_media_level_fingerprints(false)
     ///     .build();
     /// # Ok(())
     /// # }
     /// ```
     pub fn with_sdp_media_level_fingerprints(mut self, sdp_media_level_fingerprints: bool) -> Self {
-        self.0.sdp_media_level_fingerprints = sdp_media_level_fingerprints;
+        self.0.sdp_session_level_fingerprints = !sdp_media_level_fingerprints;
         self
     }
 
@@ -1593,6 +1623,84 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_disable_sdp_tls_id(mut self, is_disabled: bool) -> Self {
         self.0.disable_sdp_tls_id = is_disabled;
+        self
+    }
+
+    /// Accepts a remote description that asks for a new DTLS association without an ICE
+    /// restart.
+    ///
+    /// By default (`false`) a peer connection follows RFC 9429: a re-offer, or the answer to
+    /// one, whose `a=tls-id` differs from the one in use "MUST be part of an ICE restart"
+    /// (section 5.8.3), and an answer that changes the remote fingerprint or `tls-id`
+    /// without an ICE restart is an error (section 5.11); `set_remote_description` refuses
+    /// it. RFC 8842 section 6 asks the same over ICE ("at least one of the endpoints MUST
+    /// allocate a completely new set of ICE candidates"). With `true` such a description
+    /// establishes a new association on the ICE session it has (RFC 8842 section 3.1 alone),
+    /// for a peer that replaces its DTLS identity on the same ICE session.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_dtls_new_association_without_ice_restart(true)
+    ///     .build();
+    /// ```
+    pub fn with_dtls_new_association_without_ice_restart(mut self, allowed: bool) -> Self {
+        self.0.dtls_new_association_without_ice_restart = allowed;
+        self
+    }
+
+    /// Ends a remote track when a later remote description lists no `a=msid` on its media
+    /// section any more, while the section still sends.
+    ///
+    /// RFC 8830 section 3: "When a session description is updated to no longer list any
+    /// 'msid' attribute on a specific media description, the recipient can signal to its
+    /// application that the corresponding MediaStreamTrack has ended." In this API the W3C
+    /// webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
+    /// "process remote tracks" keeps the track, moved to the session's default stream; it is
+    /// muted when the section stops sending. That is the default (`false`). With `true` the
+    /// receiver's track ends ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)).
+    /// A direction change never ends the track (RFC 8830 section 3).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_msid_removal_ends_track(true)
+    ///     .build();
+    /// ```
+    pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
+        self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// Rejects, in an answer, the m= section of a transceiver that was stopped after the
+    /// offer arrived.
+    ///
+    /// RFC 9429 section 5.3.1: an m= section "MUST be rejected ... if the associated
+    /// RtpTransceiver has been stopped". W3C webrtc-pc 5.4 `stop()` puts such a transceiver
+    /// in the "stopping" state, which "will not affect createAnswer" ("to avoid problems with
+    /// RFC 8843"): the section is answered `a=inactive` and rejected by the next offer. That is
+    /// the default (`false`), what browsers do. With `true` the answer rejects it (port 0)
+    /// and the offerer stops its transceiver when it applies the answer; the offerer's
+    /// BUNDLE-tagged section keeps the W3C form, since rejecting it would take the group's
+    /// transport with it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_stopping_transceiver_rejected_in_answer(true)
+    ///     .build();
+    /// ```
+    pub fn with_stopping_transceiver_rejected_in_answer(mut self, rejected: bool) -> Self {
+        self.0.stopping_transceiver_rejected_in_answer = rejected;
         self
     }
 
@@ -2186,16 +2294,40 @@ impl SettingEngineBuilder {
 
     /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
     /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
-    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
-    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
-    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
-    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
-    /// re-key, or end the session).
+    /// packets for the AEAD ones (RFC 7714). When a key has a sixteenth of its lifetime left
+    /// the connection raises `OnSrtpKeyLifetimeExpiring` and, unless
+    /// [`Self::with_srtp_automatic_rekeying`] turned it off, asks for a new DTLS association
+    /// (RFC 5764 section 4.4); at the limit nothing more is protected with the key and the
+    /// DTLS transport fails (`dtls-failure`, RFC 3711 section 9.2: re-key, or end the session).
     ///
     /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
     /// fail.
     pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
         self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
+    /// Whether the connection re-keys SRTP by itself before a master key's lifetime ends. The
+    /// default is `true`.
+    ///
+    /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
+    /// be established" (with section 4.1.2: the keys come from the association). When a key has
+    /// a sixteenth of its lifetime left (`OnSrtpKeyLifetimeExpiring`, either direction), the
+    /// connection does what [`RTCPeerConnection::renew_dtls_association`] does: the
+    /// negotiation-needed flag is raised, and the next offer carries a new `a=tls-id` and new
+    /// ICE credentials (RFC 9429 section 5.8.3: a new association is part of an ICE restart).
+    /// Media goes on under the old keys until the new handshake hands over the new ones; the
+    /// SCTP association and its data channels go on over the new association (RFC 8841
+    /// section 10.5). The application only has to answer `negotiationneeded` as usual.
+    ///
+    /// `false` leaves it to the application: it gets the event only, and at the limit the
+    /// DTLS transport fails. A browser peer ignores a new `tls-id` and keeps its association,
+    /// so with one the renewal does not re-key and the transport fails at the limit either way;
+    /// the default lifetimes (2^31 packets and more) are not reached by a call.
+    ///
+    /// [`RTCPeerConnection::renew_dtls_association`]: crate::peer_connection::RTCPeerConnection::renew_dtls_association
+    pub fn with_srtp_automatic_rekeying(mut self, enabled: bool) -> Self {
+        self.0.srtp_automatic_rekeying_off = !enabled;
         self
     }
 
@@ -2212,6 +2344,75 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Answers simulcast as W3C webrtc-pc `createAnswer` (section 4.4.2) does, instead of
+    /// RFC 8853 / RFC 8851. The default is `false`.
+    ///
+    /// - A remote `a=simulcast` line that names a rid-id more than once is taken with each
+    ///   rid-id at its first occurrence (W3C: "identically named rids are reduced to the
+    ///   first"); by default it refuses the description (RFC 8853 section 5.2: "a single rid-id
+    ///   MUST NOT occur more than once per 'a=simulcast' line"; RFC 9429 section 5.8).
+    /// - The `a=rid` lines of an answer carry no restrictions (W3C sets none); by default they
+    ///   keep the offered ones (RFC 8851 section 6.3).
+    pub fn with_w3c_simulcast_answer(mut self, w3c: bool) -> Self {
+        self.0.w3c_simulcast_answer = w3c;
+        self
+    }
+
+    /// Whether each `a=msid` line carries the sender's track id as its `appdata`
+    /// (`a=msid:<stream id> <track id>`, RFC 8830 section 2), as browsers write it. The
+    /// default is `true`: webrtc-rs 0.17 (and Pion, whose track id it is) drops a simulcast
+    /// (rid) section whose `a=msid` has no appdata, as that section has no `a=ssrc` lines to
+    /// name the track (`simulcast_rtc_to_webrtc_interop`), so the interoperable form is the
+    /// default. `false` is RFC 9429 section 5.2.1 ("an "a=msid" line ... but omitting the
+    /// "appdata" field"). Either way a remote line's appdata is read when there is one, and
+    /// the recipient names the track itself when there is none (RFC 8830 section 3). The
+    /// source-level `a=ssrc:<ssrc> msid:` lines carry the track id in both forms.
+    pub fn with_msid_appdata(mut self, appdata: bool) -> Self {
+        self.0.msid_appdata_omitted = !appdata;
+        self
+    }
+
+    /// Once ICE has selected a pair, later offers list the pair's local candidate alone (RFC
+    /// 8839 section 4.4.1.2.2: "The offerer MUST NOT include any other SDP "candidate"
+    /// attributes in the subsequent offer"). The default is `false`: every candidate of the
+    /// most recent gathering, as RFC 9429 section 5.2.2 requires of a JSEP endpoint ("for
+    /// each candidate that has been gathered during the most recent gathering phase ..., an
+    /// "a=candidate" line MUST be added") and browsers do.
+    pub fn with_nominated_candidates_only(mut self, only: bool) -> Self {
+        self.0.nominated_candidates_only = only;
+        self
+    }
+
+    /// The video frame sizes this endpoint can receive, with every video codec (its decoder's
+    /// limits, or a policy): descriptions state them in `a=imageattr:* recv [x=...,y=...,q=1.0]`
+    /// lines of their receiving video sections (RFC 9429 section 3.6.1, RFC 6236). A range
+    /// that permits no size leaves the attribute out and makes those sections not receive
+    /// (`sendonly` / `inactive`). The default is none: no `a=imageattr`.
+    pub fn with_video_receive_limits(
+        mut self,
+        limits: crate::peer_connection::sdp::RTCVideoResolutionRange,
+    ) -> Self {
+        self.0.video_receive_limits = Some(limits);
+        self
+    }
+
+    /// The video frame sizes this endpoint can receive with one codec (`mime_type`, such as
+    /// `video/VP9`), instead of those of [`Self::with_video_receive_limits`]: codecs with
+    /// different limits get one `a=imageattr` line per payload type (RFC 9429 section 3.6.1).
+    pub fn with_codec_video_receive_limits(
+        mut self,
+        mime_type: &str,
+        limits: crate::peer_connection::sdp::RTCVideoResolutionRange,
+    ) -> Self {
+        self.0
+            .codec_video_receive_limits
+            .retain(|(codec, _)| !codec.eq_ignore_ascii_case(mime_type));
+        self.0
+            .codec_video_receive_limits
+            .push((mime_type.to_owned(), limits));
         self
     }
 
@@ -2264,9 +2465,12 @@ impl SettingEngineBuilder {
     ///
     /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
     /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
-    /// are sent ECT: a sender marks only where the receiver reports the CE marks back. The
-    /// codepoint is ECT(0) unless the receiver asks for ECT(1) (RFC 6679 section 7.3.1; see
-    /// [`with_ecn_marking`](Self::with_ecn_marking) for L4S's ECT(1)). As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
+    /// and whose section negotiated ECN (`a=ecn-capable-rtp`, RFC 6679 section 6.1; see
+    /// [`with_ecn_without_signalling`](Self::with_ecn_without_signalling)) are sent ECT: a
+    /// sender marks only where the receiver reports the CE marks back. The codepoint is ECT(0)
+    /// unless the receiver asks for ECT(1) (RFC 6679 section 7.3.1; see
+    /// [`with_ecn_marking`](Self::with_ecn_marking) for L4S's ECT(1)). As RFC 8888 section 7
+    /// requires, the stream first initiates ECN as RFC 6679
     /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
     /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
     /// the path clears the marking or drops marked packets (section 7.4); see
@@ -2304,44 +2508,20 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
-    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
-    /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
-    /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
-    /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.
-    pub fn with_unnegotiated_rtcp_feedback(mut self, allowed: bool) -> Self {
-        self.0.unnegotiated_rtcp_feedback = allowed;
-        self
-    }
-
-    /// Builds the connection without an RTCP session: a departure from RFC 8834 section 4.1
-    /// ("RTCP ... MUST be implemented and used by all WebRTC endpoints").
+    /// With ECN on ([`with_ecn`](Self::with_ecn)), whether a stream marks on `ack ccfb` alone.
     ///
-    /// Every peer connection sends RTCP: when the interceptor registry given to
-    /// [`RTCPeerConnectionBuilder::with_interceptor_registry`](crate::peer_connection::RTCPeerConnectionBuilder::with_interceptor_registry)
-    /// has nothing at [`Slot::RtcpSession`](interceptor::Slot::RtcpSession) and no
-    /// `SenderReportInterceptor` / `ReceiverReportInterceptor` of its own,
-    /// [`RTCPeerConnectionBuilder::build`](crate::peer_connection::RTCPeerConnectionBuilder::build)
-    /// installs the session of
-    /// [`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports)
-    /// (an empty registry included). With this on it does not, and a registry without an RTCP
-    /// session sends only the RTCP the application writes. Off by default.
-    pub fn with_rtcp_session_omitted(mut self, omitted: bool) -> Self {
-        self.0.rtcp_session_omitted = omitted;
-        self
-    }
-
-    /// Holds received RTCP to the validity checks of RFC 3550 Appendix A.2 and section 6.4.1:
-    /// a datagram whose first packet is not an SR or RR (unless reduced-size RTCP, RFC 5506,
-    /// was negotiated), whose first packet has its padding bit set, or with padding on a
-    /// packet that is not the last, is discarded whole.
+    /// By default ECN is negotiated as RFC 8888 section 7 and RFC 6679 section 6.1.1 have it:
+    /// every RTP section of an offer carries `a=ecn-capable-rtp` with the initiation methods
+    /// this endpoint implements (the one [`with_ecn_initiation`](Self::with_ecn_initiation)
+    /// names first), an answer carries it with one method where the offer had it, and a
+    /// stream marks only when both sides' sections carry it ("If the attribute is removed in
+    /// the answer, then ECN MUST NOT be used in any direction") and the peer can read the
+    /// field (its `mode` is not `setonly`); the answer's method is the initiation used.
     ///
-    /// Off by default: libwebrtc sends padding on a packet in the middle of a compound packet
-    /// (its transport-wide congestion control feedback, padded to a multiple of four), so the
-    /// default accepts any datagram whose version and lengths hold, and processes every packet
-    /// in it that parses (RFC 8834 section 4.1).
-    pub fn with_strict_rtcp_validity(mut self, strict: bool) -> Self {
-        self.0.strict_rtcp_validity = strict;
+    /// `true` is what browsers that send L4S do: no `a=ecn-capable-rtp` is written, and every
+    /// stream with `ack ccfb` negotiated marks, initiating as `with_ecn_initiation` says.
+    pub fn with_ecn_without_signalling(mut self, without_signalling: bool) -> Self {
+        self.0.ecn_without_signalling = without_signalling;
         self
     }
 
@@ -2392,11 +2572,67 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2). By default
+    /// ([`ReflexiveGathering::Engine`](crate::peer_connection::srflx::ReflexiveGathering)) the
+    /// engine sends a Binding request to each `stun:` / `stuns:` server of the configuration:
+    /// over UDP from each UDP host candidate the application adds (through `poll_write` /
+    /// `handle_read`), and over TCP / TLS from its ICE-TCP listeners for a driver that serves
+    /// the stream interface; a base for which the application adds a server-reflexive
+    /// candidate itself is left to it. `Application` keeps the engine out of it.
+    pub fn with_server_reflexive_gathering(
+        mut self,
+        who: crate::peer_connection::srflx::ReflexiveGathering,
+    ) -> Self {
+        self.0.streams.reflexive = who;
+        self
+    }
+
     /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
     /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
     /// server is used.
     pub fn with_turn_tls(mut self, tls: crate::peer_connection::turn_tls::TurnTlsConfig) -> Self {
         self.0.turn_tls = tls;
+        self
+    }
+
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
+    /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
+    /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.
+    pub fn with_unnegotiated_rtcp_feedback(mut self, allowed: bool) -> Self {
+        self.0.unnegotiated_rtcp_feedback = allowed;
+        self
+    }
+
+    /// Builds the connection without an RTCP session: a departure from RFC 8834 section 4.1
+    /// ("RTCP ... MUST be implemented and used by all WebRTC endpoints").
+    ///
+    /// Every peer connection sends RTCP: when the interceptor registry given to
+    /// [`RTCPeerConnectionBuilder::with_interceptor_registry`](crate::peer_connection::RTCPeerConnectionBuilder::with_interceptor_registry)
+    /// has nothing at [`Slot::RtcpSession`](interceptor::Slot::RtcpSession) and no
+    /// `SenderReportInterceptor` / `ReceiverReportInterceptor` of its own,
+    /// [`RTCPeerConnectionBuilder::build`](crate::peer_connection::RTCPeerConnectionBuilder::build)
+    /// installs the session of
+    /// [`configure_rtcp_reports`](crate::peer_connection::configuration::interceptor_registry::configure_rtcp_reports)
+    /// (an empty registry included). With this on it does not, and a registry without an RTCP
+    /// session sends only the RTCP the application writes. Off by default.
+    pub fn with_rtcp_session_omitted(mut self, omitted: bool) -> Self {
+        self.0.rtcp_session_omitted = omitted;
+        self
+    }
+
+    /// Holds received RTCP to the validity checks of RFC 3550 Appendix A.2 and section 6.4.1:
+    /// a datagram whose first packet is not an SR or RR (unless reduced-size RTCP, RFC 5506,
+    /// was negotiated), whose first packet has its padding bit set, or with padding on a
+    /// packet that is not the last, is discarded whole.
+    ///
+    /// Off by default: libwebrtc sends padding on a packet in the middle of a compound packet
+    /// (its transport-wide congestion control feedback, padded to a multiple of four), so the
+    /// default accepts any datagram whose version and lengths hold, and processes every packet
+    /// in it that parses (RFC 8834 section 4.1).
+    pub fn with_strict_rtcp_validity(mut self, strict: bool) -> Self {
+        self.0.strict_rtcp_validity = strict;
         self
     }
 

@@ -143,3 +143,53 @@ fn an_answer_without_sframe_stops_the_offerers_media() -> TestResult {
     assert_eq!(refused, Err(Error::ErrSFrameRefused));
     Ok(())
 }
+
+/// draft-ietf-avtcore-rtp-sframe-03 section 6: "An answerer that requires SFrame MUST reject
+/// m-sections that do not have the "a=sframe" SDP attribute": a transceiver whose SFrame
+/// transform is set answers an offer without `a=sframe` with its section rejected (port 0).
+#[test]
+fn an_answerer_that_requires_sframe_rejects_a_section_without_it() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("v", 0x0e04_0101))?;
+    let sender = answerer.add_track(video_track("w", 0x0e04_0201))?;
+    answerer
+        .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+        .expect("t")
+        .set_transform_use_sframe(true)?;
+    let offer = offerer.create_offer(None)?;
+    assert!(!has_sframe(&offer.sdp));
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?.sdp;
+    let section = &media_sections(&answer)[0];
+    assert!(section[0].starts_with("m=video 0 "), "rejected: {answer}");
+    assert!(!has_sframe(&answer));
+    Ok(())
+}
+
+/// draft-ietf-avtcore-rtp-sframe-03 section 6: an offerer whose `a=sframe` the answer left
+/// out "SHOULD close it in subsequent offers": the next offer rejects the section.
+#[test]
+fn a_refused_sframe_section_is_closed_in_the_next_offer() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let sender = offerer.add_track(video_track("v", 0x0e05_0101))?;
+    let id = RTCRtpTransceiverId::from(sender);
+    offerer
+        .rtp_transceiver(id)
+        .expect("t")
+        .set_transform_use_sframe(true)?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    answerer.set_local_description(Instant::now(), answer.clone())?;
+    let stripped = answer.sdp.replace("a=sframe\r\n", "");
+    offerer.set_remote_description(Instant::now(), RTCSessionDescription::answer(stripped)?)?;
+    assert!(offerer.rtp_transceiver(id).expect("t").sframe_refused());
+    let reoffer = offerer.create_offer(None)?.sdp;
+    let section = &media_sections(&reoffer)[0];
+    assert!(section[0].starts_with("m=video 0 "), "closed: {reoffer}");
+    Ok(())
+}

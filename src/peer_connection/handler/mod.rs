@@ -31,6 +31,7 @@ use crate::peer_connection::message::{
 };
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
+use crate::peer_connection::transport::RTCDtlsTransportState;
 use crate::peer_connection::transport::sctp::SctpPath;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
@@ -435,6 +436,11 @@ impl RTCPeerConnection {
             // Final poll write out to pipeline's write out; what leaves from one of the
             // engine's ICE-TCP candidates goes onto that transport's connection instead.
             while let Some(msg) = wouts.pop_front() {
+                // What this transport sends on a local address others share is how the
+                // answers on that 5-tuple find it (`TransportSet::route`, rule 2).
+                self.pipeline_context
+                    .transports
+                    .learn_path(id, &msg.transport);
                 if let RTCMessageInternal::Raw(message) = msg.message
                     && let Some(out) = self.take_tcp_write(
                         id,
@@ -603,6 +609,24 @@ impl RTCPeerConnection {
         }
     }
 
+    /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
+    /// be established". A key of the active transport has a sixteenth of its lifetime left:
+    /// unless the application turned it off, a new association is asked for as
+    /// `renew_dtls_association` does (new `tls-id`, ICE restart, negotiation-needed), once per
+    /// association, and only while the one in use is connected (a renewal under way, or a
+    /// transport that failed or closed, is left alone).
+    fn renew_before_the_key_lifetime_ends(&mut self) {
+        if self.setting_engine.srtp_automatic_rekeying_off || self.is_closed() {
+            return;
+        }
+        let dtls = self.dtls_transport();
+        if dtls.renewal_requested || dtls.state() != RTCDtlsTransportState::Connected {
+            return;
+        }
+        log::debug!("an SRTP master key is near its lifetime: asking for a new DTLS association");
+        self.renew_dtls_association();
+    }
+
     /// Whether the active transport is the one the SCTP association runs over.
     fn active_carries_data(&self) -> bool {
         let transports = &self.pipeline_context.transports;
@@ -733,7 +757,14 @@ impl RTCPeerConnection {
                     RTCTransportEventKind::CandidatePairRemove(pair),
                 ),
                 RTCEventInternal::RTCPeerConnectionEvent(evt) => {
+                    let expiring = matches!(
+                        evt,
+                        RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. }
+                    );
                     self.pipeline_context.event_outs.push_back(evt);
+                    if expiring {
+                        self.renew_before_the_key_lifetime_ends();
+                    }
                 }
                 _ => {}
             }
@@ -765,13 +796,21 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
+        // The answer to one of the engine's own Binding requests to a STUN server.
+        let Some(msg) = self.take_srflx_response(msg) else {
+            return Ok(());
+        };
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
-        // transport per BUNDLE group or unbundled section) reads it.
-        let transport = self
+        // transport per BUNDLE group or unbundled section) reads it. A Binding request on a
+        // local address several transports share that names none of them is dropped
+        // (`TransportSet::route`): the remote retransmits it.
+        if let Some(transport) = self
             .pipeline_context
             .transports
-            .route(&msg.transport, &msg.message);
-        self.read_on_transport(transport, msg);
+            .route(&msg.transport, &msg.message)
+        {
+            self.read_on_transport(transport, msg);
+        }
         Ok(())
     }
 
@@ -898,8 +937,10 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }), [get_interceptor_handler, get_endpoint_handler]);
         // The DTMF senders' playout (W3C webrtc-pc section 7).
         self.run_dtmf(now)?;
-        // The engine's TURN-over-stream clients and connection races.
+        // The engine's TURN-over-stream clients and connection races, and its Binding
+        // requests to STUN servers.
         self.turn_handle_timeout(now);
+        self.srflx_handle_timeout(now);
         Ok(())
     }
 
@@ -934,6 +975,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }
         if let Some(turn) = self.turn_poll_timeout() {
             eto = Some(eto.map_or(turn, |curr| curr.min(turn)));
+        }
+        if let Some(srflx) = self.srflx_poll_timeout() {
+            eto = Some(eto.map_or(srflx, |curr| curr.min(srflx)));
         }
         eto
     }

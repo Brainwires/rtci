@@ -7,9 +7,9 @@ use crate::{
     payload_feedbacks::slice_loss_indication::*, payload_feedbacks::temporal_spatial_tradeoff::*,
     payload_feedbacks::video_back_channel_message::*, raw_packet::*, receiver_report::*,
     sender_report::*, source_description::*, transport_feedbacks::cc_feedback_report::*,
-    transport_feedbacks::ecn_feedback::*, transport_feedbacks::rapid_resynchronization_request::*,
-    transport_feedbacks::tmmb::*, transport_feedbacks::transport_layer_cc::*,
-    transport_feedbacks::transport_layer_nack::*,
+    transport_feedbacks::ecn_feedback::*, transport_feedbacks::pause_resume::*,
+    transport_feedbacks::rapid_resynchronization_request::*, transport_feedbacks::tmmb::*,
+    transport_feedbacks::transport_layer_cc::*, transport_feedbacks::transport_layer_nack::*,
 };
 use shared::{
     error::{Error, Result},
@@ -194,6 +194,7 @@ fn parse_packet(framed: &FramedPacket) -> Result<Box<dyn Packet>> {
             FORMAT_TCC => Box::new(TransportLayerCc::unmarshal(in_packet)?),
             FORMAT_CCFB => Box::new(CcFeedbackReport::unmarshal(in_packet)?),
             FORMAT_ECN => Box::new(EcnFeedback::unmarshal(in_packet)?),
+            FORMAT_PAUSE_RESUME => Box::new(PauseResume::unmarshal(in_packet)?),
             _ => Box::new(RawPacket(framed.whole())),
         },
         PacketType::PayloadSpecificFeedback => match format {

@@ -235,6 +235,54 @@ impl RTCRtpTransceiverInit {
     pub fn recvonly() -> Self {
         Self::with_direction(RTCRtpTransceiverDirection::Recvonly)
     }
+
+    /// Sends `encodings` as simulcast layers: each one an RTP stream of its own, named by
+    /// its rid in the description (`a=rid` and `a=simulcast`, RFC 8853).
+    ///
+    /// In this API several encodings *without* rids are codec alternatives of one stream
+    /// (the first one the negotiation allows is sent), as upstream has them. Encodings given
+    /// here are layers instead: one without a rid gets one generated, as RFC 9429 section
+    /// 5.2.1 asks when the application set none ("an rid-id value MUST be generated ... it
+    /// MUST NOT contain user data, ... SHOULD be no more than 3 bytes"): the smallest
+    /// decimal number (`0`, `1`, ...) no other encoding uses. Rids the application set are
+    /// kept.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    /// use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+    ///
+    /// let init = RTCRtpTransceiverInit::default()
+    ///     .with_simulcast_layers(vec![RTCRtpEncodingParameters::default(); 3]);
+    /// let rids: Vec<&str> = init
+    ///     .send_encodings
+    ///     .iter()
+    ///     .map(|e| e.rtp_coding_parameters.rid.as_str())
+    ///     .collect();
+    /// assert_eq!(rids, ["0", "1", "2"]);
+    /// ```
+    pub fn with_simulcast_layers(mut self, mut encodings: Vec<RTCRtpEncodingParameters>) -> Self {
+        let mut next = 0usize;
+        for i in 0..encodings.len() {
+            if !encodings[i].rtp_coding_parameters.rid.is_empty() {
+                continue;
+            }
+            let rid = loop {
+                let candidate = next.to_string();
+                next += 1;
+                if !encodings
+                    .iter()
+                    .any(|e| e.rtp_coding_parameters.rid == candidate)
+                {
+                    break candidate;
+                }
+            };
+            encodings[i].rtp_coding_parameters.rid = rid;
+        }
+        self.send_encodings = encodings;
+        self
+    }
 }
 
 /// RTCRtpTransceiver represents a permanent pairing of an RTP sender and RTP receiver that share a common mid.
@@ -304,16 +352,25 @@ impl RTCRtpTransceiver<'_> {
 
     /// Returns the media stream identification tag (mid) for this transceiver.
     ///
-    /// The mid uniquely identifies the media description in the SDP. When not already set,
-    /// this value will be assigned during `create_offer` or `create_answer`.
+    /// The mid uniquely identifies the media description in the SDP. `create_offer` and
+    /// `create_answer` choose it (W3C `[[JsepMid]]`), but it is the transceiver's mid only
+    /// once a description that has it is applied: W3C webrtc-pc 4.4.1.6, "set the
+    /// transceiver's [[Mid]] slot to transceiver.[[JsepMid]]" when a local description is
+    /// applied, and from the remote description's section when a remote one is. Until then,
+    /// and after a rollback that disassociates it, it is `None`.
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub fn mid(&self) -> &Option<String> {
+        static NO_MID: Option<String> = None;
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        self.peer_connection.rtp_transceivers[self.id].mid()
+        let mid = self.peer_connection.rtp_transceivers[self.id].mid();
+        match mid {
+            Some(value) if self.peer_connection.applied_description_has_mid(value) => mid,
+            _ => &NO_MID,
+        }
     }
 
     /// Returns the id of this transceiver's [`RTCRtpSender`].
@@ -425,6 +482,31 @@ impl RTCRtpTransceiver<'_> {
     /// `addTrack` reuses the transceiver.
     pub fn set_associable_with_remote_offer(&mut self, associable: bool) {
         self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
+    }
+
+    /// Where this transceiver's m= section goes in the BUNDLE groups of the next offers this
+    /// side makes (W3C webrtc-pc has no such member; a JSEP application needs it to use RFC
+    /// 9143 sections 7.5.1 and 7.5.2):
+    ///
+    /// - `Some(false)`: out of every group. The offer gives the section a transport of its own
+    ///   (its own candidates, which the application gathers for the entry
+    ///   [`ice_transport_sections`](crate::peer_connection::RTCPeerConnection::ice_transport_sections)
+    ///   then lists, and its own DTLS association), leaves its tag out of the group and does
+    ///   not mark it `a=bundle-only` (RFC 9143 section 7.5.2). Once the answer accepts it, the
+    ///   section stays on that transport.
+    /// - `Some(true)`: in the first BUNDLE group (section 7.5.1); an answer that accepts it
+    ///   there closes its transport.
+    /// - `None` (the default): where the most recent answer put it (RFC 9429 section 5.2.2).
+    ///
+    /// It takes effect at the next `create_offer`; the application starts that negotiation.
+    /// Answers follow the remote offer's groups whatever this says.
+    pub fn set_bundle_request(&mut self, request: Option<bool>) {
+        self.peer_connection.rtp_transceivers[self.id].set_bundle_request(request);
+    }
+
+    /// What [`Self::set_bundle_request`] last set.
+    pub fn bundle_request(&self) -> Option<bool> {
+        self.peer_connection.rtp_transceivers[self.id].bundle_request()
     }
 
     /// Marks this transceiver as touched by W3C `addTrack`: a rollback of the remote offer that
@@ -596,6 +678,51 @@ impl RTCRtpTransceiver<'_> {
         Ok(())
     }
 
+    /// Asks, in this transceiver's offers, to receive simulcast: one `a=rid:<rid> recv` line
+    /// for each of `rids` and `a=simulcast:recv <rid>;...` (RFC 8853 section 5.3.1, RFC 8851
+    /// section 6.1), in a section that receives. The answer's `send` streams are then received
+    /// as the layers of the transceiver's receiver. At least two rids, each 1 to 255
+    /// alphanumerics (RFC 8852 section 3.1), all different; an empty list asks for none (the
+    /// default). Takes effect with the next offer.
+    ///
+    /// Not a W3C method (JSEP section 3.7: "only to receive a single encoding"): a fork
+    /// addition, for an endpoint that receives simulcast (an SFU).
+    pub fn set_receive_simulcast(&mut self, rids: Vec<String>) -> Result<()> {
+        let valid = |rid: &String| {
+            !rid.is_empty() && rid.len() <= 255 && rid.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        let distinct = rids
+            .iter()
+            .enumerate()
+            .all(|(i, rid)| !rids[..i].contains(rid));
+        if !rids.is_empty() && (rids.len() < 2 || !rids.iter().all(valid) || !distinct) {
+            return Err(Error::ErrRTPSenderRidInvalid);
+        }
+        self.peer_connection.rtp_transceivers[self.id].set_receive_simulcast(rids);
+        Ok(())
+    }
+
+    /// The most this endpoint wants to receive in this transceiver's media section, in bits
+    /// per second of RTP without transport overhead: written in its descriptions as
+    /// `b=TIAS:<bitrate>` (RFC 3890) and, for peers that read only that modifier,
+    /// `b=AS:<kilobits>` (RFC 8866 section 5.8), the value RFC 9429 section 5.10 turns back into
+    /// at least `bitrate` ("TIAS = AS * 1000 * 0.95 - (50 * 40 * 8)"). The remote sender
+    /// keeps under it (RFC 9429 section 5.10), and no TMMBR this endpoint sends for the
+    /// section's streams exceeds it (RFC 5104 section 4.2.1.2, `ccm tmmbr`). `None` (the
+    /// default) writes no `b=` line. Takes effect with the next description this endpoint
+    /// creates; a change does not by itself make negotiation needed.
+    ///
+    /// Not a W3C method (browsers take `b=` lines from the application's SDP): a fork
+    /// addition.
+    pub fn set_receive_bandwidth(&mut self, bitrate: Option<u64>) {
+        self.peer_connection.rtp_transceivers[self.id].set_receive_bandwidth(bitrate);
+    }
+
+    /// See [`Self::set_receive_bandwidth`].
+    pub fn receive_bandwidth(&self) -> Option<u64> {
+        self.peer_connection.rtp_transceivers[self.id].receive_bandwidth()
+    }
+
     /// Sets the preferred codec list for this transceiver.
     ///
     /// This overrides the default codec preferences from the media engine. An empty list
@@ -618,7 +745,7 @@ impl RTCRtpTransceiver<'_> {
         let codecs = self.peer_connection.rtp_transceivers[self.id]
             .validate_codec_preferences(codecs, &self.peer_connection.media_engine)?;
         self.peer_connection.rtp_transceivers[self.id]
-            .set_codec_preferences(codecs, &self.peer_connection.media_engine)
+            .set_application_codec_preferences(codecs, &self.peer_connection.media_engine)
     }
 }
 
@@ -766,14 +893,21 @@ mod tests {
         )
     }
 
+    /// The stream ids of the `a=msid` lines; each line's appdata is the track id `track`
+    /// (`with_msid_appdata`, on by default).
     fn msid_lines(sdp: &str) -> Vec<&str> {
         sdp.lines()
             .filter_map(|line| line.strip_prefix("a=msid:"))
+            .map(|value| {
+                let (stream, appdata) = value.split_once(' ').unwrap_or((value, ""));
+                assert_eq!(appdata, "track", "{value}");
+                stream
+            })
             .collect()
     }
 
-    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, and the stream
-    /// id the track itself has (which an application sets to `-`) when it is in none.
+    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, and the
+    /// stream id the track itself has (which an application sets to `-`) when it is in none.
     #[test]
     fn test_offer_has_one_msid_line_per_stream() {
         let mut pc = build_pc();
@@ -782,7 +916,7 @@ mod tests {
             .expect("add transceiver");
 
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["-"]);
 
         pc.rtp_sender(tid.into())
             .expect("sender")
@@ -793,14 +927,14 @@ mod tests {
             ])
             .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["one track", "two track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["one", "two"]);
 
         pc.rtp_sender(tid.into())
             .expect("sender")
             .set_streams(vec![])
             .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["-"]);
     }
 
     /// RFC 9429, Section 5.10: a remote offer's new media section takes a transceiver the

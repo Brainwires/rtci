@@ -202,7 +202,11 @@ a=sctp-port:5000
         );
         let answer = answer_to(&mut pc, &offer)?;
         let sections = media_sections(&answer);
-        assert_eq!(sections[0][0], format!("m=audio 9 {proto} 111"), "{answer}");
+        // The offered format first; formats the offer lacked may follow (RFC 9429 5.3.1).
+        assert!(
+            sections[0][0].starts_with(&format!("m=audio 9 {proto} 111")),
+            "{answer}"
+        );
         // A rejected section keeps the profile too.
         assert!(
             sections[1][0].starts_with(&format!("m=video 0 {proto} ")),

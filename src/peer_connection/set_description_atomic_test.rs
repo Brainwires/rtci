@@ -340,7 +340,10 @@ fn a_refused_local_description_applies_no_staged_ice_restart() -> Result<()> {
     )?;
     let before = pc.ice_transport().get_local_parameters()?;
 
-    let offer = pc.create_offer(Some(RTCOfferOptions { ice_restart: true }))?;
+    let offer = pc.create_offer(Some(RTCOfferOptions {
+        ice_restart: true,
+        ..Default::default()
+    }))?;
     assert!(pc.ice_transport().has_pending_restart());
 
     // Not the offer `create_offer` made (W3C setLocalDescription: InvalidModificationError).
@@ -377,7 +380,10 @@ fn a_rollback_applies_no_staged_ice_restart() -> Result<()> {
     pc.set_local_description(Instant::now(), offer)?;
 
     // A second offer, with a restart, created while the first is pending and then abandoned.
-    pc.create_offer(Some(RTCOfferOptions { ice_restart: true }))?;
+    pc.create_offer(Some(RTCOfferOptions {
+        ice_restart: true,
+        ..Default::default()
+    }))?;
     assert!(pc.ice_transport().has_pending_restart());
     pc.set_local_description(Instant::now(), rollback())?;
     assert_eq!(pc.signaling_state, RTCSignalingState::Stable);

@@ -2320,6 +2320,11 @@ pub enum Error {
     /// Sender cannot add encoding as rid is empty.
     #[error("Sender cannot add encoding as rid is empty")]
     ErrRTPSenderRidNil,
+    /// No `a=imageattr recv` line of the remote description can be satisfied for the
+    /// resolution the encoder produces (RFC 9429 section 3.6.2): the encoding is not to be
+    /// sent.
+    #[error("no a=imageattr line of the remote description can be satisfied")]
+    ErrImageAttrUnsatisfiable,
     /// Sender cannot add encoding as there is no base track.
     #[error("Sender cannot add encoding as there is no base track")]
     ErrRTPSenderNoBaseEncoding,

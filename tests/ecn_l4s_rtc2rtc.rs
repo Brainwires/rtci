@@ -3,7 +3,8 @@
 //! The engine is sans-I/O, so the application's socket layer carries the IP header's ECN
 //! codepoint in `TransportContext::ecn`: it names the codepoint each received datagram arrived
 //! with, and the engine names the codepoint each datagram to send is to carry. With ECN on
-//! (`SettingEngineBuilder::with_ecn`) and `ack ccfb` negotiated, RTP media goes out ECT(1)
+//! (`SettingEngineBuilder::with_ecn`), `ack ccfb` and `a=ecn-capable-rtp` negotiated (RFC 6679
+//! section 6.1), RTP media goes out ECT(1)
 //! once ECN is initiated (RFC 8888 section 7, RFC 6679 section 7.2.1: a few probes first,
 //! every packet once the feedback shows they arrive marked; marking stops when the path
 //! clears it or drops marked packets, section 7.4) and nothing else is marked; the receiver counts ECT(1) / CE receptions, reports each packet's
@@ -12,6 +13,8 @@
 //!
 //! Two `rtc` peers on a simulated network that can mark CE, bleach ECT(1), delay and drop
 //! packets; virtual time, no sockets.
+
+mod jsep_common;
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
@@ -71,6 +74,8 @@ struct Setup {
     nack: bool,
     /// `SettingEngineBuilder::with_ecn_initiation(EcnInitiation::LeapOfFaith)`.
     leap_of_faith: bool,
+    /// `SettingEngineBuilder::with_ecn_without_signalling(true)`.
+    unsignalled: bool,
 }
 
 struct Peer {
@@ -111,8 +116,7 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_ecn(setup.ecn)
-                    // L4S: ECT(1) whatever the receiver asks (RFC 6679's default is ECT(0)).
-                    .with_ecn_marking(EcnMarking::L4s)
+                    .with_ecn_without_signalling(setup.unsignalled)
                     .with_ecn_initiation(if setup.leap_of_faith {
                         EcnInitiation::LeapOfFaith
                     } else {
@@ -201,6 +205,8 @@ struct World {
     /// (from the sender, SSRC and sequence number if RTP, the ECN codepoint it was sent with)
     /// for every datagram either peer sent.
     sent: Vec<Sent>,
+    /// The answer's SDP.
+    answer: String,
 }
 
 impl World {
@@ -327,6 +333,16 @@ impl World {
     /// The offerer (`sender`) sends video to the answerer (`receiver`), connected over host
     /// candidates. Returns the world, the sender and the offer's SDP.
     fn connected(sender: Setup, receiver: Setup) -> Result<(Self, RTCRtpSenderId, String)> {
+        Self::connected_with(sender, receiver, |answer| answer)
+    }
+
+    /// [`connected`](Self::connected), the answer's SDP passed through `edit` before the
+    /// offerer applies it.
+    fn connected_with(
+        sender: Setup,
+        receiver: Setup,
+        edit: fn(String) -> String,
+    ) -> Result<(Self, RTCRtpSenderId, String)> {
         let mut world = World {
             peers: [
                 Peer::new("10.0.0.1:5000", sender)?,
@@ -337,6 +353,7 @@ impl World {
             path: Path::default(),
             held: Vec::new(),
             sent: Vec::new(),
+            answer: String::new(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -363,9 +380,11 @@ impl World {
             .set_local_description(now, offer.clone())?;
         world.peers[1].pc.set_remote_description(now, offer)?;
         let answer = world.peers[1].pc.create_answer(None)?;
+        world.answer = answer.sdp.clone();
         world.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
+        let answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(edit(answer.sdp))?;
         world.peers[0].pc.set_remote_description(now, answer)?;
         for i in 0..2 {
             let candidate = world.peers[i].candidate()?;
@@ -481,6 +500,7 @@ const ECN_CCFB: Setup = Setup {
     ccfb: true,
     nack: false,
     leap_of_faith: false,
+    unsignalled: false,
 };
 
 /// The media packets the sender put on the wire, in order: (sequence number, sent ECT(1)).
@@ -825,5 +845,183 @@ fn leap_of_faith_initiation_marks_from_the_first_packet_and_still_stops_on_bleac
         media[media.len() - 30..].iter().all(|(_, m)| !m),
         "and not after"
     );
+    Ok(())
+}
+
+/// RFC 8888 section 7: "the SDP offer generated MUST include an "a=ecn-capable-rtp:"
+/// attribute to negotiate ECN support, along with an "a=rtcp-fb:" attribute with the "ack"
+/// parameter "ccfb"". RFC 6679 section 6.1.1: the offer lists the initiation methods in
+/// decreasing preference, the answer "its single preferred choice". The answer's method is
+/// the one used: leap of faith offered first and answered marks from the first packet.
+#[test]
+fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
+    let (world, _, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    assert!(offer.contains("a=rtcp-fb:* ack ccfb"), "{offer}");
+    assert!(
+        offer.contains("a=ecn-capable-rtp: rtp,leap ect=1\r\n"),
+        "the offer states its methods, the configured one first:\n{offer}"
+    );
+    // RFC 6679 section 6.1: "This attribute MUST NOT be used as an SDP session-level
+    // attribute"; it is in the media sections.
+    let session_part = offer.split("\r\nm=").next().unwrap_or_default();
+    assert!(!session_part.contains("a=ecn-capable-rtp"), "{offer}");
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp: rtp ect=1\r\n"),
+        "the answer picks one:\n{}",
+        world.answer
+    );
+
+    let leap = Setup {
+        leap_of_faith: true,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(leap, ECN_CCFB)?;
+    assert!(
+        offer.contains("a=ecn-capable-rtp: leap,rtp ect=1\r\n"),
+        "{offer}"
+    );
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp: leap ect=1\r\n"),
+        "the answerer takes the offer's first method it implements:\n{}",
+        world.answer
+    );
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(200))?;
+    let media = media_on_the_wire(&world, ssrc);
+    assert!(
+        media.iter().all(|(_, m)| *m),
+        "leap of faith negotiated: every packet ECT(1)"
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 6.1.1: "If the attribute is removed in the answer, then ECN MUST NOT be
+/// used in any direction for that media flow". An answerer without ECN leaves it out, and the
+/// offerer, with ECN on and `ack ccfb` negotiated, marks nothing.
+#[test]
+fn an_answer_without_ecn_capable_rtp_marks_nothing() -> Result<()> {
+    let receiver = Setup {
+        ecn: false,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(ECN_CCFB, receiver)?;
+    assert!(offer.contains("a=ecn-capable-rtp:"), "{offer}");
+    assert!(
+        !world.answer.contains("a=ecn-capable-rtp"),
+        "{}",
+        world.answer
+    );
+    assert!(world.answer.contains("ack ccfb"), "{}", world.answer);
+    world.send_media(sender, Duration::from_millis(500))?;
+    assert!(world.sent.iter().all(|(_, _, ecn)| ecn.is_none()));
+    Ok(())
+}
+
+/// `with_ecn_without_signalling(true)`, what browsers that send L4S do: no
+/// `a=ecn-capable-rtp`, and a stream with `ack ccfb` marks all the same.
+#[test]
+fn without_signalling_ecn_is_used_on_ccfb_alone() -> Result<()> {
+    let setup = Setup {
+        unsignalled: true,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(setup, setup)?;
+    assert!(!offer.contains("a=ecn-capable-rtp"), "{offer}");
+    assert!(!world.answer.contains("a=ecn-capable-rtp"));
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(500))?;
+    let media = media_on_the_wire(&world, ssrc);
+    let from = marked_from(&media).expect("media is sent ECT(1)");
+    assert!(from.wrapping_sub(FIRST_SEQ) < 50);
+    Ok(())
+}
+
+/// RFC 6679 section 6.1: `ect=` is the receiver's preference, "with "0" being implied if not
+/// specified", and "It is RECOMMENDED that ECT(0) marking be used": a peer whose answer states
+/// no `ect=` gets ECT(0) on the wire; this endpoint's own descriptions ask for ECT(1), the L4S
+/// identifier its RFC 8888 receiver reports for (above).
+#[test]
+fn a_peer_that_states_no_ect_value_gets_ect0() -> Result<()> {
+    let (mut world, sender, _) = World::connected_with(ECN_CCFB, ECN_CCFB, |answer| {
+        answer.replace(" ect=1\r\n", "\r\n")
+    })?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(500))?;
+    let marks: Vec<_> = world
+        .sent
+        .iter()
+        .filter(|(from_sender, rtp, ecn)| {
+            *from_sender && rtp.is_some_and(|(s, _)| s == ssrc) && ecn.is_some()
+        })
+        .map(|(_, _, ecn)| *ecn)
+        .collect();
+    assert!(!marks.is_empty(), "media is marked");
+    assert!(
+        marks.iter().all(|e| *e == Some(EcnCodepoint::Ect0)),
+        "{marks:?}"
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 7.2: one RTP session initiates ECN one way. A BUNDLE group is one session:
+/// an offer whose bundled sections list different initiation methods is answered with the
+/// tagged section's method in every section.
+#[test]
+fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
+    let section = |mid: &str, methods: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\n{}a=mid:{mid}\na=sendrecv\n\
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: {methods}\n",
+            jsep_common::TRANSPORT
+        )
+    };
+    let offer = jsep_common::crlf(&format!(
+        "{}a=group:BUNDLE 0 1\n{}{}",
+        jsep_common::SESSION,
+        section("0", "leap,rtp"),
+        section("1", "rtp")
+    ));
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+    )?;
+    let answer = pc.create_answer(None)?.sdp;
+    let methods: Vec<&str> = answer
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=ecn-capable-rtp:"))
+        .collect();
+    assert_eq!(methods, vec![" leap ect=1", " leap ect=1"], "{answer}");
+    Ok(())
+}
+
+/// RFC 6679 section 6.1.3: "RTP/AVPF or a profile based on it MUST be signalled": a section
+/// offered with ECN in the RTP/SAVP profile (no timely feedback) is answered without
+/// `a=ecn-capable-rtp`, while an RTP/SAVPF section of the same offer is answered with it.
+#[test]
+fn a_section_without_the_feedback_profile_is_answered_without_ecn() -> Result<()> {
+    let section = |mid: &str, proto: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/{proto} 96\n{}a=mid:{mid}\na=sendrecv\n\
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: rtp\n",
+            jsep_common::TRANSPORT
+        )
+    };
+    let offer = jsep_common::crlf(&format!(
+        "{}{}{}",
+        jsep_common::SESSION,
+        section("0", "SAVPF"),
+        section("1", "SAVP")
+    ));
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+    )?;
+    let answer = pc.create_answer(None)?.sdp;
+    let sections: Vec<&str> = answer.split("\r\nm=").skip(1).collect();
+    assert_eq!(sections.len(), 2, "{answer}");
+    assert!(sections[0].contains("a=ecn-capable-rtp:"), "{answer}");
+    assert!(!sections[1].contains("a=ecn-capable-rtp"), "{answer}");
     Ok(())
 }

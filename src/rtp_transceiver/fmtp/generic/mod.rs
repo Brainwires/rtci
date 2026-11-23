@@ -63,6 +63,25 @@ impl Fmtp for GenericFmtp {
                 );
             }
 
+            // RFC 8627 section 5.2.1 (draft-03 section 5.2.1): `repair-window` is the time the
+            // repair packets span; a receiver takes any window it can support (the media
+            // engine refuses a longer one than it registered), so two FlexFEC formats that
+            // differ in it alone are the same format.
+            if self.mime_type.rsplit('/').next().is_some_and(|subtype| {
+                subtype.eq_ignore_ascii_case("flexfec")
+                    || subtype.eq_ignore_ascii_case("flexfec-03")
+            }) {
+                let without_window = |parameters: &HashMap<String, String>| {
+                    let mut parameters = parameters.clone();
+                    parameters.remove("repair-window");
+                    parameters
+                };
+                return fmtp_consist(
+                    &without_window(&self.parameters),
+                    &without_window(&c.parameters),
+                );
+            }
+
             // RFC 7741 section 6.2.2: VP8's `max-fr` and `max-fs` are receiver capabilities,
             // "declarative", each side's own: they do not make two VP8 formats different.
             if self

@@ -78,3 +78,30 @@ fn an_answer_without_mids_takes_ours_by_position() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 5888 section 6: "If the identification-tag attribute is not present in each "m" line
+/// of the session description, grouping of media lines MUST NOT be performed." An offer with
+/// one section lacking `a=mid` has its `a=group` lines ignored, though the numbers the engine
+/// gives its sections would match them: the answer groups nothing.
+#[test]
+fn a_description_with_a_section_without_mid_is_not_grouped() -> TestResult {
+    let mut answerer = default_peer()?;
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0 1
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=sendrecv
+a=rtpmap:96 VP8/90000
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=sendrecv
+a=rtpmap:96 VP8/90000
+"
+    ));
+    answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    let answer = answerer.create_answer(None)?;
+    assert!(!answer.sdp.contains("a=group:"), "{}", answer.sdp);
+    let sections = media_sections(&answer.sdp);
+    assert_eq!(sections.len(), 2, "{}", answer.sdp);
+    assert_eq!(mid_of(&sections[1]), Some("1"), "{}", answer.sdp);
+    Ok(())
+}
