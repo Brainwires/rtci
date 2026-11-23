@@ -348,6 +348,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while another transport is still checking (it was "connecting" then). An
   `iceConnectionState` of "completed" counts as "connected", as in browsers.
 
+- **turn**: `ClientConfig::default()` now sends SOFTWARE `rtc-turn <version>` (it sent none);
+  set `software` to an empty string for the old behaviour. A TURN request over UDP beyond the
+  path MTU is an `ErrPacketTooBig` where it was sent.
+- **peer connection** (mt-8, W3C webrtc-pc 4.3.3): `connectionState` follows the table over
+  the connection's `iceConnectionState`: "disconnected" whenever that is "disconnected", also
+  while another transport is still checking (it was "connecting" then). An
+  `iceConnectionState` of "completed" counts as "connected", as in browsers.
+
 - **peer connection** (mt-7): the transports a connection has beside the first one (the
   first section of each media type in a `balanced` initial offer, every section under
   `max-compat`, the sections answered outside a BUNDLE group) take the first transport's
@@ -427,6 +435,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local stream is under the one SRTP master key); it was accepted.
 - **ice**: with the "relay" ICE transport policy a relayed candidate is signalled with raddr
   0.0.0.0 rport 9 (RFC 8827 section 6.4).
+- **turn**: `ClientConfig::default()` now sends SOFTWARE `rtc-turn <version>` (it sent none);
+  set `software` to an empty string for the old behaviour. A TURN request over UDP beyond the
+  path MTU is an `ErrPacketTooBig` where it was sent.
 - **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
   (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
   struct literal outside the crate must name it.
@@ -485,9 +496,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the RFC). New `Registry::holds`.
     that negotiated them.
   fails the handshake).
-
-
-
 
   fails the handshake).
 - **media conformance**: RTP usage (RFC 8834).
@@ -1818,14 +1826,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
   `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
 
-### Testing (sec-10)
-
-- **sctp** interop: `sctp_rfc_defaults_interop::an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent`
-  checks RFC 3758 4.1 TR3 numbering at transmission against the `webrtc` 0.17 SCTP: messages
-  of an ordered lifetime channel that expire unsent take no stream sequence number, and the
-  messages written after them are delivered in order. The browser matrix logs each cell's
-  negotiated `tlsVersion`, `dtlsCipher` and `srtpCipher` and accepts AES-256-GCM suites.
-
 ### Behaviour changes
 
 - **ice**: through the peer connection a local candidate is paired only once it has been
@@ -1895,6 +1895,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (an ICE restart with it) RTP of every transport flows under the new keys. The transports an
   answer leaves unused fire DTLS and then ICE "closed" (`OnTransportEvent`, W3C 4.4.1.6).
   Bandwidth probing is shown per transport (`each_transport_probes_its_own_path`).
+- **peer connection** (mt-11, bug): a later offer under `balanced` whose only BUNDLE group
+  holds a section new in it (the offer of a peer that answered an earlier offer without
+  BUNDLE) took the default transport's own section for one moved out of a group (RFC 9143
+  7.5.2), gave it a new transport and made another transport the default: the offer wrote the
+  default transport's `a=tls-id` on the video transport's section, which the peer refused
+  ("replaces ... without an ICE restart", RFC 9429 5.8.3), so a glare rollback in that state
+  ended the negotiation. Only sections that have a transport count as moved out now, and a
+  new section the offer puts in a group of new sections only (a new BUNDLE group, RFC 9143
+  section 5) gets a transport of its own, as the answerer gives it, instead of the default
+  transport, whose `a=tls-id` the answer's then seemed to replace. The ICE connection state
+  and the connection state (W3C 4.3.3, 4.3.4) are aggregated again when an answer or a
+  rollback closes a transport: one that closed before it connected held the connection at
+  "connecting". A rollback of an offer that gave a new data section a transport of its own
+  (its own BUNDLE group) left that transport in place: the layout took off their transports
+  only the sections a transceiver has, never the data section, so the browser glare scenario
+  found three transports after the rollback. Every section outside the layout's groups is
+  taken off now. Tests:
+  `balanced_answered_without_bundle_a_rollback_keeps_every_transport`,
+  `balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports`,
+  `a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section`.
+- **interop** (mt-11): the browser scenarios that start with `request-offer` sent their
+  scenario only with the browser's first offer, after the Rust peer had set its own; the peer
+  then changed its header encryption policy, which webrtc-extensions 10.2 refuses
+  (`InvalidModificationError`), and never answered. The scenario now goes with the first
+  offer or `request-offer` and is set up before any description. `peer.js` handles
+  signalling messages in arrival order (an offer right after an answer was taken for a
+  colliding one and ignored) and reports the descriptions a failing scenario exchanged. The
+  two balanced rollback scenarios edit only Rust's first offer: after an unbundled exchange
+  Chromium and WebKit offer to bundle every section again, with the tagged section's ICE
+  credentials on the others (RFC 9143 7.5.1), which Rust accepts (7.3); that offer with its
+  group edited out is no description a peer could make (answering it restarts ICE on the
+  section whose credentials it changed, or libwebrtc refuses the answer). The rollback is
+  checked on the Rust side (`interop-peer` reports its transports at the rolled-back offer
+  and right after the rollback: the same, all connected), and media through what follows.
 - **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
   stream that sent last, whatever transport's congestion controller asked for it, so with
   several transports one transport's probes travelled another's path and measured nothing of
@@ -2477,6 +2511,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **sctp**: `Association::peer_abort_reason()` (the Upper Layer Abort Reason of the peer's
+  User-Initiated Abort, RFC 9260 sections 3.3.10.12 and 9.1) and
+  `Association::abort_with_reason(&[u8])`.
+- **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
+  association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
+  new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
+  RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
+  the new association, browsers ignore a new `tls-id`.
 - **Decoding dependencies** (RFC 5583; RFC 7798 section 7.2.5; branch `conf/jsep-47-depend`).
   `sdp::attribute::{Depend, Dependency, DependencyType}` parse and write `a=depend` (one
   dependency per format; `lay`, `mdc` or another token). `RTCPeerConnection::
@@ -2598,8 +2640,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoder's configured webrtc-svc mode, returned by `getParameters`). rtc-sctp: `RtoConfig`
   and `TransportConfig::{with_rto_config, rto_config}`; the timers' backoff stops at the
   configured RTO.Max.
-
-
 
 - **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
   webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
@@ -2761,7 +2801,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stats object with a selected pair.
   configured RTO.Max.
 
-
 - **media conformance**: receiver and sender rows (media phase five).
   - `rtp::codec::h265::H265MultiStreamDepacketizer`: the receiver of an HEVC bitstream carried
     in several RTP streams, on one transport (MRST) or several (MRMT), RFC 7798 section 4.3
@@ -2800,7 +2839,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `payload_types_reused_across_sections` (crate-internal, for the SDP layer): the payload
     types two sections of one BUNDLE group use for different formats (RFC 8834 section 4.3).
 
-
 - **media conformance**: an RTCP session, transport-wide numbering, congestion controller and
   pacer per transport. With m= sections on several transports (mt-2) each transport is an RTP
   session of its own (RFC 8834 section 4.4, RFC 3550 section 6): its RTCP reports name only
@@ -2820,7 +2858,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     application's estimator keeps one controller and one numbering for the connection.
   - `RtcpSessionControl::{ReducedSize, Bandwidth}` are written per transport, tagged with
     its session.
-
 
 - **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
   association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
@@ -4475,6 +4512,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the same code.
 - **test-env**: `tests/testenv_turn_client.rs` checks against coturn that a wrong password's
   401 is not answered again, and that requests keep the 500 ms initial RTO.
+
+### Testing (sec-10)
+
+- **sctp** interop: `sctp_rfc_defaults_interop::an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent`
+  checks RFC 3758 4.1 TR3 numbering at transmission against the `webrtc` 0.17 SCTP: messages
+  of an ordered lifetime channel that expire unsent take no stream sequence number, and the
+  messages written after them are delivered in order. The browser matrix logs each cell's
+  negotiated `tlsVersion`, `dtlsCipher` and `srtpCipher` and accepts AES-256-GCM suites.
 
 ### DTLS 1.3
 

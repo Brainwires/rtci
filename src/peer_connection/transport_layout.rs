@@ -204,13 +204,17 @@ impl RTCPeerConnection {
             }
         }
         transports.set_default(targets[0]);
-        for mid in self
-            .rtp_transceivers
-            .iter()
-            .filter_map(|t| t.mid().clone())
+        // Every section outside the groups leaves its transport: a transceiver's, and also a
+        // data section (which has no transceiver), else the transport a rolled-back offer
+        // gave a new data section would outlive the rollback (RFC 9429 section 5.7).
+        let outside: Vec<String> = transports
+            .ids()
+            .into_iter()
+            .flat_map(|id| transports.mids_on(id))
+            .chain(self.rtp_transceivers.iter().filter_map(|t| t.mid().clone()))
             .filter(|mid| !in_groups.contains(&mid))
-            .collect::<Vec<_>>()
-        {
+            .collect();
+        for mid in outside {
             self.pipeline_context.transports.unassign(&mid);
         }
         let data = self.data_section_mid_in(groups);
@@ -236,7 +240,27 @@ impl RTCPeerConnection {
         self.pipeline_context.describe_section_transports();
         // A transport that closed no longer counts in the connection's gathering state.
         self.update_gathering_state();
+        self.update_aggregate_connection_states();
         Ok(())
+    }
+
+    /// W3C 4.3.3 and 4.3.4 after the set of transports changed: the ICE connection state and
+    /// the connection state are aggregates over the transports there are, so one that closed
+    /// (an answer left it without a section, or a rollback took it back) stops holding them
+    /// at "new" or "connecting". Transport state changes recompute them too; this covers a
+    /// change of the set itself, which fires none of those.
+    pub(crate) fn update_aggregate_connection_states(&mut self) {
+        if self.is_closed() {
+            return;
+        }
+        let aggregate = self.ice_connection_state();
+        if aggregate != self.pipeline_context.announced_ice_connection_state {
+            self.pipeline_context.announced_ice_connection_state = aggregate;
+            self.pipeline_context
+                .event_outs
+                .push_back(crate::peer_connection::event::RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(aggregate));
+        }
+        self.update_connection_state(false);
     }
 
     /// The mid of the data section among `groups`: the one no transceiver has.
@@ -280,6 +304,7 @@ impl RTCPeerConnection {
             }
             self.pipeline_context.describe_section_transports();
             self.update_gathering_state();
+            self.update_aggregate_connection_states();
             return;
         }
         if let Err(err) = self.apply_transport_layout(&groups) {
@@ -464,7 +489,8 @@ impl RTCPeerConnection {
     /// - `balanced` (the default) gathers "for each media type in use": in an initial offer the
     ///   first section of each type has a transport of its own and the later ones are
     ///   bundle-only, on the BUNDLE transport. A later offer gives a new section the BUNDLE
-    ///   transport.
+    ///   transport, or a transport of its own when the offer puts it in a group of new
+    ///   sections only (a new BUNDLE group, as after an answer without BUNDLE).
     /// - `must-bundle` gathers for one track: every section but the first is bundle-only.
     ///
     /// A section keeps the transport it has. The first section of an initial offer keeps the
@@ -476,13 +502,38 @@ impl RTCPeerConnection {
         let transports = &self.pipeline_context.transports;
         // RFC 9143 section 7.5.2: a section this offer moves out of its BUNDLE group (outside
         // every group of `d` and on the transport of a section still in one) gets a transport
-        // of its own; the group keeps its transport.
+        // of its own; the group keeps its transport. Only sections that have a transport
+        // count: a section new in this offer has none yet, and a group of new sections alone
+        // moves nothing out of the transport the others are on.
         let offered_groups = bundle_groups(d);
         let grouped = |mid: &str| offered_groups.iter().any(|group| group.contains(&mid));
-        let on = |mid: &str| transports.transport_id_for(mid);
+        // The sections the current exchange negotiated: one with no assignment of its own is
+        // on the default transport (a single transport assigns none).
+        let negotiated: Vec<String> = self
+            .current_local_description
+            .as_ref()
+            .and_then(|desc| desc.parsed.as_ref())
+            .map(|parsed| {
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .filter(|m| !is_rejected_media(m))
+                    .filter_map(|m| get_mid_value(m).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let on = |mid: &str| {
+            transports.assignment(mid).or_else(|| {
+                negotiated
+                    .iter()
+                    .any(|known| known == mid)
+                    .then(|| transports.default_id())
+            })
+        };
         let moved_out = |mid: &str| {
             !initial
                 && !grouped(mid)
+                && on(mid).is_some()
                 && d.media_descriptions.iter().any(|m| {
                     !is_rejected_media(m)
                         && get_mid_value(m).is_some_and(|other| {
@@ -490,6 +541,17 @@ impl RTCPeerConnection {
                         })
                 })
         };
+        // A group of the offer none of whose sections has a transport is a new BUNDLE group
+        // (RFC 9143 section 5: a description may carry several, each a transport): its tagged
+        // section is not bundle-only and has a transport of its own, which the group's other
+        // new sections share. `new_groups` maps such an offered group to its entry in
+        // `groups`.
+        let new_group_of = |mid: &str| {
+            offered_groups.iter().position(|group| {
+                group.contains(&mid) && group.iter().all(|other| on(other).is_none())
+            })
+        };
+        let mut new_groups: Vec<(usize, usize)> = vec![];
         let mut groups: Vec<(Option<TransportId>, Vec<String>)> = vec![];
         // The indexes in `groups` of the sections moved out, in order.
         let mut moved: Vec<usize> = vec![];
@@ -515,9 +577,20 @@ impl RTCPeerConnection {
                 // A bundle-only section has no transport of its own (RFC 9143 section 6).
                 None if bundle_only => bundle_group,
                 // A section of an initial offer that is not bundle-only has one; in a later
-                // offer, only under `max-compat`.
+                // offer, only under `max-compat`, or in a new BUNDLE group of the offer.
                 None if own_transports || initial => None,
-                None => bundle_group,
+                None => match new_group_of(mid) {
+                    Some(offered) => new_groups
+                        .iter()
+                        .find(|(group, _)| *group == offered)
+                        .map(|(_, index)| *index)
+                        .or_else(|| {
+                            groups.push((None, vec![]));
+                            new_groups.push((offered, groups.len() - 1));
+                            Some(groups.len() - 1)
+                        }),
+                    None => bundle_group,
+                },
             };
             let index = index.unwrap_or_else(|| {
                 groups.push((None, vec![]));

@@ -13,7 +13,8 @@
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
 //!   connection state, its W3C stats counters and per-stream sequence coverage.
 //!
-//! The scenario (sent with the first offer) chooses what the peer does with media:
+//! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
+//! what the peer does with media:
 //! `{"media":"reflect","video":"VP8|VP9|H264|H265|AV1","audio":true}` sends back what it
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
@@ -292,6 +293,12 @@ struct Session {
     /// This side's offer is outstanding (have-local-offer).
     have_local_offer: bool,
     rollbacks: u64,
+    /// The DTLS transports (id, state) when this side last made an offer; those when it made
+    /// the offer it last rolled back, and right after that rollback (RFC 9429 5.7: the
+    /// rollback restores what the offer changed).
+    transports_at_offer: Vec<(String, String)>,
+    transports_at_rolled_back_offer: Vec<(String, String)>,
+    transports_after_rollback: Vec<(String, String)>,
     connected: bool,
     state: String,
     /// The ICE transports whose DTLS transport reported "connected" in an
@@ -374,6 +381,9 @@ impl Session {
             rust_dc: None,
             have_local_offer: false,
             rollbacks: 0,
+            transports_at_offer: vec![],
+            transports_at_rolled_back_offer: vec![],
+            transports_after_rollback: vec![],
             connected: false,
             state: "new".to_owned(),
             transports_connected: Default::default(),
@@ -607,7 +617,17 @@ impl Session {
         Ok(())
     }
 
+    /// The connection's DTLS transports: (id, state).
+    fn dtls_transport_states(&self) -> Vec<(String, String)> {
+        self.pc
+            .dtls_transports()
+            .iter()
+            .map(|t| (format!("{:?}", t.id()), t.state().to_string()))
+            .collect()
+    }
+
     fn send_offer(&mut self) -> Result<()> {
+        self.transports_at_offer = self.dtls_transport_states();
         self.add_candidates()?;
         let offer = self.pc.create_offer(None)?;
         self.pc
@@ -628,10 +648,7 @@ impl Session {
     fn on_signal(&mut self, v: Value) -> Result<()> {
         match v["type"].as_str().unwrap_or_default() {
             "offer" => {
-                if self.scenario.is_null() && !v["scenario"].is_null() {
-                    self.scenario = v["scenario"].clone();
-                    self.setup_scenario()?;
-                }
+                self.take_scenario(&v)?;
                 self.add_candidates()?;
                 // Glare: as the polite peer (RFC 9429 4.1.8.2, perfect negotiation), roll our
                 // own offer back, answer theirs, then offer again.
@@ -643,6 +660,8 @@ impl Session {
                     )?;
                     self.have_local_offer = false;
                     self.rollbacks += 1;
+                    self.transports_at_rolled_back_offer = self.transports_at_offer.clone();
+                    self.transports_after_rollback = self.dtls_transport_states();
                 }
                 let offer =
                     RTCSessionDescription::offer(v["sdp"].as_str().unwrap_or_default().to_owned())?;
@@ -671,6 +690,7 @@ impl Session {
                 self.pc.add_remote_candidate(c)?;
             }
             "request-offer" => {
+                self.take_scenario(&v)?;
                 let tracks: Vec<String> = v["tracks"]
                     .as_array()
                     .map(|a| {
@@ -710,6 +730,8 @@ impl Session {
                     "state": self.state,
                     "cryptex": self.pc.cryptex_negotiated(),
                     "rollbacks": self.rollbacks,
+                    "transportsAtRolledBackOffer": self.transports_at_rolled_back_offer,
+                    "transportsAfterRollback": self.transports_after_rollback,
                     "local_sdp": answer,
                     "stats": stats,
                     "transportsConnected": self.transports_connected.len(),
@@ -799,6 +821,18 @@ impl Session {
             "remoteCandidates": remote_candidates,
             "candidatePairs": candidate_pairs,
         })
+    }
+
+    /// The scenario, from the first message that carries one: the browser's first offer, or
+    /// its first request for an offer of ours when this side offers first. It is set up
+    /// before this side sets any description, since some of it (the header encryption policy)
+    /// cannot change afterwards.
+    fn take_scenario(&mut self, v: &Value) -> Result<()> {
+        if self.scenario.is_null() && !v["scenario"].is_null() {
+            self.scenario = v["scenario"].clone();
+            self.setup_scenario()?;
+        }
+        Ok(())
     }
 
     fn setup_scenario(&mut self) -> Result<()> {

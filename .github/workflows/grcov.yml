@@ -54,6 +54,10 @@ jobs:
           RUSTFLAGS: "-Cinstrument-coverage"
           LLVM_PROFILE_FILE: "cargo-test-%p-%m.profraw"
 
+      - name: Disk left after the build
+        if: always()
+        run: df -h
+
       - name: Generate coverage data
         id: grcov
         run: |
