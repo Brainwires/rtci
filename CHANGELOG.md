@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     later packet's MID names (when that section's receiver has no stream), as one the engine
     placed already did (RFC 9143 section 9.2); a MID from a packet older than the one that
     moved the stream is not applied (RFC 7941 section 4.2.6).
+  - Audit only: RFC8830-3.2.2-1 tested (stale note), 3.2.5-1 `conflict` (as 3-7),
+    RFC9429-5.8-1 `setting` (trailing white space, for webrtc-rs 0.17), RFC9429-5.2.1-28
+    tested by the MUST of RFC 8854 section 7 (Opus `useinbandfec=1`).
 
 - **audit**: JSEP umbrella rows closed by their children (`conf/jsep-60-umbrellas`, jsep16).
   No engine change. RFC8859-4.8-1, A-7, A-29, A-33, RFC9429-5.2.1-57, 5.3.1-11, 5.5-5, 5.2-1

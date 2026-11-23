@@ -105,11 +105,10 @@ RFC7728-6.3-3	C	M	jsep (running)	Carry PAUSED inside the regular compound packet
 RFC7728-6.4-2	C	S	jsep (running)	Tune the repetitions to the observed loss
 RFC7728-8.2-4	C	M	jsep (running)	As RFC7728-6.3-3
 RFC7728-8.5-1	C	M	jsep (running)	Schedule the messages in the RTCP session's Early / Regular slots
-RFC8830-3-6	C	M	jsep (running)	A MediaStream object and stream-added notice
+RFC8830-3-6	C	S	jsep (running)	A setting for the RFC form: a changed appdata ends the receiver's track and gives a new one (W3C keeps the transceiver's track; then `conflict`)
 RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8830-3.2.2-1	C	M	jsep (running)	Apply msid when the offer is set; several streams per track
-RFC8830-3.2.5-1	C	M	jsep (running)	Move a track between streams; act on removal
+RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: as RFC8830-3-7 (no msid left); memberships tested
 RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remote-candidates` (rtc-ice call)
 RFC8851-6.3-6	E	S	jsep (running)	The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes)

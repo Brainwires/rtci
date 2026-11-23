@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4987 of 5087 (98.0 %).
-- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 5.
-- Open (not tested in any form): 100: 20 untested, 57 partial, 22 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4989 of 5087 (98.1 %).
+- Tested as the default (`tested`): 4968 of 5087 (97.7 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 6.
+- Open (not tested in any form): 98: 20 untested, 55 partial, 22 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 50 | 29 |
+| C | partly implemented | 48 | 27 |
 | D | not implemented | 22 | 18 |
-| E | cannot be met or observed inside this engine | 17 | 11 |
+| E | cannot be met or observed inside this engine | 18 | 12 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 120 | 72 |
+| all | | 119 | 71 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 88 rows, 50 of size S, 29 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 86 rows, 51 of size S, 26 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 16 | 1 | 2 | 0 | 19 | 10 | 8 | 1 |
+| jsep (running) | 0 | 14 | 1 | 2 | 0 | 17 | 11 | 5 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -93,6 +93,7 @@ Sorted by class, then owner, size and ID.
 | RFC5576-4.2-2 | `rfc5576.md` | A group lists at least one ssrc-id; MAY list more | partial | C | Use groups of three or more ids and `SIM` | S | jsep (running) |
 | RFC7728-6.2-2 | `rfc7728.md` | The hold-off period is 2 * RTT + T_dither_max, RTT the longest known | partial | C | Use the measured round trip | S | jsep (running) |
 | RFC7728-6.4-2 | `rfc7728.md` | The local-pause PAUSED is repeated a sufficient number of times | partial | C | Tune the repetitions to the observed loss | S | jsep (running) |
+| RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | partial | C | A setting for the RFC form: a changed appdata ends the receiver's track and gives a new one (W3C keeps the transceiver's track; then `conflict`) | S | jsep (running) |
 | RFC8839-4.4.2.2-1 | `rfc8839.md` | Lite: remote-candidates in the offer forms the pair and completes the ... | partial | C | Pin the local side of the pair from `a=remote-candidates` (rtc-ice call) | S | jsep (running) |
 | RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move one simulcast layer of a several-stream receiver to the section its MID names | S | jsep (running) |
 | RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
@@ -102,9 +103,6 @@ Sorted by class, then owner, size and ID.
 | RFC7728-6.3-3 | `rfc7728.md` | PAUSED is repeated in the next two regular RTCP reports while paused | partial | C | Carry PAUSED inside the regular compound packets | M | jsep (running) |
 | RFC7728-8.2-4 | `rfc7728.md` | PAUSED is also in the next two regular RTCP reports | partial | C | As RFC7728-6.3-3 | M | jsep (running) |
 | RFC7728-8.5-1 | `rfc7728.md` | The messages follow the AVPF timing rules | partial | C | Schedule the messages in the RTCP session's Early / Regular slots | M | jsep (running) |
-| RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | partial | C | A MediaStream object and stream-added notice | M | jsep (running) |
-| RFC8830-3.2.2-1 | `rfc8830.md` | Answerer: msid values of the offer create or update the remote tracks ... | partial | C | Apply msid when the offer is set; several streams per track | M | jsep (running) |
-| RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | partial | C | Move a track between streams; act on removal | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | partial | C | The draft's threshold time base is a setting (`Gcc::with_threshold_time_base`), not the default: it measured worse on queueing delay, no interop failure. Owner decision on the default | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | partial | C | Congestion feedback leaves at once by default (`with_immediate_congestion_feedback`): a browser sender did not climb past 300 kbit/s with RFC timing; no named failing cell. Owner decision | S | media (running) |
@@ -161,6 +159,7 @@ Sorted by class, then owner, size and ID.
 | MDNSICE-7.1-1 | `draft-ietf-mmusic-mdns-ice-candidates.md` | An implementation-wide rate limit covers all mDNS queries and ... | partial | E | A process-wide bucket by default is ambient state, which the sans-I/O crates do not keep (`docs/sans-io-deterministic-time.md`); one bucket shared by every agent given it is tested. Owner decision: accept the setting as the form, or share a default bucket | S | ice |
 | RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | conflict | E | `conflict`: as RFC8830-3-7 (no msid left); memberships tested | S | jsep (running) |
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8851-6.3-6 | `rfc8851.md` | A recv rid the answerer cannot satisfy is discarded | partial | E | The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes) | S | jsep (running) |
 | RFC9429-3.6.2-2 | `rfc9429.md` | No transmit when no imageattr can be satisfied; SHOULD raise an error | partial | E | Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1 | S | jsep (running) |
