@@ -394,7 +394,8 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
     const answer = s.pc.remoteDescription.sdp;
     const ufrags = new Set([...answer.matchAll(/^a=ice-ufrag:(\S+)/gm)].map((m) => m[1]));
     const stats = await s.pc.getStats();
-    const transports = [...stats.values()].filter((x) => x.type === "transport" && x.dtlsState === "connected").length;
+    const transportStats = [...stats.values()].filter((x) => x.type === "transport");
+    const transports = transportStats.filter((x) => x.dtlsState === "connected").length;
     const sameTransport = tr.sender.transport === s.pc.sctp?.transport;
     const report = await s.report();
     s.close();
@@ -402,6 +403,7 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
       grouped: /^a=group:BUNDLE/m.test(answer),
       ufrags: ufrags.size,
       transports,
+      transportStats: transportStats.length,
       sameTransport,
       echoed: e.got.length,
       rtp,
@@ -411,7 +413,9 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
   expect(r.grouped, "Rust answers an offer without a BUNDLE group without one").toBe(false);
   expect(r.ufrags, JSON.stringify(r)).toBe(2);
   expect(r.sameTransport, "video and data are on two transports").toBe(false);
-  expect(r.transports, JSON.stringify(r)).toBe(2);
+  // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
+  // transport objects only.
+  if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
   expect(r.echoed, JSON.stringify(r)).toBe(1);
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
   expect(r.errors).toEqual([]);
