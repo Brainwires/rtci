@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection**: `DefaultInterceptorHandles` has a new public field, `transports`
+  (`TransportHandles`): a struct literal must name it. The default chain's circuit breaker is
+  now one per transport (`Slot::CircuitBreaker` holds a `PerRtpSession`).
+
 - **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
   (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
   struct literal outside the crate must name it.
@@ -2067,6 +2071,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **media conformance**: several transports, the per-transport parts the multi-transport work
+  left open.
+  - The congestion estimate is kept per transport: it goes on that transport's selected
+    candidate pair as `availableOutgoingBitrate` (one pair took every transport's estimate in
+    turn), and is divided among the senders on that transport. An end-to-end test with two
+    transports is still open.
+    `PerRtpSession` no longer loses what a session's instance attaches to a carrier every
+    session was given (it dropped it for every session but the first, and left the first's
+    untagged): it leaves on a carrier tagged with the session.
+  - One RTP circuit breaker per transport (RFC 8083 judges a flow by its RTP session's RTCP),
+    given to that transport's congestion controller.
+  - `TransportHandles` (`DefaultInterceptorHandles::transports`): the congestion controller and
+    circuit breaker of each transport by RTP session number, and the connection's target (the
+    sum); `RTCDtlsTransport::rtp_session` names a transport's number.
+  - A stream whose m= section moves to another transport (a bundling answer) leaves its RTP
+    session without a BYE: `Interceptor::move_local_stream_out` (defaulted to an unbind), which
+    the RTCP session implements without the goodbye.
+  - A receiver report that names no stream (no report blocks) reaches the session of its
+    sender's stream, and the session of an SSRC is learned from the reports it sends on a
+    transport. `PerRtpSession::with_first_for_sessions` (a factory given the session number).
 
 - **media conformance**: receiver and sender rows (media phase five).
   - `rtp::codec::h265::H265MultiStreamDepacketizer`: the receiver of an HEVC bitstream carried

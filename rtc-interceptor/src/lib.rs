@@ -485,6 +485,13 @@ pub trait Interceptor:
     /// unbind_local_stream is called when the Stream is removed. It can be used to clean up any data related to that track.
     fn unbind_local_stream(&mut self, info: &StreamInfo);
 
+    /// The local stream `info` moves to another RTP session (its m= section moved to another
+    /// transport, as a bundling answer does): it leaves this one without ending, so nothing
+    /// says it left (no RTCP BYE, RFC 3550 section 6.6). Unbinds it by default.
+    fn move_local_stream_out(&mut self, info: &StreamInfo) {
+        self.unbind_local_stream(info);
+    }
+
     /// bind_remote_stream lets you modify any incoming RTP packets. It is called once for per RemoteStream. The returned method
     /// will be called once per rtp packet.
     fn bind_remote_stream(&mut self, info: &StreamInfo);

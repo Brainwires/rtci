@@ -237,12 +237,76 @@ pub fn register_default_interceptors(
 /// What an application holds on to from the standard interceptor set.
 #[derive(Clone)]
 pub struct DefaultInterceptorHandles {
-    /// The congestion controller: the target bit rate for the encoder, and where the limits
-    /// from signalling go (`b=AS` / `b=TIAS`, a path change).
+    /// The congestion controller of the first transport (the only one while every m= section
+    /// is bundled): the target bit rate for the encoder, and where the limits from signalling
+    /// go (`b=AS` / `b=TIAS`, a path change). Every transport's: [`Self::transports`].
     pub congestion_control: CongestionControlHandle,
-    /// The RTP circuit breaker: which flows have ceased transmission and why, and how one is
-    /// restarted.
+    /// The RTP circuit breaker of the first transport: which flows have ceased transmission
+    /// and why, and how one is restarted. Every transport's: [`Self::transports`].
     pub circuit_breaker: CircuitBreakerHandle,
+    /// The congestion controller and circuit breaker of each transport (each RTP session,
+    /// RFC 8834 section 4.4), by its RTP session number
+    /// ([`RTCDtlsTransport::rtp_session`](crate::peer_connection::transport::RTCDtlsTransport::rtp_session)).
+    pub transports: TransportHandles,
+}
+
+/// The congestion controller and circuit breaker handles of each transport of a peer
+/// connection, by RTP session number (0 is the first transport). A transport's appear when
+/// its first stream is bound; they stay while the transport has streams.
+#[derive(Clone, Default)]
+pub struct TransportHandles {
+    shared: std::sync::Arc<std::sync::Mutex<TransportHandleTable>>,
+}
+
+#[derive(Default)]
+struct TransportHandleTable {
+    congestion_control: std::collections::BTreeMap<usize, CongestionControlHandle>,
+    circuit_breakers: std::collections::BTreeMap<usize, CircuitBreakerHandle>,
+}
+
+impl TransportHandles {
+    fn table(&self) -> std::sync::MutexGuard<'_, TransportHandleTable> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The RTP session numbers that have a congestion controller.
+    pub fn sessions(&self) -> Vec<usize> {
+        self.table().congestion_control.keys().copied().collect()
+    }
+
+    /// The congestion controller of the transport of RTP session `session`.
+    pub fn congestion_control(&self, session: usize) -> Option<CongestionControlHandle> {
+        self.table().congestion_control.get(&session).cloned()
+    }
+
+    /// The circuit breaker of the transport of RTP session `session`.
+    pub fn circuit_breaker(&self, session: usize) -> Option<CircuitBreakerHandle> {
+        self.table().circuit_breakers.get(&session).cloned()
+    }
+
+    /// The connection's target: the sum of the transports' targets, in bits per second.
+    pub fn target_bitrate(&self) -> f64 {
+        self.table()
+            .congestion_control
+            .values()
+            .map(CongestionControlHandle::target_bitrate)
+            .sum()
+    }
+
+    /// The circuit breaker handle of `session`, made the first time it is asked for.
+    fn breaker_for(&self, session: usize) -> CircuitBreakerHandle {
+        self.table()
+            .circuit_breakers
+            .entry(session)
+            .or_default()
+            .clone()
+    }
+
+    fn insert_congestion_control(&self, session: usize, handle: CongestionControlHandle) {
+        self.table().congestion_control.insert(session, handle);
+    }
 }
 
 /// The settings of the standard interceptor set. The default of each is what the RFCs say;
@@ -350,7 +414,22 @@ pub fn register_default_interceptors_with_options(
     // session names it (RFC 5104 section 7.1).
     configure_tmmbr(media_engine);
 
-    let (registry, circuit_breaker) = configure_circuit_breaker(registry);
+    // One circuit breaker per transport (RFC 8083 judges each RTP session's flows on its own
+    // RTCP), given to that transport's congestion controller.
+    let transports = TransportHandles::default();
+    let circuit_breaker = transports.breaker_for(0);
+    let registry = {
+        let transports = transports.clone();
+        registry.with_per_rtp_session(
+            Slot::CircuitBreaker,
+            PerRtpSession::with_first_for_sessions(
+                CircuitBreakerBuilder::new().build_with_handle(&circuit_breaker),
+                move |session| {
+                    CircuitBreakerBuilder::new().build_with_handle(&transports.breaker_for(session))
+                },
+            ),
+        )
+    };
 
     // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888
     // when the peer accepted `ack ccfb`, transport-wide congestion control otherwise.
@@ -360,23 +439,30 @@ pub fn register_default_interceptors_with_options(
     // first transport's controller.
     let initial_target = Gcc::default().target_bitrate();
     let congestion_control_builder = {
-        let circuit_breaker = circuit_breaker.clone();
+        let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
-        move || {
+        move |session: usize| {
             CongestionControlBuilder::new(Gcc::default())
-                .with_circuit_breaker(circuit_breaker.clone())
+                .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
         }
     };
-    let (congestion_control, handle) = congestion_control_builder().build_with_handle();
+    let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();
+    transports.insert_congestion_control(0, handle.clone());
     let pacer_immediate_release = options.pacer_immediate_release;
     let registry = registry
         .with_per_rtp_session(
             Slot::CongestionControl,
-            PerRtpSession::with_first(congestion_control, move || {
-                congestion_control_builder().build()
+            PerRtpSession::with_first_for_sessions(congestion_control, {
+                let transports = transports.clone();
+                move |session| {
+                    let (controller, handle) =
+                        congestion_control_builder(session).build_with_handle();
+                    transports.insert_congestion_control(session, handle);
+                    controller
+                }
             }),
         )
         // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
@@ -412,6 +498,7 @@ pub fn register_default_interceptors_with_options(
         DefaultInterceptorHandles {
             congestion_control: handle,
             circuit_breaker,
+            transports,
         },
     ))
 }

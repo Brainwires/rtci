@@ -207,7 +207,7 @@ fn the_estimate_is_the_selected_pairs_available_outgoing_bitrate() {
     };
     assert_eq!(snapshot(&stats).available_outgoing_bitrate, None);
 
-    stats.on_target_bitrate(640_000.0, &std::collections::HashMap::new());
+    stats.on_target_bitrate(0, 640_000.0, &std::collections::HashMap::new());
     assert_eq!(snapshot(&stats).available_outgoing_bitrate, Some(640_000.0));
 }
 

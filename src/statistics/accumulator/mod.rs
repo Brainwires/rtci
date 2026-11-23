@@ -113,6 +113,9 @@ pub(crate) struct RTCStatsAccumulator {
     /// The outbound streams whose `target_bitrate` is a share the connection allocated them
     /// (`on_target_bitrate`), reported whatever the number of streams.
     pub(crate) allocated_ssrcs: std::collections::HashSet<SSRC>,
+    /// Each transport's congestion controller's last estimate, by transport key: the
+    /// `availableOutgoingBitrate` of the pair it has selected.
+    pub(crate) outgoing_estimates: std::collections::BTreeMap<usize, f64>,
 
     /// Media source stats keyed by track ID.
     pub(crate) media_sources: HashMap<String, MediaSourceStatsAccumulator>,
@@ -1434,27 +1437,64 @@ impl RTCStatsAccumulator {
     /// Sets the congestion controller's estimate: the target bitrate of the outbound streams
     /// and the selected candidate pair's `availableOutgoingBitrate` (webrtc-stats: the bitrate
     /// the congestion control estimates for all the outgoing RTP streams on the pair).
-    pub(crate) fn on_target_bitrate(&mut self, bits_per_second: f64, shares: &HashMap<SSRC, f64>) {
-        // The estimate is one number for the connection; each outbound stream's
-        // `targetBitrate` is its share of it (`allocate_target_bitrate`: by priority, capped
-        // at maxBitrate). A stream without a share (not sending now) keeps its last one.
-        // Without any share (no allocation made), every stream is given the estimate, which
-        // the report shows only while there is one stream.
+    pub(crate) fn on_target_bitrate(
+        &mut self,
+        transport: usize,
+        bits_per_second: f64,
+        shares: &HashMap<SSRC, f64>,
+    ) {
+        // The estimate is transport `transport`'s (one congestion controller per transport);
+        // each outbound stream on it has its share as `targetBitrate`
+        // (`allocate_target_bitrate_on`: by priority, capped at maxBitrate). A stream without a
+        // share (not sending now) keeps its last one. Without any share (no allocation made),
+        // every stream of the transport is given the estimate, which the report shows only
+        // while there is one stream.
+        let name = self.transport_name(transport);
+        let several = !self.transports_are_one();
         for (ssrc, stream) in self.outbound_rtp_streams.iter_mut() {
             match shares.get(ssrc) {
                 Some(&share) => {
                     stream.target_bitrate = share;
                     self.allocated_ssrcs.insert(*ssrc);
                 }
-                None if shares.is_empty() => stream.target_bitrate = bits_per_second,
+                None if shares.is_empty() && (!several || stream.transport_id == name) => {
+                    stream.target_bitrate = bits_per_second
+                }
                 None => {}
             }
         }
-        if let Some(pair) = self
-            .ice_candidate_pairs
-            .get_mut(&self.transport.selected_candidate_pair_id)
-        {
+        // webrtc-stats: `availableOutgoingBitrate` is what the congestion control estimates
+        // for the outgoing streams on the pair: the transport's own estimate on its selected
+        // pair, not another transport's.
+        self.outgoing_estimates.insert(transport, bits_per_second);
+        let pair_id = self
+            .transport_mut(transport)
+            .map(|t| t.selected_candidate_pair_id.clone());
+        if let Some(pair) = pair_id.and_then(|id| self.ice_candidate_pairs.get_mut(&id)) {
             pair.available_outgoing_bitrate = bits_per_second;
+        }
+    }
+
+    /// Puts each transport's last congestion estimate on the candidate pair it has selected
+    /// (webrtc-stats: `availableOutgoingBitrate` is that of a pair in use), whichever order the
+    /// estimate, the selection and the pair's entry came in.
+    pub(crate) fn sync_outgoing_estimates(&mut self) {
+        let keys: Vec<(usize, f64)> = self
+            .outgoing_estimates
+            .iter()
+            .map(|(key, estimate)| (*key, *estimate))
+            .collect();
+        let estimates: Vec<(String, f64)> = keys
+            .into_iter()
+            .filter_map(|(key, estimate)| {
+                let pair = self.transport_mut(key)?.selected_candidate_pair_id.clone();
+                Some((pair, estimate))
+            })
+            .collect();
+        for (pair_id, estimate) in estimates {
+            if let Some(pair) = self.ice_candidate_pairs.get_mut(&pair_id) {
+                pair.available_outgoing_bitrate = estimate;
+            }
         }
     }
 
@@ -1489,7 +1529,15 @@ impl RTCStatsAccumulator {
             pair.available_incoming_bitrate = 0.0;
         }
         match pair_id {
-            Some(pair_id) => self.transport.on_selected_candidate_pair_changed(pair_id),
+            Some(pair_id) => {
+                // The pair now in use carries the transport's estimate.
+                if let Some(estimate) = self.outgoing_estimates.get(&self.active_transport())
+                    && let Some(pair) = self.ice_candidate_pairs.get_mut(&pair_id)
+                {
+                    pair.available_outgoing_bitrate = *estimate;
+                }
+                self.transport.on_selected_candidate_pair_changed(pair_id)
+            }
             None => self.transport.on_selected_candidate_pair_lost(),
         }
     }

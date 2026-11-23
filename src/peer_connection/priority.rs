@@ -157,13 +157,28 @@ pub fn allocate_bandwidth(total: f64, flows: &[(f64, Option<f64>)]) -> Vec<f64> 
 /// an SSRC of a transceiver that is not stopped and has a sending direction takes a share by
 /// its `priority` (`bandwidth_weight`), capped at its `maxBitrate`. Each sender keeps its
 /// encodings' shares (`RTCRtpSender::target_bitrates`); returns them by SSRC.
+#[cfg(test)]
 pub(crate) fn allocate_target_bitrate(
     transceivers: &mut [crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
     total: f64,
 ) -> std::collections::HashMap<u32, f64> {
+    allocate_target_bitrate_on(transceivers, total, |_| true)
+}
+
+/// [`allocate_target_bitrate`] among the encodings of the m= sections `on_transport` accepts
+/// (by MID): one transport's congestion controller's target is divided among the senders that
+/// transport carries (RFC 8836 section 2: each path has its own capacity).
+pub(crate) fn allocate_target_bitrate_on(
+    transceivers: &mut [crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
+    total: f64,
+    on_transport: impl Fn(&str) -> bool,
+) -> std::collections::HashMap<u32, f64> {
     let mut flows = Vec::new();
     let mut owners = Vec::new();
     for (index, transceiver) in transceivers.iter().enumerate() {
+        if !on_transport(transceiver.mid().as_deref().unwrap_or_default()) {
+            continue;
+        }
         if transceiver.stopped() || !transceiver.direction().has_send() {
             continue;
         }
@@ -207,17 +222,20 @@ impl crate::peer_connection::RTCPeerConnection {
     /// (`allocate_target_bitrate`), after a change of their parameters. Nothing before the
     /// first target.
     pub(crate) fn reallocate_target_bitrate(&mut self) {
-        let Some(total) = self
+        let targets = self
             .pipeline_context
             .interceptor_handler_context
-            .target_bitrate
-        else {
-            return;
-        };
-        let shares = allocate_target_bitrate(&mut self.rtp_transceivers, total);
-        self.pipeline_context
-            .stats
-            .on_target_bitrate(total, &shares);
+            .transport_targets
+            .clone();
+        for (key, total) in targets {
+            let stats = &self.pipeline_context.stats;
+            let shares = allocate_target_bitrate_on(&mut self.rtp_transceivers, total, |mid| {
+                stats.section_transport_key(mid) == key
+            });
+            self.pipeline_context
+                .stats
+                .on_target_bitrate(key, total, &shares);
+        }
     }
 
     /// The DSCP (RFC 8837 Table 1) a datagram [`poll_write`](sansio::Protocol::poll_write)
@@ -501,7 +519,8 @@ mod tests {
 
         pc.pipeline_context
             .interceptor_handler_context
-            .target_bitrate = Some(1_000_000.0);
+            .transport_targets
+            .insert(0, 1_000_000.0);
         pc.reallocate_target_bitrate();
         assert_eq!(shares(&mut pc, high), vec![800_000.0], "8 : 2");
         assert_eq!(shares(&mut pc, low), vec![200_000.0]);

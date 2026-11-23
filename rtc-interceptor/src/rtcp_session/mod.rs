@@ -2564,6 +2564,22 @@ impl Interceptor for RtcpSessionInterceptor {
         }
     }
 
+    /// A stream moving to another RTP session is not leaving: its SSRCs go from this
+    /// session's members without the BYE `unbind_local_stream` sends (RFC 3550 6.6 is for a
+    /// source that leaves the session; this one carries on in the other session, and this
+    /// session's transport is going away or no longer carries it).
+    fn move_local_stream_out(&mut self, info: &StreamInfo) {
+        self.dlrr_limits.remove(&info.ssrc);
+        for ssrc in std::iter::once(info.ssrc)
+            .chain(info.ssrc_rtx)
+            .chain(info.ssrc_fec)
+        {
+            if let Some(index) = self.local_index(ssrc) {
+                self.locals.remove(index);
+            }
+        }
+    }
+
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
         self.record_dlrr_limit(info);
         let rrtr = info

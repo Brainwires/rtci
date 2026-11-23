@@ -299,3 +299,23 @@ fn comfort_noise_is_sent_only_when_negotiated() -> Result<()> {
     assert_eq!(vec![0, 0], payload_types_on_the_wire(pcmu_only)?);
     Ok(())
 }
+
+/// RFC 8834 section 4.3: an endpoint "MUST be prepared to accept data in any of the payload
+/// formats that were signalled ... at any time". The sender switches between Opus, PCMU and
+/// PCMA on its one SSRC; every packet reaches the receiving application with the format it
+/// was sent in, in order.
+#[test]
+fn every_negotiated_format_is_received_at_any_time() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let sent = [111u8, 111, 0, 0, 8, 111, 0];
+    for (seq, pt) in sent.iter().enumerate() {
+        world.send(sender, seq as u16 + 1, *pt)?;
+    }
+    let received: Vec<u8> = world.peers[1]
+        .read_rtp
+        .iter()
+        .map(|h| h.payload_type)
+        .collect();
+    assert_eq!(received, sent, "every format, at any time");
+    Ok(())
+}

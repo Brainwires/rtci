@@ -3585,6 +3585,7 @@ impl RTCPeerConnection {
         for id in self.pipeline_context.transports.ids() {
             self.with_transport(id, |pc| pc.update_transport_stats_on_active());
         }
+        self.pipeline_context.stats.sync_outgoing_estimates();
     }
 
     /// `update_transport_stats` for the active transport.

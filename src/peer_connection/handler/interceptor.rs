@@ -86,9 +86,13 @@ pub(crate) struct InterceptorHandlerContext {
     /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
     /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
     pub(crate) arrival_mids: Option<Vec<String>>,
-    /// The congestion controller's last target, in bits per second: what
-    /// `allocate_target_bitrate` divides again when the encodings change.
+    /// The congestion controllers' last targets summed over the transports, in bits per
+    /// second: the connection's figure.
     pub(crate) target_bitrate: Option<f64>,
+    /// Each transport's congestion controller's last target, by transport key: what
+    /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
+    /// encodings change.
+    pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -118,6 +122,7 @@ impl Default for InterceptorHandlerContext {
             wall_clock: None,
             arrival_mids: None,
             target_bitrate: None,
+            transport_targets: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1561,15 +1566,26 @@ impl<'a>
                 for attribute in &packet.message.attributes {
                     match attribute {
                         Attribute::TargetBitrateChanged { bits_per_second } => {
-                            // The selected pair's `availableOutgoingBitrate`, and each
-                            // outbound stream's `targetBitrate`: its share by priority and
-                            // maxBitrate (`allocate_target_bitrate`).
-                            self.ctx.target_bitrate = Some(*bits_per_second);
-                            let shares = crate::peer_connection::priority::allocate_target_bitrate(
-                                self.rtp_transceivers,
-                                *bits_per_second,
-                            );
-                            self.stats.on_target_bitrate(*bits_per_second, &shares);
+                            // One controller per transport (`PerRtpSession`): the estimate is
+                            // that transport's, named by the session tag. Its selected pair's
+                            // `availableOutgoingBitrate`, and the `targetBitrate` of each
+                            // outbound stream on it: its share by priority and maxBitrate
+                            // (`allocate_target_bitrate_on`). The connection's figure is the
+                            // sum over the transports.
+                            let key = interceptor::RtpSession::of(&packet.message)
+                                .unwrap_or_else(|| self.stats.active_transport());
+                            self.ctx.transport_targets.insert(key, *bits_per_second);
+                            self.ctx.target_bitrate =
+                                Some(self.ctx.transport_targets.values().sum());
+                            let stats = &*self.stats;
+                            let on_transport = |mid: &str| stats.section_transport_key(mid) == key;
+                            let shares =
+                                crate::peer_connection::priority::allocate_target_bitrate_on(
+                                    self.rtp_transceivers,
+                                    *bits_per_second,
+                                    on_transport,
+                                );
+                            self.stats.on_target_bitrate(key, *bits_per_second, &shares);
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {

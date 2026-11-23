@@ -14,7 +14,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors,
+    CongestionFeedback, DefaultInterceptorHandles, DefaultInterceptorOptions,
     register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -58,6 +58,8 @@ struct Peer {
     rtp: Vec<Header>,
     /// Every event the peer raised, in order.
     events: Vec<RTCPeerConnectionEvent>,
+    /// The handles of the default interceptors.
+    handles: DefaultInterceptorHandles,
 }
 
 impl Peer {
@@ -71,17 +73,11 @@ impl Peer {
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let registry = match options {
-            None => register_default_interceptors(Registry::new(), &mut media_engine)?,
-            Some(options) => {
-                register_default_interceptors_with_options(
-                    Registry::new(),
-                    &mut media_engine,
-                    options,
-                )?
-                .0
-            }
-        };
+        let (registry, handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            options.unwrap_or(&DefaultInterceptorOptions::default()),
+        )?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
                 RTCConfigurationBuilder::new()
@@ -106,6 +102,7 @@ impl Peer {
             received: vec![],
             rtp: vec![],
             events: vec![],
+            handles,
         })
     }
 
@@ -1604,6 +1601,61 @@ fn each_transport_numbers_its_packets_for_congestion_feedback_on_its_own() -> Re
                 "SSRC {ssrc:#x}: one numbering per transport, without gaps: {numbers:?}"
             );
         }
+    }
+    Ok(())
+}
+
+/// The RTP session number of `sender`'s transport.
+fn session_of(world: &mut World, sender: RTCRtpSenderId) -> usize {
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .transport()
+        .expect("a transport")
+        .rtp_session()
+}
+
+/// Sends `packets` RTP packets on each sender, stepping the world after each round.
+fn send_for_a_while(world: &mut World, senders: &[RTCRtpSenderId], packets: u16) -> Result<()> {
+    for seq in 1..=packets {
+        for sender in senders {
+            world.send_rtp(*sender, seq)?;
+        }
+        for _ in 0..5 {
+            world.step()?;
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8083: the circuit breakers judge a flow by the RTCP of its RTP session. With two
+/// transports each has its own breaker, which knows the flows on that transport only.
+#[test]
+fn each_transport_has_a_circuit_breaker_of_its_own() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    send_for_a_while(&mut world, &senders, 20)?;
+    let sessions: Vec<usize> = senders.iter().map(|s| session_of(&mut world, *s)).collect();
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    let handles = world.peers[0].handles.transports.clone();
+    for (index, (ssrc, session)) in ssrcs.iter().zip(&sessions).enumerate() {
+        let own = handles
+            .circuit_breaker(*session)
+            .expect("a breaker per transport");
+        assert!(
+            own.state(*ssrc).is_some(),
+            "its own transport's breaker watches {ssrc:#x}"
+        );
+        let other = handles
+            .circuit_breaker(sessions[1 - index])
+            .expect("a breaker per transport");
+        assert!(
+            other.state(*ssrc).is_none(),
+            "the other transport's breaker does not watch {ssrc:#x}"
+        );
     }
     Ok(())
 }
