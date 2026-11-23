@@ -8,9 +8,9 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting`): 4960 of 5087 (97.5 %).
-- Tested as the default (`tested`): 4948 of 5087 (97.3 %); `setting`: 12.
-- Open (not tested in any form): 127: 21 untested, 82 partial, 23 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4964 of 5087 (97.6 %).
+- Tested as the default (`tested`): 4948 of 5087 (97.3 %); `setting`: 12; `conflict` (two specifications conflict, the governing one's form is the default): 4.
+- Open (not tested in any form): 123: 21 untested, 78 partial, 23 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -25,7 +25,7 @@ Verdicts and classes are defined in `RULES.md`.
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 112 rows, 64 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 11 rows.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 7 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 39 | 2 | 5 | 0 | 46 | 27 | 17 | 2 |
+| jsep (running) | 0 | 39 | 2 | 1 | 0 | 42 | 23 | 17 | 2 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -180,11 +180,11 @@ Sorted by class, then owner, size and ID.
 | RFC5246-4.7-1 | `rfc5246.md` | RSA signatures use DER DigestInfo; accept NULL or absent hash ... | partial | E | Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071) | S | dtls-srtp |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested) | S | dtls-srtp |
 | MDNSICE-7.1-1 | `draft-ietf-mmusic-mdns-ice-candidates.md` | An implementation-wide rate limit covers all mDNS queries and ... | partial | E | A process-wide bucket by default is ambient state, which the sans-I/O crates do not keep (`docs/sans-io-deterministic-time.md`); one bucket shared by every agent given it is tested. Owner decision: accept the setting as the form, or share a default bucket | S | ice |
-| RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | partial | E | W3C webrtc-pc governs track state (RFC 9429 defers to it); the RFC form is `with_msid_removal_ends_track(true)`, tested. Spec conflict, not interop | S | jsep (running) |
-| RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | partial | E | W3C webrtc 9.3 governs track state (as 3-7): BYE and the RTP timeout (now handled) mute the track; an ended form would be a setting. Spec conflict, not interop | S | jsep (running) |
-| RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | partial | E | RFC 9429 5.2.2 requires the opposite of a JSEP endpoint; the RFC 8839 form is `with_nominated_candidates_only(true)`, tested. Spec conflict, not interop | S | jsep (running) |
-| RFC9429-3.6.2-2 | `rfc9429.md` | No transmit when no imageattr can be satisfied; SHOULD raise an error | partial | E | As RFC9429-3.6.2-1: the engine does not hold back the application's packets | S | jsep (running) |
-| RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | partial | E | W3C webrtc-pc 5.4 ("stopping" does not affect createAnswer) governs; the RFC form is a setting, tested. Spec conflict, not interop | S | jsep (running) |
+| RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC9429-3.6.2-2 | `rfc9429.md` | No transmit when no imageattr can be satisfied; SHOULD raise an error | partial | E | Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1 | S | jsep (running) |
+| RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | partial | E | `flexfec` is registered to the RFC 8627 coder (IANA); the draft-03 coder cannot also take the name. Proposed n/a: superseded by RFC 8627 | S | media (running) |
 | RFC2198-5-4 | `rfc2198.md` | A receiver that lists RED is prepared to receive the listed encodings ... | partial | E | RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream | S | media (running) |
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |

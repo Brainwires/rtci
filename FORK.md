@@ -440,6 +440,10 @@ versions that support it. Raising it is a deliberate change of the manifest.
   sections disagreed. `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` keeps
   that refusal as a hardening.
 
+- Remote tracks: `SettingEngineBuilder::with_source_departure_ends_track(true)` ends a remote
+  track whose SSRCs all said BYE or timed out (RFC 8830 section 3); the default stays W3C
+  webrtc-pc 9.3's muting. Upstream neither mutes nor ends.
+
 ### Defaults the fork narrows on purpose
 
 - SDP (jsep15): remote descriptions without `c=` for a section, with an `a=imageattr` set

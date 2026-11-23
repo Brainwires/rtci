@@ -9,6 +9,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
@@ -37,12 +38,17 @@ struct Peer {
 
 impl Peer {
     fn new(addr: &str) -> Result<Self> {
+        Self::with_settings(addr, SettingEngineBuilder::new())
+    }
+
+    fn with_settings(addr: &str, settings: SettingEngineBuilder) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
+            .with_setting_engine(settings.build())
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
         Ok(Self {
@@ -171,8 +177,16 @@ impl World {
 
     /// The offerer sends video from a sendonly transceiver; connected over host candidates.
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(SettingEngineBuilder::new())
+    }
+
+    /// `connected`, the receiving peer (1) built with `settings`.
+    fn connected_with(settings: SettingEngineBuilder) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::new("10.0.0.1:5000")?,
+                Peer::with_settings("10.0.0.2:5000", settings)?,
+            ],
             now: Instant::now(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
@@ -294,6 +308,26 @@ fn rtp_unmutes_the_remote_track_and_a_bye_mutes_it_without_ending_it() -> Result
         world.receiver_track(),
         (true, rtc::media_stream::MediaStreamTrackState::Live),
         "muted, not ended"
+    );
+    Ok(())
+}
+
+/// RFC 8830 section 3: "a MediaStreamTrack ... has ended when all of its SSRCs have ended
+/// (BYE, timeout)", the form of `SettingEngineBuilder::with_source_departure_ends_track(true)`:
+/// the BYE of the sender's only stream ends the receiving track (`OnClose`) instead of muting
+/// it. The default is the W3C webrtc 9.3 form above.
+#[test]
+fn with_departure_ending_tracks_a_bye_ends_the_remote_track() -> Result<()> {
+    let (mut world, sender) =
+        World::connected_with(SettingEngineBuilder::new().with_source_departure_ends_track(true))?;
+    world.send_media(sender, 100, 10)?;
+    world.peers[1].take_mute_events();
+    world.peers[0].pc.close()?;
+    world.pump()?;
+    assert_eq!(world.peers[1].take_mute_events(), vec!["close"]);
+    assert_eq!(
+        world.receiver_track().1,
+        rtc::media_stream::MediaStreamTrackState::Ended
     );
     Ok(())
 }

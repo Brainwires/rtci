@@ -27,6 +27,7 @@ states something true and checkable.
 |---|---|
 | `tested` | Implemented, and a test that would fail if the behaviour broke exercises production code. |
 | `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it. |
+| `conflict` | Two specifications conflict for this endpoint: the clause's behaviour is implemented and has a test that fails without it, selected by the named setting; the other specification's form, which governs this endpoint (a W3C specification of the JavaScript API the engine is under, or RFC 9429 for a JSEP endpoint), is the default and has a test of its own. |
 | `untested` | Implemented, no such test (or the test is hollow: it asserts constants or mocks the unit). |
 | `partial` | Some of it is implemented; the note says what is missing. |
 | `missing` | Not implemented. A clause listed as "Not implemented, on purpose" is still `missing`. |
@@ -45,12 +46,26 @@ setting whose default differs for another reason (measured performance, a design
 specification conflict) is not `setting`: the row stays `partial` until the default changes or a
 failing cell or peer is named.
 
+A `conflict` row's note starts in this form, which `audit-count.py` checks the same way (the
+setting is a `fn`, both tests exist):
+
+    Setting: `SettingEngineBuilder::with_x(true)`. RFC test: `tests/x.rs::the_rfc_form`.
+    Default test: `tests/x.rs::the_w3c_form`. Default differs: W3C <spec section> requires
+    <what it requires>. <rest>
+
+(or `Default differs: RFC 9429 <section> requires ...`). It is for a clause whose behaviour a
+W3C specification (webrtc-pc, webrtc-extensions, ...) or, for a JSEP endpoint, RFC 9429
+contradicts for the same observable state; both forms are tested by mutation before the verdict
+is given. A row whose only
+reason is interoperability is `setting`; one where the clause simply does not bind the engine is
+`n/a`. A `conflict` row is listed in `OPEN-MUST.md` with class E.
+
 `COUNTS.md` reports two figures per level, over the rows that apply (all but `n/a`): "RFC
-behaviour tested" (`tested` + `setting`) and "tested as the default" (`tested`).
+behaviour tested" (`tested` + `setting` + `conflict`) and "tested as the default" (`tested`).
 
 ## Classes of the open MUST rows
 
-Every MUST row that is `untested`, `partial`, `missing`, `violated` or `setting` has exactly one
+Every MUST row that is `untested`, `partial`, `missing`, `violated`, `setting` or `conflict` has exactly one
 class in `open-must.tsv`, with a size (S, M, L), an owner area and what would close it:
 
 | Class | Meaning | Closes by |

@@ -7,16 +7,24 @@ block, one line per level::
 
     - MUST: tested 3 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 2
 
-with ``setting N / `` before ``untested`` where the file has ``setting`` rows (it may be left out
-when there are none),
+with ``setting N / `` and ``conflict N / `` before ``untested`` where the file has such rows
+(they may be left out when there are none),
 
 or all levels on one line, ``Totals (N rows): MUST: ...; SHOULD: ...; MAY: ...``
 (``n/a`` for ``n-a``, a trailing ``(total N)`` / ``(rows: N)``, a parenthesised gloss after the
 level and backticks around the line are all accepted). This script counts the table rows by level
 and verdict and fails when:
 
-* a row's verdict is not one of ``tested``, ``setting``, ``untested``, ``partial``, ``missing``,
-  ``violated``, ``n/a`` (``n-a`` and backticks accepted);
+* a row's verdict is not one of ``tested``, ``setting``, ``conflict``, ``untested``, ``partial``,
+  ``missing``, ``violated``, ``n/a`` (``n-a`` and backticks accepted);
+* a ``conflict`` row's note does not name, in this form, a setting that exists, a test of the
+  RFC form and a test of the default (the other specification's form) that exist, and that
+  specification (a W3C one, or RFC 9429 for a JSEP endpoint)::
+
+      Setting: `SettingEngineBuilder::with_x(true)`. RFC test: `tests/x.rs::the_rfc_form`.
+      Default test: `tests/x.rs::the_w3c_form`. Default differs: W3C <spec section> requires
+      <what it requires>. <rest of the note>
+
 * a ``setting`` row's note does not name, in this form, a setting that exists in the source and
   a test of the RFC form that exists, and the peer or browser cell the default is for::
 
@@ -41,7 +49,7 @@ NOT, RECOMMENDED and NOT RECOMMENDED; MAY counts MAY and OPTIONAL. A cell naming
 (``PROC``), checked against a ``Procedure steps`` totals line when the file has one.
 
 It writes ``docs/conformance/audit/COUNTS.md``, which reports for each level both "RFC behaviour
-tested" (``tested`` + ``setting``) and "tested as the default" (``tested``). ``--check`` writes nothing and fails when that
+tested" (``tested`` + ``setting`` + ``conflict``) and "tested as the default" (``tested``). ``--check`` writes nothing and fails when that
 file is not what it would write (CI runs it that way).
 
 Usage: ``python3 scripts/audit-count.py [--check]``. Standard library only.
@@ -59,7 +67,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIT = os.path.join(ROOT, "docs", "conformance", "audit")
 COUNTS = os.path.join(AUDIT, "COUNTS.md")
 
-VERDICTS = ["tested", "setting", "untested", "partial", "missing", "violated", "n/a"]
+VERDICTS = ["tested", "setting", "conflict", "untested", "partial", "missing", "violated", "n/a"]
 LEVELS = ["MUST", "SHOULD", "MAY", "PROC"]
 
 HEADER = ["ID", "§", "Level", "Clause (short paraphrase)", "Verdict", "Code", "Test", "Note"]
@@ -85,7 +93,8 @@ PROC = re.compile(r"^(proc|DESC)\b")
 
 TOTALS = re.compile(
     r"^(?:-\s*)?`?(?P<level>MUST|SHOULD|MAY|Procedure steps)\b[^:]*:\s*"
-    r"tested (?P<tested>\d+) / (?:setting (?P<setting>\d+) / )?untested (?P<untested>\d+) / "
+    r"tested (?P<tested>\d+) / (?:setting (?P<setting>\d+) / )?(?:conflict (?P<conflict>\d+) / )?"
+    r"untested (?P<untested>\d+) / "
     r"partial (?P<partial>\d+) / "
     r"missing (?P<missing>\d+) / violated (?P<violated>\d+) / n[-/]a (?P<na>\d+)"
     r"(?:\s*\((?:total|rows:)\s*(?P<total>\d+)\))?`?\s*$"
@@ -122,6 +131,13 @@ def empty() -> dict[str, dict[str, int]]:
 SETTING_NOTE = re.compile(
     r"Setting: (?P<settings>`[^`]+`(?:, `[^`]+`)*)\. RFC test: (?P<tests>`[^`]+`(?:, `[^`]+`)*)\. "
     r"Default differs: (?P<why>\S.{11,})"
+)
+
+
+CONFLICT_NOTE = re.compile(
+    r"Setting: (?P<settings>`[^`]+`(?:, `[^`]+`)*)\. RFC test: (?P<tests>`[^`]+`(?:, `[^`]+`)*)\. "
+    r"Default test: (?P<defaults>`[^`]+`(?:, `[^`]+`)*)\. "
+    r"Default differs: (?P<spec>(?:W3C|RFC \d+) [^:]{3,}?) (?:requires|governs)\b(?P<why>.{11,})"
 )
 
 
@@ -178,6 +194,27 @@ def check_setting(note: str, where: str, source: Source, errors: list[str]) -> N
     for test in re.findall(r"`([^`]+)`", m.group("tests")):
         if not source.has_test(test):
             errors.append(f"{where}: RFC test `{test}` does not exist")
+
+
+def check_conflict(note: str, where: str, source: Source, errors: list[str]) -> None:
+    """A ``conflict`` row names an existing setting, an existing test of the RFC form, an
+    existing test of the default (the other specification's form), and that specification."""
+    m = CONFLICT_NOTE.search(note)
+    if not m:
+        errors.append(
+            f"{where}: a `conflict` row's note needs 'Setting: `...`. RFC test: `...`. "
+            "Default test: `...`. Default differs: <W3C spec or RFC 9429> <section> requires ...'"
+        )
+        return
+    for setting in re.findall(r"`([^`]+)`", m.group("settings")):
+        name = setting.split("(", 1)[0].rsplit("::", 1)[-1].rsplit(".", 1)[-1].strip()
+        if not source.has_fn(name):
+            errors.append(f"{where}: setting `{setting}`: no `fn {name}` in the source")
+    for kind in ("tests", "defaults"):
+        for test in re.findall(r"`([^`]+)`", m.group(kind)):
+            if not source.has_test(test):
+                label = "RFC test" if kind == "tests" else "default test"
+                errors.append(f"{where}: {label} `{test}` does not exist")
 
 
 def scan(
@@ -241,6 +278,10 @@ def scan(
                 if source is None:
                     source = Source()
                 check_setting(d.get("Note", ""), f"{name}:{no} ({row[0]})", source, errors)
+            if vd == "conflict":
+                if source is None:
+                    source = Source()
+                check_conflict(d.get("Note", ""), f"{name}:{no} ({row[0]})", source, errors)
     if not saw_table:
         return None
     rows = sum(sum(c.values()) for c in counts.values())
@@ -280,7 +321,9 @@ def render(per_file: dict[str, dict[str, dict[str, int]]]) -> str:
         "REQUIRED; SHOULD includes SHOULD NOT and (NOT) RECOMMENDED; MAY includes OPTIONAL; PROC",
         "is a procedure step without a keyword. `setting`: the RFC behaviour is implemented and",
         "tested, selected by a named setting; the default differs because a named browser cell or",
-        "deployed peer cannot interoperate with it (`RULES.md`).",
+        "deployed peer cannot interoperate with it. `conflict`: two specifications conflict; the",
+        "clause's form is implemented and tested as a named setting, the W3C form that governs the",
+        "API is the default and tested too (`RULES.md`).",
         "",
         "## Total",
         "",
@@ -301,14 +344,14 @@ def render(per_file: dict[str, dict[str, dict[str, int]]]) -> str:
         "## RFC behaviour tested",
         "",
         "Of the rows that bind the engine (all rows but `n/a`): \"RFC behaviour tested\" counts",
-        "`tested` + `setting`, \"tested as the default\" counts `tested` alone.",
+        "`tested` + `setting` + `conflict`, \"tested as the default\" counts `tested` alone.",
         "",
         "| Level | rows that apply | RFC behaviour tested | % | tested as the default | % |",
         "|---|---|---|---|---|---|",
     ]
     for lv in LEVELS:
         apply = sum(total[lv].values()) - total[lv]["n/a"]
-        rfc = total[lv]["tested"] + total[lv]["setting"]
+        rfc = total[lv]["tested"] + total[lv]["setting"] + total[lv]["conflict"]
         default = total[lv]["tested"]
         out.append(
             f"| {lv} | {apply} | {rfc} | {pct(rfc, apply)} | {default} | {pct(default, apply)} |"

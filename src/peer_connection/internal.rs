@@ -363,7 +363,8 @@ impl RTCPeerConnection {
             ),
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            interceptor_handler_context: InterceptorHandlerContext::default(),
+            interceptor_handler_context: InterceptorHandlerContext::default()
+                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
             data_read_outs: VecDeque::new(),

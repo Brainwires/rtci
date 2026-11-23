@@ -424,6 +424,8 @@ pub struct SettingEngine {
     pub(crate) dtls_new_association_without_ice_restart: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
+    /// RFC 8830 section 3: a remote track whose SSRCs have all left (BYE, timeout) ends.
+    pub(crate) source_departure_ends_track: bool,
     /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
     /// the offer arrived.
     pub(crate) stopping_transceiver_rejected_in_answer: bool,
@@ -1686,6 +1688,21 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
         self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// Ends a remote track when all of its SSRCs have left: an RTCP BYE for each, or each
+    /// timed out (RFC 3550 section 6.3.5, the RTCP session's `SourceTimedOut`).
+    ///
+    /// RFC 8830 section 3: "a MediaStreamTrack ... has ended when all of its SSRCs have ended
+    /// (BYE, timeout)". In this API W3C webrtc section 9.3 governs the track's state: the
+    /// track is muted when its source leaves and unmuted when media arrives again, and it ends
+    /// only when its transceiver stops (a port of zero included). That is the default
+    /// (`false`). With `true` the receiver's track ends
+    /// ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose))
+    /// once every SSRC it receives has left; one that is heard again before then has not.
+    pub fn with_source_departure_ends_track(mut self, ends: bool) -> Self {
+        self.0.source_departure_ends_track = ends;
         self
     }
 

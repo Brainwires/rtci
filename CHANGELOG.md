@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **audit / jsep**: specification conflicts get a verdict of their own
+  (`conf/jsep-58-spec-conflicts`, jsep16).
+  - New verdict `conflict` (`docs/conformance/audit/RULES.md`): two specifications conflict
+    for this endpoint; the clause's form is implemented and tested as a named setting, the
+    form of the specification that governs (W3C webrtc-pc, or RFC 9429 for a JSEP endpoint) is
+    the default and tested too. `scripts/audit-count.py` checks that the note names the
+    setting (a `fn` of the source), an RFC-form test and a default-form test that exist, and
+    the governing text; COUNTS.md has a `conflict` column and counts it in "RFC behaviour
+    tested", never in "tested as the default"; `scripts/open-must.py` lists such rows with
+    class E. RFC8830-3-7, 3-8, RFC8839-4.4.1.2.2-2 and RFC9429-5.3.1-6 are `conflict`.
+  - New `SettingEngineBuilder::with_source_departure_ends_track(bool)` (default `false`):
+    with `true` a remote track whose SSRCs have all said BYE or timed out ends
+    (`RTCTrackEvent::OnClose`), RFC 8830 section 3; by default W3C webrtc-pc 9.3 mutes it.
+  - Breaking for other branches: COUNTS.md and the totals-line grammar gained `conflict`;
+    regenerate with `python3 scripts/audit-count.py`.
+
 - **jsep**: coordinator decisions on BUNDLE attributes (`conf/jsep-57-decisions`, jsep16).
   - Remote fingerprints with BUNDLE (RFC 8859 sections 4.5 and appendix A, TRANSPORT
     category): the tagged section's are the group's, and what the other bundled sections

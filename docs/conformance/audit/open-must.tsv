@@ -112,12 +112,12 @@ RFC7728-8.2-4	C	M	jsep (running)	As RFC7728-6.3-3
 RFC7728-8.5-1	C	M	jsep (running)	Schedule the messages in the RTCP session's Early / Regular slots
 RFC8830-2-4	C	S	jsep (running)	Check msid-id / appdata uniqueness
 RFC8830-3-6	C	M	jsep (running)	A MediaStream object and stream-added notice
-RFC8830-3-7	E	S	jsep (running)	W3C webrtc-pc governs track state (RFC 9429 defers to it); the RFC form is `with_msid_removal_ends_track(true)`, tested. Spec conflict, not interop
-RFC8830-3-8	E	S	jsep (running)	W3C webrtc 9.3 governs track state (as 3-7): BYE and the RTP timeout (now handled) mute the track; an ended form would be a setting. Spec conflict, not interop
+RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3.2.2-1	C	M	jsep (running)	Apply msid when the offer is set; several streams per track
 RFC8830-3.2.5-1	C	M	jsep (running)	Move a track between streams; act on removal
 RFC8839-4.2.4-1	C	M	jsep (running)	Answer checks with the local credentials before the answer arrives
-RFC8839-4.4.1.2.2-2	E	S	jsep (running)	RFC 9429 5.2.2 requires the opposite of a JSEP endpoint; the RFC 8839 form is `with_nominated_candidates_only(true)`, tested. Spec conflict, not interop
+RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remote-candidates` (rtc-ice call)
 RFC8851-6.2.2-6	C	M	jsep (running)	Check restriction values against the codec (section 8)
 RFC8851-6.3-6	C	S	jsep (running)	Ask the encoder whether it can meet the restrictions
@@ -129,7 +129,7 @@ RFC8859-A-33	C	S	jsep (running)	c= of a bundled section per RFC 9143 7.1.1
 RFC8866-6.10-1	D	S	jsep (running)	`a=charset`
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9143-9.2-5	C	S	jsep (running)	Move a declared SSRC or a layer on a later MID
-RFC9429-3.6.2-2	E	S	jsep (running)	As RFC9429-3.6.2-1: the engine does not hold back the application's packets
+RFC9429-3.6.2-2	E	S	jsep (running)	Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1
 RFC9429-4.1.8-1	C	M	jsep (running)	Umbrella of the 5.2.2 rows
 RFC9429-4.1.9-2	C	M	jsep (running)	Umbrella of the 5.3.1 rows
 RFC9429-5.1-1	C	L	jsep (running)	Umbrella of the per-spec audits
@@ -144,7 +144,7 @@ RFC9429-5.2.1-58	C	S	jsep (running)	Relative `u=`, 64-bit o= ids and times, non-
 RFC9429-5.2.2-10	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.2-27	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.3-1	C	M	jsep (running)	Umbrella
-RFC9429-5.3.1-6	E	S	jsep (running)	W3C webrtc-pc 5.4 ("stopping" does not affect createAnswer) governs; the RFC form is a setting, tested. Spec conflict, not interop
+RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9429-5.3.1-11	C	S	jsep (running)	Umbrella of rfc3264.md
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.5-5	C	S	jsep (running)	Umbrella of the 5.9 rows

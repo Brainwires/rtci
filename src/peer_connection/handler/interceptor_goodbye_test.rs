@@ -230,3 +230,65 @@ fn a_timed_out_source_mutes_its_track_as_a_bye_does() {
         assert_eq!(track.muted(), ssrc == SSRC);
     }
 }
+
+/// RFC 8830 section 3: "a MediaStreamTrack ... has ended when all of its SSRCs have ended
+/// (BYE, timeout)". The form of `SettingEngineBuilder::with_source_departure_ends_track(true)`:
+/// a BYE or a timeout of the track's SSRC ends it (`OnClose`, ended) instead of muting it, and
+/// another source's changes nothing. The default, W3C webrtc 9.3's muting, is the tests above.
+#[test]
+fn with_departure_ending_tracks_a_bye_or_a_timeout_ends_the_track() {
+    for (timeout, ssrc, expected) in [
+        (false, SSRC, vec!["close:remote-track".to_string()]),
+        (true, SSRC, vec!["close:remote-track".to_string()]),
+        (false, 4242, vec![]),
+        (true, 4242, vec![]),
+    ] {
+        let mut ctx = InterceptorHandlerContext {
+            is_dtls_handshake_complete: true,
+            ..Default::default()
+        }
+        .with_source_departure_ending_tracks(true);
+        let mut transceivers = vec![transceiver()];
+        let media_engine = MediaEngine::default();
+        let mut chain = NullChain;
+        let mut stats = RTCStatsAccumulator::default();
+        let mut handler = InterceptorHandler::new(
+            &mut ctx,
+            &mut transceivers,
+            &media_engine,
+            &mut chain,
+            &mut stats,
+            None,
+        );
+        if timeout {
+            handler.process_session_event(
+                Instant::now(),
+                &interceptor::RtcpSessionEvent::SourceTimedOut { ssrc },
+            );
+        } else {
+            handler
+                .handle_read(goodbye(vec![ssrc]))
+                .expect("handle_read");
+        }
+        let events: Vec<String> = std::iter::from_fn(|| handler.poll_event())
+            .filter_map(|event| match event.event {
+                RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                    RTCTrackEvent::OnMute(track_id),
+                )) => Some(format!("mute:{track_id}")),
+                RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                    RTCTrackEvent::OnClose(track_id),
+                )) => Some(format!("close:{track_id}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, expected, "timeout {timeout}, ssrc {ssrc}");
+        let track = transceivers[0].receiver().as_ref().unwrap().track();
+        let ended = ssrc == SSRC;
+        assert_eq!(
+            track.ready_state() == MediaStreamTrackState::Ended,
+            ended,
+            "timeout {timeout}, ssrc {ssrc}"
+        );
+        assert!(!track.muted(), "ended, not muted");
+    }
+}

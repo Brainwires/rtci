@@ -109,6 +109,21 @@ pub(crate) struct InterceptorHandlerContext {
     /// The transceiver whose receiver bound a stream for the packet being read
     /// (`InterceptorHandler::ensure_remote_stream_bound`).
     newly_bound: Option<usize>,
+    /// `SettingEngineBuilder::with_source_departure_ends_track`: a remote track whose SSRCs
+    /// have all left (BYE, RTP timeout) ends instead of being muted (RFC 8830 section 3).
+    source_departure_ends_track: bool,
+    /// The remote SSRCs that left (BYE, timeout) since they were last heard, for
+    /// `source_departure_ends_track`: a track ends when every one of its SSRCs is here.
+    /// Bounded by `MAX_REMOTE_CNAMES`.
+    departed_sources: HashSet<SSRC>,
+}
+
+impl InterceptorHandlerContext {
+    /// `SettingEngineBuilder::with_source_departure_ends_track`.
+    pub(crate) fn with_source_departure_ending_tracks(mut self, ends: bool) -> Self {
+        self.source_departure_ends_track = ends;
+        self
+    }
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -144,6 +159,8 @@ impl Default for InterceptorHandlerContext {
             rtcp_leaving: Default::default(),
             srtp_keyed: Default::default(),
             newly_bound: None,
+            source_departure_ends_track: false,
+            departed_sources: Default::default(),
         }
     }
 }
@@ -256,6 +273,10 @@ impl<'a> InterceptorHandler<'a> {
     /// the declared-SSRC path finds a codec already set and returns immediately.
     fn ensure_remote_stream_bound(&mut self, now: Instant, rtp_header: &rtp::Header) {
         self.ctx.newly_bound = None;
+        // A source heard again has not left.
+        if !self.ctx.departed_sources.is_empty() {
+            self.ctx.departed_sources.remove(&rtp_header.ssrc);
+        }
         self.bind_remote_stream_of(now, rtp_header);
         // RFC 3264 section 5.1: a stream that arrives while this endpoint's offer is pending
         // is bound with what the offer says; the receiver remembers that, for the answer to
@@ -626,6 +647,32 @@ impl<'a> InterceptorHandler<'a> {
         let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
             return;
         };
+        // RFC 8830 section 3: "a MediaStreamTrack ... has ended when all of its SSRCs have
+        // ended (BYE, timeout)", under `with_source_departure_ends_track(true)`. By default
+        // W3C webrtc 9.3 governs the track's state in this API: the track is muted.
+        if self.ctx.source_departure_ends_track {
+            if self.ctx.departed_sources.len() < MAX_REMOTE_CNAMES {
+                self.ctx.departed_sources.insert(source);
+            }
+            let departed = &self.ctx.departed_sources;
+            let all_gone = receiver
+                .track()
+                .ssrcs()
+                .all(|ssrc| ssrc == source || departed.contains(&ssrc));
+            if all_gone {
+                if receiver.end_track() {
+                    receiver.take_unannounced_end();
+                    let track_id = receiver.track().track_id().clone();
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(track_id)),
+                        ),
+                    });
+                }
+                return;
+            }
+        }
         let track = receiver.track_mut();
         if track.muted() || track.ready_state() == MediaStreamTrackState::Ended {
             return;
