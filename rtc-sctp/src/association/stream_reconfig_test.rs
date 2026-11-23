@@ -242,3 +242,105 @@ fn every_request_parameter_is_answered() {
         assert_eq!(&[0, 0, 0, result][..], &responses[0][4..8], "request {typ}");
     }
 }
+
+/// RFC 6525 4.1 and 4.4: the Outgoing SSN Reset Request (13) and the Re-configuration
+/// Response (16) "MUST NOT appear in any other chunk" than RE-CONFIG. A data channel closed
+/// in both directions over a link exchanges both; every chunk either side sends that carries
+/// parameters (INIT, INIT ACK, HEARTBEAT, HEARTBEAT ACK, RE-CONFIG) is looked at, and the two
+/// types appear in RE-CONFIG chunks only.
+#[test]
+fn reset_requests_and_responses_travel_in_re_config_chunks_only() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let seen: Rc<RefCell<Vec<Bytes>>> = Rc::new(RefCell::new(vec![]));
+    let record = seen.clone();
+    let mut link = Link::new(TransportConfig::default(), TransportConfig::default(), 503);
+    link.filter = Some(Box::new(move |_, datagram: &Bytes| {
+        record.borrow_mut().push(datagram.clone());
+        false
+    }));
+    link.connect();
+    let now = link.now;
+    link.client
+        .conn()
+        .open_stream(1, PPI)
+        .unwrap()
+        .write_sctp(now, &Bytes::from_static(b"hello"), PPI)
+        .unwrap();
+    let deadline = link.now + Duration::from_secs(5);
+    assert!(link.run_until(deadline, |l| !l.server.received.is_empty()));
+    let now = link.now;
+    link.client.conn().stream(1).unwrap().close(now).unwrap();
+    link.run_for(Duration::from_secs(40));
+
+    let datagrams = seen.borrow().clone();
+    let mut in_reconfig = vec![];
+    for datagram in &datagrams {
+        for chunk in chunks_of(datagram) {
+            let params_at = match chunk[0] {
+                1 | 2 => 20, // INIT, INIT ACK: the fixed fields first
+                4 | 5 => 4,  // HEARTBEAT, HEARTBEAT ACK
+                130 => 4,    // RE-CONFIG
+                _ => continue,
+            };
+            let types: Vec<u16> = tlvs(&chunk[params_at.min(chunk.len())..])
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect();
+            if chunk[0] == CT_RECONFIG.0 {
+                in_reconfig.extend(types);
+            } else {
+                assert!(
+                    !types.iter().any(|t| *t == 13 || *t == 16),
+                    "chunk type {} carries {types:?}",
+                    chunk[0]
+                );
+            }
+        }
+    }
+    assert!(in_reconfig.contains(&13), "{in_reconfig:?}");
+    assert!(in_reconfig.contains(&16), "{in_reconfig:?}");
+}
+
+/// RFC 6525 5.2.2 E6 (and 5.2.3 F2): the answering RE-CONFIG is sent once the incoming
+/// RE-CONFIG chunk has been processed completely. A chunk with an Outgoing SSN Reset Request
+/// and an Incoming SSN Reset Request (an allowed pair, section 3.1) is answered with one
+/// RE-CONFIG chunk that carries the response to the first and the request the second asks for.
+#[test]
+fn a_re_config_chunk_is_answered_after_all_of_it_is_processed() {
+    let mut link = connected_link(504);
+    let now = link.now;
+    {
+        // A stream each way, so both requests name a stream that exists.
+        let b = link.client.conn();
+        b.open_stream(1, PPI)
+            .unwrap()
+            .write_sctp(now, &Bytes::from_static(b"x"), PPI)
+            .unwrap();
+    }
+    let deadline = link.now + Duration::from_secs(5);
+    assert!(link.run_until(deadline, |l| !l.server.received.is_empty()));
+    let now = link.now;
+    let a = link.server.conn();
+    let _ = sent_datagrams(a, now);
+    let rsn = a.peer_rsn_window.expect("known from the INIT").1;
+    let mut outgoing = rsn.to_be_bytes().to_vec();
+    outgoing.extend_from_slice(&a.my_next_rsn.wrapping_sub(1).to_be_bytes());
+    outgoing.extend_from_slice(&a.peer_last_tsn.to_be_bytes());
+    outgoing.extend_from_slice(&[0, 1]);
+    let mut incoming = rsn.wrapping_add(1).to_be_bytes().to_vec();
+    incoming.extend_from_slice(&[0, 1]);
+    let mut value = raw_tlv(13, &outgoing);
+    value.extend_from_slice(&raw_tlv(14, &incoming));
+    let request = raw_chunk(CT_RECONFIG.0, 0, &value);
+    let raw = packet_to(a, &[request]);
+    inject(a, now, raw);
+    let answers = chunks_of_type(&sent_datagrams(a, now), CT_RECONFIG.0);
+    assert_eq!(answers.len(), 1, "one answering RE-CONFIG chunk");
+    let types: Vec<u16> = tlvs(&answers[0][4..]).into_iter().map(|(t, _)| t).collect();
+    assert!(types.contains(&16), "the response: {types:?}");
+    assert!(
+        types.contains(&13),
+        "the request the Incoming one asks for: {types:?}"
+    );
+}

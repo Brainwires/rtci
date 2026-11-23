@@ -751,6 +751,13 @@ impl SctpTransport {
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
+        // RFC 9260 6.2 drops new DATA once a closed window was advertised, so a message larger
+        // than the receive buffer could never arrive. Where the `max-message-size` this side
+        // advertised (RFC 8841 6.1) is larger than its buffer, the one-message overcommit
+        // keeps that promise.
+        let receive_buffer = sctp_transport_config.max_receive_buffer_size();
+        sctp_transport_config =
+            sctp_transport_config.with_zero_window_overcommit(can_send_size > receive_buffer);
 
         // One association per DTLS transport: once this side has initiated its own, or has
         // taken the peer's INIT, the endpoint starts no other.

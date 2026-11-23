@@ -113,6 +113,7 @@ pub struct TransportConfig {
     message_interleaving: bool,
     zero_checksum: bool,
     path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
+    zero_window_overcommit: bool,
 }
 
 impl Default for TransportConfig {
@@ -136,11 +137,32 @@ impl Default for TransportConfig {
             message_interleaving: false,
             zero_checksum: false,
             path_mtu_discovery: Some(PathMtuDiscoveryConfig::default()),
+            zero_window_overcommit: false,
         }
     }
 }
 
 impl TransportConfig {
+    /// Whether a receiver that advertised a closed window (a_rwnd 0) still takes the next
+    /// in-sequence DATA chunk when nothing is readable: the chunk that would complete a
+    /// message the full buffer holds the start of (webrtc-rs/webrtc#822), up to one message
+    /// beyond the buffer. Off by default: RFC 9260 section 6.2, "When the receiver's
+    /// advertised window is 0, the receiver MUST drop any new incoming DATA chunk with a TSN
+    /// larger than the largest TSN received so far". Without it a buffer full of incomplete
+    /// messages stays full: what is written must fit the buffer, which it does when the
+    /// largest message accepted (`with_max_receive_message_size`) is not larger than the
+    /// receive buffer. While the advertised window is open, a full buffer takes that chunk
+    /// either way (the RFC rule binds a closed advertised window only).
+    pub fn with_zero_window_overcommit(mut self, value: bool) -> Self {
+        self.zero_window_overcommit = value;
+        self
+    }
+
+    /// See [`with_zero_window_overcommit`](Self::with_zero_window_overcommit).
+    pub fn zero_window_overcommit(&self) -> bool {
+        self.zero_window_overcommit
+    }
+
     /// Path MTU discovery (DPLPMTUD, RFC 8899 section 6.2, with the PAD chunk of RFC 4820):
     /// once established, the association confirms its packet size (what
     /// [`Association::set_path_mtu`](crate::Association::set_path_mtu) set, else the

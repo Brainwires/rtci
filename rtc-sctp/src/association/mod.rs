@@ -320,6 +320,8 @@ pub struct Association {
     max_message_size: u32,
     /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
     max_receive_message_size: u32,
+    /// See [`TransportConfig::with_zero_window_overcommit`].
+    zero_window_overcommit: bool,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -464,7 +466,7 @@ pub struct Association {
     // max DATA chunk payload size
     max_payload_size: u32,
     cumulative_tsn_ack_point: u32,
-    advanced_peer_tsn_ack_point: u32,
+    pub(crate) advanced_peer_tsn_ack_point: u32,
     use_forward_tsn: bool,
     /// PR-SCTP is announced and used at all (`TransportConfig::with_partial_reliability`).
     partial_reliability_enabled: bool,
@@ -585,6 +587,7 @@ impl Default for Association {
             handshake_completed: false,
             max_message_size: 0,
             max_receive_message_size: 0,
+            zero_window_overcommit: false,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -767,6 +770,7 @@ impl Association {
             max_receive_buffer_size: config.max_receive_buffer_size(),
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
+            zero_window_overcommit: config.zero_window_overcommit(),
             transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
@@ -1027,7 +1031,12 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        let pmtud = self.pmtud.as_ref().and_then(|p| p.deadline());
+        // The discovery runs while the association is established only.
+        let pmtud = self
+            .pmtud
+            .as_ref()
+            .filter(|_| self.state() == AssociationState::Established)
+            .and_then(|p| p.deadline());
         match (self.timers.next_timeout(), pmtud) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1108,12 +1117,11 @@ impl Association {
                 self.timers.start(timer, now, self.rto_mgr.get_rto());
             }
         }
-        if self.state() == AssociationState::Established
-            && self
-                .pmtud
-                .as_ref()
-                .and_then(|p| p.deadline())
-                .is_some_and(|at| now >= at)
+        if self
+            .pmtud
+            .as_ref()
+            .and_then(|p| p.deadline())
+            .is_some_and(|at| now >= at)
         {
             self.handle_path_mtu_timeout(now);
         }
@@ -3363,8 +3371,14 @@ impl Association {
                     // accepted here is `peer_last_tsn + 1` — precisely the one that advances
                     // the cumulative ack — so every chunk would qualify and
                     // `max_receive_buffer_size` would stop bounding anything.
-                    let unblocks_reassembly =
-                        d.tsn == self.peer_last_tsn.wrapping_add(1) && !self.has_readable_data();
+                    //
+                    // RFC 9260 6.2: once the window has been advertised as closed, a new DATA
+                    // chunk above the largest TSN received MUST be dropped; the escape then
+                    // needs `TransportConfig::with_zero_window_overcommit`.
+                    let window_advertised_closed = self.last_advertised_window == 0;
+                    let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
+                        && !self.has_readable_data()
+                        && (!window_advertised_closed || self.zero_window_overcommit);
 
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But

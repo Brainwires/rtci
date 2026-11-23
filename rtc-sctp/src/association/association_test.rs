@@ -1805,6 +1805,48 @@ fn test_full_buffer_gap_fill_headroom_is_one_message() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9260 6.2: "When the receiver's advertised window is 0, the receiver MUST drop any new
+/// incoming DATA chunk with a TSN larger than the largest TSN received so far." The buffer
+/// fills with the start of a message; once a SACK has advertised a_rwnd 0, the next
+/// in-sequence chunk (above the largest TSN) is dropped and a SACK is due at once. A chunk
+/// that fills a gap below the largest TSN is still taken. With
+/// `TransportConfig::with_zero_window_overcommit` the in-sequence chunk is taken, as the
+/// deadlock escape of webrtc-rs/webrtc#822.
+#[test]
+fn after_a_closed_window_is_advertised_new_data_above_the_largest_tsn_is_dropped() -> Result<()> {
+    for overcommit in [false, true] {
+        let mut a = create_association(
+            TransportConfig::default()
+                .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
+                .with_max_message_size(FULL_BUFFER_MAX_MESSAGE)
+                .with_zero_window_overcommit(overcommit),
+        );
+        a.set_state(AssociationState::Established);
+        assert!(
+            a.create_stream(0, true, PayloadProtocolIdentifier::Binary)
+                .is_some()
+        );
+        let first = a.peer_last_tsn.wrapping_add(1);
+        let mut tsn = first;
+        while a.get_my_receiver_window_credit() > 0 {
+            a.handle_data(&ordered_fragment(tsn, tsn == first, false))?;
+            tsn = tsn.wrapping_add(1);
+        }
+        let sack = a.create_selective_ack_chunk();
+        assert_eq!(sack.advertised_receiver_window_credit, 0);
+        a.ack_state = AckState::Idle;
+        let last = a.peer_last_tsn;
+        a.handle_data(&ordered_fragment(tsn, false, false))?;
+        if overcommit {
+            assert_eq!(a.peer_last_tsn, tsn, "taken with the overcommit");
+        } else {
+            assert_eq!(a.peer_last_tsn, last, "dropped: above the largest TSN");
+            assert_eq!(a.ack_state, AckState::Immediate, "a SACK at once");
+        }
+    }
+    Ok(())
+}
+
 #[path = "message_selection_test.rs"]
 mod message_selection_test;
 
