@@ -11,6 +11,7 @@
 //! Over DTLS (`turns:...?transport=udp`, RFC 7350) each application binds one UDP socket and
 //! adds its host candidate (which the relay policy keeps from the peer): the engine runs its
 //! DTLS association to coturn from that socket, and every datagram on it is to or from coturn.
+//! Over plain UDP (`turn:...?transport=udp`) the same, without DTLS.
 
 mod common;
 mod testenv;
@@ -92,6 +93,7 @@ fn peer(
         };
         let turn_server: std::net::SocketAddr = url
             .trim_start_matches("turns:")
+            .trim_start_matches("turn:")
             .trim_end_matches("?transport=udp")
             .parse()
             .unwrap_or(env.turn_tls);
@@ -290,11 +292,16 @@ fn peer(
 fn relay_through_engine_turn(url: &str, expected: RTCIceServerTransportProtocol) {
     common::install_crypto_provider();
     let env = Env::get();
-    let dtls = expected == RTCIceServerTransportProtocol::Dtls;
-    let (ip_a, ip_b) = if dtls {
+    // Over DTLS and over plain UDP the engine runs on the application's UDP socket.
+    let datagrams = match expected {
+        RTCIceServerTransportProtocol::Dtls => Some(env.turn_tls),
+        RTCIceServerTransportProtocol::Udp => Some(env.turn_udp),
+        _ => None,
+    };
+    let (ip_a, ip_b) = if let Some(server) = datagrams {
         (
-            Some(testenv::source_ip("h-symmetric-a", env.turn_tls).unwrap()),
-            Some(testenv::source_ip("h-symmetric-b", env.turn_tls).unwrap()),
+            Some(testenv::source_ip("h-symmetric-a", server).unwrap()),
+            Some(testenv::source_ip("h-symmetric-b", server).unwrap()),
         )
     } else {
         (None, None)
@@ -371,6 +378,20 @@ fn the_engine_relays_through_turn_over_dtls() {
     relay_through_engine_turn(
         &format!("turns:{}?transport=udp", env.turn_tls),
         RTCIceServerTransportProtocol::Dtls,
+    );
+}
+
+/// RFC 8656 over plain UDP, run by the engine (`RelayGathering::Engine`, the default): each
+/// application binds one UDP socket and adds its host candidate; the engine allocates on coturn
+/// from it (the 401 exchange, permissions, channel bindings, refreshes) and relays every
+/// packet; `relayProtocol` "udp".
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn the_engine_relays_through_turn_over_udp() {
+    let env = Env::get();
+    relay_through_engine_turn(
+        &format!("turn:{}?transport=udp", env.turn_udp),
+        RTCIceServerTransportProtocol::Udp,
     );
 }
 

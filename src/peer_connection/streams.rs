@@ -73,6 +73,9 @@ pub struct StreamSettings {
     /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2): the engine by
     /// default.
     pub reflexive: super::srflx::ReflexiveGathering,
+    /// Who gathers relayed candidates from `turn:` servers over UDP (RFC 8656, RFC 8445
+    /// section 5.1.1.2): the engine by default.
+    pub relay: super::turn_streams::RelayGathering,
 }
 
 impl Default for StreamSettings {
@@ -85,6 +88,7 @@ impl Default for StreamSettings {
             turn: true,
             turn_tcp_relay: true,
             reflexive: super::srflx::ReflexiveGathering::Engine,
+            relay: super::turn_streams::RelayGathering::Engine,
         }
     }
 }

@@ -127,3 +127,77 @@ fn relayed_call_outlives_a_stale_nonce() {
         );
     }
 }
+
+/// `RelayGathering::Engine` (the default) with an application that runs its own TURN client
+/// on the same socket and adds its relayed candidate itself, as the test environment's peers
+/// do: the configuration names the same `turn:` server, and the engine leaves it to the
+/// application. Each peer announces one relayed candidate (its own), the engine sends nothing
+/// to coturn from the application's socket, and the call connects through the application's
+/// allocations.
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn an_application_gathering_its_own_relay_gets_no_engine_allocation_beside() {
+    use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+    use rtc::peer_connection::transport::{RTCIceCandidateType, RTCIceServer};
+    common::install_crypto_provider();
+    let env = Env::get();
+    let new_pc = || {
+        RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(vec![RTCIceServer {
+                        urls: vec![format!("turn:{}?transport=udp", env.turn_udp)],
+                        username: env.user.clone(),
+                        credential: env.pass.clone(),
+                    }])
+                    .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+                    .build(),
+            )
+            .build(Instant::now())
+            .unwrap()
+    };
+    // The host candidate gives the engine a base to allocate from, were it to.
+    let gather = Gather {
+        host: true,
+        srflx: false,
+        relay: Some(TurnTransport::Udp),
+    };
+    let mut a = EnvPeer::new("a", "h-symmetric-a", gather, &env, new_pc()).expect("peer a");
+    let mut b = EnvPeer::new("b", "h-symmetric-b", gather, &env, new_pc()).expect("peer b");
+    a.pc.create_data_channel("own-relay", None).unwrap();
+    negotiate(&mut a, &mut b).unwrap();
+    pump(&mut [&mut a, &mut b], Duration::from_secs(20), |p| {
+        dc_open(p[0]).is_some() && dc_open(p[1]).is_some()
+    })
+    .unwrap();
+    let relayed = |p: &EnvPeer| {
+        p.events
+            .iter()
+            .filter(|e| {
+                matches!(e, RTCPeerConnectionEvent::OnIceCandidateEvent(ev)
+                    if ev.candidate.as_ref().is_some_and(|c| c.typ == RTCIceCandidateType::Relay))
+            })
+            .count()
+    };
+    eprintln!(
+        "own relay: a {} relayed candidates, sent direct {}; b {} / {}",
+        relayed(&a),
+        a.sent_direct,
+        relayed(&b),
+        b.sent_direct
+    );
+    assert!(dc_open(&a).is_some(), "not connected through the relay");
+    for p in [&a, &b] {
+        assert_eq!(
+            relayed(p),
+            1,
+            "{}: the application's relayed candidate only",
+            p.name
+        );
+        assert_eq!(
+            p.sent_direct, 0,
+            "{}: the engine sent from the application's socket",
+            p.name
+        );
+    }
+}

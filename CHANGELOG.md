@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **TURN over plain UDP run by the engine** (branch `conf/tcp-17-udp-turn`; RFC 8656 sections
+  3.9 and 7, RFC 8445 section 5.1.1.2). A `turn:` server over UDP of the configuration is now
+  allocated on by the engine, per transport, from the transport's first UDP host candidate of
+  the server's family, on the application's socket: the Allocate and everything after it leave
+  through `poll_write`, and `handle_read` takes out the answers to the engine's own
+  transactions and the Data indications and ChannelData of its own allocations (anything else
+  from the server, an application client's answers say, still reaches ICE). The relayed
+  candidate has `relayProtocol` "udp" and the server's URL; the end of gathering waits for it.
+  The server's addresses race as RFC 8656 section 3.9 asks for UDP: an unauthenticated Allocate
+  to each family, the first answered kept, a later 401 dropped, an allocation a later answer
+  made deleted with a Refresh of LIFETIME 0. Allocations are deleted at `close()` and when a
+  description removes their transport. New `rtc::peer_connection::turn_streams` (now public)
+  with `RelayGathering { Engine, Application }`, `SettingEngineBuilder::with_relay_gathering`,
+  and a new public field `StreamSettings::relay` (struct literals add it). An application that
+  runs its own UDP TURN client either sets `RelayGathering::Application` or adds its relayed
+  candidate with the server's `url` (or none: any server) before the engine has announced one:
+  that server is then left to it. `tests/turn_udp.rs`; env
+  `testenv_turn_streams.rs::the_engine_relays_through_turn_over_udp` and
+  `testenv_turn.rs::an_application_gathering_its_own_relay_gets_no_engine_allocation_beside`.
+
 - **Relayed TCP candidates by the engine** (branch `conf/tcp-13-relayed-tcp`): for each
   `turn:...?transport=tcp` and `turns:` server the engine now also asks for a TCP allocation
   (RFC 6062, a second control connection) and announces two more candidates, a passive relayed

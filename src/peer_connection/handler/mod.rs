@@ -804,6 +804,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         let Some(msg) = self.take_srflx_response(msg) else {
             return Ok(());
         };
+        // An answer, Data indication or ChannelData of one of the engine's own TURN
+        // allocations over UDP (RFC 8656).
+        let Some(msg) = self.take_turn_udp(msg) else {
+            return Ok(());
+        };
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
         // transport per BUNDLE group or unbundled section) reads it. A Binding request on a
         // local address several transports share that names none of them is dropped

@@ -2565,8 +2565,8 @@ impl SettingEngineBuilder {
     /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
     /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
     /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
-    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
-    /// application's.
+    /// serve the stream interface sees nothing of it. `turn:` over UDP is
+    /// [`with_relay_gathering`](Self::with_relay_gathering).
     pub fn with_turn_over_streams(mut self, run: bool) -> Self {
         self.0.streams.turn = run;
         self
@@ -2594,6 +2594,28 @@ impl SettingEngineBuilder {
         who: crate::peer_connection::srflx::ReflexiveGathering,
     ) -> Self {
         self.0.streams.reflexive = who;
+        self
+    }
+
+    /// Who gathers relayed candidates from the configuration's `turn:` servers over UDP (RFC
+    /// 8656; RFC 8445 section 5.1.1.2). By default
+    /// ([`RelayGathering::Engine`](crate::peer_connection::turn_streams::RelayGathering)) the
+    /// engine allocates on each such server for each transport, from the transport's first UDP
+    /// host candidate of the server's family, on the application's socket: the Allocate and
+    /// everything after it leave through `poll_write`, the server's answers, Data indications
+    /// and ChannelData are taken out of `handle_read` before ICE sees them (only those of the
+    /// engine's own transactions and allocations: another TURN client on the socket is not
+    /// disturbed). The server's addresses race as RFC 8656 section 3.9 asks for UDP. A server
+    /// for which the application adds a relayed candidate itself (its `url`, or any relayed
+    /// candidate over UDP without one) is left to it: the engine stops what it has not
+    /// announced yet. An application that runs its own TURN client from a socket other than
+    /// the one whose host candidate it gives the engine, and adds its relayed candidate late,
+    /// would see both: it sets `Application`, and the engine sends nothing to those servers.
+    pub fn with_relay_gathering(
+        mut self,
+        who: crate::peer_connection::turn_streams::RelayGathering,
+    ) -> Self {
+        self.0.streams.relay = who;
         self
     }
 

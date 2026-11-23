@@ -280,6 +280,7 @@ impl RTCPeerConnection {
             turn_tls,
         );
         engine_turn.tcp_relay = streams_settings.turn_tcp_relay;
+        engine_turn.relay_gathering = streams_settings.relay;
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:

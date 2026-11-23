@@ -264,7 +264,9 @@ pub(crate) mod streams;
 mod transport_layout;
 /// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
 pub mod turn_discovery;
-mod turn_streams;
+/// The TURN clients the engine runs itself (RFC 8656, RFC 7350, RFC 6062): who gathers from
+/// `turn:` servers over UDP, [`turn_streams::RelayGathering`].
+pub mod turn_streams;
 /// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
 // wpt100:hdrext
@@ -3574,8 +3576,11 @@ impl RTCPeerConnection {
             self.gather_tcp_candidates(candidate_value);
             // RFC 8445 section 5.1.1.2: its server-reflexive candidates.
             self.gather_srflx_for(candidate_value);
-            // Its base carries the transport's TURN-over-DTLS links (RFC 7350).
+            // Its base carries the transport's TURN links over DTLS and UDP (RFC 7350, RFC
+            // 8656).
             self.note_udp_base_for_turn(candidate_value);
+            // A relayed candidate of the application's own: its server is left to it.
+            self.note_application_relay(candidate_value, local_candidate.url.as_deref());
         } else {
             self.finish_local_gathering_after_streams();
         }

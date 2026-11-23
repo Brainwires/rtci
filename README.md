@@ -301,7 +301,13 @@ it closes the TURN connections whose relayed candidate is not selected, and reco
 restarts ICE when the selected one's is lost (RFC 6544 section 11.2). A `turns:...?transport=udp` server is reached over DTLS
 (RFC 7350) from a UDP host candidate's base without the stream interface: its records go out
 through `poll_write` and come back through `handle_read` like any datagram (a name still needs
-`Resolve`). With `stun:` / `stuns:` servers
+`Resolve`). A plain `turn:` server over UDP is allocated on the same way, from each transport's
+UDP host candidate's base: an unauthenticated Allocate to each of the server's addresses (RFC
+8656 section 3.9), the first answered kept; the engine takes out of `handle_read` only the
+answers to its own transactions and the Data indications and ChannelData of its own
+allocations. An application that runs its own TURN client sets
+`with_relay_gathering(RelayGathering::Application)`; one that adds a relayed candidate for a
+server (its `url`) has that server left to it. With `stun:` / `stuns:` servers
 configured it also gathers the server-reflexive candidates: a Binding request from each UDP host
 candidate (out of `poll_write`, the answer taken out of `handle_read`; this needs no stream
 interface for a server given by address) and over TCP / TLS from its ICE-TCP listeners
@@ -407,7 +413,8 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
   interface: resolution by the driver, Happy Eyeballs (RFC 8305), TLS with rustls sans-I/O (ALPN `stun.turn`; roots or a
   verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
-  `relayProtocol`; TURN over DTLS is not implemented
+  `relayProtocol`; TURN over DTLS (RFC 7350) and over plain UDP on the application's socket as well (who gathers
+  from `turn:` servers over UDP: `with_relay_gathering`)
 - ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
