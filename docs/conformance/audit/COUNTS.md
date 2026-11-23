@@ -13,16 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5009 | 19 | 7 | 4 | 29 | 13 | 0 | 665 | 5746 |
+| MUST | 5024 | 24 | 7 | 2 | 18 | 5 | 0 | 666 | 5746 |
 | SHOULD | 851 | 0 | 0 | 14 | 56 | 43 | 4 | 326 | 1294 |
 | MAY | 443 | 0 | 0 | 20 | 33 | 109 | 0 | 171 | 776 |
 | PROC | 61 | 0 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6364 | 19 | 7 | 40 | 121 | 166 | 4 | 1162 | 7883 |
-| MUST | 5007 | 21 | 7 | 6 | 29 | 10 | 0 | 665 | 5745 |
-| SHOULD | 836 | 0 | 0 | 18 | 65 | 45 | 4 | 326 | 1294 |
-| MAY | 442 | 0 | 0 | 21 | 34 | 108 | 0 | 171 | 776 |
-| PROC | 61 | 0 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6346 | 21 | 7 | 47 | 131 | 164 | 4 | 1162 | 7882 |
+| all | 6379 | 24 | 7 | 38 | 110 | 158 | 4 | 1163 | 7883 |
 
 ## RFC behaviour tested
 
@@ -31,12 +26,9 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5081 | 5035 | 99.1 | 5009 | 98.6 |
+| MUST | 5080 | 5055 | 99.5 | 5024 | 98.9 |
 | SHOULD | 968 | 851 | 87.9 | 851 | 87.9 |
 | MAY | 605 | 443 | 73.2 | 443 | 73.2 |
-| MUST | 5080 | 5035 | 99.1 | 5007 | 98.6 |
-| SHOULD | 968 | 836 | 86.4 | 836 | 86.4 |
-| MAY | 605 | 442 | 73.1 | 442 | 73.1 |
 | PROC | 67 | 61 | 91.0 | 61 | 91.0 |
 
 ## Per file
@@ -56,7 +48,6 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 0 | 0 | 1 | 0 | 2 | 0 | 1 | 5 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 7 | 0 | 0 | 1 | 2 | 0 | 0 | 0 | 10 |
-| `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 1 | 0 | 0 | 3 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |
@@ -161,8 +152,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc6544.md` | MUST | 29 | 0 | 0 | 1 | 0 | 1 | 0 | 8 | 39 |
 | `rfc6544.md` | SHOULD | 20 | 0 | 0 | 1 | 0 | 0 | 0 | 12 | 33 |
 | `rfc6544.md` | MAY | 4 | 0 | 0 | 1 | 0 | 3 | 0 | 1 | 9 |
-| `rfc6679.md` | MUST | 43 | 0 | 0 | 0 | 0 | 1 | 0 | 11 | 55 |
-| `rfc6679.md` | MUST | 41 | 0 | 0 | 0 | 1 | 2 | 0 | 11 | 55 |
+| `rfc6679.md` | MUST | 44 | 0 | 0 | 0 | 0 | 0 | 0 | 11 | 55 |
 | `rfc6679.md` | SHOULD | 18 | 0 | 0 | 0 | 0 | 0 | 0 | 6 | 24 |
 | `rfc6679.md` | MAY | 4 | 0 | 0 | 1 | 0 | 1 | 0 | 1 | 7 |
 | `rfc6762.md` | MUST | 61 | 0 | 0 | 0 | 0 | 0 | 0 | 9 | 70 |
@@ -202,8 +192,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc7741.md` | MUST | 46 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 48 |
 | `rfc7741.md` | SHOULD | 7 | 0 | 0 | 0 | 0 | 4 | 0 | 3 | 14 |
 | `rfc7741.md` | MAY | 9 | 0 | 0 | 1 | 0 | 0 | 0 | 1 | 11 |
-| `rfc7742.md` | MUST | 7 | 0 | 0 | 0 | 2 | 0 | 0 | 9 | 18 |
-| `rfc7742.md` | MUST | 6 | 0 | 0 | 1 | 2 | 0 | 0 | 9 | 18 |
+| `rfc7742.md` | MUST | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 9 | 18 |
 | `rfc7742.md` | SHOULD | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 4 | 6 |
 | `rfc7742.md` | MAY | 2 | 0 | 0 | 1 | 1 | 0 | 0 | 1 | 5 |
 | `rfc7798.md` | MUST | 55 | 0 | 0 | 0 | 1 | 0 | 0 | 23 | 79 |
