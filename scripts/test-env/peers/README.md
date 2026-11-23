@@ -107,3 +107,14 @@ A step the stack cannot express ends the run with `na: {"reason": ..., "cite": .
 
 Fields a stack cannot fill are `null`. `rtcp` counts what arrived from Rust, by type;
 `descriptions` lists every description sent, received, applied or ignored, in order.
+
+## Layers
+
+`layers/` is a crate of its own (`layer-interop`, outside the workspace, `Cargo.lock` tracked)
+whose tests pair one engine layer with an independent implementation of it, in memory and in
+virtual time: `tests/dimpl_rtc_dtls.rs` (rtc-dtls against dimpl 0.9.0, DTLS 1.2 and 1.3, each
+in both roles: handshake, the DTLS-SRTP exporter, data, close_notify, the cookie exchange,
+a lost flight, the 1.3-to-1.2 fallback) and `tests/rice_rtc_ice.rs` (rtc-ice against
+rice-proto 0.4.3, librice's sans-I/O agent: full ICE in both roles, trickle, rtc-ice lite,
+role conflicts). `entry.sh` runs them in the unit stage; `cargo test --manifest-path
+scripts/test-env/peers/layers/Cargo.toml` runs them anywhere.

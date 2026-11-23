@@ -2275,6 +2275,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-5-layers`): layer interop tests against independent
+  implementations, in `scripts/test-env/peers/layers` (a crate outside the workspace, run in
+  the test image's unit stage): rtc-dtls against dimpl 0.9.0 (DTLS 1.2 and 1.3, both roles:
+  handshake, identical DTLS-SRTP exporter output and profile, data, close_notify, the
+  HelloVerifyRequest / HelloRetryRequest cookie exchange, a lost flight, the 1.3-to-1.2
+  fallback) and rtc-ice against librice's sans-I/O agent rice-proto 0.4.3 (full ICE in both
+  roles, trickle, rtc-ice lite, role conflicts).
+
 - **interop** (branch `conf/peers-4-aiortc`): aiortc 1.16.0 (BSD-3-Clause, Python) is a peer of
   the interop matrix (`scripts/test-env/peers/aiortc`). The test image has a venv with exactly
   the wheels `peers/aiortc/image/requirements.txt` pins by SHA-256 (aiortc, aioice, pyOpenSSL,
