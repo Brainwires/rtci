@@ -975,8 +975,17 @@ impl RTCRtpTransceiverInternal {
         // offer, even if they differ from those in the answer"). The sender's codecs are the
         // remote section's, with its numbers; the transceiver's and the receiver's keep this
         // endpoint's (the local description's, RFC 9429 section 5.9).
+        // RFC 3264 sections 5.1 and 6.1: the remote m= line lists its formats "in order of
+        // preference"; `send_codecs` puts exact matches first, so the order is kept beside it.
+        let remote_format_order: Vec<PayloadType> = media
+            .media_name
+            .formats
+            .iter()
+            .filter_map(|format| format.parse().ok())
+            .collect();
         if let Some(sender) = self.sender_mut() {
             sender.set_codec_preferences(send_codecs);
+            sender.set_remote_format_order(remote_format_order);
         }
         self.send_codecs_from_remote = true;
         Ok(())

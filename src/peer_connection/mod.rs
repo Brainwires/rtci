@@ -749,12 +749,16 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
         configuration::interceptor_registry::configure_key_frame_requests(registry)
     };
     // RFC 2198 (RFC 8854 section 4.2): the default codecs offer RED for audio, and a peer
-    // that negotiates it sends RED packets: every chain takes them apart (and sends RED where
-    // it was negotiated) unless the application put its own interceptor in the slot.
+    // that negotiates it may send RED packets: every chain takes them apart (and sends RED as
+    // `with_audio_redundancy` says) unless the application put its own interceptor in the
+    // slot.
     if registry.holds(interceptor::Slot::Redundancy) {
         registry
     } else {
-        configuration::interceptor_registry::configure_audio_redundancy(registry)
+        configuration::interceptor_registry::configure_audio_redundancy_with(
+            registry,
+            setting_engine.audio_redundancy,
+        )
     }
 }
 

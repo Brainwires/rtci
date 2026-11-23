@@ -17,7 +17,9 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot};
+use rtc::interceptor::{
+    AudioRedundancy, FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot,
+};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{
@@ -148,8 +150,9 @@ struct Peer {
 
 impl Peer {
     /// A peer that sends and receives audio and video, with the default interceptors (NACK
-    /// and its responder among them, audio RED) and FlexFEC-03 at a fixed rate of one repair
-    /// packet per five media packets.
+    /// and its responder among them, audio RED, sent whatever its place on the m= line:
+    /// `AudioRedundancy::Always`, so that the RED flow's numbering is on the wire) and
+    /// FlexFEC-03 at a fixed rate of one repair packet per five media packets.
     fn new(addr: &str, numbers: Numbers, own_payload_types_in_answers: bool) -> Result<Self> {
         let mut media_engine = media_engine(numbers)?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?
@@ -168,6 +171,7 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_own_payload_types_in_answers(own_payload_types_in_answers)
+                    .with_audio_redundancy(AudioRedundancy::Always)
                     .build(),
             )
             .with_interceptor_registry(registry)

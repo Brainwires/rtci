@@ -1724,13 +1724,27 @@ pub(crate) fn create_stream_info(
 /// ([`RedAudioInterceptor`](interceptor::RedAudioInterceptor), [`Slot::Redundancy`]): a local
 /// audio stream whose section negotiated a RED format with its own encoding as primary and
 /// redundancy (`a=fmtp:63 111/111`, the default codecs' form) is sent as RED with a copy of
-/// the previous packet, and received RED packets are taken apart into their primary encoding,
-/// with lost packets recovered from the next packet's copy. The peer connection installs it in
-/// any chain that does not fill the slot.
+/// the previous packet when the remote description lists RED ahead of the stream's codec
+/// ([`AudioRedundancy::WhenPreferred`](interceptor::AudioRedundancy::WhenPreferred), RFC 3264
+/// sections 5.1 and 6.1), and received RED packets are taken apart into their primary
+/// encoding, with lost packets recovered from the next packet's copy.
 pub fn configure_audio_redundancy(registry: Registry) -> Registry {
+    configure_audio_redundancy_with(registry, interceptor::AudioRedundancy::default())
+}
+
+/// [`configure_audio_redundancy`], with `audio_redundancy` deciding when a local stream is
+/// sent in RED. The peer connection installs it, with
+/// [`SettingEngineBuilder::with_audio_redundancy`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_audio_redundancy),
+/// in any chain that does not fill the slot.
+pub fn configure_audio_redundancy_with(
+    registry: Registry,
+    audio_redundancy: interceptor::AudioRedundancy,
+) -> Registry {
     registry.with(
         Slot::Redundancy,
-        interceptor::RedAudioBuilder::new().build(),
+        interceptor::RedAudioBuilder::new()
+            .with_audio_redundancy(audio_redundancy)
+            .build(),
     )
 }
 
