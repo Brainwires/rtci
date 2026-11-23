@@ -1348,6 +1348,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer_connection** (sec-10, RFC 5764 section 4.4): the connection re-keys SRTP by itself.
+  When a DTLS-SRTP master key, outbound or inbound, has a sixteenth of its lifetime left, it
+  asks for a new DTLS association as `renew_dtls_association()` does and raises
+  negotiation-needed; the application's next offer/answer makes the new association, media goes
+  on under the old keys until its handshake hands over the new ones, and the data channels go
+  on over it. `SettingEngineBuilder::with_srtp_automatic_rekeying(false)` turns it off (the
+  application gets `OnSrtpKeyLifetimeExpiring` only, and the transport fails at the limit, as
+  before). With the default lifetimes (2^31 packets and more) a call does not get there.
+- **peer_connection** (sec-10, RFC 9429 section 5.8.3, RFC 8842 section 6):
+  `renew_dtls_association()` also restarts ICE: the offer with the new `a=tls-id` carries new
+  ICE credentials, as a description that changes the `tls-id` of an association in use must.
 - **peer_connection**: the default DTLS-SRTP profiles put `SRTP_AEAD_AES_256_GCM` first, ahead
   of `SRTP_AEAD_AES_128_GCM` and `SRTP_AES128_CM_HMAC_SHA1_80` (RFC 3711 section 9.2: keys "as
   large as possible"; RFC 6188 section 6). Two engine peers now negotiate AES-256-GCM; every

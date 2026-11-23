@@ -472,6 +472,8 @@ pub struct SettingEngine {
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
+    pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -2113,16 +2115,40 @@ impl SettingEngineBuilder {
 
     /// Sets how many packets a DTLS-SRTP master key may protect. `None`, the default, is the
     /// profile's: 2^31 for the RFC 5764 profiles (section 4.1.2), 2^48 SRTP and 2^31 SRTCP
-    /// packets for the AEAD ones (RFC 7714). Shortly before a key runs out the connection
-    /// raises `OnSrtpKeyLifetimeExpiring`; at the limit nothing more is protected with it and
-    /// the DTLS transport fails (`dtls-failure`): browsers do not take a new DTLS association
-    /// on a transport that has one, so the engine does not attempt one (RFC 3711 section 9.2:
-    /// re-key, or end the session).
+    /// packets for the AEAD ones (RFC 7714). When a key has a sixteenth of its lifetime left
+    /// the connection raises `OnSrtpKeyLifetimeExpiring` and, unless
+    /// [`Self::with_srtp_automatic_rekeying`] turned it off, asks for a new DTLS association
+    /// (RFC 5764 section 4.4); at the limit nothing more is protected with the key and the
+    /// DTLS transport fails (`dtls-failure`, RFC 3711 section 9.2: re-key, or end the session).
     ///
     /// A lifetime of zero, or above the RFC 3711 limits, makes building the peer connection
     /// fail.
     pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
         self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
+    /// Whether the connection re-keys SRTP by itself before a master key's lifetime ends. The
+    /// default is `true`.
+    ///
+    /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
+    /// be established" (with section 4.1.2: the keys come from the association). When a key has
+    /// a sixteenth of its lifetime left (`OnSrtpKeyLifetimeExpiring`, either direction), the
+    /// connection does what [`RTCPeerConnection::renew_dtls_association`] does: the
+    /// negotiation-needed flag is raised, and the next offer carries a new `a=tls-id` and new
+    /// ICE credentials (RFC 9429 section 5.8.3: a new association is part of an ICE restart).
+    /// Media goes on under the old keys until the new handshake hands over the new ones; the
+    /// SCTP association and its data channels go on over the new association (RFC 8841
+    /// section 10.5). The application only has to answer `negotiationneeded` as usual.
+    ///
+    /// `false` leaves it to the application: it gets the event only, and at the limit the
+    /// DTLS transport fails. A browser peer ignores a new `tls-id` and keeps its association,
+    /// so with one the renewal does not re-key and the transport fails at the limit either way;
+    /// the default lifetimes (2^31 packets and more) are not reached by a call.
+    ///
+    /// [`RTCPeerConnection::renew_dtls_association`]: crate::peer_connection::RTCPeerConnection::renew_dtls_association
+    pub fn with_srtp_automatic_rekeying(mut self, enabled: bool) -> Self {
+        self.0.srtp_automatic_rekeying_off = !enabled;
         self
     }
 

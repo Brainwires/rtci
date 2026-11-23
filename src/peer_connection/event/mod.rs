@@ -612,10 +612,10 @@ pub enum RTCPeerConnectionEvent {
 
     /// The SRTP master key of this side's outbound (`outbound` true) or the peer's inbound
     /// stream has used fifteen sixteenths of its lifetime (RFC 3711 section 9.2): `remaining`
-    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. At the limit the
-    /// connection's DTLS transport fails (a new DTLS association cannot be had from a browser
-    /// peer without an ICE restart with new DTLS parameters), so an application that will
-    /// reach it restarts the session first. Not a W3C event: a fork addition.
+    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. The connection then
+    /// asks for a new DTLS association by itself (RFC 5764 section 4.4; negotiation-needed
+    /// follows), unless `SettingEngineBuilder::with_srtp_automatic_rekeying(false)`. At the
+    /// limit the connection's DTLS transport fails. Not a W3C event: a fork addition.
     OnSrtpKeyLifetimeExpiring {
         /// Whether it is the key this side sends with.
         outbound: bool,
