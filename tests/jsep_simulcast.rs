@@ -766,3 +766,40 @@ fn proposed_send_encodings_drop_a_repeated_rid() -> TestResult {
     );
     Ok(())
 }
+
+/// W3C webrtc-pc 4.4.1.6 / 5.4.1: a sender's simulcast envelope "may be narrowed ... but cannot
+/// be reexpanded"; a remote description that asks it for a stream outside it "attempted to
+/// renegotiate RIDs" and is refused with InvalidAccessError. Naming fewer of its rids is fine.
+#[test]
+fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestResult {
+    let (mut pc, _) = simulcast_sender(&[("f", None), ("h", None)])?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        remote_offer(
+            "recvonly",
+            "a=rid:f recv\na=rid:h recv\na=simulcast:recv f;h\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+
+    let reoffer = |version: u32, extra: &str| -> Result<RTCSessionDescription, Error> {
+        let offer = remote_offer("recvonly", extra)?;
+        RTCSessionDescription::offer(
+            offer
+                .sdp
+                .replace(" 2 IN IP4", &format!(" {version} IN IP4")),
+        )
+    };
+    let expanded = pc.set_remote_description(
+        now,
+        reoffer(
+            3,
+            "a=rid:f recv\na=rid:h recv\na=rid:x recv\na=simulcast:recv f;h;x\n",
+        )?,
+    );
+    assert_eq!(expanded.err(), Some(Error::InvalidAccessError));
+    pc.set_remote_description(now, reoffer(3, "a=rid:f recv\na=simulcast:recv f\n")?)?;
+    Ok(())
+}

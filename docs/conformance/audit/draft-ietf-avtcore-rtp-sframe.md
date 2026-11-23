@@ -15,8 +15,8 @@ does not encode or decode media: the application encrypts with `rtc::sframe`, fr
 
 Totals (36 rows):
 
-- MUST: tested 24 / untested 3 / partial 1 / missing 1 / violated 1 / n-a 0
-- SHOULD: tested 1 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 2
+- MUST: tested 25 / untested 3 / partial 1 / missing 0 / violated 1 / n-a 0
+- SHOULD: tested 2 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 2
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 
 Tests: `st` = `rtc-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtc-sframe/src/kdf_test.rs`,
@@ -46,11 +46,11 @@ Tests: `st` = `rtc-rtp/src/codec/sframe/sframe_test.rs`, `kt` = `rtc-sframe/src/
 | SFRAMERTP-5.3-1 | 5.3 | MUST | The SFrame metadata input is empty by default | tested | `rtc-sframe/src/context.rs` (encrypt, decrypt) | e2e::the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end | the application passes the metadata |
 | SFRAMERTP-6-1 | 6 | MUST | `a=sframe` is a media-level attribute, never at session level | tested | `src/peer_connection/sdp/mod.rs` (add_transceiver_sdp) | sig::an_sframe_transform_offers_and_answers_sframe | |
 | SFRAMERTP-6-2 | 6 | MUST | An answerer includes `a=sframe` only when the offer had it | tested | t (describe_sframe, note_remote_sframe) | sig::an_sframe_transform_offers_and_answers_sframe, sig::without_a_transform_the_transceiver_does_not_use_sframe | |
-| SFRAMERTP-6-3 | 6 | MUST | An answerer that requires SFrame rejects m-sections without `a=sframe` | missing | | | an existing transceiver with `[[useSFrame]]` true answering an offer without it: the answer section should be rejected (port 0); JSEP answer generation |
+| SFRAMERTP-6-3 | 6 | MUST | An answerer that requires SFrame rejects m-sections without `a=sframe` | tested | `src/peer_connection/internal.rs` (`generate_matched_sdp`: `sframe_closed`) | `tests/encoded_transform_sframe_signalling.rs::an_answerer_that_requires_sframe_rejects_a_section_without_it` | jsep9: a transceiver whose [[useSFrame]] is true answers a section offered without `a=sframe` rejected (port 0) |
 | SFRAMERTP-6-4 | 6 | MUST | Offered and not answered: the offerer sends no media for the section | tested | t (apply_sframe_answer), `src/rtp_transceiver/rtp_sender/mod.rs` (write_rtp_inner) | sig::an_answer_without_sframe_stops_the_offerers_media | `ErrSFrameRefused` |
 | SFRAMERTP-6-5 | 6 | MUST | ... and never falls back to unencrypted RTP | tested | `src/rtp_transceiver/rtp_sender/mod.rs` (write_rtp_inner) | sig::an_answer_without_sframe_stops_the_offerers_media | |
 | SFRAMERTP-6-6 | 6 | MUST | ... and discards the RTP received for the section | untested | `src/peer_connection/handler/endpoint.rs` (find_track_id) | | dropped like a stopped transceiver's; no rtc-to-rtc test |
-| SFRAMERTP-6-7 | 6 | SHOULD | ... and closes the section in subsequent offers | missing | | | |
+| SFRAMERTP-6-7 | 6 | SHOULD | ... and closes the section in subsequent offers | tested | `src/peer_connection/internal.rs` (`generate_matched_sdp`: `sframe_refused`) | `tests/encoded_transform_sframe_signalling.rs::a_refused_sframe_section_is_closed_in_the_next_offer` | jsep9: the next offer rejects (closes) a section whose `a=sframe` the answer left out |
 | SFRAMERTP-6-8 | 6 | MUST | An offered `a=sframe` appears in every re-offer unless the section is closed | tested | t (describe_sframe) | sig::an_sframe_transform_offers_and_answers_sframe | `[[useSFrame]]` never goes back to false |
 | SFRAMERTP-6-9 | 6 | MUST | Under BUNDLE, a section with `a=sframe` and one without do not share payload types of SFrame-relevant formats | violated | `src/peer_connection/configuration/media_engine.rs` | | one payload-type table for the whole connection: mixing SFrame and plain sections in one bundle reuses the types; JSEP payload-type allocation |
 | SFRAMERTP-7-1 | 7 | MAY | A per-SSRC key may be derived from the base key | tested | kdf (derive_ssrc_key) | kt::the_per_ssrc_key_is_hkdf_of_the_base_key_salted_with_the_ssrc | |

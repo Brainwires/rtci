@@ -407,7 +407,9 @@ pub struct SettingEngine {
     pub(crate) ice: IceBehaviour,
     pub(crate) multicast_dns: MulticastDNS,
     pub(crate) replay_protection: ReplayProtection,
-    pub(crate) sdp_media_level_fingerprints: bool,
+    /// Fingerprints at session level (`with_sdp_media_level_fingerprints(false)`); inverted
+    /// so that the derived `Default` is media level.
+    pub(crate) sdp_session_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
     /// A remote description may ask for a new DTLS association without an ICE restart (RFC
     /// 8842 section 3.1 read without its section 6); off by default (RFC 9429 sections 5.8.3
@@ -1497,9 +1499,11 @@ impl SettingEngineBuilder {
 
     /// Controls where DTLS fingerprints are placed in SDP.
     ///
-    /// By default, fingerprints are placed at the session level. Setting this
-    /// to `true` places them at the media level instead, which improves
-    /// compatibility with some WebRTC implementations.
+    /// By default (`true`) they are in every media section, as RFC 9429 section 5.2.1 has it:
+    /// "Attributes that SDP permits to be at either the session level or the media level
+    /// SHOULD generally be at the media level even if they are identical" (browsers write
+    /// them there too). `false` puts one at session level, which the same section allows
+    /// ("implementations MAY choose to aggregate attributes at the session level").
     ///
     /// # Parameters
     ///
@@ -1511,15 +1515,15 @@ impl SettingEngineBuilder {
     /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Use media-level fingerprints for better compatibility
+    /// // One fingerprint at session level
     /// let setting_engine = SettingEngineBuilder::new()
-    ///     .with_sdp_media_level_fingerprints(true)
+    ///     .with_sdp_media_level_fingerprints(false)
     ///     .build();
     /// # Ok(())
     /// # }
     /// ```
     pub fn with_sdp_media_level_fingerprints(mut self, sdp_media_level_fingerprints: bool) -> Self {
-        self.0.sdp_media_level_fingerprints = sdp_media_level_fingerprints;
+        self.0.sdp_session_level_fingerprints = !sdp_media_level_fingerprints;
         self
     }
 

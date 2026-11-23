@@ -351,16 +351,25 @@ impl RTCRtpTransceiver<'_> {
 
     /// Returns the media stream identification tag (mid) for this transceiver.
     ///
-    /// The mid uniquely identifies the media description in the SDP. When not already set,
-    /// this value will be assigned during `create_offer` or `create_answer`.
+    /// The mid uniquely identifies the media description in the SDP. `create_offer` and
+    /// `create_answer` choose it (W3C `[[JsepMid]]`), but it is the transceiver's mid only
+    /// once a description that has it is applied: W3C webrtc-pc 4.4.1.6, "set the
+    /// transceiver's [[Mid]] slot to transceiver.[[JsepMid]]" when a local description is
+    /// applied, and from the remote description's section when a remote one is. Until then,
+    /// and after a rollback that disassociates it, it is `None`.
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub fn mid(&self) -> &Option<String> {
+        static NO_MID: Option<String> = None;
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
-        self.peer_connection.rtp_transceivers[self.id].mid()
+        let mid = self.peer_connection.rtp_transceivers[self.id].mid();
+        match mid {
+            Some(value) if self.peer_connection.applied_description_has_mid(value) => mid,
+            _ => &NO_MID,
+        }
     }
 
     /// Returns the id of this transceiver's [`RTCRtpSender`].

@@ -77,6 +77,11 @@ pub(crate) struct RTCRtpSenderInternal {
     /// exchange): W3C 4.4.1.4 sets `[[SendCodecs]]` to the codecs negotiated for sending,
     /// none, and `get_parameters` lists none.
     negotiated_not_sending: bool,
+    /// The URIs of the header extensions the media section negotiated for sending
+    /// (webrtc-extensions `[[NegotiatedHeaderExtensions]]` of the transceiver); `None` until
+    /// an answer was applied. W3C 5.2 `getParameters`: "headerExtensions ... negotiated for
+    /// sending".
+    negotiated_send_extensions: Option<Vec<String>>,
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
@@ -268,6 +273,30 @@ impl RTCRtpSenderInternal {
         }
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// W3C webrtc-pc 4.4.1.6, the signaling state is stable after an answer: "for each
+    /// encoding ... in [[SendEncodings]], if encoding.codec does not match any entry in
+    /// [[SendCodecs]], ... remove encoding.codec". Such an encoding is then sent with the codec
+    /// negotiation picked. Returns whether an encoding lost its codec.
+    pub(crate) fn drop_unnegotiated_encoding_codecs(&mut self) -> bool {
+        if self.send_codecs.is_empty() {
+            return false;
+        }
+        let mut dropped = false;
+        for encoding in &mut self.send_encodings {
+            if !encoding.codec.mime_type.is_empty()
+                && encoding_send_codec(&encoding.codec, &self.send_codecs).is_none()
+            {
+                encoding.codec = RTCRtpCodec::default();
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.last_returned_parameters = None;
+            self.sync_tracks();
+        }
+        dropped
     }
 
     /// W3C `addTrack` reusing this sender: the track becomes `[[SenderTrack]]` and what the
@@ -476,6 +505,12 @@ impl RTCRtpSenderInternal {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
 
+            // W3C 5.2: the header extensions this section negotiated for sending (none
+            // before an answer), not every registered one of the kind.
+            let negotiated = self.negotiated_send_extensions.as_deref().unwrap_or(&[]);
+            rtp_parameters
+                .header_extensions
+                .retain(|e| negotiated.contains(&e.uri));
             rtp_parameters.codecs = if self.negotiated_not_sending {
                 vec![]
             } else {
@@ -639,6 +674,14 @@ impl RTCRtpSenderInternal {
     /// Records whether the transceiver's negotiated direction does not send; the parameters
     /// `get_parameters` returned are dropped when that changes (W3C 4.4.1.4: an answer sets
     /// `[[SendCodecs]]` and `[[LastReturnedParameters]]` to null).
+    /// The header extensions an applied answer negotiated for sending in the section.
+    pub(crate) fn set_negotiated_send_extensions(&mut self, uris: Vec<String>) {
+        if self.negotiated_send_extensions.as_ref() != Some(&uris) {
+            self.negotiated_send_extensions = Some(uris);
+            self.last_returned_parameters = None;
+        }
+    }
+
     pub(crate) fn set_negotiated_not_sending(&mut self, not_sending: bool) {
         if self.negotiated_not_sending != not_sending {
             self.negotiated_not_sending = not_sending;

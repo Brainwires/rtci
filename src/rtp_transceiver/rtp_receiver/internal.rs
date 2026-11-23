@@ -77,6 +77,12 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// What the public `getParameters` returns while the negotiated direction does not
     /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
     not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+    /// The URIs of the header extensions the media section negotiated for receiving; `None`
+    /// until an answer was applied (W3C 5.3 `getParameters`: "the header extensions the
+    /// receiver is prepared to receive" for this section). Only the public parameters are
+    /// narrowed: the streams are bound with what the media engine negotiated.
+    negotiated_recv_extensions: Option<Vec<String>>,
+    public_parameters: Option<RTCRtpReceiveParameters>,
     /// The last absolute capture time each synchronization source sent (webrtc-extensions
     /// 8), what packets without one are interpolated from.
     capture_references: Vec<CaptureReference>,
@@ -114,6 +120,8 @@ impl RTCRtpReceiverInternal {
             rtcp_reduced_size: false,
             last_returned_parameters: None,
             not_receiving_parameters: None,
+            negotiated_recv_extensions: None,
+            public_parameters: None,
             capture_references: vec![],
             remote_track_id: String::new(),
             remote_streams: vec![],
@@ -285,6 +293,11 @@ impl RTCRtpReceiverInternal {
         self.last_returned_parameters.as_ref().unwrap()
     }
 
+    /// The header extensions an applied answer negotiated for receiving in the section.
+    pub(crate) fn set_negotiated_recv_extensions(&mut self, uris: Vec<String>) {
+        self.negotiated_recv_extensions = Some(uris);
+    }
+
     /// W3C `getParameters`: [`Self::get_parameters`], without codecs when the negotiated
     /// direction does not receive (`receiving` false).
     pub(crate) fn get_public_parameters(
@@ -292,10 +305,15 @@ impl RTCRtpReceiverInternal {
         media_engine: &MediaEngine,
         receiving: bool,
     ) -> &RTCRtpReceiveParameters {
-        if receiving {
-            return self.get_parameters(media_engine);
-        }
         let mut parameters = self.get_parameters(media_engine).clone();
+        let negotiated = self.negotiated_recv_extensions.as_deref().unwrap_or(&[]);
+        parameters
+            .rtp_parameters
+            .header_extensions
+            .retain(|e| negotiated.contains(&e.uri));
+        if receiving {
+            return self.public_parameters.insert(parameters);
+        }
         parameters.rtp_parameters.codecs.clear();
         self.not_receiving_parameters.insert(parameters)
     }

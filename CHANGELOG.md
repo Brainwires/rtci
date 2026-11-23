@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: W3C webrtc-pc SDP rows and the RFC 9429 / 3264 / 9143 / 8839 sweep.
+  - `RTCRtpTransceiver::mid()` is `None` until a description with the mid is applied
+    (W3C 4.4.1.6 `[[Mid]]`); `create_offer` alone no longer makes it visible.
+  - A pranswer, local or remote, sets each transceiver's current direction (W3C 4.4.1.6).
+  - Once stable, an encoding's `codec` that the answer did not negotiate for sending is removed
+    (W3C 4.4.1.6); the encoding is sent with the negotiated codec.
+  - `RTCRtpSender::get_parameters` / `RTCRtpReceiver::get_parameters` list the header
+    extensions their own section negotiated (none before an answer), not every one of the kind
+    (W3C 5.2, 5.3).
+  - `RTCOfferOptions` has the legacy `offer_to_receive_audio` / `offer_to_receive_video`
+    (W3C 4.4.3; struct literals need `..Default::default()`).
+  - `RTCAnswerOptions::voice_activity_detection` is `Option<bool>` (was `bool`): the default
+    options answer as no options do (W3C 4.2.6).
+  - A remote description that asks a simulcast sender for a rid outside its envelope is
+    refused with `InvalidAccessError` (W3C 4.4.1.6 "renegotiate RIDs", 5.4.1).
+  - SFrame (draft-ietf-avtcore-rtp-sframe-03 section 6): a transceiver that uses SFrame
+    rejects an offered section without `a=sframe`; a section whose `a=sframe` the answer left
+    out is closed (port 0) in the next offer.
+  - DTLS fingerprints are written in every media section by default (RFC 9429 section 5.2.1
+    SHOULD); `with_sdp_media_level_fingerprints(false)` writes one at session level.
+  - A full ICE agent's offers and answers state `a=ice-pacing` (50 ms unless configured;
+    RFC 8839 sections 4.3.1, 4.3.2); a lite agent's never do.
 - **jsep**: `RTCRtpSender::send_restrictions(rid)` (new, additive): the limits an encoding is
   to be sent under, the smaller of each of its answered `a=rid` restrictions and the remote
   description's VP8 `max-fr` / `max-fs`, H.264 `max-fs` / `max-mbps` / `max-br` and the

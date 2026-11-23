@@ -692,7 +692,7 @@ impl RTCPeerConnection {
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
 
         let params = PopulateSdpParams {
-            media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
+            media_description_fingerprint: !self.setting_engine.sdp_session_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
@@ -717,7 +717,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
-            ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ice_pacing: self.stated_ice_pacing(),
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
@@ -943,6 +943,27 @@ impl RTCPeerConnection {
                             });
                             continue;
                         }
+                        // draft-ietf-avtcore-rtp-sframe-03 section 6: "An answerer that
+                        // requires SFrame MUST reject m-sections that do not have the
+                        // "a=sframe" SDP attribute"; an offerer whose `a=sframe` an answer
+                        // left out "SHOULD close it in subsequent offers".
+                        let sframe_closed = if include_unmatched {
+                            self.rtp_transceivers[i].sframe_refused()
+                        } else {
+                            self.rtp_transceivers[i].use_sframe() == Some(true)
+                                && !media.has_attribute("sframe")
+                        };
+                        if sframe_closed {
+                            media_sections.push(MediaSection {
+                                mid: mid_value.to_owned(),
+                                rejected: true,
+                                rejected_kind: media.media_name.media.clone(),
+                                transceiver_index: usize::MAX,
+                                offered_protos: offered_protos(media),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         if let Some(sender) = self.rtp_transceivers[i].sender_mut() {
                             sender.set_negotiated();
                         }
@@ -1112,7 +1133,7 @@ impl RTCPeerConnection {
         };
 
         let params = PopulateSdpParams {
-            media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
+            media_description_fingerprint: !self.setting_engine.sdp_session_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
             is_extmap_allow_mixed,
             connection_role,
@@ -1140,7 +1161,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
-            ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ice_pacing: self.stated_ice_pacing(),
             ls_groups: if include_unmatched {
                 [
                     &self.current_local_description,
@@ -2192,6 +2213,26 @@ impl RTCPeerConnection {
     }
 
     /// The mids of the pending and current local descriptions.
+    /// Whether a local or remote description that is applied (pending or current) has a
+    /// media section with `mid`: the transceiver's [[Mid]] is set then (W3C webrtc-pc 4.4.1.6).
+    pub(crate) fn applied_description_has_mid(&self, mid: &str) -> bool {
+        [
+            &self.pending_local_description,
+            &self.current_local_description,
+            &self.pending_remote_description,
+            &self.current_remote_description,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.parsed.as_ref())
+        .any(|parsed| {
+            parsed
+                .media_descriptions
+                .iter()
+                .any(|m| get_mid_value(m).is_some_and(|value| value == mid))
+        })
+    }
+
     pub(super) fn local_description_mids(&self) -> HashSet<String> {
         let mut mids = HashSet::new();
         for desc in [
@@ -2252,6 +2293,14 @@ impl RTCPeerConnection {
             Option<u32>,
             RTCRtpTransceiverId,
         )> = Vec::new();
+
+        // W3C webrtc-pc 4.4.1.6: once stable, an encoding's codec that the answer did not
+        // negotiate for sending is removed.
+        for transceiver in self.rtp_transceivers.iter_mut() {
+            if let Some(sender) = transceiver.sender_mut() {
+                sender.drop_unnegotiated_encoding_codecs();
+            }
+        }
 
         // RFC 9429 section 5.11 (RFC 7160 section 4.1): a started stream whose new codec has
         // another clock rate gets a new SSRC (and so does its RTX stream), moved as a collision
@@ -2373,6 +2422,21 @@ impl RTCPeerConnection {
         }
 
         Ok(())
+    }
+
+    /// The Ta a description states in `a=ice-pacing` (RFC 8839 sections 4.3.1, 4.3.2: a full
+    /// implementation "SHOULD include an 'ice-pacing' attribute" in offers and answers, a lite
+    /// one "MUST NOT"): the proposed one, else the default 50 ms (RFC 8445 section 14.2).
+    pub(super) fn stated_ice_pacing(&self) -> Option<std::time::Duration> {
+        if self.setting_engine.candidates.ice_lite {
+            return None;
+        }
+        Some(
+            self.ice_transport()
+                .agent
+                .proposed_pacing()
+                .unwrap_or(std::time::Duration::from_millis(50)),
+        )
     }
 
     /// The initiation an offer or answer states in `a=ecn-capable-rtp` (RFC 6679 section 6.1):

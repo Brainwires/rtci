@@ -90,7 +90,7 @@ fn an_answer_has_silence_suppression_only_where_the_offer_had_it() -> TestResult
             answerer.set_remote_description(Instant::now(), offer)?;
             Ok(answerer
                 .create_answer(Some(RTCAnswerOptions {
-                    voice_activity_detection: answer_vad,
+                    voice_activity_detection: Some(answer_vad),
                 }))?
                 .sdp)
         };

@@ -124,8 +124,8 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     // RFC 8859 puts `a=setup` and `a=fingerprint` in the TRANSPORT category: the one of the
     // tagged section of the BUNDLE group is in force for every bundled section (RFC 9143
     // section 7.1.3), whether or not the others repeat it. So the tagged section (the first:
-    // `a=group:BUNDLE 0 ...`) states a role, every role stated is the same one, and the
-    // fingerprint is the session's.
+    // `a=group:BUNDLE 0 ...`) states a role, every role stated is the same one, and so is
+    // every fingerprint.
     for sdp in [offer, answer] {
         let sections: Vec<&str> = sdp.split("\r\nm=").skip(1).collect();
         assert!(sections[0].contains("\r\na=setup:"), "{sdp}");
@@ -142,7 +142,11 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
             }
         }
         assert!(!sdp.contains("a=crypto"), "{sdp}");
-        assert_eq!(attribute_values(&sdp, "fingerprint").len(), 1, "{sdp}");
+        // One certificate: every fingerprint line (one per section, RFC 9429 section 5.2.1's
+        // media level) states the same one.
+        let fingerprints = attribute_values(&sdp, "fingerprint");
+        assert!(!fingerprints.is_empty(), "{sdp}");
+        assert!(fingerprints.iter().all(|f| f == &fingerprints[0]), "{sdp}");
         assert!(sdp.contains("a=group:BUNDLE "), "{sdp}");
     }
     Ok(())

@@ -899,6 +899,10 @@ impl RTCPeerConnection {
         // the credentials `restart_ice` was called for, even if an earlier restart offer was
         // discarded or rolled back.
         let options = options.take();
+        if let Some(options) = options {
+            self.apply_legacy_offer_to_receive(RtpCodecKind::Audio, options.offer_to_receive_audio);
+            self.apply_legacy_offer_to_receive(RtpCodecKind::Video, options.offer_to_receive_video);
+        }
         let is_ice_restart_requested =
             self.ice_restart_pending() || options.is_some_and(|options| options.ice_restart);
 
@@ -1188,14 +1192,10 @@ impl RTCPeerConnection {
 
         // RFC 9429 section 5.3.3.1: silence suppression only where the offer indicated it.
         let mut d = d;
-        if let Some(options) = options
+        if let Some(vad) = options.and_then(|options| options.voice_activity_detection)
             && let Some(offer) = self.remote_description().and_then(|r| r.parsed.clone())
         {
-            crate::peer_connection::sdp::apply_voice_activity_detection(
-                &mut d,
-                options.voice_activity_detection,
-                Some(&offer),
-            );
+            crate::peer_connection::sdp::apply_voice_activity_detection(&mut d, vad, Some(&offer));
         }
         // wpt100:hdrext — `a=cryptex` when the offer had it (RFC 9335 section 4).
         let d = self.add_cryptex_attribute(d, false);
@@ -1453,6 +1453,30 @@ impl RTCPeerConnection {
             }
             self.pipeline_context.stats.transport.ice_role = RTCIceRole::Controlling;
             self.ice_transport_mut().role_determined = true;
+        }
+
+        // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"", each transceiver's
+        // [[CurrentDirection]] is the direction it states. A final answer does that below with
+        // the rest of the negotiation; a provisional one sets the directions alone.
+        if local_description.sdp_type == RTCSdpType::Pranswer
+            && let Some(parsed) = &local_description.parsed
+        {
+            let transceiver_by_mid =
+                RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+            for media in &parsed.media_descriptions {
+                let Some(&i) = get_mid_value(media).and_then(|mid| transceiver_by_mid.get(mid))
+                else {
+                    continue;
+                };
+                let direction = get_peer_direction(media);
+                if media.is_webrtc_datachannel()
+                    || is_rejected_media(media)
+                    || direction == RTCRtpTransceiverDirection::Unspecified
+                {
+                    continue;
+                }
+                self.rtp_transceivers[i].set_current_direction(direction);
+            }
         }
 
         let we_answer = local_description.sdp_type == RTCSdpType::Answer;
@@ -2236,6 +2260,49 @@ impl RTCPeerConnection {
             }
         }
 
+        // W3C webrtc-pc 4.4.1.6 ("If the description attempted to renegotiate RIDs ... reject p
+        // with a newly created InvalidAccessError") and 5.4.1 ("This simulcast envelope may be
+        // narrowed (reducing the number of layers) in subsequent renegotiation, but cannot be
+        // reexpanded"): once a sender has sent simulcast, a remote description whose section
+        // asks it for a stream (`a=simulcast` `recv` rid) outside its encodings renegotiates
+        // the RIDs.
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        for media in &parsed.media_descriptions {
+            if !is_live_rtp_section(media) {
+                continue;
+            }
+            let Some(sender) = get_mid_value(media)
+                .and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+                .and_then(|&i| self.rtp_transceivers[i].sender().as_ref())
+            else {
+                continue;
+            };
+            let encodings = sender.send_encodings();
+            let envelope = sender.has_sent()
+                && encodings.len() > 1
+                && encodings
+                    .iter()
+                    .all(|e| !e.rtp_coding_parameters.rid.is_empty());
+            if !envelope {
+                continue;
+            }
+            if let Some(rid) = sdp::get_rids(media).into_iter().find(|rid| {
+                rid.direction == sdp::SimulcastDirection::Recv
+                    && rid.simulcast
+                    && !encodings
+                        .iter()
+                        .any(|e| e.rtp_coding_parameters.rid == rid.id)
+            }) {
+                log::warn!(
+                    "remote description renegotiates RIDs: rid {} is outside the simulcast \
+                     envelope (W3C webrtc-pc 4.4.1.6, 5.4.1)",
+                    rid.id
+                );
+                return Err(Error::InvalidAccessError);
+            }
+        }
+
         // RTP/RTCP multiplexing (RFC 9429 section 5.8.3). This endpoint has no RTCP component,
         // so a section that does not multiplex cannot be used at all.
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
@@ -2607,10 +2674,9 @@ impl RTCPeerConnection {
                             direction = RTCRtpTransceiverDirection::Sendonly;
                         }
 
-                        // [[CurrentDirection]] is set by a final answer only (W3C 4.4.1.6).
-                        if is_final_answer {
-                            transceiver.set_current_direction(direction);
-                        }
+                        // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"
+                        // ... Set transceiver.[[CurrentDirection]] to direction".
+                        transceiver.set_current_direction(direction);
 
                         transceiver.set_codec_preferences_from_remote_description(
                             media,
@@ -3960,6 +4026,57 @@ impl RTCPeerConnection {
         }
 
         Ok(self.add_rtp_transceiver(transceiver))
+    }
+
+    /// W3C webrtc-pc 4.4.3, the legacy `offerToReceive<Kind>` option of `createOffer`.
+    fn apply_legacy_offer_to_receive(&mut self, kind: RtpCodecKind, value: Option<bool>) {
+        match value {
+            None => {}
+            Some(false) => {
+                for transceiver in self
+                    .rtp_transceivers
+                    .iter_mut()
+                    .filter(|t| t.kind() == kind && !t.stopped())
+                {
+                    // [[Direction]] itself; the offer that follows carries it.
+                    match transceiver.direction() {
+                        RTCRtpTransceiverDirection::Sendrecv => {
+                            transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly)
+                        }
+                        RTCRtpTransceiverDirection::Recvonly => {
+                            transceiver.set_direction(RTCRtpTransceiverDirection::Inactive)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some(true) => {
+                let receives = self.rtp_transceivers.iter().any(|t| {
+                    t.kind() == kind
+                        && !t.stopped()
+                        && matches!(
+                            t.direction(),
+                            RTCRtpTransceiverDirection::Sendrecv
+                                | RTCRtpTransceiverDirection::Recvonly
+                        )
+                });
+                if !receives {
+                    // "the equivalent of connection.addTransceiver(kind), except that this
+                    // operation MUST NOT update the negotiation-needed flag", then recvonly.
+                    let mut transceiver = RTCRtpTransceiverInternal::new(
+                        kind,
+                        None,
+                        RTCRtpTransceiverInit {
+                            direction: RTCRtpTransceiverDirection::Recvonly,
+                            streams: vec![],
+                            send_encodings: vec![],
+                        },
+                    );
+                    self.inherit_header_extensions_to_negotiate(&mut transceiver);
+                    self.rtp_transceivers.push(transceiver);
+                }
+            }
+        }
     }
 
     /// Creates a new transceiver for the given media kind and adds it to the set of
@@ -5797,17 +5914,18 @@ a=rtcp-mux\r\n";
                 .contains(&"trickle".to_owned())
         );
 
-        // The default Ta is not proposed.
+        // RFC 8839 section 4.3.1: a full implementation "SHOULD include an 'ice-pacing'
+        // attribute in the offer": the default Ta is stated too.
         let mut plain = peer(None);
         plain
             .add_transceiver_from_kind(RtpCodecKind::Audio, None)
             .unwrap();
         assert!(
-            !plain
+            plain
                 .create_offer(None)
                 .unwrap()
                 .sdp
-                .contains("a=ice-pacing")
+                .contains("a=ice-pacing:50\r\n")
         );
     }
 

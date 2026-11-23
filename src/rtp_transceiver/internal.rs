@@ -259,6 +259,26 @@ impl RTCRtpTransceiverInternal {
         negotiated: Vec<RTCRtpHeaderExtensionToNegotiate>,
     ) {
         self.header_extensions_to_negotiate = Some(negotiated.clone());
+        let uris = |send: bool| -> Vec<String> {
+            negotiated
+                .iter()
+                .filter(|e| {
+                    if send {
+                        e.direction.has_send()
+                    } else {
+                        e.direction.has_recv()
+                    }
+                })
+                .map(|e| e.uri.clone())
+                .collect()
+        };
+        let (send, recv) = (uris(true), uris(false));
+        if let Some(sender) = self.sender.as_mut() {
+            sender.set_negotiated_send_extensions(send);
+        }
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_negotiated_recv_extensions(recv);
+        }
         self.negotiated_header_extensions = negotiated;
     }
 
