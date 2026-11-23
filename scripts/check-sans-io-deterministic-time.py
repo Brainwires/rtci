@@ -194,7 +194,9 @@ PERMANENT: dict[str, tuple[int, str]] = {
 
     # The C ABI (rtc-ffi) takes the caller's time as nanoseconds; `Instant` is opaque, so they
     # are mapped onto one anchor instant read once per process (`Instant` <-> epoch category).
-    "rtc-ffi/src/clock.rs": (1, "the C ABI's anchor for the caller's nanoseconds"),
+    # Its driven layer owns sockets and a thread, so it is a driver and reads the clock (once,
+    # in the same file).
+    "rtc-ffi/src/clock.rs": (2, "the C ABI's anchor for the caller's nanoseconds; the driven layer's clock"),
 }
 
 HEADER = """\

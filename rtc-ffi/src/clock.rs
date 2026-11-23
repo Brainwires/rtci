@@ -31,3 +31,10 @@ pub fn instant(now_ns: u64) -> Instant {
 pub fn nanos(at: Instant) -> u64 {
     u64::try_from(at.saturating_duration_since(anchor()).as_nanos()).unwrap_or(u64::MAX)
 }
+
+/// The current time in the nanoseconds of [`instant`]: the driven layer's clock, which owns
+/// its sockets and so reads the time like any driver.
+#[cfg(feature = "driver")]
+pub(crate) fn now_ns() -> u64 {
+    nanos(Instant::now())
+}

@@ -30,6 +30,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod clock;
+#[cfg(feature = "driver")]
+pub mod driver;
 mod json;
 pub mod pc;
 

@@ -18,6 +18,12 @@ header = """/*
  */"""
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
 no_includes = true
+# The driven layer is in the default build; a build without the `driver` feature defines
+# RTC_FFI_NO_DRIVER before including the header.
+after_includes = """
+#if !defined(RTC_FFI_NO_DRIVER) && !defined(RTC_FFI_DRIVER)
+#define RTC_FFI_DRIVER 1
+#endif"""
 cpp_compat = true
 documentation = true
 documentation_style = "c99"
@@ -33,6 +39,9 @@ include = ["RtcAddr", "RtcTransport", "RtcMessage"]
 "RtcAddr" = "rtc_addr"
 "RtcTransport" = "rtc_transport"
 "RtcMessage" = "rtc_message"
+"DrivenHandle" = "rtc_driven"
+"MuxHandle" = "rtc_mux"
+"RtcDrivenCallback" = "rtc_driven_callback"
 
 [parse]
 parse_deps = false

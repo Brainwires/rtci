@@ -135,13 +135,13 @@ pub(crate) enum Interceptors {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SettingsJson {
-    ice_lite: Option<bool>,
+    pub(crate) ice_lite: Option<bool>,
     #[serde(rename = "nat1to1Ips")]
-    nat_1to1_ips: Option<Vec<String>>,
+    pub(crate) nat_1to1_ips: Option<Vec<String>>,
     #[serde(rename = "nat1to1CandidateType")]
-    nat_1to1_candidate_type: Option<RTCIceCandidateType>,
+    pub(crate) nat_1to1_candidate_type: Option<RTCIceCandidateType>,
     answering_dtls_role: Option<RTCDtlsRole>,
-    tcp_candidate_gathering: Option<bool>,
+    pub(crate) tcp_candidate_gathering: Option<bool>,
     ice_credentials: Option<IceCredentialsJson>,
     ice_timeouts: Option<IceTimeoutsJson>,
     disable_certificate_fingerprint_verification: Option<bool>,

@@ -200,8 +200,16 @@ impl PcHandle {
         settings: Option<&str>,
         now_ns: u64,
     ) -> FfiResult<Self> {
+        Self::with_settings(configuration, json::parse(settings)?, now_ns)
+    }
+
+    /// As [`new`](Self::new) with the settings already parsed.
+    pub(crate) fn with_settings(
+        configuration: Option<&str>,
+        mut settings: SettingsJson,
+        now_ns: u64,
+    ) -> FfiResult<Self> {
         let configuration: ConfigurationJson = json::parse(configuration)?;
-        let mut settings: SettingsJson = json::parse(settings)?;
         let (media_engine, registry) = json::media(settings.interceptors)?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(configuration.build())
@@ -240,7 +248,7 @@ impl PcHandle {
         u64::MAX
     }
 
-    fn next_read(&mut self) -> FfiResult<Option<(RtcMessage, Vec<u8>)>> {
+    pub(crate) fn next_read(&mut self) -> FfiResult<Option<(RtcMessage, Vec<u8>)>> {
         let Some(TaggedRTCMessage { now, message }) = self.pc.poll_read() else {
             return Ok(None);
         };

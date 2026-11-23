@@ -16,6 +16,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#if !defined(RTC_FFI_NO_DRIVER) && !defined(RTC_FFI_DRIVER)
+#define RTC_FFI_DRIVER 1
+#endif
 
 // The version of this C interface. It changes whenever a function signature, a struct layout
 // or the meaning of a status code changes; a binding checks it at load time.
@@ -66,9 +69,29 @@
 // The transport protocol of a datagram: TCP (framed by the application, RFC 4571).
 #define RTC_PROTOCOL_TCP 1
 
+#if defined(RTC_FFI_DRIVER)
+// A driven peer connection (C: `rtc_driven`).
+typedef struct rtc_driven rtc_driven;
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// A shared port (C: `rtc_mux`). Thread-safe; free it after the peer connections using it.
+typedef struct rtc_mux rtc_mux;
+#endif
+
 // A peer connection of the sans-I/O layer (C: `rtc_pc`). Not thread-safe: calls on one handle
 // must not overlap.
 typedef struct rtc_pc rtc_pc;
+
+#if defined(RTC_FFI_DRIVER)
+// The callback of [`rtc_driven_set_callback`]: the user pointer, the item's JSON header (not
+// NUL-terminated) and its payload. Both buffers are valid for the call only.
+typedef void (*rtc_driven_callback)(void *user,
+                                    const char *json,
+                                    size_t json_len,
+                                    const uint8_t *data,
+                                    size_t data_len);
+#endif
 
 // A socket address: `family` 4 or 6 (0: none), the address in network order (an IPv4 one in
 // the first four bytes), the port in host order.
@@ -133,6 +156,99 @@ void rtc_string_free(char *s);
 // The number of objects (handles and strings) the library handed out that were not freed yet.
 // For leak checks in tests; 0 when everything was freed.
 int64_t rtc_debug_live_objects(void);
+
+#if defined(RTC_FFI_DRIVER)
+// Creates a driven peer connection: `configuration_json` and `settings_json` as for
+// `rtc_pc_new`, `options_json` the driver's options (`bindAddresses`, `includeLoopback`,
+// `includeLinkLocal`, `portRange` `{"min","max"}`, `tcp`, `natIps`, `natCandidateType`,
+// `iceLite`), `mux` a shared port or null. The sockets are bound and the host candidates given
+// before it returns. Free with [`rtc_driven_free`].
+int32_t rtc_driven_new(const char *configuration_json,
+                       const char *settings_json,
+                       const char *options_json,
+                       const struct rtc_mux *mux,
+                       struct rtc_driven **out);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Calls `method` with `params_json` (and `data` for `dataChannelSend`, `writeRtp`,
+// `writeFrame`) on the driver's thread and waits for it; the result's JSON goes to
+// `out_json` (free with `rtc_string_free`; `null` for a method that returns nothing).
+//
+// Methods: `createOffer` (`RTCOfferOptions`), `createAnswer`, `setLocalDescription` and
+// `setRemoteDescription` (`{"type","sdp"}`), `addIceCandidate` (`RTCIceCandidateInit` or
+// null), `restartIce`, `setConfiguration`, `states`, `description` (`{"which"}` as
+// `rtc_pc_description`), `iceUsernameFragments`, `createDataChannel` (`{"label","init"}` →
+// `{"channel"}`), `dataChannelSend` (`{"channel","isString"}`), `dataChannelClose`,
+// `dataChannelInfo`, `setBufferedAmountLowThreshold` (`{"channel","threshold"}`),
+// `addTrack` (a track → `{"sender"}`), `removeTrack` (`{"sender"}`), `addTransceiver`
+// (`{"kind","init"}` → `{"transceiver"}`), `transceivers`, `setDirection`
+// (`{"transceiver","direction"}`), `stopTransceiver`, `senderInfo` (`{"sender"}`),
+// `receiverInfo` (`{"receiver"}`), `writeRtp` (`{"sender"}`), `writeFrame`
+// (`{"sender","samples"}`), `getStats` (`{"selector": null | "sender" | "receiver", "id"}`),
+// `localAddresses`, `close`.
+int32_t rtc_driven_call(const struct rtc_driven *driven,
+                        const char *method,
+                        const char *params_json,
+                        const uint8_t *data,
+                        size_t len,
+                        char **out_json);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Delivers every later item to `callback` on the driver's thread instead of the queue (null
+// returns to the queue). Items already queued stay there for [`rtc_driven_next`].
+int32_t rtc_driven_set_callback(const struct rtc_driven *driven,
+                                rtc_driven_callback callback,
+                                void *user);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Waits up to `timeout_ms` for an item: [`RTC_OK`] when one is queued, [`RTC_EMPTY`] on
+// timeout, [`RTC_ERR_CLOSED`] when the thread ended and the queue is empty. Blocking: from
+// Deno, declare it `nonblocking`.
+int32_t rtc_driven_wait(const struct rtc_driven *driven, uint32_t timeout_ms);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Takes the next queued item: its JSON header to `buf[0..*json_len]` and its payload right
+// after it (`buf[*json_len..*json_len + *data_len]`). [`RTC_EMPTY`] when the queue is empty;
+// [`RTC_ERR_BUFFER_TOO_SMALL`] (with both lengths) keeps it.
+int32_t rtc_driven_next(const struct rtc_driven *driven,
+                        uint8_t *buf,
+                        size_t cap,
+                        size_t *json_len,
+                        size_t *data_len);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Closes the connection (telling the remote), stops the thread and closes the sockets; the
+// handle stays valid (waits return [`RTC_ERR_CLOSED`] once the queue is drained) until
+// [`rtc_driven_free`].
+int32_t rtc_driven_close(const struct rtc_driven *driven);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Closes (as [`rtc_driven_close`]) and frees a driven peer connection. Null is ignored.
+void rtc_driven_free(struct rtc_driven *driven);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Opens a shared port: `options_json` is `{"udp": "ip:port", "tcp": "ip:port"}` (`tcp`
+// optional; port 0 picks one). Pass the handle to [`rtc_driven_new`](super::rtc_driven_new) of
+// every peer connection that is to share it; free it with [`rtc_mux_free`] after them.
+int32_t rtc_mux_new(const char *options_json, struct rtc_mux **out);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// The bound addresses of a shared port: `{"udp": "ip:port", "tcp": "ip:port" or null}`.
+int32_t rtc_mux_addresses(const struct rtc_mux *mux, char **out_json);
+#endif
+
+#if defined(RTC_FFI_DRIVER)
+// Closes a shared port and joins its threads. Null is ignored.
+void rtc_mux_free(struct rtc_mux *mux);
+#endif
 
 // Creates a peer connection. `configuration_json` is a W3C `RTCConfiguration` (`iceServers`,
 // `iceTransportPolicy`, `bundlePolicy`, `rtcpMuxPolicy`, `iceCandidatePoolSize`) and
