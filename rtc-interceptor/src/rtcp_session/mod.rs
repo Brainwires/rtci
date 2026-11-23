@@ -2367,6 +2367,9 @@ impl Interceptor for RtcpSessionInterceptor {
         match self.remotes.get_mut(&info.ssrc) {
             Some(remote) => {
                 remote.stream.set_clock_rate(info.clock_rate);
+                remote
+                    .stream
+                    .set_payload_clock_rates(&info.payload_clock_rates);
                 remote.rrtr = rrtr;
                 remote.kind = Kind::of(&info.mime_type);
             }
@@ -2374,7 +2377,11 @@ impl Interceptor for RtcpSessionInterceptor {
                 self.remotes.insert(
                     info.ssrc,
                     Remote {
-                        stream: ReceiverStream::new(info.ssrc, info.clock_rate),
+                        stream: {
+                            let mut stream = ReceiverStream::new(info.ssrc, info.clock_rate);
+                            stream.set_payload_clock_rates(&info.payload_clock_rates);
+                            stream
+                        },
                         kind: Kind::of(&info.mime_type),
                         rrtr,
                         gone: false,

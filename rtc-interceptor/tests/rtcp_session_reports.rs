@@ -463,6 +463,42 @@ fn the_participant_timeout_keeps_the_fixed_minimum_under_the_reduced_minimum() {
     assert_eq!(vec![RtcpSessionEvent::SourceTimedOut { ssrc: 200 }], events);
 }
 
+/// RFC 7160 section 4.3: a source that switches payload type, and with it clock rate, on one
+/// SSRC (Opus at 48 kHz to PCMU at 8 kHz) is timed with each packet's own rate: perfectly
+/// paced packets show no jitter in the receiver report.
+#[test]
+fn a_switch_of_clock_rate_on_one_ssrc_shows_no_jitter_on_a_steady_path() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    let mut remote = audio(200);
+    remote.payload_clock_rates = vec![(0, 8_000)];
+    chain.bind_remote_stream(&remote);
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut timestamp = 1_000u32;
+    for seq in 0..50u16 {
+        let at = base + Duration::from_millis(20 * u64::from(seq));
+        let mut packet = rtp(at, 200, seq, timestamp);
+        let pcmu = seq >= 25;
+        if let Packet::Rtp(p) = &mut packet.message.packet {
+            p.header.payload_type = if pcmu { 0 } else { 111 };
+        }
+        chain.handle_read(packet).unwrap();
+        // 20 ms: 960 ticks at 48 kHz, 160 at 8 kHz.
+        timestamp = timestamp.wrapping_add(if pcmu { 160 } else { 960 });
+    }
+    read(&mut chain);
+    let sent = run(&mut chain, base + secs(1.5));
+    let jitter: Vec<u32> = sent
+        .iter()
+        .flat_map(|sent| sent.get::<ReceiverReport>())
+        .flat_map(|rr| rr.reports.iter())
+        .filter(|report| report.ssrc == 200)
+        .map(|report| report.jitter)
+        .collect();
+    assert!(!jitter.is_empty());
+    assert!(jitter.iter().all(|j| *j <= 60), "{jitter:?}");
+}
+
 /// RFC 3550 6.5.1: the CNAME a remote source names is what binds its streams together; the
 /// session reports it.
 #[test]

@@ -1365,6 +1365,9 @@ pub(crate) fn create_stream_info(
         sdp_fmtp_line_fec: fec_format
             .map(|format| format.sdp_fmtp_line.clone())
             .unwrap_or_default(),
+        // The other payload types of the section and their clock rates (RFC 7160) are not
+        // passed here yet: a stream is timed with its first codec's rate.
+        payload_clock_rates: vec![],
     }
 }
 

@@ -551,6 +551,32 @@ mod tests {
         }
     }
 
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1.5: a receive delta holds
+    /// +/-8191.75 ms; a packet further from the one before starts a new feedback message,
+    /// whose reference time takes the gap.
+    #[test]
+    fn a_delta_beyond_its_range_starts_a_new_feedback_message() {
+        let mut recorder = Recorder::new(5000);
+        recorder.record(1234, 0, 64_000);
+        recorder.record(1234, 1, 64_000 + 9_000_000);
+        let packets = recorder.build_feedback_packet();
+        assert_eq!(2, packets.len());
+        let feedback = |i: usize| {
+            packets[i]
+                .as_any()
+                .downcast_ref::<TransportLayerCc>()
+                .unwrap()
+                .clone()
+        };
+        let (first, second) = (feedback(0), feedback(1));
+        assert_eq!(vec![0], received(&first));
+        assert_eq!(vec![1], received(&second));
+        assert_eq!(1, second.base_sequence_number);
+        // Reference times count 64 ms: the second is about 9 s after the first.
+        let gap = (second.reference_time - first.reference_time) as i64 * 64;
+        assert!((8_900..=9_100).contains(&gap), "{gap} ms");
+    }
+
     #[test]
     fn test_recorder_with_gaps() {
         let mut recorder = Recorder::new(5000);

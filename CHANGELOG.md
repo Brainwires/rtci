@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: FEC and congestion control signalling.
+  - A FlexFEC answer (`video/flexfec`, `video/flexfec-03`) states this endpoint's registered
+    fmtp; it repeated the offer's line, unknown options included (RFC 8627 section 5.2.1).
+  - `StreamInfo` has a new public field `payload_clock_rates` (the clock rate of each payload
+    type a remote source may switch to, RFC 7160 section 4.3); the receiver report jitter uses
+    the earlier packet's rate across a switch. Struct literals without `..Default::default()`
+    need the field. The peer connection leaves it empty for now.
 - **media conformance**: payload formats.
   - The default VP9 formats state `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6:
     a receiver "MUST" provide both); new `media_engine::VP9_RECEIVER_LIMITS`. Offers and

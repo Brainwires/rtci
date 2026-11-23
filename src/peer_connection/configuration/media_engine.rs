@@ -1612,6 +1612,23 @@ impl MediaEngine {
             RtpCodecKind::Application => &self.application_codecs,
             RtpCodecKind::Unspecified => return codec.rtp_codec.sdp_fmtp_line.clone(),
         };
+        // RFC 8627 section 5.2.1 (and draft-ietf-payload-flexible-fec-scheme-03 5.2.1): "Any
+        // unknown option in the offer must be ignored and deleted from the answer". A FlexFEC
+        // answer states this endpoint's own parameters (its `repair-window`), as a media
+        // codec's does. RTX and RED keep theirs: they name payload types of the description.
+        if answering
+            && crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
+                &codec.rtp_codec.mime_type,
+            )
+            && let Some(local) = registered.iter().find(|registered| {
+                registered
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+            })
+        {
+            return local.rtp_codec.sdp_fmtp_line.clone();
+        }
         if is_repair_codec(&codec.rtp_codec) {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }
