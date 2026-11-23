@@ -458,8 +458,8 @@ let registry = register_default_interceptors(Registry::new(), &mut media_engine)
 
 - `Rfc`: the engine's defaults, unchanged.
 - `Chrome`: libwebrtc's choice wherever both do a thing and choose differently (a timer, an order, a form on the wire,
-  a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (DTLS 1.3, SCTP
-  interleaving, RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
+  a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (SCTP interleaving,
+  RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
 - `StrictRfc`: the RFC form even where the default is the interoperable one; for conformance testing, it **does not
   interoperate with browsers**.
 
@@ -468,10 +468,10 @@ Settings given after `with_behaviour_profile` override it. The cargo feature `ch
 features: one crate of a build that turns it on changes the defaults of every user of `rtc` in that build.** Prefer the
 explicit call; `BehaviourProfile::compiled_default()` says which default a build has.
 
-[docs/behaviour-profiles.md](docs/behaviour-profiles.md) lists every governed behaviour: the setting, the clause, its
-value in each profile and the source of each Chrome value (observed in the recorded Chromium descriptions and the
-browser matrix, or marked unverified), the engine-only capabilities, and what Chrome does that the engine cannot
-express.
+[docs/behaviour-profiles.md](docs/behaviour-profiles.md) lists every governed behaviour (40): the setting, the clause,
+its value in each profile and the source of each Chrome value, either observed in the recorded Chromium descriptions
+and the browser matrix (11) or read in libwebrtc's public source at a pinned revision, with the file and symbol (29;
+none is unverified); the engine-only capabilities; and what Chrome does that the engine cannot express (11).
 
 ## What's New in 0.21
 

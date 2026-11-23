@@ -231,6 +231,7 @@ pub(super) fn new_dtls_transport(
         crypto_provider,
     })?;
     dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+    dtls_transport.flight_interval_rule = setting_engine.dtls_flight_interval;
     Ok(dtls_transport)
 }
 
@@ -782,6 +783,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
+            ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
@@ -1252,6 +1254,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
             ice_pacing: self.stated_ice_pacing(),
+            ice_options_in_media_sections: self.setting_engine.ice_options_in_media_sections,
             ls_groups: if include_unmatched {
                 [
                     &self.current_local_description,
@@ -2725,17 +2728,18 @@ impl RTCPeerConnection {
 
     /// The Ta a description states in `a=ice-pacing` (RFC 8839 sections 4.3.1, 4.3.2: a full
     /// implementation "SHOULD include an 'ice-pacing' attribute" in offers and answers, a lite
-    /// one "MUST NOT"): the proposed one, else the default 50 ms (RFC 8445 section 14.2).
+    /// one "MUST NOT"): the proposed one, else the default 50 ms (RFC 8445 section 14.2),
+    /// unless `SettingEngineBuilder::with_default_ice_pacing_stated(false)` leaves the default
+    /// unstated.
     pub(super) fn stated_ice_pacing(&self) -> Option<std::time::Duration> {
         if self.setting_engine.candidates.ice_lite {
             return None;
         }
-        Some(
-            self.ice_transport()
-                .agent
-                .proposed_pacing()
-                .unwrap_or(std::time::Duration::from_millis(50)),
-        )
+        match self.ice_transport().agent.proposed_pacing() {
+            Some(ta) => Some(ta),
+            None if self.setting_engine.default_ice_pacing_omitted => None,
+            None => Some(std::time::Duration::from_millis(50)),
+        }
     }
 
     /// The initiation an offer or answer states in `a=ecn-capable-rtp` (RFC 6679 section 6.1):

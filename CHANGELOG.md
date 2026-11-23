@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection**: behaviour profile values verified against libwebrtc's source
+  (`conf/profile-2-verified-values`). The 26 unverified Chrome values were read in libwebrtc's
+  public source (`main` at `a222406d49ec`, 2026-11-23; Chromium's glue at `8dafa8bce175`,
+  BoringSSL at `289645a45072`); each row now cites the file, the symbol and the revision. 40
+  governed behaviours (was 35): 11 observed, 29 from the source, 0 unverified; 11 not
+  expressible (was 10).
+  - Wrong Chrome values corrected: `sctp.rto` is 500 ms / 400 ms / 3 s (was 500 / 220 ms / 60 s:
+    dcsctp's `rto_min` is 400 ms, 220 ms is `min_rtt_variance`, and libwebrtc caps the timer
+    backoff at 3 s); `gcc.threshold-time-base` is the new `ThresholdTimeBase::ArrivalCapped`
+    (libwebrtc's `TrendlineEstimator::UpdateThreshold` steps over the arrival gaps, capped at
+    100 ms, not the departure gaps).
+  - New governed behaviours: `dtls.srtp-profile-order` (libwebrtc offers AES_CM_128_HMAC_SHA1_80
+    before GCM; the engine GCM first), `sctp.max-retransmissions` (libwebrtc never gives up on
+    retransmissions), and three new settings: `SettingEngineBuilder::with_ice_options_in_media_sections`
+    (`a=ice-options` in each section, as Chromium), `with_default_ice_pacing_stated` (no
+    `a=ice-pacing` for the default Ta, as Chromium), `with_dtls_flight_interval(DtlsFlightInterval)`
+    (`Rfc9147`, the default, or libwebrtc's two round trips within 50 ms and 3 s). Also
+    `without_sctp_max_retransmissions`. The `Chrome` profile's offers now place `a=ice-options` and
+    leave out `a=ice-pacing` as Chromium's do; `tests/behaviour_profiles.rs` no longer accepts
+    session-level `a=ice-options` or an extra `a=ice-pacing` under `Chrome`.
+  - Breaking: `ThresholdTimeBase` (rtc-interceptor) has a third variant, `ArrivalCapped`; its
+    `Departure` doc no longer calls it libwebrtc's.
+  - Corrected notes: libwebrtc does not retransmit ICE connectivity checks at all (each is sent once,
+    the 250 ms RTO is for server requests); DTLS 1.3 is not engine-only (libwebrtc's factory default is
+    DTLS 1.3); flexfec-03 and RFC 8888 are behind field trials in Chromium; the doc of
+    `with_unique_transport_credentials` now gives libwebrtc's rule for offers and answers (credentials
+    per transport, shared within a BUNDLE group; its offers bundle every section whatever the
+    policy).
+
 - **peer connection**: behaviour profiles (`conf/profile-1-behaviour-profiles`).
   - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtc::peer_connection::configuration`), applied by
     `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and

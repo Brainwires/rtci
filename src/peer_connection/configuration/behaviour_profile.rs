@@ -11,9 +11,11 @@
 //! - [`BehaviourProfile::Chrome`]: libwebrtc's (Chrome's) choice wherever the engine and
 //!   libwebrtc both do a thing and choose differently: a timer value, an ordering, a form on
 //!   the wire, a lenient or a strict acceptance rule. It never turns off a capability the engine
-//!   has and Chrome lacks (DTLS 1.3, SCTP message interleaving, RFC 8888 feedback, FlexFEC per
-//!   RFC 8627, ...): those negotiate down with a Chrome peer by themselves, so a `Chrome`
-//!   profile's offers are a superset of Chrome's.
+//!   has and Chrome lacks (SCTP message interleaving, RFC 8888 feedback, FlexFEC per RFC 8627,
+//!   ...): those negotiate down with a Chrome peer by themselves, so a `Chrome` profile's
+//!   offers are a superset of Chrome's. Each Chrome value is observed in the recorded Chromium
+//!   descriptions or read in libwebrtc's source at a pinned revision (the table names the file,
+//!   the symbol and the commit).
 //! - [`BehaviourProfile::StrictRfc`]: the RFC form even where the engine's default is the
 //!   interoperable one (the audit's `setting` rows and a few RFC SHOULDs). For conformance
 //!   testing: it does **not** interoperate with browsers (Chromium, Firefox and WebKit refuse a
@@ -64,8 +66,9 @@ use std::time::Duration;
 use crate::peer_connection::configuration::interceptor_registry::DefaultInterceptorOptions;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::configuration::setting_engine::{
-    SctpMaxMessageSize, SettingEngine, SettingEngineBuilder,
+    DtlsFlightInterval, SctpMaxMessageSize, SettingEngine, SettingEngineBuilder,
 };
+use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 
 #[cfg(test)]
 #[path = "behaviour_profile_test.rs"]
@@ -135,8 +138,12 @@ pub(crate) enum Evidence {
     /// Seen: in the recorded Chromium descriptions (`tests/fixtures/browser-sdp/chromium--*`)
     /// or in a cell of the browser matrix.
     Observed,
-    /// From knowledge of libwebrtc's source, not observed in this repository: marked
-    /// "unverified" in the table.
+    /// Read in libwebrtc's source at a pinned revision: the row names the file, the symbol and
+    /// the revision (`docs/behaviour-profiles.md` the full commit).
+    Source,
+    /// Neither observed nor established from the source: marked "unverified" in the table,
+    /// with the reason. No row is at present.
+    #[allow(dead_code)]
     Unverified,
 }
 
@@ -202,6 +209,34 @@ fn sctp_rto_shown(rto: Option<sctp::RtoConfig>) -> Shown {
     Shown(match rto {
         None => "None (1s / 1s / 60s)".to_owned(),
         Some(rto) => format!("{:?} / {:?} / {:?}", rto.initial, rto.min, rto.max),
+    })
+}
+
+fn sctp_max_retransmissions_shown(limit: Option<usize>) -> Shown {
+    Shown(match limit {
+        None => "None (10)".to_owned(),
+        Some(usize::MAX) => "unlimited".to_owned(),
+        Some(limit) => limit.to_string(),
+    })
+}
+
+/// libwebrtc's DTLS-SRTP profiles in its order (`CryptoOptions::GetSupportedDtlsSrtpCryptoSuites`
+/// with GCM on and not preferred).
+const LIBWEBRTC_SRTP_PROFILES: [SrtpProtectionProfile; 3] = [
+    SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+    SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
+    SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+];
+
+/// The profiles a connection offers: the configured ones, or the engine's default list.
+fn srtp_profiles_shown(profiles: &[SrtpProtectionProfile]) -> Shown {
+    Shown(if profiles.is_empty() {
+        format!(
+            "{:?}",
+            crate::peer_connection::transport::dtls::default_srtp_protection_profiles()
+        )
+    } else {
+        format!("{profiles:?}")
     })
 }
 
@@ -297,8 +332,8 @@ governed_behaviours! {
         rfc: NominationAcceptance::HighestPriority => "HighestPriority",
         chrome: NominationAcceptance::Latest => "Latest",
         strict_rfc: NominationAcceptance::HighestPriority => "HighestPriority",
-        chrome_source: "libwebrtc P2PTransportChannel: the controlled agent switches to the connection nominated last (renomination, the NOMINATION attribute) whatever its priority",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/basic_ice_controller.cc::BasicIceController::CompareConnections @ a222406d: on the controlled side a writable, receiving pair is ranked by its remote nomination value (the NOMINATION attribute with renomination, 1 for USE-CANDIDATE), then by the time data last arrived on it, and only then by priority; p2p_transport_channel.cc::P2PTransportChannel::OnNominated switches at once. Without renomination (Chromium writes no a=ice-options:renomination) a nominated pair takes over when the peer moves its data to it: `Latest` is the closest form, not HighestPriority",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_nomination_acceptance(v),
         read: |s: &SettingEngine| s.ice.nomination_acceptance,
     },
@@ -309,8 +344,8 @@ governed_behaviours! {
         rfc: FailedNomination::FailChecklist => "FailChecklist",
         chrome: FailedNomination::Retry => "Retry",
         strict_rfc: FailedNomination::FailChecklist => "FailChecklist",
-        chrome_source: "libwebrtc P2PTransportChannel: a connection that has been writable is kept and pinged (and nominated) again; one unanswered nomination does not fail the transport",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/connection.cc::Connection::UpdateState @ a222406d: an unanswered check makes a pair unreliable (kConnectionWriteConnectFailures 5 and kConnectionWriteConnectTimeout 5 s, p2p_constants.h) and timed out only after kConnectionWriteTimeout 15 s without a response; it is pinged (and, selected, nominated) again meanwhile, and basic_ice_controller.cc::ReadyToSend keeps sending on an unreliable pair",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_failed_nomination(v),
         read: |s: &SettingEngine| s.ice.failed_nomination,
     },
@@ -321,8 +356,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc Connection::Ping: the controlling agent's pings of the selected connection carry USE-CANDIDATE",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/basic_ice_controller.cc::BasicIceController::GetUseCandidateAttr @ a222406d: the default NominationMode::SEMI_AGGRESSIVE (p2p/base/ice_transport_internal.h, IceConfig::default_nomination_mode) puts USE-CANDIDATE on every ping of the selected connection (connection.cc::Connection::BuildPingRequest)",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_nomination_on_consent_checks(v),
         read: |s: &SettingEngine| s.ice.nominate_on_consent_checks,
     },
@@ -333,8 +368,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc P2PTransportChannel: the best writable connection becomes the selected one, and carries data, before a nomination completes",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/basic_ice_controller.cc::BasicIceController::ShouldSwitchConnection and ::ReadyToSend @ a222406d: the selected connection is the best one that is writable (or unreliable), nominated or not; p2p_transport_channel.cc::SwitchSelectedConnectionInternal then sends on it and nominates it",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_data_before_nomination(v),
         read: |s: &SettingEngine| s.ice.send_data_before_nomination,
     },
@@ -345,8 +380,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc P2PTransportChannel::OnCandidatesReady: a gathered local candidate is paired at once, before the application has signalled it",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/p2p_transport_channel.cc::P2PTransportChannel::OnPortReady @ a222406d: a new local port is paired with every remote candidate known (CreateConnection) when it is ready; OnCandidatesReady only tells the application (NotifyCandidateGathered)",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_pairing_before_candidates_are_conveyed(v),
         read: |s: &SettingEngine| s.ice.pair_before_conveyed,
     },
@@ -357,10 +392,34 @@ governed_behaviours! {
         rfc: None => "None",
         chrome: Some(String::new()) => "Some(\"\")",
         strict_rfc: None => "None",
-        chrome_source: "libwebrtc ConnectionRequest: connectivity checks carry USERNAME, PRIORITY, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE, MESSAGE-INTEGRITY and FINGERPRINT, no SOFTWARE",
-        evidence: Unverified,
+        chrome_source: "libwebrtc p2p/base/connection.cc::Connection::BuildPingRequest @ a222406d: a check carries USERNAME, GOOG-NETWORK-INFO, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE or NOMINATION, PRIORITY, MESSAGE-INTEGRITY and FINGERPRINT (GOOG-MISC-INFO, GOOG-DELTA, DTLS-in-STUN behind field trials); no SOFTWARE, nor in the response (Connection::SendStunBindingResponse)",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ice_software(v),
         read: |s: &SettingEngine| s.ice.software.clone(),
+    },
+    {
+        id: "ice.options-in-media-sections",
+        setting: "SettingEngineBuilder::with_ice_options_in_media_sections",
+        clause: "RFC 8839 5.6",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "a=ice-options:trickle in every section of every Chromium fixture, after a=ice-pwd (chromium--balanced-rust-s-offer-has-a-transport-per-media-type-answered-without-bundle--1-answer.sdp); source: libwebrtc api/webrtc_sdp.cc::BuildMediaDescription @ a222406d calls BuildIceOptions per section",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_options_in_media_sections(v),
+        read: |s: &SettingEngine| s.ice_options_in_media_sections,
+    },
+    {
+        id: "ice.default-pacing-stated",
+        setting: "SettingEngineBuilder::with_default_ice_pacing_stated",
+        clause: "RFC 8839 4.3.1 (SHOULD), RFC 8445 14.2",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "no Chromium fixture has a=ice-pacing; source: libwebrtc api/webrtc_sdp.cc @ a222406d writes and reads none; its checks are paced by p2p/base/p2p_constants.h kWeakPingInterval 48 ms. A Ta other than the default is stated under every profile (RFC 8445 14.2 MUST)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_default_ice_pacing_stated(v),
+        read: |s: &SettingEngine| !s.default_ice_pacing_omitted,
     },
     // ---- DTLS / SDP fingerprints ----
     {
@@ -370,8 +429,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc SSLFingerprint::CreateUniqueFromRfc4572 decodes the hex digits of either case",
-        evidence: Unverified,
+        chrome_source: "libwebrtc rtc_base/ssl_fingerprint.cc::SSLFingerprint::CreateFromRfc4572 @ a222406d decodes with rtc_base/string_encode.cc::HexDecode, which takes A-F and a-f",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_lowercase_fingerprints_accepted(v),
         read: |s: &SettingEngine| s.accept_lowercase_fingerprints,
     },
@@ -386,6 +445,30 @@ governed_behaviours! {
         evidence: Observed,
         apply_setting: |b: SettingEngineBuilder, v| b.with_dtls_use_srtp_on_every_association(v),
         read: |s: &SettingEngine| !s.dtls_use_srtp_only_with_media,
+    },
+    {
+        id: "dtls.flight-interval",
+        setting: "SettingEngineBuilder::with_dtls_flight_interval",
+        clause: "RFC 9147 5.8.2, RFC 6347 4.2.4.1",
+        rfc: DtlsFlightInterval::Rfc9147 => "Rfc9147",
+        chrome: DtlsFlightInterval::Libwebrtc => "Libwebrtc",
+        strict_rfc: DtlsFlightInterval::Rfc9147 => "Rfc9147",
+        chrome_source: "libwebrtc p2p/dtls/dtls_transport.cc::ComputeRetransmissionTimeout @ a222406d: max(kMinDtlsHandshakeTimeoutMs 50, min(kMaxDtlsHandshakeTimeoutMs 3000, 2 * ICE RTT)), set by DtlsTransportInternalImpl::ConfigureHandshakeTimeout; without an RTT the 50 ms of rtc_base/openssl_stream_adapter.h dtls_handshake_timeout_ms_ (BoringSSL then doubles it up to 60 s, ssl/d1_lib.cc @ 289645a4)",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_dtls_flight_interval(v),
+        read: |s: &SettingEngine| s.dtls_flight_interval,
+    },
+    {
+        id: "dtls.srtp-profile-order",
+        setting: "SettingEngineBuilder::with_srtp_protection_profiles",
+        clause: "RFC 5764 4.1.1, 4.1.2, RFC 7714 14.2",
+        rfc: Vec::new() => "[Srtp_Aead_Aes_256_Gcm, Srtp_Aead_Aes_128_Gcm, Srtp_Aes128_Cm_Hmac_Sha1_80]",
+        chrome: LIBWEBRTC_SRTP_PROFILES.to_vec() => "[Srtp_Aes128_Cm_Hmac_Sha1_80, Srtp_Aead_Aes_256_Gcm, Srtp_Aead_Aes_128_Gcm]",
+        strict_rfc: Vec::new() => "[Srtp_Aead_Aes_256_Gcm, Srtp_Aead_Aes_128_Gcm, Srtp_Aes128_Cm_Hmac_Sha1_80]",
+        chrome_source: "libwebrtc api/crypto/crypto_options.cc::CryptoOptions::GetSupportedDtlsSrtpCryptoSuites @ a222406d: with prefer_gcm_crypto_suites false (api/crypto/crypto_options.h; Chromium sets enable_gcm_crypto_suites and leaves it, third_party/blink/renderer/modules/peerconnection/rtc_peer_connection_handler.cc @ Chromium 8dafa8bc) AES_CM_128_HMAC_SHA1_80 comes first, GCM 256 and 128 after it; a DTLS server takes its own most preferred profile (BoringSSL ssl/extensions.cc::ext_srtp_parse_clienthello @ 289645a4). The 32-bit tag is off in both",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_srtp_protection_profiles(v),
+        read: |s: &SettingEngine| srtp_profiles_shown(&s.srtp_protection_profiles),
     },
     // ---- JSEP / SDP ----
     {
@@ -431,8 +514,8 @@ governed_behaviours! {
         rfc: true => "true",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "Chrome honours RTCBundlePolicy max-bundle (W3C webrtc-pc 4.2.5)",
-        evidence: Unverified,
+        chrome_source: "libwebrtc pc/jsep_transport_controller.cc::JsepTransportController::ValidateAndMaybeUpdateBundleGroups @ a222406d: under kBundlePolicyMaxBundle a description of more than one section without BUNDLE is refused (\"max-bundle is used but no bundle group found\"); libwebrtc writes no a=bundle-only itself (api/webrtc_sdp.cc writes it only for content marked bundle_only)",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_max_bundle_as_must_bundle(v),
         read: |s: &SettingEngine| !s.max_bundle_ignored,
     },
@@ -443,8 +526,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
-        chrome_source: "Chrome follows W3C webrtc-pc 5.4 stop(): a stopping transceiver does not affect createAnswer",
-        evidence: Unverified,
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::GetMediaDescriptionOptionsForTransceiver @ a222406d: a section is stopped in createOffer when its transceiver is stopping, in createAnswer only when it is stopped",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_stopping_transceiver_rejected_in_answer(v),
         read: |s: &SettingEngine| s.stopping_transceiver_rejected_in_answer,
     },
@@ -455,8 +538,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
-        chrome_source: "libwebrtc webrtc_sdp.cc trims and skips what it does not use in an attribute value",
-        evidence: Unverified,
+        chrome_source: "libwebrtc api/webrtc_sdp.cc::ParseRtcpFbAttribute @ a222406d: the fields are split on spaces and the parameter is the concatenation of the rest, so a trailing space adds an empty field and is accepted",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_strict_sdp_attribute_grammar(v),
         read: |s: &SettingEngine| s.strict_sdp_attribute_grammar,
     },
@@ -467,8 +550,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc CreateSessionDescription(kRollback, ...) makes the rollback without parsing the SDP",
-        evidence: Unverified,
+        chrome_source: "libwebrtc api/jsep.cc::CreateSessionDescription @ a222406d: for SdpType::kRollback it returns CreateRollbackSessionDescription() without parsing the sdp",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_rollback_content_ignored(v),
         read: |s: &SettingEngine| s.rollback_content_ignored,
     },
@@ -479,8 +562,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "Chrome's createAnswer is W3C webrtc-pc's: repeated rids reduced to the first, answer rids without restrictions",
-        evidence: Unverified,
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::GetSendEncodingsFromRemoteDescription @ a222406d: \"We will always use the first alternative\" of each a=simulcast stream; GetMediaDescriptionOptionsForTransceiver writes the answer's send rids (RidDescription) with payload types only, no restrictions",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_w3c_simulcast_answer(v),
         read: |s: &SettingEngine| s.w3c_simulcast_answer,
     },
@@ -491,8 +574,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc media_session.cc: an inactive simulcast layer is written paused (~) in a=simulcast without RFC 7728",
-        evidence: Unverified,
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::GetMediaDescriptionOptionsForTransceiver @ a222406d: an inactive encoding becomes SimulcastLayer(rid, /*is_paused=*/true), written ~rid by pc/simulcast_sdp_serializer.cc; libwebrtc has no RFC 7728 pause",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_rid_pause_marks(v),
         read: |s: &SettingEngine| s.rid_pause_marks,
     },
@@ -526,15 +609,30 @@ governed_behaviours! {
         setting: "SettingEngineBuilder::with_sctp_rto",
         clause: "RFC 9260 6.3.1, 16",
         rfc: None => "None (1s / 1s / 60s)",
-        chrome: sctp_rto(500, 220, 60_000) => "500ms / 220ms / 60s",
+        chrome: sctp_rto(500, 400, 3_000) => "500ms / 400ms / 3s",
         strict_rfc: None => "None (1s / 1s / 60s)",
-        chrome_source: "dcsctp DcSctpOptions defaults (rto_initial 500 ms, rto_min 220 ms, rto_max 60 s), which libwebrtc's DcSctpTransport keeps",
-        evidence: Unverified,
+        chrome_source: "libwebrtc net/dcsctp/public/dcsctp_options.h::DcSctpOptions @ a222406d: rto_initial 500 ms, rto_min 400 ms, rto_max 60 s (min_rtt_variance is the 220 ms); media/sctp/dcsctp_transport.cc::DcSctpTransport::CreateDcSctpOptions caps the timer backoff at kMaxTimerBackoffDuration 3 s, which the engine's RTO.Max (it bounds the doubling too, RFC 9260 6.3.3 rule E2) expresses as 3 s. A computed RTO over 3 s, which dcsctp keeps up to 60 s, is the difference",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v: Option<sctp::RtoConfig>| match v {
             Some(rto) => b.with_sctp_rto(rto.initial, rto.min, rto.max),
             None => b.without_sctp_rto(),
         },
         read: |s: &SettingEngine| sctp_rto_shown(s.sctp_rto),
+    },
+    {
+        id: "sctp.max-retransmissions",
+        setting: "SettingEngineBuilder::with_sctp_max_retransmissions",
+        clause: "RFC 9260 8.1, 8.2, 16 (SHOULD)",
+        rfc: None => "None (10)",
+        chrome: Some(usize::MAX) => "unlimited",
+        strict_rfc: None => "None (10)",
+        chrome_source: "libwebrtc media/sctp/dcsctp_transport.cc::DcSctpTransport::CreateDcSctpOptions @ a222406d: \"Don't close the connection automatically on too many retransmissions\": max_retransmissions and max_init_retransmits none (dcsctp's own default is 10, net/dcsctp/public/dcsctp_options.h); an unreachable peer is left to ICE",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v: Option<usize>| match v {
+            Some(limit) => b.with_sctp_max_retransmissions(limit),
+            None => b.without_sctp_max_retransmissions(),
+        },
+        read: |s: &SettingEngine| sctp_max_retransmissions_shown(s.sctp_max_retransmissions),
     },
     {
         id: "datachannel.send-before-ack",
@@ -543,8 +641,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc SctpDataChannel::UpdateState: an in-band channel opens once its DATA_CHANNEL_OPEN is sent (kHandshakeWaitingForAck), so send() works before the ACK",
-        evidence: Unverified,
+        chrome_source: "libwebrtc pc/sctp_data_channel.cc::SctpDataChannel::UpdateState @ a222406d: an in-band channel turns kOpen in kHandshakeWaitingForAck, once its DATA_CHANNEL_OPEN is sent; until the ACK its messages go ordered (SctpDataChannel::SendDataMessage)",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_data_channel_send_before_ack(v),
         read: |s: &SettingEngine| s.data_channel_send_before_ack,
     },
@@ -556,8 +654,8 @@ governed_behaviours! {
         rfc: true => "true",
         chrome: false => "false",
         strict_rfc: true => "true",
-        chrome_source: "libwebrtc keeps a sender's SSRC when it switches to a codec of another clock rate (RtpSenderAudio / RtpSenderVideo)",
-        evidence: Unverified,
+        chrome_source: "libwebrtc audio/audio_send_stream.cc::AudioSendStream::ConfigureStream @ a222406d: \"Configuration parameters which cannot be changed\", RTC_DCHECK(old_config.rtp.ssrc == new_config.rtp.ssrc) when the send codec changes",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ssrc_per_clock_rate(v),
         read: |s: &SettingEngine| !s.one_ssrc_across_clock_rates,
     },
@@ -568,8 +666,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
-        chrome_source: "libwebrtc RtcpReceiver parses every packet of a compound packet whose lengths hold, padding anywhere",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtcp_receiver.cc::RTCPReceiver::ParseCompoundPacket @ a222406d: each packet whose CommonHeader parses (version 2, length, its own padding: rtcp_packet/common_header.cc::CommonHeader::Parse) is handled, the first one need not be an SR or RR and padding is taken on any",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_strict_rtcp_validity(v),
         read: |s: &SettingEngine| s.strict_rtcp_validity,
     },
@@ -580,8 +678,8 @@ governed_behaviours! {
         rfc: EcnInitiation::RtpAndRtcp => "RtpAndRtcp",
         chrome: EcnInitiation::LeapOfFaith => "LeapOfFaith",
         strict_rfc: EcnInitiation::RtpAndRtcp => "RtpAndRtcp",
-        chrome_source: "libwebrtc's L4S sending (RFC 8888 feedback with ECN, behind a field trial) marks every packet from the first",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/congestion_controller/ect1_policy.cc::Ect1Policy::ShouldSendEct1 @ a222406d: every packet goes ECT(1) from the first once RFC 8888 feedback is negotiated and the controller adapts to ECN, until no feedback came for 500 ms (kEct1FeedbackTimeoutBeforeAck) or feedback shows it bleached; RFC 8888 is behind the WebRTC-RFC8888CongestionControlFeedback field trial (pc/media_session.cc::OfferRfc8888), off by default",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_initiation(v),
         read: |s: &SettingEngine| s.ecn_initiation,
     },
@@ -592,8 +690,8 @@ governed_behaviours! {
         rfc: EcnMarking::Rfc6679 => "Rfc6679",
         chrome: EcnMarking::L4s => "L4s",
         strict_rfc: EcnMarking::Rfc6679 => "Rfc6679",
-        chrome_source: "libwebrtc's L4S sending marks ECT(1)",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/congestion_controller/ect1_policy.cc::Ect1Policy @ a222406d and media/base/media_channel_impl.cc (rtc_options.ect_1 = options.send_as_ect1): the codepoint is ECT(1) (L4S); behind the WebRTC-RFC8888CongestionControlFeedback field trial",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_marking(v),
         read: |s: &SettingEngine| s.ecn_marking,
     },
@@ -604,8 +702,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "no Chromium description carries a=ecn-capable-rtp (fixtures); libwebrtc's L4S marks on ack ccfb alone",
-        evidence: Unverified,
+        chrome_source: "libwebrtc call/rtp_transport_controller_send.cc @ a222406d: Ect1Policy::SetFeedbackSupportsEcn(rfc_8888_feedback_negotiated) is the only negotiation; api/webrtc_sdp.cc has no a=ecn-capable-rtp, and no Chromium fixture carries it",
+        evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_without_signalling(v),
         read: |s: &SettingEngine| s.ecn_without_signalling,
     },
@@ -630,8 +728,8 @@ governed_behaviours! {
         rfc: Duration::ZERO => "0ns",
         chrome: Duration::from_secs(1) => "1s",
         strict_rfc: Duration::ZERO => "0ns",
-        chrome_source: "libwebrtc RTCPSender sends regular reports about once a second for video (kDefaultVideoReportInterval) and every 5 s for audio, never at the RFC 4585 default of trr-int 0",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtp_rtcp_impl2.cc (RTCPSender configuration) @ a222406d: rtcp_report_interval 5 s for audio, 1 s for video (media/base/media_config.h rtcp_report_interval_ms), drawn from [0.5, 1.5] of it, and for video sent above 72 kbit/s min(360 s / kbit/s, 1 s) (rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport); 1 s is the video value, see \"not expressible\" for audio",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_t_rr_interval = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_t_rr_interval,
     },
@@ -642,8 +740,8 @@ governed_behaviours! {
         rfc: true => "true",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc sends transport-wide feedback on its own timer, outside the RTCP report schedule",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::TransportSequenceNumberFeedbackGenenerator::Process @ a222406d: transport-wide feedback goes on its own timer, every 100 ms (kDefaultInterval) adjusted between 50 and 250 ms to the bitrate, outside the RTCP report schedule",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_immediate_congestion_feedback = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_immediate_congestion_feedback,
     },
@@ -654,8 +752,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
-        chrome_source: "libwebrtc reports the remote SSRCs once, from one local SSRC per RTCP packet",
-        evidence: Unverified,
+        chrome_source: "libwebrtc audio/channel_receive.cc (ReceiveStatistics per receive channel) and call/rtp_video_sender.cc (send modules with no receive statistics) @ a222406d: rtcp_sender.cc::RTCPSender::CreateReportBlocks reports each remote SSRC from the one receive module, not from every local SSRC",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_report_from_every_ssrc = v,
         read: |o: &DefaultInterceptorOptions| o.rtcp_report_from_every_ssrc,
     },
@@ -666,8 +764,8 @@ governed_behaviours! {
         rfc: false => "false",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc TransportFeedback: a packet reported received is reported received again when the base sequence number moves back over it",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnReceivedPacket @ a222406d: a late packet below periodic_window_start_seq_ moves the window back, and MaybeBuildFeedbackPacket reports every packet received from there, those reported already included",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.twcc_rereport_received = v,
         read: |o: &DefaultInterceptorOptions| o.twcc_rereport_received,
     },
@@ -700,10 +798,10 @@ governed_behaviours! {
         setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
         clause: "draft-ietf-rmcat-gcc-02 5.4",
         rfc: ThresholdTimeBase::Departure => "Departure",
-        chrome: ThresholdTimeBase::Departure => "Departure",
+        chrome: ThresholdTimeBase::ArrivalCapped => "ArrivalCapped",
         strict_rfc: ThresholdTimeBase::Arrival => "Arrival",
-        chrome_source: "libwebrtc TrendlineEstimator / OveruseDetector step the adaptive threshold by the send-time gaps",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/congestion_controller/goog_cc/trendline_estimator.cc::TrendlineEstimator::UpdateThreshold @ a222406d: the step is now_ms - last_update_ms_ capped at kMaxTimeDeltaMs 100, where now_ms is the packet's receive_time (delay_based_bwe.cc::DelayBasedBwe::IncomingPacketFeedback): the arrival gaps, capped; remote_bitrate_estimator/overuse_detector.cc the same",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_threshold_time_base = v,
         read: |o: &DefaultInterceptorOptions| o.gcc_threshold_time_base,
     },
@@ -714,8 +812,8 @@ governed_behaviours! {
         rfc: true => "true",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "libwebrtc AimdRateControl::TimeToReduceFurther lowers the estimate at most once per round trip",
-        evidence: Unverified,
+        chrome_source: "libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::TimeToReduceFurther @ a222406d: a decrease waits the round trip time held between 10 and 200 ms since the last change, or for the acknowledged rate to fall under half the estimate (delay_based_bwe.cc calls it on overuse)",
+        evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_one_decrease_per_round_trip = v,
         read: |o: &DefaultInterceptorOptions| o.gcc_one_decrease_per_round_trip,
     },
@@ -753,7 +851,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_message_interleaving",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 8260 I-DATA announced; Chromium announces none, so it negotiates down to DATA chunks",
+        note: "RFC 8260 I-DATA announced; libwebrtc announces it only under the WebRTC-DataChannelMessageInterleaving field trial (media/sctp/dcsctp_transport.cc::CreateDcSctpOptions @ a222406d), off by default, so it negotiates down to DATA chunks",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_path_mtu_discovery",
@@ -763,7 +861,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_zero_checksum",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 9653 zero checksum, used only when the peer announces it too",
+        note: "RFC 9653 zero checksum, used only when the peer announces it too; dcsctp has it but libwebrtc leaves zero_checksum_alternate_error_detection_method at None (net/dcsctp/public/dcsctp_options.h @ a222406d), so it announces none",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_weighted_fair_queueing",
@@ -773,7 +871,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_disable_sdp_tls_id",
         class: NotGovernedClass::EngineOnly,
-        note: "a=tls-id (RFC 8842) is written; Chromium writes none and ignores it",
+        note: "a=tls-id (RFC 8842) is written; libwebrtc writes and reads none (api/webrtc_sdp.cc @ a222406d has no tls-id)",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_tcp_candidate_gathering",
@@ -848,7 +946,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_pacing",
         class: NotGovernedClass::Same,
-        note: "Ta 50 ms, stated as a=ice-pacing:50 in every description (RFC 8839 5.5; Chromium writes none and ignores it, so it is part of the Chrome profile's superset); libwebrtc's weak ping interval is 48 ms, close enough not to change the proposal",
+        note: "Ta 50 ms by default, as RFC 8445 14.2; libwebrtc's checks go every kWeakPingInterval 48 ms while no pair is writable (p2p/base/p2p_constants.h @ a222406d), close enough not to change the proposal. Whether the default is written is the ice.default-pacing-stated row",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_pacing_group",
@@ -858,12 +956,12 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_timeouts",
         class: NotGovernedClass::Same,
-        note: "consent every 4 to 6 s and expiry at 30 s (RFC 7675). libwebrtc pings a stable connection every 2.5 s, which RFC 7675 5.1 forbids (\"MUST NOT ... less than 4 seconds\"): not expressible, see below",
+        note: "consent every 4 to 6 s and expiry at 30 s (RFC 7675). libwebrtc pings a strong, stable connection every kStrongAndStableWritableConnectionPingInterval 2.5 s (900 ms while stabilising) and declares it dead after kDeadConnectionReceiveTimeout 30 s (p2p/base/p2p_constants.h @ a222406d); a period under 4 s is what RFC 7675 5.1 forbids (\"MUST NOT ... less than 4 seconds\"): not expressible, see below",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_connection_attempts",
         class: NotGovernedClass::Same,
-        note: "Rc 7 / RTO doubling (RFC 8489 6.2.1); libwebrtc's retransmission schedule is not this setting's form (see \"not expressible\")",
+        note: "Rc 7 / RTO doubling (RFC 8489 6.2.1). libwebrtc does not retransmit a connectivity check at all: each is sent once (p2p/base/connection.cc::ConnectionRequest::OnSent, response timeout kConnectionResponseTimeout 60 s) and the pair is pinged again on the channel's schedule (see \"not expressible\")",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_multicast_dns_mode",
@@ -911,14 +1009,9 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "off: RTCP is used (RFC 8834 4.1)",
     },
     NotGoverned {
-        setting: "SettingEngineBuilder::with_srtp_protection_profiles",
-        class: NotGovernedClass::Same,
-        note: "AEAD_AES_256_GCM, AEAD_AES_128_GCM, AES_CM_128_HMAC_SHA1_80: libwebrtc's order with GCM on (unverified); no 32-bit tag in either",
-    },
-    NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_cipher_suites",
         class: NotGovernedClass::Same,
-        note: "DTLS 1.2 suites ECDSA-AES128-GCM, RSA-AES128-GCM, ECDSA-CHACHA20: BoringSSL's relative order (unverified); the TLS 1.3 suites in front belong to DTLS 1.3, an engine-only capability",
+        note: "DTLS 1.2: ECDSA-AES128-GCM, RSA-AES128-GCM, ECDSA-CHACHA20. libwebrtc offers BoringSSL's \"DEFAULT:!NULL:!aNULL:!SHA256:!SHA384:!aECDH:!AESGCM+AES256:!aPSK:!3DES\" (rtc_base/openssl_stream_adapter.cc @ a222406d), the same AEAD suites in BoringSSL's order and the ECDHE CBC-SHA suites as well, which the engine leaves out (a hardening, kept in every profile); DTLS 1.3 (TLS_AES_128_GCM_SHA256 first) both offer",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_answering_dtls_role",
@@ -928,17 +1021,12 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_max_streams",
         class: NotGovernedClass::Same,
-        note: "65535, as browsers ask for",
-    },
-    NotGoverned {
-        setting: "SettingEngineBuilder::with_sctp_max_retransmissions",
-        class: NotGovernedClass::Same,
-        note: "RFC 9260's 10; dcsctp's max_retransmissions is 10 as well (unverified)",
+        note: "65535, as dcsctp announces (announced_maximum_incoming_streams / outgoing, net/dcsctp/public/dcsctp_options.h @ a222406d)",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_data_channel_max_buffer_size",
         class: NotGovernedClass::Same,
-        note: "W3C rule with a 16 MiB send buffer, Chromium's",
+        note: "W3C rule with a 16 MiB send buffer, libwebrtc's DataChannelInterface::MaxSendQueueSize (api/data_channel_interface.h @ a222406d)",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dcep_handshake_timeout",
@@ -1141,6 +1229,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         class: NotGovernedClass::Input,
         note: "back to the RFC 9260 timers (the sctp.rto row's Rfc value)",
     },
+    NotGoverned {
+        setting: "SettingEngineBuilder::without_sctp_max_retransmissions",
+        class: NotGovernedClass::Input,
+        note: "back to RFC 9260's 10 (the sctp.max-retransmissions row's Rfc value)",
+    },
     // ---- deprecated, not read ----
     NotGoverned {
         setting: "SettingEngineBuilder::with_include_loopback_candidate",
@@ -1161,7 +1254,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "MediaEngine::set_flexfec_with_retransmission",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 8627 flexfec answering rule; Chromium negotiates flexfec-03 (always beside rtx), not the RFC format",
+        note: "RFC 8627 flexfec answering rule; libwebrtc offers flexfec-03 only under the WebRTC-FlexFEC-03 field trial (pc/media_session.cc @ a222406d), off by default: the Chromium fixtures carry no FEC format but red / ulpfec",
     },
     NotGoverned {
         setting: "MediaEngine::set_audio_packet_time",
@@ -1171,13 +1264,13 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "MediaEngine::set_header_extension_encryption",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 6904 encrypted audio levels offered beside the clear ones; Chromium takes the clear ones",
+        note: "RFC 6904 encrypted header extensions offered beside the clear ones; libwebrtc's CryptoOptions has them on (api/crypto/crypto_options.h @ a222406d) but Chromium turns them on only with the kWebRtcEncryptedRtpHeaderExtensions feature (rtc_peer_connection_handler.cc @ Chromium 8dafa8bc), and takes the clear ones",
     },
     // ---- interceptor options ----
     NotGoverned {
         setting: "DefaultInterceptorOptions::congestion_feedback",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 8888 (ack ccfb) offered beside transport-cc; Chromium answers transport-cc",
+        note: "RFC 8888 (ack ccfb) offered beside transport-cc; libwebrtc offers and accepts it only under the WebRTC-RFC8888CongestionControlFeedback field trial (pc/media_session.cc::OfferRfc8888 @ a222406d), so Chromium answers transport-cc",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::unnegotiated_tmmbr",
@@ -1187,12 +1280,12 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "DefaultInterceptorOptions::pacer_immediate_release",
         class: NotGovernedClass::Same,
-        note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget without waiting a tick too (unverified)",
+        note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc)",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::bandwidth_probing",
         class: NotGovernedClass::Same,
-        note: "probing on, as libwebrtc's ProbeController",
+        note: "probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate)",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::rapid_synchronisation",
@@ -1211,24 +1304,19 @@ pub(crate) struct NotExpressible {
 /// `scripts/behaviour-profiles.py` renders it: keep each entry's fields on lines of their own.
 pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
     NotExpressible {
-        behaviour: "STUN / ICE retransmission timer",
-        chrome: "first retransmission after 250 ms (STUN_INITIAL_RTO), a fixed schedule of up to 8 sends (unverified)",
-        needed: "an RTO setting in rtc-ice / rtc-stun; the engine's RTO is at least 500 ms (RFC 8445 14.3, a MUST: \"RTO = MAX (500ms, ...)\")",
+        behaviour: "ICE connectivity check retransmission",
+        chrome: "no retransmission: each check is sent once and given kConnectionResponseTimeout 60 s (p2p/base/connection.cc::ConnectionRequest::OnSent / resend_delay @ a222406d); the channel sends a new check every kWeakPingInterval 48 ms while no pair is writable, a pair with no answer being unreliable after 5 checks and 5 s (Connection::UpdateState). Only requests to STUN / TURN servers retransmit: STUN_INITIAL_RTO 250 ms doubling to STUN_MAX_RTO 8 s, 9 sends (p2p/base/stun_request.cc)",
+        needed: "a check scheduler in rtc-ice that replaces transactions by new checks; the engine's checks are RFC 8489 transactions with RTO at least 500 ms (RFC 8445 14.3, a MUST: \"RTO = MAX (500ms, ...)\")",
     },
     NotExpressible {
         behaviour: "Consent / keepalive pings on the selected pair",
-        chrome: "every 2.5 s on a stable writable connection (STABLE_WRITABLE_CONNECTION_PING_INTERVAL; unverified)",
+        chrome: "every kStrongAndStableWritableConnectionPingInterval 2.5 s on a strong, stable connection, 900 ms while it stabilises, 480 ms strong / 48 ms weak at the channel level (p2p/base/p2p_constants.h @ a222406d)",
         needed: "nothing that keeps RFC 7675 5.1: a period under 4 s is forbidden (MUST NOT), the engine raises it to 5 s",
     },
     NotExpressible {
-        behaviour: "TCP candidate type preference",
-        chrome: "fixed type preferences for TCP host candidates (ICE_TYPE_PREFERENCE_HOST_TCP 90; unverified)",
-        needed: "a candidate-priority policy in rtc-ice; the engine takes the UDP preference less one (RFC 6544 4.2)",
-    },
-    NotExpressible {
-        behaviour: "DTLS handshake retransmission timer",
-        chrome: "BoringSSL's DTLS timer, started from libwebrtc's initial timeout (unverified)",
-        needed: "a flight-interval setting on the setting engine; the engine starts at 400 ms (RFC 9147 5.8.2) or 1.5 RTT from ICE",
+        behaviour: "Candidate type preferences",
+        chrome: "host 126, prflx 110, srflx 100, host TCP 90, prflx TCP 80, relayed UDP 3 / TCP 1 / TLS 0 (p2p/base/p2p_constants.h IcePriorityValue @ a222406d)",
+        needed: "a candidate-priority policy in rtc-ice; the engine takes RFC 8445 5.1.2.2's (host 126, prflx 110, srflx 100, relayed 0) and for TCP the UDP preference less one (RFC 6544 4.2)",
     },
     NotExpressible {
         behaviour: "Payload type numbering and codec order",
@@ -1242,23 +1330,33 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
     },
     NotExpressible {
         behaviour: "RTCP report interval per media type",
-        chrome: "regular reports about every 1 s for video and 5 s for audio (unverified)",
+        chrome: "5 s for audio, 1 s for video, and for video sent above 72 kbit/s min(360 s / kbit/s, 1 s), drawn from [0.5, 1.5] of it (modules/rtp_rtcp/source/rtp_rtcp_impl2.cc, rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d)",
         needed: "a per-kind interval in the RTCP session; the Chrome profile sets T_rr to 1 s for every section",
     },
     NotExpressible {
-        behaviour: "Where a=ice-options is written",
-        chrome: "a=ice-options:trickle in every media section (fixtures)",
-        needed: "a placement setting; the engine writes a=ice-options:trickle ice2 once at session level, which RFC 8839 5.6 allows as well",
+        behaviour: "Transports of an initial offer",
+        chrome: "every section in one BUNDLE group whatever the bundle policy, max-compat included (pc/sdp_offer_answer.cc: bundle_enabled = use_rtp_mux; pc/media_session.cc::UpdateTransportInfoForBundle @ a222406d): one ice-ufrag in all sections, candidates for the first transport only",
+        needed: "a bundle layout setting; the engine gives each media type a transport of its own under balanced and every section one under max-compat (RFC 9429 4.1.1), each with credentials of its own under Chrome's per-transport rule (sdp.unique-transport-credentials)",
     },
     NotExpressible {
-        behaviour: "Transports of a balanced initial offer",
-        chrome: "every section of its own offer on the first transport: one ice-ufrag in all sections, candidates in the first (fixtures)",
-        needed: "a bundle layout setting; the engine gives each media type a transport of its own (RFC 9429 4.1.1 balanced), each with credentials of its own under Chrome's per-transport rule",
+        behaviour: "Candidate generation / network-id / network-cost",
+        chrome: "a=candidate lines end with generation <n>, and network-id <n> / network-cost <n> where the network is known (api/candidate.cc::BuildCandidate @ a222406d; fixtures: generation 0 network-cost 999)",
+        needed: "nothing cheap and harmless: network-id and network-cost are the application socket layer's knowledge of its interfaces, and a made-up cost would change libwebrtc's choice of pair (basic_ice_controller.cc::CompareCandidatePairNetworks prefers the lower cost); generation is redundant, since libwebrtc reads the ufrag the engine writes before it (p2p_transport_channel.cc::GetRemoteCandidateGeneration)",
     },
     NotExpressible {
-        behaviour: "Candidate network-cost / generation attributes",
-        chrome: "a=candidate lines end with generation 0 network-cost 999 (fixtures)",
-        needed: "nothing to negotiate: extension attributes the engine ignores when it reads them",
+        behaviour: "Google STUN attributes in connectivity checks",
+        chrome: "GOOG-NETWORK-INFO in every check, GOOG-MISC-INFO / GOOG_PING, GOOG-DELTA and DTLS-in-STUN behind field trials (p2p/base/connection.cc::Connection::BuildPingRequest @ a222406d)",
+        needed: "an implementation of libwebrtc's private attributes (comprehension-optional, RFC 8489 14: a peer without them ignores them)",
+    },
+    NotExpressible {
+        behaviour: "Delay-based estimator filter",
+        chrome: "a trendline filter: window 20, smoothing 0.9, threshold gain 4, adaptive threshold gains k_up 0.0087 (outside) / k_down 0.039 (inside) (modules/congestion_controller/goog_cc/trendline_estimator.cc / .h @ a222406d)",
+        needed: "a trendline estimator in rtc-interceptor; the engine's adaptive threshold takes draft-ietf-rmcat-gcc-02 5.4's gains, K_u 0.01 / K_d 0.00018",
+    },
+    NotExpressible {
+        behaviour: "SCTP INIT retransmissions",
+        chrome: "unlimited (max_init_retransmits none, media/sctp/dcsctp_transport.cc::CreateDcSctpOptions @ a222406d)",
+        needed: "a Max.Init.Retransmits setting on the setting engine; the engine keeps RFC 9260's 8",
     },
 ];
 

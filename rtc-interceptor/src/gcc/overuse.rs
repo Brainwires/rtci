@@ -88,10 +88,15 @@ impl OveruseDetector {
             ThresholdTimeBase::Departure => {
                 self.threshold.update(now, estimate_ms);
             }
-            ThresholdTimeBase::Arrival => {
+            ThresholdTimeBase::Arrival | ThresholdTimeBase::ArrivalCapped => {
                 if let Some(last) = self.last_arrival {
-                    self.threshold
-                        .update_over(arrival.saturating_sub(last), estimate_ms);
+                    let step = arrival.saturating_sub(last);
+                    let step = if self.time_base == ThresholdTimeBase::ArrivalCapped {
+                        step.min(crate::gcc::threshold::MAX_STEP)
+                    } else {
+                        step
+                    };
+                    self.threshold.update_over(step, estimate_ms);
                 }
                 self.last_arrival = Some(arrival);
             }
@@ -302,4 +307,34 @@ mod tests {
             detector.update(epoch + Duration::from_millis(10), 23.0)
         );
     }
+
+    /// libwebrtc's time base (`TrendlineEstimator::UpdateThreshold`): the threshold moves over
+    /// the gap between the groups' arrival times, as the draft's, but never by more than a
+    /// 100 ms step; the draft's takes the whole gap.
+    #[test]
+    fn the_capped_arrival_time_base_steps_at_most_100_ms() {
+        let now = Instant::now();
+        let after = |time_base: ThresholdTimeBase, gap_ms: u64| {
+            let mut detector = OveruseDetector::new().with_threshold_time_base(time_base);
+            detector.update_with_arrival(now, Duration::ZERO, 1.0);
+            // The sender's clock does not move: only the arrival gap can step the threshold.
+            detector.update_with_arrival(now, Duration::from_millis(gap_ms), 1.0);
+            detector.threshold_ms()
+        };
+        let capped = ThresholdTimeBase::ArrivalCapped;
+        let draft = ThresholdTimeBase::Arrival;
+        // Inside the cap both take the arrival gap.
+        assert_eq!(after(capped, 60), after(draft, 60));
+        assert!(after(capped, 60) < DEFAULT_THRESHOLD_FOR_TEST);
+        // Beyond it the capped one steps 100 ms, the draft's the whole 400 ms.
+        assert_eq!(after(capped, 400), after(capped, 100));
+        assert!(after(draft, 400) < after(capped, 400));
+        // Departure takes the sender's clock, which did not move.
+        assert_eq!(
+            after(ThresholdTimeBase::Departure, 400),
+            DEFAULT_THRESHOLD_FOR_TEST
+        );
+    }
+
+    const DEFAULT_THRESHOLD_FOR_TEST: f64 = crate::gcc::threshold::DEFAULT_INITIAL_MS;
 }

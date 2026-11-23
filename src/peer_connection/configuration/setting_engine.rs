@@ -552,6 +552,50 @@ pub struct SettingEngine {
     /// RTCP feedback the application writes is sent whether or not its section negotiated
     /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
     pub(crate) unnegotiated_rtcp_feedback: bool,
+    /// `a=ice-options` in each media section instead of once at session level
+    /// ([`SettingEngineBuilder::with_ice_options_in_media_sections`]).
+    pub(crate) ice_options_in_media_sections: bool,
+    /// [`SettingEngineBuilder::with_default_ice_pacing_stated`]`(false)`: no `a=ice-pacing`
+    /// line while Ta is the default (inverted so that the derived default states it).
+    pub(crate) default_ice_pacing_omitted: bool,
+    /// How the DTLS client's retransmission timer starts
+    /// ([`SettingEngineBuilder::with_dtls_flight_interval`]).
+    pub(crate) dtls_flight_interval: DtlsFlightInterval,
+}
+
+/// How the first DTLS retransmission timer of a peer connection's handshake is chosen
+/// ([`SettingEngineBuilder::with_dtls_flight_interval`]). The timer doubles on each
+/// retransmission either way (RFC 9147 section 5.8.2, RFC 6347 section 4.2.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum DtlsFlightInterval {
+    /// RFC 9147 section 5.8.2 for DTLS-SRTP (the default): 400 ms, or, once ICE has measured
+    /// the round trip time of the selected pair, 1.5 times that and never under 100 ms.
+    #[default]
+    Rfc9147,
+    /// libwebrtc's `DtlsTransportInternalImpl::ConfigureHandshakeTimeout`
+    /// (`p2p/dtls/dtls_transport.cc`, `ComputeRetransmissionTimeout`): twice ICE's round
+    /// trip time, held between 50 ms and 3 s; 50 ms without a measured round trip time (the
+    /// initial value `OpenSSLStreamAdapter` gives BoringSSL).
+    Libwebrtc,
+}
+
+impl DtlsFlightInterval {
+    /// The first retransmission timer for a handshake started with `round_trip_time`, ICE's
+    /// measurement of the selected pair, if any.
+    pub fn initial(self, round_trip_time: Option<Duration>) -> Duration {
+        match (self, round_trip_time) {
+            (Self::Rfc9147, None) => {
+                crate::peer_connection::transport::dtls::DTLS_SRTP_FLIGHT_INTERVAL
+            }
+            (Self::Rfc9147, Some(rtt)) => (rtt + rtt / 2)
+                .max(crate::peer_connection::transport::dtls::MINIMUM_FLIGHT_INTERVAL),
+            (Self::Libwebrtc, None) => Duration::from_millis(50),
+            (Self::Libwebrtc, Some(rtt)) => {
+                (rtt * 2).clamp(Duration::from_millis(50), Duration::from_secs(3))
+            }
+        }
+    }
 }
 
 /// The engine's own defaults, [`BehaviourProfile::Rfc`], whatever the build's default profile.
@@ -624,6 +668,9 @@ impl SettingEngine {
             rtcp_session_omitted: Default::default(),
             strict_rtcp_validity: Default::default(),
             unnegotiated_rtcp_feedback: Default::default(),
+            ice_options_in_media_sections: Default::default(),
+            default_ice_pacing_omitted: Default::default(),
+            dtls_flight_interval: Default::default(),
         }
     }
 
@@ -1975,19 +2022,62 @@ impl SettingEngineBuilder {
     /// restart gives them all one new pair. Each transport keeps its own candidates, DTLS
     /// association and SRTP keys.
     ///
-    /// The default is what the browsers write (Chrome and Firefox put one `ice-ufrag` /
-    /// `ice-pwd` pair in every m= section of a session, bundled or not) and RFC 8839 section
-    /// 5.4 allows ("If two data streams have identical "ice-ufrag"s, they MUST have identical
-    /// "ice-pwd"s"). Pion and webrtc-rs 0.17 refuse a description whose sections carry
-    /// different credentials (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so
-    /// the RFC 9429 form cannot reach them: with `true` an initial `balanced` offer with audio
-    /// and video, or media and a data channel, is refused by them.
+    /// The default is what Pion and webrtc-rs 0.17 can take, and RFC 8839 section 5.4 allows
+    /// it ("If two data streams have identical "ice-ufrag"s, they MUST have identical
+    /// "ice-pwd"s"): they refuse a description whose sections carry different credentials
+    /// (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so with `true` an initial
+    /// `balanced` offer with audio and video, or media and a data channel, is refused by them.
+    ///
+    /// Chromium takes the RFC 9429 form, `true` (the `Chrome` behaviour profile's value):
+    /// libwebrtc makes a transport description with credentials of its own for each m= section
+    /// of an offer and of an answer (`TransportDescriptionFactory::CreateOffer` /
+    /// `CreateAnswer`, `p2p/base/transport_description_factory.cc`) and makes the sections of a
+    /// BUNDLE group share the first one's (`UpdateTransportInfoForBundle`,
+    /// `pc/media_session.cc`). Its offers bundle every section whatever the bundle policy
+    /// (`max-compat` included: `bundle_enabled` follows `use_rtp_mux`, `pc/sdp_offer_answer.cc`),
+    /// so they show one pair; its answer to an offer without BUNDLE gives each section its own
+    /// (fixture `chromium--balanced-rust-s-offer-has-a-transport-per-media-type-answered-without-bundle--1-answer.sdp`).
     ///
     /// With shared credentials the transports are told apart by their local addresses only:
     /// several transports on one local socket need `true`, since the ICE username of a STUN
     /// request is then the same for each.
     pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
         self.0.unique_transport_credentials = unique;
+        self
+    }
+
+    /// Where `a=ice-options` (RFC 8839 section 5.6) is written: once at session level (the
+    /// default, `false`), or in each m= section that carries ICE credentials (`true`), after
+    /// its `a=ice-pwd`. Section 5.6 allows either ("session-level or media-level"); the options
+    /// are the same (`trickle ice2`, or `ice2` for a lite agent). Chromium writes them in every
+    /// section (`BuildIceOptions` from `BuildMediaDescription`, `api/webrtc_sdp.cc`), the
+    /// `Chrome` behaviour profile's value. Bundled sections that leave the BUNDLE attributes to
+    /// the tagged one ([`Self::with_bundle_attributes_repeated`]`(false)`) leave this one too.
+    pub fn with_ice_options_in_media_sections(mut self, in_media_sections: bool) -> Self {
+        self.0.ice_options_in_media_sections = in_media_sections;
+        self
+    }
+
+    /// Whether `a=ice-pacing` is written while Ta is the default 50 ms. The default is `true`:
+    /// RFC 8839 section 4.3.1 says a full agent "SHOULD include an 'ice-pacing' attribute" in
+    /// its offers and answers. With `false` no line is written for the default, which RFC 8445
+    /// section 14.2 lets a peer read as the default ("If an agent does not ... indicate a
+    /// value, the default value is used"); a Ta other than the default
+    /// ([`Self::with_ice_pacing`]) is written either way ("MUST indicate the proposed value").
+    /// libwebrtc writes no `a=ice-pacing` (`api/webrtc_sdp.cc` has none), the `Chrome`
+    /// behaviour profile's value.
+    pub fn with_default_ice_pacing_stated(mut self, stated: bool) -> Self {
+        self.0.default_ice_pacing_omitted = !stated;
+        self
+    }
+
+    /// How the first retransmission timer of the DTLS handshake is chosen; see
+    /// [`DtlsFlightInterval`]. The default is [`DtlsFlightInterval::Rfc9147`]; the `Chrome`
+    /// behaviour profile takes [`DtlsFlightInterval::Libwebrtc`]. RFC 9147 section 5.8.2's
+    /// 1000 ms is a SHOULD "unless implementations have deployment-specific and/or external
+    /// information about the round trip time", which ICE's measurement is.
+    pub fn with_dtls_flight_interval(mut self, interval: DtlsFlightInterval) -> Self {
+        self.0.dtls_flight_interval = interval;
         self
     }
 
@@ -2378,9 +2468,19 @@ impl SettingEngineBuilder {
     /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
     /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
     /// takes before it declares the peer unreachable and fails. Unset, the default, is the
-    /// RFC's 10. See [`Self::with_sctp_rto`].
+    /// RFC's 10. See [`Self::with_sctp_rto`]. `usize::MAX` never gives up, which leaves the
+    /// failure of an unreachable peer to ICE consent (RFC 7675): what libwebrtc does
+    /// (`DcSctpTransport::CreateDcSctpOptions` sets `max_retransmissions` to none,
+    /// `media/sctp/dcsctp_transport.cc`), the `Chrome` behaviour profile's value.
     pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
         self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
+    /// Back to RFC 9260's Association.Max.Retrans of 10, undoing
+    /// [`Self::with_sctp_max_retransmissions`] (or a profile that set it).
+    pub fn without_sctp_max_retransmissions(mut self) -> Self {
+        self.0.sctp_max_retransmissions = None;
         self
     }
 

@@ -194,8 +194,39 @@ fn a_default_peer_connection_carries_its_profiles_values() -> shared::error::Res
             "{profile}"
         );
         assert_eq!(agent.software, ice.software, "{profile}");
+        // The DTLS transport starts its handshake by the profile's rule.
+        assert_eq!(
+            pc.dtls_transport().flight_interval_rule,
+            pc.setting_engine.dtls_flight_interval,
+            "{profile}"
+        );
     }
     Ok(())
+}
+
+/// The two rules of the first DTLS retransmission timer: RFC 9147's (400 ms, or 1.5 round
+/// trips and at least 100 ms) and libwebrtc's `ComputeRetransmissionTimeout` (two round trips
+/// within 50 ms and 3 s, 50 ms without one).
+#[test]
+fn the_dtls_flight_interval_rules_start_where_their_sources_say() {
+    use crate::peer_connection::configuration::setting_engine::DtlsFlightInterval;
+    let ms = Duration::from_millis;
+    for (rule, round_trip_time, expected) in [
+        (DtlsFlightInterval::Rfc9147, None, ms(400)),
+        (DtlsFlightInterval::Rfc9147, Some(ms(200)), ms(300)),
+        (DtlsFlightInterval::Rfc9147, Some(ms(20)), ms(100)),
+        (DtlsFlightInterval::Rfc9147, Some(ms(4000)), ms(6000)),
+        (DtlsFlightInterval::Libwebrtc, None, ms(50)),
+        (DtlsFlightInterval::Libwebrtc, Some(ms(200)), ms(400)),
+        (DtlsFlightInterval::Libwebrtc, Some(ms(10)), ms(50)),
+        (DtlsFlightInterval::Libwebrtc, Some(ms(4000)), ms(3000)),
+    ] {
+        assert_eq!(
+            rule.initial(round_trip_time),
+            expected,
+            "{rule:?} {round_trip_time:?}"
+        );
+    }
 }
 
 /// Removes `/* ... */` comments and `//` line comments (a commented-out setter is not one).

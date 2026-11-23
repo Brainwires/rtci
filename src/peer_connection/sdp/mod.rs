@@ -173,6 +173,7 @@ mod rejected_mline_tests {
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: false,
             ice_pacing: None,
+            ice_options_in_media_sections: false,
             ls_groups: vec![],
             selected_destination: None,
             remote_candidates: vec![],
@@ -2458,6 +2459,9 @@ pub(crate) struct PopulateSdpParams {
     /// The Ta this endpoint proposes (`ice::Agent::proposed_pacing`): `a=ice-pacing` when it is
     /// not the default.
     pub(crate) ice_pacing: Option<std::time::Duration>,
+    /// `SettingEngineBuilder::with_ice_options_in_media_sections`: `a=ice-options` after each
+    /// section's `a=ice-pwd` instead of at session level.
+    pub(crate) ice_options_in_media_sections: bool,
     /// In an offer, the `a=group:LS` groups of the most recent answer; in an answer, the
     /// offer's (RFC 9429 sections 5.2.2, 5.3.1).
     pub(crate) ls_groups: Vec<Vec<String>>,
@@ -2796,15 +2800,31 @@ impl RTCPeerConnection {
         // RFC 8445 section 10: "an agent compliant to this specification MUST inform the
         // peer about the compliance using the 'ice2' option" (RFC 8839 section 5.6:
         // `a=ice-options`), lite agents included.
-        if params.is_ice_lite {
+        let ice_options = if params.is_ice_lite {
             // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
-            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "ice2".to_owned());
+            "ice2"
         } else {
             // JSEP RFC 8829 §5.2.1 / §5.3.1: this side accepts trickled candidates
             // (`add_remote_candidate` at any time after the remote description), so it says so
             // (RFC 8840 §4.1.1). A lite agent has no checks to trickle into.
-            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), "trickle ice2".to_owned());
+            "trickle ice2"
+        };
+        // RFC 8839 section 5.6: "session-level or media-level".
+        if params.ice_options_in_media_sections {
+            for media in &mut d.media_descriptions {
+                if let Some(at) = media.attributes.iter().position(|a| a.key == "ice-pwd") {
+                    media.attributes.insert(
+                        at + 1,
+                        sdp::description::common::Attribute::new(
+                            ATTR_KEY_ICE_OPTIONS.to_owned(),
+                            Some(ice_options.to_owned()),
+                        ),
+                    );
+                }
+            }
+        } else {
+            d = d.with_value_attribute(ATTR_KEY_ICE_OPTIONS.to_owned(), ice_options.to_owned());
         }
         // RFC 8445 section 14.2: an agent that wants a Ta other than the default "MUST
         // indicate the proposed value to its peer"; RFC 8839 section 5.5: `a=ice-pacing`, in

@@ -215,10 +215,9 @@ fn compare(engine: &str, chromium: &str, what: &str) -> Result<BTreeMap<String, 
             if SCENARIO_KEYS.contains(&key.as_str()) || residual_missing(&theirs.kind, key) {
                 continue;
             }
-            // An attribute the engine writes at session level instead (RFC 8839 5.6 allows
-            // `a=ice-options` at either) is there for every section.
-            let at_session = engine_sections[0].keys.contains(key);
-            if !ours.keys.contains(key) && !at_session {
+            // Under `Chrome` every attribute is where Chromium writes it: `a=ice-options` too
+            // is in each section (`ice.options-in-media-sections`), not at session level.
+            if !ours.keys.contains(key) {
                 problems.push(format!("{}: a={key} missing", theirs.kind));
             }
         }
@@ -276,10 +275,6 @@ fn documented_superset(item: &str) -> bool {
     const KEYS: &[&str] = &[
         // RFC 8842; Chromium ignores it.
         "a=tls-id",
-        // RFC 8839 5.4 options beyond trickle, and the end of candidates.
-        "a=ice-options",
-        // RFC 8839 5.5: the engine states its Ta (50 ms) in every description.
-        "a=ice-pacing",
         // RFC 8843 / RFC 8853: rid and simulcast receive support.
         "a=rid",
         "a=simulcast",
@@ -390,7 +385,8 @@ fn the_chrome_profiles_offer_has_what_chromiums_offers_have() -> Result<()> {
 
 /// Under `Chrome` the engine's candidate lines have Chromium's form up to the type
 /// (`<foundation> 1 udp <priority> <address> <port> typ host`); Chromium appends `generation`
-/// and `network-cost`, extension attributes a reader ignores (`not expressible`).
+/// and `network-cost`, which the engine cannot know and libwebrtc does not need from it
+/// (`not expressible`).
 #[test]
 fn the_chrome_profiles_candidate_lines_have_chromiums_form() -> Result<()> {
     let offer = chrome_profile_offer()?;
@@ -522,6 +518,68 @@ fn the_chrome_profile_writes_chromiums_governed_forms() -> Result<()> {
             assert!(!line.contains("max-fs"), "{line}");
         }
     }
+    // `a=ice-options` in every section after `a=ice-pwd`, as Chromium's, and none at session
+    // level; no `a=ice-pacing` for the default Ta, as Chromium writes none.
+    let session = &sections(&offer)[0];
+    assert!(!session.keys.iter().any(|k| k == "ice-options"), "{offer}");
+    assert!(!offer.contains("a=ice-pacing"), "{offer}");
+    assert!(!chromium.contains("a=ice-pacing"));
+    let mut in_section = false;
+    let mut after_pwd = None;
+    for line in offer.lines() {
+        if line.starts_with("m=") {
+            assert_ne!(
+                after_pwd,
+                Some(false),
+                "a=ice-options after a=ice-pwd: {offer}"
+            );
+            in_section = true;
+            after_pwd = None;
+        } else if in_section && line.starts_with("a=ice-pwd:") {
+            after_pwd = Some(false);
+        } else if after_pwd == Some(false) {
+            assert_eq!(line, "a=ice-options:trickle ice2", "{offer}");
+            after_pwd = Some(true);
+        }
+    }
+    assert_eq!(after_pwd, Some(true), "{offer}");
+    Ok(())
+}
+
+/// The `Rfc` profile writes `a=ice-options` once at session level and states the default Ta;
+/// the two `Chrome` forms are settings, not a change of what is negotiated: an `Rfc` peer
+/// reads the `Chrome` peer's media-level options (`trickle`, `ice2`).
+#[test]
+fn the_rfc_profile_keeps_session_level_ice_options_and_the_stated_pacing() -> Result<()> {
+    let mut rfc = peer_connection(BehaviourProfile::Rfc)?;
+    rfc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    let offer = rfc.create_offer(None)?;
+    let session: String = offer
+        .sdp
+        .split("\r\nm=")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        session.contains("a=ice-options:trickle ice2"),
+        "{}",
+        offer.sdp
+    );
+    assert!(session.contains("a=ice-pacing:50"), "{}", offer.sdp);
+    assert_eq!(
+        offer.sdp.matches("a=ice-options:").count(),
+        1,
+        "{}",
+        offer.sdp
+    );
+
+    let now = Instant::now();
+    let chrome_offer = chrome_profile_offer()?;
+    let mut answerer = peer_connection(BehaviourProfile::Rfc)?;
+    answerer.set_remote_description(now, RTCSessionDescription::offer(chrome_offer)?)?;
+    let options = answerer.remote_ice_options();
+    assert!(options.contains(&"trickle".to_owned()), "{options:?}");
+    assert!(options.contains(&"ice2".to_owned()), "{options:?}");
     Ok(())
 }
 
