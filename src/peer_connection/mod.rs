@@ -254,6 +254,8 @@ pub mod priority;
 mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
+/// Server-reflexive candidates the engine gathers (RFC 8445 section 5.1.1.2).
+pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
@@ -3063,6 +3065,8 @@ impl RTCPeerConnection {
             )?;
             // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own.
             self.gather_tcp_candidates(candidate_value);
+            // RFC 8445 section 5.1.1.2: its server-reflexive candidates.
+            self.gather_srflx_for(candidate_value);
         } else {
             self.finish_local_gathering_after_streams();
         }

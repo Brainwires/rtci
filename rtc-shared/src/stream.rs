@@ -211,6 +211,18 @@ pub enum StreamEvent {
         /// The addresses, with the query's port.
         addresses: Vec<SocketAddr>,
     },
+    /// One family of a [`StreamCommand::Resolve`] is answered (AAAA with `ipv6`, A without),
+    /// as it arrives: the engine starts on the first answer (RFC 8305 section 3). A driver
+    /// answers each family once, an empty list when it has none; or answers the whole query
+    /// once with [`StreamEvent::Resolved`].
+    ResolvedFamily {
+        /// The query's id.
+        query: u64,
+        /// Whether these are the IPv6 (AAAA) addresses.
+        ipv6: bool,
+        /// The addresses of that family, with the query's port.
+        addresses: Vec<SocketAddr>,
+    },
 }
 
 /// Bytes to write on a connection, after every earlier transmit of the same connection.
@@ -486,6 +498,15 @@ pub enum StreamNotice {
         /// The query.
         query: u64,
         /// The addresses (empty: the name did not resolve).
+        addresses: Vec<SocketAddr>,
+    },
+    /// One family of a name the engine asked for was resolved.
+    ResolvedFamily {
+        /// The query.
+        query: u64,
+        /// Whether these are the IPv6 addresses.
+        ipv6: bool,
+        /// The addresses of that family (possibly none).
         addresses: Vec<SocketAddr>,
     },
 }
@@ -957,6 +978,15 @@ impl StreamTable {
             StreamEvent::Resolved { query, addresses } => self
                 .notices
                 .push_back(StreamNotice::Resolved { query, addresses }),
+            StreamEvent::ResolvedFamily {
+                query,
+                ipv6,
+                addresses,
+            } => self.notices.push_back(StreamNotice::ResolvedFamily {
+                query,
+                ipv6,
+                addresses,
+            }),
         }
         Ok(())
     }

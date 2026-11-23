@@ -263,6 +263,11 @@ impl RTCPeerConnection {
         setting_engine.crypto_provider = Some(crypto_provider.clone());
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
+        let engine_srflx = super::srflx::EngineSrflx::new(
+            &agent_config.urls,
+            streams_settings.reflexive,
+            turn_tls.client_config().ok().flatten(),
+        );
         let engine_turn = super::turn_streams::EngineTurn::new(
             &agent_config.urls,
             streams_settings.turn,
@@ -400,7 +405,11 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
-            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
+            streams: super::streams::EngineStreams::new(
+                streams_settings,
+                engine_turn,
+                engine_srflx,
+            ),
         })
     }
 

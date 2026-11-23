@@ -616,8 +616,9 @@ impl RTCPeerConnection {
             );
         }
         // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own,
-        // for this transport.
+        // for this transport, and its server-reflexive ones.
         self.gather_tcp_candidates(value);
+        self.gather_srflx_for(value);
         Ok(())
     }
 

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Server-reflexive candidates are gathered by the engine** (branch `conf/tcp-8-srflx`,
+  RFC 8445 section 5.1.1.2). With `stun:` / `stuns:` servers in the configuration, the engine
+  now sends a Binding request to each from every UDP host candidate the application adds (out
+  of `poll_write`; the answer is taken out of `handle_read`), and over TCP / TLS from its
+  ICE-TCP listeners for a driver that serves the stream interface, announces the mapped
+  addresses as `srflx` candidates and holds the end of gathering until every request is
+  answered or has failed (up to 39.5 s for an unanswered UDP request, RFC 8489 6.2.1). An
+  application that gathers itself keeps working: a base it adds a server-reflexive candidate
+  for is left to it, and
+  `SettingEngineBuilder::with_server_reflexive_gathering(ReflexiveGathering::Application)`
+  turns the engine's gathering off. `StreamSettings` has a new public field `reflexive`.
+
 - **turn**: `ClientConfig::default()` now sends SOFTWARE `rtc-turn <version>` (it sent none);
   set `software` to an empty string for the old behaviour. A TURN request over UDP beyond the
   path MTU is an `ErrPacketTooBig` where it was sent.
@@ -1725,6 +1737,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **Server-reflexive gathering in the engine** (branch `conf/tcp-8-srflx`; RFC 8445 5.1.1.2,
+  RFC 8489 6.2.1 / 6.2.2 / 6.2.3, RFC 6544 5.2 and Appendix B, RFC 7064, RFC 7443, RFC 8305
+  section 3). New module `rtc::peer_connection::srflx` (`ReflexiveGathering`,
+  `ALPN_STUN_NAT_DISCOVERY`). Over UDP a Binding request per server and host candidate,
+  retransmitted at RTO 500 ms doubling, seven sends, failed after 39.5 s; over TCP from the
+  passive and simultaneous-open listeners' own ports (`reuse_address`), one request failed
+  after Ti, the connection closed once answered; over TLS for `stuns:` (certificate checked
+  against the URI's host with the `with_turn_tls` roots or verifier, ALPN
+  `stun.nat-discovery`). The mapped address of a TCP probe is a server-reflexive passive or
+  simultaneous-open candidate, and on port 9 an active one. MAPPED-ADDRESS from an RFC 3489
+  server is taken when XOR-MAPPED-ADDRESS is absent; a mapped address equal to its base is
+  not announced. New transactions start at most one per Ta (50 ms). Names go to the driver
+  (`StreamCommand::Resolve`), and their addresses race as TURN's do.
+- **Happy Eyeballs on per-family answers** (RFC 8305 section 3): new
+  `StreamEvent::ResolvedFamily` / `StreamNotice::ResolvedFamily` let a driver answer AAAA and
+  A separately; the race starts on the first answer (at once for IPv6, after the 50 ms
+  Resolution Delay for IPv4 while IPv6 is outstanding) and a late answer joins the addresses
+  not yet tried, families alternating (`HappyEyeballs::awaiting_answers`, `answer`,
+  `RESOLUTION_DELAY`). Used by the server-reflexive probes and the TURN-over-stream links.
 
 - **ICE-TCP: a connection several transports could carry is tied to one only by a check**
   (branch `conf/tcp-6-train-fixes`). On a port several transports share (a driver's shared

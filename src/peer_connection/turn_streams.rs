@@ -60,6 +60,8 @@ pub(crate) struct TurnLink {
     relay: Option<SocketAddr>,
     /// The ICE generation (local ufrag) the relayed candidate was last announced for.
     announced_ufrag: Option<String>,
+    /// The name's query, while its per-family answers may still come.
+    query: Option<u64>,
     held: HashMap<IpAddr, Vec<(SocketAddr, Vec<u8>)>>,
 }
 
@@ -155,6 +157,7 @@ impl EngineTurn {
                 link_local: None,
                 relay: None,
                 announced_ufrag: None,
+                query: None,
                 held: HashMap::new(),
             });
         }
@@ -225,7 +228,9 @@ impl RTCPeerConnection {
                         .streams
                         .table
                         .resolve(link.url.host.clone(), link.url.port);
-                    self.streams.turn.links[index].state = LinkState::Resolving(query);
+                    let link = &mut self.streams.turn.links[index];
+                    link.state = LinkState::Resolving(query);
+                    link.query = Some(query);
                 }
             }
         }
@@ -310,22 +315,41 @@ impl RTCPeerConnection {
         }
     }
 
-    /// A name the driver resolved.
-    pub(crate) fn turn_resolved(&mut self, query: u64, addresses: Vec<SocketAddr>) {
+    /// A name the driver resolved: every address at once (`ipv6` `None`), or one family's
+    /// as it arrived (RFC 8305 section 3: the race starts on the first answer, and a late one
+    /// joins it).
+    pub(crate) fn turn_resolved(
+        &mut self,
+        query: u64,
+        ipv6: Option<bool>,
+        addresses: &[SocketAddr],
+    ) {
         let now = self.pipeline_context.now;
-        if let Some(link) = self
-            .streams
-            .turn
-            .links
-            .iter_mut()
-            .find(|l| l.state == LinkState::Resolving(query))
-        {
-            let sorted = sort_addresses(&addresses, true);
-            if sorted.is_empty() {
-                link.state = LinkState::Failed;
-            } else {
-                link.race = Some(HappyEyeballs::new(sorted, CONNECTION_ATTEMPT_DELAY));
-                link.state = LinkState::Connecting;
+        if let Some(link) = self.streams.turn.links.iter_mut().find(|l| {
+            l.query == Some(query)
+                && (l.state == LinkState::Resolving(query)
+                    || (l.state == LinkState::Connecting
+                        && l.race.as_ref().is_some_and(HappyEyeballs::awaiting)))
+        }) {
+            match ipv6 {
+                None => {
+                    link.query = None;
+                    let sorted = sort_addresses(addresses, true);
+                    if sorted.is_empty() {
+                        link.state = LinkState::Failed;
+                    } else {
+                        link.race = Some(HappyEyeballs::new(sorted, CONNECTION_ATTEMPT_DELAY));
+                        link.state = LinkState::Connecting;
+                    }
+                }
+                Some(ipv6) => {
+                    link.race
+                        .get_or_insert_with(|| {
+                            HappyEyeballs::awaiting_answers(CONNECTION_ATTEMPT_DELAY)
+                        })
+                        .answer(now, ipv6, addresses, true);
+                    link.state = LinkState::Connecting;
+                }
             }
         }
         self.drive_turn_races(now);

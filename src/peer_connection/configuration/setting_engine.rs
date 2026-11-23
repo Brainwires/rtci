@@ -2219,6 +2219,21 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2). By default
+    /// ([`ReflexiveGathering::Engine`](crate::peer_connection::srflx::ReflexiveGathering)) the
+    /// engine sends a Binding request to each `stun:` / `stuns:` server of the configuration:
+    /// over UDP from each UDP host candidate the application adds (through `poll_write` /
+    /// `handle_read`), and over TCP / TLS from its ICE-TCP listeners for a driver that serves
+    /// the stream interface; a base for which the application adds a server-reflexive
+    /// candidate itself is left to it. `Application` keeps the engine out of it.
+    pub fn with_server_reflexive_gathering(
+        mut self,
+        who: crate::peer_connection::srflx::ReflexiveGathering,
+    ) -> Self {
+        self.0.streams.reflexive = who;
+        self
+    }
+
     /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
     /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
     /// server is used.
