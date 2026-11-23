@@ -598,3 +598,27 @@ fn cwnd_grows_before_the_loss_adjustment_of_the_same_sack() -> Result<()> {
     assert!(grown.cwnd > 12_000, "the SACK did grow cwnd");
     Ok(())
 }
+
+/// RFC 8831 section 6.2: "the number of streams negotiated during SCTP association setup
+/// SHOULD be 65535, which is the maximum number of streams that can be negotiated during the
+/// association setup". The default INIT announces 65535 outbound and 65535 inbound streams.
+#[test]
+fn the_default_init_announces_65535_streams_each_way() {
+    let mut client = Endpoint::new(
+        remote(),
+        TransportProtocol::UDP,
+        Arc::new(EndpointConfig::default()),
+        None,
+    );
+    let now = Instant::now();
+    let (_, mut a) = client
+        .connect(
+            now,
+            ClientConfig::new(TransportConfig::default()),
+            "10.0.0.2:5000".parse().unwrap(),
+        )
+        .unwrap();
+    let init = sent_datagrams(&mut a, now);
+    let (_, outbound, inbound, _) = init_fields(&chunks_of(&init[0])[0]);
+    assert_eq!((outbound, inbound), (u16::MAX, u16::MAX));
+}
