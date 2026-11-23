@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor**: RFC 7728 rows (`conf/jsep-66-pause-resume`, jsep17).
+  - New `RepeatInRegularReports` attribute and `RtcpSessionControl::StopRepeating`: the RTCP
+    session carries a written packet again in the next N Regular compound packets. PAUSED uses
+    it: "the next two regular RTCP reports" (sections 6.3, 8.2);
+    `PauseResumeBuilder::with_repeats_in_regular_reports(false)` keeps the report-interval
+    timer for a chain without the session.
+  - The hold-off takes the longest round trip the RTCP session measured (6.2), applies again
+    with `nowait` once the received SSRCs show two CNAMEs (6.2), and a local-pause PAUSED is
+    repeated as often as the reported loss needs (6.4: 3 to 10).
+  - RFC7728-6.2-2, 6.2-4, 6.2-5, 6.3-3, 6.4-2, 8.2-4, 8.5-1 are `tested`.
+
 - **audit**: small JSEP rows (`conf/jsep-64-small-rows`, jsep17). No engine change.
   - RFC8851-6.3-6 and RFC9429-3.6.2-2 are `n/a` (coordinator decision): they bind the encoder,
     which is the application's; the engine's part of each stays tested. RFC7496-3.2-2 is
