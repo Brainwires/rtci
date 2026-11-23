@@ -679,6 +679,10 @@ fn a_layer_sends_its_handshake_first_and_messages_wait_for_it() {
             Some(Box::new(ToyLayer::new())),
         )
         .unwrap();
+    assert!(matches!(
+        table.poll_command(),
+        Some(StreamCommand::Connect { .. })
+    ));
     let message = channel_data(b"relayed");
     assert!(table.send(id, &message).unwrap());
     table
