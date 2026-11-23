@@ -199,6 +199,17 @@ fn negotiate(peers: &mut [Peer; 2], offerer: usize, now: Instant) -> Result<()> 
         .set_local_description(now, answer.clone())?;
     peers[offerer].pc.set_remote_description(now, answer)?;
     for i in 0..2 {
+        // A new DTLS association runs on new 3-tuples (RFC 8842 section 5.1): a peer whose
+        // ICE transport dropped its candidates for it gathers on the next port.
+        let holds_none = peers[i]
+            .pc
+            .dtls_transports()
+            .iter()
+            .all(|t| t.ice_transport().get_local_candidates().is_empty());
+        if holds_none {
+            let port = peers[i].addr.port();
+            peers[i].addr.set_port(port + 1);
+        }
         let candidate = host(peers[i].addr)?;
         peers[i].pc.add_local_candidate(candidate.clone())?;
         peers[1 - i].pc.add_remote_candidate(candidate)?;

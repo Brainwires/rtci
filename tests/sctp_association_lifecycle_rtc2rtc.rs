@@ -257,8 +257,9 @@ fn rejecting_the_data_section_closes_sctp_and_dtls_and_a_later_channel_brings_ne
             first_tls_id,
             "{answerer_role}: a new DTLS association"
         );
-        // The offer that sets the transport up again restarts ICE.
-        pair.trickle()?;
+        // The offer that sets the transport up again restarts ICE, and the new association
+        // runs on new 3-tuples (RFC 8842 section 5.1).
+        assert!(pair.regather()?, "{answerer_role}: new candidates");
         assert!(
             pair.run_until(
                 |p| p.offerer.opened().contains(&again) && p.answerer.opened().len() == 2

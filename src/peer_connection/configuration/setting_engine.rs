@@ -425,6 +425,10 @@ pub struct SettingEngine {
     /// 8842 section 3.1 read without its section 6); off by default (RFC 9429 sections 5.8.3
     /// and 5.11).
     pub(crate) dtls_new_association_without_ice_restart: bool,
+    /// A new DTLS association keeps the local candidates and may use the transport addresses
+    /// of the one it replaces (`with_dtls_new_association_on_previous_addresses`); off by
+    /// default (RFC 8842 sections 5.1 and 6).
+    pub(crate) dtls_new_association_on_previous_addresses: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
     /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
@@ -1748,6 +1752,53 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_dtls_new_association_without_ice_restart(mut self, allowed: bool) -> Self {
         self.0.dtls_new_association_without_ice_restart = allowed;
+        self
+    }
+
+    /// Lets a new DTLS association run on the local transport addresses of the one it
+    /// replaces.
+    ///
+    /// By default (`false`) this side allocates a new 3-tuple for every new DTLS association
+    /// over UDP, as RFC 8842 section 5.1 asks of an offerer that needs one ("the offerer MUST
+    /// allocate a new 3-tuple for the offer in such a way that the offerer can disambiguate
+    /// any packets associated with the new DTLS association from any packets associated with
+    /// any other DTLS association") and of an answerer when the offerer did not (section 6:
+    /// "a completely new set of ICE candidates that were not recently used for any other DTLS
+    /// association"). The ICE restart that comes with the new association (an offer that sets
+    /// a closed transport up again, `renew_dtls_association`, a data-only association replaced
+    /// for SRTP, or the answer to a remote offer that asks for one) discards the local
+    /// candidates, even without
+    /// [`with_discard_local_candidates_during_ice_restart`](Self::with_discard_local_candidates_during_ice_restart),
+    /// and `add_local_candidate` refuses a UDP candidate on a transport address one of them
+    /// had, with `ErrICECandidateAddressOfPreviousDtlsAssociation`: the application gathers on
+    /// new ports. The engine-run TURN clients delete their allocations and allocate again.
+    /// The addresses stay refused until the next ICE restart that is not for a new
+    /// association.
+    ///
+    /// The answerer allocates whether or not the offerer did: with trickle ICE it cannot know
+    /// when it answers.
+    ///
+    /// `true` keeps the candidates (unless
+    /// `with_discard_local_candidates_during_ice_restart` is set) and accepts the previous
+    /// addresses, for an application with one fixed socket whose peer allocates the new
+    /// 3-tuple; packets of the previous association that arrive late then reach the new one,
+    /// which drops them as records it cannot decrypt.
+    ///
+    /// A new association without an ICE restart
+    /// ([`with_dtls_new_association_without_ice_restart`](Self::with_dtls_new_association_without_ice_restart))
+    /// runs on the ICE session it has, whatever this setting says.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_dtls_new_association_on_previous_addresses(true)
+    ///     .build();
+    /// ```
+    pub fn with_dtls_new_association_on_previous_addresses(mut self, allowed: bool) -> Self {
+        self.0.dtls_new_association_on_previous_addresses = allowed;
         self
     }
 

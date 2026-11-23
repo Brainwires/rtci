@@ -533,10 +533,14 @@ impl RTCPeerConnection {
             if !answers_restart {
                 return Ok(Vec::new());
             }
+            // A new DTLS association drops the previous generation's candidates (RFC 8842
+            // section 5.1, `restart_needs_new_local_addresses`): the answer lists only those
+            // given for the restart.
             if !self
                 .setting_engine
                 .candidates
                 .discard_local_candidates_during_ice_restart
+                && !self.restart_needs_new_local_addresses(false)
             {
                 return self.ice_transport().get_local_candidates();
             }
@@ -3734,10 +3738,21 @@ impl RTCPeerConnection {
     /// the offer can take it back ([`Self::revert_local_ice_restart`]; RFC 9429 section 5.7:
     /// "any resources allocated by the abandoned local description are discarded").
     pub(super) fn apply_local_offer_ice_restart(&mut self, now: Instant) -> Result<()> {
-        let keep_local_candidates = !self
-            .setting_engine
-            .candidates
-            .discard_local_candidates_during_ice_restart;
+        let new_association = self.restart_needs_new_local_addresses(true);
+        let keep_local_candidates = !new_association
+            && !self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart;
+        let before = self
+            .ice_transport_mut()
+            .retire_local_addresses(new_association);
+        self.ice_transport_mut()
+            .previous_association_addresses_before_local_restart
+            .get_or_insert(before);
+        if new_association {
+            self.reallocate_turn_links_of_active_transport(now);
+        }
         if self
             .ice_transport()
             .gathering_before_local_restart
@@ -3755,6 +3770,44 @@ impl RTCPeerConnection {
     pub(super) fn commit_local_ice_restart(&mut self) {
         self.ice_transport_mut().agent.commit_restart();
         self.ice_transport_mut().gathering_before_local_restart = None;
+        self.ice_transport_mut()
+            .previous_association_addresses_before_local_restart = None;
+    }
+
+    /// Whether the ICE restart about to be applied on the active transport sets up a new DTLS
+    /// association whose 3-tuple this side allocates (RFC 8842 section 5.1: an offerer that
+    /// needs a new association, and an answerer when the offerer did not, "MUST allocate a new
+    /// 3-tuple"; section 6: "a completely new set of ICE candidates that were not recently
+    /// used for any other DTLS association"): its local candidates are discarded and their
+    /// UDP addresses refused. `local_offer`: the restart is a local offer's; otherwise it is
+    /// the answer's to a remote offer. The answerer allocates whether or not the offerer did,
+    /// which it cannot know with trickle ICE when it answers. Off with
+    /// `with_dtls_new_association_on_previous_addresses(true)`.
+    pub(super) fn restart_needs_new_local_addresses(&self, local_offer: bool) -> bool {
+        if self
+            .setting_engine
+            .dtls_new_association_on_previous_addresses
+        {
+            return false;
+        }
+        let dtls = self.dtls_transport();
+        // The `tls-id` of the new association: staged by the offer that asks for one
+        // (`offer_tls_id`) or by the answer to an offer that does (`defer_remote_transport`).
+        if dtls.staged_local_tls_id.is_some() {
+            return true;
+        }
+        if !local_offer {
+            return false;
+        }
+        // An offer that asks for a new association without `a=tls-id`
+        // (`with_disable_sdp_tls_id`): it sets a closed transport up again, replaces a
+        // data-only association for SRTP (RFC 5764 section 4.1), or renews it
+        // (`renew_dtls_association`); `create_offer` restarts ICE for each.
+        self.transport_closed
+            || (dtls.is_started()
+                && (dtls.renewal_requested
+                    || (self.rtp_transceivers.iter().any(|t| !t.stopped())
+                        && !dtls.can_key_srtp())))
     }
 
     /// The local offer was rolled back: the ICE session goes on as before its restart, with
@@ -3765,6 +3818,13 @@ impl RTCPeerConnection {
             .ice_transport_mut()
             .gathering_before_local_restart
             .take();
+        if let Some(before) = self
+            .ice_transport_mut()
+            .previous_association_addresses_before_local_restart
+            .take()
+        {
+            self.ice_transport_mut().previous_association_addresses = before;
+        }
         if !self.ice_transport_mut().agent.revert_restart(now) {
             return;
         }
@@ -3778,10 +3838,17 @@ impl RTCPeerConnection {
     /// A no-op when nothing is staged, so `set_local_description` can call it unconditionally
     /// without tearing down a session that was never asked to restart.
     pub(super) fn apply_ice_restart(&mut self, now: Instant) -> Result<()> {
-        let keep_local_candidates = !self
-            .setting_engine
-            .candidates
-            .discard_local_candidates_during_ice_restart;
+        let new_association = self.restart_needs_new_local_addresses(false);
+        let keep_local_candidates = !new_association
+            && !self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart;
+        self.ice_transport_mut()
+            .retire_local_addresses(new_association);
+        if new_association {
+            self.reallocate_turn_links_of_active_transport(now);
+        }
         self.ice_transport_mut()
             .apply_restart(now, keep_local_candidates)
     }
@@ -3918,6 +3985,27 @@ impl RTCPeerConnection {
         relay_protocol: Option<RTCIceServerTransportProtocol>,
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
+        // RFC 8842 sections 5.1 and 6: a new DTLS association over UDP runs on a new 3-tuple
+        // (`restart_needs_new_local_addresses`).
+        // While the restart of a new association is staged, the addresses of the generation
+        // it replaces are refused already: a candidate given now is the next generation's.
+        let staged_new_association = self.ice_transport().has_pending_restart()
+            && self.restart_needs_new_local_addresses(self.pending_remote_transport.is_none());
+        let refused = self
+            .ice_transport()
+            .on_previous_association_address(&candidate)
+            .or_else(|| {
+                (staged_new_association && candidate.network_type().is_udp())
+                    .then(|| candidate.addr())
+                    .filter(|addr| {
+                        self.ice_transport()
+                            .current_generation_udp_addresses()
+                            .contains(addr)
+                    })
+            });
+        if let Some(addr) = refused {
+            return Err(Error::ErrICECandidateAddressOfPreviousDtlsAssociation(addr));
+        }
         let known = self.ice_transport().agent.get_local_candidates().len();
         let ufrag = self
             .ice_transport()

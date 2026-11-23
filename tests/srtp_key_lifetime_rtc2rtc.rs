@@ -402,6 +402,14 @@ fn a_new_dtls_association_re_keys_srtp_and_starts_the_key_lifetime_over() -> Res
             received_at_renewal = received(&callee);
             caller.pc.renew_dtls_association();
             exchange(&mut caller, &mut callee, now)?;
+            // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+            caller.addr.set_port(55030);
+            callee.addr.set_port(55031);
+            let (a, b) = (caller.addr, callee.addr);
+            caller.pc.add_local_candidate(host(a)?)?;
+            callee.pc.add_local_candidate(host(b)?)?;
+            caller.pc.add_remote_candidate(host(b)?)?;
+            callee.pc.add_remote_candidate(host(a)?)?;
             continue;
         }
         if renewed && received(&callee) >= received_at_renewal + 35 {

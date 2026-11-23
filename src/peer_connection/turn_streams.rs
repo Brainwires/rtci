@@ -1363,6 +1363,53 @@ impl RTCPeerConnection {
         self.pump_turn(now);
     }
 
+    /// A new DTLS association needs a new 3-tuple (RFC 8842 section 5.1), the relayed one
+    /// included: each link of the active transport that holds an allocation deletes it (over
+    /// UDP a Refresh of LIFETIME 0, RFC 8656 section 8; over TCP, TLS and DTLS its connection
+    /// closes) and starts over, so that the new ICE generation announces the relayed
+    /// candidate of a new allocation.
+    pub(crate) fn reallocate_turn_links_of_active_transport(&mut self, now: Instant) {
+        let transport = self.pipeline_context.transports.active_id();
+        let mut ended = vec![];
+        let out = &mut self.pipeline_context.write_outs;
+        for l in self
+            .streams
+            .turn
+            .links
+            .iter_mut()
+            .filter(|l| l.transport == transport && l.relay.is_some())
+        {
+            ended.extend(
+                std::mem::take(&mut l.data)
+                    .iter()
+                    .filter_map(|c| c.stream()),
+            );
+            if let Some(a) = l.dtls.as_mut() {
+                let _ = a.endpoint.close(now);
+                a.flush(out);
+            }
+            release_udp_allocation(l, now, out);
+            if let LinkState::Open(id) = l.state {
+                ended.push(id);
+            }
+            debug!("{}: a new DTLS association: allocating again", l.url);
+            l.client = None;
+            l.relay = None;
+            l.dtls = None;
+            l.udp_attempts.clear();
+            l.permitted.clear();
+            l.attempts.clear();
+            l.state = LinkState::Pending;
+            l.race = None;
+            l.query = None;
+            l.discovery = None;
+            l.announced_ufrag = None;
+        }
+        for id in ended {
+            self.streams.table.close(id);
+        }
+    }
+
     /// Drops the links of transports a description removed, and their connections.
     pub(crate) fn release_removed_turn_links(&mut self) {
         let ids = self.pipeline_context.transports.ids();

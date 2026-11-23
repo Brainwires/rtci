@@ -204,6 +204,23 @@ impl World {
         Ok(())
     }
 
+    /// `gather` again for every transport on ports from `base`: what an application does for
+    /// a new DTLS association, which runs on new 3-tuples (RFC 8842 section 5.1). The earlier
+    /// addresses stay this peer's.
+    fn gather_again(&mut self, base: u16) -> Result<()> {
+        for i in 0..2 {
+            let sections = self.peers[i].pc.ice_transport_sections();
+            for (k, (mid, index)) in sections.into_iter().enumerate() {
+                let addr = SocketAddr::new(self.peers[i].ip, base + k as u16);
+                self.peers[i].addrs.push(addr);
+                let candidate = Peer::host_candidate(addr, &mid, index)?;
+                self.peers[i].pc.add_local_candidate(candidate.clone())?;
+                self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `gather` for the transports a later exchange added: the sections past those each peer
     /// gathered for already get a port of their own.
     fn gather_new(&mut self) -> Result<()> {
@@ -1992,6 +2009,7 @@ fn renewing_the_dtls_association_renews_every_transport() -> Result<()> {
 
     world.peers[0].pc.renew_dtls_association();
     let offer = world.renegotiate_with(without_bundle_group)?;
+    world.gather_again(6000)?;
     let after = tls_ids(&offer);
     assert_eq!(after.len(), 3, "{offer}");
     assert!(
