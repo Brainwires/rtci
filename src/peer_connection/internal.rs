@@ -322,6 +322,7 @@ impl RTCPeerConnection {
             ice_credentials_to_replace: Vec::new(),
             transport_closed: false,
             identity_assertion: None,
+            peer_identity: None,
             last_stable_state: None,
             negotiation_needed_state: NegotiationNeededState::Empty,
             is_negotiation_ongoing: false,
@@ -3149,6 +3150,44 @@ impl RTCPeerConnection {
         }
 
         Ok(codec_preferences)
+    }
+
+    /// RFC 3711 sections 8 and 9.1, RFC 5764 section 3: the local streams of a connection are
+    /// all protected under one SRTP master key, so no two may have the same SSRC (a two-time
+    /// pad). The SSRCs `encodings` name (media, RTX, FEC) are distinct, and no other sender
+    /// has them; `replacing` is the transceiver whose sender's encodings they replace.
+    pub(super) fn refuse_taken_ssrcs(
+        &self,
+        encodings: &[RTCRtpEncodingParameters],
+        replacing: Option<crate::rtp_transceiver::RTCRtpTransceiverId>,
+    ) -> Result<()> {
+        let ssrcs = |encoding: &RTCRtpEncodingParameters| {
+            let coding = &encoding.rtp_coding_parameters;
+            [
+                coding.ssrc,
+                coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+                coding.fec.as_ref().map(|fec| fec.ssrc),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<SSRC>>()
+        };
+        let mut taken: HashSet<SSRC> = HashSet::new();
+        for (id, transceiver) in self.rtp_transceivers.iter().enumerate() {
+            if Some(id) == replacing || transceiver.stopped() {
+                continue;
+            }
+            if let Some(sender) = transceiver.sender() {
+                taken.extend(sender.send_encodings().iter().flat_map(ssrcs));
+            }
+        }
+        let mut given = HashSet::new();
+        for ssrc in encodings.iter().flat_map(ssrcs) {
+            if taken.contains(&ssrc) || !given.insert(ssrc) {
+                return Err(Error::ErrRTPSenderSsrcTaken(ssrc));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn normalize_sender_track(

@@ -2322,6 +2322,23 @@ pub enum Error {
     /// RtpStreamId the rid is sent as; RFC 8851 section 10).
     #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]
     ErrRTPSenderRidInvalid,
+    /// An encoding names an SSRC another local stream of the connection has, or names one
+    /// twice: every local stream is protected under the one SRTP master key, and two with the
+    /// same SSRC would share a keystream (RFC 3711 sections 8 and 9.1, RFC 5764 section 3).
+    #[error("Sender cannot use SSRC {0}: another local stream has it")]
+    ErrRTPSenderSsrcTaken(u32),
+    /// `RTCPeerConnection::set_peer_identity` without a remote description that carries an
+    /// identity assertion (RFC 8827 section 5).
+    #[error("the remote description carries no identity assertion")]
+    ErrNoRemoteIdentityAssertion,
+    /// The fingerprints an identity provider verified do not cover every fingerprint of the
+    /// remote description (RFC 8827 section 7.4).
+    #[error("the verified identity does not cover every fingerprint of the remote description")]
+    ErrIdentityFingerprintsNotCovered,
+    /// The certificate the DTLS association authenticated is not among the fingerprints an
+    /// identity provider verified (RFC 8827 section 7.4).
+    #[error("the certificate in use is not among the fingerprints of the verified identity")]
+    ErrIdentityCertificateNotCovered,
     /// Sender does not have track for RID.
     #[error("Sender does not have track for RID")]
     ErrRTPSenderNoTrackForRID,

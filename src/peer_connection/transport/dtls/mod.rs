@@ -63,12 +63,17 @@ fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool
     normalize(a) == normalize(b)
 }
 
+/// The DTLS-SRTP profiles offered when the application configures none: the GCM ones and
+/// AES_CM with the 80-bit tag. Not `SRTP_AES128_CM_HMAC_SHA1_32`: RFC 3711 section 9.5 allows
+/// the 32-bit tag only where its two conditions hold (forgery of a packet does no harm worth
+/// more than 2^-32, and the payload's integrity is not needed), which the engine cannot know
+/// of any session; an application that knows sets it with
+/// `SettingEngineBuilder::with_srtp_protection_profiles`.
 pub(crate) fn default_srtp_protection_profiles() -> Vec<SrtpProtectionProfile> {
     vec![
         SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
         SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
         SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
-        SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
     ]
 }
 
@@ -813,6 +818,29 @@ mod tests {
         fn random(&self) -> &dyn RTCRandom {
             self.random_provider.random()
         }
+    }
+
+    /// RFC 3711 sections 5.2 and 9.5: the 32-bit SRTP tag is not offered by default, only
+    /// when the application configures it.
+    #[test]
+    fn the_32_bit_srtp_tag_is_offered_only_when_configured() {
+        let default = transport(vec![]);
+        let offered = default
+            .supported_srtp_protection_profiles()
+            .expect("profiles");
+        assert!(!offered.contains(&SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32));
+        assert!(offered.contains(&SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80));
+        let mut configured = transport(vec![]);
+        configured.srtp_protection_profiles = vec![
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+        ];
+        assert!(
+            configured
+                .supported_srtp_protection_profiles()
+                .expect("profiles")
+                .contains(&SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32)
+        );
     }
 
     fn transport(dtls_cipher_suites: Vec<CipherSuiteId>) -> DtlsTransport {

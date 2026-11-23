@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **srtp**: the default DTLS-SRTP profiles no longer include `SRTP_AES128_CM_HMAC_SHA1_32`
+  (RFC 3711 sections 5.2 and 9.5: the 32-bit tag only where the application knows its
+  conditions hold); `SettingEngineBuilder::with_srtp_protection_profiles` offers it.
+- **rtp**: an encoding that names an SSRC another local stream of the connection has, or
+  names one twice (media, RTX or FEC), is refused with the new
+  `Error::ErrRTPSenderSsrcTaken` (RFC 3711 sections 8 and 9.1, RFC 5764 section 3: every
+  local stream is under the one SRTP master key); it was accepted.
+- **ice**: with the "relay" ICE transport policy a relayed candidate is signalled with raddr
+  0.0.0.0 rport 9 (RFC 8827 section 6.4).
 - **jsep**: small rules.
   - `RTCRtpSender::write_rtp` takes out the header extension elements whose id is not
     negotiated for the sender (RFC 8285 section 4.1.2); they were passed through. New
@@ -1015,6 +1024,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **security**: the peer's identity (RFC 8827 sections 5.1.4, 7.4). New
+  `RTCPeerConnection::set_peer_identity(RTCPeerIdentity)` takes what the application's identity
+  provider verified of the remote assertion and refuses it unless it covers every fingerprint
+  of the remote description and the certificate the DTLS association authenticated;
+  `peer_identity()` returns it for the associations made with those fingerprints and drops it
+  when the remote fingerprints change. New errors `ErrNoRemoteIdentityAssertion`,
+  `ErrIdentityFingerprintsNotCovered`, `ErrIdentityCertificateNotCovered`.
+- **rtcp**: the SRTCP fields (E flag and index, the tag) count in the RTCP average packet size
+  (RFC 3711 section 3.4): new `RtcpSessionControl::SrtcpOverhead`, which the peer connection
+  sends from the negotiated profile when DTLS completes.
 - **dtls**: DTLS 1.3 certificates (RFC 8446 sections 4.2.5, 4.4.2.2 to 4.4.2.4). A server no
   longer sends a certificate whose KeyUsage forbids signing (handshake_failure when it has no
   other); a client answers a CertificateRequest's `oid_filters` (KeyUsage, ExtendedKeyUsage;

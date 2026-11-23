@@ -247,6 +247,7 @@ pub mod cryptex;
 mod dtls_sdp;
 pub mod event;
 pub(crate) mod handler;
+pub mod identity;
 mod internal;
 mod object_model;
 pub mod priority;
@@ -823,6 +824,9 @@ pub struct RTCPeerConnection {
     /// The value of the `a=identity` attribute offers and answers carry (RFC 8827 section 5);
     /// see `dtls_sdp`.
     identity_assertion: Option<String>,
+    /// The peer's identity the application established (RFC 8827 sections 5.1.4, 7.4); see
+    /// `identity`.
+    peer_identity: Option<identity::EstablishedIdentity>,
     /// What a rollback restores: set while an offer applied in the stable state is pending.
     last_stable_state: Option<internal::LastStableState>,
     negotiation_needed_state: NegotiationNeededState,
@@ -1583,6 +1587,18 @@ impl RTCPeerConnection {
     ///
     /// See [setRemoteDescription](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-setremotedescription!overload-1)
     pub fn set_remote_description(
+        &mut self,
+        now: Instant,
+        remote_description: RTCSessionDescription,
+    ) -> Result<()> {
+        let applied = self.set_remote_description_with_rollback(now, remote_description);
+        if applied.is_ok() {
+            self.discard_peer_identity_if_fingerprints_changed();
+        }
+        applied
+    }
+
+    fn set_remote_description_with_rollback(
         &mut self,
         now: Instant,
         remote_description: RTCSessionDescription,
@@ -3180,6 +3196,7 @@ impl RTCPeerConnection {
         }
 
         let send_encodings = self.send_encodings_from_track(&track);
+        self.refuse_taken_ssrcs(&send_encodings, None)?;
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
         let mut transceiver = self.new_transceiver_from_track(
@@ -3357,6 +3374,7 @@ impl RTCPeerConnection {
             )?;
             send_encodings
         };
+        self.refuse_taken_ssrcs(&send_encodings, None)?;
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
         init.send_encodings = send_encodings;

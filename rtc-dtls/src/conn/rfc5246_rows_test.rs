@@ -365,3 +365,37 @@ fn null_srtp_profiles_are_never_selected() -> Result<()> {
     assert!(!use_srtp_answered(&answer(true)?), "a NULL one never is");
     Ok(())
 }
+
+/// RFC 3711 section 9.1, RFC 5764 section 4.2: no two RTP sessions share a master key. Each
+/// DTLS association exports its own SRTP keying material (two associations between the same
+/// endpoints never the same), and within one the two directions' master keys differ.
+#[test]
+fn each_association_exports_its_own_srtp_master_keys() -> Result<()> {
+    use crate::extension::extension_use_srtp::SrtpProtectionProfile;
+    const LABEL: &str = "EXTRACTOR-dtls_srtp";
+    let profile = SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm;
+    for version in [DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_3] {
+        let mut exports = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let pair = Pair::new(
+                client_builder()
+                    .with_protocol_versions(version, version)
+                    .with_srtp_protection_profiles(vec![profile]),
+                server_builder()
+                    .with_protocol_versions(version, version)
+                    .with_srtp_protection_profiles(vec![profile]),
+            )?
+            .complete();
+            let material = pair
+                .client
+                .get_connection_state(server_addr())
+                .unwrap()
+                .export_keying_material(LABEL, &[], 56)?;
+            // client_write_SRTP_master_key, server_write_SRTP_master_key, then the salts.
+            let material = material.as_ref().to_vec();
+            assert_ne!(material[..16], material[16..32], "{version:?}");
+            assert!(exports.insert(material), "{version:?}");
+        }
+    }
+    Ok(())
+}

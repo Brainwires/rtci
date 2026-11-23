@@ -797,8 +797,12 @@ impl Agent {
         self.rank_local_candidate(&mut c);
 
         // With host addresses hidden behind mDNS names, a reflexive or relayed candidate does
-        // not give its base away in raddr / rport (mDNS draft Section 3.1.2.2).
-        if self.mdns_mode == MulticastDnsMode::QueryAndGather
+        // not give its base away in raddr / rport (mDNS draft Section 3.1.2.2). Nor does a
+        // relayed candidate when only relayed candidates are gathered (the W3C "relay" ICE
+        // transport policy): RFC 8827 section 6.4, the mechanism that keeps the local
+        // addresses from the peer "MUST also suppress the related address".
+        let relay_only = self.candidate_types == [CandidateType::Relay];
+        if (self.mdns_mode == MulticastDnsMode::QueryAndGather || relay_only)
             && c.candidate_type() != CandidateType::Host
             && c.related_address().is_some()
         {
