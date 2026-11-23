@@ -475,3 +475,59 @@ fn test_lite_agent_sends_binding_indications_as_keepalives() {
         assert!(pair[1].duration_since(pair[0]) >= Duration::from_secs(15));
     }
 }
+
+/// Section 5.1: consent lasts 30 seconds from the last response. A controlled agent whose own
+/// check validated the pair at once, and whose peer nominates it 15 seconds later (every
+/// response to the peer's checks was lost), has 15 seconds of consent left when it selects the
+/// pair: its first consent check goes at the selection, not an interval later (the check that
+/// validated the pair was sent 15 seconds before, so the period between checks stays above
+/// four seconds). With the first check an interval later, three lost consent checks lapsed
+/// consent at 10 % loss (`tests/lossy_link_rtc2rtc.rs` sweep, aws-lc-rs seed 1049).
+#[test]
+fn test_a_pair_selected_long_after_its_last_consent_is_checked_at_once() {
+    use crate::attributes::use_candidate::UseCandidateAttr;
+    let start = Instant::now();
+    let mut a = started_agent(start, config(false), &[REMOTE_A]);
+    run_traced(&mut a, start, start + Duration::from_millis(500), |_, _| {
+        true
+    });
+    assert!(
+        a.get_selected_candidate_pair().is_none(),
+        "controlled: waits"
+    );
+
+    let later = start + Duration::from_secs(15);
+    let nomination = peer_request(
+        &a,
+        vec![
+            Box::new(AttrControlling(1)),
+            Box::new(PriorityAttr(1000)),
+            Box::new(UseCandidateAttr::new()),
+        ],
+    );
+    deliver(&mut a, later, &nomination, REMOTE_A).unwrap();
+    assert!(a.get_selected_candidate_pair().is_some());
+    while a.poll_write().is_some() {}
+    let trace = run_traced(&mut a, later, later + Duration::from_secs(1), |_, _| true);
+    assert_eq!(
+        1,
+        trace.requests.len(),
+        "a consent check at the selection: {:?}",
+        trace
+            .requests
+            .iter()
+            .map(|(at, _, _)| *at - later)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A pair selected right after its validating response keeps the first consent check one
+/// interval (4 to 6 seconds) later.
+#[test]
+fn test_a_pair_selected_at_once_is_checked_an_interval_later() {
+    let (mut a, now) = connected(config(true));
+    let trace = run_traced(&mut a, now, now + Duration::from_secs(10), |_, _| true);
+    let first = trace.requests.first().expect("a consent check").0;
+    let after = first - now;
+    assert!(after >= Duration::from_millis(3500), "{after:?}");
+}

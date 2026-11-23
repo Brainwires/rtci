@@ -3909,6 +3909,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
   and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
   that had none.
+- **ice**: a controlled agent whose own check validated a pair at once and whose peer
+  nominated it much later (the responses to the peer's checks lost) sent its first consent
+  check one interval (4 to 6 s) after selecting the pair, although its consent had run since
+  the validating response (RFC 7675 section 5.1: 30 seconds from the last response): at 10 %
+  loss a selection 15 s in and three lost consent checks failed the connection (aws-lc-rs
+  seed 1049, 299 of 300 messages). A pair selected more than one interval after its last
+  consent response is checked at once; the period between checks stays above 4 s, as the
+  check that validated the pair was sent before that response. Tests:
+  `agent_rfc7675_test.rs::test_a_pair_selected_long_after_its_last_consent_is_checked_at_once`
+  (fails before), `test_a_pair_selected_at_once_is_checked_an_interval_later`.
 - **sctp**: an endpoint in COOKIE-ECHOED answered a HEARTBEAT (its ESTABLISHED peer's path MTU
   probe) with a HEARTBEAT ACK, against RFC 9260 5.1 C ("until the COOKIE ACK chunk is returned,
   the sender MUST NOT send any other packets to the peer"); it no longer does. And while nothing
