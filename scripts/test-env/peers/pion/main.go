@@ -137,6 +137,8 @@ type Result struct {
 	IgnoredOffers   int               `json:"ignoredOffers"`
 	Rust            map[string]any    `json:"rust"`
 	RustErrors      []string          `json:"rustErrors"`
+	// Pion's own outbound-rtp stats: what it says it sent, per SSRC and RID.
+	Outbound []map[string]any `json:"outbound"`
 }
 
 // naError ends a run as not applicable: the stack cannot express the step.
@@ -1405,6 +1407,7 @@ func (p *Peer) collect() {
 	report := p.pc.GetStats()
 	var pair *webrtc.ICECandidatePairStats
 	var transport *webrtc.TransportStats
+	outbound := []map[string]any{}
 	for _, s := range report {
 		switch v := s.(type) {
 		case webrtc.TransportStats:
@@ -1412,6 +1415,11 @@ func (p *Peer) collect() {
 			if transport == nil || t.DTLSState == webrtc.DTLSTransportStateConnected {
 				transport = &t
 			}
+		case webrtc.OutboundRTPStreamStats:
+			outbound = append(outbound, map[string]any{
+				"ssrc": v.SSRC, "kind": v.Kind, "rid": v.Rid, "packetsSent": v.PacketsSent,
+				"nackCount": v.NACKCount, "retransmittedPacketsSent": v.RetransmittedPacketsSent,
+			})
 		case webrtc.ICECandidatePairStats:
 			pp := v
 			if pp.Nominated && pp.State == webrtc.StatsICECandidatePairStateSucceeded {
@@ -1439,6 +1447,7 @@ func (p *Peer) collect() {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.res.Outbound = outbound
 	if pair != nil {
 		p.res.SelectedPair = map[string]any{"local": cand(pair.LocalCandidateID), "remote": cand(pair.RemoteCandidateID)}
 	}

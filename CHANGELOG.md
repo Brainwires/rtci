@@ -2449,6 +2449,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-6-train-fixes`, train 10 round 1): the RTCP peer cell reads
+  the remote-inbound / remote-outbound stats the peer's reports make (SR and RR are the
+  engine's RTCP session's own and never reach `poll_read`); `interop-peer` reports them and
+  its transports' packet counters. Pion is na-peer for unbundled transports and rollback;
+  aiortc is na-peer where it refuses Rust's `a=extmap` extension attributes (RFC 8285 5, its
+  parser takes two fields); the aiortc peer counts media in its receiver (aiortc's getStats
+  hides all but one SSRC per receiver) and no longer awaits `replaceTrack`; the str0m peer
+  sends PLI and FIR in turns and reports the path in use when its stats name none.
+  `docs/interop.md` has the round's matrix, what each peer negotiates and the findings.
+
 - **interop** (branch `conf/peers-5-layers`): layer interop tests against independent
   implementations, in `scripts/test-env/peers/layers` (a crate outside the workspace, run in
   the test image's unit stage): rtc-dtls against dimpl 0.9.0 (DTLS 1.2 and 1.3, both roles:
