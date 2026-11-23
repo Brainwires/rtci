@@ -218,6 +218,8 @@ enum Command {
     Resume(u32),
     LocalPause(u32),
     LocalResume(u32),
+    /// The stream was bound initially paused (`StreamInfo::initially_paused`).
+    InitialPause(u32),
 }
 
 #[derive(Default)]
@@ -233,6 +235,36 @@ fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
     shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// What the peer connection tells the [`PauseResumeInterceptor`] while it runs: a local
+/// stream it sends made inactive or active again (W3C webrtc-pc `RTCRtpEncodingParameters`
+/// `active`), which RFC 8853 section 5.2 has treated as an RFC 7728 local pause (section 6.4,
+/// announced with PAUSED) and resume. A stream that did not negotiate pause and resume is
+/// not affected.
+///
+/// It travels as an [`Attribute::Custom`] on an empty RTCP packet written into the chain
+/// ([`PauseResumeControl::into_packet`]), which the interceptor hands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PauseResumeControl {
+    /// The local stream of this SSRC is paused by local decision.
+    LocalPause(u32),
+    /// The local stream of this SSRC, paused by local decision, plays again.
+    LocalResume(u32),
+}
+
+impl PauseResumeControl {
+    /// The packet that carries this to the pause-resume interceptor when written into the
+    /// chain at `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(self))),
+        }
+    }
 }
 
 /// The application's side of [`PauseResumeInterceptor`]: asks a remote stream to pause or
@@ -337,6 +369,7 @@ impl PauseResumeBuilder {
                 shared: shared.clone(),
                 senders: HashMap::new(),
                 receivers: HashMap::new(),
+                initially_paused: HashSet::new(),
                 local_ssrcs: Vec::new(),
                 last_heard: HashMap::new(),
                 fallback_ssrc: rand::random(),
@@ -352,9 +385,21 @@ impl PauseResumeBuilder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SenderState {
     Playing,
-    Pausing { until: Instant, requester: u32 },
-    Paused { requester: u32 },
-    LocalPaused { requester: Option<u32> },
+    Pausing {
+        until: Instant,
+        requester: u32,
+    },
+    Paused {
+        requester: u32,
+    },
+    LocalPaused {
+        requester: Option<u32>,
+    },
+    /// Paused from the start by the session description (RFC 8853 section 5.2): an
+    /// unsolicited local pause that, unlike [`SenderState::LocalPaused`], a RESUME ends
+    /// ("Initially paused simulcast streams are resumed as described by the RTP pause/resume
+    /// specification").
+    InitiallyPaused,
 }
 
 impl SenderState {
@@ -363,7 +408,7 @@ impl SenderState {
             Self::Playing => PauseState::Playing,
             Self::Pausing { .. } => PauseState::Pausing,
             Self::Paused { .. } => PauseState::Paused,
-            Self::LocalPaused { .. } => PauseState::LocalPaused,
+            Self::LocalPaused { .. } | Self::InitiallyPaused => PauseState::LocalPaused,
         }
     }
 }
@@ -424,6 +469,9 @@ struct ReceiverStream {
     request: Option<Request>,
     /// No new request of this type before then (a REFUSED for this endpoint's PauseID).
     hold: Option<(PauseResumeType, Instant)>,
+    /// The sender said BYE for this SSRC: no further PAUSE or RESUME goes to it (section
+    /// 6.3.1).
+    left: bool,
 }
 
 /// How often a request is retransmitted before the receiver gives up.
@@ -436,6 +484,10 @@ pub struct PauseResumeInterceptor {
     shared: Arc<Mutex<Shared>>,
     senders: HashMap<u32, SenderStream>,
     receivers: HashMap<u32, ReceiverStream>,
+    /// The local SSRCs that were bound initially paused once: a later binding (after a
+    /// renegotiation) does not pause them again; RFC 7728 signalling decides from then on
+    /// (RFC 8853 section 5.3.4).
+    initially_paused: HashSet<u32>,
     /// Every bound local SSRC: a request is sent from one of them (section 7: "any of its
     /// SSRCs MAY be used").
     local_ssrcs: Vec<u32>,
@@ -546,6 +598,7 @@ impl PauseResumeInterceptor {
                 (PauseResumeType::Pause, _) if is_current => {}
                 (PauseResumeType::Resume, SenderState::Pausing { .. })
                 | (PauseResumeType::Resume, SenderState::Paused { .. })
+                | (PauseResumeType::Resume, SenderState::InitiallyPaused)
                     if is_current =>
                 {
                     Self::enter_playing(stream);
@@ -653,7 +706,8 @@ impl PauseResumeInterceptor {
                     let Some(stream) = self.receivers.get_mut(&ssrc) else {
                         continue;
                     };
-                    if !stream.capability.peer_receives(typ)
+                    if stream.left
+                        || !stream.capability.peer_receives(typ)
                         || stream
                             .hold
                             .is_some_and(|(held, until)| held == typ && now < until)
@@ -680,6 +734,11 @@ impl PauseResumeInterceptor {
                     };
                     match stream.state {
                         SenderState::LocalPaused { .. } => {}
+                        SenderState::InitiallyPaused => {
+                            if let Some(stream) = self.senders.get_mut(&ssrc) {
+                                stream.state = SenderState::LocalPaused { requester: None };
+                            }
+                        }
                         // "unless the stream was already in paused state".
                         SenderState::Paused { requester } => {
                             if let Some(stream) = self.senders.get_mut(&ssrc) {
@@ -701,9 +760,27 @@ impl PauseResumeInterceptor {
                 }
                 Command::LocalResume(ssrc) => {
                     if let Some(stream) = self.senders.get_mut(&ssrc)
-                        && matches!(stream.state, SenderState::LocalPaused { .. })
+                        && matches!(
+                            stream.state,
+                            SenderState::LocalPaused { .. } | SenderState::InitiallyPaused
+                        )
                     {
                         Self::enter_playing(stream);
+                    }
+                }
+                Command::InitialPause(ssrc) => {
+                    if self
+                        .senders
+                        .get(&ssrc)
+                        .is_some_and(|stream| matches!(stream.state, SenderState::Playing))
+                    {
+                        // Announced as a local pause is (section 6.4).
+                        self.enter_paused(
+                            now,
+                            ssrc,
+                            SenderState::InitiallyPaused,
+                            PAUSED_REPETITIONS + 1,
+                        );
                     }
                 }
             }
@@ -878,6 +955,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
                             // RESUME requests to it".
                             if let Some(stream) = self.receivers.get_mut(left) {
                                 stream.request = None;
+                                stream.left = true;
                             }
                         }
                     } else if let Some(report) = packet.as_any().downcast_ref::<ReceiverReport>() {
@@ -902,6 +980,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         self.now = Some(self.now.map_or(msg.now, |n| n.max(msg.now)));
+        if let Some(control) = msg.message.custom::<PauseResumeControl>() {
+            lock(&self.shared).commands.push(match *control {
+                PauseResumeControl::LocalPause(ssrc) => Command::LocalPause(ssrc),
+                PauseResumeControl::LocalResume(ssrc) => Command::LocalResume(ssrc),
+            });
+        }
         // A local pause asked for before this packet applies to it.
         self.run_commands(msg.now);
         if let Packet::Rtp(packet) = &mut msg.message.packet
@@ -954,6 +1038,7 @@ impl Interceptor for PauseResumeInterceptor {
                     pause_id: None,
                     request: None,
                     hold: None,
+                    left: false,
                 })
                 .capability = capability;
             self.publish();
@@ -970,6 +1055,17 @@ impl Interceptor for PauseResumeInterceptor {
             self.local_ssrcs.push(info.ssrc);
         }
         if let Some(capability) = negotiated_pause(info) {
+            // RFC 8853 section 5.2: an initially paused stream is "an unsolicited locally
+            // paused stream", from the start; it can be paused only with pause and resume
+            // negotiated for it (section 5.3.3), which is when this interceptor binds it.
+            if info.initially_paused
+                && !self.senders.contains_key(&info.ssrc)
+                && self.initially_paused.insert(info.ssrc)
+            {
+                lock(&self.shared)
+                    .commands
+                    .push(Command::InitialPause(info.ssrc));
+            }
             self.senders
                 .entry(info.ssrc)
                 .or_insert(SenderStream {

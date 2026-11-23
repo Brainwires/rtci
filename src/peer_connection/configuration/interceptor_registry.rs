@@ -1666,6 +1666,8 @@ pub(crate) fn create_stream_info(
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
             .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
     }
 }
 

@@ -2506,6 +2506,34 @@ mod boundary_tests {
         assert_eq!(Some(now), stream.remote_report_received_at);
         assert_eq!(1, stream.reports_received);
     }
+
+    /// RFC 9143 section 9.2: "RTCP packets that cannot be associated with an appropriate "m="
+    /// section MUST still be processed as usual by the RTP layer". A sender report from a
+    /// source no section has (no stream of either direction is known) goes into the chain,
+    /// whose RTCP session takes its sender as a member and its size into the report interval.
+    #[test]
+    fn rtcp_that_matches_no_section_still_goes_to_the_rtp_layer() {
+        let mut stats = RTCStatsAccumulator::default();
+        let reads = read_rtcp(
+            &mut stats,
+            Instant::now(),
+            vec![Box::new(SenderReport {
+                ssrc: 0x7777,
+                packet_count: 1,
+                octet_count: 100,
+                ..Default::default()
+            })],
+        );
+        assert!(stats.inbound_rtp_streams.is_empty());
+        let reached = reads.iter().any(|read| {
+            matches!(&read.message.packet, Packet::Rtcp(packets) if packets.iter().any(|p| {
+                p.as_any()
+                    .downcast_ref::<SenderReport>()
+                    .is_some_and(|sr| sr.ssrc == 0x7777)
+            }))
+        });
+        assert!(reached, "the report did not reach the RTP layer");
+    }
 }
 
 #[cfg(test)]

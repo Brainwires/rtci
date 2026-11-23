@@ -302,8 +302,19 @@ fn reject_video(answer: &str) -> String {
         .find_map(|l| l.strip_prefix("a=mid:"))
         .expect("a mid")
         .to_owned();
+    // The port is whatever the answer's default destination is (9 only while it has no
+    // candidate): it becomes zero.
     answer
-        .replacen("\r\nm=video 9 ", "\r\nm=video 0 ", 1)
+        .lines()
+        .map(|l| match l.strip_prefix("m=video ") {
+            Some(rest) => format!(
+                "m=video 0 {}",
+                rest.split_once(' ').map_or("", |(_, protos)| protos)
+            ),
+            None => l.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
         .lines()
         .map(|l| match l.strip_prefix("a=group:BUNDLE ") {
             Some(mids) => {
@@ -339,9 +350,28 @@ fn a_rejected_stream_gets_neither_media_nor_rtcp() -> Result<()> {
     let (rtp, rtcp) = datagrams_naming(&world.peers[0], start, SSRC);
     assert!(rtp >= 4 && rtcp >= 1, "accepted: {rtp} RTP, {rtcp} RTCP");
 
-    // The answer rejects the video section.
+    // The answer rejects the video section. What holds the media back is that the
+    // transceiver is stopped (W3C webrtc-pc 4.4.1.6, "set a session description": a rejected
+    // m= section stops its transceiver; its sender's streams are unbound and say BYE); the
+    // section having no transport any more is a second, unstated barrier.
     world.exchange_with(0, |offer| offer.to_owned(), reject_video)?;
     world.run_for(Duration::from_millis(500), |_| false);
+    // Stopped, and then gone with the answer (W3C 4.4.1.6): the audio one alone is live.
+    let ids: Vec<_> = world.peers[0].pc.get_transceivers().collect();
+    let states: Vec<(bool, bool)> = ids
+        .into_iter()
+        .filter_map(|id| {
+            world.peers[0]
+                .pc
+                .rtp_transceiver(id)
+                .map(|t| (t.stopped(), t.is_stopped()))
+        })
+        .collect();
+    let live = states.iter().filter(|(stopping, _)| !stopping).count();
+    assert_eq!(
+        live, 1,
+        "the rejected section's transceiver is not stopped: (stopping, stopped) {states:?}"
+    );
     let start = world.peers[0].written.len();
     for n in 0..5u16 {
         let now = world.now;

@@ -94,7 +94,7 @@ impl RTCPeerConnection {
             transceiver.set_codec_preferences(codec_preferences, &self.media_engine)?;
         }
         let preferences = transceiver.get_codec_preferences().to_vec();
-        let streams = vec![track.stream_id().clone()];
+        let streams = crate::rtp_transceiver::rtp_sender::internal::track_streams(&track);
         if let Some(sender) = transceiver.sender_mut() {
             if !sender.has_send_encodings() || !sender.is_negotiated() {
                 sender.set_send_encodings(send_encodings);

@@ -40,6 +40,7 @@ ip netns exec open-a tc qdisc add dev eth0 root handle 1: prio bands 4 priomap 1
 cp "$HERE"/*.mjs "$HERE"/peer.js /opt/interop/
 cd /opt/interop
 RTC_INTEROP_WS=ws://203.0.113.51:8080 RTC_INTEROP_JSON="$A/interop-results-wan.json" \
+  RTC_INTEROP_SDP_DIR="$A/browser-sdp" \
   ip netns exec open-a npx playwright test --config playwright.config.mjs \
   --project chromium --project firefox --project webkit "$@"
 rc=$?
@@ -48,6 +49,7 @@ ip netns exec lan-b tcpdump -i eth0 -n -vvv -l udp port 5353 > "$A/mdns-lan-b.tx
 TCPDUMP_PID=$!
 RTC_INTEROP_WS=ws://10.99.0.51:8080 RTC_INTEROP_BROWSER_IP=10.99.0.50 \
   RTC_INTEROP_JSON="$A/interop-results-mdns.json" \
+  RTC_INTEROP_SDP_DIR="$A/browser-sdp" \
   ip netns exec lan-a npx playwright test --config playwright.config.mjs \
   --project chromium-mdns --project firefox-mdns --project webkit-mdns "$@" || rc=1
 kill "$TCPDUMP_PID" 2>/dev/null; wait "$TCPDUMP_PID" 2>/dev/null

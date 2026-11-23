@@ -375,3 +375,42 @@ fn lower_case_fingerprints_are_read_on_request() -> Result<()> {
     world.ping_pong("a lower-case fingerprint")?;
     Ok(())
 }
+
+/// RFC 9429 section 5.8.3: the DTLS setup value "MUST be set according to the rules specified
+/// in [RFC5763], Section 5", whose answerer "MUST use either a setup attribute value of
+/// setup:active or setup:passive": an answer saying `actpass` is refused, and the offerer
+/// stays in `have-local-offer`.
+#[test]
+fn an_answer_saying_actpass_is_refused() -> Result<()> {
+    let mut world = world()?;
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let refused = world.exchange_with(0, keep, |answer| {
+        replace_lines(answer, "a=setup:", Some("a=setup:actpass"))
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(world.peers[0].pc.remote_description().is_none());
+    Ok(())
+}
+
+/// RFC 9429 section 5.8.3: the setup value "MUST be consistent with the selected role of the
+/// current DTLS connection, if one exists and is being continued". After the first exchange
+/// the answerer is the DTLS client (`active`); a later answer that keeps the association (the
+/// same `tls-id`, no ICE restart) but says `passive`, taking the offerer's server role, is
+/// refused; the same answer saying `active` is taken.
+#[test]
+fn a_continued_association_keeps_its_roles() -> Result<()> {
+    let mut world = world()?;
+    world.connect()?;
+    let now = world.now;
+    assert_eq!(world.peers[1].dtls_role(now), RTCDtlsRole::Client);
+    let refused = world.exchange_with(0, keep, |answer| {
+        replace_lines(answer, "a=setup:", Some("a=setup:passive"))
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    world.peers[0]
+        .pc
+        .set_local_description(world.now, RTCSessionDescription::rollback(None)?)?;
+    world.exchange(0)?;
+    world.ping_pong("after the later exchange")?;
+    Ok(())
+}

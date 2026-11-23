@@ -55,7 +55,9 @@ fn check_value(name: &str, value: Option<&str>) -> Result<()> {
         "extmap" => check::<ExtMap>(value),
         "rtcp" => check::<Rtcp>(value),
         "rtcp-fb" => check::<RtcpFb>(value),
-        "rtcp-xr" => check::<RtcpXr>(value),
+        // RFC 3611 section 5.1: `"a=" "rtcp-xr" [":" xr-format *(SP xr-format)]`, the value
+        // is optional.
+        "rtcp-xr" => value.map_or(Ok(()), |v| RtcpXr::parse(v).map(|_| ())),
         "rtpmap" => check::<RtpMap>(value),
         "fmtp" => check::<Fmtp>(value),
         "ptime" => check::<Ptime>(value),
@@ -92,6 +94,17 @@ fn check_value(name: &str, value: Option<&str>) -> Result<()> {
             }
         }
     }
+}
+
+/// Checks one attribute's value against the grammar of its name (RFC 9429 section 5.8: a
+/// line that is not well formed rejects the description "even if the value is to be
+/// discarded"): a known attribute's value must parse as its type, a property attribute
+/// (`rtcp-mux`, `sendrecv`, ...) must have none, and an unknown one needs only a token name
+/// and a value without NUL, CR or LF (RFC 8866 section 5.13). The checks across lines and
+/// levels of [`SessionDescription::validate`] are not made.
+pub fn check_attribute(attribute: &Attribute) -> Result<()> {
+    let (name, value) = attribute.parts();
+    check_value(name, value)
 }
 
 fn check_level(name: &str, media: bool) -> Result<()> {

@@ -1884,3 +1884,30 @@ fn depend_follows_the_rfc_5583_abnf() {
     );
     assert_eq!(depend.of("101").map(|d| &d.typ), Some(&DependencyType::Mdc));
 }
+
+/// `check_attribute`: one line by its grammar (RFC 9429 section 5.8). A known attribute's
+/// value parses as its type, a property attribute has none, `a=rtcp-xr` may have none (RFC
+/// 3611 section 5.1), and an unknown attribute is fine (RFC 8866 section 5.13).
+#[test]
+fn check_attribute_checks_one_line_by_its_grammar() {
+    use crate::description::common::Attribute;
+    let line =
+        |key: &str, value: Option<&str>| Attribute::new(key.to_owned(), value.map(str::to_owned));
+    for ok in [
+        line("rtcp-xr", None),
+        line("rtcp-xr", Some("rcvr-rtt=all")),
+        line("rtcp-mux", None),
+        line("x-unknown", Some("anything at all")),
+        line("ice-options", Some("trickle ice2")),
+    ] {
+        assert!(check_attribute(&ok).is_ok(), "{ok:?}");
+    }
+    for bad in [
+        line("rtcp-mux", Some("yes")),
+        line("ice-options", Some("x-future")),
+        line("rtpmap", Some("96 VP8")),
+        line("mid", None),
+    ] {
+        assert!(check_attribute(&bad).is_err(), "{bad:?}");
+    }
+}

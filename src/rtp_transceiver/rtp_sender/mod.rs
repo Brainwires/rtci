@@ -380,6 +380,22 @@ impl RTCRtpSender<'_> {
         if self.peer_connection.rtp_transceivers[self.id.0].stopped() {
             return Err(Error::InvalidStateError);
         }
+        let active = |pc: &RTCPeerConnection,
+                      id: usize|
+         -> Vec<(crate::rtp_transceiver::SSRC, bool)> {
+            pc.rtp_transceivers[id]
+                .sender()
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .filter_map(|e| e.rtp_coding_parameters.ssrc.map(|ssrc| (ssrc, e.active)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let before = active(self.peer_connection, self.id.0);
         self.peer_connection.rtp_transceivers[self.id.0]
             .sender_mut()
             .as_mut()
@@ -389,6 +405,22 @@ impl RTCRtpSender<'_> {
                 set_parameter_options,
                 &self.peer_connection.media_engine,
             )?;
+        // RFC 8853 section 5.2: a stream that is not sent is in an RFC 7728 local pause
+        // (announced with PAUSED); an encoding made inactive pauses its stream, made active
+        // again resumes it. Only a stream that negotiated pause and resume has the state.
+        let now = self.peer_connection.pipeline_context.now;
+        for (ssrc, active) in active(self.peer_connection, self.id.0) {
+            if before.contains(&(ssrc, !active)) {
+                let control = if active {
+                    interceptor::PauseResumeControl::LocalResume(ssrc)
+                } else {
+                    interceptor::PauseResumeControl::LocalPause(ssrc)
+                };
+                self.peer_connection
+                    .interceptor
+                    .handle_write(control.into_packet(now))?;
+            }
+        }
         // The encodings' priority, maxBitrate or active flag may have changed: the target is
         // divided again (W3C webrtc-priority 3.2, webrtc 5.2.5).
         self.peer_connection.reallocate_target_bitrate();

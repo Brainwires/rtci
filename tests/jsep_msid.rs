@@ -265,3 +265,71 @@ fn msid_lines_stay_when_the_track_is_removed() -> TestResult {
     assert_eq!(msid(&answer), before, "{answer}");
     Ok(())
 }
+
+/// RFC 9429 section 5.2.1: a sending transceiver "not associated with any MediaStream" is
+/// written `a=msid:- <id>` (RFC 8830 section 3: `-` is "no MediaStream"). A track that names
+/// no stream (an empty stream id, or `-`) is added in none, as W3C `addTrack(track)` with no
+/// streams; `add_track_with_streams(track, [])` takes a sender out of its track's stream. The
+/// source-level `msid` (RFC 8830 appendix A) says the same stream; a track in a stream keeps
+/// it.
+#[test]
+fn a_sender_in_no_stream_is_written_with_a_dash() -> TestResult {
+    use rtc::media_stream::MediaStreamTrack;
+    let renamed = |stream: &str| {
+        let track = jsep_common::video_track("the-track", 0x0707_0708);
+        MediaStreamTrack::new(
+            stream.to_owned(),
+            track.track_id().clone(),
+            track.label().clone(),
+            track.kind(),
+            track.codings().to_vec(),
+        )
+    };
+    let lines = |sdp: &str, prefix: &str| -> Vec<String> {
+        sdp.lines()
+            .filter_map(|l| l.strip_prefix(prefix))
+            .map(str::to_owned)
+            .collect()
+    };
+    for (stream, without_streams, expected) in [
+        ("-", false, "-"),
+        ("", false, "-"),
+        ("s", true, "-"),
+        ("s", false, "s"),
+    ] {
+        let mut pc = default_peer()?;
+        let sender = if without_streams {
+            pc.add_track_with_streams(renamed(stream), vec![])?
+        } else {
+            pc.add_track(renamed(stream))?
+        };
+        let offer = pc.create_offer(None)?.sdp;
+        let case = format!("stream {stream:?}, without streams {without_streams}:\n{offer}");
+        // W3C [[AssociatedMediaStreamIds]]: none, or the one stream.
+        let associated: Vec<String> = pc
+            .rtp_sender(sender)
+            .expect("the sender")
+            .streams()
+            .to_vec();
+        let expected_streams: Vec<String> = if expected == "-" {
+            vec![]
+        } else {
+            vec![expected.to_owned()]
+        };
+        assert_eq!(associated, expected_streams, "{case}");
+        assert_eq!(
+            lines(&offer, "a=msid:"),
+            vec![format!("{expected} the-track")],
+            "{case}"
+        );
+        let source: Vec<String> = lines(&offer, "a=ssrc:")
+            .into_iter()
+            .filter_map(|l| l.split_once(" msid:").map(|(_, v)| v.to_owned()))
+            .collect();
+        assert!(!source.is_empty(), "{case}");
+        for value in source {
+            assert_eq!(value, format!("{expected} the-track"), "{case}");
+        }
+    }
+    Ok(())
+}

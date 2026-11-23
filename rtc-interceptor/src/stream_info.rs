@@ -189,6 +189,10 @@ pub struct StreamInfo {
     /// `onelevelonly` (RFC 5109 section 13) of their `ulpfec` format here. Empty when the
     /// binder did not say.
     pub section_fmtp_lines: Vec<(u8, String)>,
+    /// A local stream the session description starts paused (RFC 8853 section 5.2: a rid-id
+    /// marked `~`, "an unsolicited locally paused stream"). The RFC 7728 interceptor starts
+    /// it paused when pause and resume were negotiated for it; other interceptors ignore it.
+    pub initially_paused: bool,
 }
 
 impl StreamInfo {
