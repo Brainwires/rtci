@@ -322,6 +322,8 @@ pub struct Association {
     max_receive_message_size: u32,
     /// See [`TransportConfig::with_zero_window_overcommit`].
     zero_window_overcommit: bool,
+    /// See [`TransportConfig::with_strict_zero_window_drop`].
+    strict_zero_window_drop: bool,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -605,6 +607,7 @@ impl Default for Association {
             max_message_size: 0,
             max_receive_message_size: 0,
             zero_window_overcommit: false,
+            strict_zero_window_drop: false,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -793,6 +796,7 @@ impl Association {
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
             zero_window_overcommit: config.zero_window_overcommit(),
+            strict_zero_window_drop: config.strict_zero_window_drop(),
             transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
@@ -3465,12 +3469,14 @@ impl Association {
                     // receiver provide "a reassembly buffer for each incoming stream". The
                     // sender's zero window probes finish one message at a time, so the
                     // headroom of one message below is enough.
+                    // `TransportConfig::with_strict_zero_window_drop` restores the drop in
+                    // every case.
                     let window_advertised_closed = self.last_advertised_window == 0;
                     let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
                         && !self.has_readable_data()
                         && (!window_advertised_closed
-                            || self.zero_window_overcommit
-                            || self.use_interleaving);
+                            || (!self.strict_zero_window_drop
+                                && (self.zero_window_overcommit || self.use_interleaving)));
 
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But

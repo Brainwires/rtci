@@ -119,6 +119,77 @@ fn a_chunk_taken_through_a_closed_window_is_acknowledged_at_once() -> Result<()>
     Ok(())
 }
 
+/// An I-DATA fragment of 1024 bytes: message `mid` of `stream`, fragment `fsn`.
+fn i_data_fragment(tsn: u32, stream: u16, mid: u32, fsn: u32) -> ChunkPayloadData {
+    ChunkPayloadData {
+        i_data: true,
+        tsn,
+        stream_identifier: stream,
+        mid,
+        fsn,
+        beginning_fragment: fsn == 0,
+        ending_fragment: false,
+        payload_type: PayloadProtocolIdentifier::Binary,
+        user_data: Bytes::from(vec![0u8; 1024]),
+        ..Default::default()
+    }
+}
+
+/// RFC 9260 6.2, "When the receiver's advertised window is 0, the receiver MUST drop any new
+/// incoming DATA chunk with a TSN larger than the largest TSN received so far", on an
+/// association that negotiated I-DATA. Four interleaved messages fill a 4 KiB buffer with
+/// none complete and a SACK advertises a_rwnd 0. By default the next in-sequence chunk is
+/// taken (interleaved messages that fill the buffer together would otherwise never
+/// complete); with `TransportConfig::with_strict_zero_window_drop` it is dropped and a SACK
+/// is due at once (RFC 9260 6.2: "if such a DATA chunk is dropped, the receiver MUST
+/// immediately send back a SACK").
+#[test]
+fn with_the_strict_drop_an_interleaving_receiver_drops_new_data_after_a_closed_window() -> Result<()>
+{
+    for strict in [false, true] {
+        let mut a = create_association(
+            TransportConfig::default()
+                .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
+                .with_max_message_size(FULL_BUFFER_MAX_MESSAGE)
+                .with_message_interleaving(true)
+                .with_strict_zero_window_drop(strict),
+        );
+        a.set_state(AssociationState::Established);
+        a.set_interleaving(true);
+        for stream in 0..4 {
+            assert!(
+                a.create_stream(stream, true, PayloadProtocolIdentifier::Binary)
+                    .is_some()
+            );
+        }
+        let mut tsn = a.peer_last_tsn.wrapping_add(1);
+        let mut fsn = [0u32; 4];
+        let mut stream = 0usize;
+        while a.get_my_receiver_window_credit() > 0 {
+            a.handle_data(&i_data_fragment(tsn, stream as u16, 0, fsn[stream]))?;
+            fsn[stream] += 1;
+            stream = (stream + 1) % 4;
+            tsn = tsn.wrapping_add(1);
+        }
+        assert!(!a.has_readable_data(), "no message is complete");
+        assert_eq!(
+            0,
+            a.create_selective_ack_chunk()
+                .advertised_receiver_window_credit
+        );
+        a.immediate_ack_triggered = false;
+        let last = a.peer_last_tsn;
+        a.handle_data(&i_data_fragment(tsn, stream as u16, 0, fsn[stream]))?;
+        if strict {
+            assert_eq!(a.peer_last_tsn, last, "dropped: above the largest TSN");
+            assert!(a.immediate_ack_triggered, "a SACK at once");
+        } else {
+            assert_eq!(a.peer_last_tsn, tsn, "taken: it unblocks reassembly");
+        }
+    }
+    Ok(())
+}
+
 /// Builds the receiver of the link tests: a receive buffer of `buffer` bytes that accepts
 /// messages up to `message` bytes, with the zero window overcommit where the peer connection
 /// enables it (the message it accepts is larger than its buffer). With I-DATA negotiated the
@@ -236,19 +307,15 @@ fn interleaved_messages_that_fill_the_buffer_together_complete_one_at_a_time() -
     Ok(())
 }
 
-/// RFC 9260 6.2 and RFC 8260 section 6: six interleaved 16 KiB messages to a receiver with
-/// a 16 KiB buffer and the zero window overcommit off. Each message fits the buffer, so no
-/// message size calls for the overcommit, but the six part-received messages fill the buffer
-/// together with none of them complete. Dropping the next in-sequence chunk then (the RFC drop
-/// after a closed window) is a deadlock: nothing becomes readable, so the window never
-/// reopens. With I-DATA negotiated the receiver takes it, and everything arrives.
-#[test]
-fn interleaved_messages_that_each_fit_the_buffer_arrive_without_the_overcommit() -> Result<()> {
+/// Six interleaved 16 KiB messages from one stream each, four in a row, to a receiver
+/// with a 16 KiB buffer, over a 10 ms link: how many of the 24 arrive in two virtual
+/// minutes.
+fn six_interleaved_streams_into_a_buffer_they_each_fit(strict: bool) -> Result<(usize, Duration)> {
     const SIZE: usize = 16 * 1024;
     const STREAMS: u16 = 6;
     let mut link = Link::new(
         sender(SIZE as u32, true),
-        receiver(SIZE as u32, SIZE as u32, true).with_zero_window_overcommit(false),
+        receiver(SIZE as u32, SIZE as u32, true).with_strict_zero_window_drop(strict),
         5,
     );
     link.connect();
@@ -268,16 +335,26 @@ fn interleaved_messages_that_each_fit_the_buffer_arrive_without_the_overcommit()
         }
     }
     let total = 4 * usize::from(STREAMS);
-    let delivered = link.run_until(start + Duration::from_secs(120), |l| {
+    link.run_until(start + Duration::from_secs(120), |l| {
         l.server.received.len() == total
     });
-    assert!(
-        delivered,
-        "{} of {total} messages after {:?}; {} bytes in reassembly",
-        link.server.received.len(),
-        link.now - start,
-        link.server.conn().bytes_in_reassembly_queues()
-    );
+    Ok((link.server.received.len(), link.now - start))
+}
+
+/// RFC 9260 6.2 with RFC 8260 section 6, measured: six interleaved 16 KiB messages into a
+/// 16 KiB buffer (the zero window overcommit off: each message fits the buffer). The six
+/// part-received messages fill the buffer together with none of them complete. The RFC drop
+/// (`with_strict_zero_window_drop(true)`) then refuses the in-sequence chunk that would
+/// complete one of them on every retransmission: 0 of the 24 messages arrive, the window
+/// never reopens. The default takes it, as RFC 8260 section 6's "reassembly buffer for each
+/// incoming stream" needs, and all 24 arrive.
+#[test]
+fn interleaved_messages_that_each_fit_the_buffer_deadlock_under_the_strict_drop() -> Result<()> {
+    let (strict, _) = six_interleaved_streams_into_a_buffer_they_each_fit(true)?;
+    let (default, took) = six_interleaved_streams_into_a_buffer_they_each_fit(false)?;
+    println!("strict drop: {strict} of 24; default: {default} of 24 in {took:?}");
+    assert_eq!(strict, 0, "the strict drop delivers none");
+    assert_eq!(default, 24, "the default delivers all");
     Ok(())
 }
 

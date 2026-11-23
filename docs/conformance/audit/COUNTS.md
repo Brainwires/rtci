@@ -11,11 +11,11 @@ deployed peer cannot interoperate with it (`RULES.md`).
 
 | Level | tested | setting | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|
-| MUST | 4928 | 15 | 16 | 113 | 18 | 0 | 655 | 5745 |
+| MUST | 4928 | 16 | 16 | 113 | 18 | 0 | 655 | 5746 |
 | SHOULD | 848 | 0 | 14 | 56 | 45 | 5 | 326 | 1294 |
 | MAY | 441 | 0 | 21 | 34 | 109 | 0 | 171 | 776 |
 | PROC | 61 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6278 | 15 | 53 | 206 | 173 | 5 | 1152 | 7882 |
+| all | 6278 | 16 | 53 | 206 | 173 | 5 | 1152 | 7883 |
 
 ## RFC behaviour tested
 
@@ -24,7 +24,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5090 | 4943 | 97.1 | 4928 | 96.8 |
+| MUST | 5091 | 4944 | 97.1 | 4928 | 96.8 |
 | SHOULD | 968 | 848 | 87.6 | 848 | 87.6 |
 | MAY | 605 | 441 | 72.9 | 441 | 72.9 |
 | PROC | 67 | 61 | 91.0 | 61 | 91.0 |
@@ -312,7 +312,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9147.md` | MUST | 90 | 0 | 0 | 0 | 0 | 0 | 4 | 94 |
 | `rfc9147.md` | SHOULD | 51 | 0 | 0 | 1 | 0 | 0 | 8 | 60 |
 | `rfc9147.md` | MAY | 17 | 0 | 2 | 0 | 0 | 0 | 5 | 24 |
-| `rfc9260.md` | MUST | 287 | 0 | 0 | 0 | 0 | 0 | 28 | 315 |
+| `rfc9260.md` | MUST | 287 | 1 | 0 | 0 | 0 | 0 | 28 | 316 |
 | `rfc9260.md` | SHOULD | 161 | 0 | 0 | 5 | 1 | 0 | 23 | 190 |
 | `rfc9260.md` | MAY | 30 | 0 | 0 | 5 | 22 | 0 | 15 | 72 |
 | `rfc9335.md` | MUST | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 23 |

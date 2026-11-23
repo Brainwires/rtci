@@ -6,21 +6,21 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5745; `n/a` (the clause does not bind this engine): 655; rows that
-  apply: 5090.
-- RFC behaviour tested (`tested` + `setting`): 4943 of 5090 (97.1 %).
-- Tested as the default (`tested`): 4928 of 5090 (96.8 %); `setting`: 15.
+- MUST rows: 5746; `n/a` (the clause does not bind this engine): 655; rows that
+  apply: 5091.
+- RFC behaviour tested (`tested` + `setting`): 4944 of 5091 (97.1 %).
+- Tested as the default (`tested`): 4928 of 5091 (96.8 %); `setting`: 16.
 - Open (not tested in any form): 147: 16 untested, 113 partial, 18 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 15 | 13 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 16 | 13 |
 | B | implemented, lacking a test that fails without it | 12 | 12 |
 | C | partly implemented | 103 | 94 |
 | D | not implemented | 17 | 13 |
 | E | cannot be met or observed inside this engine | 14 | 11 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 162 | 144 |
+| all | | 163 | 144 |
 
 ## What 100 % takes
 
@@ -68,6 +68,7 @@ Sorted by class, then owner, size and ID.
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | setting | A | `setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
+| RFC9260-6.2-34 | `rfc9260.md` | With a_rwnd 0, new DATA above the highest TSN received is dropped ... | setting | A | `setting` (measured, sctp-14): `TransportConfig::with_strict_zero_window_drop(true)`, RFC test with its mutation; with I-DATA the drop deadlocks interleaved messages that fill the buffer together (0 of 24 against 24 of 24). Closes as tested only with a partial delivery API (RFC9260-6.9-12), under which the drop would not deadlock | S | sctp |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC5576-5-2 | `rfc5576.md` | Signalled source information may be out of date and is treated so | untested | B | A test that bindings are rebuilt on each remote description | S | jsep (running) |
 | RFC8839-4.3.4-4 | `rfc8839.md` | Nominate another pair for the checklist until a restart | untested | B | A test that the controlling side nominates once until a restart | S | jsep (running) |

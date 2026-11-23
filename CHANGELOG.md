@@ -2040,7 +2040,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interleaved messages that each fit the buffer but fill it together (six 16 KiB messages,
   16 KiB buffer, weighted fair queueing) deadlocked: the RFC 9260 6.2 drop refused the chunk
   that would complete one of them, for ever. Toward peers without I-DATA (browsers) the drop
-  is unchanged.
+  is unchanged. The literal drop stays available for I-DATA associations too:
+  `TransportConfig::with_strict_zero_window_drop(true)` (new, off by default; it can deadlock
+  interleaved messages, as its documentation says). Audit: RFC9260-6.2-2 is now the
+  association without I-DATA (`tested`); the I-DATA case is the new row RFC9260-6.2-34,
+  `setting` (measured: 0 of 24 messages with the drop, 24 of 24 by default).
 - **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
   waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
   expiry count and the path error count, so probes the receiver keeps answering never end the
