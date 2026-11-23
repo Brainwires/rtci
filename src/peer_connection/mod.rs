@@ -2611,6 +2611,7 @@ impl RTCPeerConnection {
                 self.apply_remote_transport(now, parsed_remote_description, true, None)?;
             } else {
                 self.defer_remote_transport(parsed_remote_description)?;
+                self.propose_send_encodings(parsed_remote_description);
             }
 
             if is_final_answer

@@ -1305,6 +1305,16 @@ impl RTCPeerConnection {
                 // Undo what the abandoned offer changed (RFC 9429, Section 5.7). Its transport
                 // part was never applied: what it staged for the answer is dropped.
                 self.drop_pending_remote_transport();
+                // W3C: a rolled-back remote offer gives back the rid-less encoding it replaced
+                // with proposed simulcast encodings.
+                for transceiver in &mut self.rtp_transceivers {
+                    if let Some(sender) = transceiver.sender_mut()
+                        && sender.restore_ridless_send_encodings()
+                        && !sender.bound_streams().is_empty()
+                    {
+                        sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
+                    }
+                }
                 self.rollback_transceivers()?;
                 self.restore_last_stable_state();
             }
@@ -1318,6 +1328,11 @@ impl RTCPeerConnection {
             self.last_offer.clear();
             self.last_answer.clear();
             self.last_stable_state = None;
+            for transceiver in &mut self.rtp_transceivers {
+                if let Some(sender) = transceiver.sender_mut() {
+                    sender.forget_ridless_send_encodings();
+                }
+            }
         }
 
         let changed = self.signaling_state != next_state;
@@ -1708,6 +1723,86 @@ impl RTCPeerConnection {
     /// The encodings that stay take the restrictions of the answer's `a=rid` line. In a
     /// remote answer, a line that does not keep to what the offer said (RFC 8851 section 6.4)
     /// is discarded, so its stream goes.
+    /// W3C webrtc-pc "set the RTCSessionDescription", a remote offer that asks to receive
+    /// simulcast (`a=simulcast:recv`, the first alternative of each stream) on a section whose
+    /// transceiver's sender has a lone encoding without a rid: the sender is "promoted to
+    /// simulcast" with `proposedSendEncodings`, one encoding per offered rid in the offer's
+    /// order, duplicates removed, at most [`MAX_SEND_ENCODINGS`], the one at `index` of `n`
+    /// scaled down by 2^(n - index - 1) (video). The lone encoding is kept as
+    /// `[[LastStableRidlessSendEncodings]]` for a rollback; the answer then keeps the layers it
+    /// answers (`apply_simulcast_answer`).
+    ///
+    /// [`MAX_SEND_ENCODINGS`]: crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+    pub(super) fn propose_send_encodings(&mut self, offer: &SessionDescription) {
+        use super::sdp::SimulcastDirection;
+        use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        let mut minted = vec![];
+        for media in &offer.media_descriptions {
+            if is_rejected_media(media) {
+                continue;
+            }
+            let Some(&i) =
+                get_mid_value(media).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let mut rids: Vec<String> = vec![];
+            for rid in get_rids(media) {
+                if rid.direction == SimulcastDirection::Recv
+                    && rid.simulcast
+                    && !rids.contains(&rid.id)
+                {
+                    rids.push(rid.id);
+                }
+            }
+            rids.truncate(MAX_SEND_ENCODINGS);
+            if rids.is_empty() {
+                continue;
+            }
+            let kind = self.rtp_transceivers[i].kind();
+            let Some(base) = self.rtp_transceivers[i]
+                .sender()
+                .as_ref()
+                .and_then(|sender| match sender.send_encodings() {
+                    [lone] if lone.rtp_coding_parameters.rid.is_empty() => Some(lone.clone()),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let n = rids.len();
+            let mut proposed = Vec::with_capacity(n);
+            for (index, rid) in rids.into_iter().enumerate() {
+                let mut encoding = base.clone();
+                let coding = &mut encoding.rtp_coding_parameters;
+                coding.rid = rid;
+                if index > 0 {
+                    coding.ssrc = Some(self.unused_ssrc(&mut minted));
+                    if let Some(rtx) = coding.rtx.as_mut() {
+                        rtx.ssrc = self.unused_ssrc(&mut minted);
+                    }
+                    if let Some(fec) = coding.fec.as_mut() {
+                        fec.ssrc = self.unused_ssrc(&mut minted);
+                    }
+                }
+                if kind == RtpCodecKind::Video {
+                    encoding.scale_resolution_down_by = Some(f64::from(1u32 << (n - index - 1)));
+                }
+                proposed.push(encoding);
+            }
+            minted.extend(proposed.iter().filter_map(|e| e.rtp_coding_parameters.ssrc));
+            let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                continue;
+            };
+            sender.propose_send_encodings(proposed);
+            if !sender.bound_streams().is_empty() {
+                sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
+            }
+        }
+    }
+
     pub(super) fn apply_negotiated_simulcast(
         &mut self,
         offer: &SessionDescription,

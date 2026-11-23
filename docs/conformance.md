@@ -204,6 +204,24 @@ RFC9429-5.2.1-13, 5.2.1-14, 5.2.1-40, 5.2.2-7, 5.2.2-10, 5.3.1-8, 5.3.1-9, 5.3.1
 candidate in `m=` / `c=`, and the W3C webrtc-pc rows on `RTCDtlsTransport` per transceiver.
 What it does not close: a separate RTCP component (item 7).
 
+### Execution order (one branch per step)
+
+The two pieces above as a sequence of branches, each of which leaves master correct (one
+transport still works at every step) and closes rows of its own. Run every step through the
+train's browser matrix before the next; steps 4 to 9 change what is on the wire.
+
+| Step | Branch content | Files touched | Rows it closes |
+|---|---|---|---|
+| T1 | `Transport` value: move the ICE / DTLS / SRTP state of `IceHandlerContext`, `DtlsHandlerContext`, `SrtpHandlerContext` into `struct Transport` held as `Vec<Transport>` (length 1) plus `mid -> index` in `PipelineContext`; `ice_transport()` / `dtls_transport()` take the index of transport 0. No behaviour change | `src/peer_connection/handler/{mod,ice,dtls,srtp}.rs`, `src/peer_connection/mod.rs`, `internal.rs`, `dtls_sdp.rs` (the 184 call sites) | none (refactor; the whole suite is the test) |
+| T2 | Per-transport read routing: a datagram is given to a transport by its local candidate, then by the STUN USERNAME (`<remote ufrag>:<local ufrag>`) and the validated 5-tuple, before the RFC 7983 demuxer | `handler/demuxer.rs`, `handler/ice.rs`, `handler/mod.rs` (`handle_read`) | none yet; unit tests for the routing (a datagram for B on A's candidate is dropped) |
+| T3 | Gathering per transport: `add_local_candidate` and the candidate events carry the mid; `bundle_policy` decides the number of transports before the offer (RFC 9429 4.1.1) | `src/peer_connection/mod.rs` (`add_local_candidate`, events), `transport/ice/mod.rs`, `configuration/mod.rs` | WEBRTC-4.2.4-1, WEBRTC-4.2.4-2 (gathering part), RFC9429-4.1.1-3 |
+| T4 | Initial offers with one transport per non-bundle-only section: own ufrag / pwd / fingerprint / setup / tls-id / candidates and default destination per section | `sdp/mod.rs` (`populate_sdp`, `add_transceiver_sdp`, `default_candidate`), `dtls_sdp.rs`, `internal.rs` (`offered_local_candidates`) | RFC9143-7.2-1, RFC9429-5.2.1-13, 5.2.1-14, 5.2.1-40, 5.2.2-7 |
+| T5 | Received answers: bundled sections' extra transports close (candidates released, event), transceivers point at the tagged transport; an answer without BUNDLE or with a section moved out keeps each transport | `src/peer_connection/mod.rs` (`apply_remote_transport`, `apply_remote_description`), `transport/` | RFC9143-7.4-3, RFC9143-7.3.2-1, RFC9143-9.3.1.2-3, RFC9429-5.11 transport steps, 5.2.2-10 |
+| T6 | Generated answers: a section offered outside any group (or kept separate) is answered with its own transport instead of rejected | `sdp/mod.rs` (`BundleMode::Answer(None)`), `internal.rs` (`generate_matched_sdp`), `mod.rs` (`defer_remote_transport` per transport) | RFC9429-5.3.1-8, 5.3.1-9, 5.3.1-19, 5.3.2-5, RFC9143-7.3.2-1 (answerer part) |
+| T7 | Several BUNDLE groups: `MediaSection` carries its group index, `BundleMode::Answer(Vec<Vec<String>>)`, one `a=group:BUNDLE` per group in answers and later offers, answer group *i* a subset of offer group *i* | `sdp/mod.rs` (`bundle_groups`, `tagged_section`, `populate_sdp`), `internal.rs` (`check_answer_against_offer`) | RFC9143-5-2, 7.3-1, 7.3.2-2, 7.4-1, 9.2-2 (per group), RFC9429-5.2.2-28, 5.3.1-31 |
+| T8 | Rollback closes the transports the rolled-back offer created; connection and ICE connection states aggregate over transports (W3C 4.3.2, 4.3.3); one `transport` stats object and its pairs per transport | `internal.rs` (rollback, `update_connection_state`), `src/statistics/` | RFC9429-5.7-7 (several-transport part), W3C 4.3.2 / 4.3.3 aggregation rows, W3C RTCDtlsTransport-per-transceiver rows |
+| T9 | Interop: rtc2rtc tests of section 10 above, the webrtc 0.17 peer with `balanced`, and the browser matrix with `max-compat` | `tests/` | the `partial` notes "one transport" in rfc9143.md, rfc9429.md, rfc8839.md (default candidate per section) |
+
 ## Known bugs
 
 None open is the bar for calling a release conformant: each bug found is either fixed, with a test

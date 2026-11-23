@@ -80,6 +80,9 @@ pub(crate) struct RTCRtpSenderInternal {
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
+    /// W3C `[[LastStableRidlessSendEncodings]]`: the lone rid-less encoding a remote offer to
+    /// receive simulcast replaced by its proposed encodings, which a rollback restores.
+    last_stable_ridless_send_encodings: Option<Vec<RTCRtpEncodingParameters>>,
     /// The `RTCDTMFSender` of an audio sender: its slots and playout.
     pub(crate) dtmf: super::dtmf::DtmfState,
     /// Whether the last answer negotiated `a=extmap-allow-mixed` for the media section (RFC
@@ -206,6 +209,31 @@ impl RTCRtpSenderInternal {
     /// Whether the sender has encodings with SSRCs to describe and send with.
     pub(crate) fn has_send_encodings(&self) -> bool {
         !self.send_encodings.is_empty()
+    }
+
+    /// W3C "set the RTCSessionDescription", a remote offer to receive simulcast: the
+    /// sender's lone rid-less encoding is replaced by `proposed` (the "proposed envelope"),
+    /// and kept as `[[LastStableRidlessSendEncodings]]` for a rollback when none is kept yet.
+    pub(crate) fn propose_send_encodings(&mut self, proposed: Vec<RTCRtpEncodingParameters>) {
+        if self.last_stable_ridless_send_encodings.is_none() {
+            self.last_stable_ridless_send_encodings = Some(self.send_encodings.clone());
+        }
+        self.set_send_encodings(proposed);
+    }
+
+    /// A rollback of the remote offer that proposed encodings: the rid-less encoding comes
+    /// back. `true` when there was one to restore.
+    pub(crate) fn restore_ridless_send_encodings(&mut self) -> bool {
+        let Some(encodings) = self.last_stable_ridless_send_encodings.take() else {
+            return false;
+        };
+        self.set_send_encodings(encodings);
+        true
+    }
+
+    /// The negotiation completed: the proposed envelope is the sender's.
+    pub(crate) fn forget_ridless_send_encodings(&mut self) {
+        self.last_stable_ridless_send_encodings = None;
     }
 
     /// Gives a sender that has none its encodings (SSRCs allocated by the caller).

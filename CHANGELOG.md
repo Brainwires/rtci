@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: a remote offer to receive simulcast promotes a sender with one rid-less encoding
+  (W3C webrtc-pc `proposedSendEncodings`): one encoding per offered `recv` rid, in order,
+  duplicates dropped, at most `MAX_SEND_ENCODINGS`, scaled down by 2^(n - index - 1) for video,
+  new SSRCs for the added layers; the answer sends them and a rollback restores the lone encoding
+  (`[[LastStableRidlessSendEncodings]]`). Such a sender used to answer with one stream.
 - **jsep**: ICE signalling rows of RFC 8839.
   - A remote answer with a media-level `a=ice-mismatch` is refused (sections 4.2.5, 5.3): this
     endpoint has no media path without ICE.

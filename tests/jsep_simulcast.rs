@@ -639,3 +639,95 @@ fn simulcast_layers_without_rids_get_generated_rids() -> TestResult {
     }
     Ok(())
 }
+
+/// The scale factors of the sender's encodings, in order.
+fn sent_scales(pc: &mut RTCPeerConnection, sender: RTCRtpSenderId) -> Vec<Option<f64>> {
+    pc.rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings
+        .iter()
+        .map(|e| e.scale_resolution_down_by)
+        .collect()
+}
+
+/// W3C webrtc-pc "set the RTCSessionDescription" (`proposedSendEncodings`): a remote offer to
+/// receive simulcast promotes a sender with one rid-less encoding to the offered layers, in the
+/// offer's order, scaled down by 2^(n - index - 1); the answer sends them; at most
+/// `MAX_SEND_ENCODINGS` are taken; a rollback restores the rid-less encoding
+/// (`[[LastStableRidlessSendEncodings]]`).
+#[test]
+fn a_remote_offer_to_receive_simulcast_promotes_a_unicast_sender() -> TestResult {
+    let (mut pc, sender) = {
+        let mut pc = default_peer()?;
+        let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0001))?;
+        (pc, sender)
+    };
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+    let now = Instant::now();
+    let offer = || {
+        remote_offer(
+            "recvonly",
+            "a=rid:q recv\na=rid:h recv\na=rid:f recv\na=simulcast:recv q;h;f\n",
+        )
+    };
+    pc.set_remote_description(now, offer()?)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("q", None), ("h", None), ("f", None)])
+    );
+    assert_eq!(
+        sent_scales(&mut pc, sender),
+        [Some(4.0), Some(2.0), Some(1.0)]
+    );
+
+    // Rolled back: the rid-less encoding again.
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+
+    // Answered: the layers are sent.
+    pc.set_remote_description(now, offer()?)?;
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:q send", "a=rid:h send", "a=rid:f send"],
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(now, answer)?;
+    assert_eq!(sent_layers(&mut pc, sender).len(), 3);
+
+    // Truncated to the supported number of encodings.
+    let mut pc = default_peer()?;
+    let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0002))?;
+    let ids: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
+    let mut extra: String = ids.iter().map(|id| format!("a=rid:{id} recv\n")).collect();
+    extra.push_str(&format!("a=simulcast:recv {}\n", ids.join(";")));
+    pc.set_remote_description(now, remote_offer("recvonly", &extra)?)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender).len(),
+        rtc::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+    );
+    Ok(())
+}
+
+/// W3C `proposedSendEncodings`: "Remove any RTCRtpEncodingParameters dictionaries in
+/// proposedSendEncodings if their rid member is the same as a rid member of an earlier one",
+/// in the W3C answer form, which takes an `a=simulcast` line that repeats a rid.
+#[test]
+fn proposed_send_encodings_drop_a_repeated_rid() -> TestResult {
+    let mut pc = w3c_peer()?;
+    let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0003))?;
+    pc.set_remote_description(
+        Instant::now(),
+        remote_offer(
+            "recvonly",
+            "a=rid:h recv\na=rid:f recv\na=simulcast:recv h;f;h\n",
+        )?,
+    )?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("h", None), ("f", None)])
+    );
+    Ok(())
+}
