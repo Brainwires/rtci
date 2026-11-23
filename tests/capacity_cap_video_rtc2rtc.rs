@@ -25,8 +25,9 @@ use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    configure_key_frame_requests, configure_nack, configure_receiver_reference_time,
-    configure_rtcp_reports_with, configure_twcc,
+    DefaultInterceptorHandles, DefaultInterceptorOptions, configure_key_frame_requests,
+    configure_nack, configure_receiver_reference_time, configure_rtcp_reports_with, configure_twcc,
+    register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
@@ -50,6 +51,8 @@ use rtc::rtp_transceiver::rtp_sender::{
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -104,6 +107,13 @@ impl RtcpRandom for SeededRtcpRandom {
     fn next_u32(&mut self) -> u32 {
         (self.0.next_u64() >> 32) as u32
     }
+}
+
+thread_local! {
+    /// Whether the next `World`'s peers use the engine's default interceptors (the pacer, GCC
+    /// on transport-wide feedback, the NACK pair) with the video following the target the
+    /// senders are given (`RTCRtpSender::target_bitrates`), instead of ParolNet's chain.
+    static DEFAULT_CHAIN: Cell<bool> = const { Cell::new(false) };
 }
 
 const VP8_PT: u8 = 96;
@@ -284,7 +294,14 @@ struct Peer {
     pc: RTCPeerConnection,
     addr: SocketAddr,
     connected: bool,
-    gcc: GccHandle,
+    /// ParolNet's chain: its GCC's handle.
+    gcc: Option<GccHandle>,
+    /// The default chain: its handles.
+    handles: Option<DefaultInterceptorHandles>,
+    /// The video packets the application wrote, and those that left the host (by sequence
+    /// number): the difference never reached the wire (dropped by a pacer).
+    video_written: BTreeSet<u16>,
+    video_left: BTreeSet<u16>,
     audio: RTCRtpSenderId,
     video: RTCRtpSenderId,
     audio_packetizer: Option<Box<dyn Packetizer>>,
@@ -401,6 +418,24 @@ impl Peer {
             },
             RtpCodecKind::Audio,
         )?;
+        if DEFAULT_CHAIN.with(|d| d.get()) {
+            let mut options = DefaultInterceptorOptions::default();
+            options.rtcp_random = Some(provider.clone());
+            let (registry, handles) = register_default_interceptors_with_options(
+                Registry::new(),
+                &mut media_engine,
+                &options,
+            )?;
+            return Self::with_chain(
+                addr,
+                provider,
+                media_engine,
+                registry,
+                ssrc_base,
+                None,
+                Some(handles),
+            );
+        }
         let registry = match rate_limit {
             None => configure_nack(Registry::new(), &mut media_engine),
             // `configure_nack` with the responder's rule set (the codec carries the NACK
@@ -431,6 +466,26 @@ impl Peer {
                     .build(),
             ),
         );
+        Self::with_chain(
+            addr,
+            provider,
+            media_engine,
+            registry,
+            ssrc_base,
+            Some(handle),
+            None,
+        )
+    }
+
+    fn with_chain(
+        addr: &str,
+        provider: Arc<dyn RTCCryptoProvider>,
+        media_engine: MediaEngine,
+        registry: Registry,
+        ssrc_base: u32,
+        gcc: Option<GccHandle>,
+        handles: Option<DefaultInterceptorHandles>,
+    ) -> Result<Self> {
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(
@@ -452,7 +507,10 @@ impl Peer {
             pc,
             addr: addr.parse()?,
             connected: false,
-            gcc: handle,
+            gcc,
+            handles,
+            video_written: BTreeSet::new(),
+            video_left: BTreeSet::new(),
             audio,
             video,
             audio_packetizer: None,
@@ -528,9 +586,40 @@ impl Peer {
             return Ok(());
         };
         for packet in packetizer.packetize(now, &Bytes::copy_from_slice(data), samples)? {
+            if video {
+                self.video_written.insert(packet.header.sequence_number);
+            }
             sender.write_rtp(now, packet)?;
         }
         Ok(())
+    }
+
+    /// The target the encoder follows: GCC's handle in ParolNet's chain; in the default chain
+    /// the sum of what the two senders are given.
+    fn media_target(&mut self) -> Option<u32> {
+        if let Some(gcc) = &self.gcc {
+            return gcc.target_bitrate_bps();
+        }
+        let mut total = 0.0;
+        for id in [self.audio, self.video] {
+            if let Some(sender) = self.pc.rtp_sender(id) {
+                total += sender
+                    .target_bitrates()
+                    .iter()
+                    .map(|(_, bps)| bps)
+                    .sum::<f64>();
+            }
+        }
+        (total > 0.0).then_some(total as u32)
+    }
+
+    /// The congestion controller's estimate itself.
+    fn estimate(&self) -> Option<u32> {
+        match (&self.gcc, &self.handles) {
+            (Some(gcc), _) => gcc.estimate_bps(),
+            (None, Some(handles)) => Some(handles.congestion_control.target_bitrate() as u32),
+            _ => None,
+        }
     }
 
     /// Ask the sender of the received video for a key frame (PLI), as ParolNet's
@@ -590,6 +679,14 @@ impl World {
                 while let Some(msg) = self.peers[i].pc.poll_write() {
                     moved = true;
                     let payload_type = rtp_payload_type(&msg.message);
+                    if payload_type == Some(VP8_PT)
+                        && msg.message.len() >= 12
+                        && msg.message[8..12]
+                            == (0x1000_0001u32 + 0x1000_0000 * i as u32).to_be_bytes()
+                    {
+                        let seq = u16::from_be_bytes([msg.message[2], msg.message[3]]);
+                        self.peers[i].video_left.insert(seq);
+                    }
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
                     if payload_type == Some(RTX_PT) {
                         self.uplinks[i].rtx_sent += 1;
@@ -745,7 +842,7 @@ impl World {
                 "{:6.1} target {:7} estimate {:7} queue {:3} ms drops {:5} audio {:4} rtx {:5}/{:5} lost usable {:5} unusable {:4}",
                 at.as_secs_f64(),
                 self.peers[0].target_bps,
-                self.peers[0].gcc.estimate_bps().unwrap_or(0),
+                self.peers[0].estimate().unwrap_or(0),
                 link.busy_until
                     .map_or(0, |t| t.saturating_duration_since(now).as_millis()),
                 link.queue_drops,
@@ -756,7 +853,7 @@ impl World {
                 self.peers[1].unusable,
             ));
             for peer in self.peers.iter_mut() {
-                if let Some(bps) = peer.gcc.target_bitrate_bps()
+                if let Some(bps) = peer.media_target()
                     && bps != peer.target_bps
                 {
                     peer.target_bps = bps;
@@ -904,6 +1001,8 @@ struct Outcome {
     rtx_dropped: u64,
     /// Opus packets dropped at the capped link's queue.
     audio_dropped: u64,
+    /// Video packets the caller's application wrote that never left its host.
+    pacer_dropped: usize,
     unusable: u64,
 }
 
@@ -944,7 +1043,9 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
     world.advance(t)?;
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
-    let estimate_after = world.peers[0].gcc.estimate_bps().unwrap_or(0);
+    let estimate_after = world.peers[0].estimate().unwrap_or(0);
+    let caller = &world.peers[0];
+    let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
             println!("TRACE seed {seed} {line}");
@@ -967,6 +1068,7 @@ fn run(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Result<Outcome
         rtx_sent: world.uplinks[0].rtx_sent,
         rtx_dropped: world.uplinks[0].rtx_dropped,
         audio_dropped: world.uplinks[0].audio_dropped,
+        pacer_dropped,
         unusable: callee.unusable,
     })
 }
@@ -1046,5 +1148,34 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
     seeds(Some(RetransmissionRateLimit::Unlimited))?;
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors (the pacer with its default
+/// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
+/// section 7 default), the video following the target the senders are given
+/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait):
+/// an application that follows the target never has a packet dropped by the pacer, on three
+/// seeds, and the video does not freeze for more than 2 s.
+#[test]
+fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<()> {
+    DEFAULT_CHAIN.with(|d| d.set(true));
+    let outcomes: Result<Vec<_>> = (1..=3)
+        .map(|seed| {
+            let outcome = run(seed, None)?;
+            println!("default chain seed {seed}: {outcome:?}");
+            Ok((seed, outcome))
+        })
+        .collect();
+    DEFAULT_CHAIN.with(|d| d.set(false));
+    let outcomes = outcomes?;
+    for (seed, outcome) in &outcomes {
+        assert_eq!(0, outcome.pacer_dropped, "seed {seed}: {outcome:?}");
+        assert!(
+            outcome.freeze <= Duration::from_secs(2),
+            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+    }
     Ok(())
 }

@@ -44,6 +44,10 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// later offer's formats (RFC 9429 section 5.2.2, [`Self::get_offer_codecs`]). Empty: no
     /// limit.
     local_codec_preferences: Vec<RTCRtpCodecParameters>,
+    /// Whether the sender's codecs are those of a remote description's section, with its
+    /// payload types (`set_codec_preferences_from_remote_description`), rather than a copy of
+    /// `preferred_codecs`.
+    send_codecs_from_remote: bool,
     /// The application set codec preferences (`setCodecPreferences` with a non-empty list),
     /// as opposed to the list a remote description left in `preferred_codecs`.
     application_codec_preferences: bool,
@@ -157,6 +161,7 @@ impl RTCRtpTransceiverInternal {
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
             local_codec_preferences: vec![],
+            send_codecs_from_remote: false,
             application_codec_preferences: false,
             stopping: false,
             stopped: false,
@@ -497,8 +502,15 @@ impl RTCRtpTransceiverInternal {
 
         self.local_codec_preferences.clone_from(&codecs);
         self.preferred_codecs = codecs;
+        self.send_codecs_from_remote = false;
 
         Ok(())
+    }
+
+    /// Whether the sender's codecs carry a remote description's payload types: they are then
+    /// not to be replaced by the transceiver's preferences, which carry this endpoint's.
+    pub(crate) fn send_codecs_from_remote(&self) -> bool {
+        self.send_codecs_from_remote
     }
 
     /// W3C webrtc 5.4 `setCodecPreferences`, the steps before the codecs are stored:
@@ -588,10 +600,14 @@ impl RTCRtpTransceiverInternal {
             media_engine,
             self.use_sframe == Some(true),
         );
+        let from_remote = self.send_codecs_from_remote;
         self.set_codec_preferences(codecs, media_engine)?;
         if let Some(sender) = self.sender_mut() {
             match sending {
-                Some(sending) if negotiated => sender.set_codec_preferences(sending),
+                Some(sending) if negotiated => {
+                    sender.set_codec_preferences(sending);
+                    self.send_codecs_from_remote = from_remote;
+                }
                 _ if set => sender.set_codec_preferences(preferred_for_sending),
                 _ => {}
             }
@@ -797,6 +813,7 @@ impl RTCRtpTransceiverInternal {
     /// application did since (direction, track, stop, the mid, which the caller handles) stays.
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpTransceiverInternal) {
         self.preferred_codecs.clone_from(&saved.preferred_codecs);
+        self.send_codecs_from_remote = saved.send_codecs_from_remote;
         self.remote_bandwidth = saved.remote_bandwidth;
         self.remote_rtcp_xr.clone_from(&saved.remote_rtcp_xr);
         self.remote_packet_time = saved.remote_packet_time;
@@ -924,8 +941,8 @@ impl RTCRtpTransceiverInternal {
         // The local preferences only: the list an earlier remote description left does not
         // narrow what a later one negotiates (RFC 9429 section 5.2.2, a format a later offer
         // brings back).
-        let mut filtered_codecs = if self.local_codec_preferences.is_empty() {
-            vec![]
+        let (mut filtered_codecs, mut send_codecs) = if self.local_codec_preferences.is_empty() {
+            (vec![], vec![])
         } else {
             Self::match_remote_codecs(
                 remote_codecs.clone(),
@@ -938,7 +955,7 @@ impl RTCRtpTransceiverInternal {
             )
         };
         if filtered_codecs.is_empty() {
-            filtered_codecs = Self::match_remote_codecs(
+            (filtered_codecs, send_codecs) = Self::match_remote_codecs(
                 remote_codecs,
                 media_engine.codecs_for_section(self.kind, sframe),
             );
@@ -948,15 +965,71 @@ impl RTCRtpTransceiverInternal {
         let local = std::mem::take(&mut self.local_codec_preferences);
         let result = self.set_codec_preferences(filtered_codecs, media_engine);
         self.local_codec_preferences = local;
-        result
+        result?;
+        // RFC 9429 section 5.10: for each format of a remote description "the implementation
+        // records the payload type to be used in outgoing RTP packets when sending each
+        // specified media format", and section 5.11: "The payload type mapping from the remote
+        // description is used to determine payload types for the outgoing RTP streams" (RFC
+        // 3264 section 5.1: "the offerer MUST send with the payload type numbers from the
+        // answer"; section 6.1: the answerer "MUST use the payload type numbers from the
+        // offer, even if they differ from those in the answer"). The sender's codecs are the
+        // remote section's, with its numbers; the transceiver's and the receiver's keep this
+        // endpoint's (the local description's, RFC 9429 section 5.9).
+        // RFC 3264 sections 5.1 and 6.1: the remote m= line lists its formats "in order of
+        // preference"; `send_codecs` puts exact matches first, so the order is kept beside it.
+        let remote_format_order: Vec<PayloadType> = media
+            .media_name
+            .formats
+            .iter()
+            .filter_map(|format| format.parse().ok())
+            .collect();
+        if let Some(sender) = self.sender_mut() {
+            sender.set_codec_preferences(send_codecs);
+            sender.set_remote_format_order(remote_format_order);
+        }
+        self.send_codecs_from_remote = true;
+        Ok(())
     }
 
-    /// The remote codecs that match one of `left_codecs`, each with the matching local codec's
-    /// payload type, exact matches first, and the RTX codecs that go with them.
+    /// The remote codecs that match one of `left_codecs`, exact matches first, and the RTX
+    /// codecs that go with them, twice: with this endpoint's payload types (the matching local
+    /// codecs'; an RTX format's `apt` and a RED format's encodings follow), and, entry for
+    /// entry, with the remote description's own (what is sent to the remote side carries).
     fn match_remote_codecs(
         mut remote_codecs: Vec<RTCRtpCodecParameters>,
         mut left_codecs: Vec<RTCRtpCodecParameters>,
-    ) -> Vec<RTCRtpCodecParameters> {
+    ) -> (Vec<RTCRtpCodecParameters>, Vec<RTCRtpCodecParameters>) {
+        use crate::peer_connection::configuration::media_engine::red_block_payload_types;
+        use crate::rtp_transceiver::rtp_sender::rtp_codec::repair_family;
+        // The remote section as it is, for the list in its own numbering.
+        let given = remote_codecs.clone();
+        // A RED format names its encodings by payload type (RFC 2198 section 5): it is
+        // matched, and kept in the local list, with the local numbers of those encodings
+        // (the receive path finds a RED packet's primary encoding by that list).
+        let local_number = |remote: PayloadType| -> Option<PayloadType> {
+            let named = given.iter().find(|codec| codec.payload_type == remote)?;
+            match codec_parameters_fuzzy_search(&named.rtp_codec, &left_codecs) {
+                (_, CodecMatch::None) => None,
+                (local, _) => Some(local.payload_type),
+            }
+        };
+        for codec in &mut remote_codecs {
+            if repair_family(&codec.rtp_codec) == "red"
+                && let Some(local) = red_block_payload_types(&codec.rtp_codec.sdp_fmtp_line)
+                    .and_then(|blocks| {
+                        blocks
+                            .into_iter()
+                            .map(local_number)
+                            .collect::<Option<Vec<_>>>()
+                    })
+            {
+                codec.rtp_codec.sdp_fmtp_line = local
+                    .iter()
+                    .map(|block| block.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+            }
+        }
         // find codec matches between what is in remote description and
         // the transceivers codecs and use payload type registered to
         // media engine.
@@ -1038,6 +1111,28 @@ impl RTCRtpTransceiverInternal {
         let mut filtered_codecs = filter_by_match(CodecMatch::Exact);
         filtered_codecs.append(&mut filter_by_match(CodecMatch::Partial));
 
+        // The same formats as the remote section numbers them: `payload_mapping` runs in step
+        // with `filtered_codecs`.
+        let mut send_codecs: Vec<RTCRtpCodecParameters> = filtered_codecs
+            .iter()
+            .zip(&payload_mapping)
+            .map(|(local, (remote_payload_type, _))| {
+                let mut remote = local.clone();
+                remote.payload_type = *remote_payload_type;
+                if repair_family(&remote.rtp_codec) == "red"
+                    && let Some(given) = given
+                        .iter()
+                        .find(|codec| codec.payload_type == *remote_payload_type)
+                {
+                    remote
+                        .rtp_codec
+                        .sdp_fmtp_line
+                        .clone_from(&given.rtp_codec.sdp_fmtp_line);
+                }
+                remote
+            })
+            .collect();
+
         // find RTX associations and add those
         for (remote_payload_type, media_engine_payload_type) in payload_mapping {
             let Some(remote_rtx) = find_rtx_payload_type(remote_payload_type, &remote_codecs)
@@ -1065,12 +1160,24 @@ impl RTCRtpTransceiverInternal {
                 for rtx_codec in &left_codecs {
                     if rtx_codec.payload_type == media_engine_rtx {
                         filtered_codecs.push(rtx_codec.clone());
+                        // The remote section's RTX format for the same primary, with its
+                        // number and its `apt` (RFC 4588 section 8.6).
+                        let mut remote = given
+                            .iter()
+                            .find(|codec| codec.payload_type == remote_rtx)
+                            .cloned()
+                            .unwrap_or_else(|| rtx_codec.clone());
+                        remote
+                            .rtp_codec
+                            .rtcp_feedback
+                            .clone_from(&rtx_codec.rtp_codec.rtcp_feedback);
+                        send_codecs.push(remote);
                         break;
                     }
                 }
             }
         }
 
-        filtered_codecs
+        (filtered_codecs, send_codecs)
     }
 }

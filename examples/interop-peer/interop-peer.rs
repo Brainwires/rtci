@@ -16,6 +16,9 @@
 //!   stats the peer's RTCP reports made) and per-stream sequence coverage, the RTCP that
 //!   reached the application by type (feedback; SR and RR are the engine's own), what DTLS and SRTP negotiated, the selected candidate pair and the SCTP
 //!   transport's limits (what the non-browser peers' cells compare with their own view).
+//!   `wireRtp` counts the RTP packets and octets by payload type as they crossed the wire in
+//!   each direction (`received`, `sent`), read from the SRTP header, which is in the clear:
+//!   what the browser actually sent (Opus or RED, RFC 2198) before the engine took RED apart.
 //! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
 //!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
 //!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
@@ -406,6 +409,11 @@ struct Session {
     /// Simulcast layers share one track; each layer's SSRC names its RID.
     rid_by_ssrc: HashMap<u32, String>,
     rtp_by_key: BTreeMap<String, u64>,
+    /// RTP packets and octets by payload type as they arrived on the wire, before the engine
+    /// (which takes RED apart, for one) saw them.
+    wire_rtp_received: BTreeMap<u8, (u64, u64)>,
+    /// The same for what the engine put on the wire.
+    wire_rtp_sent: BTreeMap<u8, (u64, u64)>,
     /// RTCP packets received, by type (`sr`, `rr`, `nack`, `pli`, `fir`, `twcc`, ...).
     rtcp_by_type: BTreeMap<String, u64>,
     /// The SSRCs whose RTP the engine discarded as unassociated (RFC 8830 3.1).
@@ -504,6 +512,8 @@ impl Session {
             tracks: HashMap::new(),
             rid_by_ssrc: HashMap::new(),
             rtp_by_key: BTreeMap::new(),
+            wire_rtp_received: BTreeMap::new(),
+            wire_rtp_sent: BTreeMap::new(),
             rtcp_by_type: BTreeMap::new(),
             discarded_ssrcs: vec![],
             coverage: HashMap::new(),
@@ -595,6 +605,7 @@ impl Session {
         if self.udp_blocked && proto == TransportProtocol::UDP && local == self.local {
             return;
         }
+        count_wire_rtp(&mut self.wire_rtp_received, data);
         let _ = self.pc.handle_read(TaggedBytesMut {
             now: Instant::now(),
             transport: TransportContext {
@@ -923,6 +934,10 @@ impl Session {
                 self.out.push(json!({
                     "type": "report",
                     "rtp": self.rtp_by_key,
+                    "wireRtp": {
+                        "received": wire_rtp_json(&self.wire_rtp_received),
+                        "sent": wire_rtp_json(&self.wire_rtp_sent),
+                    },
                     "dc_echoed": self.dc_echoed,
                     "sent": sent,
                     "coverage": coverage,
@@ -1224,6 +1239,7 @@ impl Session {
             }
         }
         while let Some(m) = self.pc.poll_write() {
+            count_wire_rtp(&mut self.wire_rtp_sent, &m.message);
             let peer = m.transport.peer_addr;
             if self.udp_blocked
                 && m.transport.transport_protocol == TransportProtocol::UDP
@@ -1641,6 +1657,36 @@ fn opus_packet_samples(packet: &[u8]) -> u32 {
 
 /// A short name for an RTCP packet's type and format (RFC 3550 6, RFC 4585 6, RFC 5104 4.3,
 /// draft-holmer-rmcat-transport-wide-cc-extensions-01 3.1, RFC 8888 3).
+/// Counts an RTP datagram under its payload type: RFC 7983 section 7 has RTP and RTCP start
+/// with an octet in 128..=191, and RFC 5761 section 4 RTCP's second octet in 192..=223. STUN,
+/// DTLS, RTCP and anything shorter than an RTP header are not counted.
+fn count_wire_rtp(counts: &mut BTreeMap<u8, (u64, u64)>, datagram: &[u8]) {
+    if datagram.len() < 12
+        || !(128..=191).contains(&datagram[0])
+        || (192..=223).contains(&datagram[1])
+    {
+        return;
+    }
+    let entry = counts.entry(datagram[1] & 0x7f).or_default();
+    entry.0 += 1;
+    entry.1 += datagram.len() as u64;
+}
+
+/// `{"<payload type>": {"packets": n, "octets": n}}`.
+fn wire_rtp_json(counts: &BTreeMap<u8, (u64, u64)>) -> Value {
+    Value::Object(
+        counts
+            .iter()
+            .map(|(pt, (packets, octets))| {
+                (
+                    pt.to_string(),
+                    json!({"packets": packets, "octets": octets}),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn rtcp_name(h: &rtc::rtcp::header::Header) -> String {
     use rtc::rtcp::header::PacketType;
     match (h.packet_type, h.count) {

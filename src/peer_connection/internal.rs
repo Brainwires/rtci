@@ -70,7 +70,6 @@ pub(super) struct LastStableState {
     /// rollback restores.
     rtp_transceivers: Vec<RTCRtpTransceiverInternal>,
     can_trickle_ice_candidates: Option<bool>,
-    transport_closed: bool,
 }
 
 /// The transport part of a remote offer, waiting for the local answer: the ICE and DTLS
@@ -114,7 +113,6 @@ pub(super) struct DescriptionSnapshot {
     trickled_remote_candidates: usize,
     last_offer: String,
     last_answer: String,
-    transport_closed: bool,
     negotiation_needed_state: NegotiationNeededState,
     is_negotiation_ongoing: bool,
     last_stable_state: Option<LastStableState>,
@@ -260,6 +258,7 @@ impl RTCPeerConnection {
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
         media_engine
             .set_multi_codec_negotiation(!setting_engine.disable_media_engine_multiple_codecs);
+        media_engine.own_payload_types_in_answers = setting_engine.own_payload_types_in_answers;
 
         // The one place in `rtc` that resolves a default crypto provider. The application
         // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how
@@ -452,7 +451,7 @@ impl RTCPeerConnection {
             ice_credentials_to_replace: Vec::new(),
             ssrc_history: HashSet::new(),
             local_description_was_set: false,
-            transport_closed: false,
+            sctp_closed_by_answer: false,
             seen_selected_pair_changes: 0,
             identity_assertion: None,
             peer_identity: None,
@@ -1479,7 +1478,6 @@ impl RTCPeerConnection {
                 media_engine: self.media_engine.clone(),
                 rtp_transceivers: self.rtp_transceivers.clone(),
                 can_trickle_ice_candidates: self.can_trickle_ice_candidates,
-                transport_closed: self.transport_closed,
             });
         }
 
@@ -1494,13 +1492,11 @@ impl RTCPeerConnection {
                 self.current_remote_description = self.pending_remote_description.take();
                 self.pending_local_description = None;
                 self.current_local_description = Some(sd.clone());
-                self.transport_closed = rejects_every_media_section(sd);
             }
             (StateChangeOp::SetRemote, RTCSdpType::Answer) => {
                 self.current_local_description = self.pending_local_description.take();
                 self.pending_remote_description = None;
                 self.current_remote_description = Some(sd.clone());
-                self.transport_closed = rejects_every_media_section(sd);
             }
             (_, RTCSdpType::Rollback) => {
                 self.pending_local_description = None;
@@ -1540,18 +1536,16 @@ impl RTCPeerConnection {
                 // W3C 6.1.2 "closed": the association is closed intentionally by "applying a
                 // remote description that rejects data or changes the SCTP port", so the
                 // transport the application holds goes to "closed" and fires statechange,
-                // although `sctp()` is null from now on.
+                // although `sctp()` is null from now on. The event is not one of the
+                // description's own: it is queued after them, and after the `close` of the
+                // channels the association carried (`announce_sctp_closed_by_answer`).
                 let was = self.sctp().map(|sctp| sctp.state());
                 self.sctp_transport_mut().described = false;
                 if was.is_some_and(|state| {
                     state != crate::peer_connection::transport::RTCSctpTransportState::Closed
                 }) {
                     self.announced.sctp = None;
-                    self.pipeline_context.event_outs.push_back(
-                        RTCPeerConnectionEvent::OnSctpTransportStateChange(
-                            crate::peer_connection::transport::RTCSctpTransportState::Closed,
-                        ),
-                    );
+                    self.sctp_closed_by_answer = true;
                 }
             }
             RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
@@ -1626,7 +1620,6 @@ impl RTCPeerConnection {
         };
         self.media_engine = saved.media_engine;
         self.can_trickle_ice_candidates = saved.can_trickle_ice_candidates;
-        self.transport_closed = saved.transport_closed;
         // No transceiver is removed while an offer is pending, other than the ones the offer
         // created, which come after every transceiver that existed when it was applied: the
         // saved ones are the first of the list, in order.
@@ -1664,7 +1657,6 @@ impl RTCPeerConnection {
             trickled_remote_candidates: self.trickled_remote_candidates,
             last_offer: self.last_offer.clone(),
             last_answer: self.last_answer.clone(),
-            transport_closed: self.transport_closed,
             negotiation_needed_state: self.negotiation_needed_state,
             is_negotiation_ongoing: self.is_negotiation_ongoing,
             last_stable_state: self.last_stable_state.clone(),
@@ -1675,6 +1667,7 @@ impl RTCPeerConnection {
 
     /// Puts back what [`Self::description_snapshot`] copied, dropping the events queued since.
     pub(super) fn restore_description_snapshot(&mut self, snapshot: DescriptionSnapshot) {
+        self.sctp_closed_by_answer = false;
         self.signaling_state = snapshot.signaling_state;
         self.current_local_description = snapshot.current_local_description;
         self.pending_local_description = snapshot.pending_local_description;
@@ -1688,7 +1681,6 @@ impl RTCPeerConnection {
         self.trickled_remote_candidates = snapshot.trickled_remote_candidates;
         self.last_offer = snapshot.last_offer;
         self.last_answer = snapshot.last_answer;
-        self.transport_closed = snapshot.transport_closed;
         self.negotiation_needed_state = snapshot.negotiation_needed_state;
         self.is_negotiation_ongoing = snapshot.is_negotiation_ongoing;
         self.last_stable_state = snapshot.last_stable_state;
@@ -4819,6 +4811,53 @@ fn offerer_tagged_section_is_rtcp_mux_only(offer: &SessionDescription) -> bool {
             })
         })
         .is_some_and(|media| media.has_attribute(ATTR_KEY_RTCP_MUX_ONLY))
+}
+
+impl RTCPeerConnection {
+    /// The `statechange` to "closed" of the SCTP transport an applied answer closed (W3C
+    /// 6.1.2), queued once the description's own events and the `close` of its channels are.
+    pub(super) fn announce_sctp_closed_by_answer(&mut self) {
+        if std::mem::take(&mut self.sctp_closed_by_answer) {
+            self.pipeline_context.event_outs.push_back(
+                RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                    crate::peer_connection::transport::RTCSctpTransportState::Closed,
+                ),
+            );
+        }
+    }
+
+    /// W3C webrtc-pc "set a session description", once an answer made the state stable: "For
+    /// any transceiver that was removed from the set of transceivers in a previous step, if
+    /// any of its transports ... are still not closed and they're no longer referenced by a
+    /// non-stopped transceiver, close the RTCDtlsTransports and their associated
+    /// RTCIceTransports. This results in events firing on these objects in a queued task."
+    ///
+    /// With several transports, an answer's layout closes each transport it leaves without
+    /// a section (`apply_transport_layout`). This is the case that layout does not see: the
+    /// answer rejects every m= section, the data section included (RFC 9429 section 5.11:
+    /// the ICE components of a rejected section are discarded "unless a non-rejected "m="
+    /// section is bundled with" it), so no transport is in use. Each is closed; the next
+    /// description that sets a section up finds a new one, not started
+    /// (`close_transports_without_sections`). Called after the description's own events
+    /// (signalingstatechange, channel errors, mutes, track events) are queued: the transport
+    /// events are the queued task's.
+    pub(super) fn close_unused_transports(&mut self) {
+        let rejects_everything = [
+            &self.current_local_description,
+            &self.current_remote_description,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|description| {
+            description.sdp_type == RTCSdpType::Answer && rejects_every_media_section(description)
+        });
+        if !rejects_everything {
+            return;
+        }
+        if let Err(err) = self.close_transports_without_sections() {
+            log::warn!("closing the transports of a session without media sections: {err}");
+        }
+    }
 }
 
 /// Whether the description has m-sections and rejects every one (port 0): a completed

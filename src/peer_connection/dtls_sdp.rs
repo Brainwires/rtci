@@ -119,13 +119,13 @@ impl RTCPeerConnection {
             return Ok(d);
         }
         let tls_id = if is_offer {
-            // The offer asks for a new association when it sets a closed transport up again,
-            // and when it has a media section on an association that cannot key SRTP (one
-            // set up for data channels only, RFC 5764 section 4.1).
-            let new_association = self.transport_closed
-                || (has_rtp_media(&d)
-                    && self.dtls_transport().is_started()
-                    && !self.dtls_transport().can_key_srtp());
+            // The offer asks for a new association when it has a media section on an
+            // association that cannot key SRTP (one set up for data channels only, RFC 5764
+            // section 4.1). (A transport set up after the last one was closed is a new one,
+            // with a `tls-id` of its own.)
+            let new_association = has_rtp_media(&d)
+                && self.dtls_transport().is_started()
+                && !self.dtls_transport().can_key_srtp();
             // Every other transport stages the `tls-id` of the new association it was asked
             // for (`renew_dtls_association`), which `write_transport_attributes` writes in its
             // sections (RFC 8842 section 5.5, per transport).
@@ -176,12 +176,10 @@ impl RTCPeerConnection {
                 let mids = self.pipeline_context.transports.mids_on(id);
                 let value = if is_offer {
                     let part = description_for(&d, &mids);
-                    let closed = self.transport_closed;
                     self.with_transport(id, |pc| {
-                        let new_association = closed
-                            || (has_rtp_media(&part)
-                                && pc.dtls_transport().is_started()
-                                && !pc.dtls_transport().can_key_srtp());
+                        let new_association = has_rtp_media(&part)
+                            && pc.dtls_transport().is_started()
+                            && !pc.dtls_transport().can_key_srtp();
                         pc.dtls_transport_mut().offer_tls_id(new_association)
                     })?
                 } else {

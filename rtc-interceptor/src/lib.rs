@@ -261,8 +261,8 @@ pub use adaptive_jitter_buffer::{
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
 };
 pub use audio_red::{
-    RED_AUDIO_DEFAULT_MAX_PAYLOAD_SIZE, RED_AUDIO_DEFAULT_REDUNDANCY, RedAudioBuilder,
-    RedAudioInterceptor,
+    AudioRedundancy, RED_AUDIO_DEFAULT_MAX_PAYLOAD_SIZE, RED_AUDIO_DEFAULT_REDUNDANCY,
+    RedAudioBuilder, RedAudioInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
@@ -380,7 +380,8 @@ pub use pacing::pacer::{
 };
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
-    PacerBuilder, PacerInterceptor,
+    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerInterceptor,
+    QueueOverflow as PacerQueueOverflow,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;

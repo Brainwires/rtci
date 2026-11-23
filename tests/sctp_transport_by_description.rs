@@ -179,3 +179,75 @@ fn create_data_channel_without_an_available_id_is_refused_and_leaves_nothing() -
     assert_eq!(a.data_channel_ids().len(), before, "nothing was added");
     Ok(())
 }
+
+/// `sdp` with its `a=max-message-size` set to `size`.
+fn with_max_message_size(sdp: &str, size: u32) -> String {
+    sdp.lines()
+        .map(|l| {
+            if l.starts_with("a=max-message-size:") {
+                format!("a=max-message-size:{size}\r\n")
+            } else {
+                format!("{l}\r\n")
+            }
+        })
+        .collect()
+}
+
+fn max_message_size(pc: &RTCPeerConnection) -> Option<u32> {
+    pc.sctp().and_then(|sctp| sctp.max_message_size())
+}
+
+/// 4.4.1.4, for an answer or a provisional answer: "If description initiates the
+/// establishment of a new SCTP association ... or an SCTP association already exists, update
+/// the data max message size of connection.[[SctpTransport]]". A provisional answer sets it
+/// (null before), the final answer sets it again from its own value, and a later exchange
+/// that keeps the association follows the value the peer states then, down and up.
+#[test]
+fn the_max_message_size_follows_every_answer_and_provisional_answer() -> TestResult {
+    let now = Instant::now();
+    let mut a = peer()?;
+    let mut b = peer()?;
+    a.create_data_channel("d", None)?;
+
+    let offer = a.create_offer(None)?;
+    a.set_local_description(now, offer.clone())?;
+    assert_eq!(max_message_size(&a), None, "null until an answer");
+    b.set_remote_description(now, offer)?;
+    let answer = b.create_answer(None)?;
+    b.set_local_description(now, answer.clone())?;
+    assert!(
+        answer.sdp.contains("a=max-message-size:"),
+        "the answer states a size:\n{}",
+        answer.sdp
+    );
+
+    a.set_remote_description(
+        now,
+        RTCSessionDescription::pranswer(with_max_message_size(&answer.sdp, 5000))?,
+    )?;
+    assert_eq!(max_message_size(&a), Some(5000), "the provisional answer's");
+    a.set_remote_description(
+        now,
+        RTCSessionDescription::answer(with_max_message_size(&answer.sdp, 7000))?,
+    )?;
+    assert_eq!(max_message_size(&a), Some(7000), "the final answer's");
+
+    // Later exchanges on the same association (the same `a=sctp-port` on both sides).
+    for size in [1200u32, 30_000] {
+        let offer = a.create_offer(None)?;
+        a.set_local_description(now, offer.clone())?;
+        b.set_remote_description(now, offer)?;
+        let answer = b.create_answer(None)?;
+        b.set_local_description(now, answer.clone())?;
+        a.set_remote_description(
+            now,
+            RTCSessionDescription::answer(with_max_message_size(&answer.sdp, size))?,
+        )?;
+        assert_eq!(
+            max_message_size(&a),
+            Some(size),
+            "the size a later answer states"
+        );
+    }
+    Ok(())
+}

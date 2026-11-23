@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       command:
-        description: Shell command to run at the repository root
+        description: Shell command to run at the repository root (a branch name, not a short SHA, as ref)
         required: true
         type: string
       os:
@@ -30,9 +30,9 @@ on:
 
 run-name: "agent-test ${{ inputs.ref }} ${{ inputs.purpose }}"
 
-concurrency:
-  group: agent-test-${{ inputs.ref }}-${{ inputs.command }}
-  cancel-in-progress: true
+# No concurrency group: a group built from the command made a long or multi-line command an
+# invalid workflow, and the dispatch tooling already answers an identical dispatch that is still
+# in flight with its run id.
 
 permissions:
   contents: read
