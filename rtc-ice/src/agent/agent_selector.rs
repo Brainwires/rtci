@@ -90,6 +90,12 @@ impl Agent {
                 return false;
             }
         };
+        // RFC 8838 Section 14: the wait is for higher-priority candidates; once both sides
+        // have said they have no more (end-of-candidates, and local gathering complete), there
+        // is nothing left to wait for.
+        if self.remote_end_of_candidates && self.local_gathering_complete {
+            return true;
+        }
         now.saturating_duration_since(self.start_time) > min_wait
     }
 

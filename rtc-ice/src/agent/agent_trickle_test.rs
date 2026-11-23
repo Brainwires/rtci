@@ -143,3 +143,30 @@ fn test_dual_stack_lite_agent_takes_local_preference_from_rfc6724_precedence() {
         65535
     );
 }
+
+/// Section 14: an agent "MAY wait for [higher-priority] candidates before nominating", and the
+/// end-of-candidates indication ends the wait. With a ten-second wait for host pairs, the
+/// controlling agent does not nominate its valid pair in the first second; once both sides
+/// have ended their candidates it nominates at once.
+#[test]
+fn test_end_of_candidates_on_both_sides_ends_the_wait_before_nominating() {
+    let now = Instant::now();
+    let cfg = AgentConfig {
+        host_acceptance_min_wait: Some(Duration::from_secs(10)),
+        ..config(true)
+    };
+    let mut a = started_agent(now, cfg, &[REMOTE_A]);
+    let nominations = |out: &[(Message, SocketAddr)]| {
+        out.iter()
+            .filter(|(m, _)| m.typ == BINDING_REQUEST && m.contains(ATTR_USE_CANDIDATE))
+            .count()
+    };
+    let second = now + Duration::from_secs(1);
+    let out = run_answering(&mut a, now, second, |_, _| true);
+    assert_eq!(nominations(&out), 0, "nominated within the wait");
+    a.set_remote_end_of_candidates();
+    a.set_local_gathering_complete();
+    let out = run_answering(&mut a, second, second + Duration::from_millis(500), |_, _| true);
+    assert!(nominations(&out) > 0, "the wait goes on after end-of-candidates");
+    assert!(a.get_selected_candidate_pair().is_some());
+}

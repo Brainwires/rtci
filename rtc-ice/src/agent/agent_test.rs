@@ -2628,3 +2628,26 @@ fn test_published_mdns_host_candidates_resolve_at_the_peer() -> Result<()> {
     b.close()?;
     Ok(())
 }
+
+// draft-ietf-mmusic-mdns-ice-candidates section 3.1.1: "the ICE agent SHOULD still provide
+// mDNS candidates in step 6 even if [...] mDNS registration fails in step 4". Past the cap
+// of published names a host candidate is still provided, under a `.local` name that is not
+// published: its address does not show.
+#[test]
+fn test_host_candidate_past_the_name_cap_is_provided_under_an_unpublished_name() -> Result<()> {
+    let mut a = mdns_agent(crate::mdns::MulticastDnsMode::QueryAndGather, None)?;
+    let cap = mdns::MAX_LOCAL_NAMES;
+    for i in 0..=cap {
+        let address = format!("10.0.{}.{}", i / 200, 1 + i % 200);
+        assert!(
+            a.add_local_candidate(host("udp", &address, 5000, TcpType::Unspecified)?)?,
+            "candidate {i} is provided"
+        );
+    }
+    let last = &a.local_candidates[cap];
+    assert!(crate::mdns::is_ice_mdns_name(last.address()), "{}", last.address());
+    assert!(!last.marshal().contains("10.0."), "{}", last.marshal());
+    assert_eq!(a.mdns_local_names.len(), cap, "the cap is kept: it is not published");
+    a.close()?;
+    Ok(())
+}

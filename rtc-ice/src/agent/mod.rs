@@ -501,8 +501,9 @@ enum MdnsHostName {
     Hide(String),
     /// Keep its address.
     Literal,
-    /// Too many names are published already: dropping the candidate keeps its address private.
-    Refuse,
+    /// Too many names are published already: the candidate takes this name, which is not
+    /// published, and so keeps its address private.
+    Unpublished(String),
 }
 
 impl Agent {
@@ -860,14 +861,19 @@ impl Agent {
                     c.address = name;
                 }
                 MdnsHostName::Literal => {}
-                MdnsHostName::Refuse => {
+                MdnsHostName::Unpublished(name) => {
+                    // draft-ietf-mmusic-mdns-ice-candidates Section 3.1.1: "the ICE agent
+                    // SHOULD still provide mDNS candidates in step 6 even if [...] mDNS
+                    // registration fails in step 4": the candidate goes out under a name
+                    // that is never published (it does not resolve), so neither its address
+                    // nor the failure shows.
                     warn!(
-                        "[{}]: ignoring local host candidate {}: {} mDNS names already published (the cap)",
+                        "[{}]: local host candidate {} goes out under an unpublished mDNS name: {} names already published (the cap)",
                         self.get_name(),
                         c.address,
                         mdns::MAX_LOCAL_NAMES
                     );
-                    return Ok(false);
+                    c.address = name;
                 }
             }
         }
@@ -1133,7 +1139,7 @@ impl Agent {
         };
         let name = generate_multicast_dns_name();
         if !mdns_conn.add_local_name(&name, ip) {
-            return MdnsHostName::Refuse;
+            return MdnsHostName::Unpublished(name);
         }
         self.mdns_local_names.push((ip, name.clone()));
         MdnsHostName::Hide(name)

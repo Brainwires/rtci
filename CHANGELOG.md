@@ -1257,6 +1257,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an empty one (section 16.1.2). A lite agent that is dual-stack or IPv6-only takes its
   local preference from the RFC 6724 precedence of the address (RFC 8445 section 5.2), its
   rank breaking ties; an IPv4-only one keeps 65535.
+- **ice**: once the peer's end-of-candidates has arrived and local gathering is complete, the
+  per-type waits before nominating (`with_*_acceptance_min_wait`) end (RFC 8838 section 14).
+  A host candidate past the cap of published mDNS names is provided under a `.local` name
+  that is not published, instead of being dropped (draft-ietf-mmusic-mdns-ice-candidates
+  section 3.1.1).
 - **mdns**: through `rtc-ice` and the peer connection, the answers to a query of more than one
   question wait 20 to 120 ms even when every question is about the agent's own name (RFC 6762
   section 6.3); `MdnsConfig::with_multi_question_delay`,
