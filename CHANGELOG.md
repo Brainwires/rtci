@@ -3909,6 +3909,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
   and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
   that had none.
+- **sctp**: an endpoint in COOKIE-ECHOED answered a HEARTBEAT (its ESTABLISHED peer's path MTU
+  probe) with a HEARTBEAT ACK, against RFC 9260 5.1 C ("until the COOKIE ACK chunk is returned,
+  the sender MUST NOT send any other packets to the peer"); it no longer does. And while nothing
+  from the peer has shown that it left COOKIE-ECHOED (only INIT and COOKIE ECHO chunks came from
+  it since this side answered its COOKIE ECHO), a T3-rtx retransmission goes behind a COOKIE ACK
+  (5.1 D allows the COOKIE ACK with DATA; a peer in ESTABLISHED discards it, 5.2.5): when every
+  COOKIE ACK and the answers to the repeated COOKIE ECHOs were lost, the DATA waited for a
+  T1-cookie backed off to 16 s (aws-lc-rs seed 1428 at 10 % loss: the channel did not open in
+  30 s). Tests: `cookie_ack_loss_test.rs::a_heartbeat_is_not_answered_before_the_cookie_ack`,
+  `a_t3_retransmission_carries_a_cookie_ack_while_the_peer_may_be_in_cookie_echoed` (both fail
+  before).
 - **sctp**: a lost COOKIE ACK held DATA back until T3-rtx. The side that sent the COOKIE ECHO
   stays in COOKIE-ECHOED and discards the DATA its ESTABLISHED peer sends (RFC 9260 5.1, as it
   SHOULD), and each discard backs the peer's RTO off: after crossed INITs at 10 % loss a data
