@@ -342,7 +342,17 @@ fn an_offerer_answers_checks_that_arrive_before_the_answer() -> Result<()> {
     world.peers[1]
         .pc
         .set_local_description(now, answer.clone())?;
-    world.trickle()?;
+    // Each peer has its host candidate; the answerer has the offerer's. The offerer, which
+    // has no remote description yet, has none of the answerer's.
+    let offerer_candidate = world.peers[0].candidate()?;
+    world.peers[0]
+        .pc
+        .add_local_candidate(offerer_candidate.clone())?;
+    let answerer_candidate = world.peers[1].candidate()?;
+    world.peers[1]
+        .pc
+        .add_local_candidate(answerer_candidate.clone())?;
+    world.peers[1].pc.add_remote_candidate(offerer_candidate)?;
     world.run_for(Duration::from_millis(500), |_| false);
     let answerer = pairs(&mut world, 1);
     assert!(
@@ -355,6 +365,7 @@ fn an_offerer_answers_checks_that_arrive_before_the_answer() -> Result<()> {
     world.peers[0]
         .pc
         .set_remote_description(now, RTCSessionDescription::answer(answer.sdp)?)?;
+    world.peers[0].pc.add_remote_candidate(answerer_candidate)?;
     world.run("connected once the answer arrived", |peers| {
         peers.iter().all(|p| p.connected() && p.channel.is_some())
     })?;

@@ -647,13 +647,13 @@ mod tests {
             &[
                 ("imageattr", "96 send [x=[640:1920],y=[360:1080]] recv *"),
                 ("imageattr", "97 send [x=1280,y=720]"),
-                ("rid", "small send max-width=320;pt=96,97"),
-                ("rid", "wide send max-width=1920;pt=96"),
-                ("rid", "tall send max-height=320;pt=96"),
-                ("rid", "frame send max-fs=230399;pt=96"),
-                ("rid", "frame2 send max-fs=230400;pt=96"),
+                ("rid", "small send pt=96,97;max-width=320"),
+                ("rid", "wide send pt=96;max-width=1920"),
+                ("rid", "tall send pt=96;max-height=320"),
+                ("rid", "frame send pt=96;max-fs=230399"),
+                ("rid", "frame2 send pt=96;max-fs=230400"),
                 ("rid", "nopt send max-width=1000"),
-                ("rid", "in recv max-width=100;pt=96"),
+                ("rid", "in recv pt=96;max-width=100"),
             ],
         ));
         assert_eq!(ids(&section), ["wide", "frame2", "nopt", "in"]);

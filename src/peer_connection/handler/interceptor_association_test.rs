@@ -398,14 +398,7 @@ fn a_declared_ssrc_follows_its_newest_mid() {
         transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
         transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
     ];
-    transceivers[0]
-        .receiver_mut()
-        .as_mut()
-        .unwrap()
-        .set_coding_parameters(vec![RTCRtpCodingParameters {
-            ssrc: Some(0xcccc),
-            ..Default::default()
-        }]);
+    declare(&mut transceivers[0], 0xcccc);
     let arrival = |mid: &'static str| Arrival {
         ssrc: 0xcccc,
         payload_type: VP8,
@@ -430,14 +423,7 @@ fn a_declared_ssrc_follows_its_newest_mid() {
         transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
         transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
     ];
-    transceivers[0]
-        .receiver_mut()
-        .as_mut()
-        .unwrap()
-        .set_coding_parameters(vec![RTCRtpCodingParameters {
-            ssrc: Some(0xcccc),
-            ..Default::default()
-        }]);
+    declare(&mut transceivers[0], 0xcccc);
     let (_, after) = opened_in_order(
         transceivers,
         &[(arrival("1"), 10), (arrival("2"), 12), (arrival("1"), 13)],
@@ -447,6 +433,28 @@ fn a_declared_ssrc_follows_its_newest_mid() {
         vec![0],
         "a newer packet naming mid 1 moves it back"
     );
+}
+
+/// What a remote description declaring `ssrc` for the section leaves on its receiver: the
+/// coding and the track's encoding, the codec still unknown.
+fn declare(transceiver: &mut RTCRtpTransceiverInternal, ssrc: u32) {
+    let coding = RTCRtpCodingParameters {
+        ssrc: Some(ssrc),
+        ..Default::default()
+    };
+    let receiver = transceiver.receiver_mut().as_mut().unwrap();
+    receiver.set_coding_parameters(vec![coding.clone()]);
+    receiver.set_track(MediaStreamTrack::new(
+        "stream".to_string(),
+        "declared".to_string(),
+        "label".to_string(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding,
+            active: true,
+            ..Default::default()
+        }],
+    ));
 }
 
 /// [`opened`] with the sequence number of each arrival given.
