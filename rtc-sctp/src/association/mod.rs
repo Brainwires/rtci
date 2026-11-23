@@ -527,10 +527,6 @@ pub struct Association {
     /// RFC 9260 6.1 A: when the peer's SACK closed its window (a_rwnd 0), the first zero
     /// window probe waits one RTO from then.
     zero_window_probe_at: Option<Instant>,
-    /// The DATA chunk length (header and padding included) of chunks the Cumulative TSN Ack
-    /// recently covered, for the Duplicate TSNs a later SACK reports (RFC 9260 7.2.2: their
-    /// bytes count in partial_bytes_acked).
-    recently_acked_sizes: VecDeque<(u32, u32)>,
     /// The TSNs the last SACK showed the peer reneged on: they got their one miss indication
     /// there (RFC 9260 6.2.1 D iii), not another from the same SACK's Fast Retransmit count.
     reneged_in_last_sack: Vec<u32>,
@@ -714,7 +710,6 @@ impl Default for Association {
             t3_single_packet: false,
             fast_retransmit_marked: vec![],
             zero_window_probe_at: None,
-            recently_acked_sizes: VecDeque::new(),
             reneged_in_last_sack: vec![],
             acknowledging_by_shutdown: false,
             last_advertised_window: 0,
@@ -1058,9 +1053,7 @@ impl Association {
             .filter(|_| self.state() == AssociationState::Established)
             .and_then(|p| p.deadline());
         // The first zero window probe's time, while there is DATA to probe with.
-        let probe = self
-            .zero_window_probe_at
-            .filter(|_| self.inflight_queue.is_empty() && !self.pending_queue.is_empty());
+        let probe = self.zero_window_probe_at;
         [self.timers.next_timeout(), pmtud, probe]
             .into_iter()
             .flatten()
@@ -1119,6 +1112,10 @@ impl Association {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
+        // RFC 9260 6.1 A: the first zero window probe may go now.
+        if self.zero_window_probe_at.is_some_and(|at| now >= at) {
+            self.zero_window_probe_at = None;
+        }
         for &timer in &Timer::VALUES {
             let (expired, failure, n_rtos) = self.timers.is_expired(timer, now);
             if !expired {
@@ -3603,17 +3600,12 @@ impl Association {
 
         // The bytes outstanding before this SACK: the congestion window may grow only when
         // it was in full use (RFC 9260 7.2.1, 7.2.2).
-        // Counted, as cwnd is, in DATA chunk lengths with header and padding (RFC 9260 7.2).
-        let flight_before =
-            u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
+        let flight_before = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
         let marked_before = self.fast_retransmit_marked.len();
 
         // Process selective ack
         let (bytes_acked_per_stream, total_bytes_acked, htna) =
             self.process_selective_ack(d, now)?;
-        // RFC 9260 7.2.2: partial_bytes_acked counts "the number of bytes of duplicated chunks
-        // reported in Duplicate TSNs" too; 7.2: chunk lengths with header and padding.
-        let total_bytes_acked = total_bytes_acked + self.duplicate_bytes(&d.duplicate_tsn);
 
         let mut cum_tsn_ack_point_advanced = false;
         if sna32lt(self.cumulative_tsn_ack_point, d.cumulative_tsn_ack) {
@@ -3983,8 +3975,7 @@ impl Association {
                     newly_acked_data |= c.nsent > 0;
 
                     let n_bytes_acked = c.user_data.len() as i64;
-                    total_bytes_acked += c.wire_size() as i64;
-                    self.remember_acked_size(c.tsn, c.wire_size());
+                    total_bytes_acked += n_bytes_acked;
                     // A late SACK for a retired stream must not release bytes
                     // belonging to a new channel that reused its SID.
                     if self.is_current_stream_data(&c) {
@@ -4088,8 +4079,7 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get(tsn) {
                     if newly_acknowledged {
                         newly_acked_data |= c.nsent > 0;
-                        // Congestion control counts the DATA chunk length (RFC 9260 7.2).
-                        total_bytes_acked += c.wire_size() as i64;
+                        total_bytes_acked += n_bytes_acked;
                         if self.is_current_stream_data(c) {
                             *bytes_acked_per_stream
                                 .entry(c.stream_identifier)
@@ -4221,35 +4211,6 @@ impl Association {
         if self.inflight_queue.is_empty() {
             self.partial_bytes_acked = 0;
         }
-    }
-
-    /// How many recently acknowledged chunk sizes are kept for Duplicate TSNs.
-    const RECENTLY_ACKED: usize = 1024;
-
-    /// Keeps the DATA chunk length of a chunk the Cumulative TSN Ack covers, for a Duplicate
-    /// TSN a later SACK may report.
-    fn remember_acked_size(&mut self, tsn: u32, wire_size: usize) {
-        if self.recently_acked_sizes.len() == Self::RECENTLY_ACKED {
-            self.recently_acked_sizes.pop_front();
-        }
-        self.recently_acked_sizes
-            .push_back((tsn, u32::try_from(wire_size).unwrap_or(u32::MAX)));
-    }
-
-    /// RFC 9260 7.2.2: the bytes of the duplicated chunks a SACK reports in Duplicate TSNs,
-    /// for partial_bytes_acked. A TSN this side never sent, or one acknowledged too long ago
-    /// to be remembered, counts nothing.
-    fn duplicate_bytes(&self, duplicates: &[u32]) -> i64 {
-        duplicates
-            .iter()
-            .filter_map(|tsn| {
-                self.recently_acked_sizes
-                    .iter()
-                    .rev()
-                    .find(|(t, _)| t == tsn)
-                    .map(|(_, size)| i64::from(*size))
-            })
-            .sum()
     }
 
     /// RFC 9260 7.2.1: a congestion window that is not used decays, to max(cwnd / 2,
@@ -5027,11 +4988,10 @@ impl Association {
         // retransmission is taken as lost, not as in flight; each chunk retransmitted is in
         // flight again. Counting only the bytes of one call, as this did, retransmitted a
         // window's worth on every poll, the whole of what was outstanding in the end.
-        // Counted, as cwnd is, in DATA chunk lengths with header and padding (RFC 9260 7.2).
         let mut in_flight = self
             .inflight_queue
-            .get_num_wire_bytes()
-            .saturating_sub(self.inflight_queue.marked_for_retransmission_wire_bytes());
+            .get_num_bytes()
+            .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes());
         // What this call retransmits, against rwnd (6.2.1 B: rwnd is the peer's buffer
         // space, the bytes outstanding already taken out of it).
         let mut retransmitted = 0usize;
@@ -5059,10 +5019,11 @@ impl Association {
                             .is_some_and(|c| !c.abandoned())
                     });
                     // The abandonment released payload and cleared marks: count again.
-                    in_flight =
-                        self.inflight_queue.get_num_wire_bytes().saturating_sub(
-                            self.inflight_queue.marked_for_retransmission_wire_bytes(),
-                        ) + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
+                    in_flight = self
+                        .inflight_queue
+                        .get_num_bytes()
+                        .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
+                        + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     retransmitted = chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     packet_size = COMMON_HEADER_SIZE as usize
                         + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
@@ -5084,7 +5045,7 @@ impl Association {
                     // Send it as a zero window probe
                     done = true;
                     chunks_remaining = true;
-                } else if (in_flight + wire > self.cwnd as usize && in_flight > 0)
+                } else if (in_flight + c.user_data.len() > self.cwnd as usize && in_flight > 0)
                     || (retransmitted + c.user_data.len() > self.rwnd as usize
                         && !chunks.is_empty())
                 {
@@ -5093,7 +5054,7 @@ impl Association {
                     break;
                 }
 
-                in_flight += wire;
+                in_flight += c.user_data.len();
                 retransmitted += c.user_data.len();
             } else {
                 break; // end of pending data
@@ -5465,8 +5426,7 @@ impl Association {
             // plus Max.Burst packets before DATA is sent, so that a SACK for many chunks at
             // once does not release them all at once.
             if let Some(max_burst) = self.max_burst {
-                let flight =
-                    u32::try_from(self.inflight_queue.get_num_wire_bytes()).unwrap_or(u32::MAX);
+                let flight = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
                 let limit = flight.saturating_add(max_burst.saturating_mul(self.pmdcs));
                 if limit < self.cwnd {
                     self.cwnd = limit;
@@ -5539,9 +5499,7 @@ impl Association {
                 // chunk that crosses cwnd is still sent (by less than one PMDCS), and it is
                 // the last: a window that the next chunk does not fit exactly would
                 // otherwise never be in full use, and so never grow.
-                // The flight size counts DATA chunk lengths with header and padding, as cwnd
-                // does (RFC 9260 7.2).
-                if self.inflight_queue.get_num_wire_bytes() >= self.cwnd as usize {
+                if self.inflight_queue.get_num_bytes() >= self.cwnd as usize {
                     break; // cwnd is in full use
                 }
 
@@ -5575,7 +5533,8 @@ impl Association {
             if chunks.is_empty()
                 && self.inflight_queue.is_empty()
                 && !(suspended && !self.pending_queue.is_mid_message())
-                && self.zero_window_probe_at.is_none_or(|at| now >= at)
+                // Its time is cleared by `handle_timeout` once it has come.
+                && self.zero_window_probe_at.is_none()
             {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
@@ -6176,13 +6135,15 @@ impl Association {
     /// Whether no timers are running
     #[cfg(test)]
     pub(crate) fn is_idle(&self) -> bool {
-        Timer::VALUES
-            .iter()
-            // The heartbeat timer always runs on an established association.
-            .filter(|&&t| t != Timer::Heartbeat)
-            .filter_map(|&t| Some((t, self.timers.get(t)?)))
-            .min_by_key(|&(_, time)| time)
-            //.map_or(true, |(timer, _)| timer == Timer::Idle)
-            .is_none()
+        // A zero window probe waiting for its time (RFC 9260 6.1 A) is something to wake for.
+        self.zero_window_probe_at.is_none()
+            && Timer::VALUES
+                .iter()
+                // The heartbeat timer always runs on an established association.
+                .filter(|&&t| t != Timer::Heartbeat)
+                .filter_map(|&t| Some((t, self.timers.get(t)?)))
+                .min_by_key(|&(_, time)| time)
+                //.map_or(true, |(timer, _)| timer == Timer::Idle)
+                .is_none()
     }
 }

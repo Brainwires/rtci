@@ -1355,10 +1355,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp** (sec-12, RFC 9260 6.2.1 B, C): chunks marked for retransmission (T3-rtx, Fast
   Retransmit) give their size back to the peer's rwnd, and every retransmission takes it
   again; T3-rtx retransmissions are limited by cwnd and by rwnd separately.
-- **sctp** (sec-12, RFC 9260 7.2, 7.2.2): cwnd, ssthresh, partial_bytes_acked and the flight
-  size compared with cwnd count DATA chunk lengths with header and padding (user data bytes
-  before); partial_bytes_acked also counts the chunks a SACK reports as Duplicate TSNs. rwnd
-  stays in user data bytes.
 - **dtls** (sec-12, RFC 9147 8): after a key update the epoch before stays readable until a
   record of the next arrives, so a late record of it is processed (it was dropped once a
   record under the new keys had been read).
