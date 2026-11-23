@@ -7,6 +7,9 @@
 //               own offer) or a release note.
 //   na-env:     the headless build in the test image lacks it, though the browser has it. The
 //               citation says what the image is missing and where that is documented.
+//   na-peer:    a non-browser peer's stack (scripts/test-env/peers/) cannot express the
+//               scenario. The citation is the stack's source or documentation at its pinned
+//               version (its peer.json `lacks`), or what the peer observed at run time.
 //
 // The skip description is "na-<kind>: <reason> [<citation>]"; matrix.mjs parses it back.
 import { test } from "@playwright/test";
@@ -20,6 +23,7 @@ function skip(kind, condition, reason, cite) {
 
 export const naBrowser = (condition, reason, cite) => skip("browser", condition, reason, cite);
 export const naEnv = (condition, reason, cite) => skip("env", condition, reason, cite);
+export const naPeer = (condition, reason, cite) => skip("peer", condition, reason, cite);
 
 // Codecs the browser has but the headless build in the image does not, by project name. Each
 // entry is checked against the capability API at run time too: it only applies when the codec

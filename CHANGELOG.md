@@ -2275,6 +2275,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-1-harness`): the interop matrix takes non-browser peers.
+  A peer is a program around an independent WebRTC stack (`scripts/test-env/peers/<name>/`:
+  `peer.json` with its pinned version, licence, upstream and the capabilities it lacks, and a
+  `build.sh`) that speaks the browser page's WebSocket signalling with `examples/interop-peer`
+  and runs one plan per cell (steps: channels, tracks, offer, `request-offer`, echo, RTP waits,
+  RTCP feedback, ICE restart, rollback, glare, netem on either direction of the path).
+  `interop/peers.spec.mjs` holds the scenarios and their checks, once for every peer; each peer
+  is a Playwright project, so a cell is `<scenario> [<peer>]`, and `na-peer` (with a reason and
+  citation) joins `na-browser` / `na-env` in `na.mjs`, the matrix and the gate, which also
+  requires every peer to have run. `interop-peer`'s report adds the RTCP it received by type,
+  the transport's `tlsVersion` / `dtlsCipher` / `srtpCipher` / `dtlsRole` and selected
+  candidate pair, the SCTP limits and the full W3C RTP stream stats; `request-offer` takes
+  `"ice_restart": true`. The environment image's tag is `scripts/test-env/image-tag.sh` (it
+  also hashes each peer's `image/` inputs), and `open-b` gets the netem band `open-a` has.
+  Docs: `docs/interop.md`, `docs/conformance/w6.md` ("Independent peers").
+
 - **Licence gate and MSRV** (branch `conf/tcp-7-licence-msrv`). `deny.toml` has a `[licenses]`
   allow-list of permissive licences only (MIT, Apache-2.0 and its LLVM exception, BSD-2/3,
   ISC, Zlib, Unicode, CC0, 0BSD, BSL-1.0, and CDLA-Permissive-2.0 for the optional

@@ -50,7 +50,7 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
-          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
+          TAG=$(scripts/test-env/image-tag.sh)
           IMAGE="$IMAGE_REPO:$TAG"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
           if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
@@ -88,7 +88,7 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
-          TAG=$(cat scripts/test-env/Dockerfile scripts/test-env/interop/package.json scripts/test-env/interop/package-lock.json | sha256sum | cut -c1-12)
+          TAG=$(scripts/test-env/image-tag.sh)
           IMAGE="$IMAGE_REPO:$TAG"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
           # This job's token can only read packages; the `image` job publishes.
@@ -134,6 +134,7 @@ jobs:
             target/test-env/*.ivf
             target/test-env/firefox-moz*
             target/test-env/*.moz_log
+            target/test-env/peers/**
           if-no-files-found: ignore
 
   # A pull request from a fork: the same steps on GitHub's runners, with a read-only token (a

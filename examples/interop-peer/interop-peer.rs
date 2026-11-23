@@ -10,8 +10,11 @@
 //!   (renegotiation started from this side); it sends `hello-from-rust` once that opens. With
 //!   `"tracks":["VP8","OPUS",...]` it adds those send tracks (streaming the fixtures) instead,
 //!   so the browser answers for media.
+//!   `"ice_restart":true` restarts ICE in that offer (W3C restartIce).
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
-//!   connection state, its W3C stats counters and per-stream sequence coverage.
+//!   connection state, its W3C stats counters and per-stream sequence coverage, the RTCP it
+//!   received by type, what DTLS and SRTP negotiated, the selected candidate pair and the SCTP
+//!   transport's limits (what the non-browser peers' cells compare with their own view).
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -287,6 +290,8 @@ struct Session {
     /// Simulcast layers share one track; each layer's SSRC names its RID.
     rid_by_ssrc: HashMap<u32, String>,
     rtp_by_key: BTreeMap<String, u64>,
+    /// RTCP packets received, by type (`sr`, `rr`, `nack`, `pli`, `fir`, `twcc`, ...).
+    rtcp_by_type: BTreeMap<String, u64>,
     coverage: HashMap<u32, SeqCoverage>,
     dc_echoed: u64,
     rust_dc: Option<RTCDataChannelId>,
@@ -376,6 +381,7 @@ impl Session {
             tracks: HashMap::new(),
             rid_by_ssrc: HashMap::new(),
             rtp_by_key: BTreeMap::new(),
+            rtcp_by_type: BTreeMap::new(),
             coverage: HashMap::new(),
             dc_echoed: 0,
             rust_dc: None,
@@ -699,6 +705,9 @@ impl Session {
                             .collect()
                     })
                     .unwrap_or_default();
+                if v["ice_restart"].as_bool().unwrap_or(false) {
+                    self.pc.restart_ice();
+                }
                 if tracks.is_empty() {
                     let dc = self.pc.create_data_channel("from-rust", None)?;
                     self.rust_dc = Some(dc.id());
@@ -721,6 +730,13 @@ impl Session {
                     .map(|d| d.sdp)
                     .unwrap_or_default();
                 let stats = self.stats();
+                let sctp = self.pc.sctp().map(|t| {
+                    json!({
+                        "state": t.state().to_string(),
+                        "maxMessageSize": t.max_message_size(),
+                        "maxChannels": t.max_channels(),
+                    })
+                });
                 self.out.push(json!({
                     "type": "report",
                     "rtp": self.rtp_by_key,
@@ -735,6 +751,8 @@ impl Session {
                     "local_sdp": answer,
                     "stats": stats,
                     "transportsConnected": self.transports_connected.len(),
+                    "rtcp": self.rtcp_by_type,
+                    "sctp": sctp,
                     "errors": self.errors,
                 }));
             }
@@ -758,6 +776,7 @@ impl Session {
                     "ssrc": r.rtp_stream_stats.ssrc,
                     "kind": r.rtp_stream_stats.kind.to_string(),
                     "packetsReceived": r.packets_received,
+                    "w3c": serde_json::to_value(i).unwrap_or(Value::Null),
                 })
             })
             .collect();
@@ -769,6 +788,7 @@ impl Session {
                     "ssrc": r.rtp_stream_stats.ssrc,
                     "kind": r.rtp_stream_stats.kind.to_string(),
                     "packetsSent": r.packets_sent,
+                    "w3c": serde_json::to_value(o).unwrap_or(Value::Null),
                 })
             })
             .collect();
@@ -807,10 +827,37 @@ impl Session {
         let transports: Vec<Value> = report
             .iter()
             .filter_map(|e| match e {
-                RTCStatsReportEntry::Transport(t) => Some(json!({
-                    "dtlsState": t.dtls_state.to_string(),
-                    "selectedCandidatePairId": t.selected_candidate_pair_id,
-                })),
+                RTCStatsReportEntry::Transport(t) => {
+                    // The selected pair's two candidates, as W3C RTCIceCandidateStats.
+                    let candidate = |id: &str| match report.get(id) {
+                        Some(
+                            RTCStatsReportEntry::LocalCandidate(c)
+                            | RTCStatsReportEntry::RemoteCandidate(c),
+                        ) => serde_json::to_value(c).unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    };
+                    let selected = report.iter().find_map(|e| match e {
+                        RTCStatsReportEntry::IceCandidatePair(p)
+                            if !t.selected_candidate_pair_id.is_empty()
+                                && p.stats.id == t.selected_candidate_pair_id =>
+                        {
+                            Some(json!({
+                                "local": candidate(&p.local_candidate_id),
+                                "remote": candidate(&p.remote_candidate_id),
+                            }))
+                        }
+                        _ => None,
+                    });
+                    Some(json!({
+                        "dtlsState": t.dtls_state.to_string(),
+                        "selectedCandidatePairId": t.selected_candidate_pair_id,
+                        "tlsVersion": t.tls_version,
+                        "dtlsCipher": t.dtls_cipher,
+                        "srtpCipher": t.srtp_cipher,
+                        "dtlsRole": serde_json::to_value(t).ok().and_then(|v| v.get("dtlsRole").cloned()),
+                        "selectedPair": selected,
+                    }))
+                }
                 _ => None,
             })
             .collect();
@@ -1036,6 +1083,11 @@ impl Session {
                     }
                 }
                 RTCMessage::RtpPacket(track_id, pkt) => self.on_rtp(track_id, pkt),
+                RTCMessage::RtcpPacket(_, packets) => {
+                    for p in &packets {
+                        *self.rtcp_by_type.entry(rtcp_name(&p.header())).or_default() += 1;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1262,6 +1314,26 @@ fn opus_packet_samples(packet: &[u8]) -> u32 {
         _ => packet.get(1).map_or(0, |b| u32::from(b & 0x3f)),
     };
     frame * frames
+}
+
+/// A short name for an RTCP packet's type and format (RFC 3550 6, RFC 4585 6, RFC 5104 4.3,
+/// draft-holmer-rmcat-transport-wide-cc-extensions-01 3.1, RFC 8888 3).
+fn rtcp_name(h: &rtc::rtcp::header::Header) -> String {
+    use rtc::rtcp::header::PacketType;
+    match (h.packet_type, h.count) {
+        (PacketType::SenderReport, _) => "sr".into(),
+        (PacketType::ReceiverReport, _) => "rr".into(),
+        (PacketType::SourceDescription, _) => "sdes".into(),
+        (PacketType::Goodbye, _) => "bye".into(),
+        (PacketType::TransportSpecificFeedback, 1) => "nack".into(),
+        (PacketType::TransportSpecificFeedback, 15) => "twcc".into(),
+        (PacketType::TransportSpecificFeedback, 11) => "ccfb".into(),
+        (PacketType::PayloadSpecificFeedback, 1) => "pli".into(),
+        (PacketType::PayloadSpecificFeedback, 4) => "fir".into(),
+        (PacketType::PayloadSpecificFeedback, 15) => "remb".into(),
+        (PacketType::ExtendedReport, _) => "xr".into(),
+        (t, fmt) => format!("{t:?}/{fmt}"),
+    }
 }
 
 fn codec_kind(c: &RTCRtpCodec) -> RtpCodecKind {

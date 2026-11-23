@@ -123,7 +123,7 @@ stage_env() {
 }
 
 stage_interop() {
-  log "stage interop: Chromium, Firefox, WebKit (Playwright) against the Rust peer"
+  log "stage interop: Chromium, Firefox, WebKit (Playwright) and the non-browser peers (scripts/test-env/peers) against the Rust peer"
   if [ ! -x "$HERE/interop/run.sh" ]; then echo "## interop: not present" >> "$REPORT"; return 1; fi
   "$HERE/interop/run.sh" > "$A/interop.log" 2>&1
   local rc=$?

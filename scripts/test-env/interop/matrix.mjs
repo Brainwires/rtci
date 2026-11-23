@@ -1,11 +1,11 @@
 // Turns Playwright's JSON report into the interop matrix: Markdown on stdout (one row per test,
-// one column per browser; an n/a shows its kind and reason, a failure the first line of its
+// one column per browser or peer; an n/a shows its kind and reason, a failure the first line of its
 // error) and, when a second path is given, interop-summary.json for gate.mjs:
 //
 //   node matrix.mjs results.json [interop-summary.json]
 //
 // Summary cells: { test, file, browser, status, reason?, cite?, detail? } with status "pass",
-// "fail", "na-browser", "na-env", "na-uncited" (skipped without a cited na.mjs reason) or
+// "fail", "na-browser", "na-env", "na-peer", "na-uncited" (skipped without a cited na.mjs reason) or
 // "missing" (the browser ran tests from that file but not this one).
 import { readFileSync, writeFileSync } from "node:fs";
 import { NA_PATTERN } from "./na-pattern.mjs";
@@ -61,23 +61,37 @@ if (process.argv[3]) {
   writeFileSync(process.argv[3], JSON.stringify({ counts, cells }, null, 2));
 }
 
-const cols = [...new Set(cells.map((c) => c.browser))];
-const rows = new Map();
+// One table per set of columns: the browser specs' rows have a column per browser, the peer
+// cells (peers.spec.mjs) a column per peer.
+const text = (c) =>
+  (c.status === "pass"
+    ? "pass"
+    : c.status.startsWith("na-") && c.status !== "na-uncited"
+      ? `${c.status} (${c.reason})`
+      : `${c.status.toUpperCase()}: ${c.detail || ""}`
+  ).replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 160);
+const groups = new Map();
 for (const c of cells) {
-  if (!rows.has(c.test)) rows.set(c.test, {});
-  const text =
-    c.status === "pass"
-      ? "pass"
-      : c.status.startsWith("na-") && c.status !== "na-uncited"
-        ? `${c.status} (${c.reason})`
-        : `${c.status.toUpperCase()}: ${c.detail || ""}`;
-  rows.get(c.test)[c.browser] = text.replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 160);
+  const g = /peers\.spec\.mjs$/.test(c.file || "") ? "peers" : "browsers";
+  if (!groups.has(g)) groups.set(g, []);
+  groups.get(g).push(c);
 }
-console.log(`| test | ${cols.join(" | ")} |`);
-console.log(`|---|${cols.map(() => "---").join("|")}|`);
-for (const [title, r] of rows) console.log(`| ${title} | ${cols.map((c) => r[c] || "-").join(" | ")} |`);
+for (const [g, group] of groups) {
+  const cols = [...new Set(group.map((c) => c.browser))];
+  const rows = new Map();
+  for (const c of group) {
+    if (!rows.has(c.test)) rows.set(c.test, {});
+    rows.get(c.test)[c.browser] = text(c);
+  }
+  if (groups.size > 1) console.log(`\n### ${g === "peers" ? "Peers" : "Browsers"}\n`);
+  console.log(`| test | ${cols.join(" | ")} |`);
+  console.log(`|---|${cols.map(() => "---").join("|")}|`);
+  for (const [title, r] of rows) console.log(`| ${title} | ${cols.map((c) => r[c] || "-").join(" | ")} |`);
+}
 const n = (pred) => cells.filter(pred).length;
+const cited = ["pass", "na-browser", "na-env", "na-peer"];
 console.log(
-  `\n${n((c) => c.status === "pass")} pass, ${n((c) => !["pass", "na-browser", "na-env"].includes(c.status))} fail, ` +
-    `${n((c) => c.status === "na-browser")} not applicable (browser), ${n((c) => c.status === "na-env")} not tested (environment)`,
+  `\n${n((c) => c.status === "pass")} pass, ${n((c) => !cited.includes(c.status))} fail, ` +
+    `${n((c) => c.status === "na-browser")} not applicable (browser), ${n((c) => c.status === "na-peer")} not applicable (peer), ` +
+    `${n((c) => c.status === "na-env")} not tested (environment)`,
 );
