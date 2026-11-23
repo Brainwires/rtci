@@ -20,6 +20,10 @@
     "rollback": {
       "reason": "Pion does not take a rollback description",
       "cite": "pion/webrtc v4.2.29 SetLocalDescription: \"InvalidModificationError: invalid SDP type supplied to SetLocalDescription(): rollback\" (train 10 round 1)"
+    },
+    "simulcastSend": {
+      "reason": "Pion writes no MID or RID header extension on the RTP it sends: its simulcast layers reach the receiver without a RID, so they cannot be told apart by RID (RFC 8853)",
+      "cite": "pion/webrtc v4.2.29 track_local_static.go TrackLocalStaticRTP.writeRTP sets only the SSRC and payload type of each binding (\"interceptors may modify the header ... add header extensions\"); no pion/webrtc code outside tests calls SetExtension, and no default interceptor adds sdes:mid or sdes:rtp-stream-id. Train 10 round 4: the first header per layer carried only the transport-wide-cc extension (id 4)"
     }
   }
 }

@@ -127,17 +127,20 @@ type Result struct {
 	Coverage        []map[string]any  `json:"coverage"`
 	RTCP            map[string]int    `json:"rtcp"`
 	RTCPSent        map[string]int    `json:"rtcpSent"`
-	TWCCSent        bool              `json:"twccSent"`
-	SelectedPair    map[string]any    `json:"selectedPair"`
-	DTLS            map[string]any    `json:"dtls"`
-	SCTP            map[string]any    `json:"sctp"`
-	LocalCandidates []string          `json:"localCandidates"`
-	Trickled        int               `json:"trickled"`
-	Descriptions    [][3]string       `json:"descriptions"`
-	RemoteOffers    int               `json:"remoteOffers"`
-	IgnoredOffers   int               `json:"ignoredOffers"`
-	Rust            map[string]any    `json:"rust"`
-	RustErrors      []string          `json:"rustErrors"`
+	// Reception report blocks received in SRs and RRs, per reader (a block reaches the reader
+	// of the stream it is about).
+	ReportBlocks    int            `json:"reportBlocks"`
+	TWCCSent        bool           `json:"twccSent"`
+	SelectedPair    map[string]any `json:"selectedPair"`
+	DTLS            map[string]any `json:"dtls"`
+	SCTP            map[string]any `json:"sctp"`
+	LocalCandidates []string       `json:"localCandidates"`
+	Trickled        int            `json:"trickled"`
+	Descriptions    [][3]string    `json:"descriptions"`
+	RemoteOffers    int            `json:"remoteOffers"`
+	IgnoredOffers   int            `json:"ignoredOffers"`
+	Rust            map[string]any `json:"rust"`
+	RustErrors      []string       `json:"rustErrors"`
 	// Pion's own outbound-rtp stats: what it says it sent, per SSRC and RID.
 	Outbound []map[string]any `json:"outbound"`
 	// The first RTP header Pion's chain wrote per SSRC: its payload type and its header
@@ -618,6 +621,13 @@ func (p *Peer) readRTCP(read func() ([]rtcp.Packet, interceptor.Attributes, erro
 		p.mu.Lock()
 		for _, pk := range pkts {
 			p.res.RTCP[rtcpName(pk)]++
+			// Reception report blocks, in an SR or an RR (RFC 3550 6.4).
+			switch v := pk.(type) {
+			case *rtcp.SenderReport:
+				p.res.ReportBlocks += len(v.Reports)
+			case *rtcp.ReceiverReport:
+				p.res.ReportBlocks += len(v.Reports)
+			}
 		}
 		p.mu.Unlock()
 	}

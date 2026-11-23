@@ -28,7 +28,7 @@ from aiortc import (
     RTCRtpSender,
     RTCSessionDescription,
 )
-from aiortc import rtcrtpreceiver, rtcrtpsender
+from aiortc import rtcdtlstransport, rtcrtpreceiver, rtcrtpsender
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError, VideoStreamTrack
 from aiortc.rtcconfiguration import RTCBundlePolicy, RTCIceTransportPolicy
 from aiortc.rtp import (
@@ -36,6 +36,7 @@ from aiortc.rtp import (
     RTCP_PSFB_PLI,
     RTCP_RTPFB_NACK,
     RtcpByePacket,
+    RtcpPacket,
     RtcpPsfbPacket,
     RtcpRrPacket,
     RtcpRtpfbPacket,
@@ -65,18 +66,30 @@ def rtcp_name(p):
     return type(p).__name__
 
 
-def instrument(cls):
-    orig = cls._handle_rtcp_packet
-
-    async def counted(self, packet):
-        RTCP_IN[rtcp_name(packet)] += 1
-        return await orig(self, packet)
-
-    cls._handle_rtcp_packet = counted
+REPORT_BLOCKS = [0]
 
 
-instrument(rtcrtpreceiver.RTCRtpReceiver)
-instrument(rtcrtpsender.RTCRtpSender)
+def count_rtcp():
+    """Counts every RTCP packet once, as it arrives, before aiortc routes it: its router hands
+    an RR only to the senders its report blocks name, and an SR to the receiver of its SSRC
+    and to those senders, so counting in the handlers misses some and counts others twice."""
+    orig = rtcdtlstransport.RTCDtlsTransport._handle_rtcp_data
+
+    async def counted(self, data):
+        try:
+            packets = RtcpPacket.parse(data)
+        except ValueError:
+            packets = []
+        for p in packets:
+            RTCP_IN[rtcp_name(p)] += 1
+            if isinstance(p, (RtcpSrPacket, RtcpRrPacket)):
+                REPORT_BLOCKS[0] += len(p.reports)
+        return await orig(self, data)
+
+    rtcdtlstransport.RTCDtlsTransport._handle_rtcp_data = counted
+
+
+count_rtcp()
 
 # Media packets received, by kind: aiortc's getStats files every SSRC of a receiver under one
 # id ("inbound-rtp_" + id(receiver), rtcrtpreceiver.py getStats), so its report shows one
@@ -581,6 +594,7 @@ class Peer:
                 e["packets"] += s.packetsSent
                 e["bytes"] += s.bytesSent
         self.res["rtcp"] = dict(RTCP_IN)
+        self.res["reportBlocks"] = REPORT_BLOCKS[0]
         dtls = None
         transports = [t.receiver.transport for t in self.pc.getTransceivers()]
         if self.pc.sctp:
