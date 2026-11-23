@@ -1064,7 +1064,19 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         Ok(())
     }
 
+    /// The earliest deadline of every handler, and **now** while `poll_write` has something:
+    /// what a handler made while the connection served `poll_event` or `poll_read` (a
+    /// handshake flight an event started, an answer, what the interceptors' read leg made)
+    /// comes after the driver's `poll_write` in the event loop (`poll_write`, `poll_event`,
+    /// `poll_read`, then `poll_timeout` and sleep), and would otherwise wait for whatever wakes
+    /// the driver next. The handlers' output is gathered here as `poll_write` gathers it, so
+    /// the deadline is now exactly when `poll_write` has output to hand out (a datagram, or
+    /// one for an engine-run TCP connection, which `poll_write` routes there).
     fn poll_timeout(&mut self) -> Option<Instant> {
+        self.flush_writes();
+        if !self.pipeline_context.write_outs.is_empty() {
+            return Some(self.pipeline_context.now);
+        }
         let mut eto: Option<Instant> = None;
         for_each_handler!(forward: process_handler!(self, handler, {
             if let Some(next) = handler.poll_timeout() {

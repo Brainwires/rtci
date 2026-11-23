@@ -131,6 +131,25 @@ impl Chain {
             |s| s.poll_read(),
         );
         self.read_outs.extend(belt);
+        self.collect_read_writes();
+    }
+
+    /// What the read leg made for the write leg (a retransmission a NACK asks for, a probe
+    /// cluster's padding, an Early RTCP packet, a PAUSED answer) goes down the write leg now,
+    /// into `write_outs`, where [`Protocol::poll_timeout`] reports it as due.
+    ///
+    /// A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+    /// `poll_timeout` and sleep): left in the interceptor that made it, a packet would wait
+    /// for whatever wakes the driver next, since no interceptor's own deadline covers what it
+    /// has queued for `poll_write`.
+    fn collect_read_writes(&mut self) {
+        let belt = Self::walk(
+            self.interceptors.iter_mut().rev(),
+            VecDeque::new(),
+            |s, p| s.handle_write(p),
+            |s| s.poll_write(),
+        );
+        self.write_outs.extend(belt);
     }
 
     fn drain_write(&mut self) {
@@ -159,6 +178,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
             |s| s.poll_read(),
         );
         self.read_outs.extend(belt);
+        self.collect_read_writes();
         Ok(())
     }
 
@@ -198,10 +218,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
         Ok(())
     }
 
+    /// The earliest deadline of the interceptors, and at once (the instant it was made) while
+    /// a packet waits in `write_outs` for `poll_write`.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
+        let waiting = self.write_outs.iter().map(|packet| packet.now).min();
         self.interceptors
             .iter_mut()
             .filter_map(|interceptor| interceptor.poll_timeout())
+            .chain(waiting)
             .min()
     }
 
