@@ -39,9 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sctp**: assigning data channel ids with every id of this side's parity taken no longer
   overflows (a panic in debug builds for the DTLS client). The update of the data max message
   size on answers and provisional answers is `conf/audit-5-sctp-w3c`'s
-  (`SctpTransport::update_max_message_size`, `update_sctp_max_message_size`); this branch adds
-  `tests/sctp_transport_by_description.rs::the_max_message_size_follows_every_answer_and_provisional_answer`
-  for it. The umbrella WEBRTC-4.5.1-1 is `tested`.
+  (`SctpTransport::update_max_message_size`, `update_sctp_max_message_size`); this branch
+  extends it to a provisional answer that initiates the association (W3C: "If description
+  initiates the establishment of a new SCTP association ... or an SCTP association already
+  exists"): `RTCSctpTransport::max_message_size` was null until the final answer then. Test:
+  `tests/sctp_transport_by_description.rs::the_max_message_size_follows_every_answer_and_provisional_answer`. The umbrella WEBRTC-4.5.1-1 is `tested`.
 
 - **jsep**: an answer that rejects every m= section closes the transports
   (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state

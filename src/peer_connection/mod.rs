@@ -4912,9 +4912,11 @@ impl RTCPeerConnection {
         self.trigger_negotiation_needed();
     }
 
-    /// W3C webrtc 4.4.1.4 for a provisional answer: "If description ... or an SCTP
-    /// association already exists, update the data max message size" from what the
-    /// description pair negotiates for the running association's ports.
+    /// W3C webrtc 4.4.1.4 for a provisional answer: "If description initiates the
+    /// establishment of a new SCTP association, as defined in [RFC8841], Sections 10.3 and
+    /// 10.4, or an SCTP association already exists, update the data max message size": from
+    /// what the description pair negotiates, for the running association's ports or, when
+    /// none is started yet, for the one the final answer will start.
     fn update_sctp_max_message_size(
         &mut self,
         local: &::sdp::description::session::SessionDescription,
@@ -4925,7 +4927,8 @@ impl RTCPeerConnection {
             remote_port,
             remote_max_message_size,
         } = negotiated_sctp(local, remote)
-            && self.sctp_transport().negotiated_ports == Some((local_port, remote_port))
+            && (!self.sctp_transport().is_started
+                || self.sctp_transport().negotiated_ports == Some((local_port, remote_port)))
         {
             self.sctp_transport_mut()
                 .update_max_message_size(remote_max_message_size);
