@@ -881,3 +881,141 @@ fn balanced_gives_each_media_type_a_transport_of_its_own() -> Result<()> {
     })?;
     Ok(())
 }
+
+/// The offer of `negotiate` with its one BUNDLE group split in two: the RTP sections and the
+/// data section.
+fn two_bundle_groups(sdp: String) -> String {
+    sdp.replace(
+        "a=group:BUNDLE 0 1 2",
+        "a=group:BUNDLE 0 1\r\na=group:BUNDLE 2",
+    )
+}
+
+/// RFC 9143 section 5 (a description "can contain multiple BUNDLE groups"), RFC 5888: an
+/// offer with two BUNDLE groups is answered with the same two, each group a transport of its
+/// own with its own credentials (only in its tagged section), the media of the first and the
+/// data of the second each over theirs. A later offer from the answerer keeps both groups
+/// (RFC 9429 section 5.2.2).
+#[test]
+fn two_bundle_groups_run_on_two_transports() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let mut senders = vec![];
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                }],
+            }),
+        )?;
+        senders.push(
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sender"),
+        );
+    }
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    let offer = RTCSessionDescription::offer(two_bundle_groups(offer.sdp))?;
+    assert_eq!(
+        offer.sdp.matches("a=group:BUNDLE").count(),
+        2,
+        "{}",
+        offer.sdp
+    );
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(now, offer)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    let groups: Vec<&str> = answer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("a=group:BUNDLE"))
+        .collect();
+    assert_eq!(
+        groups,
+        ["a=group:BUNDLE 0 1", "a=group:BUNDLE 2"],
+        "each offered group is answered on its own:\n{}",
+        answer.sdp
+    );
+    assert_eq!(ufrags(&answer.sdp).len(), 2, "{}", answer.sdp);
+    let sections: Vec<&str> = answer.sdp.split("\r\nm=").skip(1).collect();
+    assert!(
+        !sections[1].contains("a=ice-ufrag"),
+        "the second section of the first group has no transport attributes:\n{}",
+        answer.sdp
+    );
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.ice_transport_sections().len(), 2);
+    }
+
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    assert_eq!(world.paths.len(), 4, "{:?}", world.paths);
+    let media: Vec<RTCTransportId> = senders
+        .iter()
+        .map(|sender| {
+            world.peers[0]
+                .pc
+                .rtp_sender(*sender)
+                .expect("sender")
+                .transport()
+                .expect("a transport")
+                .id()
+        })
+        .collect();
+    let data = world.peers[0].pc.sctp().expect("SCTP").transport().id();
+    assert_eq!(
+        media[0], media[1],
+        "audio and video share the first group's transport"
+    );
+    assert_ne!(media[0], data, "data is on the second group's");
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    for seq in 1..=5 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    let channel = world.peers[0].channel.expect("the offerer's channel");
+    world.peers[0]
+        .pc
+        .data_channel(channel)
+        .expect("the channel")
+        .send(world.now, BytesMut::from(&b"over the second group"[..]))?;
+    world.run("RTP of both senders and a message delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+            && !peers[1].received.is_empty()
+    })?;
+
+    // A later offer, by the answerer, keeps both groups.
+    let reoffer = world.peers[1].pc.create_offer(None)?;
+    let groups: Vec<&str> = reoffer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("a=group:BUNDLE"))
+        .collect();
+    assert_eq!(
+        groups,
+        ["a=group:BUNDLE 0 1", "a=group:BUNDLE 2"],
+        "{}",
+        reoffer.sdp
+    );
+    assert_eq!(ufrags(&reoffer.sdp).len(), 2, "{}", reoffer.sdp);
+    Ok(())
+}

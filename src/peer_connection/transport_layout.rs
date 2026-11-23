@@ -24,7 +24,7 @@ use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_group_mids,
+    ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_groups,
     extract_fingerprints, extract_ice_details, get_mid_value, is_rejected_media,
 };
 use crate::peer_connection::transport::ice::IceTransport;
@@ -39,11 +39,12 @@ use rand::RngExt;
 const TRANSPORT_ICE_ATTRIBUTES: [&str; 4] =
     ["ice-ufrag", "ice-pwd", "candidate", "end-of-candidates"];
 
-/// The m= sections of a description, grouped by the transport they share: the BUNDLE group's
-/// sections that are not rejected, then each other section that is not rejected on its own,
-/// in the order of the first section of each.
+/// The m= sections of a description, grouped by the transport they share: each BUNDLE group's
+/// sections that are not rejected (RFC 9143 section 5: a description may carry several
+/// groups, each a transport), then each other section that is not rejected on its own, in the
+/// order of the first section of each.
 pub(crate) fn transport_groups(desc: &SessionDescription) -> Vec<Vec<String>> {
-    let bundle: Vec<&str> = bundle_group_mids(desc);
+    let bundles: Vec<Vec<&str>> = bundle_groups(desc);
     let live: Vec<&str> = desc
         .media_descriptions
         .iter()
@@ -51,37 +52,40 @@ pub(crate) fn transport_groups(desc: &SessionDescription) -> Vec<Vec<String>> {
         .filter_map(|m| get_mid_value(m).map(String::as_str))
         .collect();
     let mut groups: Vec<Vec<String>> = vec![];
-    let mut bundled_at = None;
+    // Where each BUNDLE group's sections are collected, once its first live section is seen.
+    let mut bundled_at: Vec<Option<usize>> = vec![None; bundles.len()];
     for mid in live {
-        if bundle.contains(&mid) {
-            match bundled_at {
-                Some(index) => {
-                    let group: &mut Vec<String> = &mut groups[index];
-                    group.push(mid.to_owned());
-                }
+        match bundles.iter().position(|group| group.contains(&mid)) {
+            Some(bundle) => match bundled_at[bundle] {
+                Some(index) => groups[index].push(mid.to_owned()),
                 None => {
-                    bundled_at = Some(groups.len());
+                    bundled_at[bundle] = Some(groups.len());
                     groups.push(vec![mid.to_owned()]);
                 }
-            }
-        } else {
-            groups.push(vec![mid.to_owned()]);
+            },
+            None => groups.push(vec![mid.to_owned()]),
         }
     }
     groups
 }
 
 /// The part of `desc` that describes the sections `mids`: the session's attributes, with the
-/// BUNDLE group restricted to them, and their m= sections. It is what one transport is
+/// BUNDLE groups restricted to them, and their m= sections. It is what one transport is
 /// started and checked from.
 pub(crate) fn description_for(desc: &SessionDescription, mids: &[String]) -> SessionDescription {
     let mut part = desc.clone();
     part.media_descriptions
         .retain(|m| get_mid_value(m).is_some_and(|mid| mids.contains(mid)));
-    let bundle: Vec<String> = bundle_group_mids(desc)
+    let bundles: Vec<Vec<String>> = bundle_groups(desc)
         .into_iter()
-        .filter(|mid| mids.iter().any(|m| m == mid))
-        .map(str::to_owned)
+        .map(|group| {
+            group
+                .into_iter()
+                .filter(|mid| mids.iter().any(|m| m == mid))
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .filter(|group| !group.is_empty())
         .collect();
     part.attributes.retain(|a| {
         a.key != ATTR_KEY_GROUP
@@ -90,7 +94,7 @@ pub(crate) fn description_for(desc: &SessionDescription, mids: &[String]) -> Ses
                 .as_deref()
                 .is_some_and(|value| value.starts_with("BUNDLE"))
     });
-    if !bundle.is_empty() {
+    for bundle in bundles {
         part.attributes.push(Attribute::new(
             ATTR_KEY_GROUP.to_owned(),
             Some(format!("BUNDLE {}", bundle.join(" "))),
@@ -457,9 +461,10 @@ impl RTCPeerConnection {
     }
 
     /// Writes into a description this side generates each transport's own ICE attributes in
-    /// the sections on a transport other than the default one: its credentials, its
-    /// candidates (in its first section, RFC 9429 section 5.2.1) and its default destination
-    /// in `m=` / `c=`. The default transport's sections keep what `populate_sdp` wrote.
+    /// the sections on a transport other than the default one that carry transport attributes:
+    /// its credentials, its candidates (in its first such section, RFC 9429 section 5.2.1)
+    /// and its default destination in `m=` / `c=`. The default transport's sections keep what
+    /// `populate_sdp` wrote.
     pub(crate) fn write_transport_attributes(&self, d: &mut SessionDescription) {
         let transports = &self.pipeline_context.transports;
         if transports.len() == 1 {
@@ -482,6 +487,12 @@ impl RTCPeerConnection {
                 if is_rejected_media(m)
                     || !get_mid_value(m).is_some_and(|mid| transports.transport_id_for(mid) == id)
                 {
+                    continue;
+                }
+                // Only the sections that carry the transport's attributes: in an answer and a
+                // later offer that is the tagged section of the group alone (RFC 9143 section
+                // 7.1.3), in an initial offer every section that is not bundle-only.
+                if m.attribute("ice-ufrag").is_none() {
                     continue;
                 }
                 m.attributes
@@ -655,5 +666,22 @@ impl RTCPeerConnection {
                 peer_connection: self,
                 transport,
             })
+    }
+
+    /// The mids of the transceivers whose section is on the active transport; `None` while
+    /// the connection has one transport.
+    pub(crate) fn active_transport_mids(&self) -> Option<Vec<String>> {
+        let transports = &self.pipeline_context.transports;
+        if transports.len() == 1 {
+            return None;
+        }
+        let active = transports.active_id();
+        Some(
+            self.rtp_transceivers
+                .iter()
+                .filter_map(|t| t.mid().clone())
+                .filter(|mid| transports.transport_id_for(mid) == active)
+                .collect(),
+        )
     }
 }

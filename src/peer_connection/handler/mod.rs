@@ -466,6 +466,11 @@ impl RTCPeerConnection {
     }
 
     fn pump_reads_on_active(&mut self, msg: Option<TaggedRTCMessageInternal>) {
+        // RFC 9143 section 9.2: an unknown SSRC is looked up in the tables of the transport
+        // (the BUNDLE group, or the section) it arrived on.
+        self.pipeline_context
+            .interceptor_handler_context
+            .arrival_mids = self.active_transport_mids();
         let mut intermediate_routs = VecDeque::<TaggedRTCMessageInternal>::new();
 
         if let Some(msg) = msg {

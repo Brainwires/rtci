@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection** (mt-6): a subsequent offer keeps the BUNDLE groups of the most recent
+  answer (RFC 9429 section 5.2.2): a section that answer accepted outside every group stays
+  outside (it used to be put in the one group again), and each group of several stays its
+  own. `BundleMode` (internal) carries the groups.
+
 - **peer connection** (mt-5): `bundlePolicy: balanced`, the default, follows RFC 9429
   section 4.1.1 / 5.2.1 in an initial offer: the first m= section of each media type (audio,
   video, data) has a transport of its own, with its own ICE credentials, candidates and
@@ -1686,6 +1691,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **Several BUNDLE groups** (mt-6; RFC 9143 section 5, RFC 5888 section 6, RFC 9429 sections
+  5.2.2, 5.3.1): each BUNDLE group of a description is a transport. An offer with several is
+  answered group by group (each answerer-tagged section carries its group's transport
+  attributes), the transports follow the answer, a later offer keeps the groups, and an
+  unknown SSRC is looked up in the payload type and MID tables of the transport it arrived on
+  (RFC 9143 section 9.2).
 - **`bundlePolicy: balanced`** (mt-5; RFC 9429 4.1.1, 5.2.1; RFC 9143 7.2; W3C webrtc-pc
   4.2.4): an initial offer gathers for each media type in use; a peer that does not bundle
   answers one audio and one video section (and data) on separate transports, the bundle-only

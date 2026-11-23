@@ -85,10 +85,9 @@ README.
 
 ## Specified, not started
 
-Two pieces of the BUNDLE / JSEP model are not implemented. Each is written down here as the
-work it is, with the audit rows it would close, so that it can be started without a second
-analysis. Until then the rows stay as the audit has them and decision D2 stands: one transport,
-one BUNDLE group.
+Two pieces of the BUNDLE / JSEP model were written down here as the work they were, with the
+audit rows they would close. Both are now implemented (mt-1 to mt-6); the "Done" paragraphs
+below say what each step did and the last one what is left.
 
 ### Several BUNDLE groups (size M)
 
@@ -165,8 +164,14 @@ go through one path whatever the transport, the gathering state aggregates every
 4.3.2), `dtls_transports()` / `dtls_transport_by_id` give the handles, and the statistics have
 a `transport` object per transport (`src/statistics/accumulator/transports.rs`: the handlers
 update the active transport's, the others are parked).
-Left: `balanced` offers, an ICE restart or a new DTLS association of the other transports, a
-section moved out of a group in a later answer (RFC 9143 7.3.2), and several BUNDLE groups.
+Done (mt-5): `balanced` initial offers give the first section of each media type a transport
+(`plan_offer_transports`). Done (mt-6): several BUNDLE groups, each a transport
+(`transport_groups`, `BundleMode` with the groups, `arrival_mids` for the per-group payload
+type and MID tables); a later offer keeps the groups of the most recent answer.
+Left: an ICE restart or a new DTLS association of the other transports, consent and
+keepalives checked per transport, a section moved out of a group by this side's offer (RFC
+9143 7.5.2-1; no API asks for it), several transports on one local socket, and the congestion
+controller, pacer and reduced-size RTCP of the transports other than the default one.
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts

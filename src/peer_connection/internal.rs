@@ -649,7 +649,7 @@ impl RTCPeerConnection {
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle: BundleMode::Offer,
+            bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
@@ -1005,13 +1005,22 @@ impl RTCPeerConnection {
                     ..Default::default()
                 });
             }
-            BundleMode::Offer
+            // The BUNDLE groups of the most recent answer stay (RFC 9429 section 5.2.2).
+            [
+                &self.current_local_description,
+                &self.current_remote_description,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|d| d.sdp_type == RTCSdpType::Answer)
+            .and_then(|d| d.parsed.as_ref())
+            .map_or_else(BundleMode::initial_offer, BundleMode::following)
         } else {
             // The offered BUNDLE group, whatever other `a=group` lines the offer has
             // (RFC 9429 section 5.3.1); none when the offer has none.
             remote_parsed
                 .as_ref()
-                .map_or(BundleMode::Answer(None), BundleMode::answering)
+                .map_or(BundleMode::Answer(vec![]), BundleMode::answering)
         };
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;

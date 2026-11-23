@@ -80,6 +80,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
     pub(crate) wall_clock: Option<SystemInstant>,
+    /// With several transports, the m= sections of the one the packets being read arrived on:
+    /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
+    /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
+    pub(crate) arrival_mids: Option<Vec<String>>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -107,6 +111,7 @@ impl Default for InterceptorHandlerContext {
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
+            arrival_mids: None,
         }
     }
 }
@@ -680,8 +685,12 @@ impl<'a> InterceptorHandler<'a> {
                 // transceiver that is not stopped and receives this payload type. None, or
                 // more than one, and the packet belongs nowhere ("Otherwise, drop the
                 // packet").
+                let arrival = self.ctx.arrival_mids.as_deref();
                 let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
                     !t.stopped()
+                        && arrival.is_none_or(|mids| {
+                            t.mid().as_ref().is_some_and(|mid| mids.contains(mid))
+                        })
                         && t.receiver().as_ref().is_some_and(|receiver| {
                             receiver
                                 .get_codec_preferences()
@@ -694,6 +703,16 @@ impl<'a> InterceptorHandler<'a> {
                     _ => return false,
                 }
             } else {
+                // The MID table of the transport the packet arrived on: a MID of another
+                // BUNDLE group's section names no section here.
+                if self
+                    .ctx
+                    .arrival_mids
+                    .as_ref()
+                    .is_some_and(|mids| !mids.contains(&mid))
+                {
+                    return false;
+                }
                 let Some(index) = self
                     .rtp_transceivers
                     .iter()
