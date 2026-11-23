@@ -186,3 +186,73 @@ fn a_paused_answer_is_due_when_the_pause_is_read() {
     );
     assert!(!written.is_empty(), "the PAUSED answer");
 }
+
+/// RFC 4588 section 7 with the responder's rate limit (`RetransmissionRateLimit`): a NACKed
+/// packet the limit has no room for is not retransmitted, not held, so nothing is due for it.
+/// Reported as due ("at once") it would have the driver wake for nothing again and again; the
+/// next request, a round trip later, is what can bring it.
+#[test]
+fn a_retransmission_the_rate_limit_refuses_leaves_nothing_due() {
+    let start = Instant::now();
+    let mut chain = Registry::new()
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new()
+                .with_rate_limit(rtc_interceptor::RetransmissionRateLimit::UpToTarget)
+                .build(),
+        )
+        .build();
+    chain.bind_local_stream(&StreamInfo {
+        ssrc: MEDIA,
+        clock_rate: 90000,
+        mime_type: "video/VP8".to_string(),
+        payload_type: 96,
+        rtcp_feedback: vec![RTCPFeedback {
+            typ: "nack".to_string(),
+            parameter: String::new(),
+        }],
+        ..Default::default()
+    });
+    for n in 0..5 {
+        chain.handle_write(media(start, n)).unwrap();
+    }
+    while chain.poll_write().is_some() {}
+    // A target of 800 bit/s: 100 octets a second, less than one 112-octet packet.
+    let mut target = TaggedPacket {
+        now: start,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![])),
+    };
+    target
+        .message
+        .add(rtc_interceptor::Attribute::TargetBitrateChanged {
+            bits_per_second: 800.0,
+        });
+    read_then_sleep(&mut chain, target);
+
+    let at = start + Duration::from_millis(50);
+    let written = read_then_sleep(
+        &mut chain,
+        rtcp(
+            at,
+            Box::new(TransportLayerNack {
+                sender_ssrc: 1,
+                media_ssrc: MEDIA,
+                nacks: vec![NackPair {
+                    packet_id: 3,
+                    lost_packets: 0,
+                }],
+            }),
+        ),
+    );
+    assert!(
+        written.is_empty(),
+        "the limit has no room: {} written",
+        written.len()
+    );
+    assert!(
+        chain.poll_timeout().is_none_or(|due| due > at),
+        "nothing is due for a refused retransmission: {:?}",
+        chain.poll_timeout()
+    );
+}
