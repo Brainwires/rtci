@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection** (mt-8, W3C webrtc-pc 4.3.3): `connectionState` follows the table over
+  the connection's `iceConnectionState`: "disconnected" whenever that is "disconnected", also
+  while another transport is still checking (it was "connecting" then). An
+  `iceConnectionState` of "completed" counts as "connected", as in browsers.
+
 - **peer connection** (mt-7): the transports a connection has beside the first one (the
   first section of each media type in a `balanced` initial offer, every section under
   `max-compat`, the sections answered outside a BUNDLE group) take the first transport's
@@ -1472,6 +1477,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer connection** (mt-8): ICE restart and DTLS per transport. `restart_ice()` (W3C
+  restartIce) restarts every transport: the next offer gives each new credentials (one new
+  pair shared by all unless `with_unique_transport_credentials`), and each restarts when the
+  offer is applied. A remote offer that changes the credentials of one transport restarts that
+  one only (RFC 8839 4.4.1.1.1, RFC 9429 5.3.2): its answer has new credentials for it and the
+  same for the others; a new DTLS association a remote offer asks of a transport other than the
+  default one stages the answer's `tls-id` as the default transport's does, and a rollback of
+  the offer drops what it staged on every transport (RFC 9429 5.7). Each transport writes its
+  own `a=tls-id` (RFC 8842 5) in its first section, and a remote description's `tls-id`s are
+  checked per transport; one whose transports had different values was refused
+  (`ErrSessionDescriptionInvalidTlsId`). Consent and keepalives were already per transport
+  (each agent's timers); `one_transport_losing_its_path_disconnects_the_connection_only_through_it`
+  shows it.
+- **peer connection** (mt-8): sections moving between transports in a later exchange are
+  tested: a later remote offer that bundles sections on transports of their own moves them to
+  the group's transport and discards theirs (RFC 9143 7.5.1, 7.4); one that moves a section out
+  of the group (RFC 9143 7.5.2) is answered outside the group with a transport of its own (7.3.2);
+  a rejected section releases its own transport when the description is applied (RFC 8839
+  4.4.3.1). Several transports on one local socket connect when the transports have credentials
+  of their own (`three_transports_share_one_socket_with_unique_credentials`; routing of
+  `conf/tcp-5-train-fixes`). Each transport's `packetsSent` / `bytesSent` / `packetsReceived` /
+  `bytesReceived` / `selectedCandidatePairChanges` is its own (asserted in
+  `statistics_have_a_transport_object_per_transport`).
 - **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
   readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
   protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
