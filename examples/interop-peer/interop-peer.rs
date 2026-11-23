@@ -704,15 +704,14 @@ impl Session {
             self.pc
                 .create_data_channel(n["label"].as_str().unwrap_or("negotiated"), Some(init))?;
         }
-        match sc["cryptex"].as_str() {
-            Some("negotiate") => self
-                .pc
-                .set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate),
-            Some("require") => self
-                .pc
-                .set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require),
-            _ => {}
-        }
+        // A scenario that names no policy keeps headers in the clear, as before the W3C
+        // default ("negotiate") became the engine's.
+        let policy = match sc["cryptex"].as_str() {
+            Some("negotiate") => RTCRtpHeaderEncryptionPolicy::Negotiate,
+            Some("require") => RTCRtpHeaderEncryptionPolicy::Require,
+            _ => RTCRtpHeaderEncryptionPolicy::Disable,
+        };
+        self.pc.set_rtp_header_encryption_policy(policy)?;
         self.media = sc["media"].as_str().unwrap_or("").to_owned();
         if self.media != "reflect" && self.media != "send" {
             return Ok(());

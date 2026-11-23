@@ -2302,11 +2302,11 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
     // (candidate, the server it was gathered from)
     let gathered = [
         (
-            "candidate:842163049 1 udp 1694498815 203.0.113.5 6000 typ srflx raddr 10.0.0.1 rport 5000",
+            "candidate:842163049 1 udp 1694498815 203.0.113.5 6002 typ srflx raddr 10.0.0.1 rport 5000",
             Some("stun:stun.example.org:3478"),
         ),
         (
-            "candidate:3745641921 1 udp 16777215 198.51.100.7 7000 typ relay raddr 203.0.113.5 rport 6000",
+            "candidate:3745641921 1 udp 16777215 198.51.100.7 7000 typ relay raddr 203.0.113.5 rport 6002",
             Some("turn:turn.example.org:3478?transport=tcp"),
         ),
         (
@@ -2323,6 +2323,7 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
     let (mut world, _) = World::connected_with(VIDEO, |world| {
         for (candidate, url) in gathered {
             let init = RTCIceCandidateInit {
+                sdp_mline_index: Some(0),
                 candidate: candidate.to_owned(),
                 url: url.map(str::to_owned),
                 ..Default::default()
@@ -2375,7 +2376,7 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
             5000, "host", "udp", 0, "", "10.0.0.1", None, None, None, None,
         ),
         (
-            6000,
+            6002,
             "srflx",
             "udp",
             1694498815,
@@ -2393,7 +2394,7 @@ fn a_candidate_reports_what_it_was_gathered_as() -> Result<()> {
             16777215,
             "3745641921",
             "198.51.100.7",
-            Some(("203.0.113.5", 6000)),
+            Some(("203.0.113.5", 6002)),
             Some("turn:turn.example.org:3478?transport=tcp"),
             Some("tcp"),
             None,

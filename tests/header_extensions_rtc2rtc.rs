@@ -221,6 +221,13 @@ impl World {
             media_ssrc: None,
         };
         for peer in world.peers.iter_mut() {
+            // The tests read the header extensions on the wire: in the clear unless a test
+            // asks for Cryptex (whose default policy, "negotiate", would encrypt them).
+            peer.pc
+                .set_rtp_header_encryption_policy(
+                    rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
+                )
+                .expect("before any description");
             prepare(&mut peer.pc);
         }
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
@@ -598,7 +605,10 @@ fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear()
     let (mut world, sender) = World::connected_prepared(
         RtpCodecKind::Video,
         |sdp| sdp,
-        |pc| pc.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate),
+        |pc| {
+            pc.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate)
+                .expect("before any description")
+        },
     )?;
     assert!(world.peers[0].pc.cryptex_negotiated());
     assert!(world.peers[1].pc.cryptex_negotiated());

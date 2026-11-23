@@ -274,9 +274,12 @@ impl RTCIceTransport<'_> {
         self.peer_connection.ice_transport().component()
     }
 
-    /// Whether this agent is controlling or controlled.
+    /// Whether this agent is controlling or controlled: [`RTCIceRole::Unspecified`] (W3C
+    /// "unknown") until the first offer, local or remote, is applied. A local offer makes
+    /// it controlling; a remote one follows RFC 8445 (controlled, or controlling when the
+    /// remote is lite). It then follows the ICE agent, which repairs a role conflict.
     pub fn role(&self) -> RTCIceRole {
-        self.peer_connection.ice_transport().role()
+        self.peer_connection.ice_transport().w3c_role()
     }
 
     /// The current state of ICE connectivity.
@@ -300,9 +303,12 @@ impl RTCIceTransport<'_> {
             .unwrap_or_default()
     }
 
-    /// The remote candidates received so far.
+    /// The remote candidates of the remote description: those it carried and those
+    /// `add_remote_candidate` added to it since, each with the `sdp_mid`, `sdp_mline_index` and
+    /// `username_fragment` of its media section. Peer-reflexive candidates the ICE agent learns
+    /// from connectivity checks are not in the description and are not listed.
     pub fn get_remote_candidates(&self) -> Vec<RTCIceCandidate> {
-        self.peer_connection.ice_transport().get_remote_candidates()
+        self.peer_connection.remote_description_candidates()
     }
 
     /// webrtc-extensions 7 `getCandidatePairs()`: the ICE agent's candidate pairs, in the
@@ -311,8 +317,17 @@ impl RTCIceTransport<'_> {
         self.peer_connection.ice_transport().get_candidate_pairs()
     }
 
-    /// The nominated candidate pair, or `None` until ICE selects one.
+    /// The nominated candidate pair, or `None` until ICE selects one, and `None` while the
+    /// transport's state is new or closed (W3C 5.6, a closed connection included).
     pub fn get_selected_candidate_pair(&self) -> Option<RTCIceCandidatePair> {
+        if self.peer_connection.is_closed()
+            || matches!(
+                self.state(),
+                RTCIceTransportState::New | RTCIceTransportState::Closed
+            )
+        {
+            return None;
+        }
         self.peer_connection
             .ice_transport()
             .get_selected_candidate_pair()
@@ -320,10 +335,7 @@ impl RTCIceTransport<'_> {
 
     /// The local ICE parameters, or `None` before a local description has supplied them.
     pub fn get_local_parameters(&self) -> Option<RTCIceParameters> {
-        self.peer_connection
-            .ice_transport()
-            .get_local_parameters()
-            .ok()
+        self.peer_connection.local_description_ice_parameters()
     }
 
     /// The remote ICE parameters, or `None` before a remote description has supplied them.

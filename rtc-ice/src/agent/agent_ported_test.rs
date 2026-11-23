@@ -926,8 +926,11 @@ fn test_connection_state_connecting_to_failed() -> Result<()> {
         "InvalidPwd".to_owned(),
     )?;
 
+    // The checks get no valid answer: each is a transaction that ends after 39.5 seconds
+    // (RFC 8489 Section 6.2.1), and only then, every pair failed, the agent fails (RFC 8445
+    // Section 8.1.2), however short its timeouts.
     let (mut a_states, mut b_states) = (vec![], vec![]);
-    for i in 0..100u32 {
+    for i in 0..600u32 {
         let now = base + Duration::from_millis(100) * i;
         step(&mut a, &mut b, now)?;
         a_states.extend(states(&mut a));

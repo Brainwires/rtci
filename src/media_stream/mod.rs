@@ -148,10 +148,52 @@ use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 pub use track::{MediaStreamTrack, MediaStreamTrackId};
 pub use track_capabilities::MediaTrackCapabilities;
-pub use track_constraints::{MediaTrackConstraintSet, MediaTrackConstraints};
+pub use track_constraints::{
+    Constrain, ConstrainRange, MediaTrackConstraintSet, MediaTrackConstraints,
+};
 pub use track_settings::MediaTrackSettings;
 pub use track_state::MediaStreamTrackState;
 pub use track_supported_constraints::MediaTrackSupportConstraints;
+
+/// A new identifier for a stream or a track, generated as mediacapture-main 4.2 and 4.3 ask:
+/// a UUID (RFC 9562 version 4, random), 36 characters.
+pub fn generate_id() -> String {
+    let bits: u128 = rand::random();
+    // Version 4 and the RFC 9562 variant.
+    let bits = (bits & !(0xf << 76) | (0x4 << 76)) & !(0x3 << 62) | (0x2 << 62);
+    let hex = format!("{bits:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// mediacapture-main 4.4 `MediaStreamTrackEvent`: a track added to or removed from a
+/// stream, for that stream's `addtrack` or `removetrack` event. A remote stream's are derived
+/// from [`RTCRemoteStreamsChange`](crate::peer_connection::event::RTCRemoteStreamsChange)
+/// (`media_stream_track_events`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaStreamTrackEvent {
+    /// `addtrack` or `removetrack`.
+    pub kind: MediaStreamTrackEventKind,
+    /// The stream the event fires at.
+    pub stream_id: MediaStreamId,
+    /// The event's `track`.
+    pub track_id: MediaStreamTrackId,
+}
+
+/// The type of a [`MediaStreamTrackEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaStreamTrackEventKind {
+    /// `addtrack`.
+    AddTrack,
+    /// `removetrack`.
+    RemoveTrack,
+}
 
 /// Unique identifier for a media stream.
 ///
@@ -251,6 +293,24 @@ impl MediaStream {
             tracks: vec![],
         }
         .with_tracks(tracks)
+    }
+
+    /// mediacapture-main 4.2 constructor: a new stream with a generated id
+    /// ([`generate_id`]) and the given tracks.
+    pub fn with_generated_id(tracks: Vec<MediaStreamTrack>) -> Self {
+        Self::new(generate_id(), tracks)
+    }
+
+    /// mediacapture-main 4.2 `clone()`: a new stream with a new id whose tracks are clones
+    /// of this stream's ([`MediaStreamTrack::clone_track`]), in the same order.
+    pub fn clone_stream(&self) -> Self {
+        let id = generate_id();
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|track| track.clone_track_into(id.clone()))
+            .collect();
+        Self::new(id, tracks)
     }
 
     fn with_tracks(mut self, tracks: Vec<MediaStreamTrack>) -> Self {

@@ -444,6 +444,16 @@ impl<'a> EndpointHandler<'a> {
                 .find(ssrc, self.rtp_transceivers, receiver_track_has_ssrc)
             && let Some(receiver) = self.rtp_transceivers[id].receiver()
         {
+            // W3C webrtc 5.4 "stop sending and receiving": a stopping or stopped
+            // transceiver's receiver receives no more media.
+            // draft-ietf-avtcore-rtp-sframe-03 section 6: an offerer whose SFrame offer was
+            // answered without it discards what it receives in the section.
+            if rtp_header.is_some()
+                && (self.rtp_transceivers[id].stopped()
+                    || self.rtp_transceivers[id].sframe_refused())
+            {
+                return None;
+            }
             return Some(receiver.track().track_id().clone());
         }
 
@@ -759,6 +769,9 @@ mod rtx_test {
                 priority: Default::default(),
                 network_priority: None,
                 scalability_mode: None,
+                scale_resolution_down_to: None,
+                ptime: None,
+                adaptive_ptime: false,
             }],
         ));
         transceiver

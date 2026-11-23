@@ -9,6 +9,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
+  draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
+  - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
+    raw or packetized), `SFrameDepacketizer`, and `SFrameReassembler`, the receive algorithm
+    of section 5.2 over packets in any order with a bounded buffer.
+  - `rtc::sframe::derive_ssrc_key`: the per-SSRC key of section 7.
+  - `RTCRtpTransceiver::use_sframe` / `set_transform_use_sframe` (webrtc-encoded-transform
+    2.1, 2.2): an SFrame transform puts `a=sframe` in the media section; a remote
+    description's `a=sframe` sets it; the other kind of transform is then an
+    InvalidModificationError. An answer that leaves out the offered `a=sframe` stops the
+    offerer's media (`write_rtp` refused with the new `Error::ErrSFrameRefused`, received RTP
+    discarded), `RTCRtpTransceiver::sframe_refused`.
+- **webrtc-extensions** (pc-17).
+  - `RTCRtpEncodingParameters` has `scale_resolution_down_to: Option<RTCResolutionRestriction>`,
+    `ptime: Option<u32>` and `adaptive_ptime: bool` (section 5): validated in addTransceiver
+    (OperationError) and setParameters (InvalidModificationError); `adaptive_ptime` with
+    `ptime` is an InvalidModificationError; `scale_down_factor(width, height)` gives the
+    encoder's factor (never an upscale, orientation agnostic). A struct literal needs the
+    new fields.
+  - `RTCRtpHeaderEncryptionPolicy::default()` is `Negotiate` (W3C 10.2), so a connection
+    offers and answers `a=cryptex` unless configured otherwise; `RTCConfiguration` has
+    `rtp_header_encryption_policy` and `always_negotiate_data_channels`
+    (`RTCConfigurationBuilder::with_rtp_header_encryption_policy`,
+    `with_always_negotiate_data_channels`), and `set_configuration` refuses another value
+    (InvalidModificationError). `set_rtp_header_encryption_policy` and
+    `set_always_negotiate_data_channels` return `Result<()>` and are refused once a
+    description was set.
+  - Events `OnSsrcChange(receiver)` and `OnCsrcChange(receiver)` (section 11:
+    `ssrcchange`, `csrcchange`), `OnIceCandidatePairNominate(pair)` (section 7).
+  - Cancelable nomination (section 7): `SettingEngineBuilder::with_candidate_pair_proposals`
+    has the controlling agent propose each nomination; `resolve_candidate_pair_nomination`
+    accepts or cancels it; `select_candidate_pair` / `remove_candidate_pair` refuse while a
+    proposal is pending. rtc-ice: `AgentConfig::candidate_pair_proposals`,
+    `Event::CandidatePairNominationProposed`, `Agent::proposal_pending`,
+    `Agent::resolve_nomination_proposal` (additive; an `AgentConfig` literal needs the field).
+  - Header extension control (section 4.1): an extension the section's negotiated direction
+    leaves no use for is "stopped" after the answer.
+- **jsep**: SSRC collisions are resolved by the engine (RFC 3550 section 8.2, RFC 5576
+  sections 5 and 6.2, RFC 8834 sections 4.1 and 4.8). A sender whose SSRC (media, RTX or FEC
+  flow) the RTCP session hears from another source, or a remote description describes, moves
+  to a new SSRC: its streams are bound again (the old SSRC says BYE), what the application
+  still writes with the old SSRC goes out with the new one, `get_parameters` and the
+  statistics show the new one, negotiation-needed is raised, and later descriptions write
+  `a=ssrc:<new> previous-ssrc:<old>`. `OnSsrcCollision` is still fired, now after the move;
+  the application no longer has to stop the sender. Edits in the sender code:
+  `RTCRtpSenderInternal::{replace_ssrc, previous_ssrcs, replacement_ssrcs, current_ssrc}` and
+  one line in `RTCRtpSender::write_rtp_inner` (the SSRC mapping).
+- **jsep**: what descriptions say of the selected ICE pair (RFC 8839 sections 4.2.1.2, 4.3.4,
+  4.4.1.2.2, 4.4.1.3, 4.4.2, 5.1, 5.2; RFC 8445 section 8.2). Descriptions differ on the wire:
+  - Once ICE has selected a pair (and no restart is staged), the `m=` / `c=` destination of
+    later offers and answers is the pair's local candidate; an offer of the controlling agent
+    carries `a=remote-candidates:1 <address> <port>` of its remote candidate, and an answer to
+    such an offer takes the local candidate it names as its destination.
+  - Every candidate line a description carries ends with the `ufrag` extension (the section's
+    `ice-ufrag`). A trickled candidate without `usernameFragment` whose line's `ufrag` names
+    another ICE generation is ignored (RFC 8838 section 9).
+  - A remote `a=remote-candidates` line that does not parse refuses the description (RFC 9429
+    section 5.8.2).
+  - Two lite agents: the controlling one's `Event::LiteCandidateUpdate` raises
+    negotiation-needed; its next offer lists the chosen local candidate alone with
+    `a=remote-candidates`, and the controlled peer connection applies it with
+    `ice::Agent::replace_remote_candidates`, its answer listing the named candidate alone.
+- **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
+  5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
+  answer (or provisional answer) is applied, not when the offer is: the first offer starts
+  ICE and DTLS then, an offer with new ICE credentials restarts ICE then, an offer that asks
+  for a new DTLS association (another `tls-id`, fingerprint or role) replaces it then, and the
+  candidates of the offer's ICE generation, in the description or trickled, reach the agent
+  then. What the answer states is staged when the offer is applied (the restart's new local
+  credentials, the new association's `a=setup` role and `tls-id`) and dropped by a rollback.
+  Observable: after `set_remote_description(offer)` the answerer's ICE transport is still
+  `new` until `set_local_description(answer)`. New `ice::Agent::discard_restart_credentials`.
+- **media_stream**: remote tracks and the mediacapture-main model (pc-16).
+  - `MediaStreamTrack::apply_constraints` returns `Result<()>`: on a remote track (a
+    receiver's; new `is_remote()`) constraints naming `width`, `height`, `frameRate` or
+    `aspectRatio` are `Error::OverconstrainedError(<property>)` (webrtc-pc 9.3.1);
+    `apply_constraints(None)` now clears the constraints. New error variant
+    `Error::OverconstrainedError` in rtc-shared.
+  - `Constrain` and `ConstrainRange` are public (`ConstrainRange`'s members are `Option`);
+    `MediaTrackConstraintSet::with_width` / `with_height` / `with_aspect_ratio` /
+    `with_frame_rate` and getters, `MediaTrackConstraints::new` / `basic` / `advanced`.
+  - Remote video settings (webrtc-pc 9.3.1): new `RTCRtpReceiver::report_received_frame(now,
+    width, height)`, the feed the application's decoder or depacketizer supplies; the
+    track's `MediaTrackSettings::width` / `height` / `aspect_ratio` / `frame_rate` report the
+    latest frame and an estimate over the last second. New `RTCRtpReceiver::track_mut`.
+  - mediacapture-main: `generate_id()` (UUID version 4), `MediaStream::with_generated_id`,
+    `MediaStream::clone_stream`, `MediaStreamTrack::with_generated_id`,
+    `MediaStreamTrack::clone_track`; `MediaStreamTrackEvent` / `MediaStreamTrackEventKind`
+    and `RTCRemoteStreamsChange::media_stream_track_events` (addtrack / removetrack).
+  - Fixed: a transceiver that `stop()` made stopping still handed the RTP that kept arriving
+    to the application; its receiver receives nothing any more (webrtc-pc 5.4).
+- **peer_connection**: the open webrtc-pc rows of the W3C object model (pc-15).
+  - `RTCRtpTransceiver::current_direction()` returns `Option<RTCRtpTransceiverDirection>`:
+    `None` (W3C null) before an exchange has negotiated the transceiver.
+  - `Default` for `RTCIceTransportPolicy`, `RTCBundlePolicy` and `RTCRtcpMuxPolicy` is the
+    W3C default (`All`, `Balanced`, `Require`; serialised "all", "balanced", "require"), not
+    `Unspecified`; `Unspecified` still behaves as those. `RTCRtcpMuxPolicy::Negotiate` is
+    documented as RFC 9429's policy, an engine setting outside the W3C enum.
+  - `add_remote_candidate` refuses a candidate that names neither `sdp_mid` nor
+    `sdp_mline_index` (`Error::TypeError`), and every call on a closed connection
+    (`ErrConnectionClosed`), as `add_local_candidate` now does too. A candidate for a media
+    section whose transceiver is stopped is ignored.
+  - A remote candidate on a port of the Fetch bad-port list, and an mDNS candidate under the
+    "relay" policy, is administratively prohibited: written into the remote description and
+    listed, kept in the stats report, never given to the ICE agent.
+  - `RTCIceTransport::get_remote_candidates()` lists the remote description's candidates
+    (never a peer-reflexive one the agent learned); `get_local_parameters()` is `None` until
+    a local description is set and reads it; `role()` is `Unspecified` ("unknown") until the
+    first offer, and a local offer makes it controlling at once;
+    `get_selected_candidate_pair()` is `None` in the new and closed states.
+  - `set_local_description` takes `RTCSessionDescription::default()`: without a type it is an
+    offer in stable / have-local-offer / have-remote-pranswer and an answer otherwise, and
+    without an sdp the connection creates the offer or answer.
+  - Negotiation-needed is false with no current local description and nothing to negotiate
+    (a rollback to an empty stable state no longer fires it).
+  - New `RTCPeerConnection::add_track_with_streams(track, streams)` (W3C `addTrack` with
+    streams). A sender whose transceiver negotiated a direction without send lists no codecs
+    in `get_parameters`. `close()` sets every data channel's state to closed without an
+    event. `iceCandidatePoolSize` is fixed once `set_local_description` has been called,
+    after a rollback too.
 - **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
   5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
   answer (or provisional answer) is applied, not when the offer is: the first offer starts
@@ -351,6 +471,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension for video (`configure_default_header_extensions`): descriptions carry three more
   `a=extmap` lines.
 
+- **ice**: a checking agent no longer fails at its timeout (`disconnected_timeout +
+  failed_timeout`, 30 s by default) while a pair is still being checked: it fails by the timer
+  only once no pair is Frozen, Waiting or In-Progress, no triggered check is queued, no valid
+  pair is being nominated and the peer has not been heard from on any pair for 30 s (RFC 8445
+  sections 6.1.4.2 and 8.1.2: the checklist fails when every pair has failed; section 14.3: a
+  check is a transaction of Rc requests, 39.5 s at the defaults). A short `failed_timeout` no
+  longer cuts a check's transaction short. A controlling agent whose nomination's transaction
+  times out sends the nomination again while the peer is heard from on the pair, and gives the
+  pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
+  agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
+  literal without `..Default::default()` no longer compiles.
+- **turn**: the client's Binding request (`send_binding_request`, `send_binding_request_to`)
+  ends with FINGERPRINT, as every other message it sends does (RFC 8489 section 7).
 - **ice**: where the fork followed libwebrtc or its own hardening instead of the RFC, the RFC is
   now the default and the other behaviour a setting (`AgentConfig`, and
   `SettingEngineBuilder::with_ice_*`):
@@ -1562,6 +1695,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was closing (`OnError`, `OnClose`) instead of leaving it `closing`; an inactive path
   (RFC 9260 section 8.2) changes neither the transport's state nor a channel's.
 
+- **ice**: `AgentConfig::failed_nomination` / `SettingEngineBuilder::with_ice_failed_nomination`
+  (`FailedNomination::{Retry, FailChecklist}`): what a controlling agent does when its
+  nomination times out. `Retry`, the default, nominates the pair again while the peer is heard
+  from; `FailChecklist` is RFC 8445 section 7.2.5.3.4 to the letter (the pair and the checklist
+  fail). The one ICE default that is not the RFC's; see `docs/conformance/audit/rfc8445.md`
+  ("Decisions").
+- **ice**: `rank_local_candidates` and `Agent::add_local_candidates` rank candidates gathered
+  together as RFC 8421 section 4 recommends for a dual-stack host: the IPv6 candidates of a type
+  get a head start of (N4 + N6) / N4 places, then the families alternate. Candidates added one
+  at a time are ranked in their order, as before.
+- **ice**: a Binding request authenticated by MESSAGE-INTEGRITY-SHA256 is answered (success,
+  487, 420) with MESSAGE-INTEGRITY-SHA256 alone (RFC 8489 section 9.1.3); it was answered with
+  MESSAGE-INTEGRITY.
+- **dtls**: a DTLS 1.3 client whose second ClientHello is refused with illegal_parameter (its
+  HelloRetryRequest cookie had expired: a server endpoint's is good for 60 to 120 s) starts the
+  handshake over with a new ClientHello, without a cookie (RFC 9147 section 5.1), at most twice;
+  it failed.
 - **ice**: `Agent::handle_transport_error` / `RTCPeerConnection::handle_ice_transport_error`:
   the application reports a hard ICMP error (RFC 8445 section 7.2.5.2.2), a TCP connection
   that could not be established, or one whose first answer is not STUN (RFC 6544 section 7.1),
@@ -2317,6 +2467,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: at 30 % loss (seeds 0x4a, 0xff and 0x127 of `tests/lossy_link_rtc2rtc.rs` with
+  aws-lc-rs) and 40 % loss (0x1c and 0x21, both backends) the controlling peer went `failed`
+  about 30 s in, still checking, 29.5 s after the Binding success response that validated its
+  pair: every response to its nomination had been lost, the nomination's transaction (seven
+  requests over 39.5 s) was still open and the other peer had accepted it and was connected.
+  The checking timer inherited from the pion agent (`disconnected_timeout + failed_timeout`
+  from entering checking) failed the agent with a pair in progress. Tests:
+  `agent_checklist_test.rs::test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`
+  and `tests/lossy_link_rtc2rtc.rs::ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss`.
 - **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
   `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
   randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course

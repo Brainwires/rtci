@@ -364,6 +364,40 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].stopped()
     }
 
+    /// webrtc-encoded-transform 2.1 `[[useSFrame]]`: `None` (undefined) until a transform is
+    /// set ([`set_transform_use_sframe`](Self::set_transform_use_sframe)) or the transceiver
+    /// is described: by a remote description, whether its section has `a=sframe`; by a local
+    /// one, false. When true the media section carries `a=sframe` (draft-ietf-avtcore-rtp-
+    /// sframe-03 section 6) and the application sends and receives SFrame with
+    /// `rtc::rtp::codec::sframe` and `rtc::sframe`.
+    pub fn use_sframe(&self) -> Option<bool> {
+        self.peer_connection.rtp_transceivers[self.id].use_sframe()
+    }
+
+    /// webrtc-encoded-transform 2.2, the `transform` setter of the transceiver's sender or
+    /// receiver, for a transform whose `[[useSFrame]]` is `transform_uses_sframe`
+    /// (`RTCRtpSFrameEncryptor` / `RTCRtpSFrameDecryptor`, a script transform of type
+    /// "sframe": true; any other: false).
+    ///
+    /// # Errors
+    ///
+    /// InvalidModificationError when the transceiver's `[[useSFrame]]` is the other value;
+    /// InvalidStateError when the connection is closed.
+    pub fn set_transform_use_sframe(&mut self, transform_uses_sframe: bool) -> Result<()> {
+        if self.peer_connection.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
+        self.peer_connection.rtp_transceivers[self.id]
+            .set_transform_use_sframe(transform_uses_sframe)
+    }
+
+    /// draft-ietf-avtcore-rtp-sframe-03 section 6: this side offered SFrame and the answer left
+    /// it out: the sender's `write_rtp` is refused (`ErrSFrameRefused`) and what arrives is
+    /// discarded, until an answer accepts it or the section is closed.
+    pub fn sframe_refused(&self) -> bool {
+        self.peer_connection.rtp_transceivers[self.id].sframe_refused()
+    }
+
     /// W3C `[[Stopped]]`: a description rejected this transceiver's m= section (or it was
     /// created for a rejected one). [`stop`](Self::stop) alone leaves it stopping, not
     /// stopped, until the exchange that rejects the section completes.
@@ -491,21 +525,24 @@ impl RTCRtpTransceiver<'_> {
 
     /// Returns the negotiated direction of the transceiver.
     ///
-    /// The direction the last completed offer/answer exchange negotiated;
-    /// [`RTCRtpTransceiverDirection::Unspecified`] (W3C null) before the first, and
-    /// [`RTCRtpTransceiverDirection::Stopped`] once the transceiver is stopped.
+    /// The direction the last completed offer/answer exchange negotiated; `None` (W3C null)
+    /// before the first, and [`RTCRtpTransceiverDirection::Stopped`] once the transceiver is
+    /// stopped.
     ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.currentDirection](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-currentdirection).
-    pub fn current_direction(&self) -> RTCRtpTransceiverDirection {
+    pub fn current_direction(&self) -> Option<RTCRtpTransceiverDirection> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
         let transceiver = &self.peer_connection.rtp_transceivers[self.id];
         if transceiver.is_stopped() {
-            RTCRtpTransceiverDirection::Stopped
+            Some(RTCRtpTransceiverDirection::Stopped)
         } else {
-            transceiver.current_direction()
+            match transceiver.current_direction() {
+                RTCRtpTransceiverDirection::Unspecified => None,
+                direction => Some(direction),
+            }
         }
     }
 

@@ -65,7 +65,7 @@ fn every_offered_direction_is_answered_with_its_complement() -> TestResult {
                 .rtp_transceiver(RTCRtpTransceiverId::from(offered))
                 .expect("transceiver")
                 .current_direction(),
-            offer_dir
+            Some(offer_dir)
         );
     }
     Ok(())

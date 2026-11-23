@@ -214,10 +214,18 @@ pub struct DTLSConn {
     /// Client: datagrams that start with a DTLS 1.3 protected record and arrived before the
     /// ServerHello that selects DTLS 1.3 (the server's flight, reordered).
     early_dtls13_datagrams: Vec<Vec<u8>>,
+    /// Client: how many times the handshake has started over with a new ClientHello after
+    /// the server refused the cookie of its second one (RFC 9147 section 5.1).
+    fresh_client_hellos: u8,
 }
 
 /// The most datagrams a client holds for a DTLS 1.3 handshake whose ServerHello is late.
 const MAX_EARLY_DTLS13_DATAGRAMS: usize = 4;
+
+/// How many times a client starts its handshake over after the server answered its second
+/// ClientHello's cookie with illegal_parameter. The alert is unprotected, so anyone on the
+/// path can send it: past this the handshake fails as before.
+pub(crate) const MAX_FRESH_CLIENT_HELLOS: u8 = 2;
 
 /// What the hello of a handshake settles about the version (RFC 9147 5.3, RFC 8446 4.2.1).
 enum VersionOutcome {
@@ -318,6 +326,7 @@ impl DTLSConn {
             retry_keys: None,
             unverified_until: None,
             early_dtls13_datagrams: vec![],
+            fresh_client_hellos: 0,
         }
     }
 
@@ -369,6 +378,65 @@ impl DTLSConn {
             self.current_retransmit_timer = None;
             self.state.forget_secrets();
         }
+    }
+
+    /// RFC 9147 section 5.1: a server whose cookie has expired (an endpoint's is good for one
+    /// to two lifetimes of its secret) answers the ClientHello that carries it with
+    /// illegal_parameter, and "this allows the client to restart the connection from scratch
+    /// without a cookie". A client whose DTLS 1.3 handshake ended that way, with the alert
+    /// received in the clear in answer to its second ClientHello (after a HelloRetryRequest,
+    /// before any ServerHello), starts over: a new State (random, key shares, offer), the
+    /// first flight again, the record sequence number going on. At most
+    /// [`MAX_FRESH_CLIENT_HELLOS`] times. Returns whether it did.
+    fn start_over_after_refused_cookie(&mut self) -> bool {
+        use crate::dtls13::conn::HandshakeState as State13;
+        use crate::dtls13::messages::alert;
+        let Some(v13) = &self.v13 else {
+            return false;
+        };
+        let refused_cookie = self.is_client
+            && v13.failed
+            && v13.hello_retry_seen
+            && v13.state == State13::ClientWaitServerHello
+            && v13.fatal_alerts() == (None, Some(alert::ILLEGAL_PARAMETER));
+        if !refused_cookie || self.fresh_client_hellos >= MAX_FRESH_CLIENT_HELLOS {
+            return false;
+        }
+        debug!(
+            "client: the server refused the cookie (illegal_parameter): a new ClientHello ({} of {})",
+            self.fresh_client_hellos + 1,
+            MAX_FRESH_CLIENT_HELLOS
+        );
+        let next_sequence = v13.plaintext_send_sequence();
+        let clock = self.state.clock;
+        self.state.forget_secrets();
+        self.state = State::new(self.handshake_config.crypto_provider.clone(), true);
+        self.state.local_sequence_number = vec![next_sequence];
+        self.state.clock = clock;
+        self.v13 = None;
+        self.fresh_client_hellos += 1;
+        self.replay_detector.clear();
+        self.incoming_decrypted_packets.clear();
+        self.incoming_encrypted_packets.clear();
+        self.fragment_buffer = FragmentBuffer::new();
+        self.cache = HandshakeCache::new();
+        self.closed = false;
+        self.closed_by_peer = false;
+        self.failed = false;
+        self.current_flight = Box::new(Flight1 {});
+        self.flights = None;
+        self.current_handshake_state = HandshakeState::Preparing;
+        self.current_retransmit_timer = None;
+        self.current_retransmit_count = 0;
+        self.current_retransmit_interval = self.handshake_config.retransmit_interval;
+        self.handshake_mtu = self.handshake_config.maximum_transmission_unit;
+        self.fatal_alert_sent = None;
+        self.fatal_alert_received = None;
+        self.retransmit = false;
+        self.handshake_rx = None;
+        self.peer_repeated_flight = false;
+        self.early_dtls13_datagrams.clear();
+        true
     }
 
     /// Hands a datagram, or what is left of one, to the DTLS 1.3 association.
@@ -1249,7 +1317,11 @@ impl DTLSConn {
     /// Fails if the record is malformed or fails authentication.
     pub fn read(&mut self, buf: &[u8]) -> Result<()> {
         if self.v13.is_some() {
-            return self.read_dtls13(buf);
+            let result = self.read_dtls13(buf);
+            if self.start_over_after_refused_cookie() {
+                return Ok(());
+            }
+            return result;
         }
         // A failed association is finished: nothing more is processed on it. One thing is
         // still said: if this side ended it with a fatal alert and the peer goes on sending
