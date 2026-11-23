@@ -722,3 +722,9 @@ pub mod media_stream;
 pub mod peer_connection;
 pub mod rtp_transceiver;
 pub mod statistics;
+
+// The README's Rust examples are doctests: CI compiles them (they are `no_run`, they bind
+// sockets), so the README cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

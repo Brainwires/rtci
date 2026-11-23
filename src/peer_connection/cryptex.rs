@@ -32,9 +32,21 @@ pub enum RTCRtpHeaderEncryptionPolicy {
 }
 
 /// Whether Cryptex applies to every RTP `m=` section of a description: `a=cryptex` at the
-/// session level, or on each audio / video section that isn't rejected. A description with
-/// no RTP section doesn't have it.
-pub(crate) fn description_has_cryptex(d: &SessionDescription) -> bool {
+/// session level, or for each audio / video section that isn't rejected. A description with no
+/// RTP section doesn't have it.
+///
+/// For a section in a BUNDLE group the reading depends on `strict`:
+/// - `false` (the default): the attribute is of the TRANSPORT category under BUNDLE (RFC 9335
+///   section 4, RFC 8859 section 4.5), so the group's BUNDLE-tagged section decides for every
+///   section of the group (see [`group_has_cryptex`]); RFC 9143 section 7.1.3 has answers and
+///   later offers carry such attributes there only.
+/// - `true` ([`SettingEngineBuilder::with_cryptex_required_on_every_bundled_section`]): every
+///   RTP section must carry it itself, as RFC 9335 section 4 asks of the writer.
+///
+/// A section outside any BUNDLE group decides by its own attribute either way.
+///
+/// [`SettingEngineBuilder::with_cryptex_required_on_every_bundled_section`]: crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_cryptex_required_on_every_bundled_section
+pub(crate) fn description_has_cryptex(d: &SessionDescription, strict: bool) -> bool {
     let rtp: Vec<&MediaDescription> = d
         .media_descriptions
         .iter()
@@ -43,7 +55,61 @@ pub(crate) fn description_has_cryptex(d: &SessionDescription) -> bool {
     if rtp.is_empty() {
         return false;
     }
-    d.has_attribute(ATTR_KEY_CRYPTEX) || rtp.iter().all(|m| m.has_attribute(ATTR_KEY_CRYPTEX))
+    if d.has_attribute(ATTR_KEY_CRYPTEX) {
+        return true;
+    }
+    if strict {
+        return rtp.iter().all(|m| m.has_attribute(ATTR_KEY_CRYPTEX));
+    }
+    rtp.iter().all(|m| match bundle_group_of(d, m) {
+        Some(tags) => group_has_cryptex(d, &tags),
+        None => m.has_attribute(ATTR_KEY_CRYPTEX),
+    })
+}
+
+fn mid_of(m: &MediaDescription) -> Option<&str> {
+    m.attribute("mid").flatten()
+}
+
+fn section_by_mid<'a>(d: &'a SessionDescription, mid: &str) -> Option<&'a MediaDescription> {
+    d.media_descriptions.iter().find(|s| mid_of(s) == Some(mid))
+}
+
+/// The identification-tags of the BUNDLE group the section `m` is in, if any.
+fn bundle_group_of<'a>(d: &'a SessionDescription, m: &MediaDescription) -> Option<Vec<&'a str>> {
+    let mid = mid_of(m)?;
+    d.attributes
+        .iter()
+        .filter(|a| a.key == "group")
+        .filter_map(|a| a.value.as_deref()?.strip_prefix("BUNDLE "))
+        .map(|tags| tags.split_whitespace().collect::<Vec<_>>())
+        .find(|tags| tags.contains(&mid))
+}
+
+/// Whether a BUNDLE group has Cryptex, read from its BUNDLE-tagged section: the first
+/// identification-tag whose m= section has a port other than zero (RFC 9143 section 7.3.1: a
+/// zero-port section, rejected or bundle-only, is never the tagged one, so a rejected tagged
+/// section moves the tag to the next). `a=cryptex` there applies to the whole group; on other
+/// sections of the group without it there, it does not. When the tagged section is not
+/// RTP-based (a data section), a group whose every live RTP section carries `a=cryptex` has it
+/// too: that is the form RFC 9335 section 4 itself asks for.
+fn group_has_cryptex(d: &SessionDescription, tags: &[&str]) -> bool {
+    let sections: Vec<&MediaDescription> = tags
+        .iter()
+        .filter_map(|tag| section_by_mid(d, tag))
+        .collect();
+    let tagged = sections.iter().find(|m| m.media_name.port.value != 0);
+    if tagged.is_some_and(|t| t.has_attribute(ATTR_KEY_CRYPTEX)) {
+        return true;
+    }
+    if tagged.is_some_and(|t| is_live_rtp_section(t)) {
+        return false;
+    }
+    let mut rtp = sections
+        .iter()
+        .filter(|m| is_live_rtp_section(m))
+        .peekable();
+    rtp.peek().is_some() && rtp.all(|m| m.has_attribute(ATTR_KEY_CRYPTEX))
 }
 
 fn is_live_rtp_section(m: &MediaDescription) -> bool {
@@ -51,10 +117,21 @@ fn is_live_rtp_section(m: &MediaDescription) -> bool {
     (kind == "audio" || kind == "video") && m.media_name.port.value != 0
 }
 
-fn parsed_has_cryptex(description: Option<&RTCSessionDescription>) -> bool {
-    description
-        .and_then(|d| d.parsed.as_ref())
-        .is_some_and(description_has_cryptex)
+impl RTCPeerConnection {
+    /// [`description_has_cryptex`], read as the setting engine says.
+    fn has_cryptex(&self, d: &SessionDescription) -> bool {
+        description_has_cryptex(
+            d,
+            self.setting_engine
+                .cryptex_required_on_every_bundled_section,
+        )
+    }
+
+    fn parsed_has_cryptex(&self, description: Option<&RTCSessionDescription>) -> bool {
+        description
+            .and_then(|d| d.parsed.as_ref())
+            .is_some_and(|d| self.has_cryptex(d))
+    }
 }
 
 impl RTCPeerConnection {
@@ -99,8 +176,8 @@ impl RTCPeerConnection {
     /// descriptions both signal it for every RTP section, and the policy allows it.
     pub fn cryptex_negotiated(&self) -> bool {
         self.rtp_header_encryption_policy() != RTCRtpHeaderEncryptionPolicy::Disable
-            && parsed_has_cryptex(self.current_local_description.as_ref())
-            && parsed_has_cryptex(self.current_remote_description.as_ref())
+            && self.parsed_has_cryptex(self.current_local_description.as_ref())
+            && self.parsed_has_cryptex(self.current_remote_description.as_ref())
     }
 
     /// Adds a session-level `a=cryptex` to an offer or answer being generated when the
@@ -116,7 +193,7 @@ impl RTCPeerConnection {
         {
             return d;
         }
-        if !is_offer && !parsed_has_cryptex(self.remote_description()) {
+        if !is_offer && !self.parsed_has_cryptex(self.remote_description()) {
             return d;
         }
         d.with_property_attribute(ATTR_KEY_CRYPTEX.to_owned())
@@ -130,7 +207,7 @@ impl RTCPeerConnection {
     pub(crate) fn check_required_cryptex(&self, remote: &SessionDescription) -> Result<()> {
         if self.rtp_header_encryption_policy() == RTCRtpHeaderEncryptionPolicy::Require
             && remote.media_descriptions.iter().any(is_live_rtp_section)
-            && !description_has_cryptex(remote)
+            && !self.has_cryptex(remote)
         {
             return Err(Error::ErrSessionDescriptionMissingCryptex);
         }
@@ -192,21 +269,121 @@ mod tests {
         let data =
             "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:2\r\n";
 
-        let session = parse(&format!("{HEAD}a=cryptex\r\n{audio}{video}{data}"));
-        assert!(description_has_cryptex(&session));
+        for strict in [false, true] {
+            let session = parse(&format!("{HEAD}a=cryptex\r\n{audio}{video}{data}"));
+            assert!(description_has_cryptex(&session, strict));
 
-        let media = parse(&format!(
-            "{HEAD}{audio}a=cryptex\r\n{video}a=cryptex\r\n{data}"
-        ));
-        assert!(description_has_cryptex(&media));
+            let media = parse(&format!(
+                "{HEAD}{audio}a=cryptex\r\n{video}a=cryptex\r\n{data}"
+            ));
+            assert!(description_has_cryptex(&media, strict));
 
-        let partial = parse(&format!("{HEAD}{audio}a=cryptex\r\n{video}{data}"));
-        assert!(!description_has_cryptex(&partial));
+            // No BUNDLE group: each section decides by its own attribute.
+            let partial = parse(&format!("{HEAD}{audio}a=cryptex\r\n{video}{data}"));
+            assert!(!description_has_cryptex(&partial, strict));
 
-        let none = parse(&format!("{HEAD}{audio}{video}"));
-        assert!(!description_has_cryptex(&none));
+            let none = parse(&format!("{HEAD}{audio}{video}"));
+            assert!(!description_has_cryptex(&none, strict));
 
-        let data_only = parse(&format!("{HEAD}a=cryptex\r\n{data}"));
-        assert!(!description_has_cryptex(&data_only));
+            let data_only = parse(&format!("{HEAD}a=cryptex\r\n{data}"));
+            assert!(!description_has_cryptex(&data_only, strict));
+        }
+    }
+
+    /// Under BUNDLE the tagged section (the first tag with a port) decides for its group, each
+    /// group by its own, unless the strict reading is asked for.
+    #[test]
+    fn under_bundle_the_tagged_section_decides_for_its_group() {
+        let section = |kind: &str, port: u16, mid: &str, cryptex: bool| {
+            let fmt = if kind == "application" {
+                "UDP/DTLS/SCTP webrtc-datachannel".to_owned()
+            } else {
+                "UDP/TLS/RTP/SAVPF 96".to_owned()
+            };
+            let attr = if cryptex { "a=cryptex\r\n" } else { "" };
+            format!("m={kind} {port} {fmt}\r\nc=IN IP4 0.0.0.0\r\na=mid:{mid}\r\n{attr}")
+        };
+        let cases: [(&str, Vec<String>, bool, bool); 7] = [
+            // (group lines, sections, default reading, strict reading)
+            (
+                "a=group:BUNDLE 0 1\r\n",
+                vec![
+                    section("audio", 9, "0", true),
+                    section("video", 9, "1", false),
+                ],
+                true,
+                false,
+            ),
+            (
+                "a=group:BUNDLE 0 1\r\n",
+                vec![
+                    section("audio", 9, "0", false),
+                    section("video", 9, "1", true),
+                ],
+                false,
+                false,
+            ),
+            // The tag is the first identification-tag with a port: "1" here, not "0".
+            (
+                "a=group:BUNDLE 1 0\r\n",
+                vec![
+                    section("audio", 9, "0", false),
+                    section("video", 9, "1", true),
+                ],
+                true,
+                false,
+            ),
+            // A rejected (zero-port) section is never the tagged one: the tag moves to "1".
+            (
+                "a=group:BUNDLE 0 1 2\r\n",
+                vec![
+                    section("audio", 0, "0", false),
+                    section("video", 9, "1", true),
+                    section("video", 9, "2", false),
+                ],
+                true,
+                false,
+            ),
+            // Two groups, each read from its own tagged section.
+            (
+                "a=group:BUNDLE 0 1\r\na=group:BUNDLE 2 3\r\n",
+                vec![
+                    section("audio", 9, "0", true),
+                    section("audio", 9, "1", false),
+                    section("video", 9, "2", true),
+                    section("video", 9, "3", false),
+                ],
+                true,
+                false,
+            ),
+            (
+                "a=group:BUNDLE 0 1\r\na=group:BUNDLE 2 3\r\n",
+                vec![
+                    section("audio", 9, "0", true),
+                    section("audio", 9, "1", false),
+                    section("video", 9, "2", false),
+                    section("video", 9, "3", true),
+                ],
+                false,
+                false,
+            ),
+            // A data section as the tag without it: every RTP section carrying it is enough.
+            (
+                "a=group:BUNDLE 0 1 2\r\n",
+                vec![
+                    section("application", 9, "0", false),
+                    section("audio", 9, "1", true),
+                    section("video", 9, "2", true),
+                ],
+                true,
+                true,
+            ),
+        ];
+        for (groups, sections, default, strict) in cases {
+            let sdp = format!("{HEAD}{groups}{}", sections.concat());
+            let d = parse(&sdp);
+            assert_eq!(description_has_cryptex(&d, false), default, "{sdp}");
+            assert_eq!(description_has_cryptex(&d, true), strict, "{sdp}");
+        }
     }
 }

@@ -363,7 +363,15 @@ pub const MAX_CERTIFICATE_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60
 /// * [W3C RTCCertificate](https://www.w3.org/TR/webrtc/#dom-rtccertificate)
 #[derive(Clone, Debug)]
 pub struct RTCCertificate {
-    /// DTLS certificate containing X.509 certificate chain and private key
+    /// DTLS certificate containing X.509 certificate chain and private key.
+    ///
+    /// RFC 8826 section 4.3.1: "the system MUST NOT provide any APIs to either extract
+    /// long-term keying material or to directly access any stored traffic keys". This field,
+    /// [`Self::export_pem`] and [`Self::serialize_pem`] give the native application, which
+    /// is the endpoint, its own key (a server keeps its fingerprint across restarts with
+    /// them). A binding that exposes the engine to scripts a calling service supplies (the
+    /// browser model of RFC 8826) must not expose any of the three; [`Self::serialize`] is the
+    /// W3C form, which carries a handle to the key and not the key.
     pub dtls_certificate: dtls::crypto::Certificate,
 
     /// Timestamp after which this certificate is no longer valid

@@ -1329,3 +1329,114 @@ fn vp9_frames_larger_than_the_receivers_max_fs_are_not_sent() -> Result<()> {
     assert_eq!(timestamps, vec![9000, 12000], "{timestamps:?}");
     Ok(())
 }
+
+/// RFC 7160 section 3.2 / 4.2 with one SSRC across clock rates (the default, as browsers
+/// need): the sender writes Opus (48 kHz) for 2.6 seconds, PCMU (8 kHz) for 3.1, then Opus
+/// again, its RTP timestamps going on at each change from where the old rate had reached
+/// (section 4.2's `start_offset`). Read as each frame arrives, every frame's remote capture
+/// time (webrtc-extensions 15, by the sender reports) is the instant it was written, within a
+/// few milliseconds, in all three stretches: the sender report extrapolates its RTP timestamp
+/// at the rate being sent, and the receiver places a timestamp of one rate against a report
+/// taken at another across the change.
+#[test]
+fn the_remote_capture_time_holds_across_clock_rate_changes_on_one_ssrc() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let (ssrc, opus, pcmu) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        let pt = |mime: &str| {
+            parameters
+                .rtp_parameters
+                .codecs
+                .iter()
+                .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(mime))
+                .map(|c| c.payload_type)
+                .unwrap_or_else(|| panic!("{mime} negotiated"))
+        };
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            pt("audio/opus"),
+            pt("audio/PCMU"),
+        )
+    };
+    let start = world.now;
+    // RFC 7160 4.2: timestamp = (capture_time - capture_start) * clock_rate + start_offset.
+    let mut start_offset = 1_000_000u32;
+    let mut capture_start = start;
+    let mut rate = 48_000u32;
+    let mut placed = [0usize; 3];
+    for frame in 0..450u32 {
+        let now = world.now;
+        // The changes fall between the once-a-second in-band NTP timestamps (RFC 6051), so
+        // frames after each are placed by a mapping taken at the other rate.
+        let stretch = match frame {
+            0..130 => 0,
+            130..285 => 1,
+            _ => 2,
+        };
+        let (pt, new_rate) = if stretch == 1 {
+            (pcmu, 8_000)
+        } else {
+            (opus, 48_000)
+        };
+        if new_rate != rate {
+            start_offset = start_offset.wrapping_add(
+                (now.duration_since(capture_start).as_secs_f64() * f64::from(rate)).round() as u32,
+            );
+            capture_start = now;
+            rate = new_rate;
+        }
+        let timestamp = start_offset.wrapping_add(
+            (now.duration_since(capture_start).as_secs_f64() * f64::from(rate)).round() as u32,
+        );
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: 100 + frame as u16,
+                        timestamp,
+                        ssrc,
+                        marker: frame == 0,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x55u8; 80]),
+                },
+            )?;
+        world.pump()?;
+        let packets = read_frame(&world, timestamp);
+        if let Some(packet) = packets.last() {
+            let RTCEncodedFrameMetadataKind::Audio(audio) =
+                receiver_metadata(&mut world, std::slice::from_ref(packet))?
+            else {
+                panic!("an audio frame");
+            };
+            if let Some(remote) = audio.frame.remote_capture_time {
+                let error = if remote > now {
+                    remote - now
+                } else {
+                    now - remote
+                };
+                assert!(
+                    error < Duration::from_millis(5),
+                    "frame {frame} (stretch {stretch}, timestamp {timestamp}): {error:?} off"
+                );
+                placed[stretch] += 1;
+            }
+        }
+        world.run_until(now + Duration::from_millis(20))?;
+    }
+    assert!(
+        placed.iter().all(|count| *count > 100),
+        "frames placed in each stretch: {placed:?}"
+    );
+    Ok(())
+}

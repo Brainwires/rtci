@@ -73,7 +73,7 @@ pub enum RTCFlowType {
     InteractiveVideo,
     /// Non-interactive video: video known not to be interactive (a playback application).
     /// RFC 8837 section 5: "Browsers MUST NOT use the AF3x DSCP values ... Non-browser
-    /// implementations of WebRTC MAY use [them]".
+    /// implementations of WebRTC MAY use \[them\]".
     NonInteractiveVideo,
     /// Data channels.
     Data,

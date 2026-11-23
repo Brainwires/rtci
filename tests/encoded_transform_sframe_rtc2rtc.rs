@@ -82,6 +82,8 @@ struct World {
     /// (SSRC, sequence number) of media packets the link loses the first time they cross it.
     lose: Vec<(u32, u16)>,
     lost: Vec<(u32, u16)>,
+    /// The RTP datagrams the first peer put on the wire, as they went.
+    wire: Vec<Vec<u8>>,
 }
 
 /// The RTP header of an SRTP packet (the header is in the clear), `None` for anything else.
@@ -113,6 +115,7 @@ impl World {
                 if i == 0
                     && let Some(header) = rtp_header(&data)
                 {
+                    self.wire.push(data.to_vec());
                     let key = (header.ssrc, header.sequence_number);
                     if let Some(at) = self.lose.iter().position(|k| *k == key) {
                         self.lose.remove(at);
@@ -176,6 +179,7 @@ impl World {
             now: Instant::now(),
             lose: vec![],
             lost: vec![],
+            wire: vec![],
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -423,6 +427,7 @@ fn an_offerer_whose_sframe_was_refused_discards_what_it_receives() -> Result<()>
             now: Instant::now(),
             lose: vec![],
             lost: vec![],
+            wire: vec![],
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -535,6 +540,104 @@ fn an_offerer_whose_sframe_was_refused_discards_what_it_receives() -> Result<()>
         } else {
             assert!(received > 0, "without SFrame the media arrives");
         }
+    }
+    Ok(())
+}
+
+/// RFC 9605 section 6.1, per-packet SFrame: the application encrypts each RTP payload on its
+/// own and leaves the header to SRTP. The engine carries such a payload under the negotiated
+/// codec payload type unchanged: on the wire the header (payload type, sequence number,
+/// timestamp, marker) is in the clear and the payload SRTP-protected, so the SFrame
+/// ciphertext does not appear; the receiver reads the ciphertext byte for byte and decrypts
+/// each packet.
+#[test]
+fn per_packet_sframe_payloads_cross_under_the_codec_payload_type() -> Result<()> {
+    const PACKETS: u16 = 10;
+    let (mut world, sender) = World::connected()?;
+    let key = [5u8; 16];
+    let mut encryptor = SFrameContext::with_default_provider(CipherSuite::Aes128GcmSha256_128)?;
+    encryptor.add_send_key(3, &key)?;
+    let mut decryptor = SFrameContext::with_default_provider(CipherSuite::Aes128GcmSha256_128)?;
+    decryptor.add_recv_key(3, &key)?;
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let plaintext =
+        |n: u16| -> Vec<u8> { (0..900u16).map(|i| ((i * 3 + n) % 253) as u8).collect() };
+    let mut ciphertexts = vec![];
+    for n in 0..PACKETS {
+        let ciphertext: Bytes = encryptor.encrypt(3, b"", &plaintext(n))?.into();
+        ciphertexts.push(ciphertext.clone());
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: 4000 + n,
+                        timestamp: 3000 * u32::from(n),
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: ciphertext,
+                },
+            )?;
+        world.pump()?;
+        let next = world.now + Duration::from_millis(33);
+        world.run_until(next)?;
+    }
+
+    for n in 0..PACKETS {
+        let on_wire = world
+            .wire
+            .iter()
+            .find(|d| {
+                rtp_header(d).is_some_and(|h| h.ssrc == ssrc && h.sequence_number == 4000 + n)
+            })
+            .expect("the packet went out");
+        let header = rtp_header(on_wire).expect("an RTP header in the clear");
+        assert_eq!((header.payload_type, header.marker), (pt, true));
+        assert_eq!(header.timestamp, 3000 * u32::from(n));
+        let ciphertext = &ciphertexts[usize::from(n)];
+        let tag = &ciphertext[ciphertext.len() - 16..];
+        assert!(
+            !on_wire.windows(16).any(|w| w == tag),
+            "the payload is SRTP-protected on the wire"
+        );
+    }
+    let mut received: Vec<rtc::rtp::Packet> = world.peers[1]
+        .read
+        .iter()
+        .filter(|p| p.header.ssrc == ssrc)
+        .cloned()
+        .collect();
+    received.sort_by_key(|p| p.header.sequence_number);
+    received.dedup_by_key(|p| p.header.sequence_number);
+    assert_eq!(received.len(), usize::from(PACKETS));
+    for (n, packet) in received.iter().enumerate() {
+        assert_eq!(packet.header.payload_type, pt);
+        assert_eq!(
+            packet.payload, ciphertexts[n],
+            "packet {n} carried unchanged"
+        );
+        assert_eq!(
+            decryptor.decrypt(b"", &packet.payload)?,
+            plaintext(n as u16)
+        );
     }
     Ok(())
 }

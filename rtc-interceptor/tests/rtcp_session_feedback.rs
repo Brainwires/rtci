@@ -577,3 +577,151 @@ fn a_tstr_and_a_tstn_wait_for_the_regular_packet() {
         assert!(carried, "the regular packet carries it (TSTR: {request})");
     }
 }
+
+/// RFC 7728 sections 6.3 and 8.2 (PAUSED "SHALL also [be repeated] in the next two regular
+/// RTCP reports"), through [`RepeatInRegularReports`]: the packet leaves as feedback (an Early
+/// packet: the minimal compound packet, no report blocks) and a copy of it rides each of the
+/// next two Regular compound packets, the ones with the report blocks, and no packet after
+/// them. [`RtcpSessionControl::StopRepeating`] ends what is still owed.
+#[test]
+fn a_packet_to_repeat_rides_the_next_two_regular_packets() {
+    use rtc_interceptor::{Attribute, RepeatInRegularReports};
+    use rtcp::transport_feedbacks::pause_resume::{PauseResume, PauseResumeEntry};
+    use std::sync::Arc;
+
+    let paused = |now: Instant, count: u8| {
+        let mut packet = rtcp(
+            now,
+            vec![Box::new(PauseResume {
+                sender_ssrc: 300,
+                entries: vec![PauseResumeEntry::paused(300, 7, 1000)],
+            })],
+        );
+        packet
+            .message
+            .attributes
+            .push(Attribute::Custom(Arc::new(RepeatInRegularReports {
+                key: 300,
+                count,
+            })));
+        packet
+    };
+    for stop in [false, true] {
+        let mut chain = chain(builder());
+        let base = Instant::now();
+        chain.bind_local_stream(&video(300));
+        chain.bind_remote_stream(&video(200));
+        control(&mut chain, base, RtcpSessionControl::Start);
+        // The remote stream is received, so a Regular packet reports on it.
+        let mut sent = vec![];
+        let mut seq = 0u16;
+        let mut t = base;
+        let until = base + secs(40.0);
+        let mut pause_at = None;
+        while t < until {
+            chain
+                .handle_read(rtp(t, 200, seq, u32::from(seq) * 3000))
+                .unwrap();
+            let _ = read(&mut chain);
+            seq = seq.wrapping_add(1);
+            if pause_at.is_none() && t >= base + secs(8.0) {
+                chain.handle_write(paused(t, 2)).unwrap();
+                pause_at = Some(t);
+            }
+            if stop && pause_at == Some(t) {
+                sent.extend(written(&mut chain));
+                control(
+                    &mut chain,
+                    t,
+                    RtcpSessionControl::StopRepeating { key: 300 },
+                );
+            }
+            t += secs(0.1);
+            sent.extend(run(&mut chain, t));
+        }
+        let pause_at = pause_at.expect("written");
+        let after: Vec<&Sent> = sent.iter().filter(|s| s.at >= pause_at).collect();
+        let carrying: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .filter(|(_, sent)| sent.has::<PauseResume>())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(after[0].at, pause_at, "the first copy leaves at once");
+        assert!(after[0].reported().is_empty(), "in an Early packet");
+        assert_eq!(carrying[0], 0);
+        let regular: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, sent)| !sent.reported().is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            regular.len() >= 4,
+            "regular packets follow: {}",
+            regular.len()
+        );
+        if stop {
+            assert_eq!(carrying, vec![0], "stopped before the next regular packet");
+        } else {
+            assert_eq!(
+                carrying,
+                vec![0, regular[0], regular[1]],
+                "the next two regular packets carry it, and no other"
+            );
+        }
+    }
+}
+
+fn twcc(media_ssrc: u32, count: u8) -> Vec<Box<dyn rtcp::Packet>> {
+    use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+    vec![Box::new(TransportLayerCc {
+        sender_ssrc: 0,
+        media_ssrc,
+        fb_pkt_count: count,
+        ..Default::default()
+    })]
+}
+
+/// RFC 4585 section 3.5.2, as written, for congestion control feedback too
+/// (`with_immediate_congestion_feedback(false)`): after an Early packet a second transport-wide
+/// feedback message is held for the next regular packet ("allow_early == FALSE"), not sent
+/// at once. With the default (`true`) each leaves as it is built.
+#[test]
+fn with_rfc_4585_timing_a_second_congestion_feedback_waits_for_the_regular_packet() {
+    use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+    for immediate in [false, true] {
+        let mut chain = chain(
+            builder()
+                .with_bandwidth(RtcpBandwidth {
+                    session: Some(64_000),
+                    ..Default::default()
+                })
+                .with_immediate_congestion_feedback(immediate),
+        );
+        let base = Instant::now();
+        chain.bind_remote_stream(&video(200));
+        control(&mut chain, base, RtcpSessionControl::Start);
+
+        chain
+            .handle_write(rtcp(base + secs(0.01), twcc(200, 1)))
+            .unwrap();
+        assert_eq!(1, written(&mut chain).len(), "immediate {immediate}");
+        chain
+            .handle_write(rtcp(base + secs(0.02), twcc(200, 2)))
+            .unwrap();
+        let second = written(&mut chain);
+        if immediate {
+            assert_eq!(1, second.len(), "leaves as it is built");
+            assert_eq!(1, second[0].get::<TransportLayerCc>().len());
+        } else {
+            assert!(second.is_empty(), "no second Early packet");
+            let sent = run(&mut chain, base + secs(0.9));
+            assert!(!sent.is_empty());
+            assert!(sent[0].at > base + secs(0.02));
+            assert!(sent[0].is_compound(), "with the regular packet");
+            assert_eq!(1, sent[0].get::<TransportLayerCc>().len());
+        }
+    }
+}

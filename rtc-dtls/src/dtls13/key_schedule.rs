@@ -367,6 +367,28 @@ impl KeySchedule {
             && self.exporter.is_none()
     }
 
+    /// RFC 8446 section 7.1: "Once all the values which are to be derived from a given secret
+    /// have been computed, that secret SHOULD be erased." The handshake traffic secrets give
+    /// the handshake epoch's record keys and the two Finished messages: once both Finished are
+    /// computed (sent or checked), nothing more comes from them.
+    pub(crate) fn forget_handshake_secrets(&mut self) {
+        self.client_handshake_traffic = None;
+        self.server_handshake_traffic = None;
+    }
+
+    /// Whether the handshake traffic secrets are gone ([`Self::forget_handshake_secrets`]).
+    #[cfg(test)]
+    pub(crate) fn handshake_secrets_forgotten(&self) -> bool {
+        self.client_handshake_traffic.is_none() && self.server_handshake_traffic.is_none()
+    }
+
+    /// Whether the application traffic secrets were handed over (the association keeps them
+    /// for its key updates) and no copy is left here.
+    #[cfg(test)]
+    pub(crate) fn application_secrets_handed_over(&self) -> bool {
+        self.client_application_traffic.is_none() && self.server_application_traffic.is_none()
+    }
+
     pub(crate) fn forget(&mut self) {
         self.current = SecretVec::new(vec![]);
         self.client_handshake_traffic = None;

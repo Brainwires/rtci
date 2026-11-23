@@ -117,7 +117,6 @@ fn rtp(now: Instant, sequence_number: u16) -> TaggedPacket {
                 ..Default::default()
             },
             payload: vec![0xAA; 100].into(),
-            ..Default::default()
         })),
     }
 }

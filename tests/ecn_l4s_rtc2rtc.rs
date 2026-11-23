@@ -655,15 +655,43 @@ fn without_ecn_nothing_is_marked_and_the_ecn_counts_are_left_out() -> Result<()>
     Ok(())
 }
 
-/// ECN without RFC 8888 feedback marks nothing: an L4S sender needs the receiver to report CE
-/// back. The offer carries no `ack ccfb`, and the RFC 8888 members are left out.
+/// Whether `sdp` has an `a=rtcp-xr` line listing `ecn-sum` (RFC 6679 section 6.3).
+fn states_ecn_summary(sdp: &str) -> bool {
+    sdp.lines()
+        .filter_map(|l| l.strip_prefix("a=rtcp-xr:"))
+        .any(|formats| formats.split_whitespace().any(|f| f == "ecn-sum"))
+}
+
+/// The answer without RFC 6679's ECN reports: no `ecn-sum`, no `nack ecn`.
+fn without_rfc6679_reports(answer: String) -> String {
+    answer
+        .split("\r\n")
+        .filter(|l| *l != "a=rtcp-fb:* nack ecn")
+        .map(|l| match l.strip_prefix("a=rtcp-xr:") {
+            Some(formats) => format!(
+                "a=rtcp-xr:{}",
+                formats
+                    .split_whitespace()
+                    .filter(|f| *f != "ecn-sum")
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            None => l.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// ECN without feedback that reports the marks marks nothing: neither RFC 8888 nor RFC 6679's
+/// own reports. The offer carries no `ack ccfb`; the answer is stripped of the RFC 6679
+/// reports (`ecn-sum`, `nack ecn`), and the RFC 8888 members are left out.
 #[test]
 fn without_ccfb_media_is_not_marked() -> Result<()> {
     let setup = Setup {
         ccfb: false,
         ..ECN_CCFB
     };
-    let (mut world, sender, offer) = World::connected(setup, setup)?;
+    let (mut world, sender, offer) = World::connected_with(setup, setup, without_rfc6679_reports)?;
     assert!(!offer.contains("ack ccfb"), "{offer}");
     let (ssrc, _) = world.sender_stream(sender);
     world.send_media(sender, Duration::from_secs(2))?;
@@ -687,16 +715,25 @@ fn without_ccfb_media_is_not_marked() -> Result<()> {
     Ok(())
 }
 
-/// Only one side configured for RFC 8888: `ack ccfb` is not negotiated, so the sender marks
-/// nothing even with ECN on.
+/// Only one side configured for RFC 8888: `ack ccfb` is not negotiated. The answerer then
+/// takes RFC 6679's ECN feedback packet instead (`nack ecn`, RFC 8888 section 7: one of the
+/// two); with that and the summary also left out of the answer, the sender marks nothing even
+/// with ECN on.
 #[test]
 fn ccfb_offered_but_not_answered_marks_nothing() -> Result<()> {
     let answerer = Setup {
         ccfb: false,
         ..ECN_CCFB
     };
-    let (mut world, sender, offer) = World::connected(ECN_CCFB, answerer)?;
+    let (_, _, offer) = World::connected(ECN_CCFB, answerer)?;
     assert!(offer.contains("ack ccfb"));
+    let (mut world, sender, _) =
+        World::connected_with(ECN_CCFB, answerer, without_rfc6679_reports)?;
+    assert!(
+        world.answer.contains("a=rtcp-fb:* nack ecn"),
+        "{}",
+        world.answer
+    );
     world.send_media(sender, Duration::from_millis(200))?;
     assert!(world.sent.iter().all(|(_, _, ecn)| ecn.is_none()));
     Ok(())
@@ -895,6 +932,68 @@ fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
     Ok(())
 }
 
+/// RFC 6679 section 7.1: with ECN signalled, "the "rtcp-xr" attribute with the "ecn-sum"
+/// parameter MUST also be used", and `nack ecn` "MUST be used whenever the initialisation
+/// method ... requires timely sender-side knowledge of received CE markings": the offer
+/// states both beside `a=ecn-capable-rtp`. The answerer keeps the summary, and of the two
+/// per-packet feedback forms answers `ack ccfb` only (RFC 8888 section 7).
+#[test]
+fn an_ecn_offer_states_the_ecn_summary_and_the_ecn_feedback_packet() -> Result<()> {
+    let (world, _, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    assert!(states_ecn_summary(&offer), "{offer}");
+    assert!(offer.contains("a=rtcp-fb:* nack ecn\r\n"), "{offer}");
+    assert!(offer.contains("a=rtcp-fb:* ack ccfb\r\n"), "{offer}");
+    assert!(states_ecn_summary(&world.answer), "{}", world.answer);
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp:"),
+        "{}",
+        world.answer
+    );
+    assert!(!world.answer.contains("nack ecn"), "{}", world.answer);
+
+    // Without ECN on, none of it.
+    let off = Setup {
+        ecn: false,
+        ..ECN_CCFB
+    };
+    let (_, _, offer) = World::connected(off, off)?;
+    assert!(!states_ecn_summary(&offer), "{offer}");
+    assert!(!offer.contains("nack ecn"), "{offer}");
+    Ok(())
+}
+
+/// RFC 6679 section 7.1 without RFC 8888: both sides with ECN and no `ack ccfb` negotiate
+/// RFC 6679's own reports (`ecn-sum` and `nack ecn` in the offer and the answer), and the
+/// sender marks its media on them.
+#[test]
+fn without_ccfb_ecn_runs_on_the_rfc6679_reports() -> Result<()> {
+    let setup = Setup {
+        ccfb: false,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(setup, setup)?;
+    assert!(!offer.contains("ack ccfb"), "{offer}");
+    assert!(states_ecn_summary(&offer), "{offer}");
+    assert!(offer.contains("a=rtcp-fb:* nack ecn\r\n"), "{offer}");
+    assert!(states_ecn_summary(&world.answer), "{}", world.answer);
+    assert!(
+        world.answer.contains("a=rtcp-fb:* nack ecn\r\n"),
+        "{}",
+        world.answer
+    );
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_secs(2))?;
+    let marked = world
+        .sent
+        .iter()
+        .filter(|(from_sender, rtp, ecn)| {
+            *from_sender && rtp.is_some_and(|(s, _)| s == ssrc) && ecn.is_some()
+        })
+        .count();
+    assert!(marked > 0, "media is marked on RFC 6679 reports");
+    Ok(())
+}
+
 /// RFC 6679 section 6.1.1: "If the attribute is removed in the answer, then ECN MUST NOT be
 /// used in any direction for that media flow". An answerer without ECN leaves it out, and the
 /// offerer, with ECN on and `ack ccfb` negotiated, marks nothing.
@@ -963,28 +1062,43 @@ fn a_peer_that_states_no_ect_value_gets_ect0() -> Result<()> {
     Ok(())
 }
 
-/// RFC 6679 section 7.2: one RTP session initiates ECN one way. A BUNDLE group is one session:
-/// an offer whose bundled sections list different initiation methods is answered with the
-/// tagged section's method in every section.
+/// RFC 6679 section 7.2: one RTP session initiates ECN one way, and RFC 8859 section 7.4
+/// puts `a=ecn-capable-rtp` in the IDENTICAL category: a BUNDLE group (one RTP session) states
+/// one value, in every bundled RTP section or, in an answer or a subsequent offer, in the
+/// tagged one only (RFC 9143 section 7.1.3). An offer whose bundled sections list different
+/// methods breaks that and is refused (RFC 8859 section 4.3); one that states it in the
+/// tagged section only is answered with the same value in every bundled section.
 #[test]
 fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
-    let section = |mid: &str, methods: &str| {
+    let section = |mid: &str, methods: Option<&str>| {
         format!(
             "m=video 9 UDP/TLS/RTP/SAVPF 96\n{}a=mid:{mid}\na=sendrecv\n\
-             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: {methods}\n",
-            jsep_common::TRANSPORT
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\n{}",
+            jsep_common::TRANSPORT,
+            methods.map_or(String::new(), |m| format!("a=ecn-capable-rtp: {m}\n"))
         )
     };
-    let offer = jsep_common::crlf(&format!(
-        "{}a=group:BUNDLE 0 1\n{}{}",
-        jsep_common::SESSION,
-        section("0", "leap,rtp"),
-        section("1", "rtp")
-    ));
+    let offer = |second: Option<&str>| {
+        jsep_common::crlf(&format!(
+            "{}a=group:BUNDLE 0 1\n{}{}",
+            jsep_common::SESSION,
+            section("0", Some("leap,rtp")),
+            section("1", second)
+        ))
+    };
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    let refused = pc
+        .set_remote_description(
+            Instant::now(),
+            rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(Some("rtp")))?,
+        )
+        .expect_err("bundled sections with different a=ecn-capable-rtp values");
+    assert!(refused.to_string().contains("ecn-capable-rtp"), "{refused}");
+
     let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
     pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(None))?,
     )?;
     let answer = pc.create_answer(None)?.sdp;
     let methods: Vec<&str> = answer

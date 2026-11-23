@@ -73,14 +73,12 @@ pub mod cipher_suite;
 pub mod client_certificate_type;
 /// The compression-methods field. DTLS in WebRTC always negotiates null compression.
 pub mod compression_methods;
-/// Handshake configuration: certificates, roles, cipher-suite and SRTP profile preferences.
 pub mod config;
 /// Connection state shared across the handshake and record layers.
 pub mod conn;
 /// Record content types: handshake, alert, change-cipher-spec and application data.
 pub mod content;
 pub(crate) mod cookie;
-/// Cryptographic primitives: the AEAD and CBC ciphers, certificates and signatures.
 pub mod crypto;
 /// Elliptic curves and the key-exchange values exchanged over them.
 pub mod curve;
@@ -97,7 +95,6 @@ pub mod fragment_buffer;
 /// supported API.
 #[cfg(all(fuzzing, any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]
 pub mod fuzzing;
-/// The handshake message types and the cache that hashes them for `Finished`.
 pub mod handshake;
 /// Handshake orchestration: state, roles and the verification callbacks.
 pub mod handshaker;
@@ -107,7 +104,6 @@ pub mod prf;
 pub mod record_layer;
 /// DTLS 1.2 session resumption (RFC 5246 section 7.3, RFC 5077, RFC 7627 section 5.3).
 pub(crate) mod resumption;
-/// DTLS 1.3 pre-shared keys: session tickets and their store, external PSKs.
 pub mod session;
 /// Signature and hash algorithm pairs, as negotiated for certificate verification.
 pub mod signature_hash_algorithm;

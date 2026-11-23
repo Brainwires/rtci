@@ -917,7 +917,7 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 /// CNAME. What a session description negotiates beyond that reaches it as an
 /// [`RtcpSessionControl`](interceptor::RtcpSessionControl) (bandwidth from `b=` lines,
 /// `a=rtcp-rsize`, `trr-int`) or through
-/// [`RtcpSessionBuilder`](interceptor::RtcpSessionBuilder) when the chain is built by hand:
+/// [`RtcpSessionBuilder`] when the chain is built by hand:
 ///
 /// ```
 /// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
@@ -1678,13 +1678,31 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
         section_fmtp_lines: section_codecs
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
             .collect(),
-        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
-        initially_paused: false,
+        section_mime_types: section_codecs
+            .iter()
+            .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
+            .collect(),
     }
+}
+
+/// Adds redundant audio data, RED (RFC 2198), in both directions
+/// ([`RedAudioInterceptor`](interceptor::RedAudioInterceptor), [`Slot::Redundancy`]): a local
+/// audio stream whose section negotiated a RED format with its own encoding as primary and
+/// redundancy (`a=fmtp:63 111/111`, the default codecs' form) is sent as RED with a copy of
+/// the previous packet, and received RED packets are taken apart into their primary encoding,
+/// with lost packets recovered from the next packet's copy. The peer connection installs it in
+/// any chain that does not fill the slot.
+pub fn configure_audio_redundancy(registry: Registry) -> Registry {
+    registry.with(
+        Slot::Redundancy,
+        interceptor::RedAudioBuilder::new().build(),
+    )
 }
 
 /// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198) for video (`a=rtpmap:<red> red/90000`,
@@ -1783,7 +1801,6 @@ mod ulpfec_tests {
                     rtcp_feedback: vec![],
                 },
                 payload_type,
-                ..Default::default()
             }
         };
         let section = [
@@ -2131,8 +2148,10 @@ mod slot_order_tests {
     #[test]
     fn the_twcc_only_setting_neither_offers_nor_records_rfc8888() {
         let mut media_engine = MediaEngine::default();
-        let mut options = DefaultInterceptorOptions::default();
-        options.congestion_feedback = CongestionFeedback::Twcc;
+        let options = DefaultInterceptorOptions {
+            congestion_feedback: CongestionFeedback::Twcc,
+            ..Default::default()
+        };
         let (registry, _handles) = register_default_interceptors_with_options(
             Registry::new(),
             &mut media_engine,

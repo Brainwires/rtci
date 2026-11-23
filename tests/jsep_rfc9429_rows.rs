@@ -259,3 +259,166 @@ fn the_session_id_is_63_random_bits() -> TestResult {
     assert_ne!(a, b);
     Ok(())
 }
+
+/// RFC 9429 section 5.2.1: "the 'a=crypto', 'a=key-mgmt' and 'a=ice-lite' attributes MUST NOT
+/// be included" in an offer, nor (section 5.3.1) in an answer. A default offer of audio,
+/// video and a data channel, and the answer to it, have none of the three, at either level.
+/// (`SettingEngineBuilder::with_lite(true)` is a server option outside JSEP; it writes
+/// `a=ice-lite`.)
+#[test]
+fn a_default_offer_and_answer_have_no_crypto_key_mgmt_or_ice_lite() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.create_data_channel("data", None)?;
+    let mut answerer = default_peer()?;
+    let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+    for (what, sdp) in [("offer", &offer), ("answer", &answer)] {
+        for line in sdp.lines() {
+            assert!(
+                !["a=crypto", "a=key-mgmt", "a=ice-lite"]
+                    .iter()
+                    .any(|forbidden| line.starts_with(forbidden)),
+                "the {what} has {line}:\n{sdp}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8839 section 5.1: a candidate line is read by its grammar, also when it is trickled
+/// (`addIceCandidate`) rather than in a description. Lines the rtc-ice reader would take but
+/// the grammar refuses are refused: a foundation longer than 32 ice-chars or with another
+/// character, a priority of more than 10 digits, `type` for `typ`, an extension without a
+/// value, a second `raddr`. A line with `raddr` / `rport`, extensions and an mDNS name is
+/// taken.
+#[test]
+fn a_trickled_candidate_is_checked_against_the_candidate_grammar() -> TestResult {
+    let mut pc = with_remote_video_offer()?;
+    let add = |pc: &mut rtc::peer_connection::RTCPeerConnection, line: &str| {
+        pc.add_remote_candidate(RTCIceCandidateInit {
+            candidate: line.to_owned(),
+            sdp_mid: Some("v".to_owned()),
+            ..Default::default()
+        })
+    };
+    for line in [
+        &format!(
+            "candidate:{} 1 udp 2130706431 10.0.0.9 5000 typ host",
+            "f".repeat(33)
+        ),
+        "candidate:f-1 1 udp 2130706431 10.0.0.9 5000 typ host",
+        "candidate:1 1 udp 21307064310 10.0.0.9 5000 typ host",
+        "candidate:1 1 udp 2130706431 10.0.0.9 5000 type host",
+        "candidate:1 1 udp 2130706431 10.0.0.9 5000 typ host generation",
+        "candidate:1 1 udp 1694498815 192.0.2.3 5000 typ srflx raddr 10.0.0.9 rport 5000 \
+         raddr 10.0.0.8",
+    ] {
+        assert!(add(&mut pc, line).is_err(), "{line}");
+    }
+    add(
+        &mut pc,
+        "candidate:1 1 udp 1694498815 192.0.2.3 5000 typ srflx raddr 10.0.0.9 rport 5000 \
+         generation 0 ufrag 4ZcD network-cost 10",
+    )?;
+    add(
+        &mut pc,
+        "candidate:2 1 udp 2130706431 61b445d2-6503-41ac-96ce-ee3edac00e9f.local 5002 typ host",
+    )?;
+    Ok(())
+}
+
+/// RFC 9429 section 5.3.1: the answer's session-level lines are generated "as specified in
+/// Section 5.2.1": `v=0` first, then an `o=` line whose session id is below 2^63 - 1, `s=`
+/// third, no `k=`, a `t=` line, and `a=ice-options` with `trickle` and `ice2` (RFC 8840
+/// section 4.1.1, RFC 8445 section 10).
+#[test]
+fn the_answers_session_lines_follow_the_offer_rules() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    offerer.create_data_channel("data", None)?;
+    let mut answerer = default_peer()?;
+    let (_, answer) = exchange(&mut offerer, &mut answerer)?;
+    let lines: Vec<&str> = answer.lines().collect();
+    assert_eq!(lines[0], "v=0", "{answer}");
+    let origin: Vec<&str> = lines[1]
+        .strip_prefix("o=")
+        .expect("o= second")
+        .split(' ')
+        .collect();
+    assert_eq!(origin.len(), 6, "{answer}");
+    let session_id: u64 = origin[1].parse()?;
+    assert!(session_id < (1 << 63) - 1, "{answer}");
+    assert!(lines[2].starts_with("s="), "{answer}");
+    let session: Vec<&str> = lines
+        .iter()
+        .take_while(|l| !l.starts_with("m="))
+        .copied()
+        .collect();
+    assert!(session.iter().any(|l| l.starts_with("t=")), "{answer}");
+    assert!(!session.iter().any(|l| l.starts_with("k=")), "{answer}");
+    let options: Vec<&str> = session
+        .iter()
+        .filter_map(|l| l.strip_prefix("a=ice-options:"))
+        .flat_map(|v| v.split(' '))
+        .collect();
+    assert!(
+        options.contains(&"trickle") && options.contains(&"ice2"),
+        "{answer}"
+    );
+    Ok(())
+}
+
+/// RFC 9429 section 5.1.2: offered media sections say `UDP/TLS/RTP/SAVPF` or
+/// `TCP/DTLS/RTP/SAVPF` (RFC 7850), "determined by the protocol associated with the current
+/// default or selected ICE candidate". With only a TCP candidate gathered the offer's audio
+/// section says `TCP/DTLS/RTP/SAVPF` (and its data section `TCP/DTLS/SCTP`), the answer repeats
+/// the profile ("MUST exactly match"); once a UDP candidate is there it is the default and the
+/// offer says `UDP/TLS/RTP/SAVPF`.
+#[test]
+fn the_offered_media_profile_follows_the_default_candidates_protocol() -> TestResult {
+    let proto = |sdp: &str, media: &str| -> String {
+        sdp.lines()
+            .find(|l| l.starts_with(&format!("m={media} ")))
+            .and_then(|l| l.split(' ').nth(2))
+            .unwrap_or_else(|| panic!("an m={media} line in\n{sdp}"))
+            .to_owned()
+    };
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.create_data_channel("data", None)?;
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:1 1 tcp 1518280447 10.0.0.9 5000 typ host tcptype passive".to_owned(),
+        ..Default::default()
+    })?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        proto(&offer.sdp, "audio"),
+        "TCP/DTLS/RTP/SAVPF",
+        "{}",
+        offer.sdp
+    );
+    assert_eq!(proto(&offer.sdp, "application"), "TCP/DTLS/SCTP");
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let answer = answerer.create_answer(None)?;
+    assert_eq!(
+        proto(&answer.sdp, "audio"),
+        "TCP/DTLS/RTP/SAVPF",
+        "{}",
+        answer.sdp
+    );
+
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: HOST.to_owned(),
+        ..Default::default()
+    })?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        proto(&offer.sdp, "audio"),
+        "UDP/TLS/RTP/SAVPF",
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}

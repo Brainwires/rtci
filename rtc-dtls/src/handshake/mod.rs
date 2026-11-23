@@ -1,7 +1,7 @@
 //! DTLS handshake messages.
 //!
-//! Each message type has its own module; [`HandshakeMessage`](crate::handshake::HandshakeMessage) is the parsed union of them and
-//! [`Handshake`](crate::handshake::Handshake) pairs one with its [`HandshakeHeader`](crate::handshake::handshake_header::HandshakeHeader).
+//! Each message type has its own module; [`HandshakeMessage`] is the parsed union of them and
+//! [`Handshake`] pairs one with its [`HandshakeHeader`].
 //!
 //! Two things distinguish this from a TLS handshake. Messages carry a sequence number and
 //! fragment offsets, because a handshake message may be larger than a datagram and must be
@@ -9,7 +9,7 @@
 //! [`HelloVerifyRequest`](crate::handshake::handshake_message_hello_verify_request) carrying a cookie, which the
 //! client echoes — a cheap defence against using the handshake for amplification.
 //!
-//! [`handshake_cache`](crate::handshake::handshake_cache) retains the messages so the hash in `Finished` can be computed over
+//! [`handshake_cache`] retains the messages so the hash in `Finished` can be computed over
 //! exactly what both sides saw.
 /// Buffers handshake messages so their hash can be computed for `Finished` verification.
 pub mod handshake_cache;

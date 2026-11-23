@@ -336,6 +336,67 @@ fn test_check_over_tcp_is_sent_once() {
     assert_eq!(a.candidate_pairs[0].state, CandidatePairState::Failed);
 }
 
+/// RFC 6544 Section 7: TCP and UDP pairs are in one checklist, ordered by pair priority (RFC
+/// 8445 Section 6.1.2.3); Section 4.1 with RFC 8445 Section 6.1.4.2: a TCP check takes its
+/// Ta like a UDP one. With a UDP and an active TCP local candidate and remote pairs whose
+/// priorities alternate between the transports, the checks start one per Ta in decreasing
+/// pair priority, UDP, TCP, UDP, TCP.
+#[test]
+fn test_tcp_and_udp_pairs_share_one_checklist_paced_one_per_ta() {
+    let start = Instant::now();
+    let tcp = |address: &str, tcp_type: TcpType, priority: u32, foundation: &str| {
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "tcp".to_owned(),
+                address: address.to_owned(),
+                port: if tcp_type == TcpType::Active { 9 } else { 5000 },
+                component: 1,
+                priority,
+                foundation: foundation.to_owned(),
+                ..Default::default()
+            },
+            tcp_type,
+        }
+        .new_candidate_host()
+        .unwrap()
+    };
+    let mut a = bare_agent(
+        start,
+        AgentConfig {
+            failed_timeout: Some(Duration::ZERO),
+            ..config(true)
+        },
+    );
+    a.add_local_candidate(tcp("192.168.0.2", TcpType::Active, 0, ""))
+        .unwrap();
+    a.add_remote_candidate(remote(1, 500, "f1")).unwrap();
+    a.add_remote_candidate(tcp("10.0.0.2", TcpType::Passive, 400, "f2"))
+        .unwrap();
+    a.add_remote_candidate(remote(3, 300, "f3")).unwrap();
+    a.add_remote_candidate(tcp("10.0.0.4", TcpType::Passive, 200, "f4"))
+        .unwrap();
+    a.start_connectivity_checks(start, true, REMOTE_UFRAG.to_owned(), REMOTE_PWD.to_owned())
+        .unwrap();
+    assert_eq!(
+        a.candidate_pairs.len(),
+        4,
+        "a pair per transport, none across"
+    );
+
+    let out = silent(&mut a, start, Duration::ZERO, 450 * MS);
+    let started = checks_started(&out);
+    assert_eq!(
+        started.iter().map(|s| s.to).collect::<Vec<_>>(),
+        (1..=4).map(remote_addr).collect::<Vec<_>>(),
+        "decreasing pair priority across both transports"
+    );
+    assert_eq!(
+        started.iter().map(|s| s.at).collect::<Vec<_>>(),
+        (0..4).map(|i| 50 * MS * i).collect::<Vec<_>>(),
+        "one check per Ta, the TCP ones included"
+    );
+}
+
 // --- Sections 6.1.2.6, 6.1.4.2, 7.2.5.3.3 and RFC 8838 Section 12: Frozen ---
 
 /// Section 6.1.2.6: of the pairs with one foundation exactly one starts Waiting, the one with

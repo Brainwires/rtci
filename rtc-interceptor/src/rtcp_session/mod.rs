@@ -198,6 +198,42 @@ pub enum RtcpSessionControl {
         /// The SSRCs of the other clock rates the stream was sent with, still in the session.
         previous: Vec<u32>,
     },
+    /// Stops the repetitions of the packets written with the [`RepeatInRegularReports`] of
+    /// this `key` that are still owed (RFC 7728 section 6.4: "stopping such repetition
+    /// whenever leaving the state").
+    StopRepeating {
+        /// The key the packets were written with.
+        key: u32,
+    },
+}
+
+/// Attached as an [`Attribute::Custom`] to RTCP packets written into the chain: besides
+/// sending them as it sends any feedback (in an Early packet when RFC 4585 3.5.2 allows one,
+/// in the next Regular packet otherwise), the RTCP session puts a copy of them into each of
+/// the next `count` **Regular** compound packets after the one that carried them.
+///
+/// RFC 7728 section 6.3 has a paused sender "repeat PAUSED in the next two regular RTCP
+/// reports" (section 8.2: "PAUSED MUST also be included in (at least) the next two regular
+/// RTCP reports"); the session is what knows when a regular report leaves. Packets written
+/// again with the same `key` replace the repetitions still owed for it, and
+/// [`RtcpSessionControl::StopRepeating`] ends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatInRegularReports {
+    /// Groups the repetitions, for replacing or stopping them (e.g. the media SSRC the
+    /// packets are about).
+    pub key: u32,
+    /// In how many Regular compound packets after the first one they ride again.
+    pub count: u8,
+}
+
+/// Packets the RTCP session repeats in its Regular compound packets.
+struct Repeat {
+    key: u32,
+    packets: Vec<Box<dyn rtcp::Packet>>,
+    left: u8,
+    /// Whether the compound packet that carried the original has left: only Regular packets
+    /// after it carry a copy.
+    armed: bool,
 }
 
 impl RtcpSessionControl {
@@ -508,6 +544,7 @@ impl RtcpSessionBuilder {
             immediate_congestion_feedback: self.immediate_congestion_feedback,
             outside_budget: false,
             pending: Vec::new(),
+            repeats: Vec::new(),
             early_at: None,
             sender_report_requested: None,
             clock_rate_switch: None,
@@ -771,6 +808,9 @@ pub struct RtcpSessionInterceptor {
     outside_budget: bool,
     /// Feedback and other packets waiting for a compound packet.
     pending: Vec<Box<dyn rtcp::Packet>>,
+    /// Packets each of the next Regular compound packets carries again
+    /// ([`RepeatInRegularReports`]).
+    repeats: Vec<Repeat>,
     /// RFC 4585 3.5.2: when the scheduled Early packet goes.
     early_at: Option<Instant>,
     /// RFC 6051 section 3.2: the local SSRC an RTCP-SR-REQ asked for an SR of, until an
@@ -2012,6 +2052,22 @@ impl RtcpSessionInterceptor {
         12 + 20 * entries
     }
 
+    /// RFC 7728 sections 6.3, 8.2 ([`RepeatInRegularReports`]): a copy of each armed
+    /// repetition into this Regular compound packet, as far as `budget` goes; a repetition
+    /// that does not fit waits for the next Regular packet.
+    fn take_repeats(&mut self, packets: &mut Vec<Box<dyn rtcp::Packet>>, budget: &mut usize) {
+        for repeat in self.repeats.iter_mut().filter(|repeat| repeat.armed) {
+            let size: usize = repeat.packets.iter().map(|p| p.marshal_size()).sum();
+            if size > *budget {
+                continue;
+            }
+            *budget -= size;
+            packets.extend(repeat.packets.iter().map(|p| p.cloned()));
+            repeat.left = repeat.left.saturating_sub(1);
+        }
+        self.repeats.retain(|repeat| repeat.left > 0);
+    }
+
     /// Moves what is waiting into `packets`, as far as `budget` octets go. What does not fit
     /// waits for the next packet; a packet too large for any compound packet goes anyway.
     fn take_pending(&mut self, packets: &mut Vec<Box<dyn rtcp::Packet>>, budget: &mut usize) {
@@ -2189,7 +2245,15 @@ impl RtcpSessionInterceptor {
             }
         }
 
+        if shape == Shape::Full {
+            self.take_repeats(&mut packets, &mut budget);
+        }
         self.take_pending(&mut packets, &mut budget);
+        // The originals of the repetitions not yet armed left with this packet (everything
+        // pending is taken): the Regular packets after it carry the copies.
+        for repeat in &mut self.repeats {
+            repeat.armed = true;
+        }
         self.early_at = None;
         self.compound_sent = true;
         self.send(now, packets);
@@ -2594,6 +2658,9 @@ impl RtcpSessionInterceptor {
             RtcpSessionControl::ClockRateSwitch { current, previous } => {
                 self.clock_rate_switch = Some((*current, previous.clone()));
             }
+            RtcpSessionControl::StopRepeating { key } => {
+                self.repeats.retain(|repeat| repeat.key != *key);
+            }
             RtcpSessionControl::Leave => {
                 // A session that joins on `Start` and was not given it has not joined: there
                 // is nothing to leave.
@@ -2606,6 +2673,7 @@ impl RtcpSessionInterceptor {
                 self.left = true;
                 self.departing.append(&mut self.locals);
                 self.pending.clear();
+                self.repeats.clear();
                 self.early_at = None;
                 self.flush_departing(now);
                 return;
@@ -2666,6 +2734,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
         }
         self.sync(now);
 
+        let repeat = msg.message.custom::<RepeatInRegularReports>().copied();
         match msg.message.packet {
             Packet::Rtp(ref packet) => {
                 if let Some(index) = self.local_index(packet.header.ssrc) {
@@ -2690,6 +2759,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                         let any = packet.as_any();
                         any.is::<TransportLayerCc>() || any.is::<CcFeedbackReport>()
                     });
+                if let Some(repeat) = repeat {
+                    self.repeats.retain(|held| held.key != repeat.key);
+                    if repeat.count > 0 {
+                        self.repeats.push(Repeat {
+                            key: repeat.key,
+                            packets: packets.iter().map(|packet| packet.cloned()).collect(),
+                            left: repeat.count,
+                            armed: false,
+                        });
+                    }
+                }
                 for packet in packets {
                     self.adopt(packet);
                 }
@@ -2732,11 +2812,18 @@ impl Interceptor for RtcpSessionInterceptor {
             .chain(info.ssrc_rtx.map(|ssrc| (ssrc, Role::Repair)))
             .chain(info.ssrc_fec.map(|ssrc| (ssrc, Role::Repair)));
         for (ssrc, role) in sources {
+            // The media SSRC may carry the section's other formats (RFC 7160, one SSRC).
+            let rates: &[(u8, u32)] = if role == Role::Media {
+                &info.payload_clock_rates
+            } else {
+                &[]
+            };
             if let Some(index) = self.local_index(ssrc) {
                 self.locals[index].stream.set_clock_rate(info.clock_rate);
+                self.locals[index].stream.set_payload_clock_rates(rates);
                 continue;
             }
-            let local = match self.departing.iter().position(|local| local.ssrc == ssrc) {
+            let mut local = match self.departing.iter().position(|local| local.ssrc == ssrc) {
                 Some(position) => {
                     let mut local = self.departing.remove(position);
                     local.stream.set_clock_rate(info.clock_rate);
@@ -2746,6 +2833,7 @@ impl Interceptor for RtcpSessionInterceptor {
                 }
                 None => Local::new(ssrc, kind, role, info.clock_rate),
             };
+            local.stream.set_payload_clock_rates(rates);
             self.locals.push(local);
         }
         self.sync_reporter();

@@ -1,7 +1,7 @@
 //! Loss and Duplicate RLE report blocks.
 //!
 //! Both blocks report per-packet status over a sequence-number range, run-length encoded: a
-//! [`Chunk`](crate::extended_report::rle::Chunk) is either a run of identical values or an explicit 15-bit vector. That keeps a report
+//! [`Chunk`] is either a run of identical values or an explicit 15-bit vector. That keeps a report
 //! covering a long range compact while still describing individual packets.
 //!
 //! The same structure serves both blocks; [`RLEReportBlock::is_loss_rle`](crate::extended_report::rle::RLEReportBlock::is_loss_rle) selects which.

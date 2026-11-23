@@ -1,30 +1,38 @@
-<h1 align="center">
- <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
- <br>
-</h1>
-<p align="center">
- <a href="https://github.com/webrtc-rs/rtc/actions">
-  <img src="https://github.com/webrtc-rs/rtc/workflows/cargo/badge.svg">
- </a>
- <a href="https://codecov.io/gh/webrtc-rs/rtc">
-  <img src="https://codecov.io/gh/webrtc-rs/rtc/branch/main/graph/badge.svg">
- </a>
- <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
-  <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
- </a>
- <a href="https://crates.io/crates/rtc-ice">
-  <img src="https://img.shields.io/crates/v/rtc-ice.svg">
- </a>
- <a href="https://docs.rs/rtc-ice">
-  <img src="https://docs.rs/rtc-ice/badge.svg">
- </a>
- <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
- </a>
- <a href="https://discord.gg/4Ju8UHdXMs">
-  <img src="https://img.shields.io/discord/800204819540869120?logo=discord" alt="Discord">
- </a>
-</p>
-<p align="center">
- RTC ICE Protocol in Rust With Sans-IO
-</p>
+# rtc-ice
+
+An ICE agent for WebRTC: candidates, their priorities and pairing, connectivity checks
+over STUN, nomination, consent freshness and ICE restarts, with trickle ICE and ICE over
+TCP.
+
+## Specifications
+
+- RFC 8445, Interactive Connectivity Establishment
+- RFC 8838, Trickle ICE
+- RFC 6544, TCP candidates with ICE
+- RFC 7675, STUN usage for consent freshness
+- RFC 8421, multihomed and dual-stack ICE
+- RFC 8489, STUN, as ICE uses it
+- draft-ietf-mmusic-mdns-ice-candidates, mDNS names for host candidates
+- RFC 8839, the ICE candidate attribute grammar
+
+Clause-by-clause status, with the test that proves each clause: [rfc8445](../docs/conformance/audit/rfc8445.md), [rfc8838](../docs/conformance/audit/rfc8838.md), [rfc6544](../docs/conformance/audit/rfc6544.md), [rfc7675](../docs/conformance/audit/rfc7675.md), [rfc8421](../docs/conformance/audit/rfc8421.md), [draft-ietf-mmusic-mdns-ice-candidates](../docs/conformance/audit/draft-ietf-mmusic-mdns-ice-candidates.md).
+
+## Use
+
+The root crate (`rtc`) runs an `Agent` per transport. Used on its own,
+`agent::Agent` takes local and remote candidates (`candidate`), inbound STUN datagrams and
+time, and gives the checks to send, the state changes and the selected pair.
+
+## Sans-I/O
+
+The agent never gathers by itself: the application binds the sockets and tells it which local candidates exist (the root crate's stream interface gathers TCP candidates for it). The crate does no I/O and reads no clock: every call that depends on time takes an `Instant` from the caller.
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+This crate is part of the [`rtc`](../README.md) workspace, which descends from
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
+[FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
+notices are retained.

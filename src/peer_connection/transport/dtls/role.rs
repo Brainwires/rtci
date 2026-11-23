@@ -144,18 +144,31 @@ impl fmt::Display for RTCDtlsRole {
 }
 
 /// The DTLS role a remote description states with `a=setup` (RFC 4145 section 4, RFC 8842
-/// section 5): the first media-level value, else the session-level one (the attribute may sit
-/// at either level, and a media-level one overrides it). `active` is the DTLS client, `passive`
+/// section 5): with BUNDLE, the value of the group's tagged section (RFC 8859 section 4.5 and
+/// appendix A: `setup` is TRANSPORT, taken "from the m= line whose information sets up the
+/// transport"; RFC 9143 section 7.1.3); else the first media-level value, else the
+/// session-level one (the attribute may sit at either level, and a media-level one overrides
+/// it). Firefox's subsequent answers say `passive` in the tagged section and `active` in the
+/// other bundled ones (`tests/fixtures/browser-sdp/`): the tagged section's is the role. `active` is the DTLS client, `passive`
 /// the server; `actpass`, no attribute or anything else is [`RTCDtlsRole::Auto`], "no role
 /// taken". `set_remote_description` refuses the values RFC 8842 does not allow before this is
 /// used (`validate_setup_attributes`).
 impl From<&SessionDescription> for RTCDtlsRole {
     fn from(session_description: &SessionDescription) -> Self {
-        let media_level = session_description
+        let tagged = session_description
             .media_descriptions
             .iter()
-            .flat_map(|media_section| media_section.attributes.iter())
-            .find(|attribute| attribute.key == "setup");
+            .find_map(|media| {
+                crate::peer_connection::sdp::tagged_section(session_description, media)
+            })
+            .and_then(|tagged| tagged.attributes.iter().find(|a| a.key == "setup"));
+        let media_level = tagged.or_else(|| {
+            session_description
+                .media_descriptions
+                .iter()
+                .flat_map(|media_section| media_section.attributes.iter())
+                .find(|attribute| attribute.key == "setup")
+        });
         let session_level = session_description
             .attributes
             .iter()
@@ -176,8 +189,8 @@ impl From<&SessionDescription> for RTCDtlsRole {
 /// The value is `active`, `passive` or `actpass`. `holdconn` is refused: RFC 8842 section 5.1
 /// bars it from a DTLS association, and taking it for "no preference" would start a handshake
 /// the peer said not to start. A level states one value. Sections may differ from each other:
-/// with BUNDLE the transport takes the first one's (the attribute's multiplexing category is
-/// TRANSPORT, RFC 8859 section 5.9), which is the one [`RTCDtlsRole::from`] reads.
+/// with BUNDLE the transport takes the tagged section's (the attribute's multiplexing category
+/// is TRANSPORT, RFC 8859 section 5.9), which is the one [`RTCDtlsRole::from`] reads.
 pub(crate) fn validate_setup_attributes(session_description: &SessionDescription) -> Result<()> {
     let check = |attributes: &[sdp::description::common::Attribute]| -> Result<()> {
         let mut stated = None;
@@ -228,6 +241,55 @@ mod test {
         for (role, expected_string) in tests {
             assert_eq!(role.to_string(), expected_string)
         }
+    }
+
+    /// RFC 8859 section 4.5 and appendix A: `setup` is TRANSPORT, so with BUNDLE the role is
+    /// the tagged section's: the group `1 0` tags mid 1, the second m= line, whose `passive`
+    /// wins over the first line's `active` (Firefox's subsequent answers have the tagged
+    /// section `passive` and the other bundled ones `active`). A section outside the group, and
+    /// a rejected tag, do not count.
+    #[test]
+    fn with_bundle_the_tagged_sections_setup_is_the_role() -> Result<()> {
+        let head = "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n";
+        let section = |port: u16, mid: &str, setup: &str| {
+            format!(
+                "m=audio {port} UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:{mid}\r\n\
+                 a=setup:{setup}\r\n"
+            )
+        };
+        let role = |sdp: String| -> Result<RTCDtlsRole> {
+            let mut reader = Cursor::new(sdp.into_bytes());
+            Ok(RTCDtlsRole::from(&SessionDescription::unmarshal(
+                &mut reader,
+            )?))
+        };
+        assert_eq!(
+            role(format!(
+                "{head}a=group:BUNDLE 1 0\r\n{}{}",
+                section(9, "0", "active"),
+                section(9, "1", "passive")
+            ))?,
+            RTCDtlsRole::Server
+        );
+        assert_eq!(
+            role(format!(
+                "{head}a=group:BUNDLE 1 0\r\n{}{}",
+                section(9, "0", "active"),
+                section(0, "1", "passive")
+            ))?,
+            RTCDtlsRole::Client,
+            "a rejected tag is not the tagged section"
+        );
+        assert_eq!(
+            role(format!(
+                "{head}a=group:BUNDLE 1\r\n{}{}",
+                section(9, "0", "active"),
+                section(9, "1", "passive")
+            ))?,
+            RTCDtlsRole::Server,
+            "the section outside the group does not decide"
+        );
+        Ok(())
     }
 
     #[test]

@@ -716,7 +716,7 @@ fn reports_on_lossy_sources_go_first_when_not_all_fit() {
         seq = seq.wrapping_add(1);
         for stream in 0..20u32 {
             let ssrc = 1000 + stream;
-            if (ssrc == 1007 || ssrc == 1013) && seq % 4 == 0 {
+            if (ssrc == 1007 || ssrc == 1013) && seq.is_multiple_of(4) {
                 continue;
             }
             chain.handle_read(rtp(at, ssrc, seq, 0)).unwrap();

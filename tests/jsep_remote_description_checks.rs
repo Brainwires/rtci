@@ -213,3 +213,139 @@ fn a_payload_type_with_two_configurations_in_one_bundle_group_refuses_the_descri
     )?;
     Ok(())
 }
+
+/// RFC 8859 section 4.7: an IDENTICAL-PER-PT attribute "MUST" have the same value for a
+/// payload type in every multiplexed section, and appendix A puts `a=imageattr` in that
+/// category (section 5.17). A remote offer whose bundled sections give 96 two different
+/// `a=imageattr` sets is refused; the same set, written for 96 in one section and as the `*`
+/// wildcard in the other, is applied, and so is a payload type that only one section limits
+/// when the other section does not use it.
+#[test]
+fn a_payload_type_with_two_image_attributes_in_one_bundle_group_refuses_the_description()
+-> TestResult {
+    let vp8 = |imageattr: &str| format!("a=rtpmap:96 VP8/90000\n{imageattr}");
+    let small = vp8("a=imageattr:96 recv [x=[48:640],y=[48:480]]\n");
+    let large = vp8("a=imageattr:96 recv [x=[48:1280],y=[48:720]]\n");
+    let wildcard_small = vp8("a=imageattr:* recv [x=[48:640],y=[48:480]]\n");
+
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &small), ("96", &large))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &small), ("96", &vp8("")))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &small), ("96", &wildcard_small))?,
+    )?;
+    let vp9 = "a=rtpmap:98 VP9/90000\na=imageattr:98 recv [x=[48:1280],y=[48:720]]\n";
+    let mut pc = default_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &small), ("98", vp9))?,
+    )?;
+    Ok(())
+}
+
+/// RFC 9143 section 12: "the identifier used for a given extension MUST identify the same
+/// extension across all the bundled media descriptions" (RFC 8859 appendix A: `extmap` is
+/// SPECIAL, as RFC 8285 defines it). A remote offer whose bundled sections give id 3 to two
+/// different extensions is refused; the same mapping in both, or different ids for different
+/// extensions, is applied, and so is id 3 reused by a section outside the group.
+#[test]
+fn an_extension_id_naming_two_extensions_in_one_bundle_group_refuses_the_description() -> TestResult
+{
+    const MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
+    const TOFFSET: &str = "urn:ietf:params:rtp-hdrext:toffset";
+    const ABS_SEND_TIME: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+    let vp8 = |extmap: &str| format!("a=rtpmap:96 VP8/90000\n{extmap}");
+    let conflicting = two_bundled_video_sections(
+        ("96", &vp8(&format!("a=extmap:3 {TOFFSET}\n"))),
+        (
+            "96",
+            &vp8(&format!("a=extmap:3/recvonly {ABS_SEND_TIME}\n")),
+        ),
+    )?;
+    let refused = default_peer()?.set_remote_description(Instant::now(), conflicting);
+    assert!(refused.is_err(), "{refused:?}");
+
+    let same = format!("a=extmap:1 {MID}\na=extmap:3 {TOFFSET}\n");
+    default_peer()?.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(("96", &vp8(&same)), ("96", &vp8(&same)))?,
+    )?;
+    default_peer()?.set_remote_description(
+        Instant::now(),
+        two_bundled_video_sections(
+            ("96", &vp8(&format!("a=extmap:3 {TOFFSET}\n"))),
+            ("96", &vp8(&format!("a=extmap:4 {ABS_SEND_TIME}\n"))),
+        )?,
+    )?;
+
+    // Two groups of one section each: an id means one extension within a group only.
+    let ungrouped = RTCSessionDescription::offer(crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0\na=group:BUNDLE 1\n\
+         m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=sendrecv\n{}\
+         m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:1\na=sendrecv\n{}",
+        vp8(&format!("a=extmap:3 {TOFFSET}\n")),
+        vp8(&format!("a=extmap:3 {ABS_SEND_TIME}\n")),
+    )))?;
+    default_peer()?.set_remote_description(Instant::now(), ungrouped)?;
+    Ok(())
+}
+
+/// RFC 7728 section 9: "There MUST NOT be more than one 'a=rtcp-fb' line with 'pause'
+/// applicable to a single payload type in the SDP, unless the additional line uses '*'". A
+/// remote offer with two `ccm pause` lines for 96, or two for `*`, is refused; one for 96 and
+/// one for `*` (which then applies to the other formats) is applied.
+#[test]
+fn two_pause_lines_for_one_payload_type_refuse_the_description() -> TestResult {
+    let vp8 = "a=rtpmap:96 VP8/90000\n";
+    for lines in [
+        "a=rtcp-fb:96 ccm pause\na=rtcp-fb:96 ccm pause nowait\n",
+        "a=rtcp-fb:* ccm pause\na=rtcp-fb:* ccm pause config=2\n",
+    ] {
+        let refused = default_peer()?
+            .set_remote_description(Instant::now(), video_offer("96", &format!("{vp8}{lines}"))?);
+        assert!(refused.is_err(), "{lines}: {refused:?}");
+    }
+    default_peer()?.set_remote_description(
+        Instant::now(),
+        video_offer(
+            "96",
+            &format!("{vp8}a=rtcp-fb:96 ccm pause\na=rtcp-fb:* ccm pause config=2\n"),
+        )?,
+    )?;
+    Ok(())
+}
+
+/// RFC 8866 section 5.7: "A session description MUST contain either at least one 'c=' line in
+/// each media description or a single 'c=' line at the session level." A remote offer whose
+/// section has no `c=`, with none at the session level, is refused; the same offer with the
+/// `c=` at the session level is applied.
+#[test]
+fn a_section_without_connection_data_anywhere_refuses_the_description() -> TestResult {
+    let transport = TRANSPORT.replace("c=IN IP4 0.0.0.0\n", "");
+    let section = format!(
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\n{transport}a=mid:0\na=sendrecv\na=rtpmap:96 VP8/90000\n"
+    );
+    let refused = default_peer()?.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(crlf(&format!("{SESSION}{section}")))?,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let session = SESSION.replace("t=0 0\n", "c=IN IP4 0.0.0.0\nt=0 0\n");
+    default_peer()?.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(crlf(&format!("{session}{section}")))?,
+    )?;
+    Ok(())
+}

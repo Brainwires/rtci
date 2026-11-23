@@ -84,7 +84,6 @@ async fn test_custom_interceptor_registry_with_rtcp_reports() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -254,11 +253,9 @@ async fn test_custom_interceptor_registry_with_rtcp_reports() -> Result<()> {
                         log::info!("✅ RTC peer connected!");
                     }
                 }
-                RTCPeerConnectionEvent::OnTrack(track_event) => {
-                    if let RTCTrackEvent::OnOpen(init) = track_event {
-                        log::info!("RTC got track opened: {}", init.track_id);
-                        track_id2_receiver_id.insert(init.track_id, init.receiver_id);
-                    }
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
+                    log::info!("RTC got track opened: {}", init.track_id);
+                    track_id2_receiver_id.insert(init.track_id, init.receiver_id);
                 }
                 _ => {}
             }
@@ -415,7 +412,6 @@ async fn test_sender_report_generation_on_rtp_send() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -548,11 +544,11 @@ async fn test_sender_report_generation_on_rtp_send() -> Result<()> {
 
         // Process events
         while let Some(event) = rtc_pc.poll_event() {
-            if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event {
-                if state == RTCPeerConnectionState::Connected {
-                    rtc_connected = true;
-                    log::info!("✅ RTC peer connected!");
-                }
+            if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event
+                && state == RTCPeerConnectionState::Connected
+            {
+                rtc_connected = true;
+                log::info!("✅ RTC peer connected!");
             }
         }
 
@@ -703,7 +699,6 @@ async fn test_register_default_interceptors_helper() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -834,11 +829,11 @@ async fn test_register_default_interceptors_helper() -> Result<()> {
         }
 
         while let Some(event) = rtc_pc.poll_event() {
-            if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event {
-                if state == RTCPeerConnectionState::Connected {
-                    rtc_connected = true;
-                    log::info!("✅ RTC peer connected!");
-                }
+            if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event
+                && state == RTCPeerConnectionState::Connected
+            {
+                rtc_connected = true;
+                log::info!("✅ RTC peer connected!");
             }
         }
 

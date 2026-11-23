@@ -290,3 +290,72 @@ fn the_applied_answer_keeps_the_bundle_attributes_in_the_tagged_section_only() -
     }
     Ok(())
 }
+
+/// RFC 8859 section 4.3: an IDENTICAL attribute has the same value in every bundled section,
+/// or (RFC 9143 section 7.1.3, and the note of section 4.3) is carried by the tagged section
+/// only and applies to all. A remote offer whose bundled sections carry two different values
+/// is refused (`a=ecn-capable-rtp`). Firefox's form, `a=rtcp-rsize` and
+/// `a=extmap-allow-mixed` in the tagged section only, the repeated form, and a section with
+/// `a=rtcp-mux-only` the tagged one lacks (what RFC 9429 section 5.2.2 writes for a section a
+/// later offer adds) are applied.
+#[test]
+fn bundled_sections_that_disagree_on_an_identical_attribute_are_refused() -> TestResult {
+    use jsep_common::{SESSION, TRANSPORT, crlf};
+    let section = |mid: &str, extra: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:{mid}\na=recvonly\n\
+             a=rtpmap:96 VP8/90000\n{extra}"
+        )
+    };
+    let offer = |tagged: &str, other: &str| {
+        RTCSessionDescription::offer(crlf(&format!(
+            "{SESSION}a=group:BUNDLE 0 1\n{}{}",
+            section("0", tagged),
+            section("1", other)
+        )))
+    };
+    for (tagged, other, what) in [
+        (
+            "a=ecn-capable-rtp: leap\n",
+            "a=ecn-capable-rtp: rtp\n",
+            "two a=ecn-capable-rtp values",
+        ),
+        (
+            "a=ecn-capable-rtp: leap\n",
+            "a=ecn-capable-rtp: leap ect=1\n",
+            "two a=ecn-capable-rtp values",
+        ),
+    ] {
+        let mut pc = default_peer()?;
+        let refused = pc
+            .set_remote_description(Instant::now(), offer(tagged, other)?)
+            .expect_err(what);
+        assert!(
+            refused.to_string().contains("RFC 8859 section 4.3"),
+            "{what}: {refused}"
+        );
+    }
+    for (tagged, other, what) in [
+        (
+            "a=rtcp-rsize\na=extmap-allow-mixed\n",
+            "",
+            "Firefox: in the tagged section only",
+        ),
+        (
+            "a=rtcp-rsize\na=extmap-allow-mixed\n",
+            "a=extmap-allow-mixed\na=rtcp-rsize\n",
+            "repeated",
+        ),
+        (
+            "",
+            "a=rtcp-mux-only\n",
+            "a=rtcp-mux-only in a later section only",
+        ),
+    ] {
+        let mut pc = default_peer()?;
+        pc.set_remote_description(Instant::now(), offer(tagged, other)?)
+            .map_err(|e| format!("{what}: {e}"))?;
+        pc.create_answer(None)?;
+    }
+    Ok(())
+}
