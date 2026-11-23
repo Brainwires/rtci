@@ -1822,13 +1822,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scenario only with the browser's first offer, after the Rust peer had set its own; the peer
   then changed its header encryption policy, which webrtc-extensions 10.2 refuses
   (`InvalidModificationError`), and never answered. The scenario now goes with the first
-  offer or `request-offer` and is set up before any description. The two balanced rollback
-  scenarios now edit the browser's offer as they edit Rust's (unedited, the browser proposes
-  to bundle every section again, which Rust rightly accepts), `peer.js` handles signalling
-  messages in arrival order (an offer right after an answer was taken for a colliding one
-  and ignored), the descriptions are read before the connection is closed (Firefox refuses
-  them after), and the check is that the transports from before stay connected and carry
-  the same media.
+  offer or `request-offer` and is set up before any description. `peer.js` handles
+  signalling messages in arrival order (an offer right after an answer was taken for a
+  colliding one and ignored) and reports the descriptions a failing scenario exchanged. The
+  two balanced rollback scenarios edit only Rust's first offer: after an unbundled exchange
+  Chromium and WebKit offer to bundle every section again, with the tagged section's ICE
+  credentials on the others (RFC 9143 7.5.1), which Rust accepts (7.3); that offer with its
+  group edited out is no description a peer could make (answering it restarts ICE on the
+  section whose credentials it changed, or libwebrtc refuses the answer). The rollback is
+  checked on the Rust side (`interop-peer` reports its transports at the rolled-back offer
+  and right after the rollback: the same, all connected), and media through what follows.
 - **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
   stream that sent last, whatever transport's congestion controller asked for it, so with
   several transports one transport's probes travelled another's path and measured nothing of
