@@ -229,6 +229,11 @@ pub(crate) struct SctpTransport {
     // (RFC 8841 6.1), which is not the negotiated send limit above. 0 before `start()`.
     pub(crate) receive_message_limit: usize,
 
+    /// The most bytes of incomplete messages the SCTP handler holds above an association, put
+    /// together from the parts SCTP delivers (RFC 9260 6.9): the larger of the receive buffer
+    /// and `receive_message_limit`. 0 before `start()`.
+    pub(crate) partial_message_limit: usize,
+
     /// The SCTP port this side advertises in `a=sctp-port` and uses as source port: the one
     /// of the current association, or of the next one before any was negotiated.
     pub(crate) local_port: u16,
@@ -294,6 +299,7 @@ impl SctpTransport {
             path_mtu_discovery: None,
             max_path_mtu: None,
             receive_message_limit: 0,
+            partial_message_limit: 0,
             local_port: DEFAULT_SCTP_PORT,
             negotiated_ports: None,
             staged: None,
@@ -448,6 +454,7 @@ impl SctpTransport {
         self.negotiated_max_message_size = None;
         self.negotiated_max_buffer_size = None;
         self.receive_message_limit = 0;
+        self.partial_message_limit = 0;
         self.negotiated_ports = None;
         self.lost = false;
     }
@@ -811,13 +818,14 @@ impl SctpTransport {
             timers.max_t3_rtx_retrans = limit;
             sctp_transport_config = sctp_transport_config.with_timer_config(timers);
         }
-        // RFC 9260 6.2 drops new DATA once a closed window was advertised, so a message larger
-        // than the receive buffer could never arrive. Where the `max-message-size` this side
-        // advertised (RFC 8841 6.1) is larger than its buffer, the one-message overcommit
-        // keeps that promise.
+        // RFC 9260 6.2 drops new DATA once a closed window was advertised. The SCTP handler
+        // reads in parts (RFC 9260 6.9) and puts messages together above the association, so
+        // a message larger than the receive buffer, or interleaved messages that fill it
+        // together, open the window again as they arrive: no overcommit is needed. What is
+        // held above it is bounded per association by the larger of the buffer and the
+        // largest message accepted.
         let receive_buffer = sctp_transport_config.max_receive_buffer_size();
-        sctp_transport_config =
-            sctp_transport_config.with_zero_window_overcommit(can_send_size > receive_buffer);
+        self.partial_message_limit = (receive_buffer as usize).max(can_send_size as usize);
 
         // One association per DTLS transport: once this side has initiated its own, or has
         // taken the peer's INIT, the endpoint starts no other.

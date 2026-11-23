@@ -10,8 +10,8 @@ use datachannel::message::message_channel_threshold::DataChannelThreshold;
 use log::{debug, warn};
 use sctp::{
     Association, AssociationError, AssociationEvent, AssociationHandle, ClientConfig,
-    DatagramEvent, EndpointEvent, Event, Payload, PayloadProtocolIdentifier, ReconfigEvent,
-    ReliabilityType, Stream, StreamEvent, StreamId,
+    DatagramEvent, EndpointEvent, Event, MessagePart, Payload, PayloadProtocolIdentifier,
+    ReconfigEvent, ReliabilityType, Stream, StreamEvent, StreamId,
 };
 use shared::error::{Error, Result};
 use shared::marshal::Unmarshal;
@@ -131,6 +131,10 @@ pub(crate) struct SctpHandlerContext {
     /// (`IceHandlerContext::selected_pair_changes`).
     selected_pair_changes: u64,
 
+    /// Messages SCTP gives out in parts (RFC 9260 6.9), put together here for the data
+    /// channels, which deliver whole messages only (W3C webrtc 6.2, "receiving messages").
+    reassembly: InboundReassembly,
+
     /// The newest instant a caller has supplied, seeded at construction.
     ///
     /// This is the one place in the core that genuinely needs a retained instant: the flush is
@@ -160,6 +164,7 @@ impl SctpHandlerContext {
             path_dirty: false,
             path_changed: false,
             selected_pair_changes: 0,
+            reassembly: InboundReassembly::default(),
             now,
         }
     }
@@ -187,6 +192,180 @@ impl SctpHandlerContext {
     /// handed one older than the newest seen. See the design's §9.3.
     fn observe(&mut self, now: Instant) {
         self.now = now.max(self.now);
+    }
+}
+
+/// The limits a drain reads under: the largest message accepted (the `max-message-size` this
+/// side advertised, RFC 8841 6.1) and the most bytes of incomplete messages held above an
+/// association.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReceiveLimits {
+    pub(crate) message: usize,
+    pub(crate) partial: usize,
+}
+
+/// An incomplete message of one stream: the parts SCTP gave out so far.
+#[derive(Debug)]
+struct PartialMessage {
+    ppi: PayloadProtocolIdentifier,
+    payload: BytesMut,
+    /// The message is refused (larger than this side accepts, or over the association's
+    /// limit): its parts are dropped as they come, up to its end of record.
+    refused: bool,
+    /// It was refused for the association's limit: once it has ended, its data channel is
+    /// closed.
+    close_at_end: bool,
+}
+
+/// What a part made of its message.
+#[derive(Debug, PartialEq)]
+enum PartOutcome {
+    /// More parts are to come.
+    Incomplete,
+    /// The message is whole.
+    Complete(PayloadProtocolIdentifier, BytesMut),
+    /// The message is larger than this side accepts (RFC 8841 6.1): dropped, as a whole
+    /// message that large is.
+    TooLarge,
+    /// Holding it would take the association past its limit for incomplete messages:
+    /// dropped, and its data channel fails (RFC 8831 6.6). Its stream is reset once the
+    /// message has ended (`ended`), so that what is still to come of it is read and dropped
+    /// rather than left in the SCTP receive buffer, where it would hold the window closed.
+    OverLimit { ended: bool },
+    /// A part of a message already refused; `close` when it ended a message refused for the
+    /// association's limit.
+    Dropped { close: bool },
+}
+
+/// Puts together the messages SCTP gives out in parts.
+///
+/// RFC 9260 6.9 lets the receiver hand the first fragments of a message to the upper layer
+/// before the rest has arrived, which frees the SCTP receive buffer and so reopens the window
+/// (6.2). The data channel API delivers whole messages only, so the parts are joined here,
+/// outside the association's receive buffer. Bounded twice: each message by the
+/// `max-message-size` this side advertised (RFC 8841 6.1, a larger one is dropped as before),
+/// and the bytes of all incomplete messages of an association by `ReceiveLimits::partial`
+/// (the larger of its receive buffer and that message size). A peer that has more in progress
+/// at once than that (one message per stream at most, RFC 8260 2.2.2) loses the data channel
+/// whose part would go over: RFC 8831 6.6, an error "related to the received message", for
+/// which "the receiver SHOULD close the corresponding data channel".
+#[derive(Debug, Default)]
+pub(crate) struct InboundReassembly {
+    messages: HashMap<(AssociationHandle, StreamId), PartialMessage>,
+    /// Bytes held in `messages`, per association.
+    held: HashMap<AssociationHandle, usize>,
+}
+
+impl InboundReassembly {
+    /// Bytes of incomplete messages held for association `ch`.
+    pub(crate) fn held(&self, ch: AssociationHandle) -> usize {
+        self.held.get(&ch).copied().unwrap_or(0)
+    }
+
+    fn release(&mut self, ch: AssociationHandle, n: usize) {
+        if let Some(held) = self.held.get_mut(&ch) {
+            *held = held.saturating_sub(n);
+            if *held == 0 {
+                self.held.remove(&ch);
+            }
+        }
+    }
+
+    /// Adds `part` of the message on `(ch, id)`.
+    fn add(
+        &mut self,
+        ch: AssociationHandle,
+        id: StreamId,
+        part: &MessagePart,
+        limits: ReceiveLimits,
+    ) -> PartOutcome {
+        let key = (ch, id);
+        if part.first
+            && let Some(old) = self.messages.remove(&key)
+        {
+            self.release(ch, old.payload.len());
+        }
+        let len = part.chunks.len();
+        if part.first && part.end_of_record && !self.messages.contains_key(&key) {
+            // Whole in one part: nothing is held here.
+            return match part.chunks.to_payload(limits.message) {
+                Ok(payload) => PartOutcome::Complete(part.chunks.ppi, payload),
+                Err(_) => PartOutcome::TooLarge,
+            };
+        }
+        let entry = self.messages.entry(key).or_insert_with(|| PartialMessage {
+            ppi: part.chunks.ppi,
+            payload: BytesMut::new(),
+            // A later part whose first one this side never saw (the stream was taken over
+            // from a restarted association, say) cannot make a message.
+            refused: !part.first,
+            close_at_end: false,
+        });
+        let outcome = if entry.refused {
+            PartOutcome::Dropped {
+                close: part.end_of_record && entry.close_at_end,
+            }
+        } else if entry.payload.len() + len > limits.message {
+            PartOutcome::TooLarge
+        } else if self.held.get(&ch).copied().unwrap_or(0) + len > limits.partial {
+            entry.close_at_end = true;
+            PartOutcome::OverLimit {
+                ended: part.end_of_record,
+            }
+        } else {
+            let start = entry.payload.len();
+            entry.payload.resize(start + len, 0);
+            let _ = part.chunks.read(&mut entry.payload[start..]);
+            *self.held.entry(ch).or_default() += len;
+            PartOutcome::Incomplete
+        };
+        if matches!(
+            outcome,
+            PartOutcome::TooLarge | PartOutcome::OverLimit { .. }
+        ) {
+            entry.refused = true;
+            let dropped = std::mem::take(&mut entry.payload).len();
+            self.release(ch, dropped);
+        }
+        if part.end_of_record {
+            let done = self.messages.remove(&key).expect("present");
+            self.release(ch, done.payload.len());
+            if outcome == PartOutcome::Incomplete {
+                return PartOutcome::Complete(done.ppi, done.payload);
+            }
+        }
+        outcome
+    }
+
+    /// Drops what is held of stream `id`'s message: it ended without its last part
+    /// (`StreamEvent::PartialDeliveryAborted`), or the stream is gone. Returns whether it was
+    /// refused for the association's limit, so that its data channel is to be closed now.
+    pub(crate) fn forget(&mut self, ch: AssociationHandle, id: StreamId) -> bool {
+        match self.messages.remove(&(ch, id)) {
+            Some(old) => {
+                self.release(ch, old.payload.len());
+                old.close_at_end
+            }
+            None => false,
+        }
+    }
+
+    /// Drops everything held for association `ch`.
+    pub(crate) fn forget_association(&mut self, ch: AssociationHandle) {
+        self.messages.retain(|(handle, _), _| *handle != ch);
+        self.held.remove(&ch);
+    }
+
+    fn clear(&mut self) {
+        self.messages.clear();
+        self.held.clear();
+    }
+}
+
+fn receive_limits(transport: &SctpTransport) -> ReceiveLimits {
+    ReceiveLimits {
+        message: transport.receive_message_limit,
+        partial: transport.partial_message_limit,
     }
 }
 
@@ -248,12 +427,15 @@ impl<'a> SctpHandler<'a> {
         peer_opened: &mut HashSet<(AssociationHandle, StreamId)>,
         ordered_until_reply: &mut HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
         unannounced: &HashSet<AssociationHandle>,
+        reassembly: &mut InboundReassembly,
         conn: &mut Association,
         ch: AssociationHandle,
         id: StreamId,
-        max_len: usize,
+        now: Instant,
+        limits: ReceiveLimits,
         budget: &mut usize,
         messages: &mut Vec<SctpMessage>,
+        event_outs: &mut VecDeque<TaggedRTCEventInternal>,
     ) -> Result<()> {
         // An SCTP DATA chunk may arrive in the same flight as the tail of the
         // association handshake.  Do not expose that chunk to the DataChannel
@@ -282,12 +464,18 @@ impl<'a> SctpHandler<'a> {
             // (`retry_deferred_resets`), which unregisters the stream: the next read finds it
             // closed. That is the end of its data, not an error, or the messages read in this
             // pass, the last one included, would be lost with the error.
-            let chunks = match stream.read_sctp() {
-                Ok(chunks) => chunks,
+            //
+            // Read in parts (RFC 9260 6.9): a message SCTP cannot hold whole (larger than the
+            // receive buffer, or one of several interleaved messages that fill it together)
+            // leaves the receive buffer as it arrives and is put together here, so the window
+            // opens again under RFC 9260 6.2's drop. A message that is complete when read
+            // comes as one part.
+            let part = match stream.read_part() {
+                Ok(part) => part,
                 Err(Error::ErrStreamClosed) => None,
                 Err(err) => return Err(err),
             };
-            let Some(chunks) = chunks else {
+            let Some(part) = part else {
                 ctx_pending.remove(&(ch, id));
                 return Ok(());
             };
@@ -295,40 +483,62 @@ impl<'a> SctpHandler<'a> {
             // it knows the channel, and an unordered channel sends unordered from here on
             // (RFC 8832 section 6). The stream may be gone already, its reset completed by
             // this read, and then there is nothing left to configure.
-            if let Some((reliability_type, reliability_value)) =
-                ordered_until_reply.remove(&(ch, id))
+            if part.first
+                && let Some((reliability_type, reliability_value)) =
+                    ordered_until_reply.remove(&(ch, id))
             {
                 let _ = stream.set_reliability_params(true, reliability_type, reliability_value);
             }
-            // Reassemble straight into the delivered buffer: one copy instead of the
-            // scratch-buffer round-trip (`max_len` preserves the max-message-size bound
-            // `read()` enforced via `ErrShortBuffer`).
-            let payload = match chunks.to_payload(max_len) {
-                Ok(payload) => payload,
-                Err(Error::ErrShortBuffer) => {
-                    // Larger than this side advertised (RFC 8841 6.1). Drop this message
-                    // alone: returning the error abandoned the rest of the read, and with it
-                    // the messages already taken out of SCTP in this pass, which SCTP had
+            let (ppi, payload) = match reassembly.add(ch, id, &part, limits) {
+                PartOutcome::Complete(ppi, payload) => (ppi, payload),
+                PartOutcome::Incomplete | PartOutcome::Dropped { close: false } => continue,
+                PartOutcome::Dropped { close: true } => {
+                    let _ = stream.close(now);
+                    continue;
+                }
+                PartOutcome::TooLarge => {
+                    // Larger than this side advertised (RFC 8841 6.1). Dropped alone:
+                    // returning the error abandoned the rest of the read, and with it the
+                    // messages already taken out of SCTP in this pass, which SCTP had
                     // acknowledged and nothing would deliver again.
                     warn!(
-                        "dropping a {} byte message on stream {id}: over the {max_len} byte                          receive limit",
-                        chunks.len()
+                        "dropping a message on stream {id}: over the {} byte receive limit",
+                        limits.message
                     );
                     continue;
                 }
-                Err(err) => return Err(err),
+                PartOutcome::OverLimit { ended } => {
+                    // RFC 8831 6.6: "If ... some error condition related to the received
+                    // message is detected by the receiver ..., the receiver SHOULD close the
+                    // corresponding data channel." The channel fails (an error to the
+                    // application); the rest of the message is read and dropped as it comes,
+                    // and then its stream is reset, the closing procedure of section 6.7.
+                    warn!(
+                        "closing the data channel on stream {id}: its message would take the \
+                         incomplete messages held for association {} past {} bytes",
+                        ch.0, limits.partial
+                    );
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
+                    });
+                    if ended {
+                        let _ = stream.close(now);
+                    }
+                    continue;
+                }
             };
             // An in-band channel is opened by a DATA_CHANNEL_OPEN on its stream (RFC 8832 §6),
             // so only the first message of a stream the peer created can be the OPEN that
             // describes it. A first message that is not DCEP belongs to an out-of-band
             // negotiated channel, which this side configured itself.
-            if peer_opened.remove(&(ch, id)) && chunks.ppi == PayloadProtocolIdentifier::Dcep {
+            if peer_opened.remove(&(ch, id)) && ppi == PayloadProtocolIdentifier::Dcep {
                 Self::apply_peer_reliability(&mut stream, &payload)?;
             }
             messages.push(SctpMessage::Inbound(DataChannelMessage {
                 association_handle: ch.0,
                 stream_id: id,
-                ppi: chunks.ppi,
+                ppi,
                 payload,
                 negotiated: false,
             }));
@@ -352,7 +562,8 @@ impl<'a> SctpHandler<'a> {
         peer_opened: &mut HashSet<(AssociationHandle, StreamId)>,
         ordered_until_reply: &mut HashMap<(AssociationHandle, StreamId), (ReliabilityType, u32)>,
         unannounced: &mut HashSet<AssociationHandle>,
-        max_len: usize,
+        reassembly: &mut InboundReassembly,
+        limits: ReceiveLimits,
         budget: &mut usize,
         messages: &mut Vec<SctpMessage>,
     ) -> Result<()> {
@@ -384,6 +595,7 @@ impl<'a> SctpHandler<'a> {
                     pending_readable.retain(|(handle, _)| *handle != ch);
                     peer_opened.retain(|(handle, _)| *handle != ch);
                     ordered_until_reply.retain(|(handle, _), _| *handle != ch);
+                    reassembly.forget_association(ch);
                     // What each closed stream had sent, before its channel is closed: the
                     // channel's final `bufferedAmount` counts only what was never sent.
                     for (id, dequeued) in conn.streams_lost_in_restart() {
@@ -414,6 +626,7 @@ impl<'a> SctpHandler<'a> {
                     });
                     // The stream is gone, and with it what was remembered about it.
                     ordered_until_reply.remove(&(ch, id));
+                    reassembly.forget(ch, id);
                     // A stream reset (either side's close) is the channel's own
                     // closing procedure; the association going away under it is
                     // a failure the channel reports first.
@@ -506,13 +719,30 @@ impl<'a> SctpHandler<'a> {
                         peer_opened,
                         ordered_until_reply,
                         unannounced,
+                        reassembly,
                         conn,
                         ch,
                         id,
-                        max_len,
+                        now,
+                        limits,
                         budget,
                         messages,
+                        event_outs,
                     )?;
+                }
+                // RFC 6458 6.1.7: the message being read in parts was abandoned by the
+                // sender (PR-SCTP): what was put together of it is dropped. A data channel
+                // delivers whole messages, so the application sees nothing of it, as of any
+                // message a partially reliable channel abandons.
+                Event::Stream(StreamEvent::PartialDeliveryAborted { id, sequence, .. }) => {
+                    debug!(
+                        "association_handle {} stream {id}: message {sequence} abandoned while \
+                         read in parts",
+                        ch.0
+                    );
+                    if reassembly.forget(ch, id) {
+                        let _ = conn.stream(id).and_then(|mut stream| stream.close(now));
+                    }
                 }
                 Event::Stream(StreamEvent::BufferedAmountLow { id }) => {
                     debug!(
@@ -641,7 +871,7 @@ impl<'a> SctpHandler<'a> {
             return Ok(false);
         }
 
-        let max_len = self.ctx.sctp_transport.receive_message_limit;
+        let limits = receive_limits(&self.ctx.sctp_transport);
         let mut pending: Vec<(AssociationHandle, StreamId)> =
             self.ctx.pending_readable.iter().copied().collect();
         pending.sort_unstable();
@@ -674,12 +904,15 @@ impl<'a> SctpHandler<'a> {
                 &mut self.ctx.peer_opened_streams,
                 &mut self.ctx.ordered_until_reply,
                 &self.ctx.unannounced,
+                &mut self.ctx.reassembly,
                 conn,
                 ch,
                 id,
-                max_len,
+                now,
+                limits,
                 &mut budget,
                 &mut messages,
+                &mut self.ctx.event_outs,
             ) {
                 warn!("parked sctp stream {id} cannot be read, forgetting it: {err}");
                 self.ctx.pending_readable.remove(&(ch, id));
@@ -897,6 +1130,7 @@ impl<'a> SctpHandler<'a> {
         self.ctx.peer_opened_streams.clear();
         self.ctx.ordered_until_reply.clear();
         self.ctx.unannounced.clear();
+        self.ctx.reassembly.clear();
         self.flush_transmits(self.ctx.now);
     }
 
@@ -955,7 +1189,7 @@ impl<'a>
 
             // Both are read before `sctp_transport` is split up below, which would otherwise
             // conflict with the borrow of `sctp_associations`.
-            let max_len = self.ctx.sctp_transport.receive_message_limit;
+            let limits = receive_limits(&self.ctx.sctp_transport);
             let sizes = self.ctx.sctp_transport.association_sizes();
             let mut budget = self.read_budget();
             let mut inbound_transport = None;
@@ -1058,7 +1292,8 @@ impl<'a>
                         &mut self.ctx.peer_opened_streams,
                         &mut self.ctx.ordered_until_reply,
                         &mut self.ctx.unannounced,
-                        max_len,
+                        &mut self.ctx.reassembly,
+                        limits,
                         &mut budget,
                         &mut messages,
                     )?;
@@ -1105,6 +1340,7 @@ impl<'a>
                         .ordered_until_reply
                         .retain(|(pch, _), _| *pch != ch);
                     self.ctx.unannounced.remove(&ch);
+                    self.ctx.reassembly.forget_association(ch);
                 }
             }
             self.note_associations_removed(removed);
@@ -1485,7 +1721,7 @@ impl<'a>
         }
 
         let mut transmits = vec![];
-        let max_len = self.ctx.sctp_transport.receive_message_limit;
+        let limits = receive_limits(&self.ctx.sctp_transport);
         let mut budget = self.read_budget();
 
         let (sctp_endpoint, sctp_associations) = (
@@ -1511,7 +1747,8 @@ impl<'a>
                 &mut self.ctx.peer_opened_streams,
                 &mut self.ctx.ordered_until_reply,
                 &mut self.ctx.unannounced,
-                max_len,
+                &mut self.ctx.reassembly,
+                limits,
                 &mut budget,
                 &mut messages,
             )?;
@@ -1566,6 +1803,7 @@ impl<'a>
                 .ordered_until_reply
                 .retain(|(pch, _), _| *pch != ch);
             self.ctx.unannounced.remove(&ch);
+            self.ctx.reassembly.forget_association(ch);
         }
         self.note_associations_removed(removed);
 
@@ -1726,6 +1964,14 @@ mod tests {
 
     /// [`establish`] with the client's association configured by `client_config`.
     fn establish_with(client_config: TransportConfig) -> Established {
+        establish_with_both(client_config, TransportConfig::default())
+    }
+
+    /// [`establish`] with both associations' configurations.
+    fn establish_with_both(
+        client_config: TransportConfig,
+        server_config: TransportConfig,
+    ) -> Established {
         let now = Instant::now();
 
         let mut client_ep = Endpoint::new(
@@ -1738,7 +1984,7 @@ mod tests {
             server_addr(),
             TransportProtocol::UDP,
             EndpointConfig::default().into(),
-            Some(ServerConfig::new(TransportConfig::default()).into()),
+            Some(ServerConfig::new(server_config).into()),
         );
 
         let (client_ch, mut client_conn) = client_ep
@@ -2067,6 +2313,8 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
+        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
+        transport.partial_message_limit = 1024 * 1024;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -2750,6 +2998,8 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
+        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
+        transport.partial_message_limit = 1024 * 1024;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -2818,6 +3068,8 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
+        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
+        transport.partial_message_limit = 1024 * 1024;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -5758,5 +6010,164 @@ mod tests {
             "the channel on stream 4 fails, then closes"
         );
         assert!(ordered_until_reply.is_empty());
+    }
+
+    /// Runs the client handler and the server association against each other, 10 ms a step,
+    /// for up to `steps` steps or until `done`. Returns the largest number of bytes of
+    /// incomplete messages the client handler held at once.
+    fn exchange_with_server(
+        ctx: &mut SctpHandlerContext,
+        server_ep: &mut Endpoint,
+        server_conn: &mut Association,
+        mut dgrams: Vec<Bytes>,
+        start: Instant,
+        steps: u32,
+        mut done: impl FnMut(&SctpHandlerContext) -> bool,
+    ) -> usize {
+        let ch = only_association(ctx);
+        let mut held = 0;
+        let mut now = start;
+        for _ in 0..steps {
+            client_read(ctx, 0, dgrams, now);
+            held = held.max(ctx.reassembly.held(ch));
+            if done(ctx) {
+                break;
+            }
+            now += Duration::from_millis(10);
+            SctpHandler::new(ctx, 0)
+                .handle_timeout(now)
+                .expect("client timeout");
+            held = held.max(ctx.reassembly.held(ch));
+            let back = flush(ctx);
+            deliver_to_server(server_ep, server_conn, back, now);
+            if server_conn.poll_timeout().is_some_and(|at| at <= now) {
+                server_conn.handle_timeout(now);
+            }
+            while server_conn.poll().is_some() {}
+            dgrams = drain_transmits(server_conn, now);
+        }
+        held
+    }
+
+    fn delivered(ctx: &SctpHandlerContext) -> Vec<(StreamId, Vec<u8>)> {
+        ctx.read_outs
+            .iter()
+            .filter_map(|m| match &m.message {
+                RTCMessageInternal::Dtls(DTLSMessage::Sctp(msg)) => {
+                    Some((msg.stream_id, msg.payload.to_vec()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pattern(seed: u8, len: usize) -> Bytes {
+        Bytes::from(
+            (0..len)
+                .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    /// RFC 9260 6.9 and 6.2 through the data channel layer: a 48 KiB message to a receiver
+    /// with a 16 KiB SCTP receive buffer, under RFC 9260 6.2's drop (no overcommit). The
+    /// handler reads it in parts and puts it together above the association, so the window
+    /// opens again as it arrives, and the data channel gets it whole, once (W3C: whole
+    /// messages only). What was held above the association is released with it.
+    #[test]
+    fn a_message_larger_than_the_receive_buffer_reaches_the_data_channel_whole() {
+        let now = Instant::now();
+        let e = establish_with(TransportConfig::default().with_max_receive_buffer_size(16 * 1024));
+        let (mut server_ep, mut server_conn) = (e.server_ep, e.server_conn);
+        let payload = pattern(3, 48 * 1024);
+        let dgrams = server_send(
+            &mut server_conn,
+            1,
+            &[(PayloadProtocolIdentifier::Binary, payload.clone())],
+            now,
+        );
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        let held = exchange_with_server(
+            &mut ctx,
+            &mut server_ep,
+            &mut server_conn,
+            dgrams,
+            now,
+            3000,
+            |ctx| !delivered(ctx).is_empty(),
+        );
+        assert_eq!(delivered(&ctx), vec![(1, payload.to_vec())]);
+        assert!(held > 0, "it was put together above the association");
+        assert_eq!(ctx.reassembly.held(e.client_ch), 0, "and released");
+    }
+
+    /// RFC 8260 with RFC 9260 6.9: the bytes of incomplete messages held above an association
+    /// are bounded, by the larger of its receive buffer and the largest message it accepts
+    /// (here 64 KiB). Three interleaved 28 KiB messages (84 KiB in all) to a receiver with a
+    /// 16 KiB buffer: what is held never exceeds the bound, the message whose part would take
+    /// it past is dropped and its data channel fails (RFC 8831 6.6: "the receiver SHOULD
+    /// close the corresponding data channel"), and the other two messages arrive whole.
+    #[test]
+    fn incomplete_messages_held_above_an_association_are_bounded() {
+        const LIMIT: usize = 64 * 1024;
+        let now = Instant::now();
+        let e = establish_with_both(
+            TransportConfig::default()
+                .with_max_receive_buffer_size(16 * 1024)
+                .with_message_interleaving(true),
+            TransportConfig::default()
+                .with_message_interleaving(true)
+                .with_stream_scheduler(sctp::StreamScheduler::WeightedFairQueueing),
+        );
+        let (mut server_ep, mut server_conn) = (e.server_ep, e.server_conn);
+        let streams = [1u16, 3, 5];
+        let payloads: Vec<Bytes> = (0..3).map(|i| pattern(i, 28 * 1024)).collect();
+        for (&id, payload) in streams.iter().zip(&payloads) {
+            server_conn
+                .open_stream(id, PayloadProtocolIdentifier::Binary)
+                .expect("open")
+                .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)
+                .expect("write");
+        }
+        while server_conn.poll().is_some() {}
+        let dgrams = drain_transmits(&mut server_conn, now);
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        ctx.sctp_transport.partial_message_limit = LIMIT;
+        assert!(
+            ctx.sctp_transport
+                .sctp_associations
+                .values()
+                .all(|a| a.message_interleaving()),
+            "I-DATA negotiated"
+        );
+        let held = exchange_with_server(
+            &mut ctx,
+            &mut server_ep,
+            &mut server_conn,
+            dgrams,
+            now,
+            6000,
+            |ctx| delivered(ctx).len() == 2,
+        );
+        assert!(held <= LIMIT, "{held} bytes held, bound {LIMIT}");
+        let failed: Vec<u16> = ctx
+            .event_outs
+            .iter()
+            .filter_map(|e| match e.event {
+                RTCEventInternal::SCTPStreamFailed(_, id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed.len(), 1, "one channel fails: {failed:?}");
+        let mut got = delivered(&ctx);
+        got.sort();
+        let want: Vec<(u16, Vec<u8>)> = streams
+            .iter()
+            .zip(&payloads)
+            .filter(|(id, _)| **id != failed[0])
+            .map(|(id, p)| (*id, p.to_vec()))
+            .collect();
+        assert_eq!(got, want, "the other two arrive whole");
+        assert_eq!(ctx.reassembly.held(e.client_ch), 0);
     }
 }
