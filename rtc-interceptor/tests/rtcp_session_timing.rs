@@ -406,3 +406,117 @@ fn several_local_ssrcs_report_together_once_per_interval() {
         assert!(pair[1] - pair[0] >= 0.9, "{:?}", offsets(&sent, base));
     }
 }
+
+/// Regular (no feedback) packets among `sent` after `from`.
+fn regular_after(sent: &[Sent], from: Instant) -> usize {
+    sent.iter()
+        .filter(|sent| sent.at >= from)
+        .filter(|sent| {
+            !sent.has::<rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc>()
+        })
+        .count()
+}
+
+/// Twenty seconds of a receive-only session at a 16 kbit/s session bandwidth (100 octets of
+/// RTCP a second), writing a 100-octet congestion control feedback packet every 250 ms (400
+/// octets a second, more than the whole RTCP bandwidth). Returns the regular packets sent
+/// after the first two seconds.
+fn regular_reports_beside_congestion_feedback(in_budget: bool) -> usize {
+    use rtcp::transport_feedbacks::transport_layer_cc::{
+        PacketStatusChunk, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc, TransportLayerCc,
+    };
+    let mut chain = chain(
+        builder()
+            .with_t_rr_interval(Duration::ZERO)
+            .with_congestion_feedback_in_budget(in_budget)
+            .with_bandwidth(RtcpBandwidth {
+                session: Some(16_000),
+                ..Default::default()
+            }),
+    );
+    let base = Instant::now();
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut sent = vec![];
+    for step in 0..80u32 {
+        let now = base + secs(0.25) * step;
+        sent.extend(run(&mut chain, now));
+        let feedback = TransportLayerCc {
+            sender_ssrc: 0,
+            media_ssrc: 0x1234,
+            base_sequence_number: step as u16 * 10,
+            packet_status_count: 10,
+            reference_time: step,
+            fb_pkt_count: step as u8,
+            packet_chunks: vec![
+                PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                    type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                    packet_status_symbol: SymbolTypeTcc::PacketReceivedSmallDelta,
+                    run_length: 10,
+                });
+                20
+            ],
+            recv_deltas: vec![],
+        };
+        chain
+            .handle_write(rtcp(now, vec![Box::new(feedback)]))
+            .unwrap();
+        sent.extend(written(&mut chain));
+    }
+    sent.extend(run(&mut chain, base + secs(20.0)));
+    regular_after(&sent, base + secs(2.0))
+}
+
+/// `RtcpSessionBuilder::with_congestion_feedback_in_budget` (the `Performance` behaviour
+/// profile): congestion control feedback that leaves at once counts against the RTCP
+/// bandwidth, and the regular reports space out (as a `T_rr_interval`, RFC 4585 3.5.3) to
+/// what it leaves, here nothing: one every five seconds, the most it stretches to. Without
+/// it (the default) the regular reports keep RFC 3550's interval for the whole bandwidth.
+#[test]
+fn congestion_feedback_in_the_budget_spaces_the_regular_reports() {
+    let outside = regular_reports_beside_congestion_feedback(false);
+    let inside = regular_reports_beside_congestion_feedback(true);
+    assert!(outside >= 15, "default: {outside} regular reports in 18 s");
+    assert!(
+        (3..=5).contains(&inside),
+        "in the budget: {inside} regular reports in 18 s (default {outside})"
+    );
+}
+
+/// The regular packets of a sender of about 27 kbit/s (thirty 112-octet packets a second), no
+/// `b=` line, over seconds 4 to 24.
+fn regular_reports_at_low_media(minimum: Option<u64>) -> usize {
+    let builder = builder().with_t_rr_interval(Duration::ZERO);
+    let builder = match minimum {
+        Some(minimum) => builder.with_minimum_session_bandwidth(minimum),
+        None => builder,
+    };
+    let mut chain = chain(builder);
+    let base = Instant::now();
+    chain.bind_local_stream(&video(10));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut sent = vec![];
+    for step in 0..720u32 {
+        let now = base + secs(1.0 / 30.0) * step;
+        chain
+            .handle_write(rtp(now, 10, step as u16, step * 3000))
+            .unwrap();
+        sent.extend(run(&mut chain, now));
+    }
+    regular_after(&sent, base + secs(4.0))
+}
+
+/// RFC 3550 6.2 with the media measured: by default the session bandwidth is never taken
+/// below 64 kbit/s, so a 27 kbit/s sender reports as a 64 kbit/s one would; with
+/// `with_minimum_session_bandwidth(16_000)` (the `Performance` profile) the RTCP bandwidth
+/// follows the media, and the sender reports about 27/64 as often.
+#[test]
+fn the_minimum_session_bandwidth_lets_rtcp_follow_low_media() {
+    let floor = regular_reports_at_low_media(None) as f64;
+    let follows = regular_reports_at_low_media(Some(16_000)) as f64;
+    assert!(floor >= 40.0, "{floor}");
+    let ratio = follows / floor;
+    assert!(
+        (0.3..=0.6).contains(&ratio),
+        "{follows} / {floor} = {ratio:.2}"
+    );
+}
