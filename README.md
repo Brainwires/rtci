@@ -294,7 +294,11 @@ Once the application serves this interface, the engine gathers a passive, a simu
 and an active TCP candidate for each UDP host address it is given (RFC 6544; per transport when
 sections are not bundled), frames with RFC 4571, connects to `turn:...?transport=tcp` and
 `turns:` servers (names resolved through `StreamCommand::Resolve`, Happy Eyeballs across the
-addresses) and closes the connections ICE no longer needs. A `turns:...?transport=udp` server is reached over DTLS
+addresses) and closes the connections ICE no longer needs. For each TCP / TLS server it also makes a TCP allocation
+(RFC 6062): a passive and an active relayed TCP candidate, each peer's connection on a data
+connection to the server (`with_turn_tcp_relay(false)` turns this off). Once ICE has completed
+it closes the TURN connections whose relayed candidate is not selected, and reconnects and
+restarts ICE when the selected one's is lost (RFC 6544 section 11.2). A `turns:...?transport=udp` server is reached over DTLS
 (RFC 7350) from a UDP host candidate's base without the stream interface: its records go out
 through `poll_write` and come back through `handle_read` like any datagram (a name still needs
 `Resolve`). With `stun:` / `stuns:` servers

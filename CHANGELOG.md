@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Relayed TCP candidates by the engine** (branch `conf/tcp-13-relayed-tcp`): for each
+  `turn:...?transport=tcp` and `turns:` server the engine now also asks for a TCP allocation
+  (RFC 6062, a second control connection) and announces two more candidates, a passive relayed
+  TCP candidate and an active one on port 9. `StreamSettings` has a new public field
+  `turn_tcp_relay`; `SettingEngineBuilder::with_turn_tcp_relay(false)` restores one UDP
+  allocation per server. Once ICE of a transport has completed, the connection to a TURN
+  server whose relayed candidate is not selected is closed (RFC 6544 section 11.2); it was kept
+  for the life of the connection. `rtc_shared::stream::Framing` has a new variant `Raw`
+  (`Framing` is `#[non_exhaustive]`).
+
 - **ice**: `Url` has a new public field `explicit_port` (whether the URI gives the port; set
   by `parse_url`). A STUN or TURN server whose URI has no port is now looked up with S-NAPTR
   and SRV before its addresses (branch `conf/tcp-10-srv-naptr`): a driver serving the stream
@@ -2091,6 +2101,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **Relayed TCP candidates and TURN connection upkeep in the engine** (branch
+  `conf/tcp-13-relayed-tcp`; RFC 6544 sections 5.5 and 11.2, RFC 6062). A TCP allocation per
+  TCP / TLS server (REQUESTED-TRANSPORT TCP on a control connection of its own); its relayed
+  address becomes a passive TCP candidate and, on port 9, an active one. A peer reaching the
+  passive candidate is announced by ConnectionAttempt; a check from the active one sends
+  Connect (after CreatePermission); either way the engine opens a data connection to the
+  server (`Framing::Raw`, TLS for `turns:`), binds it with ConnectionBind and then carries the
+  peer's RFC 4571 stream to and from ICE. Permissions are created for the remote TCP
+  candidates' addresses as they are learned (the server refuses a peer without one). Once ICE
+  has completed, TURN connections whose relayed candidate the selected pair does not use are
+  closed and the selected one's kept (11.2); a lost TURN connection or DTLS association whose
+  candidate is in use is reconnected, allocated again and ICE restarted (`restart_ice`).
+  `tests/turn_tcp_relay.rs`; env `testenv_turn_streams.rs::the_engine_connects_over_a_relayed_tcp_candidate`.
 
 - **TURN over DTLS in the engine** (branch `conf/tcp-12-turn-dtls`; RFC 7350, RFC 8656 section
   3.1). A `turns:...?transport=udp` server of the configuration is reached with a client-role

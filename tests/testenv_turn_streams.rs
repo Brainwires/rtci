@@ -41,6 +41,18 @@ enum Signal {
     Done,
 }
 
+/// What a peer of a case is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerKind {
+    /// The relay policy, the engine's TURN client.
+    Relay,
+    /// As `Relay`, TCP candidates only: the relayed TCP candidates of the TCP allocation.
+    RelayTcpOnly,
+    /// No TURN server: the engine's own ICE-TCP candidates (the application adds the host
+    /// candidate of its UDP socket).
+    IceTcp,
+}
+
 struct Outcome {
     connected: bool,
     received: Vec<Vec<u8>>,
@@ -67,6 +79,7 @@ fn peer(
     rx: Receiver<Signal>,
     messages: Vec<Vec<u8>>,
     udp: Option<std::net::IpAddr>,
+    kind: PeerKind,
 ) -> io::Result<Outcome> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -83,25 +96,28 @@ fn peer(
             .parse()
             .unwrap_or(env.turn_tls);
         let mut buf = vec![0u8; 2048];
+        let configuration = if kind == PeerKind::IceTcp {
+            RTCConfigurationBuilder::new().build()
+        } else {
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(vec![RTCIceServer {
+                    urls: vec![url.clone()],
+                    username: env.user.clone(),
+                    credential: env.pass.clone(),
+                }])
+                .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+                .build()
+        };
+        let mut settings = SettingEngineBuilder::new().with_turn_tls(TurnTlsConfig {
+            roots: Some(roots(&env)),
+            ..Default::default()
+        });
+        if kind == PeerKind::RelayTcpOnly {
+            settings = settings.with_network_types(vec![rtc::ice::network_type::NetworkType::Tcp4]);
+        }
         let mut pc = RTCPeerConnectionBuilder::new()
-            .with_configuration(
-                RTCConfigurationBuilder::new()
-                    .with_ice_servers(vec![RTCIceServer {
-                        urls: vec![url],
-                        username: env.user.clone(),
-                        credential: env.pass.clone(),
-                    }])
-                    .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
-                    .build(),
-            )
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_turn_tls(TurnTlsConfig {
-                        roots: Some(roots(&env)),
-                        ..Default::default()
-                    })
-                    .build(),
-            )
+            .with_configuration(configuration)
+            .with_setting_engine(settings.build())
             .build(Instant::now())
             .unwrap();
         let mut driver = StreamDriver::default();
@@ -290,13 +306,13 @@ fn relay_through_engine_turn(url: &str, expected: RTCIceServerTransportProtocol)
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let offerer = std::thread::spawn(move || {
         in_netns("h-symmetric-a", move || {
-            peer(true, u, e, a_tx, a_rx, m, ip_a)
+            peer(true, u, e, a_tx, a_rx, m, ip_a, PeerKind::Relay)
         })
     });
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let answerer = std::thread::spawn(move || {
         in_netns("h-symmetric-b", move || {
-            peer(false, u, e, b_tx, b_rx, m, ip_b)
+            peer(false, u, e, b_tx, b_rx, m, ip_b, PeerKind::Relay)
         })
     });
     let b = answerer.join().unwrap().unwrap();
@@ -355,5 +371,61 @@ fn the_engine_relays_through_turn_over_dtls() {
     relay_through_engine_turn(
         &format!("turns:{}?transport=udp", env.turn_tls),
         RTCIceServerTransportProtocol::Dtls,
+    );
+}
+
+/// RFC 6544 section 5.5 over TURN-TCP (RFC 6062), run by the engine: the offerer behind a
+/// symmetric NAT has only relayed TCP candidates (the relay policy, TCP candidates only), the
+/// answerer on the WAN only its engine ICE-TCP candidates. The connection runs through
+/// coturn's TCP allocation: a Connect from the active relayed candidate to the passive one, or
+/// the answerer's active candidate connecting to the relayed address (a ConnectionAttempt);
+/// either way a data connection bound with ConnectionBind carries the RFC 4571 stream.
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn the_engine_connects_over_a_relayed_tcp_candidate() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let url = format!("turn:{}?transport=tcp", env.turn_tcp);
+    let mut messages = vec![b"over a relayed TCP candidate".to_vec(), vec![5u8; 20_000]];
+    messages.extend((0..20u8).map(|i| vec![i; 300]));
+    let ip_b = testenv::source_ip("open-b", env.turn_tcp).unwrap();
+    let (a_tx, b_rx) = std::sync::mpsc::channel();
+    let (b_tx, a_rx) = std::sync::mpsc::channel();
+    let (u, e, m) = (url.clone(), env.clone(), messages.clone());
+    let offerer = std::thread::spawn(move || {
+        in_netns("h-symmetric-a", move || {
+            peer(true, u, e, a_tx, a_rx, m, None, PeerKind::RelayTcpOnly)
+        })
+    });
+    let (u, e, m) = (url.clone(), env.clone(), messages.clone());
+    let answerer = std::thread::spawn(move || {
+        in_netns("open-b", move || {
+            peer(false, u, e, b_tx, b_rx, m, Some(ip_b), PeerKind::IceTcp)
+        })
+    });
+    let b = answerer.join().unwrap().unwrap();
+    let a = offerer.join().unwrap().unwrap();
+    eprintln!(
+        "TURN-TCP relayed candidate: received {} of {}; offerer relay protocols {:?}",
+        b.received.len(),
+        messages.len(),
+        a.relay_protocols
+    );
+    assert!(
+        a.connected && b.connected,
+        "not connected over the relayed TCP candidate"
+    );
+    assert_eq!(b.received, messages, "every message, in order");
+    assert!(
+        !a.relay_protocols.is_empty()
+            && a.relay_protocols
+                .iter()
+                .all(|p| *p == RTCIceServerTransportProtocol::Tcp),
+        "only relayed TCP candidates: {:?}",
+        a.relay_protocols
+    );
+    assert!(
+        a.only_relay,
+        "the offerer's application sockets carried nothing"
     );
 }

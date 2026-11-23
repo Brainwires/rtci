@@ -273,11 +273,12 @@ impl RTCPeerConnection {
             streams_settings.reflexive,
             turn_tls.client_config().ok().flatten(),
         );
-        let engine_turn = super::turn_streams::EngineTurn::new(
+        let mut engine_turn = super::turn_streams::EngineTurn::new(
             &agent_config.urls,
             streams_settings.turn,
             turn_tls,
         );
+        engine_turn.tcp_relay = streams_settings.turn_tcp_relay;
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:

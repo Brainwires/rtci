@@ -2810,6 +2810,9 @@ impl RTCPeerConnection {
             Some(s) => s,
             None => remote_candidate.candidate.as_str(),
         };
+        // A remote TCP candidate's address gets a permission on the engine's TCP allocations
+        // (RFC 6062 section 5.3), the active ones too, which ICE does not keep.
+        self.note_remote_tcp_candidate(candidate_value);
         // The value is written into the remote description's text as one line.
         if candidate_value
             .bytes()

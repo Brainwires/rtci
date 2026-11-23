@@ -36,6 +36,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod tcp_relay;
+
 /// Datagrams held per peer address while their permission is being created.
 const MAX_HELD_PER_PEER: usize = 32;
 
@@ -56,6 +58,9 @@ enum LinkState {
     /// Given up: no address connected, TLS failed, the allocation failed or the connection
     /// ended.
     Failed,
+    /// Closed once ICE had completed without its relayed candidate (RFC 6544 section 11.2);
+    /// a new ICE generation allocates again.
+    Released,
 }
 
 /// What carries a link's TURN messages.
@@ -95,6 +100,12 @@ pub(crate) struct TurnLink {
     dtls_attempts: Vec<DtlsAttempt>,
     /// Over DTLS: the association that won.
     dtls: Option<DtlsAttempt>,
+    /// A TCP allocation (RFC 6062): relayed TCP candidates, peers on data connections.
+    relay_tcp: bool,
+    /// Its peers' data connections.
+    data: Vec<tcp_relay::DataConn>,
+    /// The peer addresses it has created a permission for.
+    permitted: HashSet<IpAddr>,
     state: LinkState,
     race: Option<HappyEyeballs>,
     attempts: Vec<StreamId>,
@@ -113,7 +124,7 @@ pub(crate) struct TurnLink {
 
 impl TurnLink {
     fn settled(&self) -> bool {
-        self.state == LinkState::Failed || self.relay.is_some()
+        matches!(self.state, LinkState::Failed | LinkState::Released) || self.relay.is_some()
     }
 
     fn url_string(&self) -> String {
@@ -171,6 +182,12 @@ pub(crate) struct EngineTurn {
     pub(crate) enabled: bool,
     tls: TurnTlsConfig,
     tls_config: Option<std::sync::Arc<rustls::ClientConfig>>,
+    /// Relayed TCP candidates from a TCP allocation beside the UDP one, for each server over
+    /// TCP or TLS (RFC 6544 section 5.5).
+    pub(crate) tcp_relay: bool,
+    /// The addresses of the remote TCP candidates signalled per transport (for the
+    /// permissions of the TCP allocations).
+    remote_tcp_ips: Vec<(TransportId, IpAddr)>,
 }
 
 impl EngineTurn {
@@ -196,6 +213,8 @@ impl EngineTurn {
             enabled,
             tls,
             tls_config,
+            tcp_relay: true,
+            remote_tcp_ips: vec![],
         }
     }
 
@@ -210,24 +229,36 @@ impl EngineTurn {
                 (SchemeType::Turns, _) => Carrier::Tls,
                 _ => Carrier::Tcp,
             };
-            self.links.push(TurnLink {
-                transport,
-                url: url.clone(),
-                carrier,
-                dtls_attempts: vec![],
-                dtls: None,
-                state: LinkState::Pending,
-                race: None,
-                attempts: vec![],
-                client: None,
-                server: None,
-                link_local: None,
-                relay: None,
-                announced_ufrag: None,
-                query: None,
-                discovery: None,
-                held: HashMap::new(),
-            });
+            // Over TCP and TLS also a TCP allocation, on a control connection of its own (an
+            // allocation is its 5-tuple's, RFC 8656 section 2.2), for relayed TCP candidates.
+            let kinds: &[bool] = if self.tcp_relay && carrier != Carrier::Dtls {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            for &relay_tcp in kinds {
+                self.links.push(TurnLink {
+                    transport,
+                    url: url.clone(),
+                    carrier,
+                    dtls_attempts: vec![],
+                    dtls: None,
+                    relay_tcp,
+                    data: vec![],
+                    permitted: HashSet::new(),
+                    state: LinkState::Pending,
+                    race: None,
+                    attempts: vec![],
+                    client: None,
+                    server: None,
+                    link_local: None,
+                    relay: None,
+                    announced_ufrag: None,
+                    query: None,
+                    discovery: None,
+                    held: HashMap::new(),
+                });
+            }
         }
     }
 
@@ -280,9 +311,16 @@ impl EngineTurn {
             .position(|l| l.state == LinkState::Open(id) || l.attempts.contains(&id))
     }
 
-    /// The link whose relayed address is `addr`.
+    /// Whether a TCP allocation has its relayed address.
+    pub(crate) fn has_tcp_relay(&self) -> bool {
+        self.links.iter().any(|l| l.relay_tcp && l.relay.is_some())
+    }
+
+    /// The link whose relayed UDP address is `addr`.
     pub(crate) fn link_of_relay(&self, addr: SocketAddr) -> Option<usize> {
-        self.links.iter().position(|l| l.relay == Some(addr))
+        self.links
+            .iter()
+            .position(|l| !l.relay_tcp && l.relay == Some(addr))
     }
 
     /// The links and their relayed addresses, for diagnostics.
@@ -366,6 +404,27 @@ impl RTCPeerConnection {
                     link.state = LinkState::Resolving(query);
                     link.query = Some(query);
                 }
+            }
+        }
+        // A link released once ICE had completed allocates again for a new ICE generation.
+        for i in 0..self.streams.turn.links.len() {
+            let l = &self.streams.turn.links[i];
+            if l.state != LinkState::Released {
+                continue;
+            }
+            let ufrag = self
+                .ice_transport_of(l.transport)
+                .agent
+                .get_local_credentials()
+                .ufrag
+                .clone();
+            if l.announced_ufrag.as_ref() != Some(&ufrag) {
+                let l = &mut self.streams.turn.links[i];
+                l.state = LinkState::Pending;
+                l.race = None;
+                l.query = None;
+                l.discovery = None;
+                l.announced_ufrag = None;
             }
         }
         self.drive_turn_races(now);
@@ -629,8 +688,14 @@ impl RTCPeerConnection {
                 .turn_allocation_refresh_interval_cap,
             ..Default::default()
         };
+        let tcp = link.relay_tcp;
         match turn::client::Client::new(config, provider).and_then(|mut client| {
-            client.allocate(now)?;
+            if tcp {
+                // RFC 6062 section 4.1: REQUESTED-TRANSPORT TCP.
+                client.allocate_with(now, tcp_relay::tcp_allocation())?;
+            } else {
+                client.allocate(now)?;
+            }
             Ok(client)
         }) {
             Ok(client) => link.client = Some(client),
@@ -662,11 +727,101 @@ impl RTCPeerConnection {
                     "TURN connection to {} ended: its allocation is gone",
                     link.url
                 );
-                link.state = LinkState::Failed;
-                link.client = None;
-                link.relay = None;
+                self.turn_allocation_lost(now, index);
             }
             _ => {}
+        }
+    }
+
+    /// A link's allocation is gone with its connection (or DTLS association). RFC 6544 section
+    /// 11.2: when the session uses an address that server allocated, the client "SHOULD
+    /// reconnect to the TURN server, obtain a new allocation, and restart ICE": the link starts
+    /// over and ICE is restarted (`restart_ice`: the next offer has new credentials, and the
+    /// new generation announces the new relayed candidate). A link whose candidate is not in
+    /// use has failed.
+    pub(crate) fn turn_allocation_lost(&mut self, now: Instant, index: usize) {
+        let in_use = self.relay_in_use(index);
+        let link = &mut self.streams.turn.links[index];
+        for conn in std::mem::take(&mut link.data) {
+            if let Some(id) = conn.stream() {
+                self.streams.table.close(id);
+            }
+        }
+        let link = &mut self.streams.turn.links[index];
+        link.client = None;
+        link.relay = None;
+        link.dtls = None;
+        link.permitted.clear();
+        link.attempts.clear();
+        if in_use {
+            debug!(
+                "{}: reconnecting for a new allocation; ICE restarts",
+                link.url
+            );
+            link.state = LinkState::Pending;
+            link.race = None;
+            link.query = None;
+            link.discovery = None;
+            link.announced_ufrag = None;
+            self.restart_ice();
+            self.start_turn_links();
+        } else {
+            link.state = LinkState::Failed;
+        }
+        let _ = now;
+    }
+
+    /// Whether the selected pair of the link's transport has its relayed candidate as the
+    /// local one.
+    fn relay_in_use(&self, index: usize) -> bool {
+        let link = &self.streams.turn.links[index];
+        let Some(relay) = link.relay else {
+            return false;
+        };
+        self.ice_transport_of(link.transport)
+            .agent
+            .get_selected_candidate_pair()
+            .is_some_and(|(local, _)| {
+                let addr = local.addr();
+                addr == relay || (link.relay_tcp && addr.ip() == relay.ip() && addr.port() == 9)
+            })
+    }
+
+    /// RFC 6544 section 11.2: once ICE of a transport has completed, the connection to a TURN
+    /// server whose relayed candidate the selected pair does not use is closed (it "MUST be
+    /// kept open ... if a relayed candidate from the TURN server was selected"). Its
+    /// allocation goes with it; a later ICE generation allocates again.
+    pub(crate) fn close_settled_turn_links(&mut self) {
+        for index in 0..self.streams.turn.links.len() {
+            let link = &self.streams.turn.links[index];
+            let LinkState::Open(id) = link.state else {
+                continue;
+            };
+            let completed = self
+                .ice_transport_of(link.transport)
+                .agent
+                .get_selected_candidate_pair()
+                .is_some();
+            if !completed || link.relay.is_none() || self.relay_in_use(index) {
+                continue;
+            }
+            debug!(
+                "{}: ICE completed without its relayed candidate: closed",
+                link.url
+            );
+            let link = &mut self.streams.turn.links[index];
+            for conn in std::mem::take(&mut link.data) {
+                if let Some(id) = conn.stream() {
+                    self.streams.table.close(id);
+                }
+            }
+            let link = &mut self.streams.turn.links[index];
+            link.state = LinkState::Released;
+            link.client = None;
+            link.relay = None;
+            link.attempts.clear();
+            link.permitted.clear();
+            self.streams.table.close(id);
         }
     }
 
@@ -698,6 +853,8 @@ impl RTCPeerConnection {
     pub(crate) fn pump_turn(&mut self, now: Instant) {
         let mut inbound = vec![];
         let mut announce = vec![];
+        let mut peers_ready = vec![];
+        let mut failed_peers = vec![];
         for index in 0..self.streams.turn.links.len() {
             let link = &mut self.streams.turn.links[index];
             let id = match link.state {
@@ -735,6 +892,16 @@ impl RTCPeerConnection {
                             inbound.push((link.transport, relay, peer, data));
                         }
                     }
+                    turn::client::Event::ConnectResponse(_, peer, connection_id) => {
+                        peers_ready.push((index, peer, connection_id, false));
+                    }
+                    turn::client::Event::ConnectionAttempt(_, peer, connection_id) => {
+                        peers_ready.push((index, peer, connection_id, true));
+                    }
+                    turn::client::Event::ConnectError(_, peer, err) => {
+                        debug!("TURN Connect to {peer}: {err:?}");
+                        failed_peers.push((index, peer));
+                    }
                     _ => {}
                 }
             }
@@ -768,6 +935,15 @@ impl RTCPeerConnection {
         for index in announce {
             self.announce_relay_candidate(index);
         }
+        for (index, peer, connection_id, attempt) in peers_ready {
+            self.turn_tcp_peer_ready(index, peer, connection_id, attempt);
+        }
+        for (index, peer) in failed_peers {
+            self.turn_tcp_connect_failed(now, index, peer);
+        }
+        for index in 0..self.streams.turn.links.len() {
+            self.pump_turn_data(now, index);
+        }
         for (transport, relay, peer, data) in inbound {
             // On the transport the relayed candidate is of.
             self.pipeline_context.observe(now);
@@ -794,41 +970,61 @@ impl RTCPeerConnection {
             return;
         };
         let (url, protocol, transport) = (link.url_string(), link.protocol(), link.transport);
-        let candidate = ice::candidate::candidate_relay::CandidateRelayConfig {
-            base_config: ice::candidate::CandidateConfig {
-                network: "udp".to_owned(),
-                address: relay.ip().to_string(),
-                port: relay.port(),
-                component: 1,
+        // A TCP allocation: a passive relayed candidate, and on port 9 an active one (RFC
+        // 6544 sections 4.5 and 5.5).
+        let kinds: Vec<(&str, u16, Option<ice::tcp_type::TcpType>)> = if link.relay_tcp {
+            vec![
+                ("tcp", relay.port(), Some(ice::tcp_type::TcpType::Passive)),
+                ("tcp", 9, Some(ice::tcp_type::TcpType::Active)),
+            ]
+        } else {
+            vec![("udp", relay.port(), None)]
+        };
+        for (network, port, tcp_type) in kinds {
+            let candidate = ice::candidate::candidate_relay::CandidateRelayConfig {
+                base_config: ice::candidate::CandidateConfig {
+                    network: network.to_owned(),
+                    address: relay.ip().to_string(),
+                    port,
+                    component: 1,
+                    ..Default::default()
+                },
+                rel_addr: local.ip().to_string(),
+                rel_port: local.port(),
                 ..Default::default()
-            },
-            rel_addr: local.ip().to_string(),
-            rel_port: local.port(),
-            ..Default::default()
-        }
-        .new_candidate_relay()
-        .and_then(|c| crate::peer_connection::transport::RTCIceCandidate::from(&c).to_json());
-        match candidate {
-            Ok(init) => {
-                let value = init
-                    .candidate
-                    .strip_prefix("candidate:")
-                    .unwrap_or(&init.candidate)
-                    .to_owned();
-                if let Err(err) =
-                    self.add_engine_local_candidate(transport, &value, Some(&url), Some(protocol))
-                {
-                    debug!("relayed candidate {relay} not added: {err}");
-                }
-                let ufrag = self
-                    .ice_transport_of(transport)
-                    .agent
-                    .get_local_credentials()
-                    .ufrag
-                    .clone();
-                self.streams.turn.links[index].announced_ufrag = Some(ufrag);
             }
-            Err(err) => debug!("relayed candidate {relay} not made: {err}"),
+            .new_candidate_relay()
+            .and_then(|mut c| {
+                if let Some(tcp_type) = tcp_type {
+                    c.set_tcp_type(tcp_type);
+                }
+                crate::peer_connection::transport::RTCIceCandidate::from(&c).to_json()
+            });
+            match candidate {
+                Ok(init) => {
+                    let value = init
+                        .candidate
+                        .strip_prefix("candidate:")
+                        .unwrap_or(&init.candidate)
+                        .to_owned();
+                    if let Err(err) = self.add_engine_local_candidate(
+                        transport,
+                        &value,
+                        Some(&url),
+                        Some(protocol),
+                    ) {
+                        debug!("relayed candidate {relay} not added: {err}");
+                    }
+                    let ufrag = self
+                        .ice_transport_of(transport)
+                        .agent
+                        .get_local_credentials()
+                        .ufrag
+                        .clone();
+                    self.streams.turn.links[index].announced_ufrag = Some(ufrag);
+                }
+                Err(err) => debug!("relayed candidate {relay} not made: {err}"),
+            }
         }
     }
 
@@ -871,6 +1067,7 @@ impl RTCPeerConnection {
             let kept = ids.contains(&l.transport);
             if !kept {
                 ended.extend(l.attempts.iter().copied());
+                ended.extend(l.data.iter().filter_map(|c| c.stream()));
                 // A DTLS association says close_notify.
                 for a in l.dtls.iter_mut().chain(l.dtls_attempts.iter_mut()) {
                     let _ = a.endpoint.close(now);
@@ -921,6 +1118,9 @@ impl RTCPeerConnection {
                 next = Some(next.map_or(t, |n| n.min(t)));
             }
         }
+        if let Some(t) = self.turn_data_poll_timeout() {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
         next
     }
 
@@ -940,6 +1140,7 @@ impl RTCPeerConnection {
             }
         }
         self.turn_dtls_timeouts(now);
+        self.turn_data_handle_timeout(now);
         // A records query the driver did not answer counts as empty.
         let unanswered: Vec<u64> = self
             .streams
@@ -1212,15 +1413,14 @@ impl RTCPeerConnection {
         remote: SocketAddr,
         won: bool,
     ) {
-        let link = &mut self.streams.turn.links[index];
         if won {
             debug!("TURN over DTLS to {remote} ended: its allocation is gone");
-            link.dtls = None;
-            link.state = LinkState::Failed;
-            link.client = None;
-            link.relay = None;
+            // RFC 6544 section 11.2: "Similar measures SHOULD apply also to other types of
+            // relaying servers".
+            self.turn_allocation_lost(now, index);
             return;
         }
+        let link = &mut self.streams.turn.links[index];
         link.dtls_attempts
             .retain(|a| !(a.base == base && a.remote == remote));
         if link.state == LinkState::Connecting {
@@ -1288,6 +1488,8 @@ mod tests {
         .map(|u| Url::parse_url(u).unwrap())
         .collect();
         let mut turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
+        // The TCP allocations beside: `a_tcp_or_tls_server_gets_a_tcp_allocation_link_too`.
+        turn.tcp_relay = false;
         assert!(
             turn.links.is_empty(),
             "no link before a transport needs one"
@@ -1330,6 +1532,38 @@ mod tests {
             turn.links[4..]
                 .iter()
                 .all(|l| l.transport == TransportId(1))
+        );
+    }
+
+    /// RFC 6062 section 4.1 with RFC 6544 section 5.5: a server over TCP or TLS gets a second
+    /// link for a TCP allocation (its own control connection: an allocation is its 5-tuple's);
+    /// one over DTLS none (a TCP allocation needs TCP or TLS to the server).
+    #[test]
+    fn a_tcp_or_tls_server_gets_a_tcp_allocation_link_too() {
+        let urls: Vec<Url> = [
+            "turn:192.0.2.1:3478?transport=tcp",
+            "turns:192.0.2.1:5349?transport=tcp",
+            "turns:192.0.2.1:5349?transport=udp",
+        ]
+        .iter()
+        .map(|u| Url::parse_url(u).unwrap())
+        .collect();
+        let mut turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
+        turn.make_links(TransportId::default());
+        let links: Vec<(RTCIceServerTransportProtocol, bool)> = turn
+            .links
+            .iter()
+            .map(|l| (l.protocol(), l.relay_tcp))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                (RTCIceServerTransportProtocol::Tcp, false),
+                (RTCIceServerTransportProtocol::Tcp, true),
+                (RTCIceServerTransportProtocol::Tls, false),
+                (RTCIceServerTransportProtocol::Tls, true),
+                (RTCIceServerTransportProtocol::Dtls, false),
+            ]
         );
     }
 }

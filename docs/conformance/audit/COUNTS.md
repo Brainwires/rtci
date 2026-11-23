@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4622 | 104 | 193 | 104 | 21 | 634 | 5678 |
-| SHOULD | 742 | 65 | 69 | 67 | 6 | 327 | 1276 |
+| MUST | 4623 | 104 | 193 | 104 | 21 | 633 | 5678 |
+| SHOULD | 744 | 65 | 69 | 67 | 6 | 325 | 1276 |
 | MAY | 407 | 30 | 34 | 126 | 0 | 172 | 769 |
 | PROC | 59 | 2 | 4 | 2 | 0 | 0 | 67 |
-| all | 5830 | 201 | 300 | 299 | 27 | 1133 | 7790 |
+| all | 5833 | 201 | 300 | 299 | 27 | 1130 | 7790 |
 
 ## Per file
 
@@ -130,8 +130,8 @@ is a procedure step without a keyword.
 | `rfc6525.md` | MUST | 62 | 1 | 0 | 0 | 0 | 0 | 63 |
 | `rfc6525.md` | SHOULD | 11 | 0 | 0 | 0 | 0 | 1 | 12 |
 | `rfc6525.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
-| `rfc6544.md` | MUST | 25 | 3 | 1 | 1 | 0 | 9 | 39 |
-| `rfc6544.md` | SHOULD | 16 | 1 | 2 | 0 | 0 | 14 | 33 |
+| `rfc6544.md` | MUST | 26 | 3 | 1 | 1 | 0 | 8 | 39 |
+| `rfc6544.md` | SHOULD | 18 | 1 | 2 | 0 | 0 | 12 | 33 |
 | `rfc6544.md` | MAY | 3 | 1 | 0 | 4 | 0 | 1 | 9 |
 | `rfc6679.md` | MUST | 30 | 0 | 1 | 14 | 0 | 10 | 55 |
 | `rfc6679.md` | SHOULD | 14 | 2 | 1 | 1 | 0 | 6 | 24 |

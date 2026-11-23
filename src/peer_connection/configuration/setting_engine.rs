@@ -2392,6 +2392,16 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the engine also asks each of its `turn:...?transport=tcp` and `turns:` servers
+    /// for a TCP allocation (RFC 6062, on a control connection of its own) and announces its
+    /// relayed address as a passive TCP candidate and, on port 9, an active one (RFC 6544
+    /// section 5.5): a peer that only reaches the relay over TCP connects through it. On by
+    /// default.
+    pub fn with_turn_tcp_relay(mut self, relay: bool) -> Self {
+        self.0.streams.turn_tcp_relay = relay;
+        self
+    }
+
     /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2). By default
     /// ([`ReflexiveGathering::Engine`](crate::peer_connection::srflx::ReflexiveGathering)) the
     /// engine sends a Binding request to each `stun:` / `stuns:` server of the configuration:
