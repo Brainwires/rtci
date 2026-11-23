@@ -9,6 +9,7 @@ use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
 use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
 use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
 use crate::chunk::chunk_init::ChunkInit;
+use crate::chunk::chunk_padding::ChunkPadding;
 use crate::chunk::chunk_payload_data::ChunkPayloadData;
 use crate::chunk::chunk_reconfig::ChunkReconfig;
 use crate::chunk::chunk_selective_ack::ChunkSelectiveAck;
@@ -204,6 +205,7 @@ fn parse_chunks(raw: &Bytes, mut offset: usize) -> Result<Vec<Box<dyn Chunk>>> {
             CT_PAYLOAD_DATA | CT_I_DATA => Box::new(ChunkPayloadData::unmarshal(&chunk_buf)?),
             CT_SACK => Box::new(ChunkSelectiveAck::unmarshal(&chunk_buf)?),
             CT_RECONFIG => Box::new(ChunkReconfig::unmarshal(&chunk_buf)?),
+            CT_PAD => Box::new(ChunkPadding::unmarshal(&chunk_buf)?),
             CT_FORWARD_TSN => Box::new(ChunkForwardTsn::unmarshal(&chunk_buf)?),
             CT_I_FORWARD_TSN => Box::new(ChunkIForwardTsn::unmarshal(&chunk_buf)?),
             CT_ERROR => Box::new(ChunkError::unmarshal(&chunk_buf)?),

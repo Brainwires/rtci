@@ -248,6 +248,7 @@ pub mod cryptex;
 mod dtls_sdp;
 pub mod event;
 pub(crate) mod handler;
+pub mod identity;
 mod internal;
 mod object_model;
 pub mod priority;
@@ -830,6 +831,9 @@ pub struct RTCPeerConnection {
     /// The value of the `a=identity` attribute offers and answers carry (RFC 8827 section 5);
     /// see `dtls_sdp`.
     identity_assertion: Option<String>,
+    /// The peer's identity the application established (RFC 8827 sections 5.1.4, 7.4); see
+    /// `identity`.
+    peer_identity: Option<identity::EstablishedIdentity>,
     /// What a rollback restores: set while an offer applied in the stable state is pending.
     last_stable_state: Option<internal::LastStableState>,
     /// The transport part of the pending remote offer, applied with the local answer.
@@ -1641,6 +1645,18 @@ impl RTCPeerConnection {
     ///
     /// See [setRemoteDescription](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-setremotedescription!overload-1)
     pub fn set_remote_description(
+        &mut self,
+        now: Instant,
+        remote_description: RTCSessionDescription,
+    ) -> Result<()> {
+        let applied = self.set_remote_description_with_rollback(now, remote_description);
+        if applied.is_ok() {
+            self.discard_peer_identity_if_fingerprints_changed();
+        }
+        applied
+    }
+
+    fn set_remote_description_with_rollback(
         &mut self,
         now: Instant,
         remote_description: RTCSessionDescription,
@@ -3642,6 +3658,7 @@ impl RTCPeerConnection {
         }
 
         let send_encodings = self.send_encodings_from_track(&track);
+        self.refuse_taken_ssrcs(&send_encodings, None)?;
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
         let mut transceiver = self.new_transceiver_from_track(
@@ -3845,6 +3862,7 @@ impl RTCPeerConnection {
             )?;
             send_encodings
         };
+        self.refuse_taken_ssrcs(&send_encodings, None)?;
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
         init.send_encodings = send_encodings;
@@ -4023,6 +4041,23 @@ impl RTCPeerConnection {
         } else {
             None
         }
+    }
+
+    /// Asks for a new DTLS association, and with it new SRTP master keys: the re-keying of
+    /// RFC 3711 section 9.2 and RFC 7714 sections 8.4 and 9.4 for DTLS-SRTP (RFC 5764 section
+    /// 4.1.2 has the keys come from the association).
+    ///
+    /// The next offer carries a new `a=tls-id` (RFC 8842 section 5.5); when the answer is
+    /// applied, a new DTLS handshake runs on the same ICE transport, new SRTP keys are exported
+    /// from it, and the SRTP contexts start over with them (their packet counts toward the
+    /// key lifetime included). Nothing changes until an offer is made and answered. Call it
+    /// when `OnSrtpKeyLifetimeExpiring` says a key is near its end: at the end the engine
+    /// refuses to protect more with it and the DTLS transport fails. The peer must take a new
+    /// association on a transport that has one, which an `rtc` peer does; browsers ignore the
+    /// new `tls-id`.
+    pub fn renew_dtls_association(&mut self) {
+        self.dtls_transport_mut().renewal_requested = true;
+        self.trigger_negotiation_needed();
     }
 
     /// Asks for the SCTP association to be replaced by a new one.

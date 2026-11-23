@@ -236,7 +236,10 @@ fn congestion_avoidance_grows_one_packet_per_window() {
             acknowledged - (CHUNK as u32) < cwnd,
             "no growth after a full window was acknowledged"
         );
-        sack(&mut a, cumulative, &[], now);
+        // The receiver keeps reporting the gap-acknowledged chunk until the cumulative TSN
+        // covers it: a SACK without it would be a renege (RFC 9260 6.2.1 D iii).
+        let gaps: &[(u16, u16)] = if cumulative == first { &[(1, 1)] } else { &[] };
+        sack(&mut a, cumulative, gaps, now);
         let _ = send(&mut a, now);
         sacks += 1;
         assert!(sacks < 20);

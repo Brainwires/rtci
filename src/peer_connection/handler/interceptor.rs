@@ -1660,16 +1660,21 @@ impl<'a>
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
-        if let RTCEventInternal::DTLSHandshakeComplete(_, _) = &evt.event {
+        if let RTCEventInternal::DTLSHandshakeComplete(local_srtp_context, _) = &evt.event {
             debug!("interceptor recv dtls handshake complete");
             let first = !self.ctx.is_dtls_handshake_complete;
             self.ctx.is_dtls_handshake_complete = true;
             if first {
+                // RFC 3711 section 3.4: what SRTCP adds to each compound packet (E flag and
+                // index, the tag; no MKI is used) is part of the size the RTCP interval rests
+                // on.
+                let srtcp_overhead = srtcp_overhead(local_srtp_context.as_ref());
                 // The RTCP session joins when the transport is up, under the connection's
                 // CNAME: an endpoint that only receives reports from then on, not from its
                 // first inbound packet (RFC 3550 6.2).
                 for control in [
                     RtcpSessionControl::Cname(self.ctx.cname.clone()),
+                    RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
                     RtcpSessionControl::Start,
                 ] {
                     self.interceptor
@@ -1736,6 +1741,16 @@ mod interceptor_association_test;
 #[cfg(test)]
 #[path = "interceptor_session_test.rs"]
 mod interceptor_session_test;
+
+/// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
+/// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No
+/// MKI is used (RFC 8827 section 6.5). 0 without SRTP.
+pub(crate) fn srtcp_overhead(context: Option<&srtp::context::Context>) -> usize {
+    context.map_or(0, |context| {
+        let profile = context.profile();
+        4 + profile.rtcp_auth_tag_len() + profile.aead_auth_tag_len()
+    })
+}
 
 #[cfg(test)]
 mod boundary_tests {

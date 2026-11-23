@@ -55,6 +55,9 @@ pub struct Peer {
     /// Whether a datagram the peer connection refuses is passed over instead of failing the
     /// run: while a DTLS association is being replaced, records of the old one still arrive.
     pub tolerate_read_errors: bool,
+    /// The largest datagram that reaches this peer; larger ones are lost on the way, as on
+    /// a path with that MTU and the DF bit set. `None`: any size arrives.
+    pub max_datagram: Option<usize>,
     /// The addresses this peer had before [`Peer::move_to`].
     earlier_addrs: Vec<SocketAddr>,
 }
@@ -108,6 +111,7 @@ impl Peer {
             written_to: Vec::new(),
             written_first_bytes: Vec::new(),
             tolerate_read_errors: false,
+            max_datagram: None,
             earlier_addrs: Vec::new(),
         };
         let candidate = peer.candidate()?;
@@ -173,6 +177,12 @@ impl Peer {
     /// at the address it was written to, from the address it was written from.
     fn deliver(&mut self, from: SocketAddr, datagrams: Vec<TaggedBytesMut>, now: Instant) {
         for datagram in datagrams {
+            if self
+                .max_datagram
+                .is_some_and(|max| datagram.message.len() > max)
+            {
+                continue;
+            }
             let to = datagram.transport.peer_addr;
             assert!(
                 to == self.addr || self.earlier_addrs.contains(&to),

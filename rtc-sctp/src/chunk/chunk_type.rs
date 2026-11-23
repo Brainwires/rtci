@@ -23,6 +23,8 @@ pub(crate) const CT_SHUTDOWN_COMPLETE: ChunkType = ChunkType(14);
 /// I-DATA (RFC 8260 2.1).
 pub(crate) const CT_I_DATA: ChunkType = ChunkType(64);
 pub(crate) const CT_RECONFIG: ChunkType = ChunkType(130);
+/// PAD (RFC 4820 section 3).
+pub(crate) const CT_PAD: ChunkType = ChunkType(132);
 pub(crate) const CT_FORWARD_TSN: ChunkType = ChunkType(192);
 /// I-FORWARD-TSN (RFC 8260 2.3.1).
 pub(crate) const CT_I_FORWARD_TSN: ChunkType = ChunkType(194);
@@ -46,6 +48,7 @@ impl fmt::Display for ChunkType {
             CT_CWR => "ECNE", // Explicit Congestion Notification Echo
             CT_SHUTDOWN_COMPLETE => "SHUTDOWN-COMPLETE",
             CT_RECONFIG => "RECONFIG", // Re-configuration
+            CT_PAD => "PAD",
             CT_FORWARD_TSN => "FORWARD-TSN",
             CT_I_DATA => "I-DATA",
             CT_I_FORWARD_TSN => "I-FORWARD-TSN",

@@ -4,9 +4,10 @@ use crate::association::{
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
-    Chunk, ErrorCause, INVALID_MANDATORY_PARAMETER, INVALID_STREAM_IDENTIFIER,
-    MISSING_MANDATORY_PARAMETER, NO_USER_DATA, PROTOCOL_VIOLATION, STALE_COOKIE_ERROR,
-    UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, UNRESOLVABLE_ADDRESS, USER_INITIATED_ABORT,
+    COOKIE_RECEIVED_WHILE_SHUTTING_DOWN, Chunk, ErrorCause, INVALID_MANDATORY_PARAMETER,
+    INVALID_STREAM_IDENTIFIER, MISSING_MANDATORY_PARAMETER, NO_USER_DATA, PROTOCOL_VIOLATION,
+    STALE_COOKIE_ERROR, UNRECOGNIZED_CHUNK_TYPE, UNRECOGNIZED_PARAMETERS, UNRESOLVABLE_ADDRESS,
+    USER_INITIATED_ABORT,
     chunk_abort::ChunkAbort,
     chunk_cookie_ack::ChunkCookieAck,
     chunk_cookie_echo::ChunkCookieEcho,
@@ -18,6 +19,7 @@ use crate::chunk::{
     chunk_i_forward_tsn::ChunkIForwardTsn,
     chunk_init::ChunkInit,
     chunk_init::ChunkInitAck,
+    chunk_padding::ChunkPadding,
     chunk_payload_data::ChunkPayloadData,
     chunk_payload_data::{MessageId, MessageReliability, PayloadProtocolIdentifier},
     chunk_reconfig::ChunkReconfig,
@@ -72,6 +74,8 @@ use thiserror::Error;
 
 pub(crate) mod bundling;
 pub(crate) mod interleaving;
+pub(crate) mod pmtud;
+use pmtud::PathMtuState;
 pub(crate) mod reconfig;
 pub(crate) mod state;
 pub(crate) mod stats;
@@ -244,6 +248,13 @@ pub enum Event {
 
     /// The association was successfully established
     Connected,
+    /// The peer restarted the association (RFC 9260 5.2.4 action A): it sent an INIT and
+    /// then a COOKIE ECHO with the Tie-Tags of this association, as an endpoint that lost
+    /// its state does. The association is a new one from here on, with new tags and TSNs,
+    /// no streams and congestion control from its initial values; what was queued or in
+    /// flight on the old one is gone. Reported instead of [`Event::AssociationLost`] (5.2.4:
+    /// "a RESTART notification").
+    Restarted,
     /// The association was lost
     ///
     /// Emitted if the peer closes the association or an error is encountered.
@@ -309,6 +320,8 @@ pub struct Association {
     max_message_size: u32,
     /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
     max_receive_message_size: u32,
+    /// See [`TransportConfig::with_zero_window_overcommit`].
+    zero_window_overcommit: bool,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -397,6 +410,16 @@ pub struct Association {
     /// was given a crypto provider for it. Without one a cookie is random bytes, good only
     /// because this association remembers them.
     cookie_signer: Option<Arc<CookieSigner>>,
+    /// The Tie-Tags (RFC 9260 5.2.1, 5.2.2): random, drawn the first time an INIT is
+    /// answered while the association exists, and kept for its life; 0 until then.
+    local_tie_tag: u32,
+    peer_tie_tag: u32,
+    /// Without a cookie signer: the State Cookie of the INIT ACK that answered an
+    /// unexpected INIT, what it stands for, and when it was made. Its COOKIE ECHO restarts
+    /// the association (5.2.4 action A).
+    restart_cookie: Option<(Bytes, CookieFields, Instant)>,
+    /// The configuration the association was made with, for a restart.
+    transport_config: Option<Arc<TransportConfig>>,
     /// Where the random values come from: the initial TSN, an unauthenticated State Cookie,
     /// the Initiate Tag of an INIT ACK for an existing association, HEARTBEAT nonces and
     /// jitter (`EndpointConfig::random_source`).
@@ -430,6 +453,8 @@ pub struct Association {
     path_inactive: bool,
     /// When the association was made: the zero of the time a HEARTBEAT carries.
     created_at: Option<Instant>,
+    /// Path MTU discovery (RFC 8899), when configured.
+    pmtud: Option<pmtud::PathMtuDiscovery>,
 
     pub(crate) payload_queue: PayloadQueue,
     pub(crate) inflight_queue: PayloadQueue,
@@ -441,7 +466,7 @@ pub struct Association {
     // max DATA chunk payload size
     max_payload_size: u32,
     cumulative_tsn_ack_point: u32,
-    advanced_peer_tsn_ack_point: u32,
+    pub(crate) advanced_peer_tsn_ack_point: u32,
     use_forward_tsn: bool,
     /// PR-SCTP is announced and used at all (`TransportConfig::with_partial_reliability`).
     partial_reliability_enabled: bool,
@@ -499,6 +524,11 @@ pub struct Association {
     /// The TSNs marked for Fast Retransmit (their third miss indication) since the last
     /// Fast Retransmit packet. What of them does not fit that packet waits for cwnd.
     fast_retransmit_marked: Vec<u32>,
+    /// The TSNs the last SACK showed the peer reneged on: they got their one miss indication
+    /// there (RFC 9260 6.2.1 D iii), not another from the same SACK's Fast Retransmit count.
+    reneged_in_last_sack: Vec<u32>,
+    /// A SHUTDOWN's Cumulative TSN Ack is being taken as a SACK without Gap Ack Blocks.
+    acknowledging_by_shutdown: bool,
     /// The a_rwnd of the last SACK sent (of the INIT or INIT ACK before any).
     last_advertised_window: u32,
     /// SACK.Delay (RFC 9260 6.2, 16), in milliseconds.
@@ -560,6 +590,7 @@ impl Default for Association {
             handshake_completed: false,
             max_message_size: 0,
             max_receive_message_size: 0,
+            zero_window_overcommit: false,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -610,6 +641,10 @@ impl Default for Association {
             my_cookie: None,
             cookie_tcb: None,
             cookie_signer: None,
+            local_tie_tag: 0,
+            peer_tie_tag: 0,
+            restart_cookie: None,
+            transport_config: None,
             random: RandomSource::default(),
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
@@ -624,6 +659,7 @@ impl Default for Association {
             path_error_count: 0,
             path_inactive: false,
             created_at: None,
+            pmtud: None,
 
             payload_queue: PayloadQueue::default(),
             inflight_queue: PayloadQueue::default(),
@@ -665,6 +701,8 @@ impl Default for Association {
             last_data_sent: None,
             t3_single_packet: false,
             fast_retransmit_marked: vec![],
+            reneged_in_last_sack: vec![],
+            acknowledging_by_shutdown: false,
             last_advertised_window: 0,
             sack_delay: ACK_INTERVAL,
 
@@ -736,6 +774,8 @@ impl Association {
             max_receive_buffer_size: config.max_receive_buffer_size(),
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
+            zero_window_overcommit: config.zero_window_overcommit(),
+            transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
             configured_outbound_streams: config.max_num_outbound_streams(),
@@ -745,6 +785,9 @@ impl Association {
             interleaving_enabled: config.message_interleaving(),
             zero_checksum_enabled: config.zero_checksum(),
             heartbeat_interval: config.heartbeat_interval(),
+            pmtud: config
+                .path_mtu_discovery()
+                .map(|pmtud| pmtud::PathMtuDiscovery::new(pmtud, mtu)),
             created_at: Some(now),
             random,
             max_payload_size,
@@ -855,6 +898,14 @@ impl Association {
             "[{}] path change: congestion control starts over",
             self.side
         );
+        // RFC 8261 section 6.1 and RFC 8831 section 5: the path MTU is tested again. The
+        // discovery starts over from BASE_PLPMTU, which is what the packets use until a
+        // probe confirms more.
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            let base = pmtud.base();
+            pmtud.reset(base);
+            self.use_path_mtu(base, true);
+        }
         self.cwnd = Self::initial_cwnd(self.pmdcs, self.remote_addr.is_ipv6());
         // RFC 9260 7.2.1: the initial ssthresh is arbitrarily high; the peer's window is.
         self.ssthresh = self
@@ -883,18 +934,52 @@ impl Association {
     /// Tells the association the largest SCTP packet the path below carries, in bytes: the
     /// path MTU less what lies beneath SCTP (for WebRTC: the DTLS record overhead, the UDP
     /// and IP headers, and TURN framing where a relay is used). The entry point for whatever
-    /// learns the path MTU: the application's own discovery, a transport that probes, or an
-    /// ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261 section 4).
-    /// The association does not probe by itself.
+    /// learns the path MTU: the transport's initial value for a path, the application's own
+    /// discovery, or an ICMP "Packet Too Big" it has validated (RFC 9260 section 7.3, RFC 8261
+    /// section 4).
     ///
-    /// From now on packets are bundled up to `mtu`, the Path Maximum DATA Chunk Size of the
-    /// congestion control rules follows it, and messages written from now on are fragmented
-    /// to fit. A message already fragmented keeps its fragments: after a reduction they are
-    /// sent as they are, each alone in a packet larger than the new MTU, and the layer below
-    /// has to fragment or the caller to accept the loss (RFC 9260 section 6.9: SCTP does not
-    /// re-fragment). A value below [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is
-    /// raised to it.
+    /// With path MTU discovery on ([`TransportConfig::with_path_mtu_discovery`]) the value
+    /// is BASE_PLPMTU (RFC 8899 section 5.1.2): the association uses it, confirms it with a
+    /// probe once established and searches above it; a new value starts the discovery over.
+    /// Setting the value in use again changes nothing.
+    ///
+    /// From now on packets are bundled up to the packet size, the Path Maximum DATA Chunk
+    /// Size of the congestion control rules follows it, and messages written from now on are
+    /// fragmented to fit. A message already fragmented keeps its fragments: after a reduction
+    /// they are sent as they are, each alone in a packet larger than the new MTU, and the
+    /// layer below has to fragment or the caller to accept the loss (RFC 9260 section 6.9:
+    /// SCTP does not re-fragment). A value below
+    /// [`MIN_DATA_PACKET_MTU`](crate::MIN_DATA_PACKET_MTU) is raised to it.
     pub fn set_path_mtu(&mut self, mtu: u32) {
+        let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            if pmtud.base() == mtu {
+                return;
+            }
+            pmtud.reset(mtu);
+        }
+        self.use_path_mtu(mtu, true);
+    }
+
+    /// MAX_PLPMTU of the path MTU discovery (RFC 8899 section 5.1.2): the largest SCTP packet
+    /// the search tries, the local interface MTU less what lies under SCTP. Nothing without
+    /// discovery.
+    pub fn set_max_path_mtu(&mut self, max: u32) {
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.set_max_path_mtu(max)) {
+            self.use_path_mtu(mtu, false);
+        }
+    }
+
+    /// Where the path MTU discovery is (RFC 8899 section 5.2); `None` without discovery.
+    pub fn path_mtu_state(&self) -> Option<PathMtuState> {
+        self.pmtud.as_ref().map(|p| p.state())
+    }
+
+    /// Takes `mtu` as the size of the packets sent from now on. `raise_cwnd`: the congestion
+    /// window grows to one packet if it is smaller (RFC 9260 7.2.1); a PLPMTU found by
+    /// discovery leaves it as it is (RFC 8899 section 3 item 7: "An update to the PLPMTU (or
+    /// MPS) MUST NOT increase the congestion window measured in bytes").
+    fn use_path_mtu(&mut self, mtu: u32, raise_cwnd: bool) {
         let mtu = mtu.max(crate::config::MIN_DATA_PACKET_MTU);
         if mtu == self.mtu {
             return;
@@ -907,8 +992,10 @@ impl Association {
             s.max_payload_size = self.max_payload_size;
         }
         self.pending_queue.set_packet_budget(self.pmdcs as usize);
-        // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
-        self.cwnd = self.cwnd.max(self.pmdcs);
+        if raise_cwnd {
+            // RFC 9260 7.2.1: cwnd is never below one packet of the size now in use.
+            self.cwnd = self.cwnd.max(self.pmdcs);
+        }
     }
 
     /// Returns application-facing event
@@ -948,7 +1035,16 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        self.timers.next_timeout()
+        // The discovery runs while the association is established only.
+        let pmtud = self
+            .pmtud
+            .as_ref()
+            .filter(|_| self.state() == AssociationState::Established)
+            .and_then(|p| p.deadline());
+        match (self.timers.next_timeout(), pmtud) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Returns packets to transmit
@@ -1024,6 +1120,14 @@ impl Association {
                 }
                 self.timers.start(timer, now, self.rto_mgr.get_rto());
             }
+        }
+        if self
+            .pmtud
+            .as_ref()
+            .and_then(|p| p.deadline())
+            .is_some_and(|at| now >= at)
+        {
+            self.handle_path_mtu_timeout(now);
         }
     }
 
@@ -1618,6 +1722,15 @@ impl Association {
     /// side's tag.
     fn accepts_verification_tag(&self, p: &Packet) -> bool {
         let tag = p.common_header.verification_tag;
+        // RFC 9260 8.5.1 D: the receiver of a COOKIE ECHO follows section 5, which compares
+        // the tag with the one in the cookie (`handle_cookie_echo`): the cookie of a restart
+        // (5.2.4) carries a new tag of this side's.
+        if p.chunks
+            .first()
+            .is_some_and(|chunk| chunk.as_any().is::<ChunkCookieEcho>())
+        {
+            return true;
+        }
         for chunk in &p.chunks {
             let any = chunk.as_any();
             if any.downcast_ref::<ChunkInit>().is_some_and(|c| !c.is_ack) {
@@ -1794,6 +1907,10 @@ impl Association {
             self.handle_shutdown_ack(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
             self.handle_shutdown_complete(c)?
+        } else if chunk_any.downcast_ref::<ChunkPadding>().is_some() {
+            // RFC 4820 section 3: the PAD chunk is discarded, and the rest of the packet is
+            // processed.
+            vec![]
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkUnknown>() {
             return Ok(self.handle_unknown_chunk(c));
         } else {
@@ -2003,7 +2120,7 @@ impl Association {
             // RFC 9260 5.2.2: an unexpected INIT is answered and changes nothing. It used to
             // be an error, and an error closed the association: a late copy of the peer's own
             // INIT ended an established association.
-            return Ok(vec![self.answer_unexpected_init(i)]);
+            return Ok(vec![self.answer_unexpected_init(i, now)]);
         }
 
         let params = self.process_handshake_params(&i.params);
@@ -2042,7 +2159,15 @@ impl Association {
         // A State Cookie for this INIT: a new one for a new attempt (another Initiate Tag) or
         // when the one in hand has outlived its lifetime, the same one for an INIT sent again,
         // so that the cookie of an INIT ACK already under way stays good.
+        // RFC 9260 5.2.1, 5.2.2: the Tie-Tags are 0 for an INIT in CLOSED or COOKIE-WAIT, and
+        // this association's in COOKIE-ECHOED.
+        let tie_tags = if state == AssociationState::CookieEchoed {
+            self.tie_tags()
+        } else {
+            (0, 0)
+        };
         let reuse = self.my_cookie.is_some()
+            && state != AssociationState::CookieEchoed
             && self.cookie_tcb.as_ref().is_some_and(|tcb| {
                 tcb.peer_verification_tag == i.initiate_tag
                     && now.saturating_duration_since(tcb.created_at) < self.valid_cookie_life
@@ -2080,10 +2205,9 @@ impl Association {
             // RFC 9260 5.1.3: the cookie holds what the association is made from, the time
             // it was made, and a MAC over both. Without a crypto provider to make the MAC
             // with, it is random bytes this association remembers.
-            let sealed = self
-                .cookie_signer
-                .as_ref()
-                .and_then(|signer| signer.seal(&self.cookie_fields(&tcb, signer.timestamp(now))));
+            let sealed = self.cookie_signer.as_ref().and_then(|signer| {
+                signer.seal(&self.cookie_fields(&tcb, signer.timestamp(now), tie_tags))
+            });
             self.my_cookie = Some(match sealed {
                 Some(cookie) => ParamStateCookie { cookie },
                 None => ParamStateCookie::random(&self.random),
@@ -2137,7 +2261,12 @@ impl Association {
     }
 
     /// What a State Cookie made at `created_ms` says for `tcb` (RFC 9260 5.1.3).
-    fn cookie_fields(&self, tcb: &CookieTcb, created_ms: u64) -> CookieFields {
+    fn cookie_fields(
+        &self,
+        tcb: &CookieTcb,
+        created_ms: u64,
+        tie_tags: (u32, u32),
+    ) -> CookieFields {
         CookieFields {
             key_id: 0,
             created_ms,
@@ -2154,9 +2283,19 @@ impl Association {
             send_zero_checksum: tcb.send_zero_checksum,
             source_port: tcb.source_port,
             destination_port: tcb.destination_port,
-            local_tie_tag: 0,
-            peer_tie_tag: 0,
+            local_tie_tag: tie_tags.0,
+            peer_tie_tag: tie_tags.1,
         }
+    }
+
+    /// This association's Tie-Tags, drawn the first time they are needed (RFC 9260 5.2.2:
+    /// "populated with a random value other than 0").
+    fn tie_tags(&mut self) -> (u32, u32) {
+        if self.local_tie_tag == 0 {
+            self.local_tie_tag = self.random.nonzero_u32();
+            self.peer_tie_tag = self.random.nonzero_u32();
+        }
+        (self.local_tie_tag, self.peer_tie_tag)
     }
 
     /// RFC 9653 5.2: this side sends a zero checksum when the peer announced that it takes
@@ -2271,18 +2410,59 @@ impl Association {
     /// goes to the INIT's Initiate Tag and carries a new one of its own; the association and
     /// its TCB stay as they are.
     ///
-    /// The cookie it carries is not one this association will accept, so a COOKIE ECHO that
-    /// answers it is discarded: restarting an association (5.2.4, action A) is not supported.
-    fn answer_unexpected_init(&self, i: &ChunkInit) -> Packet {
+    /// Its State Cookie stands for a new association with the peer as the INIT describes it,
+    /// this side's new tag and initial TSN, and this association's Tie-Tags: a COOKIE ECHO
+    /// that brings it back is a restart (5.2.4 action A). With a cookie signer it is sealed
+    /// and nothing is kept; without one it is kept beside the association's own cookie.
+    fn answer_unexpected_init(&mut self, i: &ChunkInit, now: Instant) -> Packet {
         let initiate_tag = self.random.nonzero_u32();
+        let initial_tsn = self.random.nonzero_u32();
+        let tie_tags = self.tie_tags();
+        let params = self.process_handshake_params(&i.params);
+        // 5.2.2: the other parameters are the association's.
+        let tcb = CookieTcb {
+            created_at: now,
+            peer_verification_tag: i.initiate_tag,
+            peer_initial_tsn: i.initial_tsn,
+            peer_rwnd: i.advertised_receiver_window_credit,
+            inbound_streams: std::cmp::min(i.num_outbound_streams, self.my_max_num_inbound_streams),
+            outbound_streams: std::cmp::min(
+                i.num_inbound_streams,
+                self.my_max_num_outbound_streams,
+            ),
+            use_forward_tsn: self.negotiated_partial_reliability(&params),
+            use_interleaving: self.negotiated_interleaving(&params),
+            reconfig: params.reconfig,
+            send_zero_checksum: self.may_send_zero_checksum(&params),
+            source_port: self.source_port,
+            destination_port: self.destination_port,
+        };
+        let fields = |created_ms| {
+            let mut fields = self.cookie_fields(&tcb, created_ms, tie_tags);
+            fields.my_tag = initiate_tag;
+            fields.my_initial_tsn = initial_tsn;
+            fields
+        };
+        let cookie = match self.cookie_signer.clone() {
+            Some(signer) => {
+                let sealed = signer.seal(&fields(signer.timestamp(now)));
+                sealed.unwrap_or_else(|| ParamStateCookie::random(&self.random).cookie)
+            }
+            None => {
+                let cookie = ParamStateCookie::random(&self.random).cookie;
+                let kept = fields(0);
+                self.restart_cookie = Some((cookie.clone(), kept, now));
+                cookie
+            }
+        };
         let mut init_ack = ChunkInit {
             is_ack: true,
-            initial_tsn: self.my_next_tsn,
+            initial_tsn,
             num_outbound_streams: self.my_max_num_outbound_streams,
             num_inbound_streams: self.my_max_num_inbound_streams,
             initiate_tag,
             advertised_receiver_window_credit: self.max_receive_buffer_size,
-            params: vec![Box::new(ParamStateCookie::random(&self.random))],
+            params: vec![Box::new(ParamStateCookie { cookie })],
         };
         init_ack.announce_extensions(
             self.partial_reliability_enabled,
@@ -2297,6 +2477,202 @@ impl Association {
             },
             chunks: vec![Box::new(init_ack)],
         }
+    }
+
+    /// The cookie of a COOKIE ECHO, if it is one of this association's restart cookies
+    /// (RFC 9260 5.2.4, Table 12 row A): the tags of a new association, both unlike this
+    /// association's, and this association's Tie-Tags. With when it was made.
+    fn restart_cookie_fields(
+        &self,
+        cookie: &[u8],
+        now: Instant,
+    ) -> Option<(CookieFields, Instant)> {
+        if self.local_tie_tag == 0
+            || !matches!(
+                self.state(),
+                AssociationState::Established
+                    | AssociationState::ShutdownPending
+                    | AssociationState::ShutdownSent
+                    | AssociationState::ShutdownReceived
+                    | AssociationState::ShutdownAckSent
+            )
+        {
+            return None;
+        }
+        let (fields, created_at) = match &self.cookie_signer {
+            Some(signer) => {
+                let fields = signer.open(cookie)?;
+                let age = signer.age(&fields, now);
+                (fields, now.checked_sub(age).unwrap_or(now))
+            }
+            None => {
+                let (kept, fields, created_at) = self.restart_cookie.as_ref()?;
+                if !constant_time_eq(kept, cookie) {
+                    return None;
+                }
+                (fields.clone(), *created_at)
+            }
+        };
+        let row_a = fields.my_tag != self.my_verification_tag
+            && fields.peer_tag != self.peer_verification_tag
+            && fields.local_tie_tag == self.local_tie_tag
+            && fields.peer_tie_tag == self.peer_tie_tag;
+        row_a.then_some((fields, created_at))
+    }
+
+    /// RFC 9260 5.2.4 action A: the peer restarted. Handled as an ABORT followed by a new
+    /// COOKIE ECHO: everything of the old association goes (streams, queues, timers, the
+    /// reconfiguration state; the DATA is not retained, which 5.2.4 leaves open: a peer
+    /// that restarted has none of the old streams), the TCB comes from the cookie,
+    /// congestion control and the RTO from their initial values, and the association is
+    /// ESTABLISHED. In SHUTDOWN-ACK-SENT no new association is made: the SHUTDOWN ACK is
+    /// sent again with an ERROR "Cookie Received While Shutting Down".
+    fn handle_restart_cookie(
+        &mut self,
+        p: &Packet,
+        fields: CookieFields,
+        created_at: Instant,
+        now: Instant,
+    ) -> Result<Vec<Packet>> {
+        // 5.1.5 3): the packet's tag and ports are those the cookie was made for.
+        if p.common_header.verification_tag != fields.my_tag
+            || p.common_header.source_port != fields.destination_port
+            || p.common_header.destination_port != fields.source_port
+        {
+            self.discard_rest_of_packet = true;
+            return Ok(vec![]);
+        }
+        let to_peer = |chunk: Box<dyn Chunk + Send + Sync>| Packet {
+            common_header: CommonHeader {
+                verification_tag: fields.peer_tag,
+                source_port: fields.source_port,
+                destination_port: fields.destination_port,
+            },
+            chunks: vec![chunk],
+        };
+        // 5.2.4 3): a stale restart cookie (its tags are not the association's) is refused
+        // with an ERROR "Stale Cookie".
+        let age = now.saturating_duration_since(created_at);
+        if age > self.valid_cookie_life {
+            let staleness =
+                u32::try_from((age - self.valid_cookie_life).as_micros()).unwrap_or(u32::MAX);
+            self.discard_rest_of_packet = true;
+            return Ok(vec![to_peer(Box::new(ChunkError {
+                error_causes: vec![ErrorCause {
+                    code: STALE_COOKIE_ERROR,
+                    raw: Bytes::copy_from_slice(&staleness.to_be_bytes()),
+                }],
+            }))]);
+        }
+        if self.state() == AssociationState::ShutdownAckSent {
+            debug!(
+                "[{}] COOKIE ECHO of a restart in SHUTDOWN-ACK-SENT: no new association",
+                self.side
+            );
+            self.discard_rest_of_packet = true;
+            self.will_send_shutdown_ack = true;
+            self.awake_write_loop();
+            return Ok(vec![to_peer(Box::new(ChunkError {
+                error_causes: vec![ErrorCause {
+                    code: COOKIE_RECEIVED_WHILE_SHUTTING_DOWN,
+                    raw: Bytes::new(),
+                }],
+            }))]);
+        }
+        if !self.restart(&fields, created_at, now) {
+            self.discard_rest_of_packet = true;
+            return Ok(vec![]);
+        }
+        Ok(vec![Packet {
+            common_header: CommonHeader {
+                verification_tag: self.peer_verification_tag,
+                source_port: self.source_port,
+                destination_port: self.destination_port,
+            },
+            chunks: vec![Box::new(ChunkCookieAck {})],
+        }])
+    }
+
+    /// Replaces this association with the one the restart cookie `fields` describes.
+    /// Returns false when it cannot (an association not made by `new`).
+    fn restart(&mut self, fields: &CookieFields, created_at: Instant, now: Instant) -> bool {
+        let Some(config) = self.transport_config.clone() else {
+            return false;
+        };
+        let old_tag = self.my_verification_tag;
+        let old_peer_tag = self.peer_verification_tag;
+        let random = std::mem::take(&mut self.random);
+        let mut fresh = Association::new(
+            None,
+            config,
+            self.max_payload_size,
+            fields.my_tag,
+            self.remote_addr,
+            self.local_addr,
+            self.transport_protocol,
+            now,
+            random,
+        );
+        // `new` made an initiating association: it is an accepting one, made from the
+        // cookie, as `Endpoint::accept_cookie_echo` makes one.
+        fresh.side = self.side;
+        fresh.stored_init = None;
+        fresh.control_queue.clear();
+        fresh.timers.stop(Timer::T1Init);
+        fresh.timers.stop(Timer::HalfOpen);
+        fresh.mtu = self.mtu;
+        // The path is the same: its discovery starts over from the same base.
+        if let Some(pmtud) = &self.pmtud {
+            fresh.pmtud = Some(pmtud::PathMtuDiscovery::new(*pmtud.config(), pmtud.base()));
+            fresh.use_path_mtu(pmtud.base(), true);
+        }
+        fresh.cookie_signer = self.cookie_signer.clone();
+        let tsn = fields.my_initial_tsn;
+        fresh.my_next_tsn = tsn;
+        fresh.my_next_rsn = tsn;
+        fresh.min_tsn2measure_rtt = tsn;
+        fresh.cumulative_tsn_ack_point = tsn.wrapping_sub(1);
+        fresh.advanced_peer_tsn_ack_point = tsn.wrapping_sub(1);
+        let tcb = CookieTcb {
+            created_at,
+            peer_verification_tag: fields.peer_tag,
+            peer_initial_tsn: fields.peer_initial_tsn,
+            peer_rwnd: fields.peer_rwnd,
+            inbound_streams: fields.inbound_streams,
+            outbound_streams: fields.outbound_streams,
+            use_forward_tsn: fields.use_forward_tsn,
+            use_interleaving: fields.use_interleaving,
+            reconfig: fields.reconfig,
+            send_zero_checksum: fields.send_zero_checksum,
+            source_port: fields.source_port,
+            destination_port: fields.destination_port,
+        };
+        fresh.apply_cookie_tcb(&tcb);
+        fresh.cookie_tcb = Some(tcb);
+        fresh.handshake_completed = true;
+        fresh.set_state(AssociationState::Established);
+        fresh.start_heartbeat_timer(now);
+        // 5.1.5 7): DATA that came with the COOKIE ECHO is acknowledged at once.
+        fresh.sack_packet_immediately = true;
+        // What the application has not read of the old association's events stays, and the
+        // restart follows it.
+        fresh.events = std::mem::take(&mut self.events);
+        fresh.events.push_back(Event::Restarted);
+        fresh.endpoint_events = std::mem::take(&mut self.endpoint_events);
+        fresh
+            .endpoint_events
+            .push_back(EndpointEventInner::Retagged {
+                old_local: old_tag,
+                new_local: fields.my_tag,
+                old_peer: old_peer_tag,
+                new_peer: fields.peer_tag,
+            });
+        debug!(
+            "[{}] the peer restarted the association: tag {:#x} -> {:#x}",
+            self.side, old_tag, fields.my_tag
+        );
+        *self = fresh;
+        true
     }
 
     fn handle_init_ack(
@@ -2492,6 +2868,12 @@ impl Association {
         let state = self.state();
         debug!("[{}] COOKIE-ECHO received in state '{}'", self.side, state);
 
+        // RFC 9260 5.2.4, Table 12 row A: the cookie of an INIT ACK that answered an
+        // unexpected INIT, with this association's Tie-Tags: the peer restarted.
+        if let Some((fields, created_at)) = self.restart_cookie_fields(&c.cookie, now) {
+            return self.handle_restart_cookie(p, fields, created_at, now);
+        }
+
         // RFC 9260 5.1.5 2), 3): a cookie that is not the one sent, or that comes between
         // other ports, has its whole packet discarded, DATA included.
         let (Some(my_cookie), Some(tcb)) = (&self.my_cookie, self.cookie_tcb.clone()) else {
@@ -2683,9 +3065,92 @@ impl Association {
         );
     }
 
+    /// RFC 8899 section 6.2: the path MTU probe that is due, if any, as a packet of its own
+    /// that is exactly the size probed: a HEARTBEAT whose Heartbeat Information is the probe
+    /// size, the time it is sent and a nonce, and a PAD chunk (RFC 4820) for the rest. It
+    /// carries no user data and is not held back by the congestion or the receive window
+    /// (section 3, items 7 and 8); it waits for the established association.
+    fn gather_path_mtu_probe(&mut self, raw_packets: &mut Vec<Bytes>, now: Instant) {
+        let Some(pmtud) = self.pmtud.as_mut() else {
+            return;
+        };
+        pmtud.start();
+        let Some(size) = pmtud.poll_probe() else {
+            return;
+        };
+        let nonce = self.random.u64();
+        let sent_ms = self.created_at.map_or(0, |start| {
+            now.saturating_duration_since(start).as_millis() as u64
+        });
+        let mut info = BytesMut::with_capacity(20);
+        info.extend_from_slice(&size.to_be_bytes());
+        info.extend_from_slice(&sent_ms.to_be_bytes());
+        info.extend_from_slice(&nonce.to_be_bytes());
+        let padding_length = size.saturating_sub(pmtud::PROBE_OVERHEAD) as usize;
+        let packet = self.create_packet(vec![
+            Box::new(ChunkHeartbeat {
+                params: vec![Box::new(ParamHeartbeatInfo {
+                    heartbeat_information: info.freeze(),
+                })],
+            }),
+            Box::new(ChunkPadding { padding_length }),
+        ]);
+        match self.marshal_packet(&packet) {
+            Ok(raw) => {
+                debug!("[{}] path MTU probe of {} bytes", self.side, raw.len());
+                raw_packets.push(raw);
+                if let Some(pmtud) = self.pmtud.as_mut() {
+                    pmtud.probe_sent(nonce, size, now);
+                }
+            }
+            Err(err) => warn!(
+                "[{}] failed to serialize a path MTU probe: {err}",
+                self.side
+            ),
+        }
+    }
+
+    /// A HEARTBEAT ACK that echoes a path MTU probe (`gather_path_mtu_probe`): the probe
+    /// crossed the path. A successful probe counts as an answer from the peer (RFC 8899
+    /// section 6.2.1.2: it "updates the association and path counters"). Returns whether the
+    /// acknowledgement was a probe's.
+    fn handle_path_mtu_probe_ack(&mut self, info: &Bytes, now: Instant) -> bool {
+        if info.len() != 20 || self.pmtud.is_none() {
+            return false;
+        }
+        let nonce = u64::from_be_bytes(info[12..20].try_into().unwrap_or_default());
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.on_probe_ack(nonce, now)) {
+            self.use_path_mtu(mtu, false);
+        }
+        self.on_path_success();
+        true
+    }
+
+    /// The path MTU discovery's timers (PROBE_TIMER, PMTU_RAISE_TIMER).
+    fn handle_path_mtu_timeout(&mut self, now: Instant) {
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.on_timeout(now)) {
+            self.use_path_mtu(mtu, false);
+        }
+        if self
+            .pmtud
+            .as_ref()
+            .is_some_and(|p| p.poll_probe().is_some())
+        {
+            self.awake_write_loop();
+        }
+    }
+
     /// RFC 9260 8.3: a HEARTBEAT ACK for the HEARTBEAT outstanding measures the round trip,
     /// clears the error counters and shows the path active. Any other is ignored.
     fn handle_heartbeat_ack(&mut self, c: &ChunkHeartbeatAck, now: Instant) {
+        if let Some(info) = c.params.first().and_then(|p| {
+            p.as_any()
+                .downcast_ref::<ParamHeartbeatInfo>()
+                .map(|info| info.heartbeat_information.clone())
+        }) && self.handle_path_mtu_probe_ack(&info, now)
+        {
+            return;
+        }
         let Some((nonce, sent_at)) = self.heartbeat_outstanding else {
             trace!("[{}] HEARTBEAT ACK for no HEARTBEAT", self.side);
             return;
@@ -2910,8 +3375,14 @@ impl Association {
                     // accepted here is `peer_last_tsn + 1` — precisely the one that advances
                     // the cumulative ack — so every chunk would qualify and
                     // `max_receive_buffer_size` would stop bounding anything.
-                    let unblocks_reassembly =
-                        d.tsn == self.peer_last_tsn.wrapping_add(1) && !self.has_readable_data();
+                    //
+                    // RFC 9260 6.2: once the window has been advertised as closed, a new DATA
+                    // chunk above the largest TSN received MUST be dropped; the escape then
+                    // needs `TransportConfig::with_zero_window_overcommit`.
+                    let window_advertised_closed = self.last_advertised_window == 0;
+                    let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
+                        && !self.has_readable_data()
+                        && (!window_advertised_closed || self.zero_window_overcommit);
 
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But
@@ -3080,6 +3551,9 @@ impl Association {
 
             self.cumulative_tsn_ack_point = d.cumulative_tsn_ack;
             cum_tsn_ack_point_advanced = true;
+            if let Some(pmtud) = self.pmtud.as_mut() {
+                pmtud.on_progress();
+            }
             self.on_cumulative_tsn_ack_point_advanced(now);
         }
         // RFC 9260 7.2.4: the window growth of 7.2.1 and 7.2.2 comes before the adjustments
@@ -3295,7 +3769,11 @@ impl Association {
             gap_ack_blocks: vec![],
             duplicate_tsn: vec![],
         };
-        self.handle_sack(&sack, now)?;
+        // RFC 9260 3.3.8: a SHUTDOWN has no Gap Ack Blocks, and their absence is no renege.
+        self.acknowledging_by_shutdown = true;
+        let handled = self.handle_sack(&sack, now);
+        self.acknowledging_by_shutdown = false;
+        handled?;
         Ok(())
     }
 
@@ -3457,14 +3935,54 @@ impl Association {
 
         let mut htna = d.cumulative_tsn_ack;
 
+        // RFC 9260 6.2.1 D iii, 6.3.2 R4: a TSN an earlier Gap Ack Block acknowledged that
+        // this SACK neither covers cumulatively nor in a block was reneged on by the
+        // receiver: it is outstanding again, counts one miss indication towards Fast
+        // Retransmit, and T3-rtx runs if it was not running.
+        let gap_acknowledged = if self.acknowledging_by_shutdown {
+            vec![]
+        } else {
+            self.inflight_queue.gap_acknowledged()
+        };
+        let reneged: Vec<u32> = gap_acknowledged
+            .into_iter()
+            .filter(|tsn| {
+                sna32gt(*tsn, d.cumulative_tsn_ack)
+                    && !d.gap_ack_blocks.iter().any(|g| {
+                        let offset = tsn.wrapping_sub(d.cumulative_tsn_ack);
+                        offset >= u32::from(g.start) && offset <= u32::from(g.end)
+                    })
+            })
+            .collect();
+        for tsn in &reneged {
+            if self.inflight_queue.renege(*tsn) {
+                debug!("[{}] SACK: the peer reneged on TSN {}", self.side, tsn);
+                if let Some(c) = self.inflight_queue.get_mut(*tsn)
+                    && c.miss_indicator < 3
+                {
+                    c.miss_indicator += 1;
+                    if c.miss_indicator == 3 {
+                        self.fast_retransmit_marked.push(*tsn);
+                    }
+                }
+            }
+        }
+        if !reneged.is_empty() {
+            self.timers
+                .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
+        }
+        self.reneged_in_last_sack = reneged;
+
         // Record peer acknowledgments independently of local payload release.
         for g in &d.gap_ack_blocks {
             for i in g.start..=g.end {
                 let tsn = d.cumulative_tsn_ack.wrapping_add(i as u32);
 
                 let newly_acknowledged = self.inflight_queue.acknowledge(tsn);
+                // The payload stays until the Cumulative TSN Ack covers it: the receiver
+                // may renege on what a Gap Ack Block acknowledged (RFC 9260 6.2.1).
                 let n_bytes_acked = if newly_acknowledged {
-                    self.inflight_queue.release_payload(tsn) as i64
+                    self.inflight_queue.hold_acknowledged(tsn) as i64
                 } else {
                     0
                 };
@@ -3668,8 +4186,9 @@ impl Association {
 
             let mut tsn = cum_tsn_ack_point.wrapping_add(1);
             while sna32lt(tsn, max_tsn) {
+                let reneged = self.reneged_in_last_sack.contains(&tsn);
                 if let Some(c) = self.inflight_queue.get_mut(tsn) {
-                    if c.is_outstanding() && c.miss_indicator < 3 {
+                    if c.is_outstanding() && c.miss_indicator < 3 && !reneged {
                         c.miss_indicator += 1;
                         if c.miss_indicator == 3 {
                             self.fast_retransmit_marked.push(tsn);
@@ -3967,6 +4486,7 @@ impl Association {
                 }
                 raw_packets = self.gather_outbound_sack_packets(raw_packets);
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
+                self.gather_path_mtu_probe(&mut raw_packets, now);
                 (raw_packets, true)
             }
             AssociationState::ShutdownPending
@@ -5345,6 +5865,17 @@ impl Association {
                     "[{}] T3-rtx timed out: n_rtos={} cwnd={} ssthresh={}",
                     self.side, n_rtos, self.cwnd, self.ssthresh
                 );
+
+                // RFC 8899 section 4.3: data at the PLPMTU that keeps going unacknowledged
+                // is the sign of a path that no longer carries it.
+                if let Some(mtu) = self
+                    .pmtud
+                    .as_mut()
+                    .and_then(|p| p.on_retransmission_timeout())
+                {
+                    debug!("[{}] path MTU black hole: back to {mtu} bytes", self.side);
+                    self.use_path_mtu(mtu, false);
+                }
 
                 self.inflight_queue.mark_all_to_retrasmit();
                 self.t3_retransmit_pending = true;
