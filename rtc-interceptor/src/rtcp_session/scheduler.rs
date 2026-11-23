@@ -134,6 +134,8 @@ pub(crate) struct Timing {
     pub(crate) allow_early: bool,
     /// RFC 4585 3.5: when the last Regular RTCP packet was sent; `None` is the RFC's NaN.
     pub(crate) t_rr_last: Option<Instant>,
+    /// The first packet goes at `tn` without timer reconsideration ([`Timing::immediate`]).
+    pub(crate) immediate: bool,
 }
 
 impl Timing {
@@ -146,6 +148,17 @@ impl Timing {
             initial: true,
             allow_early: true,
             t_rr_last: None,
+            immediate: false,
+        }
+    }
+
+    /// The timer of a participant that joins at `tc` and sends its first compound packet
+    /// then: RFC 8834 section 4.1 (with RFC 3550 section 6.2 as RFC 8108 updates it), "the
+    /// delay before sending the initial compound RTCP packet can be set to zero".
+    pub(crate) fn immediate(tc: Instant) -> Self {
+        Self {
+            immediate: true,
+            ..Self::new(tc, 0.0)
         }
     }
 
@@ -164,6 +177,7 @@ impl Timing {
     /// RFC 3550 6.3.6: a packet was transmitted (or suppressed, RFC 4585 3.5.3) at `tp`, and
     /// the next interval calculated is `t`.
     pub(crate) fn rescheduled(&mut self, tp: Instant, t: f64) {
+        self.immediate = false;
         self.tp = tp;
         self.tn = after(tp, t);
         self.allow_early = true;
