@@ -232,6 +232,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for is left to it, and
   `SettingEngineBuilder::with_server_reflexive_gathering(ReflexiveGathering::Application)`
   turns the engine's gathering off. `StreamSettings` has a new public field `reflexive`.
+- **peer connection** (mt-8, W3C webrtc-pc 4.3.3): `connectionState` follows the table over
+  the connection's `iceConnectionState`: "disconnected" whenever that is "disconnected", also
+  while another transport is still checking (it was "connecting" then). An
+  `iceConnectionState` of "completed" counts as "connected", as in browsers.
 
 - **peer connection** (mt-7): the transports a connection has beside the first one (the
   first section of each media type in a `balanced` initial offer, every section under
@@ -312,6 +316,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local stream is under the one SRTP master key); it was accepted.
 - **ice**: with the "relay" ICE transport policy a relayed candidate is signalled with raddr
   0.0.0.0 rport 9 (RFC 8827 section 6.4).
+- **media conformance**: with ECN on (`SettingEngineBuilder::with_ecn`) RTP packets are marked
+  ECT(0), not ECT(1), unless the receiver's `a=ecn-capable-rtp` asks for ECT(1) with `ect=1` (or
+  `ect=random`): RFC 6679 section 7.3.1, "SHOULD use ECT(0)". The L4S form (ECT(1) always, what
+  browsers that send L4S do) is `SettingEngineBuilder::with_ecn_marking(EcnMarking::L4s)`;
+  `packetsSentWithEct1` and `packetsWithBleachedEct1Marking` count ECT(1) packets only.
+
 - **media conformance**: open MUST rows.
   - `RTCRtpReceiver::write_rtcp` / `RTCRtpSender::write_rtcp` refuse feedback the section did
     not negotiate (NACK, PLI, SLI, RPSI, FIR, TMMBR/TMMBN, TSTR/TSTN, VBCM, LRR, REMB,
@@ -398,6 +408,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails the handshake).
 
 
+
+
+  fails the handshake).
 - **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
   draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
   - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
@@ -1716,6 +1729,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address no response brought within ten seconds; an address other hosts' queries ask for in
   vain (two or more in ten seconds) is flushed without a query of our own. New
   `Mdns::is_reconfirming` (`mdns_stale_test.rs`).
+- **peer connection** (mt-8): ICE restart and DTLS per transport. `restart_ice()` (W3C
+  restartIce) restarts every transport: the next offer gives each new credentials (one new
+  pair shared by all unless `with_unique_transport_credentials`), and each restarts when the
+  offer is applied. A remote offer that changes the credentials of one transport restarts that
+  one only (RFC 8839 4.4.1.1.1, RFC 9429 5.3.2): its answer has new credentials for it and the
+  same for the others; a new DTLS association a remote offer asks of a transport other than the
+  default one stages the answer's `tls-id` as the default transport's does, and a rollback of
+  the offer drops what it staged on every transport (RFC 9429 5.7). Each transport writes its
+  own `a=tls-id` (RFC 8842 5) in its first section, and a remote description's `tls-id`s are
+  checked per transport; one whose transports had different values was refused
+  (`ErrSessionDescriptionInvalidTlsId`). Consent and keepalives were already per transport
+  (each agent's timers); `one_transport_losing_its_path_disconnects_the_connection_only_through_it`
+  shows it.
+- **peer connection** (mt-8): sections moving between transports in a later exchange are
+  tested: a later remote offer that bundles sections on transports of their own moves them to
+  the group's transport and discards theirs (RFC 9143 7.5.1, 7.4); one that moves a section out
+  of the group (RFC 9143 7.5.2) is answered outside the group with a transport of its own (7.3.2);
+  a rejected section releases its own transport when the description is applied (RFC 8839
+  4.4.3.1). Several transports on one local socket connect when the transports have credentials
+  of their own (`three_transports_share_one_socket_with_unique_credentials`; routing of
+  `conf/tcp-5-train-fixes`). Each transport's `packetsSent` / `bytesSent` / `packetsReceived` /
+  `bytesReceived` / `selectedCandidatePairChanges` is its own (asserted in
+  `statistics_have_a_transport_object_per_transport`).
 - **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
   readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
   protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
@@ -2492,6 +2528,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `OnSelectedCandidatePairChange`, gathering events) and statistics for any transport but the
     first; `balanced` offers (a transport per media type); several BUNDLE groups; an ICE restart
     of the other transports.
+- **media conformance**: engine rows.
+  - A packet whose sequence number its stream delivered within the last 1024 is not
+    delivered to the application again (RFC 7587 section 4.1: "at most one copy"): an RTX or
+    NACK retransmission of a packet that arrived after all, or its original arriving after
+    it. It still passes the interceptor chain, so congestion feedback sees the arrival.
+  - `payload_types_reused_across_sections` (crate-internal, for the SDP layer): the payload
+    types two sections of one BUNDLE group use for different formats (RFC 8834 section 4.3).
+
+- **media conformance**: RFC 6679 engine rows.
+  - `interceptor::{EcnMarking, EctPreference}`: the codepoint marked packets carry, and the
+    receiver's `ect=` (`EctPreference::from_sdp`). The SDP layer's negotiated ECN of a section
+    (`sdp::ecn::NegotiatedEcn`, from the JSEP stack) carries the remote `ect=` to the stream.
+  - `EcnValidation::on_remote_cname` (and `with_receiver_cname`, `is_provisional`,
+    `PROVISIONAL_MONITOR`): another RTCP CNAME within three reporting intervals of a
+    provisional success sends the stream back to probing (section 7.2.1); the peer connection
+    feeds it from the RTCP session's `RemoteCname` events.
+  - `EcnValidation::on_reception_report_without_ecn`: a reception report showing more than
+    three probes due, in a compound packet without an ECN report about the stream, fails the
+    initiation (section 7.2.1).
+  - `EcnInitiation::one_per_transport`: one initiation method per RTP session (section 7.2),
+    for the per-section negotiation of the SDP layer.
+  - `docs/conformance/audit/rfc6679.md` states what the engine relies on from RFC 3168.
+
+    its session.
+
 - **media conformance**: RFC 6679 ECN for RTP.
   - `rtcp::transport_feedbacks::ecn_feedback::{EcnFeedback, EcnCounters}` (RTCP ECN Feedback
     packet, RTPFB FMT 8, `FORMAT_ECN`) and `rtcp::extended_report::{EcnSummaryReportBlock,

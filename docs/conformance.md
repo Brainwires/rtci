@@ -176,10 +176,21 @@ default offer of mt-5 did not reach them); `with_unique_transport_credentials(tr
 that names no section ends every transport's gathering, so a single-socket application
 completes. Routing on a shared port by the ICE username (stream-transport stack) needs the
 unique credentials.
-Left: an ICE restart or a new DTLS association of the other transports, consent and
-keepalives checked per transport, a section moved out of a group by this side's offer (RFC
-9143 7.5.2-1; no API asks for it), several transports on one local socket, and the congestion
-controller, pacer and reduced-size RTCP of the transports other than the default one.
+Done (mt-8): ICE restart and DTLS per transport (`stage_ice_restart_on_every_transport`,
+`apply_staged_ice_restarts`, `defer_other_remote_transports`, `PendingRemoteTransport::
+other_restarts`): `restart_ice` restarts all, a remote offer restarts the transports whose
+credentials it changes, each transport writes and checks its own `a=tls-id`, a rollback undoes
+each; the connection state follows W3C 4.3.3 over the aggregate ICE state (exhaustive unit
+tables in `transport_set.rs`), consent per transport shown rtc-to-rtc. Sections moving into a
+group (the transport discarded) and out of one (a transport of its own) by a remote offer, a
+rejected section's transport released at once, and three transports on one local socket (with
+unique credentials) are tested; transport counters are per transport.
+Left: a section moved out of a group by this side's offer (RFC
+9143 7.5.2-1; no API asks for it), several transports on one 5-tuple (impossible once DTLS
+runs) or on one socket with shared credentials (use `with_unique_transport_credentials`). The
+RTCP session, transport-wide numbering, congestion controller and pacer are per transport since
+the media stack's `PerRtpSession` (`conf/media-11-train-fixes`, merged at mt-8); bandwidth
+probing per transport is not asserted by a test yet (size S).
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts

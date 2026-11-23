@@ -2977,7 +2977,25 @@ pub(crate) fn validate_dtls_attributes(
         fingerprints(&m.attributes)?;
     }
     validate_setup_attributes(desc)?;
-    extract_tls_id(desc)?;
+    // Every `tls-id` is well formed, a rejected section's too (RFC 8842 section 4).
+    for m in &desc.media_descriptions {
+        for attribute in m.attributes.iter().filter(|a| a.key == ATTR_KEY_TLS_ID) {
+            if !attribute.value.as_deref().is_some_and(is_valid_tls_id) {
+                return Err(Error::ErrSessionDescriptionInvalidTlsId);
+            }
+        }
+    }
+    // One `tls-id` per transport (RFC 8842 section 5): each BUNDLE group and each section
+    // outside one is checked on its own.
+    let groups = crate::peer_connection::transport_layout::transport_groups(desc);
+    if groups.is_empty() {
+        extract_tls_id(desc)?;
+    }
+    for group in groups {
+        extract_tls_id(&crate::peer_connection::transport_layout::description_for(
+            desc, &group,
+        ))?;
+    }
     Ok(())
 }
 
@@ -5369,6 +5387,20 @@ a=candidate:1 1 udp 1 10.0.0.2 2000 typ host\r\n";
                 Err(Error::ErrSessionDescriptionInvalidSetup)
             );
         }
+        // Two transports (no BUNDLE group), each with its own association's `tls-id`: valid;
+        // two sections of one BUNDLE group with different ones are not.
+        let two = |group: &str| {
+            parse(&format!(
+                "{HEAD}{group}{}{}",
+                section("audio", "0", 9, "a=tls-id:abc3de65cddef001be82\r\n"),
+                section("video", "1", 9, "a=tls-id:abc3de65cddef001be83\r\n")
+            ))
+        };
+        assert_eq!(validate_dtls_attributes(&two(""), false), Ok(()));
+        assert_eq!(
+            validate_dtls_attributes(&two("a=group:BUNDLE 0 1\r\n"), false),
+            Err(Error::ErrSessionDescriptionInvalidTlsId)
+        );
         for (audio, video) in [("a=tls-id:short\r\n", ""), ("", "a=tls-id:short\r\n")] {
             assert_eq!(
                 validate_dtls_attributes(&sdp("", audio, video), false),

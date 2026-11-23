@@ -24,7 +24,7 @@ use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_groups,
+    ATTR_KEY_BUNDLE_ONLY, ATTR_KEY_TLS_ID, add_candidates_to_media_descriptions, bundle_groups,
     extract_fingerprints, extract_ice_details, get_mid_value, is_rejected_media,
     set_default_destination,
 };
@@ -379,6 +379,9 @@ impl RTCPeerConnection {
             self.start_other_transports(now, parsed, true)?;
         } else {
             self.defer_remote_transport(&view)?;
+            if self.pipeline_context.transports.len() > 1 {
+                self.defer_other_remote_transports(parsed)?;
+            }
         }
         Ok(())
     }
@@ -532,6 +535,30 @@ impl RTCPeerConnection {
             return;
         }
         let default = transports.default_id();
+        // RFC 8842 section 5: `a=tls-id` names each transport's own DTLS association; a
+        // description that carries one (in the default transport's tagged section) gives every
+        // transport its own.
+        let with_tls_id = d.media_descriptions.iter().any(|m| {
+            !is_rejected_media(m) && m.attributes.iter().any(|a| a.key == ATTR_KEY_TLS_ID)
+        });
+        // `tls-id` is IDENTICAL (RFC 8842 section 4, RFC 9143 section 7.1.3): within a BUNDLE
+        // group it is the tagged section's, which the group keeps once it is answered. A
+        // transport speaks with its own only in a section outside every group, or as the tag
+        // of a group of its own (several groups, RFC 9143 section 5).
+        let groups: Vec<Vec<String>> = bundle_groups(d)
+            .into_iter()
+            .map(|group| group.into_iter().map(str::to_owned).collect())
+            .collect();
+        let speaks_for_itself = |mid: &str, id: TransportId| {
+            groups
+                .iter()
+                .find(|group| group.iter().any(|m| m == mid))
+                .is_none_or(|group| {
+                    group
+                        .first()
+                        .is_some_and(|tag| transports.transport_id_for(tag) == id)
+                })
+        };
         for id in transports.ids() {
             if id == default {
                 continue;
@@ -539,6 +566,11 @@ impl RTCPeerConnection {
             let Some(bundle) = transports.transport(id) else {
                 continue;
             };
+            let dtls = &bundle.dtls_handler_context.dtls_transport;
+            let tls_id = dtls
+                .staged_local_tls_id
+                .clone()
+                .unwrap_or_else(|| dtls.local_tls_id.clone());
             let ice = &bundle.ice_handler_context.ice_transport;
             let (ufrag, pwd) = ice.get_local_user_credentials();
             let candidates =
@@ -556,8 +588,9 @@ impl RTCPeerConnection {
                 if m.attribute("ice-ufrag").is_none() {
                     continue;
                 }
-                m.attributes
-                    .retain(|a| !TRANSPORT_ICE_ATTRIBUTES.contains(&a.key.as_str()));
+                m.attributes.retain(|a| {
+                    !TRANSPORT_ICE_ATTRIBUTES.contains(&a.key.as_str()) && a.key != ATTR_KEY_TLS_ID
+                });
                 // The dummy destination until the transport has a candidate (RFC 9429 section
                 // 5.2.1: port 9, `c=IN IP4 0.0.0.0` and `a=rtcp:9 IN IP4 0.0.0.0`), not the
                 // default transport's.
@@ -570,6 +603,13 @@ impl RTCPeerConnection {
                     .push(Attribute::new("ice-pwd".to_owned(), Some(pwd.to_owned())));
                 if first {
                     first = false;
+                    if with_tls_id && get_mid_value(m).is_some_and(|mid| speaks_for_itself(mid, id))
+                    {
+                        m.attributes.push(Attribute::new(
+                            ATTR_KEY_TLS_ID.to_owned(),
+                            Some(tls_id.clone()),
+                        ));
+                    }
                     let taken = std::mem::take(m);
                     *m = match add_candidates_to_media_descriptions(
                         &candidates,

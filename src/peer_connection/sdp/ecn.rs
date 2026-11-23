@@ -65,14 +65,15 @@ pub(crate) enum EcnEct {
     Random,
 }
 
-/// What a negotiated section's streams do: how they initiate ECN and the codepoint they mark
-/// with.
+/// What a negotiated section's streams do: how they initiate ECN and the codepoint the
+/// receiver asks them to mark with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NegotiatedEcn {
     pub(crate) initiation: interceptor::EcnInitiation,
-    /// ECT(1) when the peer asked for it (`ect=1`), else ECT(0) (RFC 6679 section 6.1: "It is
-    /// RECOMMENDED that ECT(0) marking be used"; for `random` this sender takes ECT(0)).
-    pub(crate) codepoint: shared::EcnCodepoint,
+    /// The peer's `ect=` (RFC 6679 section 6.1, "0" implied when left out); the statistics'
+    /// `EcnMarking` turns it into a codepoint: ECT(0) unless it asks for ECT(1), a random
+    /// choice per packet for `random` (section 7.3.1), ECT(1) always under L4S.
+    pub(crate) preference: Option<interceptor::EctPreference>,
 }
 
 impl EcnCapability {
@@ -215,11 +216,11 @@ pub(crate) fn negotiated_initiation(
     let initiation = answered.first_known()?;
     Some(NegotiatedEcn {
         initiation,
-        codepoint: if remote_capability.ect == EcnEct::One {
-            shared::EcnCodepoint::Ect1
-        } else {
-            shared::EcnCodepoint::Ect0
-        },
+        preference: Some(match remote_capability.ect {
+            EcnEct::Zero => interceptor::EctPreference::Ect0,
+            EcnEct::One => interceptor::EctPreference::Ect1,
+            EcnEct::Random => interceptor::EctPreference::Random,
+        }),
     })
 }
 

@@ -971,7 +971,10 @@ impl RTCPeerConnection {
         // So is one the application asked for (`renew_dtls_association`).
         let new_srtp_association = new_srtp_association
             || (self.dtls_transport().renewal_requested && self.dtls_transport().is_started());
-        if is_ice_restart_requested || self.transport_closed || new_srtp_association {
+        if is_ice_restart_requested {
+            // Every transport restarts (W3C restartIce, RFC 9429 section 5.2.2 per transport).
+            self.stage_ice_restart_on_every_transport()?;
+        } else if self.transport_closed || new_srtp_association {
             self.stage_ice_restart()?;
         }
 
@@ -1495,14 +1498,10 @@ impl RTCPeerConnection {
         // be the one created and valid in this state: a description that is refused, and a
         // rollback, leave the session on its credentials. A no-op if none was staged, so an
         // offer that was created and then discarded leaves the existing session untouched.
-        if local_description.sdp_type == RTCSdpType::Offer
-            && self.ice_transport().has_pending_restart()
-        {
-            self.apply_local_offer_ice_restart(now)?;
-        } else if local_description.sdp_type != RTCSdpType::Rollback
-            && self.ice_transport().has_pending_restart()
-        {
-            self.apply_ice_restart(now)?;
+        // A local offer's restart stays revertible until its answer (a rollback takes it back,
+        // RFC 9429 section 5.7).
+        if local_description.sdp_type != RTCSdpType::Rollback && self.any_ice_restart_staged() {
+            self.apply_staged_ice_restarts(now, local_description.sdp_type == RTCSdpType::Offer)?;
         }
 
         self.commit_description(&local_description, StateChangeOp::SetLocal, next_state, now)?;
@@ -2280,7 +2279,89 @@ impl RTCPeerConnection {
             staged_restart,
             new_dtls_role,
             staged_tls_id,
+            other_restarts: vec![],
         });
+        Ok(())
+    }
+
+    /// `defer_remote_transport` for the transports other than the default one: each whose
+    /// sections of the remote offer `parsed` carry new ICE credentials restarts ICE on its
+    /// own, its answer's new local credentials staged now and applied with the answer (RFC
+    /// 8839 section 4.4.1.1.1: the answerer changes its credentials in the restarted data
+    /// stream only). The others go on with theirs.
+    fn defer_other_remote_transports(
+        &mut self,
+        parsed: &::sdp::description::session::SessionDescription,
+    ) -> Result<()> {
+        let default = self.pipeline_context.transports.default_id();
+        let mut restarts = vec![];
+        for id in self.pipeline_context.transports.ids() {
+            if id == default {
+                continue;
+            }
+            let mids = self.pipeline_context.transports.mids_on(id);
+            let part = crate::peer_connection::transport_layout::description_for(parsed, &mids);
+            let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(&part)? else {
+                continue;
+            };
+            type Staged = (Option<RTCIceGatheringState>, bool);
+            let staged = self.with_transport(id, |pc| -> Result<Staged> {
+                let started = pc.ice_transport().state() != RTCIceTransportState::New;
+                let ice_restart = started
+                    && !pc.ice_transport().has_pending_restart()
+                    && pc
+                        .ice_transport()
+                        .have_remote_credentials_change(&ufrag, &pwd);
+                let gathering = if ice_restart {
+                    let gathering = pc.ice_transport().gathering_state();
+                    pc.stage_ice_restart()?;
+                    Some(gathering)
+                } else {
+                    None
+                };
+                // A new DTLS association of this transport (RFC 8842 section 5.3): the
+                // answer's `tls-id` is staged now, as the default transport's is.
+                let new_dtls_role = if started {
+                    pc.dtls_transport().planned_association(
+                        pc.local_ice_role(is_lite_set(&part), false),
+                        &RTCDtlsParameters {
+                            role: RTCDtlsRole::from(&part),
+                            fingerprints: extract_fingerprints(&part)?,
+                        },
+                        extract_tls_id(&part)?.as_deref(),
+                        DtlsRemoteUpdate {
+                            we_offer: false,
+                            ice_restart,
+                            transport_closed: false,
+                        },
+                        has_rtp_media(&part),
+                    )
+                } else {
+                    None
+                };
+                let staged_tls_id =
+                    new_dtls_role.is_some() && pc.dtls_transport_mut().stage_answer_tls_id()?;
+                Ok((gathering, staged_tls_id))
+            })?;
+            if staged.0.is_some() || staged.1 {
+                restarts.push((id, staged.0, staged.1));
+            }
+        }
+        match self.pending_remote_transport.as_mut() {
+            Some(pending) => pending.other_restarts = restarts,
+            None => {
+                // No transport part pending to undo them with: nothing stays staged.
+                self.pending_remote_transport = Some(internal::PendingRemoteTransport {
+                    ufrag: String::new(),
+                    ice_restart: false,
+                    staged_restart: None,
+                    new_dtls_role: None,
+                    staged_tls_id: false,
+                    other_restarts: restarts,
+                });
+                self.drop_pending_remote_transport();
+            }
+        }
         Ok(())
     }
 

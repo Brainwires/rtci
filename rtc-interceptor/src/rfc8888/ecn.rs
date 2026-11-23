@@ -62,6 +62,11 @@ pub const WINDOW: u32 = 32;
 pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Fallbacks from ongoing use, each confirmed as ECN's doing, after which ECN stays off.
 pub const FALLBACKS_TO_DISABLE: u32 = 2;
+/// How long after the start of an initiation a provisional success is watched for other
+/// receivers (RFC 6679 section 7.2.1: "three RTCP reporting intervals from the time the ECN
+/// initiation started"): three of RTP/AVP's 5 s minimum interval, the longest regular
+/// interval this engine computes without a configured `trr-int`.
+pub const PROVISIONAL_MONITOR: Duration = Duration::from_secs(15);
 
 /// Sent packets remembered, by sequence number, to match reports with how each was sent.
 const HISTORY: usize = 2048;
@@ -85,6 +90,57 @@ pub enum EcnState {
     Disabled,
 }
 
+/// Which ECT codepoint a receiver asks the sender to use: the `ect=` parameter of its
+/// `a=ecn-capable-rtp` (RFC 6679 section 6.1). Left out, the sender uses ECT(0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EctPreference {
+    /// `ect=0`.
+    Ect0,
+    /// `ect=1`.
+    Ect1,
+    /// `ect=random`: the sender picks ECT(0) or ECT(1) at random for each packet.
+    Random,
+}
+
+impl EctPreference {
+    /// The value of an `ect=` parameter (`0`, `1` or `random`, any case); `None` for any
+    /// other, which RFC 6679 section 6.1 has the receiver of the description ignore.
+    pub fn from_sdp(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "0" => Some(Self::Ect0),
+            "1" => Some(Self::Ect1),
+            "random" => Some(Self::Random),
+            _ => None,
+        }
+    }
+}
+
+/// Which ECT codepoint a stream that marks sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EcnMarking {
+    /// RFC 6679 section 7.3.1: ECT(0), unless the receiver asked for ECT(1) or a random
+    /// choice ([`EctPreference`]).
+    #[default]
+    Rfc6679,
+    /// ECT(1), the L4S identifier (RFC 9331), whatever the receiver asked: what browsers that
+    /// send L4S do.
+    L4s,
+}
+
+impl EcnMarking {
+    /// The codepoint the next packet goes out with, given the receiver's preference;
+    /// `coin` is a random bit, used for [`EctPreference::Random`].
+    pub fn codepoint(self, preference: Option<EctPreference>, coin: bool) -> shared::EcnCodepoint {
+        match (self, preference) {
+            (Self::L4s, _) | (Self::Rfc6679, Some(EctPreference::Ect1)) => {
+                shared::EcnCodepoint::Ect1
+            }
+            (Self::Rfc6679, Some(EctPreference::Random)) if coin => shared::EcnCodepoint::Ect1,
+            _ => shared::EcnCodepoint::Ect0,
+        }
+    }
+}
+
 /// How a stream starts using ECN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EcnInitiation {
@@ -97,6 +153,29 @@ pub enum EcnInitiation {
     /// allows it only for sessions that accept its limitations (the first packets may be lost
     /// on a path that drops ECT traffic).
     LeapOfFaith,
+}
+
+impl EcnInitiation {
+    /// RFC 6679 section 7.2: "all participants in an RTP session MUST use the same ECN
+    /// initiation method". Given each section's transport and the method its negotiation
+    /// gave, the method each section's streams use: the first method negotiated on the
+    /// transport, for every section on it that uses ECN at all (bundled sections share one
+    /// RTP session, RFC 9143). A section without ECN stays without.
+    pub fn one_per_transport<K: PartialEq + Copy>(
+        sections: &[(K, Option<EcnInitiation>)],
+    ) -> Vec<Option<EcnInitiation>> {
+        sections
+            .iter()
+            .map(|(transport, method)| {
+                method.and_then(|_| {
+                    sections
+                        .iter()
+                        .find(|(other, m)| other == transport && m.is_some())
+                        .and_then(|(_, m)| *m)
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -135,6 +214,12 @@ pub struct EcnValidation {
     /// The last RFC 6679 counters reported, with the extended highest sequence number they
     /// relate to ([`EcnValidation::on_counters`]).
     last_counters: Option<(u32, EcnCounters)>,
+    /// When the current initiation sent its first probe.
+    initiated_at: Option<Instant>,
+    /// The success of the initiation is provisional until then (section 7.2.1).
+    provisional_until: Option<Instant>,
+    /// The RTCP CNAME of the receiver whose reports confirmed the probes.
+    receiver_cname: Option<String>,
 }
 
 impl Default for EcnValidation {
@@ -161,6 +246,9 @@ impl EcnValidation {
             fallback_from: 0,
             fallbacks: 0,
             last_counters: None,
+            initiated_at: None,
+            provisional_until: None,
+            receiver_cname: None,
         }
     }
 
@@ -205,6 +293,7 @@ impl EcnValidation {
                 if due {
                     self.since_probe = 0;
                     self.last_probe = Some(now);
+                    self.initiated_at.get_or_insert(now);
                 } else {
                     self.since_probe += 1;
                 }
@@ -258,8 +347,7 @@ impl EcnValidation {
                 if self.probes_confirmed == 0 && self.probes_lost >= PROBES_LOST_TO_FAIL {
                     self.fail(now, "no ECT probe arrived");
                 } else if self.probes_confirmed >= CONFIRMATIONS {
-                    self.state = EcnState::Active;
-                    self.window = Window::default();
+                    self.provisional_success(now);
                 }
             }
             EcnState::Active if marked => {
@@ -366,8 +454,7 @@ impl EcnValidation {
                 if self.probes_confirmed == 0 && self.probes_lost >= PROBES_LOST_TO_FAIL {
                     self.fail(now, "no ECT probe arrived");
                 } else if self.probes_confirmed >= CONFIRMATIONS && bleached == 0 {
-                    self.state = EcnState::Active;
-                    self.window = Window::default();
+                    self.provisional_success(now);
                 }
             }
             EcnState::Active => {
@@ -436,7 +523,85 @@ impl EcnValidation {
         }
     }
 
+    /// The probes were confirmed by one receiver: every packet is marked from now on, while
+    /// the session is watched for other receivers (section 7.2.1's optimisation for a
+    /// unicast peer).
+    fn provisional_success(&mut self, now: Instant) {
+        self.state = EcnState::Active;
+        self.window = Window::default();
+        let started = self.initiated_at.unwrap_or(now);
+        self.provisional_until = Some(started + PROVISIONAL_MONITOR);
+    }
+
+    /// RFC 6679 section 7.2.1: a source of the session named its RTCP CNAME at `now`. The
+    /// first one is the receiver the probes are confirmed by. Another CNAME while the
+    /// success is provisional is another participant: "the sender MUST fallback to only
+    /// ECT-marking a small fraction of its RTP packets" and initiates again.
+    pub fn on_remote_cname(&mut self, now: Instant, cname: &str) {
+        match &self.receiver_cname {
+            None => self.receiver_cname = Some(cname.to_owned()),
+            Some(known) if known == cname => {}
+            Some(_) => {
+                let provisional = self.state == EcnState::Active
+                    && self.provisional_until.is_some_and(|until| now < until);
+                if provisional {
+                    log::info!(
+                        "ECN: another RTCP CNAME during a provisional success, probing again \
+                         (RFC 6679 section 7.2.1)"
+                    );
+                    self.initiate();
+                }
+                // Probing again, the confirmation has to come from the new set of receivers.
+                self.receiver_cname = Some(cname.to_owned());
+            }
+        }
+    }
+
+    /// RFC 6679 section 7.2.1: "ECN initiation is considered to have failed at the instant
+    /// the initiating RTP sender received an RTCP packet that doesn't contain an RTCP ECN
+    /// Feedback Report or ECN Summary Report from any RTP session participant that has an
+    /// RTCP RR with an extended RTP sequence number field that indicates that it should have
+    /// received multiple (>3) ECT-marked RTP packets." `extended_highest` is that field of a
+    /// reception report about the stream in a compound packet without an ECN report about it.
+    pub fn on_reception_report_without_ecn(&mut self, now: Instant, extended_highest: u32) {
+        if self.state != EcnState::Initiating {
+            return;
+        }
+        let highest = extended_highest as u16;
+        let due = self
+            .history
+            .iter()
+            .filter(|sent| {
+                sent.known && sent.marked && {
+                    // At or before `highest`, within the history's reach.
+                    let behind = highest.wrapping_sub(sent.sequence_number);
+                    usize::from(behind) < HISTORY
+                }
+            })
+            .count();
+        if due > 3 {
+            self.fail(
+                now,
+                "a receiver reported more than three probes without an ECN report",
+            );
+        }
+    }
+
+    /// A validation that knows the receiver by its RTCP CNAME already (named before the
+    /// stream started marking).
+    pub fn with_receiver_cname(mut self, cname: &str) -> Self {
+        self.receiver_cname = Some(cname.to_owned());
+        self
+    }
+
+    /// Whether the success of the initiation is still provisional at `now`.
+    pub fn is_provisional(&self, now: Instant) -> bool {
+        self.state == EcnState::Active && self.provisional_until.is_some_and(|until| now < until)
+    }
+
     fn initiate(&mut self) {
+        self.provisional_until = None;
+        self.initiated_at = None;
         self.state = EcnState::Initiating;
         self.since_probe = PROBE_SPACING;
         self.last_probe = None;
@@ -484,6 +649,43 @@ mod tests {
     /// RFC 6679 7.2.1 with the counters of section 5: probes counted ECT by the receiver's
     /// ECN Feedback / XR ECN Summary Reports make the initiation succeed, and every packet is
     /// then sent ECT (section 7.3.1).
+    /// RFC 6679 section 7.2: one initiation method per RTP session. Bundled sections that
+    /// negotiated different methods use the first one's; another transport keeps its own.
+    #[test]
+    fn bundled_sections_use_one_initiation_method() {
+        use EcnInitiation::{LeapOfFaith, RtpAndRtcp};
+        let methods = EcnInitiation::one_per_transport(&[
+            (0, Some(RtpAndRtcp)),
+            (0, Some(LeapOfFaith)),
+            (0, None),
+            (1, Some(LeapOfFaith)),
+        ]);
+        assert_eq!(
+            methods,
+            vec![Some(RtpAndRtcp), Some(RtpAndRtcp), None, Some(LeapOfFaith)]
+        );
+    }
+
+    #[test]
+    fn the_ect_parameter_names_ect0_ect1_or_random_and_nothing_else() {
+        assert_eq!(EctPreference::from_sdp("0"), Some(EctPreference::Ect0));
+        assert_eq!(EctPreference::from_sdp(" 1"), Some(EctPreference::Ect1));
+        assert_eq!(
+            EctPreference::from_sdp("Random"),
+            Some(EctPreference::Random)
+        );
+        assert_eq!(EctPreference::from_sdp("2"), None);
+        assert_eq!(
+            EcnMarking::Rfc6679.codepoint(None, true),
+            shared::EcnCodepoint::Ect0,
+            "RFC 6679 section 7.3.1: ECT(0) unless asked"
+        );
+        assert_eq!(
+            EcnMarking::L4s.codepoint(Some(EctPreference::Ect0), false),
+            shared::EcnCodepoint::Ect1
+        );
+    }
+
     #[test]
     fn counted_ect_probes_complete_the_initiation() {
         let mut v = EcnValidation::default();
@@ -594,6 +796,33 @@ mod tests {
 
     fn carries_ecn(_: u16, marked: bool) -> Option<Ecn> {
         Some(if marked { Ecn::Ect1 } else { Ecn::NotEct })
+    }
+
+    /// RFC 6679 section 7.2.1: after a provisional success, another RTCP CNAME within three
+    /// reporting intervals of the initiation's start sends the sender back to probing; the
+    /// same CNAME again, or another after the watch, does not.
+    #[test]
+    fn a_second_cname_during_a_provisional_success_sends_the_stream_back_to_probing() {
+        let mut v = EcnValidation::default();
+        let mut at = Instant::now();
+        v.on_remote_cname(at, "peer");
+        send(&mut v, &mut at, 0, 40);
+        report(&mut v, at, 0, 40, carries_ecn);
+        assert!(v.is_provisional(at));
+        v.on_remote_cname(at, "peer");
+        assert_eq!(v.state(), EcnState::Active, "the same receiver");
+        v.on_remote_cname(at, "another participant");
+        assert_eq!(v.state(), EcnState::Initiating);
+        let probes = send(&mut v, &mut at, 40, 40).len();
+        assert!((1..40).contains(&probes), "a small fraction only: {probes}");
+
+        // Confirmed again and watched out: a later CNAME leaves ongoing use alone.
+        report(&mut v, at, 40, 40, carries_ecn);
+        assert_eq!(v.state(), EcnState::Active);
+        at += PROVISIONAL_MONITOR;
+        assert!(!v.is_provisional(at));
+        v.on_remote_cname(at, "a third");
+        assert_eq!(v.state(), EcnState::Active);
     }
 
     #[test]

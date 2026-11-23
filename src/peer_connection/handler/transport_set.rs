@@ -581,41 +581,41 @@ pub(crate) fn aggregate_gathering_state(
 }
 
 /// W3C webrtc-pc 4.3.3 `RTCPeerConnectionState`: the aggregate of the ICE and DTLS
-/// transports' states, for a connection that is not closed.
+/// transports' states, for a connection that is not closed. The table reads the
+/// connection's `[[IceConnectionState]]` (the 4.3.4 aggregate of the ICE transports) and the
+/// DTLS transports' states:
+///
+/// - "failed": the ICE connection state is "failed", or any DTLS transport is "failed";
+/// - "disconnected": the ICE connection state is "disconnected" (whatever the others are);
+/// - "new": the ICE connection state is "new" and every DTLS transport "new" or "closed", or
+///   there are no transports;
+/// - "connected": the ICE connection state is "connected" and every DTLS transport
+///   "connected" or "closed";
+/// - "connecting" otherwise.
+///
+/// An ICE connection state of "completed" counts as "connected" here: read literally the
+/// table then gives "connecting" for a connection all of whose ICE transports completed,
+/// which no browser reports (they say "connected").
 pub(crate) fn aggregate_connection_state(
     ice: &[RTCIceConnectionState],
     dtls: &[RTCDtlsTransportState],
 ) -> RTCPeerConnectionState {
     use RTCDtlsTransportState as Dtls;
     use RTCIceConnectionState as Ice;
-    let ice_any = |f: &dyn Fn(Ice) -> bool| ice.iter().any(|s| f(*s));
-    let ice_all = |f: &dyn Fn(Ice) -> bool| ice.iter().all(|s| f(*s));
-    let dtls_any = |f: &dyn Fn(Dtls) -> bool| dtls.iter().any(|s| f(*s));
+    if ice.is_empty() && dtls.is_empty() {
+        return RTCPeerConnectionState::New;
+    }
+    let ice_state = aggregate_ice_connection_state(ice.iter().copied());
     let dtls_all = |f: &dyn Fn(Dtls) -> bool| dtls.iter().all(|s| f(*s));
-    if ice_any(&|s| s == Ice::Failed) || dtls_any(&|s| s == Dtls::Failed) {
-        // "Any of the RTCIceTransports or RTCDtlsTransports are in a failed state."
+    if ice_state == Ice::Failed || dtls.contains(&Dtls::Failed) {
         RTCPeerConnectionState::Failed
-    } else if ice_any(&|s| s == Ice::Disconnected) && !ice_any(&|s| s == Ice::Checking) {
-        // "Any of the RTCIceTransports or RTCDtlsTransports are in the disconnected state and
-        // none of them are in the failed or connecting or checking state."
+    } else if ice_state == Ice::Disconnected {
         RTCPeerConnectionState::Disconnected
-    } else if ice_all(&|s| matches!(s, Ice::New | Ice::Closed))
-        && dtls_all(&|s| matches!(s, Dtls::New | Dtls::Closed))
-    {
-        // "... all RTCIceTransports are in the new or closed state, and all RTCDtlsTransports
-        // are in the new or closed state, or there are no transports."
+    } else if ice_state == Ice::New && dtls_all(&|s| matches!(s, Dtls::New | Dtls::Closed)) {
         RTCPeerConnectionState::New
-    } else if ice_any(&|s| matches!(s, Ice::New | Ice::Checking))
-        || dtls_any(&|s| matches!(s, Dtls::New | Dtls::Connecting))
-    {
-        // "... any RTCIceTransport is in the new or checking state or any RTCDtlsTransport is
-        // in the new or connecting state."
-        RTCPeerConnectionState::Connecting
-    } else if ice_all(&|s| matches!(s, Ice::Connected | Ice::Completed | Ice::Closed))
+    } else if matches!(ice_state, Ice::Connected | Ice::Completed)
         && dtls_all(&|s| matches!(s, Dtls::Connected | Dtls::Closed))
     {
-        // "... all RTCIceTransports are in the connected, completed or closed state and all
-        // RTCDtlsTransports are in the connected or closed state."
         RTCPeerConnectionState::Connected
     } else {
         RTCPeerConnectionState::Connecting
@@ -681,6 +681,49 @@ mod tests {
         assert_eq!(
             pc.dtls_transport().id,
             transports.default().dtls_handler_context.dtls_transport.id
+        );
+    }
+
+    /// W3C webrtc-pc 5.4: "Creating an RTCRtpTransceiver does not create" DTLS or ICE
+    /// transports; descriptions do. Transceivers of every kind leave the connection with its
+    /// one transport, under `max-compat` too, until an offer is made.
+    #[test]
+    fn adding_transceivers_creates_no_transport() {
+        use crate::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+        use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+        let mut media_engine =
+            crate::peer_connection::configuration::media_engine::MediaEngine::default();
+        media_engine
+            .register_default_codecs()
+            .expect("the default codecs register");
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_bundle_policy(RTCBundlePolicy::MaxCompat)
+                    .build(),
+            )
+            .build(Instant::now())
+            .expect("a peer connection builds");
+        for kind in [
+            RtpCodecKind::Audio,
+            RtpCodecKind::Video,
+            RtpCodecKind::Video,
+        ] {
+            pc.add_transceiver_from_kind(kind, None)
+                .expect("a transceiver is added");
+        }
+        pc.create_data_channel("data", None)
+            .expect("a data channel is created");
+        assert_eq!(pc.pipeline_context.transports.len(), 1);
+        assert_eq!(pc.dtls_transports().len(), 1);
+        let offer = pc.create_offer(None).expect("an offer");
+        pc.set_local_description(Instant::now(), offer)
+            .expect("the offer is applied");
+        assert_eq!(
+            pc.pipeline_context.transports.len(),
+            4,
+            "the max-compat offer gives each section a transport"
         );
     }
 
@@ -753,6 +796,141 @@ mod tests {
         assert_eq!(aggregate(&[New, Closed]), New);
         assert_eq!(aggregate(&[Connected, New]), Checking);
         assert_eq!(aggregate(&[]), New);
+    }
+
+    const ICE_STATES: [RTCIceConnectionState; 7] = [
+        RTCIceConnectionState::New,
+        RTCIceConnectionState::Checking,
+        RTCIceConnectionState::Connected,
+        RTCIceConnectionState::Completed,
+        RTCIceConnectionState::Disconnected,
+        RTCIceConnectionState::Failed,
+        RTCIceConnectionState::Closed,
+    ];
+    const DTLS_STATES: [RTCDtlsTransportState; 5] = [
+        RTCDtlsTransportState::New,
+        RTCDtlsTransportState::Connecting,
+        RTCDtlsTransportState::Connected,
+        RTCDtlsTransportState::Closed,
+        RTCDtlsTransportState::Failed,
+    ];
+
+    /// The W3C 4.3.4 table row by row, first match wins, as the specification words it.
+    fn ice_table(states: &[RTCIceConnectionState]) -> RTCIceConnectionState {
+        use RTCIceConnectionState::*;
+        let any = |s: &[RTCIceConnectionState]| states.iter().any(|x| s.contains(x));
+        let all = |s: &[RTCIceConnectionState]| states.iter().all(|x| s.contains(x));
+        if any(&[Failed]) {
+            Failed
+        } else if any(&[Disconnected]) {
+            Disconnected
+        } else if all(&[New, Closed]) {
+            New
+        } else if any(&[New, Checking]) {
+            Checking
+        } else if all(&[Completed, Closed]) {
+            Completed
+        } else {
+            // "all ... connected, completed or closed": what is left.
+            assert!(all(&[Connected, Completed, Closed]));
+            Connected
+        }
+    }
+
+    /// W3C 4.3.4 for every combination of the states of one, two and three ICE transports.
+    #[test]
+    fn the_ice_connection_state_follows_the_w3c_table_for_every_combination() {
+        let mut combinations = 0;
+        for a in ICE_STATES {
+            assert_eq!(aggregate_ice_connection_state([a]), ice_table(&[a]));
+            for b in ICE_STATES {
+                assert_eq!(aggregate_ice_connection_state([a, b]), ice_table(&[a, b]));
+                for c in ICE_STATES {
+                    let states = [a, b, c];
+                    assert_eq!(
+                        aggregate_ice_connection_state(states),
+                        ice_table(&states),
+                        "{states:?}"
+                    );
+                    combinations += 1;
+                }
+            }
+        }
+        assert_eq!(combinations, 343);
+    }
+
+    /// W3C 4.3.3 for every combination of two transports' ICE and DTLS states: the table read
+    /// from the ICE connection state (`ice_table`) and the DTLS states, "completed" counting
+    /// as "connected".
+    #[test]
+    fn the_connection_state_follows_the_w3c_table_for_every_combination() {
+        use RTCDtlsTransportState as Dtls;
+        use RTCIceConnectionState as Ice;
+        use RTCPeerConnectionState as Pc;
+        let table = |ice: &[Ice], dtls: &[Dtls]| {
+            let ice_state = ice_table(ice);
+            let dtls_all = |s: &[Dtls]| dtls.iter().all(|x| s.contains(x));
+            if ice_state == Ice::Failed || dtls.contains(&Dtls::Failed) {
+                Pc::Failed
+            } else if ice_state == Ice::Disconnected {
+                Pc::Disconnected
+            } else if ice_state == Ice::New && dtls_all(&[Dtls::New, Dtls::Closed]) {
+                Pc::New
+            } else if matches!(ice_state, Ice::Connected | Ice::Completed)
+                && dtls_all(&[Dtls::Connected, Dtls::Closed])
+            {
+                Pc::Connected
+            } else {
+                Pc::Connecting
+            }
+        };
+        let mut combinations = 0;
+        for ia in ICE_STATES {
+            for ib in ICE_STATES {
+                for da in DTLS_STATES {
+                    for db in DTLS_STATES {
+                        let (ice, dtls) = ([ia, ib], [da, db]);
+                        assert_eq!(
+                            aggregate_connection_state(&ice, &dtls),
+                            table(&ice, &dtls),
+                            "{ice:?} {dtls:?}"
+                        );
+                        combinations += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(combinations, 1225);
+        assert_eq!(aggregate_connection_state(&[], &[]), Pc::New);
+    }
+
+    /// The W3C 4.3.3 cases with one transport failing or closing beside a connected one, and
+    /// the "disconnected" row, which looks at the ICE connection state only: a transport that
+    /// is still checking beside a disconnected one leaves the connection "disconnected".
+    #[test]
+    fn one_transport_failing_or_closing_beside_a_connected_one() {
+        use RTCDtlsTransportState as Dtls;
+        use RTCIceConnectionState as Ice;
+        use RTCPeerConnectionState as Pc;
+        let up = (Ice::Connected, Dtls::Connected);
+        let state =
+            |other: (Ice, Dtls)| aggregate_connection_state(&[up.0, other.0], &[up.1, other.1]);
+        assert_eq!(state((Ice::Failed, Dtls::Connected)), Pc::Failed);
+        assert_eq!(state((Ice::Connected, Dtls::Failed)), Pc::Failed);
+        assert_eq!(state((Ice::Closed, Dtls::Closed)), Pc::Connected);
+        assert_eq!(
+            state((Ice::Disconnected, Dtls::Connected)),
+            Pc::Disconnected
+        );
+        assert_eq!(state((Ice::Completed, Dtls::Connected)), Pc::Connected);
+        assert_eq!(state((Ice::Checking, Dtls::New)), Pc::Connecting);
+        assert_eq!(
+            aggregate_connection_state(
+                &[Ice::Disconnected, Ice::Checking],
+                &[Dtls::Connected, Dtls::New]
+            ),
+            Pc::Disconnected
+        );
     }
 
     /// W3C 4.3.2: the connection's gathering state is the aggregate of every transport's.

@@ -524,6 +524,8 @@ pub struct SettingEngine {
     /// How the engine's TURN-over-TLS connections verify their server
     /// ([`SettingEngineBuilder::with_turn_tls`]).
     pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
+    /// Which ECT codepoint marked packets carry ([`SettingEngineBuilder::with_ecn_marking`]).
+    pub(crate) ecn_marking: interceptor::EcnMarking,
     /// The connection runs without the RTCP session the builder otherwise installs
     /// ([`SettingEngineBuilder::with_rtcp_session_omitted`]); a departure from RFC 8834 4.1.
     pub(crate) rtcp_session_omitted: bool,
@@ -2436,8 +2438,11 @@ impl SettingEngineBuilder {
     /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
     /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
     /// and whose section negotiated ECN (`a=ecn-capable-rtp`, RFC 6679 section 6.1; see
-    /// [`with_ecn_without_signalling`](Self::with_ecn_without_signalling)) are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
-    /// CE marks back. As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
+    /// [`with_ecn_without_signalling`](Self::with_ecn_without_signalling)) are sent ECT: a
+    /// sender marks only where the receiver reports the CE marks back. The codepoint is ECT(0)
+    /// unless the receiver asks for ECT(1) (RFC 6679 section 7.3.1; see
+    /// [`with_ecn_marking`](Self::with_ecn_marking) for L4S's ECT(1)). As RFC 8888 section 7
+    /// requires, the stream first initiates ECN as RFC 6679
     /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
     /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
     /// the path clears the marking or drops marked packets (section 7.4); see
@@ -2460,6 +2465,18 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// The ECT codepoint a stream with ECN on ([`with_ecn`](Self::with_ecn)) marks its
+    /// packets with: [`EcnMarking::Rfc6679`](interceptor::EcnMarking::Rfc6679), the default,
+    /// sends ECT(0) unless the receiver's `a=ecn-capable-rtp` asks for ECT(1) or a random
+    /// choice with `ect=` (RFC 6679 section 7.3.1: "SHOULD use ECT(0)");
+    /// [`EcnMarking::L4s`](interceptor::EcnMarking::L4s) always sends ECT(1), the L4S
+    /// identifier (RFC 9331), as browsers that send L4S do. `packetsSentWithEct1` counts the
+    /// ECT(1) packets only.
+    pub fn with_ecn_marking(mut self, marking: interceptor::EcnMarking) -> Self {
+        self.0.ecn_marking = marking;
         self
     }
 

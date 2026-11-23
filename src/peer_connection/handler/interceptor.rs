@@ -479,6 +479,7 @@ impl<'a> InterceptorHandler<'a> {
     fn process_session_event(&mut self, now: Instant, event: &RtcpSessionEvent) {
         match event {
             RtcpSessionEvent::RemoteCname { ssrc, cname } => {
+                self.stats.on_remote_cname(now, cname);
                 if self.ctx.remote_cnames.len() < MAX_REMOTE_CNAMES
                     || self.ctx.remote_cnames.contains_key(ssrc)
                 {

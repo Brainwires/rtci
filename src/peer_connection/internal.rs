@@ -93,6 +93,11 @@ pub(super) struct PendingRemoteTransport {
     pub(super) new_dtls_role: Option<RTCDtlsRole>,
     /// This offer staged the answer's new `tls-id`.
     pub(super) staged_tls_id: bool,
+    /// The transports other than the default one the offer restarts ICE on or asks a new DTLS
+    /// association of, each on its own (RFC 9429 section 5.3.1, RFC 8842 section 5.3, per
+    /// transport): the gathering state it had before the restart credentials of the answer
+    /// were staged on it (`None`: no restart), and whether the answer's `tls-id` was staged.
+    pub(super) other_restarts: Vec<(TransportId, Option<RTCIceGatheringState>, bool)>,
 }
 
 /// See [`RTCPeerConnection::description_snapshot`].
@@ -368,7 +373,8 @@ impl RTCPeerConnection {
                 setting_engine.ecn,
                 setting_engine.ecn_initiation,
                 rand::rng().random(),
-            ),
+            )
+            .with_ecn_marking(setting_engine.ecn_marking),
             announced_ice_connection_state: RTCIceConnectionState::New,
             now,
         };
@@ -1376,12 +1382,16 @@ impl RTCPeerConnection {
         if op == StateChangeOp::SetRemote
             && matches!(sd.sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer)
         {
-            self.commit_local_ice_restart();
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.commit_local_ice_restart());
+            }
         }
         if sd.sdp_type == RTCSdpType::Rollback
             && self.signaling_state == RTCSignalingState::HaveLocalOffer
         {
-            self.revert_local_ice_restart(now);
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.revert_local_ice_restart(now));
+            }
         }
 
         // A remote offer applied in the stable state: what the last completed exchange
@@ -2729,7 +2739,7 @@ impl RTCPeerConnection {
             // What browsers that send L4S do: ECT(1) on `ack ccfb` alone.
             return Some(ecn::NegotiatedEcn {
                 initiation: self.setting_engine.ecn_initiation,
-                codepoint: shared::EcnCodepoint::Ect1,
+                preference: Some(interceptor::EctPreference::Ect1),
             });
         }
         let mid = mid?;
@@ -3382,15 +3392,78 @@ impl RTCPeerConnection {
     /// The gathering state does move here, because SDP generation reads it and a restart offer
     /// must not claim end-of-candidates.
     pub(super) fn stage_ice_restart(&mut self) -> Result<()> {
-        let (local_ufrag, local_pwd) = (
-            self.setting_engine.candidates.username_fragment.clone(),
-            self.setting_engine.candidates.password.clone(),
-        );
+        // Fixed credentials from the settings are the default transport's.
+        let (local_ufrag, local_pwd) = if self.pipeline_context.transports.active_id()
+            == self.pipeline_context.transports.default_id()
+        {
+            (
+                self.setting_engine.candidates.username_fragment.clone(),
+                self.setting_engine.candidates.password.clone(),
+            )
+        } else {
+            self.restart_credentials_for_other_transport()
+        };
         self.ice_transport_mut()
             .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
         Ok(())
+    }
+
+    /// The credentials a transport other than the default one restarts with: the ones the
+    /// default transport has staged when the transports share theirs and it restarts too
+    /// (`with_unique_transport_credentials` off), else new ones (empty: generated).
+    fn restart_credentials_for_other_transport(&self) -> (String, String) {
+        if self.setting_engine.unique_transport_credentials {
+            return (String::new(), String::new());
+        }
+        let default = self.ice_transport_of(self.pipeline_context.transports.default_id());
+        if !default.has_pending_restart() {
+            return (String::new(), String::new());
+        }
+        let staged = default.agent.get_local_credentials();
+        (staged.ufrag.clone(), staged.pwd.clone())
+    }
+
+    /// `restartIce` and an offer of this side that restarts ICE: every transport stages new
+    /// credentials (W3C restartIce: "all ICE transports"), the default one first so that the
+    /// others can take its credentials when they share them.
+    pub(super) fn stage_ice_restart_on_every_transport(&mut self) -> Result<()> {
+        let default = self.pipeline_context.transports.default_id();
+        self.with_transport(default, |pc| pc.stage_ice_restart())?;
+        for id in self.pipeline_context.transports.ids() {
+            if id != default {
+                self.with_transport(id, |pc| pc.stage_ice_restart())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the ICE restart every transport has staged (`set_local_description`); a
+    /// transport with none staged is left alone. A local offer's (`revertible`) can be taken
+    /// back by its rollback ([`Self::revert_local_ice_restart`]).
+    pub(super) fn apply_staged_ice_restarts(&mut self, now: Instant, revertible: bool) -> Result<()> {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| {
+                if !pc.ice_transport().has_pending_restart() {
+                    Ok(())
+                } else if revertible {
+                    pc.apply_local_offer_ice_restart(now)
+                } else {
+                    pc.apply_ice_restart(now)
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether any transport has an ICE restart staged.
+    pub(super) fn any_ice_restart_staged(&self) -> bool {
+        self.pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .any(|id| self.ice_transport_of(id).has_pending_restart())
     }
 
     /// Drops the transport part of the pending remote offer
@@ -3406,6 +3479,20 @@ impl RTCPeerConnection {
         }
         if pending.staged_tls_id {
             self.dtls_transport_mut().staged_local_tls_id = None;
+        }
+        for (id, gathering, staged_tls_id) in pending.other_restarts {
+            if self.pipeline_context.transports.transport(id).is_none() {
+                continue;
+            }
+            self.with_transport(id, |pc| {
+                if let Some(gathering) = gathering {
+                    pc.ice_transport_mut().discard_restart_credentials();
+                    pc.ice_transport_mut().ice_gathering_state = gathering;
+                }
+                if staged_tls_id {
+                    pc.dtls_transport_mut().staged_local_tls_id = None;
+                }
+            });
         }
     }
 

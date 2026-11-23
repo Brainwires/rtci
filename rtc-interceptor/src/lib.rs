@@ -371,8 +371,8 @@ pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportIn
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
 pub use rfc8888::ecn::{
     CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
-    EcnInitiation, EcnState, EcnValidation, PROBE_INTERVAL as ECN_PROBE_INTERVAL,
-    PROBE_SPACING as ECN_PROBE_SPACING,
+    EcnInitiation, EcnMarking, EcnState, EcnValidation, EctPreference,
+    PROBE_INTERVAL as ECN_PROBE_INTERVAL, PROBE_SPACING as ECN_PROBE_SPACING,
 };
 pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{

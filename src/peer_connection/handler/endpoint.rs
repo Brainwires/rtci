@@ -21,7 +21,7 @@ use log::{debug, trace, warn};
 use rustc_hash::FxHashMap;
 use shared::TransportContext;
 use shared::error::{Error, Result};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Returns `true` if the given MIME type identifies a repair codec (RTX or FEC)
@@ -120,6 +120,10 @@ fn receiver_track_has_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) 
 #[derive(Default)]
 pub(crate) struct EndpointHandlerContext {
     pub(crate) ssrc_owners: SsrcOwners,
+    /// The sequence numbers each inbound stream delivered lately: a packet that arrives a
+    /// second time (an RTX or NACK retransmission of one that arrived after all, a datagram
+    /// the network duplicated) reaches the application once.
+    pub(crate) delivered: HashMap<SSRC, DeliveredWindow>,
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
@@ -133,6 +137,52 @@ pub(crate) struct EndpointHandlerContext {
 /// How many SSRCs get an `OnUnassociatedRtpDiscarded` event: a peer cannot make the
 /// connection keep an unbounded set by sending from ever new SSRCs.
 pub(crate) const MAX_DISCARD_REPORTED_SSRCS: usize = 64;
+/// At most this many inbound streams are tracked for duplicates.
+const MAX_DELIVERY_WINDOWS: usize = 1024;
+
+/// The last [`DeliveredWindow::SPAN`] sequence numbers of a stream, and which of them were
+/// delivered.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeliveredWindow {
+    highest: Option<u16>,
+    bits: [u64; 16],
+}
+
+impl DeliveredWindow {
+    const SPAN: u16 = 1024;
+
+    fn slot(sequence_number: u16) -> (usize, u64) {
+        let index = usize::from(sequence_number % Self::SPAN);
+        (index / 64, 1 << (index % 64))
+    }
+
+    /// Whether `sequence_number` is delivered for the first time (and records it). One older
+    /// than the window is let through: nothing is known about it.
+    pub(crate) fn first_delivery(&mut self, sequence_number: u16) -> bool {
+        let (word, bit) = Self::slot(sequence_number);
+        let Some(highest) = self.highest else {
+            self.highest = Some(sequence_number);
+            self.bits[word] |= bit;
+            return true;
+        };
+        let ahead = sequence_number.wrapping_sub(highest);
+        if ahead != 0 && ahead < 0x8000 {
+            for step in 1..=ahead.min(Self::SPAN) {
+                let (w, b) = Self::slot(highest.wrapping_add(step));
+                self.bits[w] &= !b;
+            }
+            self.highest = Some(sequence_number);
+            self.bits[word] |= bit;
+            return true;
+        }
+        if highest.wrapping_sub(sequence_number) >= Self::SPAN {
+            return true;
+        }
+        let first = self.bits[word] & bit == 0;
+        self.bits[word] |= bit;
+        first
+    }
+}
 
 /// EndpointHandler implements DataChannel/Media Endpoint handling
 /// The transmits queue is now stored in RTCPeerConnection and passed by reference
@@ -311,6 +361,23 @@ impl<'a> EndpointHandler<'a> {
                 ssrc, rtp_packet.header.payload_type
             );
             return Ok(());
+        }
+
+        // RFC 7587 section 4.1 (and RFC 3550 section 6.4.1's duplicates): the receiver is
+        // "prepared to receive duplicate RTP packets" and passes at most one copy on. A
+        // retransmission whose original arrived too, or an original after its retransmission,
+        // is a duplicate past SRTP's replay window (they were different SRTP packets); it
+        // went through the chain, so the congestion feedback still saw it arrive.
+        if self.ctx.delivered.len() < MAX_DELIVERY_WINDOWS || self.ctx.delivered.contains_key(&ssrc)
+        {
+            let window = self.ctx.delivered.entry(ssrc).or_default();
+            if !window.first_delivery(rtp_packet.header.sequence_number) {
+                debug!(
+                    "drop rtp packet ssrc = {} seq = {}: delivered already",
+                    ssrc, rtp_packet.header.sequence_number
+                );
+                return Ok(());
+            }
         }
 
         // The packet was counted on its stream when it arrived, before the interceptor chain
@@ -918,11 +985,20 @@ mod rtx_test {
         payload_type: u8,
         payload: &'static [u8],
     ) -> Option<(String, rtp::Packet)> {
+        // Each packet a sequence number of its own: the endpoint delivers a sequence number
+        // once (RFC 7587 section 4.1).
+        thread_local!(static NEXT: std::cell::Cell<u16> = const { std::cell::Cell::new(1000) });
+        let sequence_number = NEXT.with(|next| {
+            let n = next.get();
+            next.set(n.wrapping_add(1));
+            n
+        });
         let mut stats = RTCStatsAccumulator::new();
         let packet = rtp::Packet {
             header: rtp::Header {
                 payload_type,
                 ssrc,
+                sequence_number,
                 ..Default::default()
             },
             payload: Bytes::from_static(payload),
