@@ -472,3 +472,73 @@ fn two_sections_never_carry_the_same_msid_pair() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 8830 section 3: a new msid-appdata in a section names a new track: "the recipient
+/// ... MUST" learn that a new track was added. By default the W3C object model governs (a
+/// receiver has one track for its lifetime, webrtc-pc 5.3, with an id the engine generates;
+/// RFC 9429 section 5.2.1 has senders leave the appdata out): a changed appdata changes no
+/// track and fires no event. With `with_msid_appdata_change_renews_track(true)` the
+/// receiver's track ends (`OnClose`) and a new track with a new id takes its place,
+/// announced with the `track` event; the same appdata again changes nothing.
+#[test]
+fn a_new_msid_appdata_is_a_new_track_only_when_asked() -> TestResult {
+    use rtc::media_stream::MediaStreamTrackState::Live;
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+    use rtc::sansio::Protocol;
+    let peer = |renews: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_msid_appdata_change_renews_track(renews)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    // (tracks closed, tracks announced by the `track` event) since the last call.
+    let events = |pc: &mut RTCPeerConnection| {
+        let (mut closed, mut announced) = (vec![], vec![]);
+        while let Some(event) = pc.poll_event() {
+            match event {
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(id)) => closed.push(id),
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnRemoteTrack(init)) => {
+                    announced.push(init.track_id)
+                }
+                _ => {}
+            }
+        }
+        (closed, announced)
+    };
+    for renews in [false, true] {
+        let mut pc = peer(renews)?;
+        let (_, _, first) = remote_track(&mut pc, offer("a=msid:stream one\n", ""))?;
+        assert_eq!(events(&mut pc).1, vec![first.clone()], "renews {renews}");
+
+        let (_, _, second) = remote_track(&mut pc, offer("a=msid:stream two\n", ""))?;
+        let (closed, announced) = events(&mut pc);
+        if renews {
+            assert_ne!(second, first, "a new track");
+            assert_eq!(closed, vec![first.clone()], "the old one ended");
+            assert_eq!(announced, vec![second.clone()], "the new one announced");
+            assert_eq!(
+                track_state(&mut pc, offer("a=msid:stream two\n", ""))?,
+                Live
+            );
+        } else {
+            assert_eq!(second, first, "the receiver's one track");
+            assert!(
+                closed.is_empty() && announced.is_empty(),
+                "{closed:?} {announced:?}"
+            );
+        }
+        let (_, _, third) = remote_track(&mut pc, offer("a=msid:stream two\n", ""))?;
+        assert_eq!(third, second, "renews {renews}: the same appdata again");
+        assert_eq!(events(&mut pc), (vec![], vec![]), "renews {renews}");
+    }
+    Ok(())
+}

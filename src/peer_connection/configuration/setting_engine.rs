@@ -424,6 +424,9 @@ pub struct SettingEngine {
     pub(crate) dtls_new_association_without_ice_restart: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
+    /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
+    /// track ends and a new one takes its place.
+    pub(crate) msid_appdata_change_renews_track: bool,
     /// RFC 8830 section 3: a remote track whose SSRCs have all left (BYE, timeout) ends.
     pub(crate) source_departure_ends_track: bool,
     /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
@@ -1688,6 +1691,32 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
         self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// RFC 8830 section 3: "if the application ... receives an msid with a new msid-appdata
+    /// value, it SHOULD [learn] that a new MediaStreamTrack has been added" (section 3, the
+    /// recipient "MUST" learn of a new track for new appdata in the RFC's model). In this API
+    /// the W3C webrtc-pc object model governs: a receiver has one track for its lifetime
+    /// (webrtc-pc 5.3), with an id the engine generates, and RFC 9429 section 5.2.1 has
+    /// senders leave the appdata out. That is the default (`false`): a changed appdata changes
+    /// nothing the application sees. With `true`, a remote description whose section names
+    /// another appdata than the one before ends the receiver's track
+    /// ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)) and
+    /// gives the receiver a new track, announced with a track event
+    /// ([`RTCTrackEvent::OnRemoteTrack`](crate::peer_connection::event::RTCTrackEvent::OnRemoteTrack)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_msid_appdata_change_renews_track(true)
+    ///     .build();
+    /// ```
+    pub fn with_msid_appdata_change_renews_track(mut self, renews: bool) -> Self {
+        self.0.msid_appdata_change_renews_track = renews;
         self
     }
 

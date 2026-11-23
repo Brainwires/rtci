@@ -2050,6 +2050,7 @@ impl RTCPeerConnection {
         let snapshot = self.description_snapshot();
         let (sdp_type, prior_state) = (remote_description.sdp_type, self.signaling_state);
         let msid_sections = self.remote_sections_with_msid();
+        let renewed = self.sections_with_new_msid_appdata(remote_description.parsed.as_ref());
         let applied = self.apply_remote_description(
             now,
             remote_description,
@@ -2059,7 +2060,7 @@ impl RTCPeerConnection {
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
         } else {
-            self.after_remote_description(sdp_type, prior_state, msid_sections);
+            self.after_remote_description(sdp_type, prior_state, msid_sections, renewed);
             self.apply_ice_mismatch(now, sdp_type);
         }
         applied

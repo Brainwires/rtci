@@ -1179,6 +1179,17 @@ impl RTCRtpReceiverInternal {
         true
     }
 
+    /// A new track in place of the receiver's (ended) one, as a new msid-appdata names it
+    /// (RFC 8830 section 3, `with_msid_appdata_change_renews_track`): a new id the engine
+    /// generates, live and muted, with the old one's stream, codings and label.
+    pub(crate) fn renew_track(&mut self) {
+        let mut track = self.track.clone();
+        track.track_id = shared::util::math_rand_alpha(16);
+        track.renew();
+        track.set_muted(true);
+        self.track = track;
+    }
+
     /// Whether the track ended since the application was last told (once: the flag is
     /// cleared).
     pub(crate) fn take_unannounced_end(&mut self) -> bool {
