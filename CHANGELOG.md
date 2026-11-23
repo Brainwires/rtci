@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: the TWCC receiver reports a remote stream only when `transport-cc`
+  was negotiated in its feedback beside the header extension (RFC 4585 section 4.2, as
+  libwebrtc); `TwccReceiverBuilder::with_feedback_on_extension_alone(true)` is the earlier
+  behaviour. A `StreamInfo` built by hand for the TWCC receiver needs the `transport-cc`
+  feedback. `RTCRtpReceiverInternal::interceptor_remote_stream_op` / `create_stream_info`
+  (crate-private) take the section's codecs.
 - **media conformance**: every peer connection runs the RTCP session (RFC 8834 section 4.1:
   RTCP "MUST be implemented and used by all WebRTC endpoints"). `RTCPeerConnectionBuilder::build`
   installs the session of `configure_rtcp_reports` when the interceptor registry has nothing at
@@ -1610,6 +1616,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: engine rows.
+  - The endpoint drops an RTP packet whose payload type its stream's m= section did not
+    negotiate (RFC 3550 section 5.1).
+  - A minted RTX / FEC SSRC differs from every SSRC the track names; encodings naming one
+    SSRC twice are refused with the new `Error::ErrRTPSenderSsrcCollision` (RFC 4588 section 4).
+  - `SystemInstant::shared` (rtc-shared): one wall-clock anchor for the sender reports, the
+    RRTR blocks and the RFC 8888 report timestamp (RFC 8888 section 3.1); `SystemInstant::unix`
+    maps an instant before the anchor to an earlier time instead of the anchor's.
+  - `StreamInfo::payload_clock_rates` is filled from the m= section's media formats, so a
+    source switching payload type (telephone events on Opus) is timed in each one's clock
+    (RFC 7160 section 4.3, RFC 4733 section 2.5.2.2).
+  - `H264DeinterleavingBuffer::{with_init_buf_time, push_at, is_initial_buffering}`: initial
+    buffering of RFC 6184 section 7.2.2 with `sprop-init-buf-time`.
+  - RED (RFC 2198): `RedEncoder::encode_rtp`, `RedDecoder::decode_rtp` (`RecoveredMedia`: the
+    RED packet's CSRCs, no marker on recovered data); a remote RED format whose fmtp names a
+    payload type not negotiated in the section, or of another clock rate, is not negotiated.
 - **media conformance**: `SettingEngineBuilder::with_strict_rtcp_validity(true)` holds
   received RTCP to RFC 3550 Appendix A.2 and section 6.4.1 (SR or RR first unless reduced-size
   RTCP was negotiated, no padding bit on the first packet, padding only on the last); the

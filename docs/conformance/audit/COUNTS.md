@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4236 | 248 | 301 | 138 | 24 | 613 | 5560 |
-| SHOULD | 660 | 82 | 78 | 76 | 6 | 327 | 1229 |
+| MUST | 4238 | 248 | 300 | 137 | 24 | 613 | 5560 |
+| SHOULD | 661 | 82 | 77 | 76 | 6 | 327 | 1229 |
 | MAY | 388 | 33 | 36 | 129 | 0 | 166 | 752 |
 | PROC | 57 | 3 | 4 | 3 | 0 | 0 | 67 |
-| all | 5341 | 366 | 419 | 346 | 30 | 1106 | 7608 |
+| all | 5344 | 366 | 417 | 345 | 30 | 1106 | 7608 |
 
 ## Per file
 
@@ -38,8 +38,8 @@ is a procedure step without a keyword.
 | `draft-ietf-rmcat-gcc.md` | MUST | 34 | 0 | 1 | 0 | 0 | 0 | 35 |
 | `draft-ietf-rmcat-gcc.md` | SHOULD | 15 | 0 | 2 | 0 | 0 | 0 | 17 |
 | `draft-ietf-rmcat-gcc.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `rfc2198.md` | MUST | 7 | 0 | 4 | 1 | 0 | 1 | 13 |
-| `rfc2198.md` | SHOULD | 1 | 1 | 1 | 0 | 0 | 0 | 3 |
+| `rfc2198.md` | MUST | 9 | 0 | 3 | 0 | 0 | 1 | 13 |
+| `rfc2198.md` | SHOULD | 2 | 1 | 0 | 0 | 0 | 0 | 3 |
 | `rfc2198.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc3264.md` | MUST | 32 | 8 | 6 | 0 | 2 | 7 | 55 |
 | `rfc3264.md` | SHOULD | 6 | 3 | 1 | 1 | 0 | 2 | 13 |
