@@ -286,14 +286,41 @@ impl TransportSet {
         self.route_datagram(transport, datagram, Direction::Outbound)
     }
 
+    /// The transport a datagram on a connection that names none yet belongs to, only when
+    /// that is certain: one transport, an address only one transport gathered on, or a
+    /// Binding request whose USERNAME names one (RFC 8445 section 7.2.2). `None` where
+    /// [`Self::route`] would guess from the peer's address, which two transports may both
+    /// know (two of this side's active ICE-TCP candidates to one remote candidate).
+    pub(crate) fn route_named(
+        &self,
+        transport: &TransportContext,
+        datagram: &[u8],
+    ) -> Option<TransportId> {
+        match self.route_with_certainty(transport, datagram, Direction::Inbound) {
+            (id, true) => Some(id),
+            (_, false) => None,
+        }
+    }
+
     fn route_datagram(
         &self,
         transport: &TransportContext,
         datagram: &[u8],
         direction: Direction,
     ) -> TransportId {
+        self.route_with_certainty(transport, datagram, direction).0
+    }
+
+    /// The transport, and whether the datagram's address or USERNAME named it (`false`: it
+    /// was chosen by the peer's address or as the default).
+    fn route_with_certainty(
+        &self,
+        transport: &TransportContext,
+        datagram: &[u8],
+        direction: Direction,
+    ) -> (TransportId, bool) {
         if self.bundles.len() == 1 {
-            return self.default;
+            return (self.default, true);
         }
         let local = transport.local_addr;
         let on: Vec<&TransportBundle> = self
@@ -307,8 +334,8 @@ impl TransportSet {
             })
             .collect();
         match on.as_slice() {
-            [] => return self.default,
-            [only] => return only.id,
+            [] => return (self.default, false),
+            [only] => return (only.id, true),
             _ => {}
         }
         if let Some((receiver, sender)) = binding_request_ufrags(datagram) {
@@ -320,7 +347,7 @@ impl TransportSet {
                 .iter()
                 .find(|bundle| agent_of(bundle).get_local_credentials().ufrag == ours)
             {
-                return bundle.id;
+                return (bundle.id, true);
             }
         }
         let peer = transport.peer_addr;
@@ -330,13 +357,15 @@ impl TransportSet {
                 .iter()
                 .any(|candidate| candidate.addr() == peer)
         }) {
-            return bundle.id;
+            return (bundle.id, false);
         }
         // The default transport first: an address several transports gathered on is its.
-        on.iter()
+        let id = on
+            .iter()
             .find(|bundle| bundle.id == self.default)
             .unwrap_or(&on[0])
-            .id
+            .id;
+        (id, false)
     }
 
     /// Every transport, in the order they were created.
@@ -1061,6 +1090,63 @@ mod tests {
                 &binding_request(&format!("{}:x", ufrag(&pc, default)))
             ),
             other
+        );
+    }
+
+    /// `route_named` answers only where the address or a check's USERNAME names the
+    /// transport: DTLS on an address two transports share, which `route` gives to the
+    /// transport that knows the peer, is no one's until a check names it.
+    #[test]
+    fn only_an_address_or_a_checks_username_names_the_transport_for_certain() {
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .expect("a default peer connection builds");
+        let context = TransportContext {
+            local_addr: "10.0.0.1:4000".parse().unwrap(),
+            peer_addr: "10.0.0.2:5000".parse().unwrap(),
+            ..Default::default()
+        };
+        let dtls = [0x16, 0xfe, 0xfd];
+        assert_eq!(
+            pc.pipeline_context.transports.route_named(&context, &dtls),
+            Some(pc.pipeline_context.transports.default_id()),
+            "one transport: everything is its"
+        );
+        let default = pc.pipeline_context.transports.default_id();
+        let other = pc.add_transport().expect("a second transport");
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                let local = ice::candidate::unmarshal_candidate(
+                    "candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host",
+                )
+                .unwrap();
+                pc.ice_transport_mut().add_local_candidate(local).unwrap();
+                // Both know the peer.
+                let remote = ice::candidate::unmarshal_candidate(
+                    "candidate:2 1 udp 2130706431 10.0.0.2 5000 typ host",
+                )
+                .unwrap();
+                pc.ice_transport_mut().add_remote_candidate(remote).unwrap()
+            });
+        }
+        let transports = &pc.pipeline_context.transports;
+        assert_eq!(transports.route_named(&context, &dtls), None);
+        assert_eq!(
+            transports.route(&context, &dtls),
+            default,
+            "route still guesses for the datagram path"
+        );
+        let ours = pc
+            .ice_transport_of(other)
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone();
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route_named(&context, &binding_request(&format!("{ours}:peer"))),
+            Some(other)
         );
     }
 }

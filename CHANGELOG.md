@@ -1890,6 +1890,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Licence gate and MSRV** (branch `conf/tcp-7-licence-msrv`). `deny.toml` has a `[licenses]`
+  allow-list of permissive licences only (MIT, Apache-2.0 and its LLVM exception, BSD-2/3,
+  ISC, Zlib, Unicode, CC0, 0BSD, BSL-1.0, and CDLA-Permissive-2.0 for the optional
+  `webpki-roots`); no GPL, LGPL or AGPL, no exceptions needed today (r-efi's LGPL is one arm
+  of an `OR`). The audit workflow runs `cargo deny --all-features check licenses bans
+  sources`. The workspace declares `rust-version = "1.89"` (the lowest that builds: uuid
+  1.29 needs 1.89), every crate inherits it, and cargo.yml's `msrv` job checks the workspace
+  with every feature on that toolchain, resolving dependencies to versions that support it.
+
 - **The peer connection's transports are a set** (mt-1). The ICE, DTLS and SRTP contexts that
   `PipelineContext` held once are now a `TransportSet` of transport bundles keyed by a transport
   id, reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport
@@ -2161,6 +2170,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends a FIR (RFC 5104 4.3.1, sequence number per request) when receiving with `ccm fir`
   negotiated, an InvalidStateError on audio. `RTCPeerConnectionEvent::OnKeyFrameRequest {
   sender, rid }` for each PLI / FIR naming a sender's SSRC (6.4 `keyframerequest`).
+
+- **ICE-TCP: a connection several transports could carry is tied to one only by a check**
+  (branch `conf/tcp-6-train-fixes`). On a port several transports share (a driver's shared
+  passive port), a connection accepted without a recorded transport took the first frame's
+  transport from the peer's address, so DTLS on a connection the peer reopened (RFC 6544
+  section 11.1) could tie it to the wrong transport for good. Now only a check names it (RFC
+  8445 section 7.2.2; `TransportSet::route_named`): a frame before one is dropped, and a write
+  that is not STUN never takes a connection whose transport is not known. A transport is
+  recorded on every connection the engine opens, at open.
 - **Stream transports per transport** (branch `conf/tcp-5-train-fixes`, with mt-2's several
   transports per connection). Each transport gathers its own ICE-TCP candidates (its own
   passive and simultaneous-open listeners and active candidate, announced with its section's

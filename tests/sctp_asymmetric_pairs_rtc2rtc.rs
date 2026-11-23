@@ -51,7 +51,11 @@ fn collect(pc: &mut RTCPeerConnection, seen: &mut Seen) {
         if let RTCPeerConnectionEvent::OnDataChannel(event) = event {
             match event {
                 RTCDataChannelEvent::OnOpen(id) => seen.opened.push(id),
-                RTCDataChannelEvent::OnBufferedAmountLow(_)
+                // W3C `datachannel`: the answerer is told of the channel the offerer opened
+                // in-band, right before its `OnOpen`; an announcement, not a change of the
+                // channel's state.
+                RTCDataChannelEvent::OnDataChannel(_)
+                | RTCDataChannelEvent::OnBufferedAmountLow(_)
                 | RTCDataChannelEvent::OnBufferedAmountHigh(_) => {}
                 other => seen.lifecycle.push(other),
             }

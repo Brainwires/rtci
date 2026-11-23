@@ -3,6 +3,7 @@ name = "rtc-sframe"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "RTC SFrame (RFC 9605) in Rust"
 license.workspace = true
 documentation = "https://docs.rs/rtc-sframe"
