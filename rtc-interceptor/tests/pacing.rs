@@ -594,12 +594,24 @@ fn a_packet_larger_than_the_burst_is_still_released() {
     );
 }
 
-/// The queue is bounded. Under sustained overload the arrival is refused rather than a queued
-/// packet evicted, since the queued ones are older and dropping one would put a hole mid-stream.
+/// The queue is bounded, and nothing in it is ever thrown away: the packets are numbered, and
+/// one refused (as the pacer once did) is a hole in its stream that no path lost, which the
+/// receiver counts as loss. A packet arriving at a full queue makes the oldest leave at once,
+/// over the budget. Ten packets into a queue of three: all ten leave, in order, with no gap.
 #[test]
-fn the_queue_is_bounded_and_refuses_new_arrivals_when_full() {
+fn a_full_queue_releases_its_oldest_and_refuses_nothing() {
     let epoch = Instant::now();
+    let released = Arc::new(Mutex::new(Vec::new()));
     let mut chain = Registry::new()
+        .with(
+            Slot::from(2_500),
+            Marker {
+                released: Arc::clone(&released),
+                epoch,
+                read_queue: VecDeque::new(),
+                write_queue: VecDeque::new(),
+            },
+        )
         .with(
             Slot::Pacer,
             PacerBuilder::new()
@@ -625,23 +637,103 @@ fn the_queue_is_bounded_and_refuses_new_arrivals_when_full() {
                 })),
             })
             .expect("handle_write");
+        while chain.poll_write().is_some() {}
     }
+    // Seven left at the write: the first inside the budget, six to make room.
+    assert_eq!(7, released.lock().unwrap().len());
 
-    // Drain everything the pacer will ever release: only what fitted in the queue comes out.
-    let mut released = 0;
     let mut now = epoch;
     for _ in 0..100 {
         chain.handle_timeout(now).expect("handle_timeout");
-        while chain.poll_write().is_some() {
-            released += 1;
-        }
+        while chain.poll_write().is_some() {}
         now += Duration::from_millis(10);
     }
-
+    let order: Vec<u16> = released
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|packet| packet.sequence_number)
+        .collect();
     assert_eq!(
-        4, released,
-        "the first left inside the budget, three filled the queue, the other six were refused"
+        (0..10).collect::<Vec<u16>>(),
+        order,
+        "every packet, in order"
     );
+}
+
+/// The queue time is bounded (libwebrtc's pacer: an expected queue length of 2 s). A source
+/// writing 2.4 Mb/s for ten seconds against a 1.2 Mb/s target fills the queue at 1.2 Mb/s;
+/// the pacing rate rises above the target as far as it takes to drain what is queued before
+/// the oldest packet has waited 2 s, so no packet waits longer than that (and a packet more),
+/// and every packet leaves. Without the bound the last packet waits 10 s.
+#[test]
+fn no_packet_waits_longer_than_the_queue_time_limit() {
+    let mut harness = Harness::new();
+    let waits = |harness: &Harness| -> Vec<Duration> {
+        harness
+            .released()
+            .iter()
+            .map(|packet| packet.at - ms(5 * u64::from(packet.sequence_number)))
+            .collect()
+    };
+    for n in 0..2000u16 {
+        let at = ms(5 * u64::from(n));
+        harness.advance_to(at);
+        harness.send(at, n);
+        harness.drain();
+    }
+    harness.advance_to(ms(20_000));
+    let released = harness.released();
+    assert_eq!(2000, released.len(), "every packet left");
+    let longest = waits(&harness).into_iter().max().unwrap_or_default();
+    assert!(
+        longest <= ms(2_010),
+        "the longest wait was {longest:?}, over the 2 s limit"
+    );
+    assert!(longest >= ms(1_500), "the queue did grow: {longest:?}");
+}
+
+/// Audio is not queued behind video (libwebrtc paces audio first): with a second of video
+/// queued, an audio packet leaves when it is written.
+#[test]
+fn audio_is_not_queued_behind_video() {
+    let mut harness = Harness::new();
+    harness
+        .chain
+        .bind_local_stream(&rtc_interceptor::StreamInfo {
+            ssrc: 7,
+            mime_type: "audio/opus".to_owned(),
+            clock_rate: 48_000,
+            ..Default::default()
+        });
+    for n in 0..100u16 {
+        harness.send(ms(0), n);
+    }
+    harness.drain();
+    harness
+        .chain
+        .handle_write(TaggedPacket {
+            now: harness.epoch + ms(1),
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 111,
+                    sequence_number: 5000,
+                    ssrc: 7,
+                    ..Default::default()
+                },
+                payload: vec![0u8; 100].into(),
+            })),
+        })
+        .expect("handle_write");
+    harness.drain();
+    let audio = harness
+        .released()
+        .into_iter()
+        .find(|packet| packet.sequence_number == 5000)
+        .expect("the audio packet left");
+    assert_eq!(ms(1), audio.at, "at the instant it was written");
 }
 
 /// RFC 8836 section 2, requirement 1 (self-induced delay as low as possible) with

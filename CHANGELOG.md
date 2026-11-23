@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors**: the pacer bounds its queue time and never refuses a packet
+  (`conf/pacer-1-queue-time`).
+  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
+    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
+    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
+    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
+    replaced by `forced`.
+  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
+    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
+    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
+    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
+    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
+    25 s; now 2 s. The application sees that its source is above the target in the target
+    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
+  - Audio streams are not queued behind video: their packets leave when written and are
+    charged to the budget.
+  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
+    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
+    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
+  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
+    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
+    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
+    every time. Without it they come from `rand`, as before.
+
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
   times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech

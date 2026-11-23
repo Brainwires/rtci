@@ -8,15 +8,20 @@ use crate::{Attribute, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
 use shared::marshal::MarshalSize;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Rate used when none is configured: 1 Mb/s.
 pub const DEFAULT_BITRATE: f64 = 1_000_000.0;
 
-/// Packets held before new ones are refused.
+/// Packets held before the oldest is released over the budget to make room.
 pub const DEFAULT_QUEUE_LIMIT: usize = 4096;
+
+/// How long a packet may wait in the queue by default: the pacing rate is raised above the
+/// target as far as it takes to drain the queue within it (libwebrtc's `kMaxExpectedQueueLength`,
+/// 2 s).
+pub const DEFAULT_QUEUE_TIME_LIMIT: Duration = Duration::from_secs(2);
 
 /// Builder for [`PacerInterceptor`].
 ///
@@ -33,6 +38,7 @@ pub struct PacerBuilder {
     bitrate: f64,
     burst_bits: Option<f64>,
     queue_limit: usize,
+    queue_time_limit: Option<Duration>,
     immediate_release: bool,
 }
 
@@ -42,6 +48,7 @@ impl Default for PacerBuilder {
             bitrate: DEFAULT_BITRATE,
             burst_bits: None,
             queue_limit: DEFAULT_QUEUE_LIMIT,
+            queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
             immediate_release: true,
         }
     }
@@ -67,9 +74,24 @@ impl PacerBuilder {
         self
     }
 
-    /// How many packets may be queued before new ones are refused.
+    /// How many packets may be queued. When a packet arrives at a full queue, the oldest one
+    /// leaves at once, over the budget: a packet the application has numbered is never thrown
+    /// away here, since the hole in the sequence would be loss the sender made itself.
     pub fn with_queue_limit(mut self, queue_limit: usize) -> Self {
         self.queue_limit = queue_limit;
+        self
+    }
+
+    /// How long a packet may wait in the queue ([`DEFAULT_QUEUE_TIME_LIMIT`] by default,
+    /// `None` for no bound). When the application writes faster than the congestion
+    /// controller's target, the queue grows; the pacing rate is then raised above the target
+    /// to what drains the queued bits before its oldest packet has waited this long
+    /// (libwebrtc's pacer does the same with its expected queue length of 2 s). The
+    /// application learns that its source is above the target from the target itself
+    /// (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`), and from
+    /// [`PacerInterceptor::queue_time`].
+    pub fn with_queue_time_limit(mut self, limit: Option<Duration>) -> Self {
+        self.queue_time_limit = limit;
         self
     }
 
@@ -98,6 +120,7 @@ impl PacerBuilder {
         };
         let mut pacer = PacerInterceptor::new(bucket, self.queue_limit);
         pacer.immediate_release = self.immediate_release;
+        pacer.queue_time_limit = self.queue_time_limit;
         pacer
     }
 }
@@ -127,14 +150,23 @@ impl PacerBuilder {
 ///   webrtc#862 busy-loop.
 pub struct PacerInterceptor {
     pacer: LeakyBucket,
+    /// The rate the bucket was set to before the queue time limit raised it, while it is
+    /// raised: the target to come back to (the congestion controller's, or one set through
+    /// [`Self::pacer_mut`]).
+    raised_from: Option<f64>,
     queue: VecDeque<TaggedPacket>,
+    /// The bits waiting in `queue`.
+    queued_bits: f64,
     queue_limit: usize,
+    queue_time_limit: Option<Duration>,
+    /// The SSRCs of the audio streams: their packets are not queued behind others.
+    audio: HashSet<u32>,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
     probe: Option<ActiveProbe>,
-    /// Packets refused because the queue was full.
-    dropped: u64,
+    /// Packets released over the budget because the queue was full.
+    forced: u64,
     /// Packets the budget has released, waiting to join the belt.
     released: VecDeque<TaggedPacket>,
     /// Inbound packets ready for the next interceptor.
@@ -150,12 +182,16 @@ impl PacerInterceptor {
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
             released: VecDeque::new(),
+            raised_from: None,
             pacer,
             queue: VecDeque::new(),
+            queued_bits: 0.0,
             queue_limit: queue_limit.max(1),
+            queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
+            audio: HashSet::new(),
             immediate_release: true,
             probe: None,
-            dropped: 0,
+            forced: 0,
         }
     }
 
@@ -174,9 +210,64 @@ impl PacerInterceptor {
         self.queue.len()
     }
 
-    /// How many packets have been refused because the queue was full.
-    pub fn dropped(&self) -> u64 {
-        self.dropped
+    /// How many packets left over the budget because the queue was full (none is ever
+    /// refused).
+    pub fn forced(&self) -> u64 {
+        self.forced
+    }
+
+    /// How long the oldest queued packet has waited at `now`, zero with nothing queued.
+    pub fn queue_time(&self, now: Instant) -> Duration {
+        self.queue.front().map_or(Duration::ZERO, |head| {
+            now.saturating_duration_since(head.now)
+        })
+    }
+
+    /// The rate to pace at now: the target, or more when the queue would otherwise not drain
+    /// before its oldest packet has waited the queue time limit. With `q` bits queued and the
+    /// oldest packet having waited `w`, the rate is max(target, q / (limit - w)); once `w`
+    /// reaches the limit, everything queued may leave.
+    fn pacing_rate(&self, now: Instant) -> f64 {
+        let target = self.target();
+        let Some(limit) = self.queue_time_limit else {
+            return target;
+        };
+        if self.queue.is_empty() {
+            return target;
+        }
+        let remaining = limit.saturating_sub(self.queue_time(now)).as_secs_f64();
+        let needed = if remaining > 0.001 {
+            self.queued_bits / remaining
+        } else {
+            // Overdue: everything may leave (`handle_timeout` releases it).
+            1e12
+        };
+        target.max(needed)
+    }
+
+    /// The target rate: what the bucket paces at when the queue is short.
+    fn target(&self) -> f64 {
+        self.raised_from
+            .unwrap_or_else(|| self.pacer.target_bitrate())
+    }
+
+    /// Paces at [`Self::pacing_rate`] from `now`: above the target while the queue needs it,
+    /// back at the target once it does not.
+    fn follow_queue(&mut self, now: Instant) {
+        let target = self.target();
+        let rate = self.pacing_rate(now);
+        if rate > target {
+            self.raised_from = Some(target);
+            if rate != self.pacer.target_bitrate() {
+                self.pacer.set_target_bitrate(rate);
+            }
+        } else if let Some(target) = self.raised_from.take() {
+            self.pacer.set_target_bitrate(target);
+        }
+    }
+
+    fn is_audio(&self, packet: &TaggedPacket) -> bool {
+        matches!(&packet.message.packet, Packet::Rtp(rtp) if self.audio.contains(&rtp.header.ssrc))
     }
 
     /// The size of a packet on the wire, in bits — the unit the budget is kept in.
@@ -198,7 +289,22 @@ impl PacerInterceptor {
     /// The instant the head of the queue can next be released.
     fn next_release(&self) -> Option<Instant> {
         let head = self.queue.front()?;
-        self.bucket().releasable_at(Self::bits_of(head))
+        let by_budget = self.bucket().releasable_at(Self::bits_of(head)).map(|at| {
+            // While the rate is raised it moves with every call, and the instant computed at
+            // one rate can come out a hair short of the budget at the next: a microsecond
+            // later it is not, and the deadline advances (webrtc#862).
+            if self.raised_from.is_some() {
+                at + Duration::from_micros(1)
+            } else {
+                at
+            }
+        });
+        // The rate rises as the oldest packet ages: wake by the time it reaches the limit.
+        let by_limit = self.queue_time_limit.map(|limit| head.now + limit);
+        match (by_budget, by_limit) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether `bits` may leave now, and if so, spends them.
@@ -283,7 +389,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 bits_per_second: 0.0,
             })
         {
-            self.pacer.set_target_bitrate(*bits_per_second);
+            match self.raised_from.as_mut() {
+                // Raised to drain the queue: the new target is what it comes back to.
+                Some(target) => *target = *bits_per_second,
+                None => self.pacer.set_target_bitrate(*bits_per_second),
+            }
         }
 
         // A probe cluster the congestion controller asks for: the next packets leave at its
@@ -325,6 +435,19 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         // Keeping the budget current at enqueue time is what lets `poll_timeout` compute a
         // deadline that is never in the past, even before the first `handle_timeout`.
         self.refill(msg.now);
+        self.follow_queue(msg.now);
+
+        // Audio is never queued behind video: its packets are small and few, and a voice that
+        // waits behind a video backlog is the call breaking up. It leaves at once and is
+        // charged to the budget, which the packets behind it then wait out.
+        if self.is_audio(&msg) {
+            let bits = Self::bits_of(&msg);
+            if !self.try_spend(bits) {
+                self.pacer.consume(bits);
+            }
+            self.release(msg, bits);
+            return Ok(());
+        }
 
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
@@ -337,16 +460,25 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         }
 
         if self.queue.len() >= self.queue_limit {
-            // Refuse the arrival rather than evicting something already queued: the queued
-            // packets are older, and dropping one of those would put a hole in the middle of a
-            // stream that the receiver would have to recover from.
-            self.dropped += 1;
-            // Refused, so it never leaves.
-            return Ok(());
+            // The oldest leaves now, over the budget, to make room. The packets here are
+            // numbered: refusing one, as the pacer once did, put a hole in its stream that no
+            // packet was ever lost to on the path, which the receiver then counted as loss and
+            // asked for again. The queue time limit keeps this a last resort.
+            if let Some(mut oldest) = self.queue.pop_front() {
+                let bits = Self::bits_of(&oldest);
+                self.queued_bits -= bits;
+                self.pacer.consume(bits);
+                oldest.now = msg.now;
+                self.forced += 1;
+                self.release(oldest, bits);
+            }
         }
 
         // Held: it leaves later, from `poll_write`, when the budget allows.
+        let now = msg.now;
+        self.queued_bits += Self::bits_of(&msg);
         self.queue.push_back(msg);
+        self.follow_queue(now);
         Ok(())
     }
 
@@ -360,14 +492,22 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
         self.refill(now);
+        self.follow_queue(now);
 
         while let Some(head) = self.queue.front() {
             let bits = Self::bits_of(head);
-            if !self.try_spend(bits) {
+            // Past the queue time limit the head leaves whatever the budget says.
+            let overdue = self
+                .queue_time_limit
+                .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit);
+            if overdue {
+                self.pacer.consume(bits);
+            } else if !self.try_spend(bits) {
                 break;
             }
 
             let mut packet = self.queue.pop_front().expect("front just checked");
+            self.queued_bits = (self.queued_bits - bits).max(0.0);
             // Rule 3: the packet departs now. Anything below recording departure — the send
             // history congestion control reads — must see the release instant, not the enqueue
             // instant, or this queueing delay is charged to the network.
@@ -376,6 +516,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             // interceptor ahead — numbering, and the send history reading the release instant just set.
             self.release(packet, bits);
         }
+        if self.queue.is_empty() {
+            self.queued_bits = 0.0;
+        }
+        self.follow_queue(now);
         Ok(())
     }
 
@@ -385,9 +529,18 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
 }
 
 impl Interceptor for PacerInterceptor {
-    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    /// Audio streams (and their repair flows) are not queued behind others.
+    fn bind_local_stream(&mut self, info: &StreamInfo) {
+        if info.mime_type.to_ascii_lowercase().starts_with("audio/") {
+            self.audio.extend(crate::twcc::flow_ssrcs(info));
+        }
+    }
 
-    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        for ssrc in crate::twcc::flow_ssrcs(info) {
+            self.audio.remove(&ssrc);
+        }
+    }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
 
