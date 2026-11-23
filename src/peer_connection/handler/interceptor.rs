@@ -13,7 +13,9 @@ use crate::peer_connection::message::internal::{
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_format, find_rtx_payload_type};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    find_receive_fec_format, find_rtx_payload_type,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
 };
@@ -585,7 +587,7 @@ impl<'a> InterceptorHandler<'a> {
             payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -598,6 +600,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // Each repair flow is also bound in its own right, exactly as
@@ -617,6 +620,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -632,6 +636,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -783,6 +788,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         let track_id = receiver.track().track_id().to_owned();
@@ -882,6 +888,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -895,6 +902,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &repair_flow_codec(&codec.rtp_codec),
             &parameters.rtp_parameters.header_extensions,
+            &[],
         );
 
         // Attribute RTX packets to the primary stream's stats.
@@ -998,6 +1006,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &codec.rtp_codec,
                 &parameters.rtp_parameters.header_extensions,
+                &parameters.rtp_parameters.codecs,
             );
             self.stats.remove_inbound_rtp_stream(previous_ssrc);
             self.ctx.ssrc_owners.remove(previous_ssrc);
@@ -1032,7 +1041,7 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -1045,6 +1054,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // And each repair flow in its own right, as `interceptor_remote_streams_op` does: naming it
@@ -1064,6 +1074,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -1079,6 +1090,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 

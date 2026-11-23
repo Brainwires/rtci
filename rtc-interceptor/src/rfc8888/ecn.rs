@@ -41,6 +41,7 @@
 //! caller's part, as is choosing the codepoint (ECT(1) for L4S, RFC 9331).
 
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
+use rtcp::transport_feedbacks::ecn_feedback::EcnCounters;
 use std::time::{Duration, Instant};
 
 /// During initiation one packet in this many is a probe sent ECT.
@@ -131,6 +132,9 @@ pub struct EcnValidation {
     /// The loss of the window that sent the stream into [`EcnState::Fallback`].
     fallback_from: u32,
     fallbacks: u32,
+    /// The last RFC 6679 counters reported, with the extended highest sequence number they
+    /// relate to ([`EcnValidation::on_counters`]).
+    last_counters: Option<(u32, EcnCounters)>,
 }
 
 impl Default for EcnValidation {
@@ -156,6 +160,7 @@ impl EcnValidation {
             window: Window::default(),
             fallback_from: 0,
             fallbacks: 0,
+            last_counters: None,
         }
     }
 
@@ -294,6 +299,130 @@ impl EcnValidation {
         }
     }
 
+    /// An RFC 6679 report about the stream arrived at `now`: the receiver's cumulative ECN
+    /// counters (an RTCP ECN Feedback packet, section 5.1, or an XR ECN Summary Report,
+    /// section 5.2) and the extended highest sequence number they relate to (the feedback
+    /// packet's, or the reception report's in the same compound packet). The procedure is the
+    /// one [`on_report`](Self::on_report) runs, on what changed since the last report: the
+    /// packets sent up to the new highest sequence number, how many went out ECT, and how many
+    /// the receiver counted ECT or CE, not-ECT, lost and duplicated (section 7.4.2).
+    ///
+    /// * Initiating: ECT or CE counts confirm probes; not-ECT counts beyond the unmarked
+    ///   packets sent (and the duplicates) are a negative indication; more than three probes
+    ///   sent with no ECT counted is a failure (section 7.2.1).
+    /// * Ongoing use: each packet sent ECT is reported; the not-ECT count beyond duplicates is
+    ///   bleaching, the lost count is loss; the thresholds are those of per-packet reports.
+    pub fn on_counters(&mut self, now: Instant, extended_highest: u32, counters: EcnCounters) {
+        let (previous_highest, previous) = match self.last_counters {
+            Some(last) => last,
+            None => (
+                extended_highest.wrapping_sub(self.known_since(extended_highest)),
+                EcnCounters::default(),
+            ),
+        };
+        // An older report than the last one says nothing new.
+        let span = extended_highest.wrapping_sub(previous_highest);
+        if span > 0x8000_0000 {
+            return;
+        }
+        self.last_counters = Some((extended_highest, counters));
+        if span == 0 && counters == previous {
+            return;
+        }
+        let ect = u64::from(counters.ect0.wrapping_sub(previous.ect0))
+            + u64::from(counters.ect1.wrapping_sub(previous.ect1))
+            + u64::from(counters.ce.wrapping_sub(previous.ce));
+        let not_ect = u64::from(counters.not_ect.wrapping_sub(previous.not_ect));
+        let duplicates = u64::from(counters.duplicates.wrapping_sub(previous.duplicates));
+        // The loss counter may fall (late packets) between reports.
+        let lost = i64::from(counters.lost.wrapping_sub(previous.lost) as i16).max(0) as u64;
+
+        // What went out in (previous_highest, extended_highest], as far as the history knows.
+        let (mut marked, mut unmarked) = (0u64, 0u64);
+        let first = previous_highest.wrapping_add(1);
+        for offset in 0..span.min(HISTORY as u32) {
+            let sequence_number = first.wrapping_add(offset) as u16;
+            let slot = &self.history[usize::from(sequence_number) % HISTORY];
+            if slot.known && slot.sequence_number == sequence_number {
+                if slot.marked {
+                    marked += 1;
+                } else {
+                    unmarked += 1;
+                }
+            }
+        }
+        let bleached = not_ect.saturating_sub(unmarked + duplicates);
+
+        match self.state {
+            EcnState::Initiating => {
+                if bleached > 0 && marked > 0 {
+                    self.fail(now, "ECT probes were counted Not-ECT");
+                    return;
+                }
+                self.probes_confirmed += ect.min(u64::from(u32::MAX)) as u32;
+                if ect == 0 {
+                    self.probes_lost += marked as u32;
+                }
+                if self.probes_confirmed == 0 && self.probes_lost >= PROBES_LOST_TO_FAIL {
+                    self.fail(now, "no ECT probe arrived");
+                } else if self.probes_confirmed >= CONFIRMATIONS && bleached == 0 {
+                    self.state = EcnState::Active;
+                    self.window = Window::default();
+                }
+            }
+            EcnState::Active => {
+                self.window.reported += marked as u32;
+                self.window.lost += lost.min(marked) as u32;
+                self.window.bleached += bleached.min(marked) as u32;
+                if self.window.bleached * 4 > WINDOW {
+                    self.fail(now, "the path clears the ECN field");
+                } else if self.window.lost * 2 >= WINDOW {
+                    log::debug!("ECN: high loss of ECT packets; sending Not-ECT to compare");
+                    self.state = EcnState::Fallback;
+                    self.fallback_from = self.window.lost;
+                    self.window = Window::default();
+                } else if self.window.reported >= WINDOW {
+                    self.window = Window::default();
+                }
+            }
+            EcnState::Fallback => {
+                self.window.reported += unmarked as u32;
+                self.window.lost += lost.min(unmarked) as u32;
+                if self.window.reported >= WINDOW {
+                    if self.window.lost * 4 < WINDOW && self.window.lost * 2 < self.fallback_from {
+                        self.fallbacks += 1;
+                        if self.fallbacks >= FALLBACKS_TO_DISABLE {
+                            log::warn!("ECN: ECT packets were lost again; ECN off for the stream");
+                            self.state = EcnState::Disabled;
+                        } else {
+                            log::warn!("ECN: ECT packets were lost; initiating again");
+                            self.initiate();
+                        }
+                    } else {
+                        self.state = EcnState::Active;
+                        self.window = Window::default();
+                    }
+                }
+            }
+            EcnState::Failed { .. } | EcnState::Disabled => {}
+        }
+    }
+
+    /// How many sequence numbers before `extended_highest` the history holds sent packets
+    /// for: the span the first RFC 6679 report covers.
+    fn known_since(&self, extended_highest: u32) -> u32 {
+        let mut span = 0u32;
+        while span < HISTORY as u32 {
+            let sequence_number = extended_highest.wrapping_sub(span) as u16;
+            let slot = &self.history[usize::from(sequence_number) % HISTORY];
+            if !(slot.known && slot.sequence_number == sequence_number) {
+                break;
+            }
+            span += 1;
+        }
+        span
+    }
+
     fn count(&mut self, undo_loss: bool, received: bool, bleached: bool) {
         if undo_loss {
             self.window.lost = self.window.lost.saturating_sub(1);
@@ -329,6 +458,108 @@ impl EcnValidation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 6679 counters for `marked` probes and the unmarked rest of `first..=last`, as a
+    /// receiver on a path that `ect_arrives` (or clears the field) counts them.
+    fn counters_for(
+        sent: &[u16],
+        marked: &[u16],
+        ect_arrives: bool,
+        lost: u16,
+        base: EcnCounters,
+    ) -> EcnCounters {
+        let marked_count = marked.len() as u32;
+        let unmarked = (sent.len() - marked.len()) as u16;
+        let mut c = base;
+        if ect_arrives {
+            c.ect1 += marked_count - u32::from(lost.min(marked_count as u16));
+            c.not_ect += unmarked;
+        } else {
+            c.not_ect += unmarked + marked_count as u16 - lost;
+        }
+        c.lost += lost;
+        c
+    }
+
+    /// RFC 6679 7.2.1 with the counters of section 5: probes counted ECT by the receiver's
+    /// ECN Feedback / XR ECN Summary Reports make the initiation succeed, and every packet is
+    /// then sent ECT (section 7.3.1).
+    #[test]
+    fn counted_ect_probes_complete_the_initiation() {
+        let mut v = EcnValidation::default();
+        let mut at = Instant::now();
+        let sent: Vec<u16> = (0..40).collect();
+        let marked = send(&mut v, &mut at, 0, 40);
+        assert!(
+            marked.len() >= 2 && marked.len() < 40,
+            "probes only: {marked:?}"
+        );
+        let c = counters_for(&sent, &marked, true, 0, EcnCounters::default());
+        v.on_counters(at, 39, c);
+        assert_eq!(v.state(), EcnState::Active);
+        assert_eq!(
+            send(&mut v, &mut at, 40, 10).len(),
+            10,
+            "all marked once active"
+        );
+    }
+
+    /// Section 7.2.1: a path that clears the field (probes counted not-ECT) fails the
+    /// initiation; section 7.4.1: it is retried later.
+    #[test]
+    fn probes_counted_not_ect_fail_the_initiation() {
+        let mut v = EcnValidation::default().with_retry_after(Duration::from_secs(10));
+        let mut at = Instant::now();
+        let sent: Vec<u16> = (0..40).collect();
+        let marked = send(&mut v, &mut at, 0, 40);
+        let c = counters_for(&sent, &marked, false, 0, EcnCounters::default());
+        v.on_counters(at, 39, c);
+        assert!(
+            matches!(v.state(), EcnState::Failed { .. }),
+            "{:?}",
+            v.state()
+        );
+        assert!(
+            send(&mut v, &mut at, 40, 20).is_empty(),
+            "nothing marked after the failure"
+        );
+        at += Duration::from_secs(11);
+        assert!(
+            !send(&mut v, &mut at, 60, 20).is_empty(),
+            "probing again after the retry time"
+        );
+    }
+
+    /// Section 7.4.2, ongoing use: once every packet goes out ECT, a receiver counting them
+    /// not-ECT means the path clears the field, and marking stops.
+    #[test]
+    fn bleaching_counted_in_ongoing_use_stops_the_marking() {
+        let mut v = EcnValidation::new(EcnInitiation::LeapOfFaith);
+        let mut at = Instant::now();
+        let sent: Vec<u16> = (0..40).collect();
+        let marked = send(&mut v, &mut at, 0, 40);
+        assert_eq!(marked.len(), 40);
+        let c = counters_for(&sent, &marked, false, 0, EcnCounters::default());
+        v.on_counters(at, 39, c);
+        assert!(
+            matches!(v.state(), EcnState::Failed { .. }),
+            "{:?}",
+            v.state()
+        );
+    }
+
+    /// Section 7.4.1: high loss of ECT packets switches to not-ECT to compare.
+    #[test]
+    fn counted_loss_of_ect_packets_falls_back_to_not_ect() {
+        let mut v = EcnValidation::new(EcnInitiation::LeapOfFaith);
+        let mut at = Instant::now();
+        let sent: Vec<u16> = (0..40).collect();
+        let marked = send(&mut v, &mut at, 0, 40);
+        let c = counters_for(&sent, &marked, true, 20, EcnCounters::default());
+        v.on_counters(at, 39, c);
+        assert_eq!(v.state(), EcnState::Fallback);
+        assert!(send(&mut v, &mut at, 40, 10).is_empty());
+    }
 
     /// Sends `count` packets 20 ms apart from `first`; returns which were marked.
     fn send(v: &mut EcnValidation, at: &mut Instant, first: u16, count: u16) -> Vec<u16> {

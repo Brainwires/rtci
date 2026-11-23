@@ -554,10 +554,122 @@ pub(crate) fn find_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecF
         })
 }
 
+/// The FEC format of a remote stream's `FEC-FR` repair flow in `haystack`: as
+/// [`find_fec_format`], and else ULPFEC (`video/ulpfec`) as a stream of its own (RFC 5109
+/// section 14.1, SSRC-multiplexed in the session as RFC 5956 section 4.3 groups it). Only the
+/// receive side reads it: the engine sends ULPFEC in RED unless the application builds the
+/// separate stream itself, so a local ULPFEC registration mints no repair SSRC.
+pub(crate) fn find_receive_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecFormat> {
+    find_fec_format(haystack).or_else(|| {
+        haystack
+            .iter()
+            .find(|c| {
+                c.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC,
+                )
+            })
+            .map(|c| FecFormat {
+                payload_type: c.payload_type,
+                mime_type: c.rtp_codec.mime_type.clone(),
+                sdp_fmtp_line: c.rtp_codec.sdp_fmtp_line.clone(),
+            })
+    })
+}
+
 /// The payload type of the FEC format in `haystack` ([`find_fec_format`]).
 #[cfg(test)]
 pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
     find_fec_format(haystack).map(|format| format.payload_type)
+}
+
+/// The RTCP feedback a packet is, as the `a=rtcp-fb` entry (type, first word of the
+/// parameter) that negotiates it: NACK, PLI, SLI, RPSI (RFC 4585), FIR, TMMBR / TMMBN, TSTR /
+/// TSTN, VBCM (RFC 5104), LRR (`ccm lrr`), REMB (`goog-remb`), transport-wide congestion
+/// control (`transport-cc`), RFC 8888 (`ack ccfb`) and the RFC 6679 ECN feedback (`nack ecn`).
+/// `None` for what is not feedback (SR, RR, SDES, BYE, APP, XR) and for feedback this endpoint
+/// has no negotiation rule for.
+pub(crate) fn feedback_negotiating(
+    packet: &dyn rtcp::Packet,
+) -> Option<(&'static str, &'static str)> {
+    use rtcp::payload_feedbacks::{
+        full_intra_request::FullIntraRequest,
+        layer_refresh_request::LayerRefreshRequest,
+        picture_loss_indication::PictureLossIndication,
+        receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
+        reference_picture_selection_indication::ReferencePictureSelectionIndication,
+        slice_loss_indication::SliceLossIndication,
+        temporal_spatial_tradeoff::{
+            TemporalSpatialTradeoffNotification, TemporalSpatialTradeoffRequest,
+        },
+        video_back_channel_message::VideoBackChannelMessage,
+    };
+    use rtcp::transport_feedbacks::{
+        cc_feedback_report::CcFeedbackReport,
+        ecn_feedback::EcnFeedback,
+        tmmb::{TemporaryMaximumBitrateNotification, TemporaryMaximumBitrateRequest},
+        transport_layer_cc::TransportLayerCc,
+        transport_layer_nack::TransportLayerNack,
+    };
+    let any = packet.as_any();
+    Some(if any.is::<TransportLayerNack>() {
+        ("nack", "")
+    } else if any.is::<PictureLossIndication>() {
+        ("nack", "pli")
+    } else if any.is::<SliceLossIndication>() {
+        ("nack", "sli")
+    } else if any.is::<ReferencePictureSelectionIndication>() {
+        ("nack", "rpsi")
+    } else if any.is::<EcnFeedback>() {
+        ("nack", "ecn")
+    } else if any.is::<FullIntraRequest>() {
+        ("ccm", "fir")
+    } else if any.is::<TemporaryMaximumBitrateRequest>()
+        || any.is::<TemporaryMaximumBitrateNotification>()
+    {
+        ("ccm", "tmmbr")
+    } else if any.is::<TemporalSpatialTradeoffRequest>()
+        || any.is::<TemporalSpatialTradeoffNotification>()
+    {
+        ("ccm", "tstr")
+    } else if any.is::<VideoBackChannelMessage>() {
+        ("ccm", "vbcm")
+    } else if any.is::<LayerRefreshRequest>() {
+        ("ccm", "lrr")
+    } else if any.is::<ReceiverEstimatedMaximumBitrate>() {
+        ("goog-remb", "")
+    } else if any.is::<TransportLayerCc>() {
+        ("transport-cc", "")
+    } else if any.is::<CcFeedbackReport>() {
+        ("ack", "ccfb")
+    } else {
+        return None;
+    })
+}
+
+/// RFC 4585 section 4.2 ("no feedback messages other than those listed ... MUST be used") and
+/// RFC 5104 section 7.2 ("MUST NOT use other CCM messages than those indicated"): the first
+/// of `packets` whose feedback type `negotiated` (the feedback of a section's negotiated
+/// codecs) does not list, as its `a=rtcp-fb` type and parameter.
+pub(crate) fn unnegotiated_feedback(
+    packets: &[Box<dyn rtcp::Packet>],
+    negotiated: &[RTCRtpCodecParameters],
+) -> Option<(&'static str, &'static str)> {
+    packets
+        .iter()
+        .filter_map(|packet| feedback_negotiating(packet.as_ref()))
+        .find(|(typ, parameter)| {
+            !negotiated
+                .iter()
+                .flat_map(|codec| &codec.rtp_codec.rtcp_feedback)
+                .any(|f| {
+                    f.typ.eq_ignore_ascii_case(typ)
+                        && f.parameter
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .eq_ignore_ascii_case(parameter)
+                })
+        })
 }
 
 /// Computes the intersection of two RTCP feedback lists.

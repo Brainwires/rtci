@@ -138,8 +138,8 @@ use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
     TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::{
-    RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
-    RTCRtpHeaderExtensionParameters, RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability,
+    RTCRtpHeaderExtensionEncryption, RTCRtpHeaderExtensionParameters, RtpCodecKind,
 };
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, SSRC};
 use interceptor::{
@@ -1327,6 +1327,7 @@ pub(crate) fn create_stream_info(
     fec_format: Option<&crate::rtp_transceiver::rtp_sender::rtp_codec::FecFormat>,
     codec: &RTCRtpCodec,
     header_extensions: &[RTCRtpHeaderExtensionParameters],
+    section_codecs: &[RTCRtpCodecParameters],
 ) -> interceptor::StreamInfo {
     let rtp_header_extensions: Vec<interceptor::RTPHeaderExtension> = header_extensions
         .iter()
@@ -1365,9 +1366,20 @@ pub(crate) fn create_stream_info(
         sdp_fmtp_line_fec: fec_format
             .map(|format| format.sdp_fmtp_line.clone())
             .unwrap_or_default(),
-        // The other payload types of the section and their clock rates (RFC 7160) are not
-        // passed here yet: a stream is timed with its first codec's rate.
-        payload_clock_rates: vec![],
+        // RFC 7160 section 4.3 (RFC 8834 section 4.3): the other media formats of the m=
+        // section and their clock rates, for a source that switches between them on one SSRC.
+        // Repair formats are left out: RTX is de-encapsulated to the media format before the
+        // chain, and FEC has an SSRC of its own.
+        payload_clock_rates: section_codecs
+            .iter()
+            .filter(|c| {
+                c.payload_type != payload_type
+                    && !crate::peer_connection::handler::endpoint::is_repair_mime_type(
+                        &c.rtp_codec.mime_type,
+                    )
+            })
+            .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
+            .collect(),
     }
 }
 

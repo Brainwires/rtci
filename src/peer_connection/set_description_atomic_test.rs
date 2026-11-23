@@ -718,3 +718,26 @@ fn a_rolled_back_max_compat_offer_takes_its_transports_with_it() -> Result<()> {
     assert_eq!(pc.pipeline_context.transports.len(), 1);
     Ok(())
 }
+
+/// RFC 3264 section 5.1: an applied local offer makes its payload types receivable on each
+/// section's receiver until the answer sets the receive codecs, which clears them.
+#[test]
+fn a_local_offer_makes_its_payload_types_receivable_until_the_answer() -> Result<()> {
+    let (mut offerer, answer) = pending_offer()?;
+    let offer = offerer.local_description().expect("offer applied");
+    let parsed = offer.parsed.expect("parsed offer");
+    let video_formats: Vec<u8> = parsed.media_descriptions[1]
+        .media_name
+        .formats
+        .iter()
+        .map(|format| format.parse().unwrap())
+        .collect();
+    assert!(!video_formats.is_empty());
+    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
+    assert_eq!(receiver.offered_payload_types(), video_formats.as_slice());
+
+    offerer.set_remote_description(Instant::now(), description(RTCSdpType::Answer, &answer))?;
+    let receiver = offerer.rtp_transceivers[1].receiver().as_ref().unwrap();
+    assert!(receiver.offered_payload_types().is_empty());
+    Ok(())
+}

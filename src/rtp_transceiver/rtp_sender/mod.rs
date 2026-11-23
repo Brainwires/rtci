@@ -962,6 +962,24 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        // RFC 4585 section 4.2, RFC 5104 section 7.2: only the feedback the section negotiated.
+        let codecs = self.sender().get_send_codecs();
+        if !self
+            .peer_connection
+            .setting_engine
+            .unnegotiated_rtcp_feedback
+            && !codecs.is_empty()
+            && let Some((typ, parameter)) =
+                crate::rtp_transceiver::rtp_sender::rtp_codec::unnegotiated_feedback(
+                    &packets, codecs,
+                )
+        {
+            return Err(Error::ErrRTCPFeedbackNotNegotiated(
+                typ.to_owned(),
+                parameter.to_owned(),
+            ));
+        }
+
         let track_id = self.sender().track().track_id().to_string();
         self.peer_connection.handle_write(TaggedRTCMessage {
             now,

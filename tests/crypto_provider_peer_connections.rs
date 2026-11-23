@@ -259,6 +259,11 @@ impl Peer {
             rtp_codec: RTCRtpCodec {
                 mime_type: MIME_TYPE_VP8.to_owned(),
                 clock_rate: 90_000,
+                // The PLI the test writes is negotiated (RFC 4585 section 4.2).
+                rtcp_feedback: vec![rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                    typ: "nack".to_owned(),
+                    parameter: "pli".to_owned(),
+                }],
                 ..Default::default()
             },
             payload_type: 96,

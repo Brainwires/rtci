@@ -206,6 +206,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,
+                ecn_counters: HashMap::new(),
                 tmmbr_requests: TmmbrRequester::default(),
                 receiver_ssrc: crate::rfc8888::sender::random_ssrc(),
                 path: None,
@@ -371,6 +372,9 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     unnegotiated_tmmbr: bool,
     /// Whether the compound packet being read asks for a TMMBN.
     tmmbn_owed: bool,
+    /// The last RFC 6679 ECN counters read about each local stream: (CE, packets received),
+    /// each kept in the width of its field.
+    ecn_counters: HashMap<u32, rtcp::transport_feedbacks::ecn_feedback::EcnCounters>,
     /// The receiver side of TMMBR: the limits this endpoint asks of remote senders.
     tmmbr_requests: TmmbrRequester,
     /// The SSRC a receive-only endpoint sends its TMMBRs from (RFC 3550 section 8: random,
@@ -402,6 +406,50 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
 }
 
 impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
+    /// RFC 6679 sections 5 and 7.3.3: the CE marks an RTCP ECN Feedback packet or an XR ECN
+    /// Summary Report counts for a local stream since the last such report reach the
+    /// estimator as congestion, as losses would. A stream reported in RFC 8888, whose
+    /// per-packet reports carry each mark already, is left out, so no mark counts twice.
+    fn observe_congestion_marks(&mut self, now: Instant, packets: &[Box<dyn rtcp::Packet>]) {
+        use rtcp::extended_report::{EcnSummaryReportBlock, ExtendedReport};
+        use rtcp::transport_feedbacks::ecn_feedback::{EcnCounters, EcnFeedback};
+        let mut seen: Vec<(u32, EcnCounters)> = vec![];
+        for packet in packets {
+            let any = packet.as_any();
+            if let Some(feedback) = any.downcast_ref::<EcnFeedback>() {
+                seen.push((feedback.media_ssrc, feedback.counters));
+            } else if let Some(xr) = any.downcast_ref::<ExtendedReport>() {
+                for block in &xr.reports {
+                    if let Some(summary) = block.as_any().downcast_ref::<EcnSummaryReportBlock>() {
+                        seen.extend(summary.reports.iter().map(|r| (r.ssrc, r.counters)));
+                    }
+                }
+            }
+        }
+        let (mut marked, mut total) = (0u64, 0u64);
+        for (ssrc, counters) in seen {
+            let Some(stream) = self.streams.get(&ssrc) else {
+                continue;
+            };
+            if stream.feedback == Some(CongestionFeedbackFormat::Rfc8888) {
+                continue;
+            }
+            // "The counters SHALL be initiated to 0 for each new SSRC": the first report
+            // counts from zero. Each counter wraps in its own width.
+            let last = self.ecn_counters.insert(ssrc, counters).unwrap_or_default();
+            let ce = u64::from(counters.ce.wrapping_sub(last.ce));
+            let received = u64::from(counters.ect0.wrapping_sub(last.ect0))
+                + u64::from(counters.ect1.wrapping_sub(last.ect1))
+                + ce
+                + u64::from(counters.not_ect.wrapping_sub(last.not_ect));
+            marked += ce;
+            total += received;
+        }
+        if total > 0 {
+            self.estimator.on_congestion_marks(now, marked, total);
+        }
+    }
+
     /// The estimator, for reading its stats.
     pub fn estimator(&self) -> &E {
         &self.estimator
@@ -896,6 +944,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             for rtcp_packet in &feedback {
                 reported |= self.ingest(msg.now, rtcp_packet);
             }
+            self.observe_congestion_marks(msg.now, &feedback);
         }
         if std::mem::take(&mut self.tmmbn_owed) {
             self.send_tmmbn(msg.now);
@@ -1072,6 +1121,7 @@ impl<E: BandwidthEstimator> Interceptor for CongestionControlInterceptor<E> {
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         for ssrc in flow_ssrcs(info) {
             self.streams.remove(&ssrc);
+            self.ecn_counters.remove(&ssrc);
         }
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
     }
