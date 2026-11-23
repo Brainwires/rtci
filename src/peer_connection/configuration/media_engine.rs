@@ -2241,6 +2241,10 @@ impl MediaEngine {
                     });
                 }
             }
+            // By id: the negotiated mappings are kept in a map, whose order is not the same
+            // from one run to the next, and these are what a description's `a=extmap` lines
+            // are written from.
+            header_extensions.sort_by_key(|extension| (extension.id, extension.encrypted));
         } else {
             // Each registered extension in each form its encryption setting offers (RFC 6904
             // section 4.1), with the id it was negotiated with or the first free one.
