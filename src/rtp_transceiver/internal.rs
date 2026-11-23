@@ -39,6 +39,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     direction: RTCRtpTransceiverDirection,
     current_direction: RTCRtpTransceiverDirection,
     preferred_codecs: Vec<RTCRtpCodecParameters>,
+    /// The codec preferences set locally (`setCodecPreferences`, or the codec of the track
+    /// a sender was created for), which a remote description does not replace: what limits a
+    /// later offer's formats (RFC 9429 section 5.2.2, [`Self::get_offer_codecs`]). Empty: no
+    /// limit.
+    local_codec_preferences: Vec<RTCRtpCodecParameters>,
     /// The application set codec preferences (`setCodecPreferences` with a non-empty list),
     /// as opposed to the list a remote description left in `preferred_codecs`.
     application_codec_preferences: bool,
@@ -151,6 +156,7 @@ impl RTCRtpTransceiverInternal {
             direction: init.direction,
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
+            local_codec_preferences: vec![],
             application_codec_preferences: false,
             stopping: false,
             stopped: false,
@@ -489,6 +495,7 @@ impl RTCRtpTransceiverInternal {
             receiver.set_codec_preferences(codecs.clone());
         }
 
+        self.local_codec_preferences.clone_from(&codecs);
         self.preferred_codecs = codecs;
 
         Ok(())
@@ -581,6 +588,61 @@ impl RTCRtpTransceiverInternal {
     /// Codecs returns list of supported codecs
     pub(crate) fn get_codecs(&self, media_engine: &MediaEngine) -> Vec<RTCRtpCodecParameters> {
         self.codecs_in_numbering(media_engine, self.use_sframe == Some(true))
+    }
+
+    /// The formats a local offer lists for this transceiver's section (RFC 9429 section
+    /// 5.2.2): once its kind is negotiated, "all currently available formats" the codec
+    /// preferences do not exclude, the negotiated ones first in their order
+    /// ([`MediaEngine::offer_codecs_for_section`]); before that, and for an SFrame section,
+    /// [`Self::get_codecs`].
+    pub(crate) fn get_offer_codecs(
+        &self,
+        media_engine: &MediaEngine,
+    ) -> Vec<RTCRtpCodecParameters> {
+        let sframe = self.use_sframe == Some(true)
+            || self.preferred_codecs.iter().any(|codec| {
+                media_engine
+                    .sframe_payload_types
+                    .contains(&codec.payload_type)
+            });
+        if sframe || !media_engine.is_kind_negotiated(self.kind()) {
+            return self.get_codecs(media_engine);
+        }
+        // What the local preferences (the application's, or the track's codec) allow, in
+        // their order.
+        let available = RTCRtpReceiverInternal::preferred_among(
+            &self.local_codec_preferences,
+            media_engine.offer_codecs_for_section(self.kind()),
+        );
+        let codecs = if self.application_codec_preferences {
+            available
+        } else {
+            // The list a remote description left (the most recent answer's formats, in its
+            // order, with this endpoint's payload types) orders the formats and limits none:
+            // the ones it lacks follow.
+            let mut ordered: Vec<RTCRtpCodecParameters> = self
+                .preferred_codecs
+                .iter()
+                .filter_map(|p| available.iter().find(|a| a.payload_type == p.payload_type))
+                .cloned()
+                .collect();
+            for codec in available {
+                if !ordered.iter().any(|o| o.payload_type == codec.payload_type) {
+                    ordered.push(codec);
+                }
+            }
+            ordered
+        };
+        // RFC 2198 section 5, as `codecs_in_numbering`.
+        let all = codecs.clone();
+        codecs
+            .into_iter()
+            .filter(|codec| {
+                crate::peer_connection::configuration::media_engine::red_encodings_negotiated(
+                    codec, &all,
+                )
+            })
+            .collect()
     }
 
     /// [`Self::get_codecs`] in the SFrame numbering (`sframe`) or the plain one
@@ -834,12 +896,20 @@ impl RTCRtpTransceiverInternal {
         // An SFrame section's formats are matched in the SFrame numbering, a plain one's in
         // the plain numbering (draft-ietf-avtcore-rtp-sframe-03 section 6).
         let sframe = media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME);
-        let mut filtered_codecs = if self.preferred_codecs.is_empty() {
+        // The local preferences only: the list an earlier remote description left does not
+        // narrow what a later one negotiates (RFC 9429 section 5.2.2, a format a later offer
+        // brings back).
+        let mut filtered_codecs = if self.local_codec_preferences.is_empty() {
             vec![]
         } else {
             Self::match_remote_codecs(
                 remote_codecs.clone(),
-                self.codecs_in_numbering(media_engine, sframe),
+                RTCRtpReceiverInternal::get_codecs(
+                    &self.local_codec_preferences,
+                    self.kind(),
+                    media_engine,
+                    sframe,
+                ),
             )
         };
         if filtered_codecs.is_empty() {
@@ -849,7 +919,11 @@ impl RTCRtpTransceiverInternal {
             );
         }
 
-        self.set_codec_preferences(filtered_codecs, media_engine)
+        // The remote description's list is not a local preference.
+        let local = std::mem::take(&mut self.local_codec_preferences);
+        let result = self.set_codec_preferences(filtered_codecs, media_engine);
+        self.local_codec_preferences = local;
+        result
     }
 
     /// The remote codecs that match one of `left_codecs`, each with the matching local codec's

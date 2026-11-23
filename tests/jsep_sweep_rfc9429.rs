@@ -171,3 +171,176 @@ fn an_rtcp_attribute_is_parsed_and_its_value_ignored() -> TestResult {
     }
     Ok(())
 }
+
+/// Section 5.8: "If any line is not well formed or cannot be parsed as described, the parser
+/// MUST stop with an error and reject the session description, even if the value is to be
+/// discarded." Malformed values of attributes the engine reads, and of ones it then ignores,
+/// refuse the description at either level; an unknown attribute is ignored (RFC 8866 section
+/// 5.13), and so are the malformed lines other specifications have the receiver ignore:
+/// `a=msid` (RFC 8830 section 2) and `a=rid` (RFC 8851 section 6.2.2 step 1).
+#[test]
+fn a_malformed_attribute_refuses_the_description_unless_its_specification_ignores_it() -> TestResult
+{
+    let transport = transport_attributes();
+    for (session, media, taken) in [
+        ("", "", true),
+        ("", "a=x-unknown:anything at all\n", true),
+        ("", "a=msid:one two three\n", true),
+        ("", "a=rid:\n", true),
+        ("", "a=rid:1 sideways\n", true),
+        ("", "a=ssrc:1234 msid:one two three\n", true),
+        ("", "a=ssrc:1234 x-unknown:anything\n", true),
+        ("", "a=ssrc:1234 previous-ssrc:none\n", false),
+        ("", "a=ssrc:1234 cname\n", false),
+        ("", "a=ssrc-group:FID 1234  5678\n", false),
+        ("", "a=rtpmap:97 H264\n", false),
+        ("", "a=fmtp:\n", false),
+        ("", "a=rtcp-fb:96\n", false),
+        ("", "a=ptime:soon\n", false),
+        ("", "a=framerate:fast\n", false),
+        ("", "a=ssrc:not-a-number cname:x\n", false),
+        ("", "a=ssrc-group:FID one two\n", false),
+        (
+            "",
+            "a=extmap:x urn:ietf:params:rtp-hdrext:sdes:mid\n",
+            false,
+        ),
+        ("", "a=rtcp-mux:yes\n", false),
+        // RFC 8839 section 5.1: the candidate grammar.
+        (
+            "",
+            "a=candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host\n",
+            true,
+        ),
+        (
+            "",
+            "a=candidate:1 1 udp 1694498815 203.0.113.9 4000 typ srflx raddr 10.0.0.1 rport \
+             4000 generation 0\n",
+            true,
+        ),
+        (
+            "",
+            "a=candidate:1 1 udp 2130706431 10.0.0.1 4000 type host\n",
+            false,
+        ),
+        (
+            "",
+            "a=candidate:1 1 udp 2130706431 10.0.0.1 4000 typ\n",
+            false,
+        ),
+        (
+            "",
+            "a=candidate:a!b 1 udp 2130706431 10.0.0.1 4000 typ host\n",
+            false,
+        ),
+        (
+            "",
+            "a=candidate:123456789012345678901234567890123 1 udp 1 10.0.0.1 4000 typ host\n",
+            false,
+        ),
+        (
+            "",
+            "a=candidate:1 1 udp 12345678901 10.0.0.1 4000 typ host\n",
+            false,
+        ),
+        (
+            "",
+            "a=candidate:1 1 udp 1 203.0.113.9 4000 typ srflx raddr 10.0.0.1 rport\n",
+            false,
+        ),
+        ("a=ice-options:\n", "", false),
+        ("a=msid-semantic\n", "", false),
+    ] {
+        let mut pc = default_peer()?;
+        let applied = pc.set_remote_description(
+            Instant::now(),
+            offer(session, &format!("{transport}{media}"))?,
+        );
+        assert_eq!(applied.is_ok(), taken, "{session}{media}: {applied:?}");
+        if !taken {
+            assert!(pc.remote_description().is_none(), "{session}{media}");
+        }
+    }
+    Ok(())
+}
+
+/// Section 5.2.1: the offer's formats include the codecs every WebRTC endpoint must support:
+/// RFC 7874 section 3, Opus, PCMA and PCMU, comfort noise for G.711 and telephone events
+/// (RFC 4733) on the clock of each audio codec; RFC 7742 section 5, VP8 and H.264 Constrained
+/// Baseline (`profile-level-id` 42e0xx).
+#[test]
+fn an_offer_has_the_mandatory_audio_and_video_formats() -> TestResult {
+    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    let mut pc = default_peer()?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let offer = pc.create_offer(None)?.sdp;
+    let encodings: Vec<String> = offer
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=rtpmap:"))
+        .filter_map(|l| l.split_once(' ').map(|(_, e)| e.to_ascii_lowercase()))
+        .collect();
+    for mandatory in [
+        "opus/48000/2",
+        "pcmu/8000",
+        "pcma/8000",
+        "cn/8000",
+        "telephone-event/48000",
+        "telephone-event/8000",
+        "vp8/90000",
+        "h264/90000",
+    ] {
+        assert!(
+            encodings.iter().any(|e| e == mandatory),
+            "{mandatory} is not offered:\n{offer}"
+        );
+    }
+    assert!(
+        offer
+            .lines()
+            .any(|l| l.starts_with("a=fmtp:") && l.contains("profile-level-id=42e0")),
+        "no H.264 Constrained Baseline:\n{offer}"
+    );
+    Ok(())
+}
+
+/// Section 5.8 with the deployed stacks: webrtc-rs 0.17 and Pion write a feedback without
+/// parameters as `a=rtcp-fb:96 goog-remb ` (a trailing space). By default white space at the
+/// end of a value is not held against it, so their offers are answered;
+/// `with_strict_sdp_attribute_grammar(true)` is the strict RFC reading, which refuses it. A
+/// value that is malformed otherwise is refused either way.
+#[test]
+fn trailing_white_space_in_a_value_is_refused_only_when_asked() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    let peer = |strict: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_strict_sdp_attribute_grammar(strict)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    let transport = transport_attributes();
+    for (media, default_takes, strict_takes) in [
+        ("a=rtcp-fb:96 goog-remb \n", true, false),
+        ("a=rtcp-fb:96 goog-remb\n", true, true),
+        ("a=rtcp-fb:96 \n", false, false),
+    ] {
+        for (strict, takes) in [(false, default_takes), (true, strict_takes)] {
+            let applied = peer(strict)?
+                .set_remote_description(Instant::now(), offer("", &format!("{transport}{media}"))?);
+            assert_eq!(
+                applied.is_ok(),
+                takes,
+                "strict {strict}, {media:?}: {applied:?}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -476,3 +476,158 @@ fn an_inactive_simulcast_encoding_is_marked_paused_when_pause_is_offered() -> Re
     }
     Ok(())
 }
+
+/// RFC 8853 section 5.3.3: "An offerer with RTP stream pause/resume capability that receives
+/// an answer where some rid-ids are marked as initially paused SHOULD initially pause those
+/// RTP streams" (section 5.2: as "an unsolicited locally paused stream"). The offerer sends
+/// layers `a` and `b`; the answer, which negotiates `ccm pause`, receives `a;~b`. Layer `b`
+/// starts in the local paused state and nothing of it goes on the wire, while `a` flows.
+#[test]
+fn a_layer_the_answer_marks_paused_starts_paused() -> Result<()> {
+    use rtc::media_stream::MediaStreamTrack;
+    use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
+    let ssrc = |i: u32| 0x0808_0100 + i;
+    let mut peers = [
+        Peer::new("10.0.0.1:5000", Pause::On)?,
+        Peer::new("10.0.0.2:5000", Pause::On)?,
+    ];
+    let encodings = ["a", "b"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, rid)| RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                rid: rid.to_owned(),
+                ssrc: Some(ssrc(i as u32)),
+                ..Default::default()
+            },
+            active: true,
+            ..Default::default()
+        })
+        .collect();
+    let sender = peers[0].pc.add_track(MediaStreamTrack::new(
+        "stream".to_owned(),
+        "simulcast".to_owned(),
+        "simulcast".to_owned(),
+        RtpCodecKind::Video,
+        encodings,
+    ))?;
+    let now = Instant::now();
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    peers[1].pc.set_remote_description(now, offer.clone())?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    assert!(
+        answer.sdp.contains("a=simulcast:recv a;b"),
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(pause_lines(&answer.sdp), vec!["a=rtcp-fb:96 ccm pause"]);
+    let paused = answer
+        .sdp
+        .replace("a=simulcast:recv a;b", "a=simulcast:recv a;~b");
+    peers[0].pc.set_remote_description(
+        now,
+        rtc::peer_connection::sdp::RTCSessionDescription::answer(paused)?,
+    )?;
+    let mut world = World {
+        peers,
+        now,
+        sender,
+        ssrc: ssrc(1),
+        next_seq: 5000,
+        on_the_wire: vec![],
+        offer: offer.sdp,
+        answer: answer.sdp,
+    };
+    for i in 0..2 {
+        let candidate = world.peers[i].candidate()?;
+        world.peers[i].pc.add_local_candidate(candidate.clone())?;
+        world.peers[1 - i].pc.add_remote_candidate(candidate)?;
+    }
+    let start = world.now;
+    while !world.peers.iter().all(|p| p.connected) {
+        if world.now.duration_since(start) >= CONNECT_WITHIN {
+            bail!("not connected");
+        }
+        let until = world.now + Duration::from_millis(20);
+        world.run_until(until)?;
+    }
+    // Both layers written, 20 ms apart.
+    for n in 0..10u16 {
+        for layer in [0u32, 1] {
+            let now = world.now;
+            world.peers[0]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp(
+                    now,
+                    rtc::rtp::Packet {
+                        header: rtc::rtp::header::Header {
+                            version: 2,
+                            payload_type: VP8_PT,
+                            sequence_number: 100 + n,
+                            timestamp: u32::from(100 + n) * 1800,
+                            ssrc: ssrc(layer),
+                            marker: true,
+                            ..Default::default()
+                        },
+                        payload: Bytes::from(vec![0x10u8; 100]),
+                    },
+                )?;
+        }
+        world.pump()?;
+        let until = world.now + Duration::from_millis(20);
+        world.run_until(until)?;
+    }
+    assert_eq!(
+        world.handle(0).state(ssrc(1)),
+        Some(PauseState::LocalPaused)
+    );
+    assert_eq!(world.handle(0).state(ssrc(0)), Some(PauseState::Playing));
+    assert!(world.on_the_wire.is_empty(), "{:?}", world.on_the_wire);
+    assert!(
+        world.peers[1].received.len() >= 8,
+        "layer a: {:?}",
+        world.peers[1].received
+    );
+    Ok(())
+}
+
+/// Peer 0's one encoding made active or inactive with `set_parameters`.
+fn set_active(world: &mut World, active: bool) -> Result<()> {
+    let id = world.peers[0].pc.get_senders().next().expect("a sender");
+    let mut sender = world.peers[0].pc.rtp_sender(id).expect("the sender");
+    let mut parameters = sender.get_parameters().clone();
+    parameters.encodings[0].active = active;
+    sender.set_parameters(parameters, None)?;
+    Ok(())
+}
+
+/// RFC 8853 section 5.2: a stream that is not sent is treated as an RFC 7728 local pause
+/// (section 6.4). An encoding made inactive (W3C `active` false) pauses its stream and the
+/// receiver learns PAUSED; made active again it resumes and the receiver sees it play.
+#[test]
+fn an_encoding_made_inactive_is_a_local_pause_and_active_again_a_resume() -> Result<()> {
+    let mut world = World::connected(Pause::On, Pause::On)?;
+    world.send(5)?;
+    let ssrc = world.ssrc;
+    set_active(&mut world, false)?;
+    world.send(5)?;
+    assert_eq!(world.handle(0).state(ssrc), Some(PauseState::LocalPaused));
+    assert_eq!(
+        world.handle(1).remote_state(ssrc),
+        Some(RemotePauseState::Paused)
+    );
+    assert_eq!(world.on_the_wire.len(), 5);
+    set_active(&mut world, true)?;
+    world.send(5)?;
+    assert_eq!(world.on_the_wire.len(), 10);
+    assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Playing));
+    assert_eq!(
+        world.handle(1).remote_state(ssrc),
+        Some(RemotePauseState::Playing)
+    );
+    Ok(())
+}

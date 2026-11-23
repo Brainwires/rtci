@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
+  - A later offer lists every available format, not only the negotiated ones (RFC 9429
+    section 5.2.2): the formats of the most recent answer first in its order, then every
+    other registered format the local preferences allow (the application's
+    `setCodecPreferences`, or the codec of the track a sender was made for). The format
+    list a remote description left no longer acts as a codec preference: it limits neither
+    later offers nor what a later remote description negotiates. Negotiated payload types are kept; a format
+    that comes back keeps its registered payload type unless a negotiated format has it, and
+    then takes a free dynamic one (its RTX `apt` follows). The formats a remote answer
+    accepts are now negotiated also without `MediaEngine::set_multi_codec_negotiation`, so
+    a format that comes back is sent and received (RFC 3264 section 6.1).
+  - An encoding made inactive with `set_parameters` (W3C `active` false) is an RFC 7728
+    local pause of its stream when pause is negotiated: PAUSED is announced and the receiver
+    sees the stream paused; made active again it resumes (RFC 8853 section 5.2). New:
+    `rtc_interceptor::PauseResumeControl`.
+- **jsep**: train fixes for the sweep branches (`conf/jsep-54-train-fixes`, jsep14). No
+  engine change.
+  - Real descriptions through the remote-description checks: `tests/fixtures/browser-sdp/`
+    holds SDP as real writers put it on the wire (`<writer>--<scenario>--<n>-<type>.sdp`), and
+    `src/peer_connection/sdp/browser_sdp_test.rs` runs each through the attribute grammar
+    check (RFC 9429 section 5.8), the answer `a=setup` check (RFC 5763 section 5) and the
+    bundled payload-type comparison (RFC 8859), and applies each offer whole. A form the
+    strict grammar refuses must be one of the documented tolerances (trailing white space,
+    webrtc-rs 0.17's `create_offer` text). First fixtures: a Firefox 152 simulcast offer and
+    webrtc-rs 0.17 offers and answers (`tests/webrtc_0_17_descriptions_interop.rs`, which
+    also applies them live). None is refused.
+  - The browser interop harness records every description the browser sends
+    (`scripts/test-env/interop/common.mjs` `recordDescriptions`; artifact
+    `test-env-N/browser-sdp/<project>--<test>--<n>-<type>.sdp`) for the Chromium, Firefox and
+    WebKit fixtures.
+  - Tests that a mutation did not fail now do: the rejected-stream test (RFC 3264 section
+    6) rejected nothing (its answer kept the section's port; only the BUNDLE group lost the
+    mid), it now rejects the section and checks the transceiver is stopped; the RFC 8839 rows
+    (credentials between levels, FQDN candidates, FQDN `c=`, hold) and the RFC 7728 CSRC
+    rule were mutation-checked.
 - **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no
   engine change: the RFC 9143 section 9.1 payload-type rewrite and the RFC 3264 section 8.3.2
   switch to a new answer's formats are separate tests; an encoding that names a codec the new
@@ -19,6 +54,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets its media; must-bundle rejects a section outside the first group. Audit verdicts
   corrected where the code was right and a unit test already pinned it (the tls-id and
   `a=group` parses, the session-level attributes, `create_offer` in have-remote-offer).
+- **jsep**: sweep of the JSEP rows, phase thirteen (`conf/jsep-53-sweep`, jsep13).
+  - Every attribute of a remote description is checked against its grammar
+    (`sdp::attribute::check_attribute`, new in rtc-sdp), at session and media level, also
+    when the engine then ignores the value (RFC 9429 section 5.8); a malformed line refuses
+    the description. The exceptions are the lines other specifications have ignored:
+    `a=msid` and the `msid` source attribute (RFC 8830 section 2) and `a=rid` (RFC 8851
+    section 6.2.2). A remote `a=extmap` whose name is not a URI now refuses the description
+    (it was left out of the answer); `a=rtcp-xr` without a value is well formed (RFC 3611
+    section 5.1). White space at the end of a value is not held against it by default:
+    webrtc-rs 0.17 and Pion write `a=rtcp-fb:96 goog-remb ` (`media_rejection_interop`
+    failed on it); `SettingEngineBuilder::with_strict_sdp_attribute_grammar(true)` is the
+    strict reading.
+  - A remote answer saying `a=setup:actpass` is refused (RFC 5763 section 5), and so is a
+    description that continues a DTLS association (the same `tls-id`) with the role the
+    association does not have (RFC 9429 section 5.8.3).
+  - Bundled sections that give one payload type different `a=rtcp-fb` lines (in any order,
+    white space aside) refuse the description (RFC 8859 appendix A, IDENTICAL-PER-PT), as
+    different `a=rtpmap` / `a=fmtp` already did.
+  - A sender in no MediaStream (a track whose stream id is empty or `-`, or
+    `add_track_with_streams(track, [])`) is written `a=msid:- <id>` and `a=ssrc:<n> msid:-
+    <id>`; the source-level `msid` names the sender's first stream, no longer the track's own
+    stream id (RFC 9429 section 5.2.1, RFC 8830 section 3).
+  - `rtc_interceptor::StreamInfo` has a new field `initially_paused` (literals need
+    `..Default::default()`): a simulcast stream the remote description marks `~` starts in
+    an unsolicited local pause when RFC 7728 pause is negotiated (RFC 8853 sections 5.2 and
+    5.3.3), and a RESUME plays it; later descriptions do not pause it again (section
+    5.3.4).
+  - RFC 7728: no PAUSE or RESUME goes to a sender after its BYE (section 6.3.1).
+  - Tests pin behaviour the audit had untested or not pinned by a mutation of its own: the
+    tls-id and `a=group` parses, the payload-type rewrite (RFC 9143 section 9.1) apart from
+    following a new answer (RFC 3264 section 8.3.2), an encoding that names a codec the new
+    answer drops, a rejected stream sending neither RTP nor RTCP (RFC 3264 section 6),
+    recvonly and inactive endpoints sending RTCP (RFC 8866 section 6.7), a removed simulcast
+    layer sending nothing (RFC 8853 section 5.3.3), media of a section without any msid
+    delivered (RFC 8830 section 3.1), the mandatory codecs offered, must-bundle
+    rejecting a section outside the first group, an FQDN default destination, credentials
+    moved between levels, hold as a direction, FQDN local candidates refused, the RFC 7728
+    CSRC and current-PauseID rules.
 - **jsep**: sweep of the JSEP MUST rows (`conf/jsep-50-rfc9429-sweep`, jsep12).
   - A `rollback` description whose SDP is not empty is refused by `set_local_description`
     and `set_remote_description` (RFC 9429 section 4.1.10: "The contents MUST be empty").

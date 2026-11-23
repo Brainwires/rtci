@@ -1480,6 +1480,126 @@ impl MediaEngine {
         numbered
     }
 
+    /// Whether a description has negotiated formats of `kind` (the media engine then hands
+    /// out the negotiated list instead of the registered one).
+    pub(crate) fn is_kind_negotiated(&self, kind: RtpCodecKind) -> bool {
+        match kind {
+            RtpCodecKind::Audio => self.negotiated_audio,
+            RtpCodecKind::Video => self.negotiated_video,
+            RtpCodecKind::Application => self.negotiated_application,
+            RtpCodecKind::Unspecified => false,
+        }
+    }
+
+    /// RFC 9429 section 5.2.2, a later offer: the formats of a section of `kind` "MUST
+    /// include all currently available formats", in the order of the most recent answer with
+    /// "any media formats that were not present in the most recent answer ... added after all
+    /// existing formats". That is the negotiated list (plain numbering), then each registered
+    /// format the negotiation left out. An added format keeps its registered payload type
+    /// unless a negotiated or SFrame format of either kind already has it (bundled sections
+    /// share one numbering, RFC 9143 section 7.5.1), in which case it takes the next free
+    /// dynamic one (96 to 127, then 35 to 63; never 64 to 95, RFC 5761 section 4); an added
+    /// RTX format's `apt` follows its primary. Negotiated payload types are never renumbered
+    /// (section 5.2.2: they "MUST stay the same" for the session's lifetime).
+    pub(crate) fn offer_codecs_for_section(
+        &self,
+        kind: RtpCodecKind,
+    ) -> Vec<RTCRtpCodecParameters> {
+        let mut out = self.codecs_for_section(kind, false);
+        if !self.is_kind_negotiated(kind) {
+            return out;
+        }
+        let registered: Vec<&RTCRtpCodecParameters> = self
+            .registered_codecs_by_kind(kind)
+            .iter()
+            .filter(|codec| !self.sframe_payload_types.contains(&codec.payload_type))
+            .collect();
+        let mut taken: std::collections::HashSet<PayloadType> = self
+            .negotiated_audio_codecs
+            .iter()
+            .chain(&self.negotiated_video_codecs)
+            .map(|codec| codec.payload_type)
+            .chain(self.sframe_payload_types.iter().copied())
+            .collect();
+        // The registered formats of either kind that are offered as they are keep their
+        // numbers; a renumbered one must not take a number another still uses.
+        let reserved: std::collections::HashSet<PayloadType> = self
+            .audio_codecs
+            .iter()
+            .chain(&self.video_codecs)
+            .map(|codec| codec.payload_type)
+            .collect();
+        let mut free = (96..=127u8)
+            .chain(35..=63u8)
+            .filter(|pt| !reserved.contains(pt));
+        let mut number = |registered_pt: PayloadType,
+                          taken: &mut std::collections::HashSet<PayloadType>|
+         -> Option<PayloadType> {
+            let pt = if taken.contains(&registered_pt) {
+                free.by_ref().find(|pt| !taken.contains(pt))?
+            } else {
+                registered_pt
+            };
+            taken.insert(pt);
+            Some(pt)
+        };
+        // Registered payload type of a primary -> the one it has in this offer.
+        let mut primaries: std::collections::HashMap<PayloadType, PayloadType> =
+            std::collections::HashMap::new();
+        let is_rtx = |codec: &RTCRtpCodec| repair_family(codec) == "rtx";
+        // A registered format is matched against the negotiated ones only: two registered
+        // formats of one codec (H.264 profiles) are both offered.
+        let negotiated = out.clone();
+        for codec in registered.iter().filter(|c| !is_rtx(&c.rtp_codec)) {
+            match codec_parameters_fuzzy_search(&codec.rtp_codec, &negotiated) {
+                (negotiated, CodecMatch::Exact) => {
+                    primaries.insert(codec.payload_type, negotiated.payload_type);
+                }
+                _ => {
+                    let Some(pt) = number(codec.payload_type, &mut taken) else {
+                        continue;
+                    };
+                    primaries.insert(codec.payload_type, pt);
+                    out.push(RTCRtpCodecParameters {
+                        payload_type: pt,
+                        ..(*codec).clone()
+                    });
+                }
+            }
+        }
+        for codec in registered.iter().filter(|c| is_rtx(&c.rtp_codec)) {
+            let Some(&apt) =
+                parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line).and_then(|apt| primaries.get(&apt))
+            else {
+                continue;
+            };
+            let repaired = out.iter().any(|c| {
+                is_rtx(&c.rtp_codec) && parse_rtx_apt(&c.rtp_codec.sdp_fmtp_line) == Some(apt)
+            });
+            if repaired {
+                continue;
+            }
+            let Some(pt) = number(codec.payload_type, &mut taken) else {
+                continue;
+            };
+            let mut rtx = (*codec).clone();
+            rtx.payload_type = pt;
+            let rest = codec
+                .rtp_codec
+                .sdp_fmtp_line
+                .split(';')
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && !p.to_ascii_lowercase().starts_with("apt="))
+                .map(str::to_owned);
+            rtx.rtp_codec.sdp_fmtp_line = std::iter::once(format!("apt={apt}"))
+                .chain(rest)
+                .collect::<Vec<_>>()
+                .join(";");
+            out.push(rtx);
+        }
+        out
+    }
+
     /// The registered formats of `kind` renumbered for an SFrame section: each registered
     /// format (audio first, then video, so that the kinds do not share a number either) takes
     /// the next dynamic payload type (96 to 127, then 35 to 63; never 64 to 95, RFC 5761
@@ -1647,6 +1767,19 @@ impl MediaEngine {
         &mut self,
         desc: &SessionDescription,
     ) -> Result<()> {
+        self.update_from_remote_description_merging(desc, false)
+    }
+
+    /// [`Self::update_from_remote_description`]; with `merge_answer`, the formats of a remote
+    /// answer are added to a kind already negotiated even without multi-codec negotiation: a
+    /// later local offer lists every available format (RFC 9429 section 5.2.2,
+    /// [`Self::offer_codecs_for_section`]), and the ones the answer accepts are negotiated
+    /// (RFC 3264 section 6.1), to be sent and received.
+    pub(crate) fn update_from_remote_description_merging(
+        &mut self,
+        desc: &SessionDescription,
+        merge_answer: bool,
+    ) -> Result<()> {
         for media in &desc.media_descriptions {
             // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
             // 8841 `DTLS/SCTP` data section): no codecs to read.
@@ -1677,7 +1810,9 @@ impl MediaEngine {
                 // then the two media secontions have different rtp header extensions in offer
                 self.update_header_extension_from_media_section(media)?;
 
-                if !self.negotiate_multi_codecs || typ == RtpCodecKind::Unspecified {
+                if !(self.negotiate_multi_codecs || merge_answer)
+                    || typ == RtpCodecKind::Unspecified
+                {
                     continue;
                 }
             }

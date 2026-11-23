@@ -1842,11 +1842,6 @@ impl RTCPeerConnection {
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
             let mut parsed = remote_description.unmarshal()?;
-            // RFC 9429 section 5.8.2: "Any 'a=rtcp' attribute MUST be parsed as specified in
-            // [RFC3605], Section 2.1, but its value is ignored". (The whole
-            // `SessionDescription::validate` is not run here: other specifications ask for
-            // some malformed lines to be ignored, RFC 8830 section 3 for `a=msid`.)
-            crate::peer_connection::sdp::check_rtcp_attributes(&parsed)?;
             self.assign_missing_mids(&mut parsed, answers);
             crate::peer_connection::sdp::discard_groups_with_unknown_tags(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
@@ -1927,6 +1922,12 @@ impl RTCPeerConnection {
             // So is a description whose DTLS attributes are malformed (RFC 8122 section 5,
             // RFC 4145 section 4, RFC 8842 sections 4 and 5.1).
             validate_dtls_attributes(&parsed, self.setting_engine.accept_lowercase_fingerprints)?;
+            // RFC 5763 section 5 (RFC 9429 section 5.8.3): "The answerer MUST use either a
+            // setup attribute value of setup:active or setup:passive"; `actpass` is the
+            // offerer's.
+            if answers && has_setup_value(&parsed, "actpass") {
+                return Err(Error::ErrSessionDescriptionInvalidSetup);
+            }
             // RFC 8122 section 5: a certificate is verified with the most preferred hash
             // function the peer offers; MD5, MD2 and functions the crypto provider lacks are
             // never used. A description that offers nothing else cannot be verified at all.
@@ -1952,7 +1953,7 @@ impl RTCPeerConnection {
         let negotiated_media_engine = match &remote_description.parsed {
             Some(parsed) => {
                 let mut media_engine = self.media_engine.clone();
-                media_engine.update_from_remote_description(parsed)?;
+                media_engine.update_from_remote_description_merging(parsed, answers)?;
                 Some(media_engine)
             }
             None => None,
@@ -2619,6 +2620,14 @@ impl RTCPeerConnection {
         self.check_remote_transports(parsed, answers)?;
         // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
         remote_candidates(parsed)?;
+        // RFC 9429 section 5.8: a line that is not well formed rejects the description, also
+        // when its value is then ignored (section 5.8.2, `a=rtcp`), except the lines other
+        // specifications have ignored (`check_attribute_lines`). Last, so that the checks
+        // above give their own errors for the lines they read.
+        crate::peer_connection::sdp::check_attribute_lines(
+            parsed,
+            self.setting_engine.strict_sdp_attribute_grammar,
+        )?;
         Ok(())
     }
 
@@ -2671,6 +2680,24 @@ impl RTCPeerConnection {
                 "a=tls-id:{new} replaces {previous} without an ICE restart (RFC 9429 section \
                  5.8.3)"
             )));
+        }
+        // RFC 9429 section 5.8.3: the DTLS setup value "MUST be consistent with the selected
+        // role of the current DTLS connection, if one exists and is being continued". The
+        // same `tls-id` continues it (RFC 8842 section 5.4); without one, a changed role asks
+        // for a new association instead (section 4) and is not an error.
+        if remote_tls_id.is_some() && dtls.remote_tls_id == remote_tls_id {
+            let consistent = match RTCDtlsRole::from(parsed) {
+                RTCDtlsRole::Client => dtls.dtls_role == RTCDtlsRole::Server,
+                RTCDtlsRole::Server => dtls.dtls_role == RTCDtlsRole::Client,
+                _ => true,
+            };
+            if !consistent {
+                return Err(Error::SdpInvalidValue(format!(
+                    "a=setup takes the DTLS role this endpoint has ({}) on an association the \
+                     description continues (RFC 9429 section 5.8.3)",
+                    dtls.dtls_role
+                )));
+            }
         }
         if answers
             && dtls
@@ -4883,12 +4910,51 @@ impl RTCPeerConnection {
 /// remote description whose bundled sections give one payload type two configurations (media
 /// type, encoding name, clock rate, channels or format parameters) is refused: the payload
 /// type could not tell the streams' format.
+/// The `a=rtcp-fb` lines a section gives payload type `pt` (its own and the `*` ones), each as
+/// its feedback type and parameters with single spaces.
+fn rtcp_fb_lines(
+    media: &::sdp::description::media::MediaDescription,
+    pt: u8,
+) -> std::collections::BTreeSet<String> {
+    let pt = pt.to_string();
+    media
+        .attributes
+        .iter()
+        .filter(|a| a.key == "rtcp-fb")
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| value.split_once(' '))
+        .filter(|(format, _)| *format == pt || *format == "*")
+        .map(|(_, feedback)| feedback.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// Whether `a=setup:<value>` is stated at session level or in a section that is not rejected.
+fn has_setup_value(parsed: &::sdp::description::session::SessionDescription, value: &str) -> bool {
+    let states = |attributes: &[::sdp::description::common::Attribute]| {
+        attributes
+            .iter()
+            .any(|a| a.key == "setup" && a.value.as_deref() == Some(value))
+    };
+    states(&parsed.attributes)
+        || parsed
+            .media_descriptions
+            .iter()
+            .any(|m| !is_rejected_media(m) && states(&m.attributes))
+}
+
 fn check_bundled_payload_types(
     parsed: &::sdp::description::session::SessionDescription,
 ) -> Result<()> {
     for group in crate::peer_connection::sdp::bundle_groups(parsed) {
-        let mut seen: std::collections::HashMap<u8, (String, RTCRtpCodecParameters)> =
-            std::collections::HashMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut seen: std::collections::HashMap<
+            u8,
+            (
+                String,
+                RTCRtpCodecParameters,
+                std::collections::BTreeSet<String>,
+            ),
+        > = std::collections::HashMap::new();
         // draft-ietf-avtcore-rtp-sframe-03 section 6: "If BUNDLE is in use and the "a=sframe"
         // attribute is present for a media section but not for another media section of the
         // same BUNDLE, payload types for media encodings that are relevant for SFrame MUST
@@ -4916,11 +4982,12 @@ fn check_bundled_payload_types(
                         codec.payload_type
                     )));
                 }
+                let feedback = rtcp_fb_lines(media, codec.payload_type);
                 match seen.get(&codec.payload_type) {
                     None => {
-                        seen.insert(codec.payload_type, (kind.clone(), codec));
+                        seen.insert(codec.payload_type, (kind.clone(), codec, feedback));
                     }
-                    Some((seen_kind, earlier)) => {
+                    Some((seen_kind, earlier, seen_feedback)) => {
                         let (a, b) = (&earlier.rtp_codec, &codec.rtp_codec);
                         let same = *seen_kind == kind
                             && a.mime_type.eq_ignore_ascii_case(&b.mime_type)
@@ -4930,7 +4997,10 @@ fn check_bundled_payload_types(
                                 .equal(&*crate::rtp_transceiver::fmtp::parse(
                                     &b.mime_type,
                                     &b.sdp_fmtp_line,
-                                ));
+                                ))
+                            // RFC 8859 appendix A: `a=rtcp-fb` is IDENTICAL-PER-PT too, so the
+                            // payload type has the same lines (in any order) in each.
+                            && *seen_feedback == feedback;
                         if !same {
                             return Err(Error::SdpInvalidValue(format!(
                                 "payload type {} has two configurations in one BUNDLE group \
