@@ -569,6 +569,46 @@ fn the_engine_refreshes_its_udp_allocation_before_it_expires() -> Result<()> {
     Ok(())
 }
 
+/// The SOFTWARE of the engine's TURN client over UDP (RFC 8656 section 5: SOFTWARE "SHOULD"
+/// be in every Allocate and Refresh request; RFC 8489 section 16.1.2: "Implementers SHOULD make usage
+/// of the SOFTWARE attribute a configurable option"): `rtc-turn` and its version by default, the text
+/// `with_ice_software` names, and with `with_ice_software(None)` no SOFTWARE in any message
+/// sent to the server (the 401 exchange, the signed Allocate, the Refresh).
+#[test]
+fn the_engine_udp_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
+    use rtc::stun::attributes::ATTR_SOFTWARE;
+    use rtc::stun::textattrs::Software;
+    for (setting, expected) in [
+        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (Some(None), None),
+        (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
+    ] {
+        let mut settings = SettingEngineBuilder::new().with_tcp_candidate_gathering(false);
+        if let Some(software) = setting.clone() {
+            settings = settings.with_ice_software(software);
+        }
+        let mut h = Harness::with(&format!("turn:{SERVER}"), settings.build(), vec![a(SERVER)])?;
+        h.add_host(HOST)?;
+        h.run(h.now + Duration::from_secs(600))?;
+        assert_eq!(
+            h.server.requests_of(METHOD_ALLOCATE).len(),
+            2,
+            "{setting:?}"
+        );
+        assert!(
+            !h.server.requests_of(METHOD_REFRESH).is_empty(),
+            "{setting:?}"
+        );
+        for (_, m) in &h.server.requests {
+            let software = Software::get_from_as(m, ATTR_SOFTWARE)
+                .ok()
+                .map(|software| software.text);
+            assert_eq!(software, expected, "{setting:?}: {}", m.typ);
+        }
+    }
+    Ok(())
+}
+
 /// The "who gathers" rule: a server for which the application adds its own relayed candidate
 /// (here before the engine had a base to start from) is left to it. The engine sends nothing
 /// to the server, announces no relayed candidate of its own, and gathering is not held for

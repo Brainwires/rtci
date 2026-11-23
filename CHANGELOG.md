@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
+  SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:
+  the ICE agent's connectivity checks (nominations and consent checks included) and success
+  responses, and the requests of the TURN clients the engine runs over UDP, TCP, TLS and DTLS.
+  `None` sends no SOFTWARE attribute at all, for an application that must not put an
+  implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD make usage of
+  the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
+  nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
+  characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
+  engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
+  `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
