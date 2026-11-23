@@ -377,6 +377,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
   association of every transport of the connection, not only the first.
 
+### Features
+
+- **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
+  SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:
+  the ICE agent's connectivity checks (nominations and consent checks included) and success
+  responses, and the requests of the TURN clients the engine runs over UDP, TCP, TLS and DTLS.
+  `None` sends no SOFTWARE attribute at all, for an application that must not put an
+  implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD make usage of
+  the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
+  nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
+  characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
+  engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
+  `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+
 ### Bug Fixes
 
 - **rtc**: a stream whose SSRC the remote description declares for an m= section with
@@ -400,22 +414,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rid; one without MID or RID, and a declared RTX packet, without a rid). The interop cell
   `simulcast without MID or RID on the wire: *` is no longer an expected failure for Pion.
   Row RFC9143-9.2-7.
-
-### Features
-
-- **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
-  SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:
-  the ICE agent's connectivity checks (nominations and consent checks included) and success
-  responses, and the requests of the TURN clients the engine runs over UDP, TCP, TLS and DTLS.
-  `None` sends no SOFTWARE attribute at all, for an application that must not put an
-  implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD make usage of
-  the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
-  nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
-  characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
-  engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
-  `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
-
-### Bug Fixes
 
 - **ICE restart**: an answerer's local candidates added between `set_remote_description` of a
   restart offer and `set_local_description` of its answer are the new generation's. The engine
@@ -480,6 +478,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not enrolled in OSS-Fuzz; `oss-fuzz/README.md` says what the remaining files are for. FORK.md
   loses 25 table rows that merges had duplicated and a blank line that split its feature table.
   cargo.yml's packaging comment no longer names rtc-crypto 0.21.0.
+- **CI**: `scripts/check-changelog-released.py` (cargo.yml, test inventory job) fails when a
+  released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
+  that union two CHANGELOGs had put new entries into, and repeated entries in, the released
+  0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
 
 ### Notes for integrators
 

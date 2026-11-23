@@ -167,6 +167,8 @@ jobs:
         run: python3 scripts/audit-count.py --check
       - name: Every open MUST row of the audit has a class (OPEN-MUST.md up to date)
         run: python3 scripts/open-must.py --check
+      - name: Released CHANGELOG sections equal the latest release tag's
+        run: python3 scripts/check-changelog-released.py
 
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
