@@ -1385,6 +1385,7 @@ impl<'a> InterceptorHandler<'a> {
         };
         if let Some(ntp) = ntp.filter(|ntp| *ntp != 0) {
             stream.in_band_ntp = Some((ntp, packet.header.timestamp, now));
+            stream.on_in_band_ntp_clock();
         }
     }
 
@@ -2131,6 +2132,23 @@ impl<'a>
                     } else {
                         self.stats
                             .on_rtp_received(ssrc, overhead_bytes, payload_bytes, msg.now);
+                        // RFC 7160 section 3.2: the clock rate this packet's timestamp runs at,
+                        // for placing it against a sender report taken at another one. Comfort
+                        // noise and telephone events ride the stream's clock as they are.
+                        if let Ok((codec, _)) = self
+                            .media_engine
+                            .get_codec_by_payload(rtp_packet.header.payload_type)
+                            && !super::endpoint::is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+                            && let Some(stream) = self
+                                .stats
+                                .inbound_rtp_streams
+                                .get_mut(&rtp_packet.header.ssrc)
+                        {
+                            stream.on_media_clock(
+                                rtp_packet.header.timestamp,
+                                codec.rtp_codec.clock_rate,
+                            );
+                        }
                     }
 
                     // W3C webrtc-stats 8.5 corruptionMeasurements: "If the corruption-detection
