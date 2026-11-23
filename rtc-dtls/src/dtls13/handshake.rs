@@ -43,6 +43,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// RFC 8446 section 4.4.2.4: a certificate signed with MD5 is a bad_certificate, whether or
+/// not the chain is verified (with fingerprint authentication it is not, and MD5 is still
+/// refused).
+fn refuse_md5(chain: &[Vec<u8>]) -> std::result::Result<(), Refusal> {
+    if chain
+        .iter()
+        .any(|der| super::certificate_checks::signed_with_md5(der))
+    {
+        return Err(refuse(
+            alert::BAD_CERTIFICATE,
+            Error::Other("a certificate signed with MD5".to_owned()),
+        ));
+    }
+    Ok(())
+}
+
 fn internal(error: Error) -> Refusal {
     refuse(alert::INTERNAL_ERROR, error)
 }
@@ -613,8 +629,12 @@ impl Conn13 {
                     self.early_data_accepted = Some(true);
                 }
                 EXT_USE_SRTP => {
-                    // RFC 5764 section 4.1.1: exactly one profile, one of those offered.
-                    let (profiles, _mki) = parse_use_srtp(data).map_err(decode_error)?;
+                    // RFC 5764 sections 4.1.1 and 4.1.3: exactly one profile, one of those
+                    // offered, and no MKI (this client offers none; RFC 8827 section 6.5).
+                    let (profiles, mki) = parse_use_srtp(data).map_err(decode_error)?;
+                    if !mki.is_empty() {
+                        return Err(illegal(Error::ErrInvalidUseSrtpAnswer));
+                    }
                     let profile = match profiles.as_slice() {
                         [profile] => SrtpProtectionProfile::from(*profile),
                         _ => return Err(illegal(Error::ErrInvalidUseSrtpAnswer)),
@@ -650,12 +670,12 @@ impl Conn13 {
     }
 
     fn on_certificate_request(&mut self, body: &[u8]) -> std::result::Result<(), Refusal> {
-        let (context, schemes) = parse_certificate_request(body)?;
+        let (context, schemes, oid_filters) = parse_certificate_request(body)?;
         // RFC 8446 section 4.3.2: the context is empty in the handshake.
         if !context.is_empty() {
             return Err(illegal(Error::ErrLengthMismatch));
         }
-        self.certificate_requested = Some(schemes);
+        self.certificate_requested = Some((schemes, oid_filters));
         self.transcript.add(CERTIFICATE_REQUEST, body);
         self.state = HandshakeState::ClientWaitCertificate;
         Ok(())
@@ -666,6 +686,7 @@ impl Conn13 {
         if !context.is_empty() {
             return Err(illegal(Error::ErrLengthMismatch));
         }
+        refuse_md5(&chain)?;
         if self.is_client {
             // RFC 8446 section 4.4.2.4: a server's Certificate is never empty.
             if chain.is_empty() {
@@ -779,8 +800,8 @@ impl Conn13 {
         // for, and its Finished.
         let mut flight = Flight::new(FlightKind::ClientFinal);
         let authenticates = self.certificate_requested.is_some();
-        if let Some(schemes) = self.certificate_requested.take() {
-            match self.client_credentials(&schemes) {
+        if let Some((schemes, oid_filters)) = self.certificate_requested.take() {
+            match self.client_credentials(&schemes, &oid_filters) {
                 Some((certificate, scheme)) => {
                     let chain: Vec<&[u8]> = certificate
                         .certificate
@@ -1441,14 +1462,31 @@ impl Conn13 {
     // Post-handshake authentication (RFC 8446 sections 4.2.6 and 4.6.2).
     // ------------------------------------------------------------------------------------
 
-    /// The certificate a client answers a CertificateRequest listing `schemes` with, and the
-    /// scheme it signs with: one TLS 1.3 signs with, that the request lists and its key can
-    /// make (RFC 8446 section 4.4.2.3). `None` when it has none.
+    /// The certificate a client answers a CertificateRequest listing `schemes` and
+    /// `oid_filters` with, and the scheme it signs with: one TLS 1.3 signs with, that the
+    /// request lists and its key can make (RFC 8446 section 4.4.2.3). `None` when it has
+    /// none: no certificate, or one whose chain is signed with algorithms the request does
+    /// not list (a self-signed certificate excepted) or that does not meet the filters.
     fn client_credentials(
         &self,
         schemes: &[u16],
+        oid_filters: &[super::certificate_checks::OidFilter],
     ) -> Option<(crate::crypto::Certificate, SignatureHashAlgorithm)> {
+        use super::certificate_checks::{client_chain_acceptable, matches_oid_filters};
+
         let certificate = self.cfg.get_certificate(&self.cfg.server_name).ok()?;
+        let pairs: Vec<SignatureHashAlgorithm> = schemes
+            .iter()
+            .map(|code| SignatureHashAlgorithm::from_scheme_code(*code))
+            .collect();
+        if !client_chain_acceptable(&certificate.certificate, &pairs)
+            || !certificate
+                .certificate
+                .first()
+                .is_some_and(|leaf| matches_oid_filters(leaf.as_ref(), oid_filters))
+        {
+            return None;
+        }
         self.cfg
             .local_signature_schemes
             .iter()
@@ -1459,6 +1497,17 @@ impl Conn13 {
             })
             .copied()
             .map(|scheme| (certificate, scheme))
+    }
+
+    /// Whether this client would answer a CertificateRequest of `schemes` and `oid_filters`
+    /// with a certificate.
+    #[cfg(test)]
+    pub(crate) fn client_credentials_for_test(
+        &self,
+        schemes: &[u16],
+        oid_filters: &[super::certificate_checks::OidFilter],
+    ) -> bool {
+        self.client_credentials(schemes, oid_filters).is_some()
     }
 
     /// Whether the client sent post_handshake_auth (RFC 8446 section 4.2.6).
@@ -1513,7 +1562,7 @@ impl Conn13 {
         &mut self,
         body: &[u8],
     ) -> std::result::Result<(), Refusal> {
-        let (context, schemes) = parse_certificate_request(body)?;
+        let (context, schemes, oid_filters) = parse_certificate_request(body)?;
         // RFC 8446 section 4.3.2: after the handshake the context is not empty.
         if context.is_empty() {
             return Err(illegal(Error::ErrLengthMismatch));
@@ -1524,7 +1573,7 @@ impl Conn13 {
         let mut transcript = self.transcript.clone();
         transcript.add(CERTIFICATE_REQUEST, body);
         let mut messages = vec![];
-        match self.client_credentials(&schemes) {
+        match self.client_credentials(&schemes, &oid_filters) {
             Some((certificate, scheme)) => {
                 let chain: Vec<&[u8]> = certificate
                     .certificate
@@ -1594,6 +1643,7 @@ impl Conn13 {
         match (handshake_type, self.client_authentication.take()) {
             (CERTIFICATE, None) => {
                 let (context, chain) = parse_certificate(body)?;
+                refuse_md5(&chain)?;
                 let Some(index) = self
                     .pending_certificate_requests
                     .iter()

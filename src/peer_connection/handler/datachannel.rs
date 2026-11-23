@@ -694,6 +694,39 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPRestarted(_association_handle) => {
+                // The peer restarted the association (RFC 9260 section 5.2.4): what ran over
+                // the old one is gone, so every channel that was dialed on it is closed with an
+                // error (W3C webrtc 6.2, "announce the data channel as closed"). Channels not
+                // dialed yet belong to no association and wait for the `SCTPHandshakeComplete`
+                // of the new one, which follows.
+                let mut dialed: Vec<RTCDataChannelId> = self
+                    .data_channels
+                    .values()
+                    .filter(|dc| dc.data_channel.is_some())
+                    .map(|dc| dc.id)
+                    .collect();
+                dialed.sort_unstable();
+                for id in dialed {
+                    let Some(dc) = self.data_channels.remove(&id) else {
+                        continue;
+                    };
+                    if !dc.close_emitted && !dc.failed {
+                        Self::push_channel_error(
+                            &mut self.ctx.event_outs,
+                            self.data_channels,
+                            now,
+                            dc.id,
+                            RTCError::new(
+                                RTCErrorDetailType::SctpFailure,
+                                "the peer restarted the SCTP association (RFC 9260 section 5.2.4)",
+                            ),
+                        );
+                    }
+                    self.announce_closed(now, dc);
+                }
+            }
+
             RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
                 let error = self.sctp_failure();
                 if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)

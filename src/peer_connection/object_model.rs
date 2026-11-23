@@ -48,6 +48,7 @@ impl RTCPeerConnection {
                 ..Default::default()
             });
         }
+        self.refuse_taken_ssrcs(&encodings, None)?;
         let placeholder =
             MediaStreamTrack::new(String::new(), String::new(), String::new(), kind, vec![]);
         let (_, encodings, codec_preferences) =
@@ -84,6 +85,7 @@ impl RTCPeerConnection {
         track: MediaStreamTrack,
     ) -> Result<RTCRtpSenderId> {
         let send_encodings = self.send_encodings_from_track(&track);
+        self.refuse_taken_ssrcs(&send_encodings, Some(id))?;
         let (track, send_encodings, codec_preferences) =
             self.normalize_sender_track(track, send_encodings)?;
 
@@ -147,6 +149,7 @@ impl RTCPeerConnection {
         });
         let (track, send_encodings) = if adopts_encodings && !track.codings().is_empty() {
             let send_encodings = self.send_encodings_from_track(&track);
+            self.refuse_taken_ssrcs(&send_encodings, Some(id))?;
             let (track, send_encodings, codec_preferences) =
                 self.normalize_sender_track(track, send_encodings)?;
             let transceiver = &mut self.rtp_transceivers[id];
