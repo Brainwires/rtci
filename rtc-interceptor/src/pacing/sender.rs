@@ -125,9 +125,23 @@ impl PacerBuilder {
 /// - **The deadline is when the head can afford to go**, not `now + interval`, so it always
 ///   advances — a deadline at or before the `now` just handed to `handle_timeout` is the
 ///   webrtc#862 busy-loop.
+///
+/// # Padding goes last
+///
+/// A padding-only packet (RFC 3550 section 5.1: the padding bit set and no payload, what the
+/// NACK responder fills a probe cluster with) is held in a queue of its own and leaves only when
+/// no other packet is waiting. A probe cluster is written as a burst of padding the moment it is
+/// asked for; queued in line with the media it would hold every packet the application writes
+/// during the cluster behind all of it (about 180 ms for a 6000-octet cluster at 200 kbit/s),
+/// delay the sender made for nothing, which RFC 8836 section 2 (requirement 1) asks a
+/// congestion controller for interactive media to keep low. Media written during a cluster
+/// leaves first, at the cluster's rate and with its mark, so it fills the cluster in place of
+/// padding, as libwebrtc's pacer does (padding has the lowest priority of its packet queue).
 pub struct PacerInterceptor {
     pacer: LeakyBucket,
     queue: VecDeque<TaggedPacket>,
+    /// Padding-only packets, released only while `queue` is empty.
+    padding: VecDeque<TaggedPacket>,
     queue_limit: usize,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
@@ -152,6 +166,7 @@ impl PacerInterceptor {
             released: VecDeque::new(),
             pacer,
             queue: VecDeque::new(),
+            padding: VecDeque::new(),
             queue_limit: queue_limit.max(1),
             immediate_release: true,
             probe: None,
@@ -169,9 +184,9 @@ impl PacerInterceptor {
         &mut self.pacer
     }
 
-    /// How many packets are waiting to be released.
+    /// How many packets are waiting to be released, padding included.
     pub fn queued(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + self.padding.len()
     }
 
     /// How many packets have been refused because the queue was full.
@@ -195,9 +210,24 @@ impl PacerInterceptor {
             .map_or(&self.pacer, |probe| &probe.bucket)
     }
 
+    /// Whether `packet` is padding only: an RTP packet with the padding bit and no payload.
+    fn is_padding(packet: &TaggedPacket) -> bool {
+        matches!(&packet.message.packet, Packet::Rtp(rtp) if rtp.header.padding && rtp.payload.is_empty())
+    }
+
+    /// The packet that leaves next: the head of the queue, or padding when nothing else waits.
+    fn head(&self) -> Option<&TaggedPacket> {
+        self.queue.front().or_else(|| self.padding.front())
+    }
+
+    /// Takes the packet [`Self::head`] names.
+    fn pop_head(&mut self) -> Option<TaggedPacket> {
+        self.queue.pop_front().or_else(|| self.padding.pop_front())
+    }
+
     /// The instant the head of the queue can next be released.
     fn next_release(&self) -> Option<Instant> {
-        let head = self.queue.front()?;
+        let head = self.head()?;
         self.bucket().releasable_at(Self::bits_of(head))
     }
 
@@ -326,9 +356,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         // deadline that is never in the past, even before the first `handle_timeout`.
         self.refill(msg.now);
 
+        // Padding only waits behind everything else, and nothing waits behind it.
+        let padding = Self::is_padding(&msg);
+
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
-        if self.immediate_release && self.queue.is_empty() {
+        // Queued padding is not in line ahead of anything else.
+        if self.immediate_release && self.queue.is_empty() && (!padding || self.padding.is_empty())
+        {
             let bits = Self::bits_of(&msg);
             if self.try_spend(bits) {
                 self.release(msg, bits);
@@ -336,7 +371,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             }
         }
 
-        if self.queue.len() >= self.queue_limit {
+        if self.queued() >= self.queue_limit {
             // Refuse the arrival rather than evicting something already queued: the queued
             // packets are older, and dropping one of those would put a hole in the middle of a
             // stream that the receiver would have to recover from.
@@ -346,7 +381,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         }
 
         // Held: it leaves later, from `poll_write`, when the budget allows.
-        self.queue.push_back(msg);
+        if padding {
+            self.padding.push_back(msg);
+        } else {
+            self.queue.push_back(msg);
+        }
         Ok(())
     }
 
@@ -361,13 +400,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
         self.refill(now);
 
-        while let Some(head) = self.queue.front() {
+        while let Some(head) = self.head() {
             let bits = Self::bits_of(head);
             if !self.try_spend(bits) {
                 break;
             }
 
-            let mut packet = self.queue.pop_front().expect("front just checked");
+            let mut packet = self.pop_head().expect("head just checked");
             // Rule 3: the packet departs now. Anything below recording departure — the send
             // history congestion control reads — must see the release instant, not the enqueue
             // instant, or this queueing delay is charged to the network.

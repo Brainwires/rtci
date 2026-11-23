@@ -151,6 +151,29 @@ impl Harness {
             .expect("handle_write");
     }
 
+    /// A padding-only packet (RFC 3550 section 5.1), as the NACK responder fills a probe
+    /// cluster with: no payload and 255 octets of padding, 2136 bits on the wire.
+    fn send_padding(&mut self, at: Duration, sequence_number: u16) {
+        self.chain
+            .handle_write(TaggedPacket {
+                now: self.epoch + at,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        padding: true,
+                        payload_type: 97,
+                        sequence_number,
+                        ssrc: 2,
+                        padding_size: 255,
+                        ..Default::default()
+                    },
+                    payload: bytes::Bytes::new(),
+                })),
+            })
+            .expect("handle_write");
+    }
+
     /// Fire a timeout and then drain, which is what a driver does.
     ///
     /// The draining is load-bearing on the belt and was not under nesting: a released packet is
@@ -338,6 +361,35 @@ fn packets_arriving_mid_drain_keep_their_order() {
             .iter()
             .map(|(sequence_number, _)| *sequence_number)
             .collect::<Vec<_>>()
+    );
+}
+
+/// A probe cluster is written as a burst of padding the moment it is asked for. Media written
+/// while that padding waits goes ahead of it, as soon as the budget allows, instead of waiting
+/// out the whole cluster; the padding keeps its order and leaves once nothing else waits.
+#[test]
+fn media_leaves_ahead_of_queued_padding() {
+    let mut harness = Harness::new();
+    // 20 padding packets of 2136 bits: the 12 000-bit burst lets 5 out at once, and the other
+    // 15 would take about 27 ms at 1.2 Mb/s.
+    for sequence_number in 100..120 {
+        harness.send_padding(ms(0), sequence_number);
+    }
+    harness.send(ms(1), 1);
+    harness.advance_to(ms(100));
+
+    let schedule = harness.schedule();
+    let order: Vec<u16> = schedule.iter().map(|(seq, _)| *seq).collect();
+    let mut expected: Vec<u16> = (100..105).collect();
+    expected.push(1);
+    expected.extend(105..120);
+    assert_eq!(expected, order, "{schedule:?}");
+    // The media packet waits only for the budget its own 12 000 bits need: 1320 bits were
+    // left after the padding that went at once, and 10 680 more take 8.9 ms.
+    let (_, media_at) = schedule[5];
+    assert!(
+        media_at < ms(10),
+        "the media packet left at {media_at:?}, behind the padding"
     );
 }
 
