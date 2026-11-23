@@ -256,6 +256,25 @@ struct World {
     seq: u64,
     sent: u64,
     dropped: u64,
+    /// When the run started, and what happened in it since: every datagram a peer sent (its
+    /// length, whether the link dropped it) and every state change, in order. A seed must give
+    /// the same trace every time.
+    start: Instant,
+    trace: Vec<(Duration, Traced)>,
+}
+
+/// One entry of [`World::trace`].
+#[derive(Clone, Debug, PartialEq)]
+enum Traced {
+    Datagram {
+        from: usize,
+        /// The first byte: STUN (0 to 3) or the DTLS record's content type (RFC 7983).
+        kind: u8,
+        len: usize,
+        dropped: bool,
+    },
+    State(usize, RTCPeerConnectionState),
+    Ice(usize, RTCIceConnectionState),
 }
 
 impl World {
@@ -277,6 +296,8 @@ impl World {
             seq: 0,
             sent: 0,
             dropped: 0,
+            start: now,
+            trace: Vec::new(),
         })
     }
 
@@ -307,7 +328,17 @@ impl World {
                         peer.nomination = Some((self.now, id));
                     }
                     self.sent += 1;
-                    if self.rng.unit() < self.link.loss {
+                    let dropped = self.rng.unit() < self.link.loss;
+                    self.trace.push((
+                        self.now - self.start,
+                        Traced::Datagram {
+                            from: i,
+                            kind: msg.message.first().copied().unwrap_or(0),
+                            len: msg.message.len(),
+                            dropped,
+                        },
+                    ));
+                    if dropped {
                         self.dropped += 1;
                         continue;
                     }
@@ -349,13 +380,17 @@ impl World {
                 });
                 delivered = true;
             }
-            for peer in self.peers.iter_mut() {
+            for (i, peer) in self.peers.iter_mut().enumerate() {
                 while let Some(event) = peer.pc.poll_event() {
                     match event {
                         RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
+                            self.trace
+                                .push((self.now - self.start, Traced::State(i, state)));
                             peer.states.push(state)
                         }
                         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state) => {
+                            self.trace
+                                .push((self.now - self.start, Traced::Ice(i, state)));
                             peer.ice_states.push(state)
                         }
                         RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
@@ -490,6 +525,26 @@ fn session_over_salted(
     lapse_allowed: bool,
 ) -> Result<Outcome> {
     let mut world = World::new(link, seed, salt, failed_nomination)?;
+    drive(
+        &mut world,
+        seed,
+        count,
+        open_within,
+        deliver_within,
+        lapse_allowed,
+    )
+}
+
+/// The body of [`session_over_salted`], on a world made for it.
+fn drive(
+    world: &mut World,
+    seed: u64,
+    count: u32,
+    open_within: Duration,
+    deliver_within: Duration,
+    lapse_allowed: bool,
+) -> Result<Outcome> {
+    let link = world.link;
     world.peers[0].pc.create_data_channel(
         "lossy-link",
         Some(RTCDataChannelInit {
@@ -626,6 +681,28 @@ fn session_over_salted(
 
 const SEEDS: [u64; 4] = [1, 2, 3, 0x5eed];
 
+/// [`SEEDS`], or the seeds `LOSSY_LINK_SEEDS` names: a comma-separated list of numbers and
+/// half-open ranges (`0..200`), each decimal or `0x` hex.
+fn seeds() -> Vec<u64> {
+    let Ok(list) = std::env::var("LOSSY_LINK_SEEDS") else {
+        return SEEDS.to_vec();
+    };
+    let number = |s: &str| {
+        let s = s.trim();
+        match s.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => s.parse(),
+        }
+        .unwrap_or_else(|e| panic!("LOSSY_LINK_SEEDS: {s:?}: {e}"))
+    };
+    list.split(',')
+        .flat_map(|part| match part.split_once("..") {
+            Some((from, to)) => (number(from)..number(to)).collect::<Vec<_>>(),
+            None => vec![number(part)],
+        })
+        .collect()
+}
+
 /// The netem link `tests/testenv_impairment.rs` ran the reliable unordered channel over: 5 %
 /// loss, 30 ms plus or minus 15 ms, so datagrams sent within 30 ms of each other overtake each
 /// other.
@@ -636,7 +713,7 @@ fn a_session_over_a_link_with_loss_and_reordering_connects_and_delivers_everythi
         delay: Duration::from_millis(30),
         jitter: Duration::from_millis(15),
     };
-    for seed in SEEDS {
+    for seed in seeds() {
         session_over(
             link,
             seed,
@@ -657,7 +734,37 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
         delay: Duration::from_millis(20),
         jitter: Duration::from_millis(2),
     };
-    for seed in SEEDS {
+    for seed in seeds() {
+        session_over(
+            link,
+            seed,
+            300,
+            Duration::from_secs(30),
+            Duration::from_secs(90),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+/// Seeds of a 2000-seed sweep at 10 % loss where the data channel had not opened after 30
+/// seconds (760, 1629 and 1963 with the aws-lc-rs provider, 992 with ring). The controlled
+/// peer, the DTLS client, selected the pair when the first nomination request reached it and
+/// started its handshake; the responses to the nomination were lost twice, and for those 3.5
+/// seconds the controlling peer, with no pair selected, dropped every datagram that was not
+/// STUN and could send none. Its four ClientHellos lost, the client's retransmission timer
+/// had backed off to 6.4 seconds by the time the controlling peer selected the pair, and two
+/// ordinary losses after that (12.8 seconds more) took the handshake past 30 seconds. The
+/// controlling agent now sends and receives data on the pair it is nominating (RFC 8445
+/// sections 12.1 and 12.2).
+#[test]
+fn the_handshake_is_answered_while_the_nominations_responses_are_lost() -> Result<()> {
+    let link = Link {
+        loss: 0.10,
+        delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(2),
+    };
+    for seed in [760, 992, 1629, 1963] {
         session_over(
             link,
             seed,
@@ -675,7 +782,7 @@ fn a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything(
 /// an error (never closes silently), and what arrives arrives once.
 #[test]
 fn a_session_over_a_link_with_thirty_percent_loss_fails_only_when_consent_lapses() -> Result<()> {
-    for seed in SEEDS {
+    for seed in seeds() {
         session_over(
             THIRTY_PERCENT,
             seed,
@@ -861,6 +968,168 @@ fn a_retried_nomination_keeps_the_session_over_heavy_loss() -> Result<()> {
             Outcome::NominationFailed,
             "{loss} loss, seed {seed:#x}: the nomination failed with Retry"
         );
+    }
+    Ok(())
+}
+
+/// A sweep for investigating, not part of the suite: runs a session on each seed of
+/// [`seeds`] (`LOSSY_LINK_SEEDS`), the peers salted with `LOSSY_LINK_SALT` (default 0, see
+/// [`World::new`]), `LOSSY_LINK_REPEAT` times each (default 1), at the loss
+/// `LOSSY_LINK_LOSS` (default 0.10), and prints one line per run: the outcome, or the error,
+/// and a fingerprint of the run's trace, so a seed that does not give the same run every
+/// time shows. At 10 % loss nothing may fail (the parameters of
+/// [`a_session_over_a_link_with_ten_percent_loss_connects_and_delivers_everything`]); from
+/// 20 % on, those of the 30 % test.
+/// `LOSSY_LINK_TRACE` prints each run's trace.
+/// `cargo test --test lossy_link_rtc2rtc sweep -- --ignored --nocapture`
+#[test]
+#[ignore = "an investigation tool: set LOSSY_LINK_SEEDS, LOSSY_LINK_LOSS, LOSSY_LINK_SALT, LOSSY_LINK_REPEAT"]
+fn sweep() -> Result<()> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    // `RUST_LOG` shows the engine's own logs.
+    let _ = env_logger::builder().is_test(true).try_init();
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or(default.to_owned());
+    let loss: f64 = env("LOSSY_LINK_LOSS", "0.10").parse()?;
+    let repeat: u32 = env("LOSSY_LINK_REPEAT", "1").parse()?;
+    let salt: u64 = env("LOSSY_LINK_SALT", "0").parse()?;
+    let heavy = loss >= 0.2;
+    let link = Link {
+        loss,
+        delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(if heavy { 5 } else { 2 }),
+    };
+    let (count, open_within, deliver_within) = if heavy {
+        (50, Duration::from_secs(400), Duration::from_secs(900))
+    } else {
+        (300, Duration::from_secs(30), Duration::from_secs(90))
+    };
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    for seed in seeds() {
+        let mut fingerprints = HashSet::new();
+        for rep in 0..repeat {
+            let mut world = World::new(link, seed, salt, FailedNomination::default())?;
+            let outcome = drive(&mut world, seed, count, open_within, deliver_within, heavy);
+            let mut hasher = DefaultHasher::new();
+            // The course: what the link saw, lengths aside (see
+            // `the_same_seed_gives_the_same_run`).
+            for (at, entry) in &world.trace {
+                at.hash(&mut hasher);
+                match entry {
+                    Traced::Datagram {
+                        from,
+                        kind,
+                        dropped,
+                        ..
+                    } => (from, kind, dropped).hash(&mut hasher),
+                    other => format!("{other:?}").hash(&mut hasher),
+                }
+            }
+            let fingerprint = hasher.finish();
+            if std::env::var_os("LOSSY_LINK_TRACE").is_some() {
+                for (at, entry) in &world.trace {
+                    println!("TRACE seed={seed} {at:?} {entry:?}");
+                }
+            }
+            fingerprints.insert(fingerprint);
+            let summary = match &outcome {
+                Ok(outcome) => format!("{outcome:?}"),
+                Err(_) => "Error".to_owned(),
+            };
+            *tally.entry(summary.clone()).or_default() += 1;
+            println!(
+                "SWEEP loss={loss} seed={seed} rep={rep} outcome={summary} trace={} \
+                 fingerprint={fingerprint:016x} received={} {}",
+                world.trace.len(),
+                world.peers[1].received.len(),
+                match outcome {
+                    Ok(_) => world.describe(),
+                    Err(e) => e.to_string(),
+                }
+            );
+        }
+        if fingerprints.len() > 1 {
+            println!(
+                "SWEEP-NONDETERMINISTIC seed={seed}: {} traces in {repeat} runs",
+                fingerprints.len()
+            );
+        }
+    }
+    println!("SWEEP-TALLY loss={loss}: {tally:?}");
+    Ok(())
+}
+
+/// A seed fixes a run: the same seed twice gives the same course (every datagram each peer
+/// sent, what kind it was and whether the link dropped it, and every state change, at the same
+/// virtual instants), on every crypto provider. The lengths of the DTLS handshake datagrams
+/// may differ by a byte or two: the provider's own key generation and ECDSA signatures (DER,
+/// 70 to 72 bytes) draw from the OS, out of reach of `random()`; the link's draws are per
+/// datagram, so they do not change the course. A run whose course something unseeded
+/// decides (the OS's randomness, a hash map's iteration order, the wall clock) makes the
+/// seeded tests here samples rather than cases: a seed that passes once can fail the next
+/// time, as seed 2 of the 10 % test did once in CI.
+#[test]
+fn the_same_seed_gives_the_same_run() -> Result<()> {
+    let link = Link {
+        loss: 0.10,
+        delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(2),
+    };
+    for seed in seeds() {
+        let mut traces = Vec::new();
+        for _ in 0..2 {
+            let mut world = World::new(link, seed, 0, FailedNomination::default())?;
+            let outcome = drive(
+                &mut world,
+                seed,
+                300,
+                Duration::from_secs(30),
+                Duration::from_secs(90),
+                false,
+            );
+            traces.push((outcome.map_err(|e| e.to_string()), world.trace));
+        }
+        // First the course (what was sent when, and what was dropped), then the lengths.
+        let course = |trace: &[(Duration, Traced)]| {
+            trace
+                .iter()
+                .map(|(at, entry)| match entry {
+                    Traced::Datagram {
+                        from,
+                        kind,
+                        dropped,
+                        ..
+                    } => (
+                        *at,
+                        Traced::Datagram {
+                            from: *from,
+                            kind: *kind,
+                            len: 0,
+                            dropped: *dropped,
+                        },
+                    ),
+                    other => (*at, other.clone()),
+                })
+                .collect::<Vec<_>>()
+        };
+        let (first, second) = (course(&traces[0].1), course(&traces[1].1));
+        if let Some(at) =
+            (0..first.len().max(second.len())).find(|&i| first.get(i) != second.get(i))
+        {
+            let (first, second) = (&traces[0].1, &traces[1].1);
+            let around = |trace: &[(Duration, Traced)]| {
+                trace[at.saturating_sub(4)..(at + 12).min(trace.len())].to_vec()
+            };
+            bail!(
+                "seed {seed}: two runs part at entry {at} of {} / {}:\n  first:  {:?}\n  \
+                 second: {:?}\n  outcomes: {:?} / {:?}",
+                first.len(),
+                second.len(),
+                around(first),
+                around(second),
+                traces[0].0,
+                traces[1].0
+            );
+        }
     }
     Ok(())
 }

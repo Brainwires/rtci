@@ -413,6 +413,11 @@ versions that support it. Raising it is a deliberate change of the manifest.
   `close()`. `MdnsProbePolicy::Never` and `MdnsConfig::with_announce_count` are the knobs;
   announcing and goodbyes are what RFC 6762 requires and cannot be turned off.
 
+- ICE, controlling agent: the pair it is nominating carries data until the nomination is
+  answered or fails (RFC 8445 sections 12.1 and 12.2), so the peer, which selected that pair
+  when the nomination reached it, has its DTLS handshake answered. Upstream sends and
+  receives data only on the selected pair.
+
 ### Defaults the fork narrows on purpose
 
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream

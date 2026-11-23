@@ -3964,6 +3964,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **ice**: over a lossy link the data channel could take more than 30 seconds to open because
+  the controlling agent dropped the peer's DTLS handshake while the responses to its
+  nomination were lost. The controlled agent selects the pair when the first USE-CANDIDATE
+  request reaches it and its DTLS client starts at once; the controlling agent, with no pair
+  selected until a response came, had no media path, so it discarded every non-STUN datagram
+  and could send none. At 10 % loss, two lost responses (3.5 s) cost the client four
+  ClientHellos and backed its retransmission timer off to 6.4 s, and two ordinary losses after
+  that took the handshake past 30 s (seeds 760, 1629 and 1963 with aws-lc-rs, 992 with ring,
+  of 2000). `Agent::media_path` is now the nominated pair's path while the controlling agent's
+  nomination is in flight: the pair is valid (RFC 8445 section 12.1: data MAY be sent on any
+  valid pair before selection) and data from it is received (section 12.2). Tests:
+  `agent_rfc8445_test.rs::test_data_flows_on_the_pair_being_nominated_until_its_response_comes`,
+  `tests/lossy_link_rtc2rtc.rs::the_handshake_is_answered_while_the_nominations_responses_are_lost`.
+- **rtc**: a seed did not fix a run. The RTCP session the peer connection installs by default
+  drew its report intervals (RFC 3550 section 6.3.1), feedback dither, SSRC and CNAME from
+  `rand` instead of the crypto provider's `random()`; its reports go out from the moment DTLS
+  is up, also on a data-channel-only session, and moved every later datagram, so the seeded
+  lossy-link tests ran a different course each time (the 10 % test failed once in CI on seed
+  2, 205 of 300 messages delivered, and passed on the same code before and after). It now
+  draws from the provider set with `SettingEngineBuilder::with_crypto_provider`. Test:
+  `tests/lossy_link_rtc2rtc.rs::the_same_seed_gives_the_same_run` (same seed twice, same
+  course, both providers). The lossy-link harness takes `LOSSY_LINK_SEEDS` and has an
+  ignored `sweep` (`LOSSY_LINK_LOSS`, `LOSSY_LINK_SALT`, `LOSSY_LINK_REPEAT`).
+
 - **interceptor**: inbound RTCP that no interceptor annotated reached the application as an
   empty carrier once the chain held a `PerRtpSession` wrapper. The wrapper tags what each
   session's instance hands on with its `RtpSession`, and the terminus (`NoopInterceptor`)
