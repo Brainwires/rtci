@@ -12,6 +12,9 @@ pub mod abs_capture_time_extension;
 pub mod abs_send_time_extension;
 /// Per-packet audio loudness and voice activity ([RFC 6464]).
 pub mod audio_level_extension;
+/// Corruption detection samples (a libwebrtc experiment, W3C webrtc-stats
+/// `corruptionMeasurements`).
+pub mod corruption_detection_extension;
 /// The audio level of each contributing source of a mixed packet ([RFC 6465]).
 ///
 /// [RFC 6465]: https://datatracker.ietf.org/doc/html/rfc6465
@@ -38,6 +41,9 @@ pub const ABS_SEND_TIME_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrex
 /// The URI of the absolute-capture-time extension.
 pub const ABS_CAPTURE_TIME_URI: &str =
     "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time";
+/// The URI of the corruption detection extension (W3C webrtc-stats 8.5).
+pub const CORRUPTION_DETECTION_URI: &str =
+    "http://www.webrtc.org/experiments/rtp-hdrext/corruption-detection";
 /// The URI of the client-to-mixer audio level extension (RFC 6464).
 pub const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
 /// The URI of the mixer-to-client audio level extension (RFC 6465).

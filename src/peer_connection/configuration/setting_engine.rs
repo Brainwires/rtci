@@ -455,11 +455,19 @@ pub struct SettingEngine {
     /// The SCTP zero checksum (RFC 9653) is announced as acceptable. `None` is the default,
     /// on.
     pub(crate) sctp_zero_checksum: Option<bool>,
+    /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
+    pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
+    pub(crate) sctp_rto: Option<sctp::RtoConfig>,
+    /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
+    pub(crate) sctp_max_retransmissions: Option<usize>,
     /// A message over 16 KB is refused on an association without message interleaving
     /// (RFC 8831 section 6.6). `None` is the default, on.
     pub(crate) sctp_message_size_limit_without_interleaving: Option<bool>,
     /// [`SettingEngineBuilder::with_data_channel_max_buffer_size`].
     pub(crate) data_channel_max_buffer_size: Option<u32>,
+    /// [`SettingEngineBuilder::with_data_channel_send_before_ack`].
+    pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
@@ -2009,6 +2017,40 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The number of SCTP streams this endpoint asks for and accepts in each direction
+    /// (the OS and MIS of its INIT or INIT ACK, RFC 9260 section 3.3.2). The association has
+    /// the smaller of both sides' counts, which is W3C `RTCSctpTransport.maxChannels`
+    /// (webrtc-pc 6.1.1): a data channel id at or above it cannot be used. Unset, the default,
+    /// is 65535, as browsers ask for; a value of 0 is raised to 1.
+    pub fn with_sctp_max_streams(mut self, streams: u16) -> Self {
+        self.0.sctp_max_streams = Some(streams.max(1));
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the SCTP association (RFC 9260 sections 6.3.1 and
+    /// 16): the retransmission timeout before a round trip is measured, and its bounds. Unset,
+    /// the default, is the RFC's recommendation: 1, 1 and 60 seconds. A minimum or maximum of
+    /// zero is raised to a millisecond, a maximum below the minimum to the minimum.
+    ///
+    /// With [`Self::with_sctp_max_retransmissions`] this bounds how long the association keeps
+    /// retransmitting to a peer that does not answer before it fails (W3C webrtc-pc 6.2: the
+    /// data channels then fail with `sctp-failure`). At the defaults that is minutes, longer
+    /// than ICE consent (30 seconds) takes to fail the path: an application that wants SCTP
+    /// itself to report an unreachable peer sooner (a path ICE still thinks alive) lowers it.
+    pub fn with_sctp_rto(mut self, initial: Duration, min: Duration, max: Duration) -> Self {
+        self.0.sctp_rto = Some(sctp::RtoConfig { initial, min, max });
+        self
+    }
+
+    /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
+    /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
+    /// takes before it declares the peer unreachable and fails. Unset, the default, is the
+    /// RFC's 10. See [`Self::with_sctp_rto`].
+    pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
+        self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
     /// Whether a message over 16 KB is refused when the SCTP association does not interleave
     /// user messages. On by default: RFC 8831 section 6.6 says "As long as message
     /// interleaving is not supported, the sender SHOULD limit the maximum message size to
@@ -2038,6 +2080,22 @@ impl SettingEngineBuilder {
     /// `bufferedAmount` low by `bufferedAmountLowThreshold` needs none.
     pub fn with_data_channel_max_buffer_size(mut self, limit: Option<u32>) -> Self {
         self.0.data_channel_max_buffer_size = limit;
+        self
+    }
+
+    /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
+    /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
+    ///
+    /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
+    /// start sending messages containing user data without waiting for the reception of the
+    /// corresponding DATA_CHANNEL_ACK message". The data goes out ordered behind the OPEN, and
+    /// a peer that implements RFC 8832 (any browser, this engine) takes it as the ACK would.
+    ///
+    /// [`Error::ErrDataChannelNotOpen`]: shared::error::Error::ErrDataChannelNotOpen
+    pub fn with_data_channel_send_before_ack(mut self, enabled: bool) -> Self {
+        self.0.data_channel_send_before_ack = enabled;
         self
     }
 

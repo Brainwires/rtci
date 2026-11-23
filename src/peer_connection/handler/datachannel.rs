@@ -371,7 +371,19 @@ impl<'a>
                     }
                 };
 
-                self.data_channels.insert(data_channel_internal);
+                let channel_id = self.data_channels.insert(data_channel_internal);
+                // W3C 6.2.3 "announce the data channel instance": fire `datachannel` with the
+                // channel, then announce it open.
+                self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport,
+                    message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                        ApplicationMessage {
+                            data_channel_id: channel_id,
+                            data_channel_event: DataChannelEvent::Announced,
+                        },
+                    )),
+                });
                 true
             };
 
@@ -691,6 +703,12 @@ impl<'a>
                         );
                     }
                     self.announce_closed(now, dc);
+                }
+            }
+
+            RTCEventInternal::SCTPStreamDequeued(_association_handle, stream_id, dequeued) => {
+                if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id) {
+                    dc.bytes_dequeued_at_close = Some(dequeued);
                 }
             }
 
@@ -1724,17 +1742,19 @@ mod tests {
         }
     }
 
-    /// A user message arriving before the ACK is buffered and delivered only
-    /// after the channel opens, with the open event first.
+    /// RFC 8832 section 6, "after the DATA_CHANNEL_ACK or any other message has been
+    /// received", and W3C 6.2.8 (data is delivered only on an open channel): a user message
+    /// that arrives before the ACK completes the opener's handshake as the ACK would, so the
+    /// channel opens, and the message is delivered after the open event, never before. The ACK
+    /// that follows changes nothing.
     #[test]
-    fn pre_open_data_is_buffered_until_open() {
+    fn user_data_before_the_ack_opens_the_channel_first() {
         let now = Instant::now();
         let mut ctx = DataChannelHandlerContext::new(now);
         let (mut data_channels, handles) = registry(vec![in_band_channel(1)]);
-        let _handle = handles[0];
+        let handle = handles[0];
         let mut stats = RTCStatsAccumulator::new();
 
-        // Dial first.
         {
             let mut handler = DataChannelHandler::new(
                 &mut ctx,
@@ -1751,39 +1771,12 @@ mod tests {
                 })
                 .unwrap();
         }
-
-        // A user data message arrives while the channel is still Connecting.
-        {
-            let mut handler = DataChannelHandler::new(
-                &mut ctx,
-                &mut data_channels,
-                &mut stats,
-                None,
-                RTCDtlsRole::Server,
-                None,
-            );
-            handler
-                .handle_read(TaggedRTCMessageInternal {
-                    now,
-                    transport: TransportContext::default(),
-                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_message(
-                        0, 1, b"hello",
-                    ))),
-                })
-                .unwrap();
-        }
-
-        // No message event yet.
-        assert!(
-            !message_events(&ctx)
-                .iter()
-                .any(|e| matches!(e, DataChannelEvent::Message(_))),
-            "no message may be delivered before the channel is open"
+        assert_eq!(
+            data_channels.get(&handle).map(|dc| dc.ready_state),
+            Some(RTCDataChannelState::Connecting)
         );
 
-        // The ACK arrives: the channel opens and the buffered message is delivered,
-        // with the open event first.
-        {
+        for message in [data_message(0, 1, b"hello"), ack(0, 1)] {
             let mut handler = DataChannelHandler::new(
                 &mut ctx,
                 &mut data_channels,
@@ -1796,31 +1789,43 @@ mod tests {
                 .handle_read(TaggedRTCMessageInternal {
                     now,
                     transport: TransportContext::default(),
-                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(ack(0, 1))),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)),
                 })
                 .unwrap();
         }
 
+        assert_eq!(
+            data_channels.get(&handle).map(|dc| dc.ready_state),
+            Some(RTCDataChannelState::Open)
+        );
         let events = message_events(&ctx);
         assert!(
             matches!(events.first(), Some(DataChannelEvent::Open)),
-            "open event must fire first"
+            "open event must fire first: {events:?}"
         );
         assert!(
             matches!(events.get(1), Some(DataChannelEvent::Message(_))),
-            "the buffered message must be delivered after the open event"
+            "the message is delivered after the open event"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, DataChannelEvent::Open))
+                .count(),
+            1,
+            "the ACK after it opens nothing again"
         );
     }
 
-    /// A user message buffered before the ACK is discarded if the channel times
-    /// out: it must never be delivered to the application.
+    /// RFC 8832 section 6: once a user message showed the peer took the OPEN, the DCEP
+    /// handshake deadline no longer applies: the channel is open and stays open past it.
     #[test]
-    fn pre_open_data_is_dropped_on_timeout() {
+    fn user_data_before_the_ack_ends_the_handshake_deadline() {
         let now = Instant::now();
         let timeout = Duration::from_millis(100);
         let mut ctx = DataChannelHandlerContext::new(now);
         let (mut data_channels, handles) = registry(vec![in_band_channel(1)]);
-        let _handle = handles[0];
+        let handle = handles[0];
         let mut stats = RTCStatsAccumulator::new();
 
         {
@@ -1838,18 +1843,6 @@ mod tests {
                     event: RTCEventInternal::SCTPHandshakeComplete(0),
                 })
                 .unwrap();
-        }
-
-        // Buffer a user message while Connecting.
-        {
-            let mut handler = DataChannelHandler::new(
-                &mut ctx,
-                &mut data_channels,
-                &mut stats,
-                Some(timeout),
-                RTCDtlsRole::Server,
-                None,
-            );
             handler
                 .handle_read(TaggedRTCMessageInternal {
                     now,
@@ -1860,8 +1853,6 @@ mod tests {
                 })
                 .unwrap();
         }
-
-        // Time out; the channel closes and the buffered message must not be delivered.
         let later = now + timeout + Duration::from_secs(1);
         {
             let mut handler = DataChannelHandler::new(
@@ -1874,12 +1865,17 @@ mod tests {
             );
             handler.handle_timeout(later).unwrap();
         }
-
-        assert!(
-            !message_events(&ctx)
+        assert_eq!(
+            data_channels.get(&handle).map(|dc| dc.ready_state),
+            Some(RTCDataChannelState::Open),
+            "the deadline closed nothing"
+        );
+        assert_eq!(
+            message_events(&ctx)
                 .iter()
-                .any(|e| matches!(e, DataChannelEvent::Message(_))),
-            "a buffered message must never be delivered after the timeout"
+                .filter(|e| matches!(e, DataChannelEvent::Message(_)))
+                .count(),
+            1
         );
     }
 
@@ -1959,6 +1955,19 @@ mod tests {
             }
 
             read(&mut handler, open_message(0, peer_id));
+            // W3C 6.2.3: the channel is announced (`datachannel`), then opened.
+            assert!(
+                matches!(
+                    handler.poll_read().map(|m| m.message),
+                    Some(RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                        ApplicationMessage {
+                            data_channel_event: DataChannelEvent::Announced,
+                            ..
+                        }
+                    )))
+                ),
+                "{role}: the peer's OPEN on stream {peer_id} announces a channel"
+            );
             assert!(
                 matches!(
                     handler.poll_read().map(|m| m.message),

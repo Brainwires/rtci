@@ -76,13 +76,22 @@ fn assert_basic_capabilities(crypto: &dyn RTCCrypto) {
             "missing capability: {capability:?}"
         );
     }
-    assert!(!crypto.supports(CryptoAlgorithm::SigningKeyGeneration(
-        SignatureScheme::RsaPkcs1Sha256
-    )));
-    assert!(matches!(
-        crypto.generate_signing_key(SignatureScheme::RsaPkcs1Sha256),
-        Err(CryptoError::UnsupportedAlgorithm(_))
-    ));
+    // RSA key generation: what the provider says it supports, it does; otherwise an explicit
+    // unsupported-algorithm error (ring has no RSA key generation).
+    if crypto.supports(CryptoAlgorithm::SigningKeyGeneration(
+        SignatureScheme::RsaPkcs1Sha256,
+    )) {
+        assert!(
+            crypto
+                .generate_signing_key(SignatureScheme::RsaPkcs1Sha256)
+                .is_ok()
+        );
+    } else {
+        assert!(matches!(
+            crypto.generate_signing_key(SignatureScheme::RsaPkcs1Sha256),
+            Err(CryptoError::UnsupportedAlgorithm(_))
+        ));
+    }
     for scheme in [
         SignatureScheme::Ed25519,
         SignatureScheme::EcdsaP256Sha256,

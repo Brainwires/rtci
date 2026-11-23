@@ -77,6 +77,7 @@ use sansio::Protocol;
 use shared::error::{Error, Result};
 use std::time::Instant;
 
+pub(crate) mod closed;
 pub(crate) mod init;
 pub(crate) mod internal;
 pub(crate) mod message;
@@ -112,6 +113,7 @@ pub type RTCDataChannelId = usize;
 /// See [`RTCDataChannel::stream_id`].
 pub use sctp::StreamId;
 
+pub use closed::{MAX_KEPT_CLOSED_DATA_CHANNELS, RTCClosedDataChannel};
 pub use init::RTCDataChannelInit;
 
 pub use message::RTCDataChannelMessage;
@@ -359,14 +361,17 @@ impl RTCDataChannel<'_> {
 
         // W3C `send()`: "If channel.[[ReadyState]] is not "open", throw an
         // InvalidStateError". A closing channel still has its stream, and refuses. An in-band
-        // channel waiting for its DATA_CHANNEL_ACK is "connecting" here, but RFC 8832 section
-        // 6 lets its opener send on the stream at once ("MAY start sending messages
-        // containing user data without waiting for the reception of the corresponding
-        // DATA_CHANNEL_ACK"), which is what a browser's channel, open by then, does: it is
-        // accepted.
+        // channel waiting for its DATA_CHANNEL_ACK is "connecting" and refuses too, unless
+        // the application asked for RFC 8832 section 6's early send ("MAY start sending
+        // messages containing user data without waiting for the reception of the
+        // corresponding DATA_CHANNEL_ACK"; `with_data_channel_send_before_ack`).
+        let early_send = self
+            .peer_connection
+            .setting_engine
+            .data_channel_send_before_ack;
         match dc.ready_state {
-            RTCDataChannelState::Open | RTCDataChannelState::Connecting
-                if dc.data_channel.is_some() => {}
+            RTCDataChannelState::Open if dc.data_channel.is_some() => {}
+            RTCDataChannelState::Connecting if early_send && dc.data_channel.is_some() => {}
             RTCDataChannelState::Closed => return Err(Error::ErrDataChannelClosed),
             _ => return Err(Error::ErrDataChannelNotOpen),
         }
@@ -396,8 +401,10 @@ impl RTCDataChannel<'_> {
     ///
     /// # Errors
     ///
-    /// - [`Error::ErrDataChannelNotOpen`] if the channel's SCTP stream has not been established
-    ///   yet — wait for the channel's open event before sending.
+    /// - [`Error::ErrDataChannelNotOpen`] if the channel is not "open" yet (W3C
+    ///   InvalidStateError) — wait for the channel's open event before sending; an in-band
+    ///   channel awaiting its DATA_CHANNEL_ACK accepts data only with
+    ///   `SettingEngineBuilder::with_data_channel_send_before_ack`.
     /// - [`Error::ErrDataChannelClosed`] once the channel is gone.
     /// - [`Error::ErrOutboundPacketTooLarge`] if `data` is larger than the negotiated
     ///   [`max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size).

@@ -42,6 +42,9 @@ pub(crate) struct JitterBufferStream {
     pub(crate) target_delay: Duration,
     min_delay: Duration,
     max_delay: Duration,
+    /// The application's target (W3C webrtc 5.3 `jitterBufferTarget`), used instead of the
+    /// adaptive one, clamped to `min_delay` ..= `max_delay`; `None` without a preference.
+    application_target: Option<Duration>,
 }
 
 impl JitterBufferStream {
@@ -64,7 +67,23 @@ impl JitterBufferStream {
             target_delay: initial_delay.max(min_delay).min(max_delay),
             min_delay,
             max_delay,
+            application_target: None,
         }
+    }
+
+    /// Sets the application's target (`None`: no preference, the adaptive target applies).
+    pub(crate) fn set_application_target(&mut self, target: Option<Duration>) {
+        self.application_target = target;
+    }
+
+    /// The delay a packet is held for: the application's target when it set one, clamped to
+    /// the minimum and maximum allowed (W3C webrtc 5.3: "the actual jitter buffer target is
+    /// clamped within the minimum allowed target and maximum allowed target"), else the
+    /// adaptive target.
+    pub(crate) fn effective_delay(&self) -> Duration {
+        self.application_target.map_or(self.target_delay, |target| {
+            target.max(self.min_delay).min(self.max_delay)
+        })
     }
 
     /// Returns `true` if sequence number `a` is strictly after `b` under u16 wrapping.
@@ -109,7 +128,7 @@ impl JitterBufferStream {
             self.last_rtp_ts = rtp_ts;
             self.last_arrival = Some(now);
         }
-        now + self.target_delay
+        now + self.effective_delay()
     }
 
     /// Parse a playout-delay RTP extension (3 bytes, 12-bit min + 12-bit max in 10 ms units).
@@ -156,7 +175,7 @@ impl JitterBufferStream {
             // Sender's min raises our floor; sender's max lowers our ceiling.
             let effective_min = self.min_delay.max(sender_min);
             let effective_max = self.max_delay.min(sender_max.max(effective_min));
-            let clamped_delay = self.target_delay.max(effective_min).min(effective_max);
+            let clamped_delay = self.effective_delay().max(effective_min).min(effective_max);
             now + clamped_delay
         } else {
             release

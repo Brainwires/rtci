@@ -580,6 +580,18 @@ pub enum RTCPeerConnectionEvent {
     /// frame it received changed (`RTCRtpReceiver::get_contributing_sources`).
     OnCsrcChange(crate::rtp_transceiver::RTCRtpReceiverId),
 
+    /// webrtc-encoded-transform 6.4 `keyframerequest`: a Picture Loss Indication or Full
+    /// Intra Request (RFC 4585 6.3.1, RFC 5104 4.3.1) arrived for an SSRC this sender sends;
+    /// the encoder (the application's) should generate a key frame for that layer. `rid` is
+    /// the layer's RID, `None` when the sender's encoding has none (not simulcast). The PLI /
+    /// FIR itself is delivered as well (`RTCMessage::RtcpPacket`).
+    OnKeyFrameRequest {
+        /// The sender whose stream the request names.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the requested layer.
+        rid: Option<String>,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),
@@ -706,6 +718,17 @@ pub(crate) enum RTCEventInternal {
     /// An SRTP master key reached its lifetime (RFC 3711 section 9.2): nothing more is
     /// protected or accepted with it, and the DTLS transport that keyed it fails.
     SRTPKeyExhausted,
+
+    /// The application bytes that left a stream's send queue, reported once as the stream is
+    /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before
+    /// signalling closes the association), so the channel's final `bufferedAmount` stays
+    /// readable after it closed (W3C webrtc-pc 6.2: not reset when the channel closes).
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    /// - Bytes taken from the stream's send queue
+    SCTPStreamDequeued(usize /*AssociationHandle*/, u16 /*StreamID*/, u64),
 
     /// SCTP stream has been closed
     ///

@@ -396,6 +396,14 @@ impl<'a> SctpHandler<'a> {
                 }
                 Event::AssociationLost { reason, id } => {
                     debug!("association_handle {} is closed due to {}", ch.0, reason);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamDequeued(
+                            ch.0,
+                            id,
+                            conn.stream_bytes_dequeued(id),
+                        ),
+                    });
                     // The stream is gone, and with it what was remembered about it.
                     ordered_until_reply.remove(&(ch, id));
                     // A stream reset (either side's close) is the channel's own
@@ -457,6 +465,18 @@ impl<'a> SctpHandler<'a> {
                     debug!("association_handle {} path is active again", ch.0);
                 }
                 Event::Reconfig(reconfig) => {
+                    if let ReconfigEvent::OutgoingStreamsResetFailed { streams, .. } = &reconfig {
+                        for &id in streams {
+                            event_outs.push_back(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPStreamDequeued(
+                                    ch.0,
+                                    id,
+                                    conn.stream_bytes_dequeued(id),
+                                ),
+                            });
+                        }
+                    }
                     Self::process_reconfig_event(
                         ch,
                         reconfig,
@@ -813,6 +833,21 @@ impl<'a> SctpHandler<'a> {
     /// closes the channels that ran over the old one either way.
     pub(crate) fn close_for_renegotiation(&mut self, now: Instant, replaced: bool) {
         self.ctx.observe(now);
+        // What each stream sent stays the final `bufferedAmount` of its channel.
+        for (ch, association) in &self.ctx.sctp_transport.sctp_associations {
+            let mut ids = association.stream_ids();
+            ids.sort_unstable();
+            for id in ids {
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPStreamDequeued(
+                        ch.0,
+                        id,
+                        association.stream_bytes_dequeued(id),
+                    ),
+                });
+            }
+        }
         self.abort_associations();
         self.ctx.sctp_transport.sctp_associations.clear();
         self.ctx.association_transport.clear();
@@ -1310,6 +1345,14 @@ impl<'a>
                             stream.close(now)?;
 
                             if !resets {
+                                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                                    now,
+                                    event: RTCEventInternal::SCTPStreamDequeued(
+                                        message.association_handle,
+                                        message.stream_id,
+                                        conn.stream_bytes_dequeued(message.stream_id),
+                                    ),
+                                });
                                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                                     now,
                                     event: RTCEventInternal::SCTPStreamClosed(
