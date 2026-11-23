@@ -570,7 +570,32 @@ impl RTCRtpTransceiverInternal {
         media_engine: &MediaEngine,
     ) -> Result<()> {
         let set = !codecs.is_empty();
+        let negotiated = self.current_direction() != RTCRtpTransceiverDirection::Unspecified;
+        let sending = self
+            .sender()
+            .as_ref()
+            .map(|sender| sender.get_send_codecs().to_vec());
+        // The application's list names formats, not payload types (getCapabilities() has
+        // none; the preferences carry 0). The preferences are not the codecs a sender sends
+        // with (W3C 4.4.1.4: only negotiation sets [[SendCodecs]]): once negotiated the sender
+        // keeps the negotiated codecs, and before that it reads the preferred formats with the
+        // engine's payload types, the ones a local offer gives them. Without this, a sender's
+        // `get_parameters()` named payload type 0 (PCMU) for every preferred format, and an
+        // application that took Opus's number from it before the answer sent Opus as PCMU.
+        let preferred_for_sending = RTCRtpReceiverInternal::get_codecs(
+            &codecs,
+            self.kind(),
+            media_engine,
+            self.use_sframe == Some(true),
+        );
         self.set_codec_preferences(codecs, media_engine)?;
+        if let Some(sender) = self.sender_mut() {
+            match sending {
+                Some(sending) if negotiated => sender.set_codec_preferences(sending),
+                _ if set => sender.set_codec_preferences(preferred_for_sending),
+                _ => {}
+            }
+        }
         self.application_codec_preferences = set;
         Ok(())
     }
