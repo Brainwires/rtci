@@ -2043,10 +2043,17 @@ impl<'a> InterceptorHandler<'a> {
             String::new()
         };
 
+        // RFC 8852 section 3: an RtpStreamId or RepairedRtpStreamId is 1 to 255 ASCII
+        // letters and digits; an element that is anything else names no stream and is not
+        // used (read through the typed codec, as the SDES items are).
         let rid = if rid_extension_id != 0
             && let Some(payload) = rtp_header.get_extension(rid_extension_id as u8)
         {
-            String::from_utf8(payload.to_vec()).unwrap_or_default()
+            String::from_utf8(payload.to_vec())
+                .ok()
+                .and_then(|value| rtp::extension::sdes_extension::RtpStreamId::new(value).ok())
+                .map(|rid| rid.as_str().to_owned())
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -2054,7 +2061,13 @@ impl<'a> InterceptorHandler<'a> {
         let rrid = if rrid_extension_id != 0
             && let Some(payload) = rtp_header.get_extension(rrid_extension_id as u8)
         {
-            String::from_utf8(payload.to_vec()).unwrap_or_default()
+            String::from_utf8(payload.to_vec())
+                .ok()
+                .and_then(|value| {
+                    rtp::extension::sdes_extension::RepairedRtpStreamId::new(value).ok()
+                })
+                .map(|rrid| rrid.as_str().to_owned())
+                .unwrap_or_default()
         } else {
             String::new()
         };
