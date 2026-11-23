@@ -330,7 +330,7 @@ impl TransportHandles {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DefaultInterceptorOptions {
     /// Which congestion control feedback is offered and accepted. The default,
@@ -368,6 +368,34 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Where the RTCP sessions draw their random numbers from (the report interval's
+    /// variation, RFC 3550 section 6.3.1; the dither of early feedback, RFC 4585 section
+    /// 3.5.2; their SSRC and CNAME): the provider's `random()` when one is given, as ICE, DTLS
+    /// and SCTP do with the setting engine's provider; `rand` otherwise. Give the same provider
+    /// as [`SettingEngineBuilder::with_crypto_provider`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_crypto_provider)
+    /// for a run that a seeded provider makes the same every time (without it the report
+    /// times, and with them everything the reports drive, differ from run to run).
+    pub rtcp_random: Option<std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+}
+
+impl std::fmt::Debug for DefaultInterceptorOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultInterceptorOptions")
+            .field("congestion_feedback", &self.congestion_feedback)
+            .field("unnegotiated_tmmbr", &self.unnegotiated_tmmbr)
+            .field("pacer_immediate_release", &self.pacer_immediate_release)
+            .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field(
+                "circuit_breaker_packet_size",
+                &self.circuit_breaker_packet_size,
+            )
+            .field(
+                "rtcp_random",
+                &self.rtcp_random.as_ref().map(|provider| provider.name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -379,6 +407,7 @@ impl Default for DefaultInterceptorOptions {
             bandwidth_probing: true,
             rapid_synchronisation: true,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            rtcp_random: None,
         }
     }
 }
@@ -501,7 +530,7 @@ pub fn register_default_interceptors_with_options(
             }),
         );
 
-    let registry = configure_rtcp_reports(registry);
+    let registry = configure_rtcp_reports_from(registry, options.rtcp_random.as_ref());
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);

@@ -113,9 +113,11 @@ fn the_helper_paces_at_the_estimators_starting_rate() {
         ..Default::default()
     });
 
-    // Two seconds of media at 1 Mbit/s offered at once; count what leaves in two seconds.
+    // Sixty packets offered at once (about 0.5 Mbit, under what the starting rate sends in the
+    // pacer's 2 s queue time limit, so the limit does not raise the rate): they leave at the
+    // starting rate.
     let epoch = Instant::now();
-    for sequence_number in 0..250u16 {
+    for sequence_number in 0..60u16 {
         chain
             .handle_write(TaggedPacket {
                 now: epoch,
@@ -134,18 +136,21 @@ fn the_helper_paces_at_the_estimators_starting_rate() {
             .expect("write");
     }
     let mut released_bits = 0usize;
-    for step in 0..=2_000u64 {
+    let mut last = Duration::ZERO;
+    for step in 0..=3_000u64 {
         chain
             .handle_timeout(epoch + Duration::from_millis(step))
             .expect("timeout");
         while let Some(packet) = chain.poll_write() {
             if let Packet::Rtp(rtp) = &packet.message.packet {
                 released_bits += rtp.marshal_size() * 8;
+                last = Duration::from_millis(step);
             }
         }
     }
 
-    let rate = released_bits as f64 / 2.0;
+    // All but the first burst over the time the last one took to leave.
+    let rate = released_bits as f64 / last.as_secs_f64().max(0.001);
     assert!(
         rate <= target * 1.15,
         "released at {rate} bit/s against a target of {target}"

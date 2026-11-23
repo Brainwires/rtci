@@ -10,7 +10,14 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::CircuitBreakerPacketSize;
+use rtc::interceptor::{CircuitBreakerPacketSize, PassThroughInterceptor, Slot};
+use std::cell::Cell;
+
+thread_local! {
+    /// Whether the next `World`'s peers run without the pacer.
+    static WITHOUT_PACER: Cell<bool> = const { Cell::new(false) };
+}
+use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
@@ -18,6 +25,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
     register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
@@ -31,6 +39,7 @@ use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::statistics::StatsSelector;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A small deterministic generator (SplitMix64).
@@ -48,6 +57,38 @@ impl Rng {
     /// Uniform in [0, 1).
     fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// The built-in crypto provider with its random source replaced by a seeded [`Rng`]: what
+/// the engine draws through `RTCCryptoProvider::random()` (ICE, DTLS, SCTP and, through
+/// `DefaultInterceptorOptions::rtcp_random`, the RTCP report times) is the same in every run.
+struct SeededProvider {
+    inner: Arc<dyn RTCCryptoProvider>,
+    rng: Mutex<Rng>,
+}
+
+impl RTCCryptoProvider for SeededProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn crypto(&self) -> &dyn RTCCrypto {
+        self.inner.crypto()
+    }
+
+    fn random(&self) -> &dyn RTCRandom {
+        self
+    }
+}
+
+impl RTCRandom for SeededProvider {
+    fn fill(&self, output: &mut [u8]) -> Result<(), CryptoError> {
+        let mut rng = self.rng.lock().map_err(|_| CryptoError::RandomnessFailed)?;
+        for chunk in output.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next_u64().to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
     }
 }
 
@@ -93,21 +134,35 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    fn new(addr: &str, seed: u64) -> Result<Self> {
+        let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
+            inner: default_provider()?,
+            rng: Mutex::new(Rng(seed)),
+        });
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         // The sweep's `RTC_CB_PACKET_SIZE=last-frames` runs RFC 8083 section 3's s.
         let mut options = DefaultInterceptorOptions::default();
+        options.rtcp_random = Some(provider.clone());
         if std::env::var("RTC_CB_PACKET_SIZE").as_deref() == Ok("last-frames") {
             options.circuit_breaker_packet_size = CircuitBreakerPacketSize::LastFrames;
         }
-        let (registry, handles) = register_default_interceptors_with_options(
+        let (mut registry, handles) = register_default_interceptors_with_options(
             Registry::new(),
             &mut media_engine,
             &options,
         )?;
+        if WITHOUT_PACER.with(|w| w.get()) {
+            // A sender whose packets are not held to the congestion controller's target.
+            registry = registry.with(Slot::Pacer, PassThroughInterceptor::new());
+        }
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_crypto_provider(provider)
+                    .build(),
+            )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
@@ -269,7 +324,10 @@ impl World {
     /// link's impairment starts once both are connected.
     fn connected(kind: RtpCodecKind, link: Link, seed: u64) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::new("10.0.0.1:5000", seed ^ 0x1111)?,
+                Peer::new("10.0.0.2:5000", seed ^ 0x2222)?,
+            ],
             now: Instant::now(),
             link,
             impaired: false,
@@ -553,6 +611,93 @@ fn a_talkspurt_flow_over_a_lossless_jittered_link_is_never_stopped() -> Result<(
         assert_eq!(outcome.left, outcome.written, "seed {seed}: {outcome:?}");
         assert_eq!(outcome.packets_lost, 0, "seed {seed}: {outcome:?}");
     }
+    Ok(())
+}
+
+/// RFC 8083 section 4.3 where it must fire: a sender that ignores the congestion controller
+/// (the pacer taken out of the chain, so 8 Mbit/s reaches the wire whatever the target), over a
+/// path that loses 20 % of its datagrams with a 50 ms round trip. Ten times the TCP throughput
+/// for that loss is about 0.45 MB/s against the flow's 1 MB/s: the congestion breaker ceases
+/// the flow. The same sender over 1 % loss (ten times TCP about 2 MB/s) keeps running.
+#[test]
+fn a_flow_far_above_the_tcp_rate_over_a_lossy_link_is_ceased() -> Result<()> {
+    let _ = env_logger::builder().is_test(true).try_init();
+    WITHOUT_PACER.with(|w| w.set(true));
+    let congested = run(
+        RtpCodecKind::Video,
+        Shape::Constant(8000),
+        Link::reordering(0, 0.2),
+        30,
+        7,
+    );
+    let light = run(
+        RtpCodecKind::Video,
+        Shape::Constant(8000),
+        Link::reordering(0, 0.01),
+        30,
+        7,
+    );
+    WITHOUT_PACER.with(|w| w.set(false));
+    let (congested, light) = (congested?, light?);
+    println!("20 %: {congested:?}\n1 %: {light:?}");
+    assert!(
+        congested
+            .ceased
+            .iter()
+            .any(|(_, reason)| reason == "Congestion"),
+        "{congested:?}"
+    );
+    assert!(light.ceased.is_empty(), "{light:?}");
+    Ok(())
+}
+
+/// The pacer's queue time is bounded at 2 s (libwebrtc's expected queue length). A 2 Mbit/s
+/// source that ignores the target over a link that holds every datagram back by up to 40 ms,
+/// where the congestion
+/// controller settles under 1 Mbit/s: every packet leaves, the last one within about 2 s of its
+/// write, and none is refused (the pacer once refused packets at a full queue of 4096, and the
+/// receiver counted the holes as 4419 lost on a path that lost nothing).
+#[test]
+fn a_source_above_the_target_is_queued_two_seconds_at_most_and_loses_nothing() -> Result<()> {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let outcome = run(
+        RtpCodecKind::Video,
+        Shape::Constant(2000),
+        Link::jittered(40, 0.0),
+        60,
+        7,
+    )?;
+    println!("{outcome:?}");
+    assert!(outcome.ceased.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.left, outcome.written, "{outcome:?}");
+    assert!(
+        outcome
+            .drained_in
+            .is_some_and(|d| d <= Duration::from_millis(2_100)),
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.packets_lost, 0, "{outcome:?}");
+    Ok(())
+}
+
+/// A run is reproducible from its seed: the link's randomness, and everything the engine draws
+/// (ICE, DTLS, SCTP through the setting engine's crypto provider, and the RTCP report times
+/// through `DefaultInterceptorOptions::rtcp_random`), come from it. Two runs of one seed end
+/// the same, to the packet.
+#[test]
+fn the_same_seed_gives_the_same_run() -> Result<()> {
+    let once = || {
+        run(
+            RtpCodecKind::Video,
+            Shape::Constant(500),
+            Link::jittered(40, 0.02),
+            20,
+            3,
+        )
+        .map(|outcome| format!("{outcome:?}"))
+    };
+    let (first, second) = (once()?, once()?);
+    assert_eq!(first, second);
     Ok(())
 }
 
