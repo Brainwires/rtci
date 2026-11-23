@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FID or FEC-FR group of three or more ids and an `a=ssrc-group:SIM` (one track whose further
   streams are codings of its receiver) are read (RFC 5576 section 4.2, RFC 5956 section 4.1);
   they were ignored. RFC5576-4.2-2 is `tested`.
+- **interceptor**: RFC 7728 rows (`conf/jsep-66-pause-resume`, jsep17).
+  - New `RepeatInRegularReports` attribute and `RtcpSessionControl::StopRepeating`: the RTCP
+    session carries a written packet again in the next N Regular compound packets. PAUSED uses
+    it: "the next two regular RTCP reports" (sections 6.3, 8.2);
+    `PauseResumeBuilder::with_repeats_in_regular_reports(false)` keeps the report-interval
+    timer for a chain without the session.
+  - The hold-off takes the longest round trip the RTCP session measured (6.2), applies again
+    with `nowait` once the received SSRCs show two CNAMEs (6.2), and a local-pause PAUSED is
+    repeated as often as the reported loss needs (6.4: 3 to 10).
+  - RFC7728-6.2-2, 6.2-4, 6.2-5, 6.3-3, 6.4-2, 8.2-4, 8.5-1 are `tested`.
+- **rtc-sdp**: `o=` session ids and versions of any length (`conf/jsep-65-origin`, jsep17).
+  `Origin::session_id` and `Origin::session_version` are now `SdpDecimal` (was `u64`): the
+  `1*DIGIT` of RFC 8866 section 9 has no upper bound, and RFC 9429 section 5.8 has a JSEP
+  endpoint accept compliant SDP beyond the 64 bits it generates. `SdpDecimal` keeps the digits
+  as written, compares as a number, has `From<u64>`, `PartialEq<u64>`, `to_u64()` and
+  `incremented()`. RFC9429-5.2.1-58 is `tested`.
 
 - **audit**: small JSEP rows (`conf/jsep-64-small-rows`, jsep17). No engine change.
   - RFC8851-6.3-6 and RFC9429-3.6.2-2 are `n/a` (coordinator decision): they bind the encoder,
@@ -23,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RFC7941-6-2 `tested` (a changed Cryptex extension block fails authentication, both AES-CM
     and AES-GCM), RFC7941-6-1 `conflict`: the `require` header encryption policy is RFC 7941
     section 6's form, `negotiate` stays the default as W3C webrtc-extensions 10.2 requires.
+- **jsep**: audio RED by default (`conf/jsep-63-red-default`, jsep17).
+  - `register_default_codecs` adds `audio/red` 48000/2 (payload type 63, `a=fmtp:63 111/111`,
+    after Opus), as Chromium and WebKit offer it (RFC 2198, RFC 8854 section 4.2). Default
+    offers and answers to them now list it.
+  - New `RedAudioInterceptor` / `RedAudioBuilder` (`rtc-interceptor`), `Slot::Redundancy`
+    (10_450) and `configure_audio_redundancy`; the peer connection installs it in any chain
+    that does not fill the slot. A local Opus stream whose section negotiated RED is sent as
+    RED with a copy of the previous packet; received RED is taken apart into Opus packets, a
+    lost one recovered from the next packet's copy. A RED stream is bound with its primary
+    codec.
+  - `StreamInfo` has a new field, `section_mime_types` (struct literals need it or
+    `..Default::default()`).
+  - Video `red` + `ulpfec` stay out of the defaults (FORK.md: the opt-in ULPFEC interceptors
+    take fixed payload types, and no browser cell exercises ULPFEC in RED).
 
 - **jsep**: receive-side JSEP rows (`conf/jsep-61-receive-rows`, jsep16).
   - An `a=rid` line whose `max-width`, `max-height` or `max-fs` no `a=imageattr` set of its
