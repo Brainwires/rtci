@@ -8,8 +8,8 @@ pub(crate) mod sctp;
 pub(crate) mod srtp;
 
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent};
+use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::datachannel::{DataChannelHandler, DataChannelHandlerContext};
 use crate::peer_connection::handler::demuxer::{DemuxerHandler, DemuxerHandlerContext};
 use crate::peer_connection::handler::dtls::{DtlsHandler, DtlsHandlerContext};
@@ -153,6 +153,22 @@ impl RTCPeerConnection {
      Pipeline Flow (Write Path):
      Application -> Endpoint -> Interceptor -> SRTP -> DataChannel -> SCTP -> DTLS -> ICE -> Demuxer -> Raw Bytes
     */
+
+    /// An event leaves for the application. A local candidate's `OnIceCandidateEvent` is the
+    /// application's to trickle: from here on the candidate counts as conveyed and the agent
+    /// pairs it (RFC 8838 section 10).
+    fn hand_out_event(&mut self, evt: RTCPeerConnectionEvent) -> RTCPeerConnectionEvent {
+        if let RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
+            candidate: Some(candidate),
+            ..
+        }) = &evt
+        {
+            self.ice_transport_mut()
+                .agent
+                .local_candidate_conveyed(&candidate.id);
+        }
+        evt
+    }
 
     pub(crate) fn get_demuxer_handler(&mut self) -> DemuxerHandler<'_> {
         DemuxerHandler::new(
@@ -586,7 +602,7 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
         // behind it anyway, and the sweep runs once the backlog is empty.
         if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
-            return Some(evt);
+            return Some(self.hand_out_event(evt));
         }
 
         // Handling an event can queue read messages, like the open of a negotiated data channel
@@ -597,7 +613,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             self.pump_events();
         }
 
-        self.pipeline_context.event_outs.pop_front()
+        let evt = self.pipeline_context.event_outs.pop_front()?;
+        Some(self.hand_out_event(evt))
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
