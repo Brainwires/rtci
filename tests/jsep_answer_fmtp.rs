@@ -178,3 +178,105 @@ fn av1_and_vp9_answers_state_this_endpoints_parameters() -> TestResult {
     assert_eq!(fmtp(&sdp, "98"), vec!["profile-id=0"], "{sdp}");
     Ok(())
 }
+
+/// A peer whose only video format is the H.264 format `fmtp` registers.
+fn h264_peer(fmtp: &str) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MediaEngine};
+    use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 102,
+        },
+        RtpCodecKind::Video,
+    )?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    Ok(pc)
+}
+
+/// RFC 7742 section 6.2: "Implementations MUST include this parameter [profile-level-id]
+/// within SDP". An H.264 format the application registers without fmtp parameters is the
+/// RFC 6184 section 8.1 default (Baseline, Level 1), and the offer states it explicitly.
+#[test]
+fn an_h264_format_registered_without_profile_level_id_is_offered_with_its_default() -> TestResult {
+    let mut pc = h264_peer("")?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        fmtp(&offer.sdp, "102"),
+        vec!["profile-level-id=42000a"],
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// RFC 7742 section 6.2: parameter sets travel in-band, "WebRTC implementations MUST NOT
+/// include this parameter [sprop-parameter-sets] in the SDP they generate": not from a format
+/// the application registered with it, nor in an answer to an offer that has it.
+#[test]
+fn sprop_parameter_sets_is_never_written() -> TestResult {
+    let mut pc = h264_peer(
+        "packetization-mode=1;profile-level-id=42e01f;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA==",
+    )?;
+    let offer = pc.create_offer(None)?;
+    assert_eq!(
+        fmtp(&offer.sdp, "102"),
+        vec!["packetization-mode=1", "profile-level-id=42e01f"],
+        "{}",
+        offer.sdp
+    );
+
+    let mut pc = default_peer()?;
+    let sdp = answer(
+        &mut pc,
+        offer_with_h264(
+            "packetization-mode=1;profile-level-id=42e01f;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA==",
+        ),
+    )?;
+    let parameters = fmtp(&sdp, "100");
+    assert!(
+        parameters.contains(&"profile-level-id=42e01f".to_owned()),
+        "{sdp}"
+    );
+    assert!(!sdp.contains("sprop-parameter-sets"), "{sdp}");
+    Ok(())
+}
+
+fn offer_with_h264(fmtp: &str) -> String {
+    let fmtp = if fmtp.is_empty() {
+        String::new()
+    } else {
+        format!("a=fmtp:100 {fmtp}\n")
+    };
+    offer("video", "100", &format!("a=rtpmap:100 H264/90000\n{fmtp}"))
+}
+
+/// RFC 7742 section 6.2: `profile-level-id` is interpreted when received. An offer without
+/// it is RFC 6184 section 8.1's Baseline at Level 1 in single NAL mode; the answer keeps the
+/// profile and answers no higher level than that (this endpoint's own is 3.1), stating it.
+#[test]
+fn an_h264_offer_without_profile_level_id_is_answered_at_level_1() -> TestResult {
+    let mut pc = default_peer()?;
+    let sdp = answer(&mut pc, offer_with_h264(""))?;
+    let parameters = fmtp(&sdp, "100");
+    assert!(
+        parameters.contains(&"profile-level-id=42000a".to_owned()),
+        "{sdp}"
+    );
+    assert!(
+        parameters.contains(&"packetization-mode=0".to_owned()),
+        "{sdp}"
+    );
+    Ok(())
+}

@@ -80,6 +80,9 @@ enum Generators {
     Fixed,
     /// The defaults.
     Default,
+    /// The defaults, with congestion control feedback held to RFC 4585 section 3.5.2's
+    /// timing (`RtcpSessionBuilder::with_immediate_congestion_feedback(false)`).
+    Rfc4585Timing,
 }
 
 fn endpoint(seed: u64, generators: Generators, reduced_size: bool) -> Box<dyn Interceptor> {
@@ -92,7 +95,9 @@ fn endpoint(seed: u64, generators: Generators, reduced_size: bool) -> Box<dyn In
                 .with_interval(Duration::from_millis(100))
                 .with_adaptive_interval(false),
         ),
-        Generators::Default => (TwccReceiverBuilder::new(), Rfc8888Builder::new()),
+        Generators::Default | Generators::Rfc4585Timing => {
+            (TwccReceiverBuilder::new(), Rfc8888Builder::new())
+        }
     };
     Box::new(
         Registry::new()
@@ -103,6 +108,7 @@ fn endpoint(seed: u64, generators: Generators, reduced_size: bool) -> Box<dyn In
                     // RFC 4585 section 3.4: T_rr_interval is zero unless `trr-int` says otherwise.
                     .with_t_rr_interval(Duration::ZERO)
                     .with_reduced_size(reduced_size)
+                    .with_immediate_congestion_feedback(generators != Generators::Rfc4585Timing)
                     .build(),
             )
             .with(Slot::TwccSender, TwccSenderBuilder::new().build())
@@ -583,6 +589,43 @@ fn a_low_starting_sender_gets_feedback_every_100_ms() {
     }
 }
 
+/// The measurement behind the default of `with_immediate_congestion_feedback` (RFC 4585
+/// section 3.5.2 as written is `false`): three simulcast layers at 300 kbit/s, the start of a
+/// browser's simulcast send, transport-wide feedback, both timings. Held to one Early packet
+/// per regular interval, feedback reaches the sender less often and with longer gaps than as
+/// it is built. Run with `--nocapture` for the figures.
+#[test]
+fn rfc_4585_timing_of_congestion_feedback_measured_against_immediate() {
+    let mut figures = vec![];
+    for generators in [Generators::Rfc4585Timing, Generators::Default] {
+        let measured = measure_layers(
+            300_000.0,
+            3,
+            CongestionFeedbackFormat::TransportCc,
+            generators,
+            false,
+        );
+        println!(
+            "{generators:?}: {:.2} feedback datagrams/s, longest gap {} ms, longest report delay {} ms, coverage {:.3}",
+            measured.feedback_datagrams_per_second,
+            measured.longest_gap.as_millis(),
+            measured.longest_report_delay.as_millis(),
+            measured.coverage,
+        );
+        figures.push(measured);
+        println!(
+            "{generators:?}: a Gcc sender with three layers reaches 2 Mbit/s from 300 kbit/s after {:?}",
+            gcc_ramp_to_2_mbits(generators)
+        );
+    }
+    let (rfc, immediate) = (&figures[0], &figures[1]);
+    assert!(
+        rfc.feedback_datagrams_per_second < immediate.feedback_datagrams_per_second,
+        "RFC 4585 timing sends fewer feedback datagrams"
+    );
+    assert!(rfc.longest_gap > immediate.longest_gap);
+}
+
 /// The engine's own congestion controller standing in for a browser's: a `Gcc` sender with
 /// bandwidth probing and RTX, three simulcast layers sharing its target (a seventh, two
 /// sevenths and four sevenths), fed only by what the engine's receiver (RTCP session and
@@ -590,6 +633,19 @@ fn a_low_starting_sender_gets_feedback_every_100_ms() {
 /// each way. It reaches 2 Mbit/s from 300 kbit/s within a few seconds.
 #[test]
 fn a_gcc_sender_fed_by_the_receiver_ramps_to_2_mbits() {
+    let reached = gcc_ramp_to_2_mbits(Generators::Default);
+    println!("Gcc with three layers, fed by the receiver: 2 Mbit/s after {reached:?}");
+    let reached = reached.expect("the sender reaches 2 Mbit/s");
+    // Measured: 0.49 s (0.58 s with the RFC 4585 timing alone at the measured rate, 0.24 s
+    // with feedback every 100 ms from the start): the probes do the climbing, and they need
+    // their reports within a few hundred milliseconds.
+    assert!(reached <= Duration::from_secs(1), "{reached:?}");
+}
+
+/// How long the `Gcc` sender of [`a_gcc_sender_fed_by_the_receiver_ramps_to_2_mbits`] takes
+/// to reach 2 Mbit/s from 300 kbit/s, its receiver's generators `generators`; `None` if not
+/// within 30 s.
+fn gcc_ramp_to_2_mbits(generators: Generators) -> Option<Duration> {
     use rtc_interceptor::{CongestionControlBuilder, Gcc, NackResponderBuilder, PacerBuilder};
     let epoch = Instant::now();
     let (controller, handle) = CongestionControlBuilder::new(Gcc::default())
@@ -613,7 +669,7 @@ fn a_gcc_sender_fed_by_the_receiver_ramps_to_2_mbits() {
             .with(Slot::NackResponder, NackResponderBuilder::new().build())
             .build(),
     );
-    let mut receiver = endpoint(2, Generators::Default, false);
+    let mut receiver = endpoint(2, generators, false);
     for (chain, cname) in [(&mut sender, "sender"), (&mut receiver, "receiver")] {
         chain
             .handle_write(RtcpSessionControl::Cname(cname.to_owned()).into_packet(epoch))
@@ -709,10 +765,5 @@ fn a_gcc_sender_fed_by_the_receiver_ramps_to_2_mbits() {
         }
         elapsed += step;
     }
-    println!("Gcc with three layers, fed by the receiver: 2 Mbit/s after {reached:?}");
-    let reached = reached.expect("the sender reaches 2 Mbit/s");
-    // Measured: 0.49 s (0.58 s with the RFC 4585 timing alone at the measured rate, 0.24 s
-    // with feedback every 100 ms from the start): the probes do the climbing, and they need
-    // their reports within a few hundred milliseconds.
-    assert!(reached <= Duration::from_secs(1), "{reached:?}");
+    reached
 }

@@ -333,6 +333,11 @@ pub(crate) fn certificates_signed_within(
     })
 }
 
+/// The smallest RSA key a peer may sign with (RFC 8446 appendix C.2; 4.2.3 for RSASSA-PSS).
+pub(crate) const MIN_RSA_KEY_BITS: usize = 2048;
+/// The largest RSA key a peer may sign with (RFC 8446 appendix C.2).
+pub(crate) const MAX_RSA_KEY_BITS: usize = 8192;
+
 fn verify_signature(
     crypto: &dyn crypto::RTCCrypto,
     message: &[u8],
@@ -362,6 +367,21 @@ fn verify_signature(
         && !insecure_verification
     {
         return Err(Error::ErrKeySignatureMismatch);
+    }
+    // RFC 8446 appendix C.2: "Applications SHOULD also enforce minimum and maximum key
+    // sizes." RSA keys from 2048 bits (below with `insecure_verification` only) to 8192 bits:
+    // a larger one costs the verifier time for no security anyone needs. The EC and EdDSA
+    // keys have the sizes of their curves, which the provider checks.
+    if let Ok(x509_parser::public_key::PublicKey::RSA(rsa)) =
+        certificate.tbs_certificate.subject_pki.parsed()
+    {
+        let bits = rsa.key_size();
+        if bits > MAX_RSA_KEY_BITS || (bits < MIN_RSA_KEY_BITS && !insecure_verification) {
+            return Err(Error::Other(format!(
+                "an RSA key of {bits} bits, outside {MIN_RSA_KEY_BITS} to {MAX_RSA_KEY_BITS} \
+                 (RFC 8446 appendix C.2)"
+            )));
+        }
     }
     let scheme = match (hash_algorithm.signature, hash_algorithm.hash) {
         (SignatureAlgorithm::Ecdsa, crate::signature_hash_algorithm::HashAlgorithm::Sha256) => {

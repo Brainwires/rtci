@@ -1529,7 +1529,11 @@ impl RTCPeerConnection {
                 .any(|c| is_fec_mime_type(&c.rtp_codec.mime_type)),
         };
         let mut ccfb = false;
+        let mut nack_ecn = false;
         let mut rrtr = false;
+        // The `xr-format`s other than `rcvr-rtt` the section's formats have (RFC 3611 section
+        // 5.1), in the order met: `ecn-sum` with ECN (RFC 6679 section 6.3).
+        let mut xr_formats: Vec<String> = vec![];
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -1567,8 +1571,20 @@ impl RTCPeerConnection {
                     ccfb = true;
                     continue;
                 }
+                // RFC 6679 section 6.2: the ECN feedback packet (`nack ecn`) applies to the
+                // RTP session, so it is written once, for every format, below.
+                if feedback.typ == crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK
+                    && feedback.parameter
+                        == crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                {
+                    nack_ecn = true;
+                    continue;
+                }
                 // XR formats are `a=rtcp-xr` (below), never `a=rtcp-fb` lines.
                 if feedback.typ == RTCP_FB_XR {
+                    if !xr_formats.contains(&feedback.parameter) {
+                        xr_formats.push(feedback.parameter.clone());
+                    }
                     continue;
                 }
                 // Receiver reference times: `a=rtcp-xr`, below; an `a=rtcp-fb ... rrtr` line
@@ -1662,24 +1678,42 @@ impl RTCPeerConnection {
                 format!("* {TYPE_RTCP_FB_ACK} {RTCP_FB_ACK_CCFB}"),
             );
         }
+        if nack_ecn {
+            media = media.with_value_attribute(
+                ATTR_KEY_RTCP_FB.to_owned(),
+                format!(
+                    "* {} {}",
+                    crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK,
+                    crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                ),
+            );
+        }
         // RFC 3611 section 5: XR use is signalled with `a=rtcp-xr`. An offer asks for
         // receiver reference times when this endpoint takes them (`rcvr-rtt=all`, both ways);
         // an answer to an offer with the attribute states what it takes of it, an empty
         // attribute for nothing (section 5.2: "it SHOULD include an empty 'a=rtcp-xr'
         // attribute"); an answer to an offer without it has none (section 5.1: omitted when
         // XR is not used).
+        // The other formats (`ecn-sum`, RFC 6679 section 7.1: "the "rtcp-xr" attribute with
+        // the "ecn-sum" parameter MUST also be used") follow in the same attribute: an
+        // answer's feedback is already what the offer had of them.
+        let with_xr_formats = |first: Option<String>| -> Option<String> {
+            let formats: Vec<String> = first.into_iter().chain(xr_formats.clone()).collect();
+            (!formats.is_empty()).then(|| formats.join(" "))
+        };
         let rtcp_xr = match &media_section.offered_rtcp_xr {
-            None if is_offer => rrtr.then(|| format!("{XR_FORMAT_RCVR_RTT}=all")),
+            None if is_offer => with_xr_formats(rrtr.then(|| format!("{XR_FORMAT_RCVR_RTT}=all"))),
             None => None,
-            Some(offered) => Some(if rrtr {
-                offered
-                    .iter()
-                    .find(|f| is_rcvr_rtt(f))
-                    .cloned()
-                    .unwrap_or_else(|| format!("{XR_FORMAT_RCVR_RTT}=all"))
-            } else {
-                String::new()
-            }),
+            Some(offered) => Some(
+                with_xr_formats(rrtr.then(|| {
+                    offered
+                        .iter()
+                        .find(|f| is_rcvr_rtt(f))
+                        .cloned()
+                        .unwrap_or_else(|| format!("{XR_FORMAT_RCVR_RTT}=all"))
+                }))
+                .unwrap_or_default(),
+            ),
         };
         if let Some(rtcp_xr) = rtcp_xr {
             media = media.with_value_attribute(ATTR_KEY_RTCP_XR.to_owned(), rtcp_xr);

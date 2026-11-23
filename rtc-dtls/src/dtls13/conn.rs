@@ -1554,10 +1554,15 @@ impl Conn13 {
             self.drop_read_epoch(EPOCH_EARLY);
         }
         if epoch > EPOCH_APPLICATION {
-            // RFC 9147 section 8: the keys before an update are kept until a record under
-            // the new ones has been read.
-            self.read
-                .retain(|read| read.epoch < EPOCH_APPLICATION || read.epoch >= epoch);
+            // RFC 9147 section 8: the keys before an update "MUST" be kept until a record
+            // under the new ones has been read, and records of an older epoch, late through
+            // loss or reordering, "SHOULD" be processed with it. The epoch before this one
+            // stays readable until a record of the next arrives; anything older goes (the
+            // peer cannot send in two epochs past it before an update is acknowledged, so
+            // the epoch bits of section 4.2.2 still tell them apart).
+            self.read.retain(|read| {
+                read.epoch < EPOCH_APPLICATION || read.epoch.saturating_add(1) >= epoch
+            });
         }
 
         let number = RecordNumber { epoch, sequence };
