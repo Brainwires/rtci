@@ -2511,6 +2511,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**, **datachannel**: a peer that restarts the SCTP association (RFC 9260 5.2.4 action
+  A) no longer closes the SCTP transport. The peer connection's SCTP handler took every
+  endpoint event of an association for its drain and removed the association, and since the
+  restart an association also reports its new tags to the endpoint. Only `Drained` removes
+  one now. On `Event::Restarted` every data channel dialed on the old association is closed
+  with an `sctp-failure` error (`OnError`, `OnClose`, counted in `dataChannelsClosed`); the
+  SCTP transport stays `connected`, channels waiting for an association and the peer's new
+  ones open on the new one (`tests/sctp_restart_rtc2rtc.rs`). The peer's new channel on a
+  stream id an old channel still held was refused as a protocol violation.
 - **ice**: at 30 % loss (seeds 0x4a, 0xff and 0x127 of `tests/lossy_link_rtc2rtc.rs` with
   aws-lc-rs) and 40 % loss (0x1c and 0x21, both backends) the controlling peer went `failed`
   about 30 s in, still checking, 29.5 s after the Binding success response that validated its
