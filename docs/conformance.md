@@ -232,10 +232,9 @@ datagram path (only a check whose full USERNAME, or whose tie-breaker, names one
 a connection to it, `route_named`: such a port needs `with_unique_transport_credentials(true)`
 on one side; `a_shared_passive_port_with_shared_credentials_is_tied_by_the_full_username_or_tie_breaker`), moving the data section out of a group (the API is per transceiver), and the
 "closed" events of a connection all of whose sections are rejected (one transport, which the
-engine keeps for the next offer). Media after `renew_dtls_association` is not delivered when
-this side offered and is the DTLS server (the default roles), one transport or several, on this
-branch without the security stack's `conf/sec-11-auto-rekey`, whose renewal also restarts ICE:
-checked again with it merged (`conf/mt-10-rekey-per-transport`). The RTCP session, transport-wide numbering, congestion
+engine keeps for the next offer). With the security stack's renewal (`conf/sec-11-auto-rekey`, which also restarts ICE) RTP of
+every transport flows under the new keys (`renewing_the_dtls_association_renews_every_transport`,
+mt-10); without it, media after a renewal was lost when this side offered as DTLS server. The RTCP session, transport-wide numbering, congestion
 controller and pacer are per transport since the media stack's `PerRtpSession`
 (`conf/media-11-train-fixes`, merged at mt-8).
 

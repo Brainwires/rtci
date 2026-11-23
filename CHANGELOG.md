@@ -1544,7 +1544,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   association; the group keeps its transport); `Some(true)` puts it back into the first group
   (7.5.1); `None` (the default) follows the last answer. `renew_dtls_association()` renews
   every transport's association (each its own new `a=tls-id` and handshake, RFC 8842 5.5,
-  RFC 5764 4.4), which the security stack's automatic re-keying calls. The transports an
+  RFC 5764 4.4), which the security stack's automatic re-keying calls; with sec-11's renewal
+  (an ICE restart with it) RTP of every transport flows under the new keys. The transports an
   answer leaves unused fire DTLS and then ICE "closed" (`OnTransportEvent`, W3C 4.4.1.6).
   Bandwidth probing is shown per transport (`each_transport_probes_its_own_path`).
 - **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
