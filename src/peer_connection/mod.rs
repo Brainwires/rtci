@@ -1842,10 +1842,11 @@ impl RTCPeerConnection {
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
             let mut parsed = remote_description.unmarshal()?;
-            // RFC 9429 section 5.8: "If any line is not well formed ... the description MUST
-            // be rejected", also when its value is then ignored (section 5.8.2, `a=rtcp`):
-            // every attribute rtc-sdp has a type for is parsed by its grammar.
-            parsed.validate()?;
+            // RFC 9429 section 5.8.2: "Any 'a=rtcp' attribute MUST be parsed as specified in
+            // [RFC3605], Section 2.1, but its value is ignored". (The whole
+            // `SessionDescription::validate` is not run here: other specifications ask for
+            // some malformed lines to be ignored, RFC 8830 section 3 for `a=msid`.)
+            crate::peer_connection::sdp::check_rtcp_attributes(&parsed)?;
             self.assign_missing_mids(&mut parsed, answers);
             crate::peer_connection::sdp::discard_groups_with_unknown_tags(&mut parsed);
             discard_stray_bundle_only(&mut parsed, answers);

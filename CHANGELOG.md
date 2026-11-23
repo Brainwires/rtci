@@ -21,11 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     section had (RFC 9429 sections 5.2.2, 5.3.2): offers and answers change on the wire.
   - An answer's `t=` line is the offer's (RFC 3264 section 6; WebRTC offers say `t=0 0`,
     which is unchanged).
-  - `set_remote_description` runs `SessionDescription::validate` (RFC 9429 section 5.8: a
-    line that is not well formed rejects the description, even when its value is ignored):
-    a malformed value of any attribute rtc-sdp has a type for (`a=rtcp`, `a=rtpmap`,
-    `a=fmtp`, `a=rtcp-fb`, `a=ssrc`, `a=rid`, ...) now refuses the description instead of
-    being skipped where it is used.
+  - A remote `a=rtcp` line that does not parse (RFC 3605 section 2.1) refuses the
+    description (RFC 9429 section 5.8.2); its value is still not used.
   - A remote `a=group` line (any semantics) naming a mid that no m= line has is ignored as a
     whole (RFC 5888 section 6); it used to be kept with the unknown tags skipped.
   - Under `with_disable_media_engine_multiple_codecs(true)` an SFrame section still adds its

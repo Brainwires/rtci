@@ -3550,6 +3550,21 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
     }
 }
 
+/// Every `a=rtcp` line of the description, at session or media level, parses by RFC 3605
+/// section 2.1 (RFC 9429 section 5.8.2); the values are not used.
+pub(crate) fn check_rtcp_attributes(desc: &SessionDescription) -> Result<()> {
+    use sdp::attribute::TypedAttribute;
+    let lines = desc.attributes.iter().chain(
+        desc.media_descriptions
+            .iter()
+            .flat_map(|media| media.attributes.iter()),
+    );
+    for a in lines.filter(|a| a.key == ATTR_KEY_RTCP) {
+        sdp::attribute::Rtcp::parse(a.value.as_deref().unwrap_or_default())?;
+    }
+    Ok(())
+}
+
 /// RFC 5888 section 6: "'a=group' lines that contain identification-tags that do not
 /// correspond to any 'm' line within the session description MUST be ignored. The
 /// application acts as if the 'a=group' line did not exist." Such lines (of any semantics)
