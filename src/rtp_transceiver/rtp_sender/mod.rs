@@ -272,12 +272,17 @@ impl RTCRtpSender<'_> {
         // negotiation — the point at which the transceiver acquires a mid. Before that the slot
         // is null, which is what the spec means by "prior to construction of the
         // `RTCDtlsTransport` object".
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .as_ref()?;
 
         Some(RTCDtlsTransport {
             peer_connection: self.peer_connection,
+            transport: self
+                .peer_connection
+                .pipeline_context
+                .transports
+                .transport_id_for(mid),
         })
     }
     fn sender(&self) -> &internal::RTCRtpSenderInternal {
@@ -626,6 +631,8 @@ impl RTCRtpSender<'_> {
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
         }
+        // An SSRC a collision replaced (RFC 3550 section 8.2) goes out as its replacement.
+        packet.header.ssrc = sender.current_ssrc(packet.header.ssrc);
 
         // RFC 8853 section 5.3.3: no RTP for a simulcast stream the answer removed. Dropped
         // like an inactive encoding's packet, so an encoder that has not re-read the

@@ -69,9 +69,10 @@ impl RTCPeerConnection {
         if policy != self.rtp_header_encryption_policy() && self.a_description_was_set() {
             return Err(Error::InvalidModificationError);
         }
-        self.pipeline_context
-            .srtp_handler_context
-            .rtp_header_encryption_policy = policy;
+        // The policy is the connection's: every transport's SRTP contexts follow it.
+        for transport in self.pipeline_context.transports.iter_mut() {
+            transport.srtp_handler_context.rtp_header_encryption_policy = policy;
+        }
         self.configuration.rtp_header_encryption_policy = policy;
         self.update_cryptex();
         Ok(())
@@ -88,6 +89,8 @@ impl RTCPeerConnection {
     /// The `RTCRtpHeaderEncryptionPolicy` in force.
     pub fn rtp_header_encryption_policy(&self) -> RTCRtpHeaderEncryptionPolicy {
         self.pipeline_context
+            .transports
+            .default()
             .srtp_handler_context
             .rtp_header_encryption_policy
     }
@@ -140,12 +143,12 @@ impl RTCPeerConnection {
         let negotiated = self.cryptex_negotiated();
         let require = negotiated
             && self.rtp_header_encryption_policy() == RTCRtpHeaderEncryptionPolicy::Require;
-        self.pipeline_context
-            .srtp_handler_context
-            .set_cryptex(Cryptex {
+        for transport in self.pipeline_context.transports.iter_mut() {
+            transport.srtp_handler_context.set_cryptex(Cryptex {
                 send: negotiated,
                 require,
             });
+        }
     }
 }
 
@@ -163,9 +166,11 @@ impl RTCPeerConnection {
             .filter_map(|(id, _)| u8::try_from(*id).ok())
             .collect();
         let set = srtp::header_extension::EncryptedHeaderExtensions::new(&ids).unwrap_or_default();
-        self.pipeline_context
-            .srtp_handler_context
-            .set_encrypted_header_extensions(set);
+        for transport in self.pipeline_context.transports.iter_mut() {
+            transport
+                .srtp_handler_context
+                .set_encrypted_header_extensions(set);
+        }
     }
 }
 

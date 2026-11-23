@@ -1476,6 +1476,33 @@ impl RTCStatsAccumulator {
         }
     }
 
+    /// A sender's stream moved from SSRC `old` to `new` after a collision (RFC 3550 section
+    /// 8.2): the old stream's stats go, and a new stream with the same identity (kind, mid,
+    /// rid, encoding, RTX SSRC, transceiver) starts under `new`. Nothing when `old` has none.
+    pub(crate) fn replace_outbound_rtp_stream(&mut self, old: SSRC, new: SSRC) {
+        let Some(stream) = self.outbound_rtp_streams.get(&old) else {
+            return;
+        };
+        let (kind, mid, rid, encoding_index, rtx_ssrc, transceiver_id) = (
+            stream.kind,
+            stream.mid.clone(),
+            stream.rid.clone(),
+            stream.encoding_index,
+            stream.rtx_ssrc,
+            stream.transceiver_id,
+        );
+        self.remove_outbound_rtp_stream(old);
+        self.get_or_create_outbound_rtp_streams(
+            new,
+            kind,
+            &mid,
+            &rid,
+            encoding_index,
+            rtx_ssrc,
+            transceiver_id,
+        );
+    }
+
     /// Removes an outbound stream's stats, its remote-inbound object with them, and its RTX
     /// reverse-lookup entry.
     pub(crate) fn remove_outbound_rtp_stream(&mut self, ssrc: SSRC) {

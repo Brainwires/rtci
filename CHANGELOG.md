@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Agent::resolve_nomination_proposal` (additive; an `AgentConfig` literal needs the field).
   - Header extension control (section 4.1): an extension the section's negotiated direction
     leaves no use for is "stopped" after the answer.
+- **jsep**: SSRC collisions are resolved by the engine (RFC 3550 section 8.2, RFC 5576
+  sections 5 and 6.2, RFC 8834 sections 4.1 and 4.8). A sender whose SSRC (media, RTX or FEC
+  flow) the RTCP session hears from another source, or a remote description describes, moves
+  to a new SSRC: its streams are bound again (the old SSRC says BYE), what the application
+  still writes with the old SSRC goes out with the new one, `get_parameters` and the
+  statistics show the new one, negotiation-needed is raised, and later descriptions write
+  `a=ssrc:<new> previous-ssrc:<old>`. `OnSsrcCollision` is still fired, now after the move;
+  the application no longer has to stop the sender. Edits in the sender code:
+  `RTCRtpSenderInternal::{replace_ssrc, previous_ssrcs, replacement_ssrcs, current_ssrc}` and
+  one line in `RTCRtpSender::write_rtp_inner` (the SSRC mapping).
 - **jsep**: what descriptions say of the selected ICE pair (RFC 8839 sections 4.2.1.2, 4.3.4,
   4.4.1.2.2, 4.4.1.3, 4.4.2, 5.1, 5.2; RFC 8445 section 8.2). Descriptions differ on the wire:
   - Once ICE has selected a pair (and no restart is staged), the `m=` / `c=` destination of
@@ -1412,6 +1422,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The peer connection's transports are a set** (mt-1). The ICE, DTLS and SRTP contexts that
+  `PipelineContext` held once are now a `TransportSet` of transport bundles keyed by a transport
+  id, reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport
+  the SCTP association runs over; an inbound datagram is routed to a transport by where it
+  arrived before the pipeline reads it, and `RTCRtpSender::transport`,
+  `RTCRtpReceiver::transport` and `RTCSctpTransport::transport` name the transport of their
+  section. The set holds exactly one transport, so nothing behaves differently; it is the
+  ground for unbundled sections, several BUNDLE groups and `bundlePolicy` balanced /
+  max-compat (RFC 9429 4.1.1, RFC 9143). No public API changes.
 - **rtcp**: `configure_rtcp_reports` registers the RTCP session instead of
   `SenderReportInterceptor` and `ReceiverReportInterceptor` (both stay, for a chain built by
   hand: fixed timers, no scheduling). What changes on the wire with the default interceptors:
