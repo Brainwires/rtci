@@ -1225,7 +1225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A peer connection starts from RFC 8831's 1200 / 1280-byte IP packet as before and searches
   up to a 1500-byte IP packet less the headers of the selected pair and the DTLS record, so
   its datagrams grow on paths that carry them. New API: `sctp::PathMtuDiscoveryConfig`,
-  `sctp::PathMtuState`, `TransportConfig::with_path_mtu_discovery` (`None` turns it off),
+  `sctp::PathMtuState`, `TransportConfig::with_path_mtu_discovery` (off in a bare
+  `TransportConfig::default()`; the peer connection turns it on),
   `Association::{set_max_path_mtu, path_mtu_state}`,
   `SettingEngineBuilder::with_sctp_path_mtu_discovery(Option<u32>)` (the largest IP packet,
   `None` off; a fixed `with_sctp_mtu` turns it off too). `Association::set_path_mtu` sets

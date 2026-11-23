@@ -135,7 +135,7 @@ impl Default for TransportConfig {
             partial_reliability: true,
             message_interleaving: false,
             zero_checksum: false,
-            path_mtu_discovery: Some(PathMtuDiscoveryConfig::default()),
+            path_mtu_discovery: None,
         }
     }
 }
@@ -146,9 +146,11 @@ impl TransportConfig {
     /// [`Association::set_path_mtu`](crate::Association::set_path_mtu) set, else the
     /// default) with a probe, searches for a larger one up to
     /// [`PathMtuDiscoveryConfig::with_max_path_mtu`], and falls back to it when the path
-    /// stops carrying the larger size. On by default (RFC 8261 section 4: SCTP over DTLS
-    /// "MUST implement and use" a discovery method that works without ICMP; RFC 9260 section
-    /// 7.3). `None` keeps the packet size where the transport sets it.
+    /// stops carrying the larger size (RFC 9260 section 7.3; RFC 8261 section 4: SCTP over
+    /// DTLS "MUST implement and use" a discovery method that works without ICMP). `None`, the
+    /// crate's default, keeps the packet size where the transport sets it: the transport
+    /// knows the largest packet worth probing for, so it turns discovery on. The `rtc` peer
+    /// connection does, by default (`SettingEngineBuilder::with_sctp_path_mtu_discovery`).
     pub fn with_path_mtu_discovery(mut self, value: Option<PathMtuDiscoveryConfig>) -> Self {
         self.path_mtu_discovery = value;
         self
