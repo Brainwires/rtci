@@ -34,7 +34,6 @@ RFC5124-3.3.1-6	E	S	dtls-srtp	RFC 9429 5.1.2 requires a JSEP endpoint to accept 
 RFC5124-5-2	F	S	dtls-srtp	Keys come from each handshake and SRTCP exhaustion re-keys or fails: rfc3711.md 9.2-4 / 11.3-1 tests; cite them
 RFC5246-4.7-1	E	S	dtls-srtp	Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
 RFC5583-5.2.1-4	B	S	sdp	A test that an answer keeps the offer's dependency structure for every payload type
-RFC5761-5.1.3-4	C	S	ice	Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6
 RFC5764-4.1-1	A	S	dtls-srtp	`setting`: `use_srtp` only for media associations
 RFC6184-7.2.2-1	C	S	media (running)	PDON starts at the DON before the earliest one, not 0 (kept on purpose); owner decision or a test that the RFC start orders a stream numbered from 0
 RFC6464-4-1	C	S	media (running)	Register `ssrc-audio-level` by default so a browser's offer is answered with it
@@ -49,8 +48,6 @@ RFC6679-6.1.3-1	C	S	media (running)	Clear the ECN codepoint when the selected pa
 RFC6679-7.1-1	C	S	sdp	Write `nack ecn` / `ecn-sum` / the ECN attribute in offers (SDP half)
 RFC6679-7.1-3	C	S	sdp	Offer `a=rtcp-xr:ecn-sum` with ECN
 RFC6679-7.1-4	C	S	sdp	Offer `nack ecn` where ECN is offered
-RFC7022-4.1-1	C	S	sdp	Write `rtcp_cname()` in `a=ssrc ... cname:` instead of the MediaStream id
-RFC7022-4.2-1	C	S	sdp	As RFC7022-4.1-1
 RFC7164-5-1	E	S	media (running)	The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds
 RFC7496-3-1	F	S	sctp	RFC 3758's MUST rows are all tested (rfc3758.md: 39 tested, 4 n/a); cite them
 RFC7714-13.1-3	E	S	dtls-srtp	Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
@@ -67,7 +64,6 @@ RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered 
 RFC7941-6-1	A	S	security	`setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it
 RFC7874-3-13	B	S	media (running)	Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes)
 RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite
-RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
 RFC8108-5.1-1	C	S	media (running)	Report blocks from every SSRC is a setting (`with_report_from_every_ssrc`), not the default (browser behaviour, no failing cell). Owner decision
@@ -81,7 +77,6 @@ RFC8842-5.1-1	C	M	dtls-srtp	The engine has no sockets: on a new association, ref
 RFC8842-5.1-2	C	M	dtls-srtp	As RFC8842-5.1-1, for the offer
 RFC8842-5.1-3	C	M	dtls-srtp	As RFC8842-5.1-1, for the answer
 RFC8842-5.2-4	C	M	dtls-srtp	As RFC8122-6.2-6
-RFC8852-3-5	C	S	rtp	Read RID / RRID through the typed `RtpStreamId` codec in the handler, so a value that is not 1..255 alphanumerics is not used
 RFC8852-3.3-1	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_rid_of_each_simulcast_encoding` (send), both header forms tested at the codec; mutation-check and cite
 RFC8852-5-2	B	S	dtls-srtp	A test that a changed RID header extension byte fails SRTP authentication
 RFC9335-4-5	B	S	security	A test that later offers and answers keep `a=cryptex`
@@ -101,7 +96,7 @@ RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the govern
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-4.1.8-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of 5.2.2-10, -27)
 RFC9429-4.1.9-2	E	S	jsep (running)	`conflict`: umbrella of 5.3.1-6
-RFC9429-5.1-1	C	L	jsep (running)	Umbrella of the per-spec audits
+RFC9429-5.1-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of the per-spec audits: every child is `tested`, `setting` or `conflict`)
 RFC9429-5.2.1-13	A	S	jsep (running)	`setting`: unique transport credentials
 RFC9429-5.2.1-23	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.1-34	A	S	jsep (running)	`setting`: msid without appdata

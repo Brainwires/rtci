@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: follow-ups to the payload type stack (`conf/jsep-74-followups`). The `a=extmap`
+  lines of negotiated header extensions are written in id order; they were written in the
+  order of a hash map, different from one run to the next (the ids and URIs are unchanged).
+  The RtpStreamId and RepairedRtpStreamId header extension elements are read through the typed
+  codec: an element that is not 1 to 255 ASCII letters and digits (RFC 8852 section 3) names
+  no stream, where it was used as given before. The engine's answer to every recorded offer
+  (`tests/fixtures/browser-sdp/`: Chromium, Firefox, WebKit, webrtc-rs 0.17; 38 offers) is
+  pinned line by line in `tests/fixtures/browser-sdp-answers/`
+  (`tests/browser_offer_answers_pinned.rs`; `RTC_UPDATE_ANSWER_FIXTURES=1` rewrites them):
+  compared with the train head before the payload type stack (`conf/train-11` daf14463), the
+  38 answers are the same line for line, the payload type numbers included, once the `a=extmap`
+  lines are in id order. Rows RFC8852-3-5, RFC7022-4.1-1, RFC7022-4.2-1 and RFC5761-5.1.3-4
+  `tested` (the last three were implemented and tested already: stale notes, mutation-checked);
+  the umbrella RFC9429-5.1-1 is `setting` (every child is `tested`, `setting` or `conflict`).
+
 - **jsep**: the events a description causes are queued when it is applied, in the W3C order,
   data channels included (`conf/jsep-73-dc-error-order`). W3C webrtc-pc 4.4.1.4 fires
   `signalingstatechange`, then `error` at each channel of errorList (a channel that got no id),
