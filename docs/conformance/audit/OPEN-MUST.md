@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 652; rows that
   apply: 5093.
-- RFC behaviour tested (`tested` + `setting`): 4927 of 5093 (96.7 %).
-- Tested as the default (`tested`): 4915 of 5093 (96.5 %); `setting`: 12.
-- Open (not tested in any form): 166: 20 untested, 124 partial, 22 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting`): 4928 of 5093 (96.8 %).
+- Tested as the default (`tested`): 4916 of 5093 (96.5 %); `setting`: 12.
+- Open (not tested in any form): 165: 20 untested, 123 partial, 22 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 13 | 12 |
-| C | partly implemented | 117 | 96 |
+| C | partly implemented | 116 | 96 |
 | D | not implemented | 17 | 13 |
 | E | cannot be met or observed inside this engine | 18 | 14 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 178 | 147 |
+| all | | 177 | 147 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 148 rows, 100 of size S, 39 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 147 rows, 99 of size S, 39 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 14 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -40,7 +40,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 0 | 6 | 1 | 2 | 0 | 9 | 3 | 6 | 0 |
+| dtls-srtp | 0 | 5 | 1 | 2 | 0 | 8 | 2 | 6 | 0 |
 | ice | 0 | 1 | 0 | 1 | 0 | 2 | 2 | 0 | 0 |
 | jsep (running) | 10 | 82 | 2 | 10 | 0 | 104 | 79 | 23 | 2 |
 | media (running) | 2 | 13 | 10 | 4 | 1 | 30 | 19 | 6 | 5 |
@@ -84,7 +84,6 @@ Sorted by class, then owner, size and ID.
 | RFC7874-3-10 | `rfc7874.md` | Generated DTMF events last no more than 8000 ms and no less than 40 ... | missing | B | Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing | S | media (running) |
 | RFC7874-3-13 | `rfc7874.md` | The endpoint can generate and consume events 0 to 15 (digits, *, #, ... | missing | B | Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes) | S | media (running) |
 | RFC9605-X-4 | `rfc9605.md` | Per-packet SFrame: an application can encrypt each RTP payload and ... | untested | B | A test that `write_rtp` carries an application-encrypted (per-packet) payload under a codec payload type unchanged, the header to SRTP | S | sframe |
-| RFC8122-6.2-5 | `rfc8122.md` | Server ends with bad_certificate when the client sends none or a ... | partial | C | Missing certificate: bad_certificate (RFC 8122) instead of handshake_failure (RFC 5246 7.4.6) on the peer-connection path | S | dtls-srtp |
 | RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | partial | C | Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4) | M | dtls-srtp |
 | RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | The engine has no sockets: on a new association, refuse to reuse the old local candidates (or ask the application for new ones) by default | M | dtls-srtp |
 | RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | As RFC8842-5.1-1, for the offer | M | dtls-srtp |
@@ -240,7 +239,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-19 rows: 9 of class B, 1 of class C, 2 of class E, 7 of class F. The note of each row says how it was closed.
+20 rows: 9 of class B, 2 of class C, 2 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -253,6 +252,7 @@ Sorted by class, then owner, size and ID.
 | RFC8852-5-2 | `rfc8852.md` | The identifiers have integrity and source authentication | B | tested |
 | RFC9335-4-5 | `rfc9335.md` | Subsequent offers / answers use the same procedure for including the ... | B | tested |
 | RFC9335-5-2 | `rfc9335.md` | With two-byte extensions, the id carried in "appbits" (value 256) is ... | B | tested |
+| RFC8122-6.2-5 | `rfc8122.md` | Server ends with bad_certificate when the client sends none or a ... | C | tested |
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | C | tested |
 | RFC5124-3.3.1-6 | `rfc5124.md` | A media section offered with another profile is rejected by an ... | E | n/a |
 | RFC8826-4.3-3 | `rfc8826.md` | No API extracts long-term keying material or reaches stored traffic ... | E | n/a |
