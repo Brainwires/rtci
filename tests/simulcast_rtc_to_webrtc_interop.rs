@@ -139,8 +139,12 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
+    // webrtc 0.17 takes a simulcast (rid) section only when its `a=msid` carries the track id
+    // as appdata, which RFC 9429 section 5.2.1 has a JSEP endpoint leave out (this engine's
+    // default); a simulcast section has no `a=ssrc` lines to fall back on.
     let setting_engine = SettingEngineBuilder::new()
         .with_answering_dtls_role(RTCDtlsRole::Server)
+        .with_msid_appdata(true)
         .build();
 
     // Create MediaEngine with simulcast support

@@ -776,8 +776,9 @@ mod tests {
             .collect()
     }
 
-    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, and the stream
-    /// id the track itself has (which an application sets to `-`) when it is in none.
+    /// RFC 9429, Section 5.2.1: one `a=msid` line per MediaStream of the sender, without
+    /// appdata, and the stream id the track itself has (which an application sets to `-`)
+    /// when it is in none.
     #[test]
     fn test_offer_has_one_msid_line_per_stream() {
         let mut pc = build_pc();
@@ -786,7 +787,7 @@ mod tests {
             .expect("add transceiver");
 
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["-"]);
 
         pc.rtp_sender(tid.into())
             .expect("sender")
@@ -797,14 +798,14 @@ mod tests {
             ])
             .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["one track", "two track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["one", "two"]);
 
         pc.rtp_sender(tid.into())
             .expect("sender")
             .set_streams(vec![])
             .expect("the change is accepted");
         let offer = pc.create_offer(None).expect("create offer");
-        assert_eq!(msid_lines(&offer.sdp), vec!["- track"]);
+        assert_eq!(msid_lines(&offer.sdp), vec!["-"]);
     }
 
     /// RFC 9429, Section 5.10: a remote offer's new media section takes a transceiver the

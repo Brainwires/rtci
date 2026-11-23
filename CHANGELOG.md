@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `a=msid` lines carry no appdata by default (`a=msid:<stream id>`, RFC 9429 section
     5.2.1); new `SettingEngineBuilder::with_msid_appdata(true)` writes the track id as
     browsers do. Descriptions differ on the wire. The source-level `a=ssrc ... msid:` lines
-    still name the track.
+    still name the track. A webrtc-rs 0.17 receiver drops a simulcast (rid) section whose
+    `a=msid` has no appdata: an application that sends simulcast to one sets
+    `with_msid_appdata(true)`.
   - A remote description whose RTX format names a payload type absent from its m= line
     (`a=fmtp:<pt> apt=<x>`) is refused (RFC 9429 section 5.10); one whose primary is present
     but unsupported is still ignored.

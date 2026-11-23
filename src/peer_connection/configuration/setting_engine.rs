@@ -2034,6 +2034,8 @@ impl SettingEngineBuilder {
     /// omitting the "appdata" field"). Either way a remote line's appdata is read when there is
     /// one, and the recipient names the track itself when there is none (RFC 8830 section 3).
     /// The source-level `a=ssrc:<ssrc> msid:` lines carry the track id in both forms.
+    /// webrtc-rs 0.17 drops a simulcast (rid) section without the appdata, as that section has
+    /// no `a=ssrc` lines: sending simulcast to it needs `true`.
     pub fn with_msid_appdata(mut self, appdata: bool) -> Self {
         self.0.msid_appdata = appdata;
         self
