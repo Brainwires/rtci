@@ -10,8 +10,7 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 863 / untested 0 / partial 4 / missing 0 / violated 0 / n-a 62
-- MUST: tested 860 / untested 0 / partial 7 / missing 0 / violated 0 / n-a 62
+- MUST: tested 864 / untested 0 / partial 3 / missing 0 / violated 0 / n-a 62
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 7 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 11
 
