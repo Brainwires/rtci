@@ -1481,9 +1481,25 @@ impl RTCPeerConnection {
                     media.with_value_attribute(ATTR_KEY_MAXPTIME.to_owned(), maxptime.to_string());
             }
         }
-        if codecs.is_empty() {
+        // RFC 9429 section 5.3.1: "the media formats in the answer MUST include at least one
+        // format that is present in the offer ... If no common format exists, the "m=" section
+        // is rejected". The transceiver's list falls back to every registered format when the
+        // offer matched none of them, so an answer checks it against the offer.
+        let no_common_format = !is_offer
+            && media_section
+                .offered_codecs
+                .as_ref()
+                .is_some_and(|offered| {
+                    !codecs.iter().any(|codec| {
+                        !matches!(
+                            codec_parameters_fuzzy_search(&codec.rtp_codec, offered).1,
+                            CodecMatch::None
+                        )
+                    })
+                });
+        if codecs.is_empty() || no_common_format {
             // If we are sender and have no codecs throw an error early
-            if transceiver.describes_sender() {
+            if !no_common_format && transceiver.describes_sender() {
                 return Err(Error::ErrSenderWithNoCodecs);
             }
 
