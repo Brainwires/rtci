@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC STUN in Rust"
+description = "STUN messages, attributes and a sans-I/O client (RFC 8489), for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-stun"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "stun", "nat-traversal", "ice", "sans-io"]
+categories = ["network-programming", "parser-implementations"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
 
 [features]
 default = ["crypto-ring"]

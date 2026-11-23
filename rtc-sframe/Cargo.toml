@@ -4,14 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC SFrame (RFC 9605) in Rust"
+description = "Sans-I/O SFrame (RFC 9605) end-to-end media encryption"
 license.workspace = true
-documentation = "https://docs.rs/rtc-sframe"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "sframe", "e2ee", "encryption", "sans-io"]
+categories = ["cryptography", "multimedia"]
 readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
 
 [features]
 default = ["crypto-ring"]

@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC DTLS in Rust"
+description = "Sans-I/O DTLS 1.2 and 1.3 (RFC 6347, RFC 9147) with DTLS-SRTP key export, for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-dtls"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "dtls", "tls", "srtp", "sans-io"]
+categories = ["cryptography", "network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs", "pem"]
 
 [features]
 default = ["crypto-ring"]

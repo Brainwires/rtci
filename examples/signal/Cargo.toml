@@ -4,13 +4,10 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Examples of WebRTC.rs stack's signaling"
+description = "Signalling helpers shared by the examples (not published)"
 license.workspace = true
-documentation = "https://docs.rs/rtc-signal"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+publish = false
 
 [dependencies]
 tokio.workspace = true

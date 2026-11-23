@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC Interceptor in Rust"
+description = "Sans-I/O RTP/RTCP interceptor pipeline for WebRTC: RTCP reports, NACK, TWCC, congestion control, pacing, FEC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-interceptor"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "rtp", "rtcp", "congestion-control", "sans-io"]
+categories = ["network-programming", "multimedia"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = [] }
