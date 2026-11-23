@@ -2397,8 +2397,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left open.
   - The congestion estimate is kept per transport: it goes on that transport's selected
     candidate pair as `availableOutgoingBitrate` (one pair took every transport's estimate in
-    turn), and is divided among the senders on that transport. An end-to-end test with two
-    transports is still open.
+    turn), and is divided among the senders on that transport. End to end with two
+    transports, each held at a limit of its own: `each_transport_s_selected_pair_reports_its_own_estimate`
+    (media-17 restored it: it was red because it read the pairs before any virtual time had
+    passed, so no feedback or timer had published an estimate yet; with media flowing for
+    three seconds each pair reports its own controller's figure).
     `PerRtpSession` no longer loses what a session's instance attaches to a carrier every
     session was given (it dropped it for every session but the first, and left the first's
     untagged): it leaves on a carrier tagged with the session.

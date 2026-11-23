@@ -2251,19 +2251,28 @@ fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
     let (senders, _) = world.negotiate(without_bundle_group)?;
     world.gather()?;
     world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
-    // Long enough for the receiver's congestion feedback to reach the sender on each
-    // transport.
-    send_media_for(&mut world, &senders, Duration::from_secs(3))?;
     let sessions: Vec<usize> = senders.iter().map(|s| session_of(&mut world, *s)).collect();
     assert_ne!(
         sessions[0], sessions[1],
         "audio and video in two RTP sessions"
     );
+    // Each transport's controller held at a limit of its own, so the two estimates differ
+    // and one transport's estimate on the other's pair shows.
+    let handles = world.peers[0].handles.transports.clone();
+    for (session, limit) in sessions.iter().zip([150_000.0, 90_000.0]) {
+        handles
+            .congestion_control(*session)
+            .expect("a congestion controller per transport")
+            .set_session_bitrate_limit(Some(limit));
+    }
+    // Long enough for the receiver's congestion feedback to reach the sender on each
+    // transport, and for the controllers' timers to run.
+    send_media_for(&mut world, &senders, Duration::from_secs(3))?;
     let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
     let now = world.now;
     let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
-    let handles = world.peers[0].handles.transports.clone();
     let mut pairs = HashSet::new();
+    let mut reported_estimates = vec![];
     for (ssrc, session) in ssrcs.iter().zip(&sessions) {
         let transport_id = report
             .outbound_rtp_streams()
@@ -2298,7 +2307,12 @@ fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
             "the pair of {ssrc:#x}'s transport reports its own controller's estimate"
         );
         pairs.insert(pair.stats.id.clone());
+        reported_estimates.push(reported);
     }
     assert_eq!(pairs.len(), 2, "two transports, two selected pairs");
+    assert_ne!(
+        reported_estimates[0], reported_estimates[1],
+        "each transport at a limit of its own: {reported_estimates:?}"
+    );
     Ok(())
 }
