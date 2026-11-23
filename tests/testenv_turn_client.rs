@@ -24,17 +24,13 @@ use rtc::ice::network_type::NetworkType;
 use rtc::ice::state::ConnectionState;
 use rtc::ice::tcp_type::TcpType;
 use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
 use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
 use rtc::shared::turn_framing::TurnStreamDecoder;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::error_code::{
-    CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED, CODE_WRONG_CREDENTIALS,
-};
+use rtc::stun::error_code::{CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED};
 use rtc::turn::client::data_connection::{DataConnection, DataConnectionEvent};
 use rtc::turn::client::{
-    AllocateOptions, Client, ClientConfig, Event, RelayTransport, RequestError,
-    RetransmissionConfig,
+    AllocateOptions, Client, ClientConfig, Event, RelayTransport, RetransmissionConfig,
 };
 use rtc::turn::proto::connid::ConnectionId;
 use rtc::turn::proto::evenport::EvenPort;
@@ -580,16 +576,15 @@ fn an_ipv6_relay_is_refused_by_a_server_without_one() {
     a.release(relayed);
 }
 
-/// RFC 8656 5: an allocation belongs to the username that made it, and a server answers a
-/// request for it under another username with 441 (Wrong Credentials). What the client makes
-/// of that answer is RFC 8489 9.2.5's: a response counts only when it is signed with the key
-/// the request was signed with. A server that signs its 441 that way has it reported with
-/// its code; coturn 4.6.1 does not (its log shows the 441, the client finds no valid
-/// integrity in it), so the request ends as an integrity violation. Either way the Refresh
-/// is not accepted, the allocation is kept, and the owner's credential still refreshes it.
+/// RFC 8656 5: an allocation belongs to the username that made it ("the client MUST use the
+/// same username" for its later requests), and a server answers a request for it under
+/// another username with 441 (Wrong Credentials). The client keeps each allocation under its
+/// own username: after `update_credentials` with another one, the Refresh of the live
+/// allocation is still signed as its owner and coturn accepts it; the new username is for the
+/// next allocation only.
 #[test]
 #[ignore = "needs the real-network test environment (the TURN client's coturn, namespaces): scripts/test-env/run.sh"]
-fn a_refresh_under_another_username_is_not_accepted() {
+fn a_live_allocation_keeps_its_username_after_a_credential_change() {
     common::install_crypto_provider();
     let env = Env::get();
     let server = client_server();
@@ -600,39 +595,12 @@ fn a_refresh_under_another_username_is_not_accepted() {
         .update_credentials("other".to_owned(), "other".to_owned())
         .unwrap();
     a.client.refresh_allocations(Instant::now()).unwrap();
-    let outcome = a.wait_for("RefreshError", |e| match e {
-        Event::RefreshError(addr, err) if *addr == relayed => Some(match err {
-            RequestError::Rejected(rejected) => format!("rejected with {}", rejected.code.0),
-            RequestError::Failed(Error::ErrIntegrityMismatch) => "integrity violation".to_owned(),
-            other => format!("failed: {other}"),
-        }),
-        _ => None,
-    });
-    eprintln!("TURN client: Refresh under another username: {outcome}");
-    assert!(
-        outcome == format!("rejected with {}", CODE_WRONG_CREDENTIALS.0)
-            || outcome == "integrity violation",
-        "{outcome}"
-    );
-    assert!(a.client.relay(relayed).is_ok(), "the allocation is kept");
-    // Whether the server's log already shows its 441 (it is written through a buffer).
-    if let Ok(path) = std::env::var("RTC_TESTENV_TURN_CLIENT_LOG") {
-        let log = std::fs::read_to_string(&path).unwrap_or_default();
-        eprintln!(
-            "TURN client: the server's log shows a 441: {}",
-            log.contains("error 441")
-        );
-    }
-
-    a.client
-        .update_credentials(env.user.clone(), env.pass.clone())
-        .unwrap();
-    a.client.refresh_allocations(Instant::now()).unwrap();
-    let events = a.run_for(Duration::from_secs(1));
+    let events = a.run_for(Duration::from_secs(2));
     assert!(
         events.is_empty(),
-        "the owner's Refresh is accepted: {events:?}"
+        "the Refresh goes out under the allocation's own username and is accepted: {events:?}"
     );
+    assert!(a.client.relay(relayed).is_ok(), "the allocation is kept");
     a.release(relayed);
 }
 
