@@ -129,5 +129,5 @@ RFC9429-5.2.2-27	A	S	jsep (running)	`setting`: bundle attributes in the tagged s
 RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella; 5.3.2-5, and 5.3.1-6 `conflict`)
 RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9429-5.8-1	C	S	jsep (running)	The remaining grammar exceptions
+RFC9429-5.8-1	A	S	jsep (running)	`setting`: trailing white space in attribute values (webrtc-rs 0.17)
 RFC9429-6-1	C	S	jsep (running)	As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested

@@ -8,15 +8,15 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4986 of 5087 (98.0 %).
-- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 14; `conflict` (two specifications conflict, the governing one's form is the default): 5.
-- Open (not tested in any form): 101: 20 untested, 58 partial, 22 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4987 of 5087 (98.0 %).
+- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 5.
+- Open (not tested in any form): 100: 20 untested, 57 partial, 22 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 14 | 13 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 51 | 30 |
+| C | partly implemented | 50 | 29 |
 | D | not implemented | 22 | 18 |
 | E | cannot be met or observed inside this engine | 17 | 11 |
 | F | stale note: already tested on this tree | 6 | 0 |
@@ -24,7 +24,7 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 89 rows, 51 of size S, 29 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 88 rows, 50 of size S, 29 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 17 | 1 | 2 | 0 | 20 | 11 | 8 | 1 |
+| jsep (running) | 0 | 16 | 1 | 2 | 0 | 19 | 10 | 8 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -69,6 +69,7 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2.2-27 | `rfc9429.md` | Bundled sections omit IDENTICAL and TRANSPORT parameters | setting | A | `setting`: bundle attributes in the tagged section only | S | jsep (running) |
 | RFC9429-5.3-1 | `rfc9429.md` | createAnswer output is compatible with the remote description and RFC ... | setting | A | `setting`: bundle attributes in the tagged section only (umbrella; 5.3.2-5, and 5.3.1-6 `conflict`) | S | jsep (running) |
 | RFC9429-5.3.2-5 | `rfc9429.md` | A bundled section carries no ICE credentials | setting | A | `setting`: bundle attributes in the tagged section only | S | jsep (running) |
+| RFC9429-5.8-1 | `rfc9429.md` | Any line that is not well formed rejects the description, even when ... | setting | A | `setting`: trailing white space in attribute values (webrtc-rs 0.17) | S | jsep (running) |
 | RFC3550-6.1-13 | `rfc3550.md` | Padding only on the last packet of a compound packet | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
@@ -95,7 +96,6 @@ Sorted by class, then owner, size and ID.
 | RFC8839-4.4.2.2-1 | `rfc8839.md` | Lite: remote-candidates in the offer forms the pair and completes the ... | partial | C | Pin the local side of the pair from `a=remote-candidates` (rtc-ice call) | S | jsep (running) |
 | RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move one simulcast layer of a several-stream receiver to the section its MID names | S | jsep (running) |
 | RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
-| RFC9429-5.8-1 | `rfc9429.md` | Any line that is not well formed rejects the description, even when ... | partial | C | The remaining grammar exceptions | S | jsep (running) |
 | RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested | S | jsep (running) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
