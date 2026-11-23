@@ -4207,7 +4207,8 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   nor RRID, and no MID naming another section, opens a stream of the section without a rid
   (`RTCTrackEventInit::rid` is `None`; the track is the section's), with the RTX SSRC its FID
   group names, and a declared RTX packet resolves to its primary. No rid is guessed from the
-  order of the `a=ssrc` lines. A packet that carries a RID is bound by its rid as before
+  order of the `a=ssrc` lines; each member of an `a=ssrc-group:SIM` there is a declared SSRC
+  too. A packet that carries a RID is bound by its rid as before
   (Firefox, which also declares its layers' SSRCs). Tests:
   `simulcast_repair_rtc2rtc::declared_layer_ssrcs_sent_without_mid_or_rid_are_received_as_streams_of_their_section`,
   `a_declared_layer_without_rid_is_repaired_over_its_declared_rtx_ssrc`,
