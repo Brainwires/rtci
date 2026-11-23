@@ -2453,6 +2453,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **ffi**: `.github/workflows/release-binaries.yml` builds rtc-ffi's libraries and header for
+  Linux x86_64 and aarch64 (glibc 2.17 with cargo-zigbuild, checked), macOS aarch64 (11.0) and
+  x86_64 (10.13) and Windows x86_64 (MSVC), with `SHA256SUMS` and `manifest.json`; on a `v*`
+  tag or by hand only, artifacts on a dispatch and attached to the tag's release on a tag, no
+  secret but `GITHUB_TOKEN`. It has not been run. `docs/packaging.md` documents the C
+  interface, the platforms, the Deno example, the release contents and the owner's two
+  decisions (tagging and publishing; crate names, since the `rtc*` names on crates.io are
+  upstream's).
 - **ffi**: a reference Deno binding of the driven layer, `bindings/deno/` (not published; the
   Denext project maintains its own): `RTCPeerConnection`, `RTCDataChannel`,
   `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their

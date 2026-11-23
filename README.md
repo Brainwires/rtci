@@ -405,6 +405,11 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
   bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
 - ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
+- ✅ **A C interface** - `rtc-ffi` (`cdylib` / `staticlib`, header `rtc-ffi/include/rtc.h`): the sans-I/O API one to one
+  (JSON configuration and events, caller-owned buffers, the caller's clock), and a driven layer that owns its sockets and
+  a thread (port ranges, a shared UDP / ICE-TCP port, bind addresses, 1:1 NAT, ICE-lite); a reference Deno binding with
+  the browser API in `bindings/deno/`; a release workflow for prebuilt libraries on five platforms (not run). See
+  [docs/packaging.md](docs/packaging.md)
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
 [docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
