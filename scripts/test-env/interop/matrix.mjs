@@ -25,6 +25,14 @@ const walk = (suite, file) => {
         else Object.assign(cell, { status: "na-uncited", detail: why || "skipped without a reason" });
       } else if (res.status === "passed" && (t.status === "expected" || t.status === undefined)) {
         cell.status = "pass";
+      } else if (t.status === "expected" && res.status === "failed") {
+        // test.fail(): an expected failure, a known gap with its verdict ("engine-gap: <reason>
+        // [<citation>]"). Once it passes, Playwright reports it unexpected, and the gate fails
+        // until the annotation is taken out.
+        const notes = [...(t.annotations || []), ...(res.annotations || [])];
+        const why = notes.find((a) => a.type === "fail")?.description || "";
+        const m = why.match(/^engine-gap: (.+) \[(.+)\]$/s);
+        Object.assign(cell, m ? { status: "xfail", reason: m[1], cite: m[2] } : { status: "fail", detail: `expected failure without a cited reason: ${why}` });
       } else {
         const first = (res.error?.message || res.status || t.status || "").split("\n")[0];
         Object.assign(cell, { status: "fail", detail: first.slice(0, 300) });
@@ -66,7 +74,7 @@ if (process.argv[3]) {
 const text = (c) =>
   (c.status === "pass"
     ? "pass"
-    : c.status.startsWith("na-") && c.status !== "na-uncited"
+    : (c.status.startsWith("na-") && c.status !== "na-uncited") || c.status === "xfail"
       ? `${c.status} (${c.reason})`
       : `${c.status.toUpperCase()}: ${c.detail || ""}`
   ).replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 160);
@@ -89,9 +97,9 @@ for (const [g, group] of groups) {
   for (const [title, r] of rows) console.log(`| ${title} | ${cols.map((c) => r[c] || "-").join(" | ")} |`);
 }
 const n = (pred) => cells.filter(pred).length;
-const cited = ["pass", "na-browser", "na-env", "na-peer"];
+const cited = ["pass", "na-browser", "na-env", "na-peer", "xfail"];
 console.log(
   `\n${n((c) => c.status === "pass")} pass, ${n((c) => !cited.includes(c.status))} fail, ` +
     `${n((c) => c.status === "na-browser")} not applicable (browser), ${n((c) => c.status === "na-peer")} not applicable (peer), ` +
-    `${n((c) => c.status === "na-env")} not tested (environment)`,
+    `${n((c) => c.status === "na-env")} not tested (environment), ${n((c) => c.status === "xfail")} known gaps (expected failures)`,
 );

@@ -44,6 +44,10 @@
     "answerUnbundled": {
       "reason": "aiortc answers an offer without a BUNDLE group with one (a=group:BUNDLE 0 1), then still runs an ICE connection per section; the offerer bundles by that answer and aiortc's second connection never completes",
       "cite": "RFC 9143 7.3: \"The answerer is only allowed to include a BUNDLE group in an initial BUNDLE answer if the offerer requested the BUNDLE group to be created in the corresponding initial BUNDLE offer\"; train 10 round 3, cell `balanced, answered without BUNDLE` [aiortc]: received offer with no group, sent answer `a=group:BUNDLE 0 1`, aioice Connection(1) never completed"
+    },
+    "simulcastWithoutRid": {
+      "reason": "aiortc sends one encoding per sender: no simulcast",
+      "cite": "aiortc 1.16.0 rtcrtpsender.py RTCRtpSender (one SSRC, no rid / simulcast in sdp.py's offer)"
     }
   }
 }

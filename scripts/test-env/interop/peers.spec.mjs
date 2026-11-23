@@ -332,7 +332,14 @@ test("RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedbac
   const blocks = (stats.remoteInbound || []).length;
   const out = (stats.outbound || []).find((o) => o.kind === "video")?.w3c || {};
   expect(r.rtcp?.sr || 0, `the peer received no SR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
-  expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  // A sender puts its reception report blocks in its SRs and sends a bare RR only for the
+  // SSRCs that send nothing (RFC 3550 6.4): Rust sends media in this cell, so what the peer must
+  // get is report blocks about its streams, in SRs or RRs.
+  const peerBlocks = r.reportBlocks ?? null;
+  if (peerBlocks !== null) expect(peerBlocks, `the peer received no reception report block from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  else expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  const secs = (r.steps || []).reduce((a, s) => a + (s.ms || 0), 0) / 1000;
+  console.log(`[${peerName()}] RTCP cell: ${secs.toFixed(1)} s; Rust sending SSRCs ${(stats.outbound || []).length}; the peer counted ${JSON.stringify(r.rtcp)}, ${peerBlocks} report blocks`);
   expect(srs, `Rust took in no SR from the peer (remote-outbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(blocks, `Rust took in no report block about its streams (remote-inbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(r.rtcpSent?.pli || 0, ctx(r)).toBeGreaterThan(0);
@@ -676,6 +683,34 @@ test("simulcast: three RIDs from the peer reach Rust", async () => {
     const n = Object.entries(r.rust?.rtp || {}).filter(([k]) => k.startsWith(`video:${rid}:`)).reduce((a, [, c]) => a + c, 0);
     expect(n, `no packets on rid ${rid}: ${ctx(r, { peerOutbound: r.outbound, peerFirstHeaders: r.firstHeaders, rustDiscarded: r.rust?.discardedSsrcs, rustTransports: r.rust?.stats?.transports })}`).toBeGreaterThan(20);
   }
+});
+
+// The same three layers with no MID or RID extension on the wire, identified only by the SSRCs
+// the offer declares for the section (`a=ssrc`, `a=ssrc-group:FID`): RFC 9143 9.2 associates
+// a declared SSRC with its m= section. Known engine gap (train 10 round 4): the engine drops a
+// rid section's declared SSRCs and discards RID-less packets there; the cell is an expected
+// failure with that verdict until `conf/demux-1-declared-ssrc-in-rid-section` lands.
+const DECLARED_SSRC_GAP =
+  "engine-gap: a stream whose SSRC the offer declared for a section with a=rid is discarded when its packets carry no RID " +
+  "[RFC 9143 9.2; docs/interop.md Findings, train 10 round 4; fix scheduled on conf/demux-1-declared-ssrc-in-rid-section]";
+test("simulcast without MID or RID on the wire: the layers' declared SSRCs reach Rust's section", async () => {
+  test.fail(peerName() === "pion", DECLARED_SSRC_GAP);
+  const r = await run(test.info().title, {
+    scenario: { media: "count" },
+    steps: [
+      { op: "track", kind: "video", codec: "vp8", simulcast: ["q", "h", "f"], ridExtensions: false },
+      { op: "offer" },
+      { op: "connected" },
+      { op: "wait", ms: 8000 },
+      { op: "report" },
+    ],
+  }, ["simulcastSend", "simulcastWithoutRid"]);
+  expectOk(r);
+  const declared = [...lastDescription(r, "sent", "offer").matchAll(/^a=ssrc-group:FID (\d+) \d+/gm)].map((m) => Number(m[1]));
+  expect(declared.length, ctx(r)).toBe(3);
+  expect(r.rust?.discardedSsrcs || [], `Rust discarded the declared layers: ${ctx(r, { peerFirstHeaders: r.firstHeaders })}`).toEqual([]);
+  const inbound = (r.rust?.stats?.inbound || []).filter((i) => i.kind === "video").map((i) => i.ssrc);
+  for (const ssrc of declared) expect(inbound, ctx(r)).toContain(ssrc);
 });
 
 // ---- several transports (RFC 9429 4.1.1, 5.2.1, 5.3.1; RFC 9143 7) ----

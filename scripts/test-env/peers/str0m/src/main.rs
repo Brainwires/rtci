@@ -209,6 +209,8 @@ struct Peer {
     rtp_sent: BTreeMap<String, (u64, u64)>,
     coverage: BTreeMap<String, Coverage>,
     rtcp: BTreeMap<String, u64>,
+    /// Reception report blocks received, in SRs and RRs (RFC 3550 6.4).
+    report_blocks: u64,
     rtcp_sent: BTreeMap<String, u64>,
     selected: Value,
     descriptions: Vec<Value>,
@@ -399,6 +401,7 @@ impl Peer {
             rtp_sent: BTreeMap::new(),
             coverage: BTreeMap::new(),
             rtcp: BTreeMap::new(),
+            report_blocks: 0,
             rtcp_sent: BTreeMap::new(),
             selected: Value::Null,
             descriptions: vec![],
@@ -680,6 +683,13 @@ impl Peer {
             Event::RawPacket(raw) => {
                 if let RawPacket::RtcpRx(r) = &*raw {
                     *self.rtcp.entry(rtcp_name(r)).or_default() += 1;
+                    // Reception report blocks, in an SR or an RR (RFC 3550 6.4).
+                    let blocks = match r {
+                        Rtcp::SenderReport(sr) => sr.reports.len(),
+                        Rtcp::ReceiverReport(rr) => rr.reports.len(),
+                        _ => 0,
+                    };
+                    self.report_blocks += blocks as u64;
                 }
             }
             _ => {}
@@ -1426,6 +1436,7 @@ impl Peer {
             "coverage": coverage,
             "rtcp": self.rtcp,
             "rtcpSent": self.rtcp_sent,
+            "reportBlocks": self.report_blocks,
             "twccSent": answer.contains("transport-wide-cc"),
             "selectedPair": selected,
             "dtls": version.map(|v| json!({"version": format!("{:04X}", v.as_u16()), "cipher": null, "srtpProfile": null, "role": null})),
