@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 655; rows that
   apply: 5090.
-- RFC behaviour tested (`tested` + `setting`): 4943 of 5090 (97.1 %).
-- Tested as the default (`tested`): 4928 of 5090 (96.8 %); `setting`: 15.
-- Open (not tested in any form): 147: 16 untested, 113 partial, 18 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting`): 4946 of 5090 (97.2 %).
+- Tested as the default (`tested`): 4931 of 5090 (96.9 %); `setting`: 15.
+- Open (not tested in any form): 144: 16 untested, 111 partial, 17 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 15 | 13 |
 | B | implemented, lacking a test that fails without it | 12 | 12 |
-| C | partly implemented | 103 | 94 |
-| D | not implemented | 17 | 13 |
+| C | partly implemented | 101 | 94 |
+| D | not implemented | 16 | 13 |
 | E | cannot be met or observed inside this engine | 14 | 11 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 162 | 144 |
+| all | | 159 | 144 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 133 rows, 84 of size S, 40 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 130 rows, 84 of size S, 37 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 11 rows.
 - Never testable inside this engine (class E, reason stated): 3 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -39,7 +39,7 @@ become `setting` only if such a cell is named, or close when the default changes
 
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
-| dtls-srtp | 0 | 5 | 1 | 2 | 0 | 8 | 2 | 6 | 0 |
+| dtls-srtp | 0 | 3 | 0 | 2 | 0 | 5 | 2 | 3 | 0 |
 | ice | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | jsep (running) | 10 | 82 | 2 | 9 | 0 | 103 | 78 | 23 | 2 |
 | media (running) | 2 | 11 | 10 | 2 | 1 | 26 | 14 | 7 | 5 |
@@ -81,11 +81,9 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2.1-56 | `rfc9429.md` | a=crypto, a=key-mgmt and a=ice-lite are not included | partial | B | A test that a default offer has no `a=crypto`, `a=key-mgmt`, `a=ice-lite` | S | jsep (running) |
 | RFC7874-3-10 | `rfc7874.md` | Generated DTMF events last no more than 8000 ms and no less than 40 ... | missing | B | Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing | S | media (running) |
 | RFC7874-3-13 | `rfc7874.md` | The endpoint can generate and consume events 0 to 15 (digits, *, #, ... | missing | B | Stale note: `RTCDTMFSender` plays `0-9*#A-D`; only `1` and `A` are in a test; a test of all 16 events (send and the received event codes) | S | media (running) |
-| RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | partial | C | Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4) | M | dtls-srtp |
-| RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | The engine has no sockets: on a new association, refuse to reuse the old local candidates (or ask the application for new ones) by default | M | dtls-srtp |
-| RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | As RFC8842-5.1-1, for the offer | M | dtls-srtp |
-| RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | As RFC8842-5.1-1, for the answer | M | dtls-srtp |
-| RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
+| RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
+| RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
+| RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
 | RFC5576-4.2-2 | `rfc5576.md` | A group lists at least one ssrc-id; MAY list more | partial | C | Use groups of three or more ids and `SIM` | S | jsep (running) |
 | RFC5576-5-3 | `rfc5576.md` | Local SSRCs are not ones mentioned in received descriptions | partial | C | Check application-named SSRCs; detect a remote description that mentions a local SSRC | S | jsep (running) |
 | RFC5576-5-9 | `rfc5576.md` | An SSRC is not reused for another source with the same CNAME within ... | untested | C | Keep a history of SSRCs used | S | jsep (running) |
@@ -184,7 +182,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.1.4-36 | `w3c-webrtc-pc.md` | Answer or pranswer: update the data max message size of the SCTP ... | partial | C | Update the max message size on a pranswer and on renegotiation | S | w3c |
 | WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
 | WEBRTC-4.4.1.4-91 | `w3c-webrtc-pc.md` | Events fire in order: signalingstatechange, channel errors, mute, ... | partial | C | Queue the data channel errors of a description in the spec order | M | w3c |
-| RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | missing | D | ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833) | M | dtls-srtp |
 | RFC8866-6.10-1 | `rfc8866.md` | a=charset names an IANA character set, compared case-insensitively | missing | D | `a=charset` | S | jsep (running) |
 | RFC7728-6.2-4 | `rfc7728.md` | A sender with hold-off 0 that learns of several receivers uses the ... | missing | D | Detect several receivers (RFC7728-6.2-5) | M | jsep (running) |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | partial | D | A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it | S | media (running) |
@@ -219,7 +216,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-35 rows: 10 of class B, 12 of class C, 6 of class E, 7 of class F. The note of each row says how it was closed.
+38 rows: 10 of class B, 14 of class C, 1 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -243,8 +240,11 @@ Sorted by class, then owner, size and ID.
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | C | tested |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | C | tested |
 | RFC8122-6.2-5 | `rfc8122.md` | Server ends with bad_certificate when the client sends none or a ... | C | tested |
+| RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | C | tested |
+| RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | C | tested |
 | RFC8852-3-5 | `rfc8852.md` | Values are at most 255 octets and only ASCII alphanumerics (48-57, ... | C | tested |
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | C | tested |
+| RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | D | tested |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | E | n/a |
 | RFC5124-3.3.1-6 | `rfc5124.md` | A media section offered with another profile is rejected by an ... | E | n/a |
 | RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | E | n/a |

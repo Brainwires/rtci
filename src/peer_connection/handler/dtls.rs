@@ -377,6 +377,7 @@ impl<'a>
             let mut peer_certificates_for_stats: Vec<Vec<u8>> = vec![];
             let mut dtls_cipher_for_stats: Option<String> = None;
             let mut dtls_version_for_stats = None;
+            let mut application_protocol = None;
 
             let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
@@ -442,6 +443,8 @@ impl<'a>
                                     dtls_cipher_for_stats =
                                         state.cipher_suite().map(|cs| cs.to_string());
                                     dtls_version_for_stats = state.negotiated_version();
+                                    application_protocol =
+                                        Some(state.application_protocol().map(str::to_owned));
 
                                     handshake_complete = Some(srtp_contexts);
                                 }
@@ -504,6 +507,11 @@ impl<'a>
                 });
             }
 
+            // RFC 8833 section 2: what ALPN selected; a peer that used none is taken as
+            // `webrtc` by the application ("SHOULD assume ... "webrtc"").
+            if let Some(application_protocol) = application_protocol {
+                self.ctx.dtls_transport.application_protocol = application_protocol;
+            }
             // Update stats after dtls_endpoint borrow ends
             if let Some(srtp_profile) = srtp_profile_for_stats {
                 self.update_dtls_stats_from_profile(

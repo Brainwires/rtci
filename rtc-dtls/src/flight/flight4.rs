@@ -792,6 +792,10 @@ pub(crate) fn server_hello_extensions(state: &mut State, cfg: &HandshakeConfig) 
             state.remote_connection_id = None;
         }
     }
+    // RFC 7301 section 3.1: the protocol selected from the client's list (flight 0).
+    if let Some(protocol) = &state.application_protocol {
+        extensions.push(Extension::alpn(std::slice::from_ref(protocol)));
+    }
     if state.secure_renegotiation {
         extensions.push(Extension::RenegotiationInfo(
             ExtensionRenegotiationInfo::default(),

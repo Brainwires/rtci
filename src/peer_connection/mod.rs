@@ -3820,6 +3820,16 @@ impl RTCPeerConnection {
             .ok_or(Error::NotFoundError)
     }
 
+    /// The application protocol the DTLS handshake of the connection's transport selected
+    /// with ALPN (RFC 8835 section 3.5, RFC 8833: `webrtc`, or `c-webrtc` when the remote
+    /// server selected it: a promise to keep the received media confidential that the
+    /// application must keep), once the association is up. `None` before that, or when the
+    /// peer used no ALPN, which RFC 8833 section 2 has the application take as `webrtc`.
+    /// [`SettingEngineBuilder::with_dtls_alpn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_alpn).
+    pub fn dtls_application_protocol(&self) -> Option<&str> {
+        self.dtls_transport().application_protocol()
+    }
+
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
     /// from is described with in RTCP (RFC 3550 6.5.1), so that a receiver can tell which
     /// streams come from one endpoint and synchronise them.

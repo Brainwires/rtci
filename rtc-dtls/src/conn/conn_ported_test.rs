@@ -1534,3 +1534,64 @@ fn test_multiple_hello_verify_request() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 7301 sections 3.1 and 3.2, for DTLS 1.2 (ServerHello) and DTLS 1.3
+/// (EncryptedExtensions): the client offers its protocols, the server selects the first of
+/// its own the client offered and both sides know it; a side without ALPN still connects,
+/// with none selected; a client offering only protocols the server does not have is refused
+/// with no_application_protocol.
+#[test]
+fn alpn_selects_the_servers_first_protocol_the_client_offered() -> Result<()> {
+    use crate::config::DtlsVersion;
+    let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    for version in [DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_3] {
+        let versioned = || builder().with_protocol_versions(version, version);
+        for (client_protocols, server_protocols, selected) in [
+            (
+                vec!["webrtc", "c-webrtc"],
+                vec!["webrtc", "c-webrtc"],
+                Some("webrtc"),
+            ),
+            (
+                vec!["c-webrtc", "webrtc"],
+                vec!["webrtc", "c-webrtc"],
+                Some("webrtc"),
+            ),
+            (vec!["c-webrtc", "webrtc"], vec!["webrtc"], Some("webrtc")),
+            (vec!["webrtc", "c-webrtc"], vec![], None),
+            (vec![], vec!["webrtc"], None),
+        ] {
+            let what =
+                format!("{version:?}: client {client_protocols:?}, server {server_protocols:?}");
+            let (client, server) = run_handshake(
+                test_client(
+                    versioned().with_alpn_protocols(names(&client_protocols)),
+                    true,
+                ),
+                test_server(
+                    versioned().with_alpn_protocols(names(&server_protocols)),
+                    true,
+                ),
+            );
+            let (client, server) = (client?, server?);
+            assert_eq!(
+                client.connection_state().application_protocol(),
+                selected,
+                "{what}: client"
+            );
+            assert_eq!(
+                server.connection_state().application_protocol(),
+                selected,
+                "{what}: server"
+            );
+        }
+
+        let (client, server) = run_handshake(
+            test_client(versioned().with_alpn_protocols(names(&["c-webrtc"])), true),
+            test_server(versioned().with_alpn_protocols(names(&["webrtc"])), true),
+        );
+        assert!(server.is_err(), "{version:?}: no protocol in common");
+        assert!(client.is_err(), "{version:?}: the client hears the alert");
+    }
+    Ok(())
+}

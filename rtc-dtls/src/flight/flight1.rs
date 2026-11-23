@@ -260,6 +260,12 @@ pub(crate) fn client_hello_extensions(
         }));
     }
 
+    // RFC 7301 section 3.1: the application protocols this client offers, in its order of
+    // preference.
+    if !cfg.alpn_protocols.is_empty() {
+        extensions.push(Extension::alpn(&cfg.alpn_protocols));
+    }
+
     // RFC 5077 section 3.2: a ticket to resume with, or nothing to ask for one. Ahead of the
     // DTLS 1.3 extensions, whose pre_shared_key is the last of all (RFC 8446 section 4.2.11).
     if let Some(session_ticket) = session_ticket {

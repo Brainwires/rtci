@@ -98,6 +98,46 @@ pub enum Extension {
 /// The `connection_id` extension type (RFC 9146 section 3, RFC 9147 section 9).
 pub(crate) const EXTENSION_CONNECTION_ID: u16 = 54;
 
+/// The `application_layer_protocol_negotiation` extension type (RFC 7301 section 3.1).
+pub(crate) const EXTENSION_ALPN: u16 = 16;
+
+/// The extension_data of an ALPN extension (RFC 7301 section 3.1): a `ProtocolNameList`,
+/// `ProtocolName protocol_name_list<2..2^16-1>` with `opaque ProtocolName<1..2^8-1>`.
+pub(crate) fn encode_alpn(protocols: &[String]) -> Vec<u8> {
+    let mut list = vec![];
+    for protocol in protocols {
+        list.push(protocol.len() as u8);
+        list.extend_from_slice(protocol.as_bytes());
+    }
+    let mut data = (list.len() as u16).to_be_bytes().to_vec();
+    data.extend_from_slice(&list);
+    data
+}
+
+/// The protocol names of an ALPN extension's extension_data (RFC 7301 section 3.1): an error
+/// when it is not a non-empty list of non-empty names filling the extension exactly.
+pub(crate) fn parse_alpn(data: &[u8]) -> Result<Vec<String>> {
+    let malformed = || Error::Other("malformed application_layer_protocol_negotiation".to_owned());
+    let (length, mut list) = match data {
+        [a, b, rest @ ..] => (usize::from(u16::from_be_bytes([*a, *b])), rest),
+        _ => return Err(malformed()),
+    };
+    if length != list.len() || length < 2 {
+        return Err(malformed());
+    }
+    let mut protocols = vec![];
+    while let Some((&name_length, rest)) = list.split_first() {
+        let name_length = usize::from(name_length);
+        if name_length == 0 || rest.len() < name_length {
+            return Err(malformed());
+        }
+        let (name, rest) = rest.split_at(name_length);
+        protocols.push(String::from_utf8_lossy(name).into_owned());
+        list = rest;
+    }
+    Ok(protocols)
+}
+
 impl Extension {
     /// A `connection_id` extension (RFC 9146 section 3): `opaque cid<0..2^8-1>`, the
     /// connection id the sender wants in the records it receives.
@@ -107,6 +147,26 @@ impl Extension {
         Extension::Unknown {
             extension_type: EXTENSION_CONNECTION_ID,
             data,
+        }
+    }
+
+    /// An ALPN extension (RFC 7301 section 3.1) listing `protocols`.
+    pub(crate) fn alpn(protocols: &[String]) -> Self {
+        Extension::Unknown {
+            extension_type: EXTENSION_ALPN,
+            data: encode_alpn(protocols),
+        }
+    }
+
+    /// The protocol names of an ALPN extension: `None` for another extension, an error when
+    /// its contents are not a protocol name list.
+    pub(crate) fn as_alpn(&self) -> Option<Result<Vec<String>>> {
+        match self {
+            Extension::Unknown {
+                extension_type: EXTENSION_ALPN,
+                data,
+            } => Some(parse_alpn(data)),
+            _ => None,
         }
     }
 

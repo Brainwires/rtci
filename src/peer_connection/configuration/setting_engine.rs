@@ -494,6 +494,8 @@ pub struct SettingEngine {
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     /// [`SettingEngineBuilder::with_dtls_connection_id`].
     pub(crate) dtls_connection_id_length: Option<usize>,
+    /// [`SettingEngineBuilder::with_dtls_alpn`]: `true` when it is turned off.
+    pub(crate) dtls_alpn_off: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
@@ -2327,6 +2329,22 @@ impl SettingEngineBuilder {
     /// not linked to the old ones by their id.
     pub fn with_dtls_connection_id(mut self, length: Option<usize>) -> Self {
         self.0.dtls_connection_id_length = length;
+        self
+    }
+
+    /// Whether the DTLS handshake carries Application-Layer Protocol Negotiation with the
+    /// WebRTC identifiers of RFC 8833 (RFC 8835 section 3.5). The default is `true`: as the
+    /// DTLS client the engine offers `webrtc` and `c-webrtc` (section 2: "A peer in the client
+    /// role MUST offer both identifiers if it is not aware of a need for confidentiality"),
+    /// as the server it selects `webrtc`. A peer that sends or answers no ALPN connects all
+    /// the same, taken as `webrtc` (section 2). The engine never selects `c-webrtc` as the
+    /// server: it cannot promise the media confidentiality that identifier stands for (a
+    /// client that requires it is refused with `no_application_protocol`, and section 2 has
+    /// such a client abort anyway).
+    /// [`RTCPeerConnection::dtls_application_protocol`](crate::peer_connection::RTCPeerConnection::dtls_application_protocol)
+    /// gives what was selected. `false` leaves the extension out.
+    pub fn with_dtls_alpn(mut self, alpn: bool) -> Self {
+        self.0.dtls_alpn_off = !alpn;
         self
     }
 

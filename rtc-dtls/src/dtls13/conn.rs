@@ -260,6 +260,8 @@ pub(crate) struct Conn13 {
     pub(crate) schedule: Option<KeySchedule>,
     pub(crate) transcript: Transcript,
     pub(crate) srtp_profile: SrtpProtectionProfile,
+    /// The application protocol ALPN selected (RFC 7301), if either side used it.
+    pub(crate) application_protocol: Option<String>,
     pub(crate) peer_certificates: Vec<Vec<u8>>,
     pub(crate) server_name: String,
     pub(crate) client_random: Vec<u8>,
@@ -428,6 +430,7 @@ impl Conn13 {
             schedule: None,
             transcript: Transcript::default(),
             srtp_profile: SrtpProtectionProfile::Unsupported,
+            application_protocol: None,
             peer_certificates: vec![],
             server_name: String::new(),
             client_random: vec![],
