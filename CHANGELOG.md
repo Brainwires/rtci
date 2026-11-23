@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: `SettingEngineBuilder::with_msid_appdata_change_renews_track`
+  (`conf/jsep-69-msid-appdata`, jsep17). RFC 8830 section 3's form: a remote description that
+  names a new msid-appdata ends the receiver's track and gives it a new one with a `track`
+  event. Off by default (W3C webrtc-pc 5.3: one track per receiver). RFC8830-3-6 is
+  `conflict`.
+
 - **audit**: small JSEP rows (`conf/jsep-64-small-rows`, jsep17). No engine change.
   - RFC8851-6.3-6 and RFC9429-3.6.2-2 are `n/a` (coordinator decision): they bind the encoder,
     which is the application's; the engine's part of each stays tested. RFC7496-3.2-2 is
