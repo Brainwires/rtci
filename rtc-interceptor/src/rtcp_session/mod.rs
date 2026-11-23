@@ -256,6 +256,7 @@ pub struct RtcpSessionBuilder {
     report_from_every_ssrc: bool,
     immediate_congestion_feedback: bool,
     joins_on_start: bool,
+    first_report_at_join: bool,
     random: Box<dyn RtcpRandom>,
 }
 
@@ -274,6 +275,7 @@ impl Default for RtcpSessionBuilder {
             report_from_every_ssrc: false,
             immediate_congestion_feedback: true,
             joins_on_start: false,
+            first_report_at_join: false,
             random: Box::new(ThreadRandom),
         }
     }
@@ -393,6 +395,20 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// Whether the first compound packet goes out when the session joins (`true`), or after
+    /// the initial interval of RFC 3550 section 6.2 (`false`, the default).
+    ///
+    /// RFC 8834 section 4.1, with RFC 3550 section 6.2 as RFC 8108 updates it: "The delay
+    /// before sending the initial compound RTCP packet can be set to zero." A peer connection
+    /// joins a transport's session when its keys exist, and reporting then tells the peer the
+    /// endpoint's SSRCs at once (RFC 3550 section 8.2: an SSRC collision is found from the
+    /// first packet that shows it) and starts the round-trip and loss reports congestion
+    /// control reads.
+    pub fn with_first_report_at_join(mut self, at_join: bool) -> Self {
+        self.first_report_at_join = at_join;
+        self
+    }
+
     /// The source of the session's random numbers; a test supplies one that repeats.
     pub fn with_random(mut self, random: impl RtcpRandom + 'static) -> Self {
         self.random = Box::new(random);
@@ -430,6 +446,7 @@ impl RtcpSessionBuilder {
             report_from_every_ssrc: template.report_from_every_ssrc,
             immediate_congestion_feedback: template.immediate_congestion_feedback,
             joins_on_start: template.joins_on_start,
+            first_report_at_join: template.first_report_at_join,
             random: Box::new(random.clone()),
         };
         let first = make(&template).build();
@@ -457,6 +474,7 @@ impl RtcpSessionBuilder {
             random: self.random,
 
             joins_on_start: self.joins_on_start,
+            first_report_at_join: self.first_report_at_join,
             start_given: false,
             started: false,
             left: false,
@@ -701,6 +719,8 @@ pub struct RtcpSessionInterceptor {
 
     /// [`RtcpSessionBuilder::with_joins_on_start`].
     joins_on_start: bool,
+    /// [`RtcpSessionBuilder::with_first_report_at_join`].
+    first_report_at_join: bool,
     /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
     start_given: bool,
     started: bool,
@@ -1201,6 +1221,7 @@ impl RtcpSessionInterceptor {
             return;
         }
         self.sync_reporter();
+        let joining = !self.started;
         if !self.started {
             self.started = true;
             // RFC 3550 6.3.2: avg_rtcp_size starts at the probable size of the first packet:
@@ -1216,8 +1237,12 @@ impl RtcpSessionInterceptor {
         }
         for index in 0..self.locals.len() {
             if self.locals[index].timing.is_none() && self.locals[index].participates() {
-                let t = self.interval(index, now);
-                self.locals[index].timing = Some(Timing::new(now, t));
+                self.locals[index].timing = Some(if joining && self.first_report_at_join {
+                    Timing::immediate(now)
+                } else {
+                    let t = self.interval(index, now);
+                    Timing::new(now, t)
+                });
             }
         }
         self.flush_departing(now);
@@ -2253,7 +2278,7 @@ impl RtcpSessionInterceptor {
             // catches up with the expiries it would have suppressed.
             let tc = timing.tn;
             let t = self.interval(index, tc);
-            if !timing.reconsider(tc, t) {
+            if !timing.immediate && !timing.reconsider(tc, t) {
                 self.locals[index].timing = Some(timing);
                 self.pmembers = self.member_count().max(1);
                 continue;

@@ -3889,6 +3889,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
   `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
   lossy-link run takes another course now (no RTCP on its data-only connection).
+- **rtc**: after the RTCP session moved to joining per transport, its first report waited the
+  initial interval of RFC 3550 section 6.2 after the join (it had gone at DTLS-up before, from a
+  timer the negotiation had armed): a peer that heard the other's media before any report
+  resolved an SSRC collision alone, so the other never learnt of it
+  (`rtcp_session_rtc2rtc::a_sender_moves_to_a_new_ssrc_after_a_collision` failed in 6 of 8
+  runs of train 9), and the reports congestion control reads came later
+  (`the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends`). The sessions the
+  peer connection installs send the first compound packet when they join, which RFC 8834
+  section 4.1 allows ("the delay before sending the initial compound RTCP packet can be set to
+  zero", RFC 8108); `RtcpSessionBuilder::with_first_report_at_join` is the setting. Test:
+  `rtcp_session_joins_on_start.rs::the_first_report_leaves_when_the_session_joins`.
 - **sctp**: in Fast Recovery, a SACK that advanced the Cumulative TSN Ack Point and brought a
   chunk to its third miss indication sent it at once in a packet that ignored cwnd. RFC 9260
   section 7.2.4 step 3 is "If not in Fast Recovery": during one the chunk is marked for
