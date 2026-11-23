@@ -801,10 +801,7 @@ impl RTCRtpSender<'_> {
             .peer_connection
             .setting_engine
             .unnegotiated_header_extensions;
-        let one_ssrc_across_clock_rates = self
-            .peer_connection
-            .setting_engine
-            .one_ssrc_across_clock_rates;
+        let ssrc_per_clock_rate = self.peer_connection.setting_engine.ssrc_per_clock_rate;
         let negotiated_header_extensions = self.peer_connection.rtp_transceivers[self.id.0]
             .negotiated_header_extensions()
             .to_vec();
@@ -844,8 +841,8 @@ impl RTCRtpSender<'_> {
         // SSRC of a rate it returns to). Comfort noise and telephone events ride the stream
         // as they are (RFC 4733 section 2.5.1.2 puts the events in the stream's numbering); a
         // payload type that is not negotiated is sent as the encoding's codec, below.
-        // `with_ssrc_per_clock_rate(false)` keeps one SSRC.
-        if from_application && !one_ssrc_across_clock_rates {
+        // Only with `with_ssrc_per_clock_rate(true)`: by default one SSRC.
+        if from_application && ssrc_per_clock_rate {
             let stream_ssrc = packet.header.ssrc;
             let chosen = sender
                 .get_send_codecs()

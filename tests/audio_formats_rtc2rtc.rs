@@ -7,6 +7,7 @@ use rtc::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPa
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -18,8 +19,12 @@ use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtcp::goodbye::Goodbye;
 use rtc::rtcp::sender_report::SenderReport;
 use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+};
+use rtc::rtp_transceiver::{
+    RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
+};
 use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use rtc::shared::marshal::Unmarshal;
@@ -109,7 +114,7 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str) -> Result<Self> {
+    fn new(addr: &str, ssrc_per_clock_rate: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let tap = Tap::default();
@@ -124,6 +129,11 @@ impl Peer {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_ssrc_per_clock_rate(ssrc_per_clock_rate)
+                    .build(),
+            )
             .with_interceptor_registry(registry)
             .build(Instant::now())?;
         Ok(Self {
@@ -248,8 +258,28 @@ impl World {
         kind: RtpCodecKind,
         edit: impl Fn(String) -> String,
     ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(kind, edit, false)
+    }
+
+    /// [`Self::connected`], the sender built with `with_ssrc_per_clock_rate(true)`: the RFC
+    /// 7160 section 4.1 form.
+    fn connected_ssrc_per_clock_rate(
+        kind: RtpCodecKind,
+        edit: impl Fn(String) -> String,
+    ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with(kind, edit, true)
+    }
+
+    fn connected_with(
+        kind: RtpCodecKind,
+        edit: impl Fn(String) -> String,
+        ssrc_per_clock_rate: bool,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
-            peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
+            peers: [
+                Peer::new("10.0.0.1:5000", ssrc_per_clock_rate)?,
+                Peer::new("10.0.0.2:5000", ssrc_per_clock_rate)?,
+            ],
             now: Instant::now(),
             wire: Vec::new(),
         };
@@ -403,6 +433,46 @@ fn every_negotiated_format_is_received_at_any_time() -> Result<()> {
     Ok(())
 }
 
+/// By default a stream keeps its SSRC across clock rates (RFC 7160 section 4.1's SSRC per
+/// clock rate is the setting `with_ssrc_per_clock_rate(true)`): libwebrtc's receivers
+/// (Chromium, WebKit) keep the track on the signalled SSRC and stop counting packets at a
+/// switch to a new one. Opus, PCMU, PCMA and Opus again go out on one SSRC, no BYE is sent,
+/// and the receiver reads every packet.
+#[test]
+fn by_default_a_stream_keeps_one_ssrc_across_clock_rates() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let sent = [111u8, 111, 0, 8, 111, 0];
+    for (seq, pt) in sent.iter().enumerate() {
+        world.send(sender, seq as u16 + 1, *pt)?;
+    }
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+    let ssrcs = wire_ssrcs(&world);
+    assert_eq!(ssrcs.len(), sent.len(), "{ssrcs:?}");
+    let distinct: HashSet<u32> = ssrcs.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "one SSRC for every clock rate: {ssrcs:?}"
+    );
+    let tap = world.peers[0].tap.lock().expect("tap");
+    let goodbyes = tap
+        .rtcp
+        .iter()
+        .flat_map(|(_, packets)| packets)
+        .filter(|packet| packet.as_any().is::<Goodbye>())
+        .count();
+    assert_eq!(goodbyes, 0, "no BYE while the stream is sent");
+    drop(tap);
+    let received: Vec<u8> = world.peers[1]
+        .read_rtp
+        .iter()
+        .map(|h| h.payload_type)
+        .collect();
+    assert_eq!(received, sent, "every packet, in order");
+    Ok(())
+}
+
 /// The RTP SSRC of each packet the first peer put on the wire, in order.
 fn wire_ssrcs(world: &World) -> Vec<u32> {
     world.wire.iter().map(|header| header.ssrc).collect()
@@ -413,10 +483,10 @@ fn wire_ssrcs(world: &World) -> Vec<u32> {
 /// switches back to a value already seen in the RTP stream." Opus (48 kHz), PCMU and PCMA
 /// (8 kHz), Opus and PCMU again on one audio sender: four SSRCs, PCMA on PCMU's; each return
 /// to a rate says BYE for the SSRC that used it before; the receiving application gets every
-/// packet, in order, on its one track.
+/// packet, in order, on its one track. The RFC form is `with_ssrc_per_clock_rate(true)`.
 #[test]
 fn each_clock_rate_is_sent_with_an_ssrc_of_its_own() -> Result<()> {
-    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let (mut world, sender) = World::connected_ssrc_per_clock_rate(RtpCodecKind::Audio, |sdp| sdp)?;
     let sent = [111u8, 111, 0, 8, 111, 0];
     for (seq, pt) in sent.iter().enumerate() {
         world.send(sender, seq as u16 + 1, *pt)?;
@@ -485,7 +555,7 @@ fn each_clock_rate_is_sent_with_an_ssrc_of_its_own() -> Result<()> {
 /// PCMU SSRC's sender report, and the Opus SSRC's follows it.
 #[test]
 fn after_a_clock_rate_switch_the_sender_reports_lead_with_the_current_rate() -> Result<()> {
-    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let (mut world, sender) = World::connected_ssrc_per_clock_rate(RtpCodecKind::Audio, |sdp| sdp)?;
     for seq in 1..=5 {
         world.send(sender, seq, 111)?;
     }
@@ -519,5 +589,105 @@ fn after_a_clock_rate_switch_the_sender_reports_lead_with_the_current_rate() -> 
         vec![pcmu, opus],
         "the current clock rate's sender report first, the other one's behind it"
     );
+    Ok(())
+}
+
+/// The payload type a sender's parameters give `mime`.
+fn send_payload_type(pc: &mut RTCPeerConnection, sender: RTCRtpSenderId, mime: &str) -> Option<u8> {
+    pc.rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .iter()
+        .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(mime))
+        .map(|c| c.payload_type)
+}
+
+/// W3C webrtc 4.4.1.4 / 5.4: `setCodecPreferences` names formats (the capabilities it takes
+/// them from carry no payload type) and does not set the codecs a sender sends with; only
+/// negotiation does. A sender whose transceiver has preferences reads, before the answer, the
+/// payload types the engine gives those formats in its offer (Opus 111, PCMU 0, PCMA 8), never
+/// the 0 every preference carries; after negotiation, new preferences leave the negotiated
+/// codecs alone until the next answer. (An application that took Opus's number from the
+/// parameters before the answer otherwise sent Opus as PCMU: the browser interop matrix's
+/// clock-rate cells with Rust offering.)
+#[test]
+fn codec_preferences_do_not_renumber_the_formats_a_sender_sends() -> Result<()> {
+    let mut pc = Peer::new("10.0.0.1:5000", false)?.pc;
+    let transceiver = pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            }],
+        }),
+    )?;
+    let sender = pc
+        .rtp_transceiver(transceiver)
+        .and_then(|t| t.sender())
+        .expect("a sendonly transceiver has a sender");
+    let preferences = |pc: &mut RTCPeerConnection, mimes: &[&str]| -> Vec<RTCRtpCodecParameters> {
+        let capabilities = pc
+            .rtp_sender(sender)
+            .and_then(|s| s.get_capabilities(RtpCodecKind::Audio))
+            .map(|c| c.codecs)
+            .unwrap_or_default();
+        mimes
+            .iter()
+            .flat_map(|mime| {
+                capabilities
+                    .iter()
+                    .filter(|c| c.mime_type.eq_ignore_ascii_case(mime))
+                    .map(|rtp_codec| RTCRtpCodecParameters {
+                        rtp_codec: rtp_codec.clone(),
+                        payload_type: 0,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let wanted = preferences(&mut pc, &["audio/opus", "audio/PCMU", "audio/PCMA"]);
+    pc.rtp_transceiver(transceiver)
+        .expect("transceiver")
+        .set_codec_preferences(wanted)?;
+    assert_eq!(
+        (
+            send_payload_type(&mut pc, sender, "audio/opus"),
+            send_payload_type(&mut pc, sender, "audio/PCMU"),
+            send_payload_type(&mut pc, sender, "audio/PCMA"),
+        ),
+        (Some(111), Some(0), Some(8)),
+        "before the answer: the engine's numbers for the preferred formats"
+    );
+
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let negotiated = send_payload_type(&mut world.peers[0].pc, sender, "audio/opus");
+    assert_eq!(negotiated, Some(111));
+    let transceiver = RTCRtpTransceiverId::from(sender);
+    let pcmu_first = preferences(&mut world.peers[0].pc, &["audio/PCMU", "audio/opus"]);
+    world.peers[0]
+        .pc
+        .rtp_transceiver(transceiver)
+        .expect("transceiver")
+        .set_codec_preferences(pcmu_first)?;
+    assert_eq!(
+        send_payload_type(&mut world.peers[0].pc, sender, "audio/opus"),
+        Some(111),
+        "negotiated: the preferences wait for the next negotiation"
+    );
+    let first = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .first()
+        .map(|c| c.rtp_codec.mime_type.to_ascii_lowercase());
+    assert_eq!(first.as_deref(), Some("audio/opus"), "the negotiated order");
     Ok(())
 }

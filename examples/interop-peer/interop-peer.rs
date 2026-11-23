@@ -18,8 +18,9 @@
 //!   Each SSRC's sequence numbers run on across the switches (RFC 3550 5.1), and the tone's
 //!   timestamps across a switch between the two G.711 laws.
 //!
-//! The WebSocket URL's query `?ssrc_per_clock_rate=0` builds the peer connection with
-//! `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` (one SSRC across clock rates).
+//! The WebSocket URL's query `?ssrc_per_clock_rate=1` builds the peer connection with
+//! `SettingEngineBuilder::with_ssrc_per_clock_rate(true)` (RFC 7160 section 4.1: a new SSRC
+//! per clock rate); without it, the engine's default (one SSRC across clock rates).
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -121,16 +122,16 @@ async fn main() -> Result<()> {
         let (stream, from) = listener.accept().await?;
         let (ip, dir) = (cli.ice_ip, cli.media_dir.clone());
         tokio::spawn(async move {
-            let mut ssrc_per_clock_rate = true;
+            let mut ssrc_per_clock_rate = false;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
             #[allow(clippy::result_large_err)]
             let options = |request: &Request, response: Response| {
-                ssrc_per_clock_rate = !request
+                ssrc_per_clock_rate = request
                     .uri()
                     .query()
                     .unwrap_or_default()
                     .split('&')
-                    .any(|pair| pair == "ssrc_per_clock_rate=0");
+                    .any(|pair| pair == "ssrc_per_clock_rate=1");
                 Ok::<_, ErrorResponse>(response)
             };
             match tokio_tungstenite::accept_hdr_async(stream, options).await {
@@ -1379,6 +1380,9 @@ impl Session {
                     if let Some(wire) = wire {
                         p.header.ssrc = wire;
                     }
+                    // The number the parameters give the format now: the packetizer was made
+                    // with the one they gave when the first frame went out.
+                    p.header.payload_type = pt;
                     renumber(&mut o.next_sequence, &mut p);
                     let _ = s.write_rtp(now, p);
                 }
