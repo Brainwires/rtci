@@ -326,8 +326,9 @@ pub struct Association {
     max_receive_message_size: u32,
     /// See [`TransportConfig::with_zero_window_overcommit`].
     zero_window_overcommit: bool,
-    /// See [`TransportConfig::with_strict_zero_window_drop`].
-    strict_zero_window_drop: bool,
+    /// The partial delivery point (RFC 6458 8.1.21): see
+    /// [`TransportConfig::with_partial_delivery_point`].
+    partial_delivery_point: u32,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -568,6 +569,9 @@ pub struct Association {
     reassembly_bytes: usize,
     /// Streams whose reassembly queue holds a readable message.
     readable_streams: FxHashSet<StreamId>,
+    /// Streams with no readable message whose reassembly queue has part of a message to give
+    /// [`Stream::read_part`] (RFC 9260 6.9), each announced once with `StreamEvent::Readable`.
+    part_readable_streams: FxHashSet<StreamId>,
     /// Streams whose reassembly queue holds anything at all; the only ones a FORWARD TSN can
     /// change.
     streams_with_data: FxHashSet<StreamId>,
@@ -612,7 +616,7 @@ impl Default for Association {
             max_message_size: 0,
             max_receive_message_size: 0,
             zero_window_overcommit: false,
-            strict_zero_window_drop: false,
+            partial_delivery_point: 1,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -740,6 +744,7 @@ impl Default for Association {
             streams_lost_in_restart: vec![],
             reassembly_bytes: 0,
             readable_streams: FxHashSet::default(),
+            part_readable_streams: FxHashSet::default(),
             streams_with_data: FxHashSet::default(),
 
             events: VecDeque::default(),
@@ -802,7 +807,7 @@ impl Association {
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
             zero_window_overcommit: config.zero_window_overcommit(),
-            strict_zero_window_drop: config.strict_zero_window_drop(),
+            partial_delivery_point: config.partial_delivery_point(),
             transport_config: Some(config.clone()),
             my_max_num_outbound_streams: config.max_num_outbound_streams(),
             my_max_num_inbound_streams: config.max_num_inbound_streams(),
@@ -3572,23 +3577,14 @@ impl Association {
                     //
                     // RFC 9260 6.2: once the window has been advertised as closed, a new DATA
                     // chunk above the largest TSN received MUST be dropped; the escape then
-                    // needs `TransportConfig::with_zero_window_overcommit`.
-                    //
-                    // With user message interleaving (I-DATA) negotiated it is taken whatever
-                    // the setting. Several part-received messages, each smaller than the
-                    // buffer, can fill it together with none of them complete, so no
-                    // message size makes the buffer large enough; RFC 8260 section 6 has the
-                    // receiver provide "a reassembly buffer for each incoming stream". The
-                    // sender's zero window probes finish one message at a time, so the
-                    // headroom of one message below is enough.
-                    // `TransportConfig::with_strict_zero_window_drop` restores the drop in
-                    // every case.
+                    // needs `TransportConfig::with_zero_window_overcommit`. An application
+                    // that reads in parts (`Stream::read_part`, RFC 9260 6.9) needs no
+                    // escape: a buffer full of incomplete messages is given out in parts
+                    // (`partial_delivery_threshold`), and the window opens again.
                     let window_advertised_closed = self.last_advertised_window == 0;
                     let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
                         && !self.has_readable_data()
-                        && (!window_advertised_closed
-                            || (!self.strict_zero_window_drop
-                                && (self.zero_window_overcommit || self.use_interleaving)));
+                        && (!window_advertised_closed || self.zero_window_overcommit);
 
                     // Either kind may take the receiver past `max_receive_buffer_size`, which
                     // is what lets a message larger than the buffer be reassembled at all. But
@@ -3666,6 +3662,8 @@ impl Association {
                 self.deliver_to_stream(d);
             }
         }
+        // A chunk taken may have used the buffer up; one dropped arrives while it is.
+        self.offer_partial_delivery();
 
         self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
     }
@@ -4644,14 +4642,29 @@ impl Association {
     /// Every change to a reassembly queue goes through here, so the receive window and
     /// "is anything readable" cost the same however many streams the peer opened.
     pub(crate) fn reindex_stream(&mut self, id: StreamId, bytes_before: usize) {
-        let (bytes_after, readable, holds_data) = match self.streams.get(&id) {
+        let (bytes_after, readable, holds_data, aborted) = match self.streams.get_mut(&id) {
             Some(s) => (
                 s.get_num_bytes_in_reassembly_queue(),
                 s.reassembly_queue.is_readable(),
                 !s.reassembly_queue.is_empty(),
+                s.reassembly_queue.take_partial_abort(),
             ),
-            None => (0, false, false),
+            None => (0, false, false, None),
         };
+        // RFC 6458 6.1.7, SCTP_PARTIAL_DELIVERY_ABORTED: "the user message gets abandoned
+        // using PR-SCTP while the partial delivery of this message is going on".
+        if let Some(abort) = aborted {
+            debug!(
+                "[{}] partial delivery of message {} on stream {id} aborted",
+                self.side, abort.sequence
+            );
+            self.events
+                .push_back(Event::Stream(StreamEvent::PartialDeliveryAborted {
+                    id,
+                    unordered: abort.unordered,
+                    sequence: abort.sequence,
+                }));
+        }
         self.reassembly_bytes = self
             .reassembly_bytes
             .saturating_sub(bytes_before)
@@ -4665,6 +4678,61 @@ impl Association {
             self.streams_with_data.insert(id);
         } else {
             self.streams_with_data.remove(&id);
+        }
+        self.reindex_parts(id, readable);
+    }
+
+    /// Brings `part_readable_streams` up to date for stream `id`, and announces a stream
+    /// that has just come to hold part of a message to read (and nothing readable whole,
+    /// which `StreamEvent::Readable` is raised for where the message completes).
+    fn reindex_parts(&mut self, id: StreamId, readable: bool) {
+        let threshold = self.partial_delivery_threshold();
+        let parts = !readable
+            && self
+                .streams
+                .get(&id)
+                .is_some_and(|s| s.reassembly_queue.part_readable(threshold));
+        if parts {
+            if self.part_readable_streams.insert(id) {
+                self.events
+                    .push_back(Event::Stream(StreamEvent::Readable { id }));
+            }
+        } else {
+            self.part_readable_streams.remove(&id);
+        }
+    }
+
+    /// RFC 9260 6.9: "If the data receiver runs out of buffer space while still waiting for
+    /// more fragments to complete the reassembly of the message, it SHOULD dispatch part of
+    /// its inbound message through a partial delivery API". Out of space is a window that
+    /// would be advertised as closed (6.2, silly window avoidance included) with no message
+    /// readable whole; then the first fragments of a message are given out whatever their
+    /// size. Otherwise a message starts partial delivery at the partial delivery point
+    /// (RFC 6458 8.1.21).
+    pub(crate) fn partial_delivery_threshold(&self) -> usize {
+        if self.advertised_window() == 0 && !self.has_readable_data() {
+            1
+        } else {
+            self.partial_delivery_point.max(1) as usize
+        }
+    }
+
+    /// The receive buffer may have run out of space: every stream that holds the first
+    /// fragments of a message is announced, so the application can take them in parts.
+    pub(crate) fn offer_partial_delivery(&mut self) {
+        if self.partial_delivery_threshold() > 1 || self.partial_delivery_point <= 1 {
+            return;
+        }
+        let candidates: Vec<StreamId> = self
+            .streams_with_data
+            .iter()
+            .copied()
+            .filter(|id| {
+                !self.readable_streams.contains(id) && !self.part_readable_streams.contains(id)
+            })
+            .collect();
+        for id in candidates {
+            self.reindex_parts(id, false);
         }
     }
 
