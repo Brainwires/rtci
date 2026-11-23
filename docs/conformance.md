@@ -186,9 +186,10 @@ rejected section's transport released at once, and three transports on one local
 unique credentials) are tested; transport counters are per transport.
 Left: a section moved out of a group by this side's offer (RFC
 9143 7.5.2-1; no API asks for it), several transports on one 5-tuple (impossible once DTLS
-runs) or on one socket with shared credentials (use `with_unique_transport_credentials`), and
-the congestion controller, pacer, probing and RTCP session (interval, reduced-size session
-flag) per transport: one interceptor chain serves every transport (size L).
+runs) or on one socket with shared credentials (use `with_unique_transport_credentials`). The
+RTCP session, transport-wide numbering, congestion controller and pacer are per transport since
+the media stack's `PerRtpSession` (`conf/media-11-train-fixes`, merged at mt-8); bandwidth
+probing per transport is not asserted by a test yet (size S).
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts
