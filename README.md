@@ -415,6 +415,9 @@ over SRTP and is subject to none of SCTP's flow control.
   verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
   `relayProtocol`; TURN over DTLS (RFC 7350) and over plain UDP on the application's socket as well (who gathers
   from `turn:` servers over UDP: `with_relay_gathering`)
+- ✅ **NAT-assisted candidates in the reference driver** - `rtc_stream_driver::nat_mapping` (opt-in, no dependency): a
+  PCP (RFC 6887) MAP request with a NAT-PMP (RFC 6886) fallback to the gateway the application names; the mapping is
+  added as a server-reflexive candidate with type preference 105 (RFC 6544 section 5.3)
 - ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first

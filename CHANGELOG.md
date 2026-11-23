@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ICE-TCP type preferences** (branch `conf/tcp-18-rows`, RFC 6544 section 4.2): a TCP
+  candidate's priority now uses its type's preference less one (host 125, peer-reflexive 109,
+  server-reflexive 99, relayed 0), as RFC 6544 recommends when UDP is preferred for RTP: a UDP
+  candidate outranks the TCP candidate of its type. `Candidate::type_preference` (rtc-ice,
+  new); `Candidate::priority` and `peer_reflexive_priority` change for TCP candidates.
+- **NAT-assisted candidates in the reference driver** (`conf/tcp-18-rows`, RFC 6544 section
+  5.3): `rtc_stream_driver::nat_mapping` (opt-in, no new dependency): `map_port` asks the
+  gateway with PCP (RFC 6887 MAP) and falls back to NAT-PMP (RFC 6886); `candidate_line`
+  writes the mapping as a server-reflexive candidate with type preference 105.
+
 - **TURN over plain UDP run by the engine** (branch `conf/tcp-17-udp-turn`; RFC 8656 sections
   3.9 and 7, RFC 8445 section 5.1.1.2). A `turn:` server over UDP of the configuration is now
   allocated on by the engine, per transport, from the transport's first UDP host candidate of

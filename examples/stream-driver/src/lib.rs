@@ -51,6 +51,12 @@
 //! one UDP port for many peer connections ([`sockets::UfragMux`]) and one passive ICE-TCP port
 //! for many ([`DriverConfig::shared_passive`], [`sockets::accept_by_ufrag`]).
 //!
+//! # NAT-assisted candidates
+//!
+//! [`nat_mapping`] (opt-in, no dependency) asks the gateway for a port mapping with PCP (RFC
+//! 6887), falling back to NAT-PMP (RFC 6886); the application adds the mapped address as a
+//! server-reflexive candidate ([`nat_mapping::candidate_line`], RFC 6544 section 5.3).
+//!
 //! # Features
 //!
 //! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
@@ -64,6 +70,7 @@
 
 #![warn(missing_docs)]
 
+pub mod nat_mapping;
 pub mod sockets;
 
 use shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId, StreamTransmit};
