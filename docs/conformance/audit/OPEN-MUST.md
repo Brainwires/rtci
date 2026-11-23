@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5000 of 5084 (98.3 %).
-- Tested as the default (`tested`): 4977 of 5084 (97.9 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
-- Open (not tested in any form): 84: 19 untested, 45 partial, 19 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4999 of 5084 (98.3 %).
+- Tested as the default (`tested`): 4976 of 5084 (97.9 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Open (not tested in any form): 85: 19 untested, 46 partial, 19 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 9 | 0 |
-| C | partly implemented | 40 | 16 |
+| C | partly implemented | 41 | 16 |
 | D | not implemented | 20 | 17 |
 | E | cannot be met or observed inside this engine | 18 | 11 |
 | F | stale note: already tested on this tree | 5 | 0 |
-| all | | 107 | 58 |
+| all | | 108 | 58 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 74 rows, 45 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 75 rows, 46 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,6 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
+| interceptors (cb-2) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | media (train 9) | 0 | 4 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
@@ -90,6 +91,7 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | As RFC8842-5.1-1, for the answer | M | dtls-srtp |
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
 | RFC5761-5.1.3-4 | `rfc5761.md` | ICE checks run for the RTP component only once multiplexing is agreed | untested | C | Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6 | S | ice |
+| RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form is the setting `CircuitBreakerPacketSize::LastFrames` with its own test; the default (s over the rate window) was chosen on measured evidence recorded in the row's note; convert to `setting` (class A) when RULES.md has a verdict for a measured default on this base | S | interceptors (cb-2) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
