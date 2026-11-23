@@ -484,6 +484,31 @@ impl RTCRtpTransceiver<'_> {
         self.peer_connection.rtp_transceivers[self.id].set_associable_with_remote_offer(associable);
     }
 
+    /// Where this transceiver's m= section goes in the BUNDLE groups of the next offers this
+    /// side makes (W3C webrtc-pc has no such member; a JSEP application needs it to use RFC
+    /// 9143 sections 7.5.1 and 7.5.2):
+    ///
+    /// - `Some(false)`: out of every group. The offer gives the section a transport of its own
+    ///   (its own candidates, which the application gathers for the entry
+    ///   [`ice_transport_sections`](crate::peer_connection::RTCPeerConnection::ice_transport_sections)
+    ///   then lists, and its own DTLS association), leaves its tag out of the group and does
+    ///   not mark it `a=bundle-only` (RFC 9143 section 7.5.2). Once the answer accepts it, the
+    ///   section stays on that transport.
+    /// - `Some(true)`: in the first BUNDLE group (section 7.5.1); an answer that accepts it
+    ///   there closes its transport.
+    /// - `None` (the default): where the most recent answer put it (RFC 9429 section 5.2.2).
+    ///
+    /// It takes effect at the next `create_offer`; the application starts that negotiation.
+    /// Answers follow the remote offer's groups whatever this says.
+    pub fn set_bundle_request(&mut self, request: Option<bool>) {
+        self.peer_connection.rtp_transceivers[self.id].set_bundle_request(request);
+    }
+
+    /// What [`Self::set_bundle_request`] last set.
+    pub fn bundle_request(&self) -> Option<bool> {
+        self.peer_connection.rtp_transceivers[self.id].bundle_request()
+    }
+
     /// Marks this transceiver as touched by W3C `addTrack`: a rollback of the remote offer that
     /// created it keeps it (RFC 9429, Section 5.7). For a caller that attaches the track itself,
     /// to a transceiver that already has a sender.

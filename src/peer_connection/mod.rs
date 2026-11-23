@@ -3804,43 +3804,10 @@ impl RTCPeerConnection {
         {
             return Err(Error::ErrModifyingPeerIdentity);
         }
-        // The certificates are those of the constructor, one for one: the same list, the same
-        // certificates in the same order ("the same ECMAScript object": the same certificate
-        // and expiry).
-        if configuration.certificates.len() != self.configuration.certificates.len()
-            || configuration
-                .certificates
-                .iter()
-                .zip(&self.configuration.certificates)
-                .any(|(new, old)| new != old || new.expires != old.expires)
-        {
-            return Err(Error::ErrModifyingCertificates);
-        }
-        if configuration.bundle_policy != self.configuration.bundle_policy {
-            return Err(Error::ErrModifyingBundlePolicy);
-        }
-        if configuration.rtcp_mux_policy != self.configuration.rtcp_mux_policy {
-            return Err(Error::ErrModifyingRTCPMuxPolicy);
-        }
-        // webrtc-extensions 10.2 and 13.2: neither policy changes after construction.
-        if configuration.rtp_header_encryption_policy
-            != self.configuration.rtp_header_encryption_policy
-            || configuration.always_negotiate_data_channels
-                != self.configuration.always_negotiate_data_channels
-        {
-            return Err(Error::InvalidModificationError);
-        }
-        if configuration.ice_candidate_pool_size != self.configuration.ice_candidate_pool_size
-            && self.local_description_was_set
-        {
-            return Err(Error::ErrModifyingICECandidatePoolSize);
-        }
+        // W3C "set the configuration": the checks the constructor runs too (webrtc-pc
+        // 4.4.1.1-9), with the members that cannot change compared with the connection's.
         configuration
-            .ice_servers
-            .truncate(configuration::MAX_ICE_SERVERS);
-        for server in &configuration.ice_servers {
-            server.validate()?;
-        }
+            .set_the_configuration(Some(&self.configuration), self.local_description_was_set)?;
 
         // Every check passed: the configuration is stored, and the ICE agent's transport
         // setting follows; candidates already added stay, and the new setting applies from
@@ -4623,8 +4590,14 @@ impl RTCPeerConnection {
     /// refuses to protect more with the key and the DTLS transport fails. The peer must take a
     /// new association on a transport that has one, which an `rtc` peer does; browsers ignore
     /// the new `tls-id`.
+    ///
+    /// With several transports (sections outside a BUNDLE group, several groups) every
+    /// transport takes a new association: each writes its own new `tls-id` in its sections
+    /// and runs its own handshake when the answer is applied.
     pub fn renew_dtls_association(&mut self) {
-        self.dtls_transport_mut().renewal_requested = true;
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.dtls_transport_mut().renewal_requested = true);
+        }
         self.ice_credentials_to_replace = self.local_ice_ufrags();
         self.trigger_negotiation_needed();
     }

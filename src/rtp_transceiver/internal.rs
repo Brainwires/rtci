@@ -70,6 +70,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// that tells the two kinds apart clears it with
     /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
     associable_with_remote_offer: bool,
+    /// Where the application wants this transceiver's m= section in the next offer's BUNDLE
+    /// groups: `Some(false)` out of every group, with a transport of its own (RFC 9143 section
+    /// 7.5.2), `Some(true)` in the first group (section 7.5.1), `None` where the most recent
+    /// answer put it (RFC 9429 section 5.2.2).
+    bundle_request: Option<bool>,
     /// webrtc-extensions `[[HeaderExtensionsToNegotiate]]`. `None` until the application or
     /// an answer sets it: the media engine's extensions for the kind, each in the direction
     /// it was registered for (`header_extension_control::default_to_negotiate`).
@@ -150,6 +155,7 @@ impl RTCRtpTransceiverInternal {
             used_to_send: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
+            bundle_request: None,
             header_extensions_to_negotiate: None,
             use_sframe: None,
             remote_sframe: false,
@@ -201,6 +207,14 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_associable_with_remote_offer(&mut self, associable: bool) {
         self.associable_with_remote_offer = associable;
+    }
+
+    pub(crate) fn bundle_request(&self) -> Option<bool> {
+        self.bundle_request
+    }
+
+    pub(crate) fn set_bundle_request(&mut self, request: Option<bool>) {
+        self.bundle_request = request;
     }
 
     /// The URIs of `[[HeaderExtensionsToNegotiate]]` that are not "stopped", what the media

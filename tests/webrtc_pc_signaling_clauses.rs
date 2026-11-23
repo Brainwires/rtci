@@ -142,6 +142,91 @@ fn an_expired_certificate_is_refused() -> TestResult {
     Ok(())
 }
 
+/// W3C 4.4.1.1 step "set the configuration" (webrtc-pc 4.4.1.1-9): the constructor runs the
+/// validation `setConfiguration` runs, so each configuration below is refused by both with the
+/// same error, or accepted by both, and both keep at most 32 ICE servers.
+#[test]
+fn the_constructor_validates_the_configuration_as_set_configuration_does() -> TestResult {
+    use rtc::peer_connection::configuration::RTCIceServer;
+    let server = |urls: &[&str], username: &str, credential: &str| RTCIceServer {
+        urls: urls.iter().map(|url| (*url).to_owned()).collect(),
+        username: username.to_owned(),
+        credential: credential.to_owned(),
+    };
+    let cases: Vec<(&str, Vec<RTCIceServer>)> = vec![
+        (
+            "a STUN url",
+            vec![server(&["stun:stun.example.org"], "", "")],
+        ),
+        ("no url", vec![server(&[], "", "")]),
+        (
+            "a query on a STUN url",
+            vec![server(&["stun:stun.example.org?transport=udp"], "", "")],
+        ),
+        (
+            "an unknown scheme",
+            vec![server(&["http:example.org"], "", "")],
+        ),
+        (
+            "a hierarchical url",
+            vec![server(&["stun://stun.example.org"], "", "")],
+        ),
+        (
+            "a TURN url without credentials",
+            vec![server(&["turn:turn.example.org"], "", "")],
+        ),
+        (
+            "a TURN url with a query other than transport",
+            vec![server(&["turn:turn.example.org?foo=bar"], "user", "pass")],
+        ),
+        (
+            "a TURN url with credentials",
+            vec![server(
+                &["turn:turn.example.org?transport=tcp"],
+                "user",
+                "pass",
+            )],
+        ),
+    ];
+    for (what, servers) in cases {
+        let configuration = || {
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(servers.clone())
+                .build()
+        };
+        let constructed = RTCPeerConnectionBuilder::new()
+            .with_configuration(configuration())
+            .build(Instant::now())
+            .map(|_| ());
+        let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+        let set = pc.set_configuration(configuration());
+        assert_eq!(
+            format!("{constructed:?}"),
+            format!("{set:?}"),
+            "{what}: the constructor and setConfiguration agree"
+        );
+    }
+    let many: Vec<RTCIceServer> = (0..40)
+        .map(|i| server(&[&format!("stun:stun{i}.example.org")], "", ""))
+        .collect();
+    let pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(many.clone())
+                .build(),
+        )
+        .build(Instant::now())?;
+    assert_eq!(pc.get_configuration().ice_servers().len(), 32);
+    let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+    pc.set_configuration(
+        RTCConfigurationBuilder::new()
+            .with_ice_servers(many)
+            .build(),
+    )?;
+    assert_eq!(pc.get_configuration().ice_servers().len(), 32);
+    Ok(())
+}
+
 /// W3C 4.4.1.5 set a configuration: a different bundlePolicy or rtcpMuxPolicy is an
 /// InvalidModificationError; on a closed connection setConfiguration is an InvalidStateError.
 /// iceCandidatePoolSize is stored and returned (4.2.1).

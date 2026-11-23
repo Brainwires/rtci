@@ -2234,6 +2234,40 @@ impl BundleMode {
         }
     }
 
+    /// A subsequent offer with the application's requests applied
+    /// (`RTCRtpTransceiver::set_bundle_request`): the sections `out` leave their group and stay
+    /// outside every group (RFC 9143 section 7.5.2), the sections `into` outside every group
+    /// join the first one (section 7.5.1). A section is never moved from one group to another
+    /// (section 7.5.2-2). Answers are left as they are.
+    pub(crate) fn with_requests(self, out: &[String], into: &[String]) -> Self {
+        match self {
+            BundleMode::Offer {
+                mut groups,
+                mut answered,
+            } => {
+                for group in &mut groups {
+                    group.retain(|mid| !out.contains(mid));
+                }
+                for mid in out {
+                    if !answered.contains(mid) {
+                        answered.push(mid.clone());
+                    }
+                }
+                for mid in into {
+                    if groups.iter().any(|group| group.contains(mid)) {
+                        continue;
+                    }
+                    match groups.first_mut() {
+                        Some(first) => first.push(mid.clone()),
+                        None => groups.push(vec![mid.clone()]),
+                    }
+                }
+                BundleMode::Offer { groups, answered }
+            }
+            answer => answer,
+        }
+    }
+
     /// The group of the section `mid` in the description (an index into the groups it
     /// writes), or `None` for a section outside every group.
     fn group_of(&self, mid: &str) -> Option<usize> {

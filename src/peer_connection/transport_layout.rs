@@ -225,6 +225,7 @@ impl RTCPeerConnection {
         for id in transports.ids() {
             if id != default && self.pipeline_context.transports.mids_on(id).is_empty() {
                 log::debug!("transport {id:?} carries no m= section any more: closed");
+                self.with_transport(id, |pc| pc.announce_transport_closed());
                 if let Some(mut bundle) = self.pipeline_context.remove_transport(id) {
                     let _ = sansio::Protocol::close(
                         &mut bundle.ice_handler_context.ice_transport.agent,
@@ -473,7 +474,25 @@ impl RTCPeerConnection {
         // An initial BUNDLE offer (RFC 9143 section 2): no offer/answer exchange completed.
         let initial = self.is_initial_exchange();
         let transports = &self.pipeline_context.transports;
+        // RFC 9143 section 7.5.2: a section this offer moves out of its BUNDLE group (outside
+        // every group of `d` and on the transport of a section still in one) gets a transport
+        // of its own; the group keeps its transport.
+        let offered_groups = bundle_groups(d);
+        let grouped = |mid: &str| offered_groups.iter().any(|group| group.contains(&mid));
+        let on = |mid: &str| transports.transport_id_for(mid);
+        let moved_out = |mid: &str| {
+            !initial
+                && !grouped(mid)
+                && d.media_descriptions.iter().any(|m| {
+                    !is_rejected_media(m)
+                        && get_mid_value(m).is_some_and(|other| {
+                            other != mid && grouped(other) && on(other) == on(mid)
+                        })
+                })
+        };
         let mut groups: Vec<(Option<TransportId>, Vec<String>)> = vec![];
+        // The indexes in `groups` of the sections moved out, in order.
+        let mut moved: Vec<usize> = vec![];
         // The group a section without a transport of its own joins: the BUNDLE transport's.
         let mut bundle_group: Option<usize> = None;
         for m in &d.media_descriptions {
@@ -485,6 +504,7 @@ impl RTCPeerConnection {
             };
             let bundle_only = m.attribute(ATTR_KEY_BUNDLE_ONLY).is_some();
             let index = match transports.assignment(mid) {
+                _ if moved_out(mid) => None,
                 Some(id) => groups
                     .iter()
                     .position(|(on, _)| *on == Some(id))
@@ -504,8 +524,18 @@ impl RTCPeerConnection {
                 groups.len() - 1
             });
             groups[index].1.push(mid.clone());
-            bundle_group.get_or_insert(index);
+            if moved_out(mid) {
+                moved.push(index);
+            } else {
+                bundle_group.get_or_insert(index);
+            }
         }
+        // The sections moved out last: the group keeps the transport it has.
+        let mut moved_groups = vec![];
+        for index in moved.into_iter().rev() {
+            moved_groups.insert(0, groups.remove(index));
+        }
+        groups.extend(moved_groups);
         // The default transport's group first: it is the one the first section had.
         let default = transports.default_id();
         if let Some(index) = groups.iter().position(|(on, _)| *on == Some(default)) {

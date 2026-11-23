@@ -45,7 +45,7 @@ The rest of the evidence that the claims hold:
 |---|---|---|
 | D1 | ULPFEC (RFC 5109) | Implemented, opt-in, and not offered by default. `configure_ulpfec` adds the encoder and decoder for ULPFEC carried in RED (RFC 2198), the form browsers negotiate for video; the application registers `video/red` and `MIME_TYPE_ULP_FEC` and passes their payload types. The RED payload format (RFC 2198) is in `rtc-rtp` (`codec::red`); the engine uses it for that carriage only: it neither offers `red` for audio nor wraps or unwraps audio in it. A separate FEC RTP session (RFC 5109 14.1) is not expressible over one transport. |
 | D1 | ULPFEC (RFC 5109) | Not offered by default: nothing encodes or decodes it. `MIME_TYPE_ULP_FEC` stays, and an application with its own coder registers it explicitly. RED is not implemented. |
-| D2 | `bundle_policy` | A section outside a BUNDLE group has a transport of its own (mt-2): a remote offer without a group, or with sections outside it, is answered with a transport per such section, and `max-compat` offers a transport per section; an answer that bundles them closes all but the tagged section's. The policy decides what an initial offer marks `a=bundle-only` and which sections of an offer without a BUNDLE group are answered (RFC 9429 4.1.1; `balanced` is the default; `must-bundle` is a policy; `max-bundle`, which W3C webrtc-pc 4.2.5 still defines, is that policy too, unless `with_max_bundle_as_must_bundle(false)` has it ignored as the RFC's SHOULD says). Still one transport: a `balanced` offer (its first section of each type shares the BUNDLE transport's credentials) and several BUNDLE groups. |
+| D2 | `bundle_policy` | A section outside a BUNDLE group has a transport of its own (mt-2): a remote offer without a group, or with sections outside it, is answered with a transport per such section, and `max-compat` offers a transport per section; an answer that bundles them closes all but the tagged section's. The policy decides what an initial offer marks `a=bundle-only` and which sections of an offer without a BUNDLE group are answered (RFC 9429 4.1.1; `balanced` is the default; `must-bundle` is a policy; `max-bundle`, which W3C webrtc-pc 4.2.5 still defines, is that policy too, unless `with_max_bundle_as_must_bundle(false)` has it ignored as the RFC's SHOULD says). A `balanced` initial offer gives the first section of each media type a transport (mt-5), each BUNDLE group is one (mt-6); the transports share the first one's ICE credentials unless `with_unique_transport_credentials(true)` (mt-7), also on one shared local socket (mt-9). |
 | D3 | `SettingEngine` options with no effect in a sans-I/O engine (`receive_mtu`, `include_loopback_candidate`, `disable_media_engine_copy`) | `#[deprecated]` with the reason; no option is silently a no-op. `nat_1to1_ips` and `disable_media_engine_multiple_codecs` are implemented. |
 | D4 | FlexFEC draft-03 (`video/flexfec-03`) where libwebrtc departs from the draft's letter | The engine follows libwebrtc, the only draft-03 peer: mask bit j names the packet SN base + j (the draft's text says SN base + j + 1; RFC 8627 4.2.2.1 later wrote down what libwebrtc does), and the coder answers to the subtype `flexfec-03` only (the draft registers `flexfec`, which now means RFC 8627 and selects that coder). Both are pinned by tests (`mask_bit_j_names_sn_base_plus_j_as_libwebrtc_sends_it`, `the_mime_type_match_is_exact`). |
 
@@ -174,8 +174,7 @@ form; Pion and webrtc-rs 0.17 refuse a description whose sections differ, so the
 default offer of mt-5 did not reach them); `with_unique_transport_credentials(true)` is RFC
 9429 5.2.1's unique credentials, and the multi-transport tests run both. An end-of-candidates
 that names no section ends every transport's gathering, so a single-socket application
-completes. Routing on a shared port by the ICE username (stream-transport stack) needs the
-unique credentials.
+completes. (Routing on a shared port then needed the unique credentials; mt-9 below.)
 Done (mt-8): ICE restart and DTLS per transport (`stage_ice_restart_on_every_transport`,
 `apply_staged_ice_restarts`, `defer_other_remote_transports`, `PendingRemoteTransport::
 other_restarts`): `restart_ice` restarts all, a remote offer restarts the transports whose
@@ -185,12 +184,60 @@ tables in `transport_set.rs`), consent per transport shown rtc-to-rtc. Sections 
 group (the transport discarded) and out of one (a transport of its own) by a remote offer, a
 rejected section's transport released at once, and three transports on one local socket (with
 unique credentials) are tested; transport counters are per transport.
-Left: a section moved out of a group by this side's offer (RFC
-9143 7.5.2-1; no API asks for it), several transports on one 5-tuple (impossible once DTLS
-runs) or on one socket with shared credentials (use `with_unique_transport_credentials`). The
-RTCP session, transport-wide numbering, congestion controller and pacer are per transport since
-the media stack's `PerRtpSession` (`conf/media-11-train-fixes`, merged at mt-8); bandwidth
-probing per transport is not asserted by a test yet (size S).
+Done (mt-9): several transports on one local socket with the default (shared) credentials.
+The receiver's ufrag of a Binding request names every transport then, so a datagram that
+arrives on a local address several transports gathered on goes to the first of these rules
+that leaves one transport (`TransportSet::route`, `src/peer_connection/handler/transport_set.rs`):
+
+1. a Binding request: the transports whose local ufrag is the receiver's part of the USERNAME
+   and whose remote ufrag, once known, is the sender's part (RFC 8445 section 7.2.2; a peer
+   with credentials of its own per transport is told apart here, as is any peer by unique
+   local credentials);
+2. the transport that sent on this 5-tuple, or read a request on it that a rule settled
+   (every datagram a transport writes on a shared address is recorded,
+   `TransportSet::learn_path`; a 5-tuple two transports claim decides nothing);
+3. the transport that knows the sender as a remote candidate (signalled with its section's
+   `sdpMid`, or peer-reflexive from a check it answered);
+4. a Binding request: the transport an earlier request with the same tie-breaker
+   (ICE-CONTROLLING / ICE-CONTROLLED) was routed to, when the remote's agents have one each
+   (an `rtc` peer; a browser has one per connection, and a tie-breaker two transports saw
+   decides nothing).
+
+A Binding request none of these settles (shared credentials, from an address no transport has
+signalled, sent to or answered) goes to no transport: answered by the wrong one it would give
+that transport a peer-reflexive candidate on another transport's path, and the two would
+connect crossed. It is dropped, and the remote's retransmission (RFC 8445 section 14.3) is
+routed once a candidate has been signalled or a check sent on the path. Anything else none of
+the rules settles goes to the default transport, as before. A remote that sends every check
+from addresses it never signals (all of them peer-reflexive, behind an address-dependent NAT)
+to transports that share credentials and one local socket cannot be told apart by anything a
+datagram carries: with such a peer, use `with_unique_transport_credentials(true)` or a socket
+per transport. Tests: `transport_set.rs`
+(`a_port_shared_with_shared_credentials_is_routed_by_username_path_candidate_and_tie_breaker`)
+and `tests/multi_transport_rtc2rtc.rs::three_transports_share_one_port_with_shared_credentials_through_the_drivers_mux`
+(three transports on one port behind the reference driver's `UfragMux`, the remote's
+candidates arriving late, no transport on another's path).
+Done (mt-9) too: this side moving a section out of a BUNDLE group and back
+(`RTCRtpTransceiver::set_bundle_request`, RFC 9143 sections 7.5.1 and 7.5.2: the next offer
+leaves the tag out of the group, without `a=bundle-only`, and gives the section a transport of
+its own; `plan_offer_transports` keeps the group's transport for the group); bandwidth probing
+per transport (`each_transport_probes_its_own_path`, which found the NACK responder filling
+every transport's probe clusters on one transport's RTX stream, fixed); `renew_dtls_association`,
+which the security stack's automatic re-keying calls, renews every transport's association,
+each writing its own new `a=tls-id` and running its own handshake; the transports an answer leaves unused fire "closed" at their DTLS and
+ICE transports (W3C 4.4.1.6).
+Left: several transports on one 5-tuple (impossible once DTLS runs), the remote of the
+paragraph above, an ICE-TCP connection accepted on a passive port several transports share
+when both sides share their credentials and the remote's tie-breakers have not been seen on a
+datagram path (only a check whose full USERNAME, or whose tie-breaker, names one transport ties
+a connection to it, `route_named`: such a port needs `with_unique_transport_credentials(true)`
+on one side; `a_shared_passive_port_with_shared_credentials_is_tied_by_the_full_username_or_tie_breaker`), moving the data section out of a group (the API is per transceiver), and the
+"closed" events of a connection all of whose sections are rejected (one transport, which the
+engine keeps for the next offer). With the security stack's renewal (`conf/sec-11-auto-rekey`, which also restarts ICE) RTP of
+every transport flows under the new keys (`renewing_the_dtls_association_renews_every_transport`,
+mt-10); without it, media after a renewal was lost when this side offered as DTLS server. The RTCP session, transport-wide numbering, congestion
+controller and pacer are per transport since the media stack's `PerRtpSession`
+(`conf/media-11-train-fixes`, merged at mt-8).
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts
