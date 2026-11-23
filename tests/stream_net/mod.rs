@@ -44,6 +44,8 @@ pub struct Peer {
     pub udp: SocketAddr,
     pub events: Vec<RTCPeerConnectionEvent>,
     pub received: Vec<Vec<u8>>,
+    /// The SSRC of each RTP packet read.
+    pub rtp_ssrcs: Vec<u32>,
     pub channel_open: Option<RTCDataChannelId>,
     /// Candidates to trickle to the other peer.
     pub outbox: Vec<RTCIceCandidateInit>,
@@ -61,6 +63,7 @@ impl Peer {
             udp: SocketAddr::new(ip, 4000),
             events: vec![],
             received: vec![],
+            rtp_ssrcs: vec![],
             channel_open: None,
             outbox: vec![],
             commands: vec![],
@@ -142,6 +145,9 @@ pub struct Net {
     /// Connection requests to a listener that is not bound with reuse (a passive one) are
     /// refused.
     pub refuse_plain_listeners: bool,
+    /// Every passive listener asked for on port 0 gets this port, as `rtc-stream-driver`'s
+    /// shared passive port: the last one asked for is the listener accepts are reported on.
+    pub shared_passive_port: Option<u16>,
     pub rng: XorShift,
     pub listeners: BTreeMap<SocketAddr, (usize, ListenerId, bool)>,
     pub conns: Vec<Conn>,
@@ -169,6 +175,7 @@ impl Net {
             udp: false,
             refused: vec![],
             refuse_plain_listeners: false,
+            shared_passive_port: None,
             rng: XorShift(0x9e37_79b9_7f4a_7c15),
             listeners: BTreeMap::new(),
             conns: vec![],
@@ -233,7 +240,12 @@ impl Net {
                 local,
                 reuse_address,
             } => {
-                let port = if local.port() == 0 {
+                let port = if local.port() == 0
+                    && !reuse_address
+                    && let Some(shared) = self.shared_passive_port
+                {
+                    shared
+                } else if local.port() == 0 {
                     let p = self.next_port.entry(local.ip()).or_insert(5000);
                     *p += 1;
                     *p
@@ -407,8 +419,10 @@ impl Net {
                 peer.events.push(event);
             }
             while let Some(message) = peer.pc.poll_read() {
-                if let RTCMessage::DataChannelMessage(_, m) = message.message {
-                    peer.received.push(m.data.to_vec());
+                match message.message {
+                    RTCMessage::DataChannelMessage(_, m) => peer.received.push(m.data.to_vec()),
+                    RTCMessage::RtpPacket(_, packet) => peer.rtp_ssrcs.push(packet.header.ssrc),
+                    _ => {}
                 }
             }
         }

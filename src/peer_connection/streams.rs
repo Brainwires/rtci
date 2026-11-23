@@ -16,7 +16,10 @@
 //! application), as before.
 
 use super::RTCPeerConnection;
+use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::state::RTCIceGatheringState;
+use crate::peer_connection::transport::RTCIceCandidateInit;
+use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use bytes::BytesMut;
 use ice::TransportError;
 use ice::candidate::{CandidateConfig, CandidateType, candidate_host::CandidateHostConfig};
@@ -29,7 +32,7 @@ use shared::stream::{
     StreamOrigin, StreamState, StreamTable, StreamTransmit,
 };
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
@@ -81,8 +84,10 @@ struct GatherListener {
     failed: bool,
 }
 
-/// The TCP candidates of one local address.
+/// The TCP candidates of one local address of one transport (RFC 9429 section 5.2.1: each
+/// transport gathers its own).
 struct TcpGather {
+    transport: TransportId,
     ip: IpAddr,
     listeners: Vec<GatherListener>,
     active_added: bool,
@@ -111,8 +116,13 @@ pub(crate) struct EngineStreams {
     active_connections: HashSet<StreamId>,
     /// Connections that have delivered a message.
     answered: HashSet<StreamId>,
-    /// End of gathering was signalled while listeners were still being bound.
-    end_of_gathering_deferred: bool,
+    /// The transport each ICE-TCP connection carries: the one whose check opened it, the
+    /// one whose listener accepted it, or (a listening port shared by several transports)
+    /// the one its first Binding request names.
+    connection_transport: HashMap<StreamId, TransportId>,
+    /// The transports whose end of gathering was signalled while their listeners or TURN
+    /// allocations were still being made.
+    end_of_gathering_deferred: HashSet<TransportId>,
     /// Writes for an engine candidate that no connection could take.
     pub(crate) unroutable: u64,
     /// The TURN-over-stream links.
@@ -131,7 +141,8 @@ impl EngineStreams {
             bound: HashSet::new(),
             active_connections: HashSet::new(),
             answered: HashSet::new(),
-            end_of_gathering_deferred: false,
+            connection_transport: HashMap::new(),
+            end_of_gathering_deferred: HashSet::new(),
             unroutable: 0,
         }
     }
@@ -142,8 +153,29 @@ impl EngineStreams {
             || self.bound.contains(&local)
     }
 
-    fn pending_listeners(&self) -> bool {
-        self.gathers.iter().any(TcpGather::pending)
+    /// Whether a listener of `transport` is still being bound.
+    fn pending_listeners(&self, transport: TransportId) -> bool {
+        self.gathers
+            .iter()
+            .any(|g| g.transport == transport && g.pending())
+    }
+
+    /// The transport whose listener `listener` is, when no other transport's listener has
+    /// the same address (a port the driver shares between transports).
+    fn transport_of_listener(&self, listener: ListenerId) -> Option<TransportId> {
+        let (gather, bound) = self.gathers.iter().find_map(|g| {
+            g.listeners
+                .iter()
+                .find(|l| l.id == listener)
+                .map(|l| (g, l.bound))
+        })?;
+        let shared = bound.is_some_and(|bound| {
+            self.gathers.iter().any(|other| {
+                other.transport != gather.transport
+                    && other.listeners.iter().any(|l| l.bound == Some(bound))
+            })
+        });
+        (!shared).then_some(gather.transport)
     }
 
     /// The local address the agent knows a connection by: an active candidate's (port 9) for
@@ -156,12 +188,25 @@ impl EngineStreams {
         }
     }
 
-    /// The connection for a datagram the agent sends from `local` to `remote`.
-    fn connection_for(&self, local: SocketAddr, remote: SocketAddr) -> Option<StreamId> {
+    /// The connection for a datagram the agent of `transport` sends from `local` to `remote`.
+    /// A connection known to carry another transport is not it.
+    fn connection_for(
+        &self,
+        local: SocketAddr,
+        remote: SocketAddr,
+        transport: TransportId,
+    ) -> Option<StreamId> {
         let active = local.port() == ACTIVE_PORT && self.active.contains(&local.ip());
         let mut connecting = None;
         for c in self.table.connections() {
             if c.tag != ICE_TCP || c.remote != remote || c.state == StreamState::Closing {
+                continue;
+            }
+            if self
+                .connection_transport
+                .get(&c.id)
+                .is_some_and(|t| *t != transport)
+            {
                 continue;
             }
             let fits = if active {
@@ -203,6 +248,7 @@ impl RTCPeerConnection {
     /// of `streams` for who owns what.
     pub fn poll_stream_command(&mut self) -> Option<StreamCommand> {
         self.streams.driver_seen = true;
+        self.release_removed_transports();
         self.start_turn_links();
         self.route_stream_writes();
         self.close_unused_tcp_connections();
@@ -249,6 +295,11 @@ impl RTCPeerConnection {
         }
         let id = self.streams.table.accept(listener, local, remote);
         trace!("accepted {id:?} on {listener} from {remote}");
+        if let Some(id) = id
+            && let Some(transport) = self.streams.transport_of_listener(listener)
+        {
+            self.streams.connection_transport.insert(id, transport);
+        }
         id
     }
 
@@ -259,7 +310,6 @@ impl RTCPeerConnection {
     /// [`Error::ErrUnknownStream`]; the connection's stream is not of its framing or its
     /// layer failed (the connection is then reset).
     pub fn handle_stream_read(&mut self, now: Instant, id: StreamId, data: &[u8]) -> Result<()> {
-        use sansio::Protocol;
         self.streams.driver_seen = true;
         self.pipeline_context.observe(now);
         let info = self.streams.table.info(id).ok_or(Error::ErrUnknownStream)?;
@@ -285,23 +335,38 @@ impl RTCPeerConnection {
                 continue;
             };
             let transport = tcp_context(local, info.remote);
+            // The connection's transport; for one accepted on a port several transports
+            // share, the one its first check names (RFC 8445 section 7.2.2).
+            let on = match self.streams.connection_transport.get(&id) {
+                Some(on) => *on,
+                None => {
+                    let on = self.pipeline_context.transports.route(&transport, &message);
+                    self.streams.connection_transport.insert(id, on);
+                    on
+                }
+            };
             if !demultiplexable(first) {
                 debug!("{id}: a frame that is neither STUN, DTLS nor RTP: framing lost, reset");
                 self.streams.table.reset(id);
-                self.ice_transport_mut().agent.handle_transport_error(
-                    now,
-                    transport,
-                    TransportError::NotStun,
-                );
+                self.with_transport(on, |pc| {
+                    pc.ice_transport_mut().agent.handle_transport_error(
+                        now,
+                        transport,
+                        TransportError::NotStun,
+                    )
+                });
                 break;
             }
             let first_answer =
                 self.streams.answered.insert(id) && info.origin == StreamOrigin::Connected;
-            self.handle_read(TaggedBytesMut {
-                now,
-                transport,
-                message: BytesMut::from(&message[..]),
-            })?;
+            self.read_on_transport(
+                on,
+                TaggedBytesMut {
+                    now,
+                    transport,
+                    message: BytesMut::from(&message[..]),
+                },
+            );
             // RFC 6544 section 7.1: on a connection this agent opened, a first answer that is
             // not STUN closes it (the agent has failed the pairs of that remote candidate).
             if first_answer && first > 3 {
@@ -328,13 +393,36 @@ impl RTCPeerConnection {
             .clone()
     }
 
+    /// The ICE username fragment of every transport of the connection, the default one's
+    /// first: a connection with sections outside a BUNDLE group has a transport, with its
+    /// own ufrag, per section or group (RFC 9429 section 5.2.1). A driver that shares a port
+    /// between peer connections registers each of them for this connection; the engine then
+    /// gives what arrives on the shared port to the transport its checks name.
+    pub fn ice_username_fragments(&self) -> Vec<String> {
+        let default = self.pipeline_context.transports.default_id();
+        let mut ids = self.pipeline_context.transports.ids();
+        ids.sort_by_key(|id| *id != default);
+        ids.into_iter()
+            .map(|id| {
+                self.ice_transport_of(id)
+                    .agent
+                    .get_local_credentials()
+                    .ufrag
+                    .clone()
+            })
+            .collect()
+    }
+
     /// Requests the TCP candidates of the address of a UDP host candidate the application just
     /// added (`candidate_value`), or adds them again when they are bound already (a new ICE
     /// generation re-gathering the same addresses).
+    /// The candidate is of the active transport (the default one, or the one
+    /// [`Self::with_transport`] names), and so are its TCP candidates.
     pub(crate) fn gather_tcp_candidates(&mut self, candidate_value: &str) {
         if !self.streams.settings.tcp_candidates || self.is_closed() {
             return;
         }
+        let on = self.pipeline_context.transports.active_id();
         let Ok(candidate) = ice::candidate::unmarshal_candidate(candidate_value) else {
             return;
         };
@@ -359,7 +447,12 @@ impl RTCPeerConnection {
         if !accepted || (!types.is_empty() && !types.contains(&network)) {
             return;
         }
-        if let Some(gather) = self.streams.gathers.iter().find(|g| g.ip == ip) {
+        if let Some(gather) = self
+            .streams
+            .gathers
+            .iter()
+            .find(|g| g.transport == on && g.ip == ip)
+        {
             let bound: Vec<(SocketAddr, TcpType)> = gather
                 .listeners
                 .iter()
@@ -367,10 +460,14 @@ impl RTCPeerConnection {
                 .collect();
             let active = gather.active_added;
             for (addr, tcp_type) in bound {
-                self.add_engine_tcp_candidate(addr, tcp_type);
+                self.add_engine_tcp_candidate(on, addr, tcp_type);
             }
             if active {
-                self.add_engine_tcp_candidate(SocketAddr::new(ip, ACTIVE_PORT), TcpType::Active);
+                self.add_engine_tcp_candidate(
+                    on,
+                    SocketAddr::new(ip, ACTIVE_PORT),
+                    TcpType::Active,
+                );
             }
             return;
         }
@@ -396,26 +493,73 @@ impl RTCPeerConnection {
             });
         }
         self.streams.gathers.push(TcpGather {
+            transport: on,
             ip,
             listeners,
             active_added: false,
         });
     }
 
-    /// The end-of-gathering sentinel: held back while the engine's listeners are being bound
-    /// for a driver that serves them, so their candidates are not refused (RFC 8838 section
-    /// 13); given at once otherwise.
+    /// The end-of-gathering sentinel of the default transport: held back while the engine's
+    /// listeners are being bound for a driver that serves them, so their candidates are not
+    /// refused (RFC 8838 section 13); given at once otherwise.
     pub(crate) fn finish_local_gathering_after_streams(&mut self) {
-        if self.streams.driver_seen
-            && (self.streams.pending_listeners() || self.streams.turn.pending())
-        {
-            self.streams.end_of_gathering_deferred = true;
-        } else {
+        if !self.defer_end_of_gathering() {
             self.finish_local_gathering();
         }
     }
 
-    fn add_engine_tcp_candidate(&mut self, addr: SocketAddr, tcp_type: TcpType) {
+    /// Whether the end of gathering of the active transport waits for the engine's listeners
+    /// and TURN allocations of that transport; it is then given once they are settled
+    /// ([`Self::finish_deferred_gathering`]).
+    pub(crate) fn defer_end_of_gathering(&mut self) -> bool {
+        let on = self.pipeline_context.transports.active_id();
+        let wait = self.streams.driver_seen
+            && (self.streams.pending_listeners(on) || self.streams.turn.pending(on));
+        if wait {
+            self.streams.end_of_gathering_deferred.insert(on);
+        }
+        wait
+    }
+
+    /// Adds a candidate the engine gathered for `transport`: as the application's own on the
+    /// default transport, through that transport's path on another one.
+    pub(crate) fn add_engine_local_candidate(
+        &mut self,
+        transport: TransportId,
+        value: &str,
+        url: Option<&str>,
+        relay_protocol: Option<RTCIceServerTransportProtocol>,
+    ) -> Result<()> {
+        if self
+            .pipeline_context
+            .transports
+            .transport(transport)
+            .is_none()
+        {
+            return Ok(());
+        }
+        let default = self.pipeline_context.transports.default_id();
+        self.with_transport(transport, |pc| {
+            if transport == default {
+                pc.add_ice_local_candidate(value, url, relay_protocol)
+            } else {
+                pc.add_other_local_candidate(RTCIceCandidateInit {
+                    candidate: format!("candidate:{value}"),
+                    url: url.map(str::to_owned),
+                    relay_protocol,
+                    ..Default::default()
+                })
+            }
+        })
+    }
+
+    fn add_engine_tcp_candidate(
+        &mut self,
+        transport: TransportId,
+        addr: SocketAddr,
+        tcp_type: TcpType,
+    ) {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "tcp".to_owned(),
@@ -450,7 +594,7 @@ impl RTCPeerConnection {
                 self.streams.bound.insert(addr);
             }
         }
-        if let Err(err) = self.add_ice_local_candidate(&value, None, None) {
+        if let Err(err) = self.add_engine_local_candidate(transport, &value, None, None) {
             debug!("TCP candidate {addr} not added: {err}");
         }
     }
@@ -472,15 +616,19 @@ impl RTCPeerConnection {
                     {
                         if let Some(l) = gather.listeners.iter_mut().find(|l| l.id == listener) {
                             l.bound = Some(local);
-                            add.push((local, l.tcp_type));
+                            add.push((gather.transport, local, l.tcp_type));
                         }
                         if !gather.active_added {
                             gather.active_added = true;
-                            add.push((SocketAddr::new(gather.ip, ACTIVE_PORT), TcpType::Active));
+                            add.push((
+                                gather.transport,
+                                SocketAddr::new(gather.ip, ACTIVE_PORT),
+                                TcpType::Active,
+                            ));
                         }
                     }
-                    for (addr, tcp_type) in add {
-                        self.add_engine_tcp_candidate(addr, tcp_type);
+                    for (transport, addr, tcp_type) in add {
+                        self.add_engine_tcp_candidate(transport, addr, tcp_type);
                     }
                 }
                 StreamNotice::ListenFailed {
@@ -501,11 +649,12 @@ impl RTCPeerConnection {
                         // The active candidate needs no listener.
                         if !gather.active_added {
                             gather.active_added = true;
-                            active = Some(SocketAddr::new(gather.ip, ACTIVE_PORT));
+                            active =
+                                Some((gather.transport, SocketAddr::new(gather.ip, ACTIVE_PORT)));
                         }
                     }
-                    if let Some(addr) = active {
-                        self.add_engine_tcp_candidate(addr, TcpType::Active);
+                    if let Some((transport, addr)) = active {
+                        self.add_engine_tcp_candidate(transport, addr, TcpType::Active);
                     }
                 }
                 StreamNotice::ConnectFailed {
@@ -518,11 +667,7 @@ impl RTCPeerConnection {
                     let local = self.streams.agent_local(id, local);
                     self.streams.active_connections.remove(&id);
                     debug!("{id} from {local} to {remote} could not be established");
-                    self.ice_transport_mut().agent.handle_transport_error(
-                        now,
-                        tcp_context(local, remote),
-                        TransportError::ConnectionFailed,
-                    );
+                    self.stream_transport_error(id, tcp_context(local, remote));
                 }
                 StreamNotice::Closed {
                     id,
@@ -538,11 +683,7 @@ impl RTCPeerConnection {
                     // A check still waiting on it will not be answered there. A valid pair is
                     // left to consent: an active or simultaneous-open side reopens its
                     // connection with the next write (RFC 6544 section 11.1).
-                    self.ice_transport_mut().agent.handle_transport_error(
-                        now,
-                        tcp_context(local, remote),
-                        TransportError::ConnectionFailed,
-                    );
+                    self.stream_transport_error(id, tcp_context(local, remote));
                 }
                 StreamNotice::Connected {
                     id,
@@ -559,18 +700,85 @@ impl RTCPeerConnection {
         self.finish_deferred_gathering();
     }
 
-    /// The end of gathering held back for the engine's listeners and TURN allocations, once
-    /// they are all settled.
+    /// RFC 6544 section 7.1: a connection that failed or ended fails the checks waiting on it,
+    /// on the agent of its transport (every agent when it is not known yet: a pair of another
+    /// agent does not match the 5-tuple).
+    fn stream_transport_error(&mut self, id: StreamId, transport: TransportContext) {
+        let now = self.pipeline_context.now;
+        let on = match self.streams.connection_transport.remove(&id) {
+            Some(on) => vec![on],
+            None => self.pipeline_context.transports.ids(),
+        };
+        for t in on {
+            self.with_transport(t, |pc| {
+                pc.ice_transport_mut().agent.handle_transport_error(
+                    now,
+                    transport,
+                    TransportError::ConnectionFailed,
+                )
+            });
+        }
+    }
+
+    /// The ends of gathering held back for the engine's listeners and TURN allocations, each
+    /// once those of its transport are settled.
     pub(crate) fn finish_deferred_gathering(&mut self) {
-        if self.streams.end_of_gathering_deferred
-            && !self.streams.pending_listeners()
-            && !self.streams.turn.pending()
-        {
-            self.streams.end_of_gathering_deferred = false;
-            if self.ice_gathering_state() != RTCIceGatheringState::Complete {
-                self.finish_local_gathering();
+        let ready: Vec<TransportId> = self
+            .streams
+            .end_of_gathering_deferred
+            .iter()
+            .copied()
+            .filter(|t| !self.streams.pending_listeners(*t) && !self.streams.turn.pending(*t))
+            .collect();
+        for t in ready {
+            self.streams.end_of_gathering_deferred.remove(&t);
+            if self.pipeline_context.transports.transport(t).is_none() {
+                continue;
+            }
+            if t == self.pipeline_context.transports.default_id() {
+                self.with_transport(t, |pc| {
+                    if pc.ice_gathering_state() != RTCIceGatheringState::Complete {
+                        pc.finish_local_gathering();
+                    }
+                });
+            } else if let Err(err) = self.with_transport(t, |pc| {
+                pc.add_other_local_candidate(RTCIceCandidateInit::default())
+            }) {
+                debug!("end of gathering of {t:?}: {err}");
             }
         }
+    }
+
+    /// Stops the listeners and closes the connections of transports a description removed
+    /// (RFC 9143 section 7: a bundled section's own transport is released).
+    pub(crate) fn release_removed_transports(&mut self) {
+        let ids = self.pipeline_context.transports.ids();
+        let gone: Vec<ListenerId> = self
+            .streams
+            .gathers
+            .iter()
+            .filter(|g| !ids.contains(&g.transport))
+            .flat_map(|g| g.listeners.iter().map(|l| l.id))
+            .collect();
+        for listener in gone {
+            self.streams.table.stop_listening(listener);
+        }
+        self.streams.gathers.retain(|g| ids.contains(&g.transport));
+        self.streams
+            .end_of_gathering_deferred
+            .retain(|t| ids.contains(t));
+        let closed: Vec<StreamId> = self
+            .streams
+            .connection_transport
+            .iter()
+            .filter(|(_, t)| !ids.contains(t))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closed {
+            self.streams.connection_transport.remove(&id);
+            self.streams.table.close(id);
+        }
+        self.release_removed_turn_links();
     }
 
     /// Moves the queued datagrams for the engine's TCP candidates onto their connections.
@@ -602,13 +810,31 @@ impl RTCPeerConnection {
             self.send_via_turn(index, msg);
             return None;
         }
+        // Not known to come from one transport: the one its check names, or that knows the
+        // peer.
+        let on = self
+            .pipeline_context
+            .transports
+            .route_outbound(&msg.transport, &msg.message);
+        self.take_tcp_write(on, msg)
+    }
+
+    /// Takes `msg`, which the agent of `on` sends, when it leaves from an engine TCP
+    /// candidate: onto the connection of that transport (opened when an active or
+    /// simultaneous-open candidate needs one). Returns it otherwise.
+    pub(crate) fn take_tcp_write(
+        &mut self,
+        on: TransportId,
+        msg: TaggedBytesMut,
+    ) -> Option<TaggedBytesMut> {
+        let local = msg.transport.local_addr;
         if msg.transport.transport_protocol != TransportProtocol::TCP
             || !self.streams.manages(local)
         {
             return Some(msg);
         }
         let remote = msg.transport.peer_addr;
-        let id = match self.streams.connection_for(local, remote) {
+        let id = match self.streams.connection_for(local, remote, on) {
             Some(id) => Some(id),
             None if local.port() == ACTIVE_PORT && self.streams.active.contains(&local.ip()) => {
                 // RFC 6544 section 7.1: an active candidate opens its connection from that
@@ -623,6 +849,7 @@ impl RTCPeerConnection {
                 );
                 if let Ok(id) = id {
                     self.streams.active_connections.insert(id);
+                    self.streams.connection_transport.insert(id, on);
                 }
                 id.ok()
             }
@@ -635,10 +862,15 @@ impl RTCPeerConnection {
             {
                 // A simultaneous-open candidate connects from its own port (RFC 6544
                 // section 7.1), beside its listener.
-                self.streams
+                let id = self
+                    .streams
                     .table
                     .connect(local, remote, Framing::Rfc4571, ICE_TCP, true, None)
-                    .ok()
+                    .ok();
+                if let Some(id) = id {
+                    self.streams.connection_transport.insert(id, on);
+                }
+                id
             }
             // A passive candidate only answers on connections it accepted.
             None => None,
@@ -653,37 +885,57 @@ impl RTCPeerConnection {
     }
 
     /// RFC 6544 section 8: once ICE has completed, the connections that do not carry the
-    /// selected pair are closed.
+    /// selected pair are closed, for each transport on its own. A connection whose transport
+    /// is not known yet (accepted, nothing read) is closed once every transport has completed.
     fn close_unused_tcp_connections(&mut self) {
         if !self.streams.settings.close_unused_connections || self.is_closed() {
             return;
         }
-        let agent = &self.ice_transport().agent;
-        // Completed: a pair is selected (RFC 8445 section 6.1.2.1), and the agent has not failed.
-        if agent.get_selected_candidate_pair().is_none()
-            || agent.state() == ice::state::ConnectionState::Failed
-        {
+        let ids = self.pipeline_context.transports.ids();
+        let mut completed: Vec<(TransportId, Option<StreamId>)> = vec![];
+        for t in &ids {
+            let agent = &self.ice_transport_of(*t).agent;
+            // Completed: a pair is selected (RFC 8445 section 6.1.2.1), and the agent has not
+            // failed.
+            if agent.get_selected_candidate_pair().is_none()
+                || agent.state() == ice::state::ConnectionState::Failed
+            {
+                continue;
+            }
+            let Some(path) = agent.media_path() else {
+                continue;
+            };
+            let keep = if path.transport_protocol == TransportProtocol::TCP {
+                // The selected pair's connection is gone: the peer may be reopening it (RFC
+                // 6544 section 11.1), on a connection this side has not tied to the pair yet.
+                // Nothing of this transport is closed until the pair has one again.
+                match self
+                    .streams
+                    .connection_for(path.local_addr, path.peer_addr, *t)
+                {
+                    Some(id) => Some(id),
+                    None => continue,
+                }
+            } else {
+                None
+            };
+            completed.push((*t, keep));
+        }
+        if completed.is_empty() {
             return;
         }
-        let Some(path) = agent.media_path() else {
-            return;
-        };
-        let keep = if path.transport_protocol == TransportProtocol::TCP {
-            // The selected pair's connection is gone: the peer may be reopening it (RFC 6544
-            // section 11.1), on a connection this side has not tied to the pair yet. Nothing
-            // is closed until the pair has one again.
-            match self.streams.connection_for(path.local_addr, path.peer_addr) {
-                Some(id) => Some(id),
-                None => return,
-            }
-        } else {
-            None
-        };
+        let all = completed.len() == ids.len();
         let unused: Vec<StreamId> = self
             .streams
             .table
             .connections()
-            .filter(|c| c.tag == ICE_TCP && c.state != StreamState::Closing && Some(c.id) != keep)
+            .filter(|c| c.tag == ICE_TCP && c.state != StreamState::Closing)
+            .filter(|c| match self.streams.connection_transport.get(&c.id) {
+                Some(t) => completed
+                    .iter()
+                    .any(|(done, keep)| done == t && *keep != Some(c.id)),
+                None => all && !completed.iter().any(|(_, keep)| *keep == Some(c.id)),
+            })
             .map(|c| c.id)
             .collect();
         for id in unused {

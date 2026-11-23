@@ -579,3 +579,316 @@ fn nat_1to1_addresses_apply_to_the_engines_tcp_candidates() -> Result<()> {
     }
     Ok(())
 }
+
+/// The offerer under `max-compat` with an audio section and a data section, answered by a peer
+/// that does not bundle (the BUNDLE group is taken out of the offer): two transports on each
+/// side (RFC 9429 section 5.2.1). Each transport's UDP host candidate is added with its
+/// section, on a port of its own; UDP is blocked.
+fn negotiate_two_transports(
+    peers: &mut [Peer],
+    net: &Net,
+) -> Result<rtc::data_channel::RTCDataChannelId> {
+    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    let now = net.now;
+    peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![],
+        }),
+    )?;
+    let channel = peers[0].pc.create_data_channel("tcp", None)?.id();
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    let unbundled: String = offer
+        .sdp
+        .lines()
+        .filter(|l| !l.starts_with("a=group:BUNDLE"))
+        .map(|l| format!("{l}\r\n"))
+        .collect();
+    peers[1].pc.set_remote_description(
+        now,
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(unbundled)?,
+    )?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+    for p in peers.iter_mut() {
+        let sections = p.pc.ice_transport_sections();
+        assert_eq!(sections.len(), 2, "two transports: {sections:?}");
+        for (k, (mid, index)) in sections.into_iter().enumerate() {
+            p.pc.add_local_candidate(RTCIceCandidateInit {
+                candidate: format!(
+                    "candidate:{} 1 udp 2130706431 {} {} typ host",
+                    k + 1,
+                    p.ip,
+                    4000 + k
+                ),
+                sdp_mid: Some(mid),
+                sdp_mline_index: Some(index),
+                ..Default::default()
+            })?;
+        }
+    }
+    Ok(channel)
+}
+
+fn max_compat_peers(settings: impl Fn() -> SettingEngine) -> Result<Vec<Peer>> {
+    use rtc::peer_connection::configuration::RTCBundlePolicy;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    let mut peers = vec![];
+    for (i, policy) in [RTCBundlePolicy::MaxCompat, RTCBundlePolicy::Balanced]
+        .into_iter()
+        .enumerate()
+    {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_bundle_policy(policy)
+                    .build(),
+            )
+            .with_media_engine(media_engine)
+            .with_setting_engine(settings())
+            .build(Instant::now())?;
+        peers.push(Peer::new(pc, i));
+    }
+    Ok(peers)
+}
+
+/// The sdpMids the TCP candidates a peer announced name.
+fn tcp_candidate_mids(p: &Peer) -> std::collections::BTreeSet<String> {
+    p.events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(ev) => ev.candidate.as_ref(),
+            _ => None,
+        })
+        .filter(|c| !c.end_of_candidates)
+        .filter_map(|c| c.to_json().ok())
+        .filter(|init| init.candidate.contains(" tcp "))
+        .filter_map(|init| init.sdp_mid)
+        .collect()
+}
+
+/// RFC 6544 with RFC 9429 section 5.2.1: each transport of a connection gathers TCP
+/// candidates of its own (its own listeners, announced with its section) and its checks run
+/// on connections of its own; with UDP blocked both transports connect over TCP, so the
+/// connection (the aggregate of both) connects and the data channel on the second transport
+/// carries every message.
+#[test]
+fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() -> Result<()> {
+    let mut net = Net::new();
+    let mut peers = max_compat_peers(SettingEngine::default)?;
+    let channel = negotiate_two_transports(&mut peers, &net)?;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    for (i, p) in peers.iter().enumerate() {
+        assert!(p.connected(), "peer {i}: both transports connected");
+        assert_eq!(
+            tcp_candidate_mids(p).len(),
+            2,
+            "peer {i} announced TCP candidates for both sections"
+        );
+        let listens = p
+            .commands
+            .iter()
+            .filter(|c| matches!(c, StreamCommand::Listen { .. }))
+            .count();
+        assert_eq!(
+            listens, 4,
+            "peer {i}: a passive and a simultaneous-open listener per transport"
+        );
+        assert_eq!(p.pc.ice_username_fragments().len(), 2);
+    }
+    assert_eq!(net.tcp_writes_via_poll_write, 0);
+    Ok(())
+}
+
+/// A driver that shares one passive ICE-TCP port (`rtc-stream-driver`'s `shared_passive`)
+/// gives both transports' passive candidates the same address and reports every accept on
+/// one listener. The engine gives each accepted connection to the transport its first check
+/// names (RFC 8445 section 7.2.2) and answers on it; with simultaneous open off, every pair is
+/// active to passive, so both transports connect through the shared port.
+#[test]
+fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check() -> Result<()> {
+    let mut net = Net::new();
+    net.shared_passive_port = Some(7000);
+    let mut peers = max_compat_peers(|| {
+        SettingEngineBuilder::new()
+            .with_tcp_simultaneous_open(false)
+            .build()
+    })?;
+    let channel = negotiate_two_transports(&mut peers, &net)?;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    assert_eq!(peers[1].received, expected);
+    for (i, p) in peers.iter().enumerate() {
+        assert!(p.connected(), "peer {i}: both transports connected");
+        let passive: Vec<String> = p
+            .announced()
+            .into_iter()
+            .filter(|c| c.contains("tcptype passive"))
+            .collect();
+        assert_eq!(passive.len(), 2, "one per transport: {passive:?}");
+        assert!(
+            passive.iter().all(|c| c.contains(" 7000 typ host")),
+            "both on the shared port: {passive:?}"
+        );
+    }
+    Ok(())
+}
+
+/// RFC 4571 section 3: one direction of a framed TCP connection carries RTP of several SSRCs,
+/// and RTCP about several. Two senders (audio and video, bundled) on one ICE-TCP pair, UDP
+/// blocked: the receiver reads RTP of both SSRCs and has the sender reports of both (its
+/// remote-outbound-rtp statistics exist only once an SR for the SSRC arrived).
+#[test]
+fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
+    use bytes::Bytes;
+    use rtc::interceptor::Registry;
+    use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+    use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+
+    let mut net = Net::new();
+    let mut peers = vec![];
+    for i in 0..2 {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        let pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build(Instant::now())?;
+        peers.push(Peer::new(pc, i));
+    }
+    let mut senders = vec![];
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        let transceiver = peers[0].pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                }],
+            }),
+        )?;
+        senders.push(
+            peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sendonly transceiver has a sender"),
+        );
+    }
+    let now = net.now;
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    peers[1].pc.set_remote_description(now, offer)?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+    for p in peers.iter_mut() {
+        let c = udp_host(p);
+        p.pc.add_local_candidate(c)?;
+    }
+    let mut ssrcs = vec![];
+    let mut seq = 0u16;
+    let mut next_send = net.now;
+    while net.elapsed() < Duration::from_secs(30) {
+        net.step(&mut peers);
+        if peers[0].connected() && net.now >= next_send {
+            seq = seq.wrapping_add(1);
+            for sender in &senders {
+                let (ssrc, payload_type) = {
+                    let mut sender = peers[0].pc.rtp_sender(*sender).expect("sender");
+                    let parameters = sender.get_parameters();
+                    (
+                        parameters.encodings[0]
+                            .rtp_coding_parameters
+                            .ssrc
+                            .expect("an SSRC"),
+                        parameters.rtp_parameters.codecs[0].payload_type,
+                    )
+                };
+                if !ssrcs.contains(&ssrc) {
+                    ssrcs.push(ssrc);
+                }
+                let header = rtc::rtp::header::Header {
+                    version: 2,
+                    payload_type,
+                    sequence_number: seq,
+                    timestamp: u32::from(seq) * 960,
+                    ssrc,
+                    marker: true,
+                    ..Default::default()
+                };
+                peers[0].pc.rtp_sender(*sender).expect("sender").write_rtp(
+                    net.now,
+                    rtc::rtp::Packet {
+                        header,
+                        payload: Bytes::from(vec![0x10u8; 100]),
+                    },
+                )?;
+            }
+            next_send = net.now + Duration::from_millis(20);
+        }
+        if ssrcs.len() == 2 && ssrcs.iter().all(|s| peers[1].rtp_ssrcs.contains(s)) {
+            let report = peers[1].pc.get_stats(net.now, StatsSelector::None);
+            let reported: Vec<u32> = report
+                .iter()
+                .filter_map(|e| match e {
+                    RTCStatsReportEntry::RemoteOutboundRtp(s) => {
+                        Some(s.sent_rtp_stream_stats.rtp_stream_stats.ssrc)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if ssrcs.iter().all(|s| reported.contains(s)) {
+                let now = net.now;
+                for p in peers.iter_mut() {
+                    assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
+                }
+                assert_eq!(
+                    net.open_connections(),
+                    1,
+                    "everything on one TCP connection"
+                );
+                return Ok(());
+            }
+        }
+        net.advance(&mut peers);
+    }
+    bail!(
+        "not done: connected {}, RTP SSRCs read {:?} of {ssrcs:?}",
+        peers[0].connected(),
+        peers[1]
+            .rtp_ssrcs
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    )
+}

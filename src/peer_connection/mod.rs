@@ -256,10 +256,10 @@ mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
 pub(crate) mod streams;
+mod transport_layout;
 mod turn_streams;
 /// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
-mod transport_layout;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -1372,9 +1372,14 @@ impl RTCPeerConnection {
             // The local description lists the candidates gathered so far, and it is the one
             // the application sends: they are conveyed with it (RFC 8838 section 10).
             if sdp_type != RTCSdpType::Rollback {
-                self.ice_transport_mut()
-                    .agent
-                    .all_local_candidates_conveyed();
+                // Every transport's: the description lists the candidates of each.
+                for bundle in self.pipeline_context.transports.iter_mut() {
+                    bundle
+                        .ice_handler_context
+                        .ice_transport
+                        .agent
+                        .all_local_candidates_conveyed();
+                }
             }
         }
         applied

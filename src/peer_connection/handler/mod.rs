@@ -145,9 +145,18 @@ impl RTCPeerConnection {
             ..
         }) = &evt
         {
-            self.ice_transport_mut()
-                .agent
-                .local_candidate_conveyed(&candidate.id);
+            // The candidate is of the transport whose ufrag it carries (each transport has
+            // its own agent, RFC 9429 section 5.2.1).
+            let ufrag = candidate.username_fragment.clone();
+            for bundle in self.pipeline_context.transports.iter_mut() {
+                let agent = &mut bundle.ice_handler_context.ice_transport.agent;
+                if ufrag
+                    .as_ref()
+                    .is_none_or(|u| *u == agent.get_local_credentials().ufrag)
+                {
+                    agent.local_candidate_conveyed(&candidate.id);
+                }
+            }
         }
         evt
     }
@@ -413,14 +422,20 @@ impl RTCPeerConnection {
             }), [get_dtls_handler, get_ice_handler, get_demuxer_handler]);
             self.pipeline_context.transports.set_active(previous);
 
-            // Final poll write out to pipeline's write out
+            // Final poll write out to pipeline's write out; what leaves from one of the
+            // engine's ICE-TCP candidates goes onto that transport's connection instead.
             while let Some(msg) = wouts.pop_front() {
-                if let RTCMessageInternal::Raw(message) = msg.message {
-                    self.pipeline_context.write_outs.push_back(TaggedBytesMut {
-                        now: msg.now,
-                        transport: msg.transport,
-                        message,
-                    });
+                if let RTCMessageInternal::Raw(message) = msg.message
+                    && let Some(out) = self.take_tcp_write(
+                        id,
+                        TaggedBytesMut {
+                            now: msg.now,
+                            transport: msg.transport,
+                            message,
+                        },
+                    )
+                {
+                    self.pipeline_context.write_outs.push_back(out);
                 }
             }
         }
@@ -697,6 +712,19 @@ impl RTCPeerConnection {
     }
 }
 
+impl RTCPeerConnection {
+    /// Reads a datagram on the transport `id`, which the caller has already chosen (a stream
+    /// the engine knows the transport of, a relayed candidate's link).
+    pub(crate) fn read_on_transport(&mut self, id: TransportId, msg: TaggedBytesMut) {
+        let msg = TaggedRTCMessageInternal {
+            now: msg.now,
+            transport: msg.transport,
+            message: RTCMessageInternal::Raw(msg.message),
+        };
+        self.with_transport(id, |pc| pc.pump_reads(Some(msg)));
+    }
+}
+
 impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCPeerConnection {
     type Rout = TaggedRTCMessage;
     type Wout = TaggedBytesMut;
@@ -708,13 +736,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         self.pipeline_context.observe(msg.now);
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
         // transport per BUNDLE group or unbundled section) reads it.
-        let transport = self.pipeline_context.transports.route(&msg.transport);
-        let msg = TaggedRTCMessageInternal {
-            now: msg.now,
-            transport: msg.transport,
-            message: RTCMessageInternal::Raw(msg.message),
-        };
-        self.with_transport(transport, |pc| pc.pump_reads(Some(msg)));
+        let transport = self
+            .pipeline_context
+            .transports
+            .route(&msg.transport, &msg.message);
+        self.read_on_transport(transport, msg);
         Ok(())
     }
 

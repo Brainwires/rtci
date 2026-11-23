@@ -1,7 +1,7 @@
 //! One UDP port shared by two peer connections, as a server does it: both announce the same
 //! host candidate, and what arrives on the port goes to the connection the first Binding
 //! request from each remote address names by its ICE ufrag (`rtc-stream-driver`'s `UfragMux`,
-//! fed `RTCPeerConnection::ice_username_fragment`). Two remote peers connect, one to each, on
+//! fed `RTCPeerConnection::ice_username_fragments`). Two remote peers connect, one to each, on
 //! a virtual clock; nothing crosses between the sessions.
 
 use anyhow::{Result, bail};
@@ -77,7 +77,9 @@ fn two_peer_connections_share_one_udp_port_routed_by_ufrag() -> Result<()> {
             .pc
             .set_local_description(now, answer.clone())?;
         nodes[client].pc.set_remote_description(now, answer)?;
-        mux.register(&nodes[server].pc.ice_username_fragment(), server);
+        for ufrag in nodes[server].pc.ice_username_fragments() {
+            mux.register(&ufrag, server);
+        }
         for (a, b) in [(server, client), (client, server)] {
             let c = host(nodes[a].addr);
             nodes[a].pc.add_local_candidate(c.clone())?;

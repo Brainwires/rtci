@@ -3758,7 +3758,7 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
 /// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
 /// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
 /// TURN URL.
-fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
+pub(super) fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("turns:") {
         return RTCIceServerTransportProtocol::Tls;

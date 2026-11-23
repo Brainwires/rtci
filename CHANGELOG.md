@@ -1717,6 +1717,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **Stream transports per transport** (branch `conf/tcp-5-train-fixes`, with mt-2's several
+  transports per connection). Each transport gathers its own ICE-TCP candidates (its own
+  passive and simultaneous-open listeners and active candidate, announced with its section's
+  `sdpMid`) and its own TURN-over-TCP/TLS allocations, and holds back its own end of
+  gathering until they are settled (RFC 9429 section 5.2.1, RFC 6544, RFC 8656 3.1). Every
+  ICE-TCP connection carries one transport: the one whose check opened it, whose listener
+  accepted it, or, on a port several transports share, the one its first Binding request
+  names. A datagram arriving on a local address several transports gathered on (a driver's
+  shared UDP or ICE-TCP port) goes to the transport its Binding request's USERNAME names
+  (RFC 8445 section 7.2.2), then to the one that knows the sender. Removed transports' listeners,
+  connections and TURN links are released. New `RTCPeerConnection::ice_username_fragments` (every
+  transport's ufrag, for a driver's `UfragMux`); a relay candidate on a transport other than the
+  default one carries its `url` and `relayProtocol` as on the default one.
+  Fixed in the merge of ice-19 with mt-2: every transport's agent holds its local candidates
+  until they are conveyed, so a candidate's `OnIceCandidateEvent` and a local description now
+  convey it on the transport it belongs to (by its ufrag), not only on the default one; without
+  this a transport other than the default one never paired a candidate.
+
 - **turn, ice: STUN rows of the TURN client and ICE-TCP** (branch `conf/tcp-4-stun-turn-rows`).
   The TURN client's requests carry SOFTWARE `rtc-turn <version>` by default
   (`turn::client::DEFAULT_SOFTWARE`; an empty `ClientConfig::software` sends none, RFC 8489

@@ -82,7 +82,8 @@ pub struct DriverConfig {
     /// `reuse_address` is answered with this address and binds nothing; the application
     /// accepts on the shared listener ([`sockets::accept_by_ufrag`]) and hands each connection
     /// to the driver of the peer connection its first check names
-    /// ([`StreamDriver::adopt_shared`]).
+    /// ([`StreamDriver::adopt_shared`]). Every transport of the connection is answered with the
+    /// same address; the engine gives each connection to the transport its first check names.
     pub shared_passive: Option<SocketAddr>,
 }
 

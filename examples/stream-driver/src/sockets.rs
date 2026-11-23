@@ -6,8 +6,10 @@
 //! of a Binding request is `<receiver's ufrag>:<sender's ufrag>` (RFC 8445 section 7.2.2). The
 //! first request from a remote address says which peer connection it is for
 //! ([`UfragMux::route`]); everything else from that address follows it. Each peer connection
-//! registers its local ufrag (`RTCPeerConnection::ice_username_fragment`) after each local
-//! description, an ICE restart's new one included.
+//! registers its local ufrags (`RTCPeerConnection::ice_username_fragments`: one per transport,
+//! several when sections are not bundled) after each local description, an ICE restart's new
+//! ones included. Inside the peer connection the engine does the same between its transports:
+//! what the shared port brings goes to the transport whose ufrag the first check names.
 
 use std::collections::HashMap;
 use std::hash::Hash;

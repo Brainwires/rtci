@@ -14,6 +14,7 @@
 use super::RTCPeerConnection;
 use super::streams::{TURN, tcp_context};
 use super::turn_tls::{TlsLayer, TurnTlsConfig};
+use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::transport::ice::candidate::RTCIceServerTransportProtocol;
 use bytes::BytesMut;
 use ice::url::{ProtoType, SchemeType, Url};
@@ -22,7 +23,7 @@ use sansio::Protocol;
 use shared::stream::happy_eyeballs::{CONNECTION_ATTEMPT_DELAY, HappyEyeballs, sort_addresses};
 use shared::stream::{Framing, StreamId, StreamLayer};
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
@@ -45,6 +46,9 @@ enum LinkState {
 }
 
 pub(crate) struct TurnLink {
+    /// The transport the relayed candidate is gathered for: each transport allocates on its
+    /// own (RFC 9429 section 5.2.1).
+    transport: TransportId,
     url: Url,
     tls: bool,
     state: LinkState,
@@ -99,6 +103,10 @@ fn host_for_url(host: &str) -> String {
 
 /// The engine's TURN-over-stream links.
 pub(crate) struct EngineTurn {
+    /// The servers each transport allocates on: `turn:...?transport=tcp` and `turns:` URLs.
+    servers: Vec<Url>,
+    /// The transports whose links were made (once each, failed ones are not made again).
+    made_for: HashSet<TransportId>,
     links: Vec<TurnLink>,
     pub(crate) enabled: bool,
     tls: TurnTlsConfig,
@@ -108,7 +116,7 @@ pub(crate) struct EngineTurn {
 impl EngineTurn {
     /// The links of the `turn:...?transport=tcp` and `turns:` URLs among `urls`.
     pub(crate) fn new(urls: &[Url], enabled: bool, tls: TurnTlsConfig) -> Self {
-        let links = urls
+        let servers = urls
             .iter()
             // `turns:` over UDP is DTLS (RFC 7350 section 4), which this does not run: such a
             // server is left alone (its resolution "MUST stop with an error").
@@ -116,9 +124,29 @@ impl EngineTurn {
                 matches!(u.scheme, SchemeType::Turn | SchemeType::Turns)
                     && u.proto == ProtoType::Tcp
             })
-            .map(|u| TurnLink {
-                url: u.clone(),
-                tls: u.scheme == SchemeType::Turns,
+            .cloned()
+            .collect();
+        let tls_config = tls.client_config().ok().flatten();
+        Self {
+            servers,
+            made_for: HashSet::new(),
+            links: vec![],
+            enabled,
+            tls,
+            tls_config,
+        }
+    }
+
+    /// The links of `transport`, one per server, unless it has had them.
+    fn make_links(&mut self, transport: TransportId) {
+        if !self.made_for.insert(transport) {
+            return;
+        }
+        for url in &self.servers {
+            self.links.push(TurnLink {
+                transport,
+                url: url.clone(),
+                tls: url.scheme == SchemeType::Turns,
                 state: LinkState::Pending,
                 race: None,
                 attempts: vec![],
@@ -128,24 +156,17 @@ impl EngineTurn {
                 relay: None,
                 announced_ufrag: None,
                 held: HashMap::new(),
-            })
-            .collect();
-        let tls_config = tls.client_config().ok().flatten();
-        Self {
-            links,
-            enabled,
-            tls,
-            tls_config,
+            });
         }
     }
 
-    /// Whether a link is still on its way to a relayed candidate.
-    pub(crate) fn pending(&self) -> bool {
+    /// Whether a link of `transport` is still on its way to a relayed candidate.
+    pub(crate) fn pending(&self, transport: TransportId) -> bool {
         self.enabled
             && self
                 .links
                 .iter()
-                .any(|l| l.state != LinkState::Pending && !l.settled())
+                .any(|l| l.transport == transport && l.state != LinkState::Pending && !l.settled())
     }
 
     fn link_of_stream(&self, id: StreamId) -> Option<usize> {
@@ -184,6 +205,9 @@ impl RTCPeerConnection {
         if !self.streams.turn.enabled || self.is_closed() || self.local_description().is_none() {
             return;
         }
+        for transport in self.pipeline_context.transports.ids() {
+            self.streams.turn.make_links(transport);
+        }
         let now = self.pipeline_context.now;
         for index in 0..self.streams.turn.links.len() {
             let link = &mut self.streams.turn.links[index];
@@ -206,14 +230,20 @@ impl RTCPeerConnection {
             }
         }
         self.drive_turn_races(now);
-        let ufrag = self.ice_username_fragment();
         let again: Vec<usize> = self
             .streams
             .turn
             .links
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.relay.is_some() && l.announced_ufrag.as_deref() != Some(&ufrag))
+            .filter(|(_, l)| {
+                let ufrag = &self
+                    .ice_transport_of(l.transport)
+                    .agent
+                    .get_local_credentials()
+                    .ufrag;
+                l.relay.is_some() && l.announced_ufrag.as_ref() != Some(ufrag)
+            })
             .map(|(i, _)| i)
             .collect();
         for index in again {
@@ -451,7 +481,7 @@ impl RTCPeerConnection {
                     }
                     turn::client::Event::DataIndicationOrChannelData(_, peer, data) => {
                         if let Some(relay) = link.relay {
-                            inbound.push((relay, peer, data));
+                            inbound.push((link.transport, relay, peer, data));
                         }
                     }
                     _ => {}
@@ -475,17 +505,22 @@ impl RTCPeerConnection {
         for index in announce {
             self.announce_relay_candidate(index);
         }
-        for (relay, peer, data) in inbound {
-            let _ = self.handle_read(TaggedBytesMut {
-                now,
-                transport: TransportContext {
-                    local_addr: relay,
-                    peer_addr: peer,
-                    transport_protocol: TransportProtocol::UDP,
-                    ecn: None,
+        for (transport, relay, peer, data) in inbound {
+            // On the transport the relayed candidate is of.
+            self.pipeline_context.observe(now);
+            self.read_on_transport(
+                transport,
+                TaggedBytesMut {
+                    now,
+                    transport: TransportContext {
+                        local_addr: relay,
+                        peer_addr: peer,
+                        transport_protocol: TransportProtocol::UDP,
+                        ecn: None,
+                    },
+                    message: data,
                 },
-                message: data,
-            });
+            );
         }
         self.finish_deferred_gathering();
     }
@@ -495,7 +530,7 @@ impl RTCPeerConnection {
         let (Some(relay), Some(local)) = (link.relay, link.link_local) else {
             return;
         };
-        let (url, protocol) = (link.url_string(), link.protocol());
+        let (url, protocol, transport) = (link.url_string(), link.protocol(), link.transport);
         let candidate = ice::candidate::candidate_relay::CandidateRelayConfig {
             base_config: ice::candidate::CandidateConfig {
                 network: "udp".to_owned(),
@@ -517,10 +552,17 @@ impl RTCPeerConnection {
                     .strip_prefix("candidate:")
                     .unwrap_or(&init.candidate)
                     .to_owned();
-                if let Err(err) = self.add_ice_local_candidate(&value, Some(&url), Some(protocol)) {
+                if let Err(err) =
+                    self.add_engine_local_candidate(transport, &value, Some(&url), Some(protocol))
+                {
                     debug!("relayed candidate {relay} not added: {err}");
                 }
-                let ufrag = self.ice_username_fragment();
+                let ufrag = self
+                    .ice_transport_of(transport)
+                    .agent
+                    .get_local_credentials()
+                    .ufrag
+                    .clone();
                 self.streams.turn.links[index].announced_ufrag = Some(ufrag);
             }
             Err(err) => debug!("relayed candidate {relay} not made: {err}"),
@@ -554,6 +596,23 @@ impl RTCPeerConnection {
             Err(err) => debug!("TURN send to {peer}: {err}"),
         }
         self.pump_turn(now);
+    }
+
+    /// Drops the links of transports a description removed, and their connections.
+    pub(crate) fn release_removed_turn_links(&mut self) {
+        let ids = self.pipeline_context.transports.ids();
+        let mut ended = vec![];
+        self.streams.turn.links.retain(|l| {
+            let kept = ids.contains(&l.transport);
+            if !kept {
+                ended.extend(l.attempts.iter().copied());
+            }
+            kept
+        });
+        self.streams.turn.made_for.retain(|t| ids.contains(t));
+        for id in ended {
+            self.streams.table.close(id);
+        }
     }
 
     /// The TURN clients' and races' next timer.
@@ -606,7 +665,14 @@ mod tests {
         .iter()
         .map(|u| Url::parse_url(u).unwrap())
         .collect();
-        let turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
+        let mut turn = EngineTurn::new(&urls, true, TurnTlsConfig::default());
+        assert!(
+            turn.links.is_empty(),
+            "no link before a transport needs one"
+        );
+        let first = TransportId::default();
+        turn.make_links(first);
+        turn.make_links(first);
         let links: Vec<(String, bool)> =
             turn.links.iter().map(|l| (l.url_string(), l.tls)).collect();
         assert_eq!(
@@ -620,6 +686,14 @@ mod tests {
         assert_eq!(turn.links[0].protocol(), RTCIceServerTransportProtocol::Tcp);
         assert_eq!(turn.links[1].protocol(), RTCIceServerTransportProtocol::Tls);
         // Nothing started: nothing pending for the end of gathering.
-        assert!(!turn.pending());
+        assert!(!turn.pending(first));
+        // Another transport gets links of its own, once.
+        turn.make_links(TransportId(1));
+        assert_eq!(turn.links.len(), 6);
+        assert!(
+            turn.links[3..]
+                .iter()
+                .all(|l| l.transport == TransportId(1))
+        );
     }
 }
