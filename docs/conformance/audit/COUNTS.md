@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 4992 | 15 | 8 | 8 | 41 | 18 | 0 | 663 | 5745 |
+| MUST | 4992 | 16 | 7 | 8 | 41 | 18 | 0 | 663 | 5745 |
 | SHOULD | 836 | 0 | 0 | 18 | 65 | 45 | 4 | 326 | 1294 |
 | MAY | 442 | 0 | 0 | 21 | 34 | 108 | 0 | 171 | 776 |
 | PROC | 61 | 0 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6331 | 15 | 8 | 49 | 143 | 172 | 4 | 1160 | 7882 |
+| all | 6331 | 16 | 7 | 49 | 143 | 172 | 4 | 1160 | 7882 |
 
 ## RFC behaviour tested
 
@@ -201,7 +201,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc7874.md` | MUST | 5 | 0 | 0 | 0 | 0 | 3 | 0 | 1 | 9 |
 | `rfc7874.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 6 | 9 |
 | `rfc7874.md` | MAY | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 3 | 5 |
-| `rfc7941.md` | MUST | 7 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 8 |
+| `rfc7941.md` | MUST | 7 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 8 |
 | `rfc7941.md` | SHOULD | 0 | 0 | 0 | 2 | 0 | 4 | 0 | 1 | 7 |
 | `rfc7941.md` | MAY | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 3 |
 | `rfc7983.md` | MUST | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 5 |

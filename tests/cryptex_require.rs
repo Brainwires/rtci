@@ -396,3 +396,34 @@ fn a_cryptex_attribute_in_the_bundle_tagged_section_applies_to_the_group() -> Te
     }
     Ok(())
 }
+
+/// RFC 7941 section 6: with RTCP encrypted, "the SDES item header extensions MUST also be
+/// protected". `Require` is that form: no session sends MID or RID in the clear. A recorded
+/// Firefox 152 offer (simulcast, three rids) signals neither `a=cryptex` nor any RFC 6904
+/// encrypted extension, and carries its layers' RIDs only in the clear: `Require` refuses it,
+/// while the default policy (`negotiate`) accepts it.
+#[test]
+fn require_refuses_the_recorded_firefox_offer() -> TestResult {
+    const FIREFOX_OFFER: &str =
+        include_str!("fixtures/browser-sdp/firefox-152--simulcast-three-rids-send--1-offer.sdp");
+    let offer = || -> Result<_, Box<dyn std::error::Error>> {
+        Ok(rtc::peer_connection::sdp::RTCSessionDescription::offer(
+            FIREFOX_OFFER.replace("\r\n", "\n").replace('\n', "\r\n"),
+        )?)
+    };
+    assert!(!FIREFOX_OFFER.contains("a=cryptex"));
+    assert!(!FIREFOX_OFFER.contains("rtp-hdrext:encrypt"));
+
+    let mut answerer = default_peer()?;
+    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
+    let err = answerer
+        .set_remote_description(Instant::now(), offer()?)
+        .expect_err("Firefox's offer under `Require`");
+    assert_eq!(err, Error::ErrSessionDescriptionMissingCryptex);
+
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(Instant::now(), offer()?)?;
+    let answer = answerer.create_answer(None)?;
+    assert!(answer.sdp.contains("m=video 9 "), "{}", answer.sdp);
+    Ok(())
+}

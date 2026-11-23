@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present for every RTP section with `with_bundle_attributes_repeated` either way
   (`every_written_offer_and_answer_has_cryptex_for_every_bundled_rtp_section`). Rows
   RFC9335-4-4, RFC9335-9.1-1 and RFC8859-A-30 `tested`.
+  RFC7941-6-1 is `setting` (as on `conf/audit-5-sctp-w3c`, with its Firefox 152 test
+  `require_refuses_the_recorded_firefox_offer`), not `conflict`: W3C webrtc-extensions 10.2
+  fixes only the `negotiate` default; that header extensions then go in the clear is in its
+  non-normative enumeration description, so the texts can both be met and the default is kept
+  by a peer (Firefox 152 signals neither Cryptex nor RFC 6904), not by a W3C requirement.
 
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
