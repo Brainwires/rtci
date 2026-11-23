@@ -354,6 +354,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `n/a`: it binds the script-facing API.
   - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
 
+- **interceptors**: a packet only overtaken is not a loss for congestion control
+  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
+  received" as lost at once and forgot it, so the later feedback reporting it received matched
+  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
+  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
+  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
+  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
+  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
+  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
+
+- **interceptors**: the pacer bounds its queue time and never refuses a packet
+  (`conf/pacer-1-queue-time`).
+  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
+    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
+    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
+    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
+    replaced by `forced`.
+  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
+    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
+    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
+    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
+    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
+    25 s; now 2 s. The application sees that its source is above the target in the target
+    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
+  - Audio streams are not queued behind video: their packets leave when written and are
+    charged to the budget.
+  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
+    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
+    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
+  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
+    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
+    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
+    every time. Without it they come from `rand`, as before.
+
 ### Behaviour changes
 
 - **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
@@ -488,6 +522,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/ice_restart_answerer_candidates.rs`,
   `agent_open_rows_test.rs::test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it`.
 
+- **pacer**: media is no longer held behind a probe cluster's padding
+  (`conf/early-2-late-last-packet`). The NACK responder writes a cluster as a burst of
+  padding-only packets when the congestion controller asks for it, and the pacer queued them
+  in line with the media, so every packet the application wrote during the cluster waited for
+  all of it: about 180 ms for a 6000-octet cluster at 200 kbit/s. Padding-only packets (RFC
+  3550 section 5.1) now wait in a queue of their own and leave only when no other packet waits;
+  media written during a cluster leaves first, at the cluster's rate and with its mark, as in
+  libwebrtc's pacer. This was the intermittent failure of
+  `early_media_rtc2rtc::simulcast_streams_an_offer_asks_for_are_received_before_the_answer`
+  (about 1 run in 25): the five-second application-limited probe fell on the last writes of the
+  low layer, whose last one or two packets left 140 to 180 ms after they were written, past the
+  test's 100 ms settle (`media_leaves_ahead_of_queued_padding`). With the queue time bound of
+  `conf/pacer-1-queue-time` (`conf/pacer-2-combined`): the order of service is audio, then other
+  media, then padding; padding never counts toward raising the pacing rate and is never released
+  over the budget, and padding older than the bound is sent late rather than dropped (each
+  holds an RTX sequence number, so a dropped one would read as loss at the receiver). A padding
+  queue at the queue limit discards the arrival (`PacerInterceptor::padding_discarded`)
+  (`padding_never_raises_the_pacing_rate`, `padding_older_than_the_queue_time_limit_waits_for_spare_budget`).
+- **nack**: what the NACK responder makes on the read leg (a retransmission a NACK asks for, a
+  probe cluster's padding) is due at once: `poll_timeout` returns the instant it was made while
+  it waits. A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+  `poll_timeout` and sleep), so these packets waited for whatever woke the driver next; in the
+  failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
+  write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
+  `the_padding_of_a_probe_cluster_is_due_at_once`).
+- **interceptors**: what any interceptor makes on the read leg for the write leg is due at once
+  (`conf/pacer-2-combined`). An audit of every interceptor that writes while reading found four
+  that left the packet for whatever woke the driver next: the NACK responder (a retransmission,
+  a probe cluster's padding), the RTCP session (the Early SR answering an RTCP-SR-REQ, RFC 6051
+  section 3.2) and the pause/resume interceptor (PAUSED or REFUSED answering a PAUSE, RFC 7728).
+  The chain now takes what its read leg made down the write leg after each read and reports it
+  from `poll_timeout` until `poll_write` takes it (`rtc-interceptor/tests/read_work_is_due.rs`,
+  over the reusable `tests/wakeup_common` helper). At the peer connection,
+  `tests/driver_wakeup_rtc2rtc.rs` runs a call (ICE, DTLS, SCTP, a data channel, video with
+  RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
+  `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
+  ICE, DTLS and SCTP handlers left nothing waiting.
+
 ### Publishing readiness (crates.io)
 
 - **Manifests**: every publishable crate has a one-line description of what it implements,
@@ -552,46 +624,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read by `add_local_candidate`: a candidate added while a restart is staged is the staged
   generation's, otherwise the current one's.
 
-### Bug fixes
-
-- **pacer**: media is no longer held behind a probe cluster's padding
-  (`conf/early-2-late-last-packet`). The NACK responder writes a cluster as a burst of
-  padding-only packets when the congestion controller asks for it, and the pacer queued them
-  in line with the media, so every packet the application wrote during the cluster waited for
-  all of it: about 180 ms for a 6000-octet cluster at 200 kbit/s. Padding-only packets (RFC
-  3550 section 5.1) now wait in a queue of their own and leave only when no other packet waits;
-  media written during a cluster leaves first, at the cluster's rate and with its mark, as in
-  libwebrtc's pacer. This was the intermittent failure of
-  `early_media_rtc2rtc::simulcast_streams_an_offer_asks_for_are_received_before_the_answer`
-  (about 1 run in 25): the five-second application-limited probe fell on the last writes of the
-  low layer, whose last one or two packets left 140 to 180 ms after they were written, past the
-  test's 100 ms settle (`media_leaves_ahead_of_queued_padding`). With the queue time bound of
-  `conf/pacer-1-queue-time` (`conf/pacer-2-combined`): the order of service is audio, then other
-  media, then padding; padding never counts toward raising the pacing rate and is never released
-  over the budget, and padding older than the bound is sent late rather than dropped (each
-  holds an RTX sequence number, so a dropped one would read as loss at the receiver). A padding
-  queue at the queue limit discards the arrival (`PacerInterceptor::padding_discarded`)
-  (`padding_never_raises_the_pacing_rate`, `padding_older_than_the_queue_time_limit_waits_for_spare_budget`).
-- **nack**: what the NACK responder makes on the read leg (a retransmission a NACK asks for, a
-  probe cluster's padding) is due at once: `poll_timeout` returns the instant it was made while
-  it waits. A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
-  `poll_timeout` and sleep), so these packets waited for whatever woke the driver next; in the
-  failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
-  write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
-  `the_padding_of_a_probe_cluster_is_due_at_once`).
-- **interceptors**: what any interceptor makes on the read leg for the write leg is due at once
-  (`conf/pacer-2-combined`). An audit of every interceptor that writes while reading found four
-  that left the packet for whatever woke the driver next: the NACK responder (a retransmission,
-  a probe cluster's padding), the RTCP session (the Early SR answering an RTCP-SR-REQ, RFC 6051
-  section 3.2) and the pause/resume interceptor (PAUSED or REFUSED answering a PAUSE, RFC 7728).
-  The chain now takes what its read leg made down the write leg after each read and reports it
-  from `poll_timeout` until `poll_write` takes it (`rtc-interceptor/tests/read_work_is_due.rs`,
-  over the reusable `tests/wakeup_common` helper). At the peer connection,
-  `tests/driver_wakeup_rtc2rtc.rs` runs a call (ICE, DTLS, SCTP, a data channel, video with
-  RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
-  `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
-  ICE, DTLS and SCTP handlers left nothing waiting.
-
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
@@ -617,40 +649,6 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   session exists, and the RTP circuit breaker no longer stops a lossless reordered flow.
 
 ### Breaking changes
-
-- **interceptors**: a packet only overtaken is not a loss for congestion control
-  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
-  received" as lost at once and forgot it, so the later feedback reporting it received matched
-  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
-  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
-  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
-  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
-  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
-  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
-
-- **interceptors**: the pacer bounds its queue time and never refuses a packet
-  (`conf/pacer-1-queue-time`).
-  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
-    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
-    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
-    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
-    replaced by `forced`.
-  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
-    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
-    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
-    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
-    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
-    25 s; now 2 s. The application sees that its source is above the target in the target
-    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
-  - Audio streams are not queued behind video: their packets leave when written and are
-    charged to the budget.
-  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
-    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
-    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
-  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
-    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
-    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
-    every time. Without it they come from `rand`, as before.
 
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
