@@ -1392,37 +1392,6 @@ impl MediaEngine {
             return Ok((local_codec, match_type));
         }
 
-        // A RED format names its encodings by payload type (RFC 2198 section 5,
-        // `a=fmtp:<red> <primary>/<redundant>`), in the remote description's numbering: it is
-        // matched with those numbers replaced by the registered ones of the same formats, as
-        // an RTX format's `apt` is above, so that a peer that numbers the formats otherwise
-        // still negotiates RED.
-        if repair_family(&remote_codec.rtp_codec) == "red"
-            && let Some(blocks) = red_block_payload_types(&remote_codec.rtp_codec.sdp_fmtp_line)
-        {
-            let registered: Option<Vec<String>> = blocks
-                .iter()
-                .map(|block| {
-                    let named = exact_matches
-                        .iter()
-                        .chain(partial_matches)
-                        .find(|codec| codec.payload_type == *block)?;
-                    match codec_parameters_fuzzy_search(&named.rtp_codec, codecs) {
-                        (_, CodecMatch::None) => None,
-                        (local, _) => Some(local.payload_type.to_string()),
-                    }
-                })
-                .collect();
-            if let Some(registered) = registered {
-                let mut to_match_codec = remote_codec.clone();
-                to_match_codec.rtp_codec.sdp_fmtp_line = registered.join("/");
-                return Ok(codec_parameters_fuzzy_search(
-                    &to_match_codec.rtp_codec,
-                    codecs,
-                ));
-            }
-        }
-
         let (local_codec, match_type) =
             codec_parameters_fuzzy_search(&remote_codec.rtp_codec, codecs);
         Ok((local_codec, match_type))

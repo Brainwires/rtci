@@ -97,7 +97,6 @@ WEBRTC-4.4.1.4-36	C	S	w3c	Update the max message size on a pranswer and on reneg
 WEBRTC-4.4.1.4-82	C	S	w3c	With one transport, a description rejecting every section closes it and fires the closed events
 WEBRTC-4.4.1.4-91	C	M	w3c	Queue the data channel errors of a description in the spec order
 WEBRTC-4.5.1-1	C	S	jsep (running)	Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c)
-RFC3264-5.1-8	C	M	jsep (running)	Follow an answer that renumbers a codec when sending
 RFC8830-3-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
