@@ -1610,6 +1610,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **shared**: stream transports for the sans-I/O engine (`rtc_shared::stream`, branch
+  `conf/tcp-1-framing`). An engine names its TCP connections and listeners by id
+  (`StreamId`, `ListenerId`) and tells its driver what to do with `StreamCommand` (listen,
+  stop listening, connect from a local address, close after the last byte, reset); the driver
+  answers with `StreamEvent` (listening with the bound address, connected with the local
+  address, failed, bytes written, closed, reset), `StreamTable::accept` for a connection it
+  accepted and `StreamTable::read` for the bytes it read, in any segmentation. `StreamTable`
+  frames messages (`Framing::Rfc4571` for ICE-TCP, RFC 4571 / RFC 6544; `Framing::Turn`, RFC
+  8656 section 12.5), splits reads back into messages with memory bounded by two messages
+  whatever the read size, runs an optional `StreamLayer` (TLS) between the two, and applies
+  back-pressure: at most `StreamConfig::window` bytes a connection not yet reported written,
+  then a queue of `max_queued` bytes beyond which a message is dropped whole, never cut. New
+  errors `ErrUnknownStream`, `ErrStreamConnectionClosed`, `ErrStreamMessageTooLong`.
+  `examples/stream-driver` (`rtc-stream-driver`, not published) is a tokio driver for it,
+  tested over loopback sockets. RFC 4571 audit: `docs/conformance/audit/rfc4571.md`.
+
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the

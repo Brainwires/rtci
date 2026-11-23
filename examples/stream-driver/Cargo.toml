@@ -1,0 +1,18 @@
+[package]
+name = "rtc-stream-driver"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP / TLS) of WebRTC.rs's sans-I/O engine"
+license.workspace = true
+documentation = "https://docs.rs/rtc-stream-driver"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+shared = { workspace = true, default-features = false }
+tokio.workspace = true
+socket2.workspace = true

@@ -325,6 +325,9 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active and passive
+- ✅ **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
+  commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
+  back-pressure; `examples/stream-driver` is a tokio driver for it
 - ✅ **Simulcast** - RID-based simulcast, sending and receiving
 - ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
 - ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
