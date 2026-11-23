@@ -395,8 +395,9 @@ pub use rfc8888::sender::{
 pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
 pub use rtcp_session::{
     RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
-    RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH, RtcpBandwidth,
-    RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
+    RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH,
+    RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl,
+    RtcpSessionEvent, RtcpSessionInterceptor,
 };
 pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
