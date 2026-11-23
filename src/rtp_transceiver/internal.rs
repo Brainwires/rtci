@@ -84,6 +84,9 @@ pub(crate) struct RTCRtpTransceiverInternal {
     negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
     rtcp_reduced_size: bool,
+    /// The ECT codepoint the remote's `a=ecn-capable-rtp` asks this endpoint's packets to
+    /// carry (`ect=`, RFC 6679 section 6.1), set by the SDP layer.
+    remote_ect_preference: Option<interceptor::EctPreference>,
     /// The `b=` lines of this transceiver's section of the remote description.
     remote_bandwidth: RTCRemoteBandwidth,
     /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
@@ -146,6 +149,7 @@ impl RTCRtpTransceiverInternal {
             sframe_refused: false,
             negotiated_header_extensions: vec![],
             rtcp_reduced_size: false,
+            remote_ect_preference: None,
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
             remote_packet_time: RTCPacketTime::default(),
@@ -642,6 +646,22 @@ impl RTCRtpTransceiverInternal {
 
     /// Whether the last answer negotiated reduced-size RTCP (RFC 5506) for this transceiver's
     /// media section.
+    /// The hook for the SDP layer: the `ect=` of the remote description's
+    /// `a=ecn-capable-rtp` for this section (RFC 6679 section 6.1), parsed with
+    /// [`EctPreference::from_sdp`](interceptor::EctPreference::from_sdp); `None` when it has
+    /// none. Takes effect when the section's streams are bound next (an applied answer).
+    pub(crate) fn set_remote_ect_preference(
+        &mut self,
+        preference: Option<interceptor::EctPreference>,
+    ) {
+        self.remote_ect_preference = preference;
+    }
+
+    /// What [`set_remote_ect_preference`](Self::set_remote_ect_preference) recorded.
+    pub(crate) fn remote_ect_preference(&self) -> Option<interceptor::EctPreference> {
+        self.remote_ect_preference
+    }
+
     pub(crate) fn rtcp_reduced_size(&self) -> bool {
         self.rtcp_reduced_size
     }

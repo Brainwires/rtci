@@ -347,7 +347,8 @@ impl RTCPeerConnection {
                 setting_engine.ecn,
                 setting_engine.ecn_initiation,
                 rand::rng().random(),
-            ),
+            )
+            .with_ecn_marking(setting_engine.ecn_marking),
             announced_ice_connection_state: RTCIceConnectionState::New,
             now,
         };
@@ -2284,6 +2285,9 @@ impl RTCPeerConnection {
                 self.pipeline_context
                     .stats
                     .set_outbound_rfc6679(info.ssrc, rfc6679);
+                self.pipeline_context
+                    .stats
+                    .set_outbound_ect_preference(info.ssrc, transceiver.remote_ect_preference());
                 self.pipeline_context
                     .stats
                     .set_outbound_ccfb(info.ssrc, ccfb);

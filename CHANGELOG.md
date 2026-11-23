@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: with ECN on (`SettingEngineBuilder::with_ecn`) RTP packets are marked
+  ECT(0), not ECT(1), unless the receiver's `a=ecn-capable-rtp` asks for ECT(1) with `ect=1` (or
+  `ect=random`): RFC 6679 section 7.3.1, "SHOULD use ECT(0)". The L4S form (ECT(1) always, what
+  browsers that send L4S do) is `SettingEngineBuilder::with_ecn_marking(EcnMarking::L4s)`;
+  `packetsSentWithEct1` and `packetsWithBleachedEct1Marking` count ECT(1) packets only.
+
 - **media conformance**: open MUST rows.
   - `RTCRtpReceiver::write_rtcp` / `RTCRtpSender::write_rtcp` refuse feedback the section did
     not negotiate (NACK, PLI, SLI, RPSI, FIR, TMMBR/TMMBN, TSTR/TSTN, VBCM, LRR, REMB,
@@ -1744,6 +1750,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **media conformance**: RFC 6679 engine rows.
+  - `interceptor::{EcnMarking, EctPreference}`: the codepoint marked packets carry, and the
+    receiver's `ect=` (`EctPreference::from_sdp`). The SDP layer hands the remote `ect=` to a
+    transceiver (`set_remote_ect_preference`, crate-internal); until it does, ECT(0).
+  - `EcnValidation::on_remote_cname` (and `with_receiver_cname`, `is_provisional`,
+    `PROVISIONAL_MONITOR`): another RTCP CNAME within three reporting intervals of a
+    provisional success sends the stream back to probing (section 7.2.1); the peer connection
+    feeds it from the RTCP session's `RemoteCname` events.
+  - `EcnValidation::on_reception_report_without_ecn`: a reception report showing more than
+    three probes due, in a compound packet without an ECN report about the stream, fails the
+    initiation (section 7.2.1).
+  - `EcnInitiation::one_per_transport`: one initiation method per RTP session (section 7.2),
+    for the per-section negotiation of the SDP layer.
+  - `docs/conformance/audit/rfc6679.md` states what the engine relies on from RFC 3168.
 
 - **media conformance**: an RTCP session, transport-wide numbering, congestion controller and
   pacer per transport. With m= sections on several transports (mt-2) each transport is an RTP

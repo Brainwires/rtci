@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4365 | 231 | 265 | 141 | 22 | 621 | 5645 |
-| SHOULD | 687 | 81 | 79 | 75 | 6 | 333 | 1261 |
+| MUST | 4368 | 230 | 264 | 140 | 22 | 621 | 5645 |
+| SHOULD | 689 | 81 | 77 | 75 | 6 | 333 | 1261 |
 | MAY | 395 | 34 | 36 | 129 | 0 | 169 | 763 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5505 | 349 | 383 | 348 | 28 | 1123 | 7736 |
+| all | 5510 | 348 | 380 | 347 | 28 | 1123 | 7736 |
 
 ## Per file
 
@@ -129,8 +129,8 @@ is a procedure step without a keyword.
 | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 | 39 |
 | `rfc6544.md` | SHOULD | 9 | 1 | 2 | 0 | 0 | 21 | 33 |
 | `rfc6544.md` | MAY | 3 | 1 | 0 | 4 | 0 | 1 | 9 |
-| `rfc6679.md` | MUST | 27 | 1 | 2 | 15 | 0 | 10 | 55 |
-| `rfc6679.md` | SHOULD | 12 | 2 | 3 | 1 | 0 | 6 | 24 |
+| `rfc6679.md` | MUST | 30 | 0 | 1 | 14 | 0 | 10 | 55 |
+| `rfc6679.md` | SHOULD | 14 | 2 | 1 | 1 | 0 | 6 | 24 |
 | `rfc6679.md` | MAY | 4 | 1 | 0 | 1 | 0 | 1 | 7 |
 | `rfc6762.md` | MUST | 60 | 0 | 1 | 0 | 0 | 9 | 70 |
 | `rfc6762.md` | SHOULD | 27 | 0 | 3 | 0 | 0 | 8 | 38 |
