@@ -372,3 +372,27 @@ fn an_offer_leaves_out_a_red_format_naming_an_encoding_it_does_not_offer() -> Te
     }
     Ok(())
 }
+
+/// RFC 9429 section 5.2.2 (subsequent offers, as 5.2.1): "the 'a=rtcp-fb' lines ... MUST
+/// include only the RTCP feedback ... the application supports". After answering an offer
+/// rich in feedback, this endpoint's own later offer lists only its own (NACK and PLI), not
+/// what the peer offered.
+#[test]
+fn a_later_offer_lists_only_the_feedback_this_endpoint_supports() -> TestResult {
+    let now = Instant::now();
+    let mut pc = peer()?;
+    pc.set_remote_description(
+        now,
+        offer(
+            "a=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\na=rtcp-fb:96 goog-remb\n\
+             a=rtcp-fb:96 ccm fir\na=rtcp-fb:96 transport-cc\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+    let later = pc.create_offer(None)?;
+    let mut lines = feedback_lines(&later.sdp);
+    lines.sort_unstable();
+    assert_eq!(lines, ["96 nack", "96 nack pli"], "{}", later.sdp);
+    Ok(())
+}

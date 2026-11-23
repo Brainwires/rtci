@@ -1424,6 +1424,7 @@ impl RTCPeerConnection {
             }
         }
 
+        self.check_rollback_is_empty(&local_description)?;
         // Parse SDP (skip for rollback as content is ignored per spec)
         if local_description.sdp_type != RTCSdpType::Rollback {
             local_description.parsed = Some(local_description.unmarshal()?);
@@ -1840,10 +1841,17 @@ impl RTCPeerConnection {
             RTCSdpType::Answer | RTCSdpType::Pranswer
         );
 
+        self.check_rollback_is_empty(&remote_description)?;
         // Parse SDP (skip for rollback as content is ignored per spec)
         if remote_description.sdp_type != RTCSdpType::Rollback {
             let mut parsed = remote_description.unmarshal()?;
+            // RFC 9429 section 5.8.2: "Any 'a=rtcp' attribute MUST be parsed as specified in
+            // [RFC3605], Section 2.1, but its value is ignored". (The whole
+            // `SessionDescription::validate` is not run here: other specifications ask for
+            // some malformed lines to be ignored, RFC 8830 section 3 for `a=msid`.)
+            crate::peer_connection::sdp::check_rtcp_attributes(&parsed)?;
             self.assign_missing_mids(&mut parsed, answers);
+            crate::peer_connection::sdp::discard_groups_with_unknown_tags(&mut parsed, answers);
             discard_stray_bundle_only(&mut parsed, answers);
             // W3C webrtc-pc createAnswer: identically named rids reduced to the first
             // (`with_w3c_simulcast_answer`); by default such a line refuses the description.
@@ -2396,6 +2404,39 @@ impl RTCPeerConnection {
             })
     }
 
+    /// A rollback's "contents MUST be empty" (RFC 9429 section 4.1.10), unless the
+    /// application asked for W3C's "unused" reading (`with_rollback_content_ignored`).
+    fn check_rollback_is_empty(&self, description: &RTCSessionDescription) -> Result<()> {
+        if description.sdp_type == RTCSdpType::Rollback
+            && !description.sdp.trim().is_empty()
+            && !self.setting_engine.rollback_content_ignored
+        {
+            return Err(Error::SdpInvalidValue(
+                "a rollback description has contents; they MUST be empty (RFC 9429 section \
+                 4.1.10)"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the section `mid` was accepted (a port other than zero) in the last answer: the
+    /// current descriptions are the last offer / answer exchange.
+    fn was_negotiated_section(&self, mid: &str) -> bool {
+        [
+            &self.current_local_description,
+            &self.current_remote_description,
+        ]
+        .into_iter()
+        .filter_map(|description| description.as_ref()?.parsed.as_ref())
+        .all(|parsed| {
+            parsed.media_descriptions.iter().any(|media| {
+                get_mid_value(media).is_some_and(|m| m == mid) && !is_rejected_media(media)
+            })
+        }) && self.current_local_description.is_some()
+            && self.current_remote_description.is_some()
+    }
+
     /// The checks `set_remote_description` makes on a parsed description before applying it
     /// (RFC 9429 section 5.8.3), none of which changes anything:
     ///
@@ -2550,6 +2591,18 @@ impl RTCPeerConnection {
                 return Err(Error::SdpInvalidValue(format!(
                     "m= section {index}: the answer has no a=rtcp-mux and there is no RTCP \
                      component to fall back to (RFC 8858 section 4.4)"
+                )));
+            }
+            // RFC 9429 section 5.8.3: "If an 'm=' section was present in the previous answer,
+            // the state of RTP/RTCP multiplexing MUST match what was previously negotiated".
+            // Every section this endpoint accepted multiplexes (it has no RTCP component), so
+            // a later offer that drops it for such a section is an error, under every policy.
+            if let Some(mid) = get_mid_value(media)
+                && self.was_negotiated_section(mid)
+            {
+                return Err(Error::SdpInvalidValue(format!(
+                    "m= section {index} (mid {mid}): no a=rtcp-mux, but RTP/RTCP multiplexing \
+                     was negotiated for it in the previous answer (RFC 9429 section 5.8.3)"
                 )));
             }
             // W3C webrtc-pc "set a session description" and RFC 9429 section 5.8.3: under the
@@ -6021,6 +6074,41 @@ a=rtcp-mux\r\n";
             pc.add_remote_candidate(candidate("candidate:nonsense", Some("a1"), None))
                 .is_err()
         );
+    }
+
+    /// RFC 9429 section 5.10: an `a=end-of-candidates` in the remote description itself (not
+    /// trickled) tells the ICE agent the remote candidates are complete: the agent then takes
+    /// no further remote candidate (RFC 8838 section 14), which it takes without the attribute.
+    #[test]
+    fn a_descriptions_end_of_candidates_reaches_the_ice_agent() {
+        for (end_of_candidates, taken) in [(false, true), (true, false)] {
+            let sdp = if end_of_candidates {
+                PER_SECTION_UFRAG_OFFER.replacen(
+                    "a=rtcp-mux\r\n",
+                    "a=rtcp-mux\r\na=end-of-candidates\r\n",
+                    1,
+                )
+            } else {
+                PER_SECTION_UFRAG_OFFER.to_owned()
+            };
+            let mut pc = media_pc();
+            pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &sdp))
+                .unwrap();
+            let answer = pc.create_answer(None).unwrap();
+            pc.set_local_description(Instant::now(), answer).unwrap();
+            let late = ice::candidate::unmarshal_candidate(
+                "candidate:2 1 udp 2113929471 203.0.113.101 10101 typ host",
+            )
+            .unwrap();
+            assert_eq!(
+                pc.ice_transport_mut()
+                    .agent
+                    .add_remote_candidate(late)
+                    .unwrap(),
+                taken,
+                "a=end-of-candidates in the description: {end_of_candidates}"
+            );
+        }
     }
 
     #[test]

@@ -497,6 +497,8 @@ pub struct SettingEngine {
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
+    /// [`SettingEngineBuilder::with_rollback_content_ignored`].
+    pub(crate) rollback_content_ignored: bool,
     /// [`SettingEngineBuilder::with_w3c_simulcast_answer`].
     pub(crate) w3c_simulcast_answer: bool,
     /// [`SettingEngineBuilder::with_nominated_candidates_only`].
@@ -2344,6 +2346,19 @@ impl SettingEngineBuilder {
     /// does for inactive layers.
     pub fn with_rid_pause_marks(mut self, rid_pause_marks: bool) -> Self {
         self.0.rid_pause_marks = rid_pause_marks;
+        self
+    }
+
+    /// Ignores the SDP of a `rollback` description instead of refusing one that has any. The
+    /// default is `false`.
+    ///
+    /// RFC 9429 section 4.1.10: a rollback's "contents MUST be empty", so by default
+    /// `set_local_description` / `set_remote_description` refuse a rollback whose SDP is not
+    /// empty (whitespace aside) and change nothing. W3C webrtc-pc `RTCSessionDescriptionInit`
+    /// says the `sdp` member "is unused" for a rollback: `true` takes that form and rolls back
+    /// whatever the SDP holds.
+    pub fn with_rollback_content_ignored(mut self, ignored: bool) -> Self {
+        self.0.rollback_content_ignored = ignored;
         self
     }
 

@@ -1943,6 +1943,7 @@ impl RTCPeerConnection {
         // Every transceiver has a sender; one that has neither a track nor a sending
         // direction is not described (RFC 9429 section 5.2.1).
         let negotiated_header_extensions = transceiver.negotiated_header_extensions().to_vec();
+        let mut transceiver_msid = None;
         if transceiver.describes_sender()
             && let Some(sender) = transceiver.sender_mut()
         {
@@ -1973,13 +1974,20 @@ impl RTCPeerConnection {
             if stream_ids.is_empty() {
                 stream_ids.push(track.stream_id().to_string());
             }
-            for stream_id in stream_ids {
-                media = media.with_property_attribute(if msid_appdata {
-                    format!("msid:{stream_id} {track_id}")
-                } else {
-                    format!("msid:{stream_id}")
-                });
+            let msid: Vec<String> = stream_ids
+                .into_iter()
+                .map(|stream_id| {
+                    if msid_appdata {
+                        format!("msid:{stream_id} {track_id}")
+                    } else {
+                        format!("msid:{stream_id}")
+                    }
+                })
+                .collect();
+            for line in &msid {
+                media = media.with_property_attribute(line.clone());
             }
+            transceiver_msid = Some(msid);
 
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
                 for encoding in &encodings {
@@ -2040,6 +2048,19 @@ impl RTCPeerConnection {
                     }
                 }
             }
+        }
+        // RFC 9429 sections 5.2.2 and 5.3.2: "the 'a=msid' lines MUST stay the same" for a
+        // transceiver that is not stopped, "regardless of changes to the transceiver's
+        // direction or track": one that no longer has a track or a sending direction keeps
+        // the lines its section had.
+        match transceiver_msid {
+            Some(msid) => transceiver.set_described_msid(msid),
+            None if !transceiver.stopped() => {
+                for line in transceiver.described_msid() {
+                    media = media.with_property_attribute(line.clone());
+                }
+            }
+            None => {}
         }
 
         media
@@ -3527,6 +3548,48 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
             media.attributes.retain(|a| a.key != ATTR_KEY_BUNDLE_ONLY);
         }
     }
+}
+
+/// Every `a=rtcp` line of the description, at session or media level, parses by RFC 3605
+/// section 2.1 (RFC 9429 section 5.8.2); the values are not used.
+pub(crate) fn check_rtcp_attributes(desc: &SessionDescription) -> Result<()> {
+    use sdp::attribute::TypedAttribute;
+    let lines = desc.attributes.iter().chain(
+        desc.media_descriptions
+            .iter()
+            .flat_map(|media| media.attributes.iter()),
+    );
+    for a in lines.filter(|a| a.key == ATTR_KEY_RTCP) {
+        sdp::attribute::Rtcp::parse(a.value.as_deref().unwrap_or_default())?;
+    }
+    Ok(())
+}
+
+/// RFC 5888 section 6: "'a=group' lines that contain identification-tags that do not
+/// correspond to any 'm' line within the session description MUST be ignored. The
+/// application acts as if the 'a=group' line did not exist." Such lines (of any semantics)
+/// are taken out of the parsed description; the SDP text stays as given. In an answer a
+/// BUNDLE group is kept: RFC 9143 section 7.4 makes one that names a section the offer did
+/// not bundle an error, which the answer check reports.
+pub(crate) fn discard_groups_with_unknown_tags(desc: &mut SessionDescription, answers: bool) {
+    let mids: HashSet<String> = desc
+        .media_descriptions
+        .iter()
+        .filter_map(|media| get_mid_value(media).cloned())
+        .collect();
+    desc.attributes.retain(|a| {
+        a.key != ATTR_KEY_GROUP
+            || (answers
+                && a.value
+                    .as_deref()
+                    .is_some_and(|value| value.split_whitespace().next() == Some("BUNDLE")))
+            || a.value.as_deref().is_none_or(|value| {
+                value
+                    .split_whitespace()
+                    .skip(1)
+                    .all(|tag| mids.contains(tag))
+            })
+    });
 }
 
 /// The mids of the description's first `a=group:BUNDLE` (RFC 8843 §7.1), in order.

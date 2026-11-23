@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no
+  engine change: the RFC 9143 section 9.1 payload-type rewrite and the RFC 3264 section 8.3.2
+  switch to a new answer's formats are separate tests; an encoding that names a codec the new
+  answer drops is sent with a format the answer lists (W3C webrtc-pc 4.4.1.6 removes
+  `encoding.codec`; the jsep-51 finding came from its test, whose offer listed the named
+  codec only); a rejected stream sends neither RTP nor RTCP; recvonly and inactive endpoints
+  send RTCP; a simulcast layer the answer removed sends nothing; a section without any msid
+  gets its media; must-bundle rejects a section outside the first group. Audit verdicts
+  corrected where the code was right and a unit test already pinned it (the tls-id and
+  `a=group` parses, the session-level attributes, `create_offer` in have-remote-offer).
+- **jsep**: sweep of the JSEP MUST rows (`conf/jsep-50-rfc9429-sweep`, jsep12).
+  - A `rollback` description whose SDP is not empty is refused by `set_local_description`
+    and `set_remote_description` (RFC 9429 section 4.1.10: "The contents MUST be empty").
+    `SettingEngineBuilder::with_rollback_content_ignored(true)` is W3C's reading (the `sdp`
+    member "is unused" for a rollback).
+  - A later remote offer that drops `a=rtcp-mux` for a section the last answer accepted is
+    refused under every RTCP mux policy (RFC 9429 section 5.8.3; under "negotiate" it was
+    answered rejected).
+  - A transceiver that loses its track and sending direction keeps the `a=msid` lines its
+    section had (RFC 9429 sections 5.2.2, 5.3.2): offers and answers change on the wire.
+  - An answer's `t=` line is the offer's (RFC 3264 section 6; WebRTC offers say `t=0 0`,
+    which is unchanged).
+  - A remote `a=rtcp` line that does not parse (RFC 3605 section 2.1) refuses the
+    description (RFC 9429 section 5.8.2); its value is still not used.
+  - A remote `a=group` line (any semantics) naming a mid that no m= line has is ignored as a
+    whole (RFC 5888 section 6); it used to be kept with the unknown tags skipped.
+  - A test pins that an SFrame section keeps its own payload-type numbering under
+    `with_disable_media_engine_multiple_codecs(true)` (no failure was found there).
+  - New tests pin behaviour the audit had untested: candidates and `a=end-of-candidates` in
+    the tagged section only, the relay policy's suppressed related address, a description's
+    `a=end-of-candidates` reaching the ICE agent, `a=rtcp` parsed, mandatory values inherited
+    from the session level, later offers listing only the endpoint's own feedback, the
+    sender following its section's formats and a later answer (RFC 9143 section 9.1, RFC
+    3264 sections 8.3.2 and 8.3.4).
 - **jsep**: train fixes for the JSEP stack (`conf/jsep-44-train-fixes`, merged with tcp-10,
   mt-8 and sec-11).
   - `a=msid` lines carry the sender's track id again by default (`a=msid:<stream> <track>`,
@@ -1803,6 +1837,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (an ICE restart with it) RTP of every transport flows under the new keys. The transports an
   answer leaves unused fire DTLS and then ICE "closed" (`OnTransportEvent`, W3C 4.4.1.6).
   Bandwidth probing is shown per transport (`each_transport_probes_its_own_path`).
+- **peer connection** (mt-11, bug): a later offer under `balanced` whose only BUNDLE group
+  holds a section new in it (the offer of a peer that answered an earlier offer without
+  BUNDLE) took the default transport's own section for one moved out of a group (RFC 9143
+  7.5.2), gave it a new transport and made another transport the default: the offer wrote the
+  default transport's `a=tls-id` on the video transport's section, which the peer refused
+  ("replaces ... without an ICE restart", RFC 9429 5.8.3), so a glare rollback in that state
+  ended the negotiation. Only sections that have a transport count as moved out now, and a
+  new section the offer puts in a group of new sections only (a new BUNDLE group, RFC 9143
+  section 5) gets a transport of its own, as the answerer gives it, instead of the default
+  transport, whose `a=tls-id` the answer's then seemed to replace. The ICE connection state
+  and the connection state (W3C 4.3.3, 4.3.4) are aggregated again when an answer or a
+  rollback closes a transport: one that closed before it connected held the connection at
+  "connecting". A rollback of an offer that gave a new data section a transport of its own
+  (its own BUNDLE group) left that transport in place: the layout took off their transports
+  only the sections a transceiver has, never the data section, so the browser glare scenario
+  found three transports after the rollback. Every section outside the layout's groups is
+  taken off now. Tests:
+  `balanced_answered_without_bundle_a_rollback_keeps_every_transport`,
+  `balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports`,
+  `a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section`.
+- **interop** (mt-11): the browser scenarios that start with `request-offer` sent their
+  scenario only with the browser's first offer, after the Rust peer had set its own; the peer
+  then changed its header encryption policy, which webrtc-extensions 10.2 refuses
+  (`InvalidModificationError`), and never answered. The scenario now goes with the first
+  offer or `request-offer` and is set up before any description. `peer.js` handles
+  signalling messages in arrival order (an offer right after an answer was taken for a
+  colliding one and ignored) and reports the descriptions a failing scenario exchanged. The
+  two balanced rollback scenarios edit only Rust's first offer: after an unbundled exchange
+  Chromium and WebKit offer to bundle every section again, with the tagged section's ICE
+  credentials on the others (RFC 9143 7.5.1), which Rust accepts (7.3); that offer with its
+  group edited out is no description a peer could make (answering it restarts ICE on the
+  section whose credentials it changed, or libwebrtc refuses the answer). The rollback is
+  checked on the Rust side (`interop-peer` reports its transports at the rolled-back offer
+  and right after the rollback: the same, all connected), and media through what follows.
 - **interceptor** (mt-9, bug): the NACK responder filled every probe cluster on the RTX
   stream that sent last, whatever transport's congestion controller asked for it, so with
   several transports one transport's probes travelled another's path and measured nothing of
