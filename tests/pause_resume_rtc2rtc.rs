@@ -5,7 +5,8 @@
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use rtc::interceptor::{
-    PauseResumeBuilder, PauseResumeHandle, PauseState, Registry, RemotePauseState,
+    Interceptor, Packet, PauseResumeBuilder, PauseResumeHandle, PauseState, Registry,
+    RemotePauseState, Slot, StreamInfo, TaggedPacket,
 };
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
@@ -25,7 +26,9 @@ use rtc::rtp_transceiver::rtp_sender::{
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
@@ -39,6 +42,55 @@ enum Pause {
     NoWait,
 }
 
+/// The RTCP compound packets a peer's chain writes, as they leave its RTCP session.
+type Written = Arc<Mutex<Vec<Vec<Box<dyn rtc::rtcp::Packet>>>>>;
+
+/// An interceptor below the RTCP session (written packets pass it after the session): it
+/// records each RTCP packet written and passes everything on.
+struct WireTap {
+    written: Written,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Packet::Rtcp(packets) = &msg.message.packet
+            && !packets.is_empty()
+        {
+            self.written.lock().expect("tap").push(packets.clone());
+        }
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+}
+
+impl Interceptor for WireTap {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
 struct Peer {
     pc: RTCPeerConnection,
     handle: Option<PauseResumeHandle>,
@@ -46,8 +98,8 @@ struct Peer {
     connected: bool,
     /// The sequence numbers of the RTP packets delivered to the application.
     received: Vec<u16>,
-    /// The RTCP delivered to the application, one entry per datagram and track, in order.
-    rtcp: Vec<Vec<Box<dyn rtc::rtcp::Packet>>>,
+    /// The RTCP compound packets its chain wrote, in order.
+    written: Written,
 }
 
 impl Peer {
@@ -66,7 +118,15 @@ impl Peer {
             },
             RtpCodecKind::Video,
         )?;
-        let registry = configure_rtcp_reports(Registry::new());
+        let written = Written::default();
+        let registry = configure_rtcp_reports(Registry::new()).with(
+            Slot::Custom(250),
+            WireTap {
+                written: written.clone(),
+                read_queue: VecDeque::new(),
+                write_queue: VecDeque::new(),
+            },
+        );
         let (registry, handle) = match pause {
             Pause::Off => (registry, None),
             Pause::On => {
@@ -94,7 +154,7 @@ impl Peer {
             addr: addr.parse()?,
             connected: false,
             received: vec![],
-            rtcp: vec![],
+            written,
         })
     }
 
@@ -184,12 +244,8 @@ impl World {
                 }
             }
             while let Some(message) = peer.pc.poll_read() {
-                match message.message {
-                    RTCMessage::RtpPacket(_, packet) => {
-                        peer.received.push(packet.header.sequence_number);
-                    }
-                    RTCMessage::RtcpPacket(_, packets) => peer.rtcp.push(packets),
-                    _ => {}
+                if let RTCMessage::RtpPacket(_, packet) = message.message {
+                    peer.received.push(packet.header.sequence_number);
                 }
             }
         }
@@ -658,23 +714,24 @@ fn pause_resume_entries(
 
 /// RFC 7728 section 8.5 ("The messages follow the AVPF timing rules") and sections 6.3 and
 /// 8.2 ("PAUSED MUST also be included in (at least) the next two regular RTCP reports"),
-/// between two peers whose RTCP sessions are the default ones. The sender's PAUSED is not a
-/// packet of its own: its RTCP session adopted it, and it arrives in a compound packet, and again in the
-/// next two compound packets of the sender's session, its Regular ones (the sender writes no
-/// other feedback, so every later packet of its session is a Regular one), and in no packet
-/// after them.
+/// between two peers whose RTCP sessions are the default ones, as the sender's chain writes
+/// its RTCP to the wire. PAUSED is not a packet of its own: the sender's RTCP session adopted
+/// it, and it leaves in a compound packet, and again in the next two compound packets of the
+/// session, its Regular ones (the sender writes no other feedback, so every later packet of
+/// its session is a Regular one), and in no packet after them.
 #[test]
 fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()> {
     use rtc::rtcp::transport_feedbacks::pause_resume::PauseResumeType;
     let mut world = World::connected(Pause::NoWait, Pause::NoWait)?;
     world.send(10)?;
     let ssrc = world.ssrc;
-    let to_receiver = world.peers[1].rtcp.len();
+    let from = world.peers[0].written.lock().expect("tap").len();
     world.handle(1).pause(ssrc);
     world.send(1000)?;
     assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Paused));
 
-    let later = &world.peers[1].rtcp[to_receiver..];
+    let written = world.peers[0].written.lock().expect("tap").clone();
+    let later = &written[from..];
     let carrying: Vec<usize> = later
         .iter()
         .enumerate()
