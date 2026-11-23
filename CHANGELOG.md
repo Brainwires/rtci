@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no
+  engine change: the RFC 9143 section 9.1 payload-type rewrite and the RFC 3264 section 8.3.2
+  switch to a new answer's formats are separate tests; an encoding that names a codec the new
+  answer drops is sent with a format the answer lists (W3C webrtc-pc 4.4.1.6 removes
+  `encoding.codec`; the jsep-51 finding came from its test, whose offer listed the named
+  codec only); a rejected stream sends neither RTP nor RTCP; recvonly and inactive endpoints
+  send RTCP; a simulcast layer the answer removed sends nothing; a section without any msid
+  gets its media; must-bundle rejects a section outside the first group. Audit verdicts
+  corrected where the code was right and a unit test already pinned it (the tls-id and
+  `a=group` parses, the session-level attributes, `create_offer` in have-remote-offer).
 - **jsep**: sweep of the JSEP MUST rows (`conf/jsep-50-rfc9429-sweep`, jsep12).
   - A `rollback` description whose SDP is not empty is refused by `set_local_description`
     and `set_remote_description` (RFC 9429 section 4.1.10: "The contents MUST be empty").
