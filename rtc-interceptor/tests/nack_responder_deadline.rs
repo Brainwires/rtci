@@ -8,7 +8,7 @@
 use bytes::Bytes;
 use rtc_interceptor::{
     AttributedPacket, Interceptor, NackResponderBuilder, Packet, ProbeRequest, RTCPFeedback,
-    Registry, Slot, StreamInfo, TaggedPacket,
+    StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::transport_layer_nack::{NackPair, TransportLayerNack};
 use sansio::Protocol;
@@ -66,11 +66,11 @@ fn nack(now: Instant, sequence_number: u16) -> TaggedPacket {
     }
 }
 
-/// A responder with one stream (RTX negotiated) that has sent packets 100 to 104 at `start`.
+/// A responder with one stream (RTX negotiated) that has sent packets 100 to 104 at `start`:
+/// the interceptor by itself, as an application drives it without a chain (a chain reports what
+/// its read leg made by itself, `tests/read_work_is_due.rs`).
 fn sender(start: Instant) -> impl Interceptor {
-    let mut chain = Registry::new()
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
-        .build();
+    let mut chain = NackResponderBuilder::new().build();
     chain.bind_local_stream(&stream_info());
     for sequence_number in 100..105 {
         chain
