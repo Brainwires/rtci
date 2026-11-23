@@ -214,7 +214,7 @@ impl RTCPeerConnection {
         }
         // The other transports' sections, each with its association's `tls-id` (RFC 8842
         // section 5: one per transport).
-        self.write_transport_attributes(&mut d);
+        self.write_transport_attributes(&mut d, Some(is_offer));
         Ok(d)
     }
 }

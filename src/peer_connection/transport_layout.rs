@@ -632,7 +632,17 @@ impl RTCPeerConnection {
     /// its credentials, its candidates (in its first such section, RFC 9429 section 5.2.1)
     /// and its default destination in `m=` / `c=`. The default transport's sections keep what
     /// `populate_sdp` wrote.
-    pub(crate) fn write_transport_attributes(&self, d: &mut SessionDescription) {
+    ///
+    /// `offer` is `Some` while an offer (`true`) or an answer (`false`) is being made: a
+    /// transport with an ICE restart staged lists the candidates
+    /// [`Self::restart_offered_local_candidates`] gives, as the default transport does
+    /// (`offered_local_candidates`). `None` when a description already set is read back
+    /// (`populate_local_candidates`): the candidates the transport holds.
+    pub(crate) fn write_transport_attributes(
+        &self,
+        d: &mut SessionDescription,
+        offer: Option<bool>,
+    ) {
         let transports = &self.pipeline_context.transports;
         if transports.len() == 1 {
             return;
@@ -676,8 +686,15 @@ impl RTCPeerConnection {
                 .unwrap_or_else(|| dtls.local_tls_id.clone());
             let ice = &bundle.ice_handler_context.ice_transport;
             let (ufrag, pwd) = ice.get_local_user_credentials();
-            let candidates =
-                rtc_ice_candidates_from_ice_candidates(&ice.agent.get_local_candidates_to_signal());
+            let staged = match offer {
+                Some(offer) => self
+                    .restart_offered_local_candidates(id, offer)
+                    .unwrap_or_default(),
+                None => None,
+            };
+            let candidates = staged.unwrap_or_else(|| {
+                rtc_ice_candidates_from_ice_candidates(&ice.agent.get_local_candidates_to_signal())
+            });
             let mut first = true;
             for m in &mut d.media_descriptions {
                 if is_rejected_media(m)
@@ -780,7 +797,7 @@ impl RTCPeerConnection {
     /// The local candidates of every transport other than the default one, in the local
     /// description as it is read (`populate_local_candidates`).
     pub(crate) fn populate_other_transports_candidates(&self, d: &mut SessionDescription) {
-        self.write_transport_attributes(d);
+        self.write_transport_attributes(d, None);
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,
