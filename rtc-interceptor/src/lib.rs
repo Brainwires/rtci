@@ -361,11 +361,14 @@ pub use jitterbuffer::receiver::{
 pub use keyframe::{FirCommands, KeyFrameRequestInterceptor};
 pub use nack::NackControl;
 pub use nack::generator::{
-    DEFAULT_MAX_NACKS_PER_PACKET as NACK_DEFAULT_MAX_NACKS_PER_PACKET,
-    DEFAULT_MAX_PACKET_AGE as NACK_DEFAULT_MAX_PACKET_AGE, NackGeneratorBuilder,
-    NackGeneratorInterceptor,
+    NackGeneratorBuilder, NackGeneratorInterceptor,
+    SUGGESTED_MAX_NACKS_PER_PACKET as NACK_SUGGESTED_MAX_NACKS_PER_PACKET,
+    SUGGESTED_MAX_PACKET_AGE as NACK_SUGGESTED_MAX_PACKET_AGE,
 };
-pub use nack::responder::{NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS};
+pub use nack::responder::{
+    NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS,
+    RETRANSMISSION_RATE_WINDOW, RetransmissionRateLimit,
+};
 pub use noop::NoopInterceptor;
 pub use ntp_timestamp::{
     NTP_TIMESTAMP_INITIAL_WINDOW, NTP_TIMESTAMP_INTERVAL, NTP_TIMESTAMP_SLOT, NtpTimestampBuilder,
