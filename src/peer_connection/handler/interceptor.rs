@@ -516,12 +516,21 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         let placed = self.ctx.placed_ssrcs.contains(&ssrc);
+        // The receiver's only stream, placed by the engine or declared; or one stream of
+        // several (a simulcast layer, bound by its rid or declared by an `a=ssrc-group:SIM`).
         let movable = |t: &RTCRtpTransceiverInternal| {
-            (placed || receiver_declares_ssrc(t, ssrc))
-                && t.receiver().as_ref().is_some_and(|receiver| {
-                    let codings = receiver.track().codings();
-                    codings.len() == 1 && codings[0].rtp_coding_parameters.ssrc == Some(ssrc)
-                })
+            t.receiver().as_ref().is_some_and(|receiver| {
+                let codings = receiver.track().codings();
+                match codings {
+                    [only] => {
+                        (placed || receiver_declares_ssrc(t, ssrc))
+                            && only.rtp_coding_parameters.ssrc == Some(ssrc)
+                    }
+                    layers => layers
+                        .iter()
+                        .any(|coding| coding.rtp_coding_parameters.ssrc == Some(ssrc)),
+                }
+            })
         };
         let free = |t: &RTCRtpTransceiverInternal| {
             !t.stopped()
@@ -537,9 +546,35 @@ impl<'a> InterceptorHandler<'a> {
         }
         debug!("ssrc {ssrc} moves to the m= section with mid {mid} (RFC 9143 section 9.2)");
         if let Some(receiver) = self.rtp_transceivers[current].receiver_mut() {
-            receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
-            receiver.set_coding_parameters(vec![]);
-            receiver.track_mut().set_codings(vec![]);
+            if receiver.track().codings().len() == 1 {
+                receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+                receiver.set_coding_parameters(vec![]);
+                receiver.track_mut().set_codings(vec![]);
+            } else {
+                // One layer of several: only its stream leaves. A layer named by a rid keeps
+                // its place, without an SSRC, for the stream that rid names next; a declared
+                // one goes.
+                for info in receiver.remote_stream_infos(self.media_engine) {
+                    if info.ssrc == ssrc {
+                        self.interceptor.unbind_remote_stream(&info);
+                    }
+                }
+                let leave = |coding: &mut RTCRtpCodingParameters| -> bool {
+                    if coding.ssrc != Some(ssrc) {
+                        return true;
+                    }
+                    coding.ssrc = None;
+                    coding.rtx = None;
+                    coding.fec = None;
+                    !coding.rid.is_empty()
+                };
+                let mut parameters = receiver.get_coding_parameters().to_vec();
+                parameters.retain_mut(leave);
+                receiver.set_coding_parameters(parameters);
+                let mut codings = receiver.track().codings().to_vec();
+                codings.retain_mut(|coding| leave(&mut coding.rtp_coding_parameters));
+                receiver.track_mut().set_codings(codings);
+            }
         }
         self.ctx.ssrc_owners.remove(ssrc);
         self.ctx.placed_ssrcs.remove(&ssrc);
