@@ -313,12 +313,15 @@ impl RTCPeerConnection {
     }
 
     pub(crate) fn get_interceptor_handler(&mut self) -> InterceptorHandler<'_> {
+        let transports = &self.pipeline_context.transports;
+        let rtp_session = (transports.len() > 1).then(|| transports.active_id().0);
         InterceptorHandler::new(
             &mut self.pipeline_context.interceptor_handler_context,
             &mut self.rtp_transceivers,
             &self.media_engine,
             &mut self.interceptor,
             &mut self.pipeline_context.stats,
+            rtp_session,
         )
     }
 

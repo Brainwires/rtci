@@ -214,6 +214,17 @@ pub fn validate_compound(raw: &[u8]) -> Result<()> {
     CompoundPacket::unmarshal(&mut &raw[..]).map(|_| ())
 }
 
+/// The header checks of RFC 3550 Appendix A.2 on `raw`, one datagram, as a compound packet:
+/// every packet is version 2, the first is an SR or an RR with the padding bit clear, the
+/// lengths add up to the datagram, and only the last packet is padded (section 6.4.1).
+///
+/// Unlike [`validate_compound`] it does not parse what the packets carry, so a packet of an
+/// unknown type or one that does not parse is left to the caller (RFC 3550 section 6.1: such a
+/// packet is ignored, the others processed).
+pub fn validate_compound_headers(raw: &[u8]) -> Result<()> {
+    validate_headers(raw, Datagram::Compound)
+}
+
 /// Checks that `raw`, one datagram, is acceptable as reduced-size RTCP (RFC 5506 §4.1): one
 /// or more RTCP packets of any type, with no SR or RR in front and no SDES required.
 ///

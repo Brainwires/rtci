@@ -105,7 +105,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03ReceiveInterceptor {
         // non-media stream in front of every interceptor ahead.
         if let Some(&media_ssrc) = self.repair_to_media.get(&ssrc) {
             let recovered = match self.decoders.get_mut(&media_ssrc) {
-                Some(decoder) => decoder.decode(rtp_packet.clone()),
+                Some(decoder) => decoder.decode_at(now, rtp_packet.clone()),
                 None => Vec::new(),
             };
             self.queue_recovered(now, transport, recovered);
@@ -115,7 +115,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03ReceiveInterceptor {
         // A protected media packet: the decoder needs it in order to recover its neighbours, and
         // it carries on as usual.
         let recovered = match self.decoders.get_mut(&ssrc) {
-            Some(decoder) => decoder.decode(rtp_packet.clone()),
+            Some(decoder) => decoder.decode_at(now, rtp_packet.clone()),
             None => {
                 self.read_queue.push_back(msg);
                 return Ok(());
@@ -159,8 +159,15 @@ impl Interceptor for FlexFec03ReceiveInterceptor {
         if let (Some(ssrc_fec), Some(_)) = (info.ssrc_fec, info.payload_type_fec)
             && info.fec_is_flexfec03()
         {
-            self.decoders
-                .insert(info.ssrc, FlexFec03Decoder::new(ssrc_fec, info.ssrc));
+            // The repair window the section negotiated (`a=fmtp:<pt> repair-window=<us>`,
+            // draft section 5.1) bounds how long packets are held for recovery.
+            let mut decoder = FlexFec03Decoder::new(ssrc_fec, info.ssrc);
+            if let Some(window) =
+                crate::FlexFecParameters::parse(&info.sdp_fmtp_line_fec).repair_window
+            {
+                decoder = decoder.with_repair_window(window);
+            }
+            self.decoders.insert(info.ssrc, decoder);
             self.repair_to_media.insert(ssrc_fec, info.ssrc);
         }
     }

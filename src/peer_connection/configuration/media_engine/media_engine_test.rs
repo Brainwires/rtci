@@ -536,3 +536,89 @@ fn rtx_is_negotiated_when_flexfec_is_registered_but_not_offered() -> Result<()> 
     );
     Ok(())
 }
+
+/// Opus and RED (`red/48000/2`, `a=fmtp:63 111/111`, as browsers register it).
+fn opus_and_red() -> MediaEngine {
+    let mut m = MediaEngine::default();
+    for (payload_type, mime_type, fmtp) in [
+        (111, MIME_TYPE_OPUS, "minptime=10;useinbandfec=1"),
+        (63, "audio/red", "111/111"),
+    ] {
+        m.register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: codec(mime_type, 48000, 2, fmtp),
+                payload_type,
+            },
+            RtpCodecKind::Audio,
+        )
+        .expect("register");
+    }
+    m
+}
+
+fn negotiated_audio_names(m: &MediaEngine) -> Vec<String> {
+    m.negotiated_audio_codecs
+        .iter()
+        .map(|codec| codec.rtp_codec.mime_type.to_lowercase())
+        .collect()
+}
+
+/// RFC 2198 section 5: the encodings a RED format names in its fmtp are formats of the m=
+/// line; a RED format whose blocks are of the section's Opus is negotiated.
+#[test]
+fn red_naming_a_format_of_the_section_is_negotiated() -> Result<()> {
+    let mut m = opus_and_red();
+    m.update_from_remote_description(&remote(
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111 63\r\n\
+         a=rtpmap:111 opus/48000/2\r\n\
+         a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+         a=rtpmap:63 red/48000/2\r\n\
+         a=fmtp:63 111/111\r\n",
+    ))?;
+    assert_eq!(
+        vec!["audio/opus".to_owned(), "audio/red".to_owned()],
+        negotiated_audio_names(&m)
+    );
+    Ok(())
+}
+
+/// A RED format naming a payload type that is not a format of the m= line (RFC 2198 section
+/// 5: "MUST" be listed) is not negotiated: its blocks could not be decoded.
+#[test]
+fn red_naming_a_payload_type_missing_from_the_m_line_is_not_negotiated() -> Result<()> {
+    let mut m = opus_and_red();
+    m.update_from_remote_description(&remote(
+        "m=audio 9 UDP/TLS/RTP/SAVPF 63\r\n\
+         a=rtpmap:63 red/48000/2\r\n\
+         a=fmtp:63 111/111\r\n",
+    ))?;
+    assert!(negotiated_audio_names(&m).is_empty());
+    Ok(())
+}
+
+/// RFC 2198 section 3: a redundant encoding uses the primary's clock rate. RED at 48 kHz
+/// naming PCMU (8 kHz) is not negotiated.
+#[test]
+fn red_naming_a_format_of_another_clock_rate_is_not_negotiated() -> Result<()> {
+    let mut m = MediaEngine::default();
+    for (payload_type, mime_type, clock_rate, channels, fmtp) in [
+        (0, MIME_TYPE_PCMU, 8000, 0, ""),
+        (63, "audio/red", 48000, 2, "0/0"),
+    ] {
+        m.register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: codec(mime_type, clock_rate, channels, fmtp),
+                payload_type,
+            },
+            RtpCodecKind::Audio,
+        )?;
+    }
+    m.update_from_remote_description(&remote(
+        "m=audio 9 UDP/TLS/RTP/SAVPF 0 63\r\n\
+         a=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:63 red/48000/2\r\n\
+         a=fmtp:63 0/0\r\n",
+    ))?;
+    assert_eq!(vec!["audio/pcmu".to_owned()], negotiated_audio_names(&m));
+    Ok(())
+}

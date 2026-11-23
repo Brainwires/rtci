@@ -293,6 +293,19 @@ impl Gcc {
 }
 
 impl BandwidthEstimator for Gcc {
+    /// RFC 6679 section 7.3.3: CE marks counted by the receiver's ECN reports go to the
+    /// loss-based controller as losses would; the target can only fall by them.
+    fn on_congestion_marks(&mut self, now: Instant, marked: u64, packets: u64) {
+        if marked == 0 || packets == 0 {
+            return;
+        }
+        let packets = packets.min(usize::MAX as u64) as usize;
+        let marked = (marked.min(packets as u64)) as usize;
+        self.loss_control.update(now, marked, packets);
+        let loss_target = self.loss_control.target();
+        self.target = self.target.min(loss_target).clamp(self.min, self.max);
+    }
+
     fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
         if reports.is_empty() {
             return;
@@ -569,6 +582,70 @@ mod tests {
         assert!(marked < 1_000_000.0, "15% marked: {marked}");
         assert!(clean >= 1_000_000.0, "no marks, no losses: {clean}");
         assert!(marked < 0.8 * clean, "{marked} vs {clean}");
+    }
+
+    /// RFC 6679 section 7.3.3: CE marks counted by RFC 6679 ECN reports (no per-packet
+    /// marks) bring the target down as the same share of losses would; reports without marks
+    /// leave it where it was.
+    #[test]
+    fn ce_marks_from_ecn_counters_lower_the_target_as_losses_do() {
+        let epoch = Instant::now();
+        let run = |marked: u64| {
+            let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+            for batch in 0..20u64 {
+                gcc.on_congestion_marks(epoch + Duration::from_millis(batch * 200), marked, 20);
+            }
+            gcc.target_bitrate()
+        };
+        let marked = run(3);
+        let clean = run(0);
+        assert!(marked < 0.8 * 1_000_000.0, "15% marked: {marked}");
+        assert_eq!(clean, 1_000_000.0, "no marks: {clean}");
+    }
+
+    /// RFC 5104 section 5: after a TMMBR raises (or lifts) the limit, "the sender ... SHALL
+    /// use congestion control" to go up: the target does not jump to the new limit but climbs
+    /// by the estimator's own increase as feedback shows the path carries it.
+    #[test]
+    fn a_raised_limit_is_climbed_to_by_congestion_control_not_jumped_to() {
+        let epoch = Instant::now();
+        let mut gcc = Gcc::new(300_000.0, 50_000.0, 10_000_000.0);
+        gcc.set_external_bounds(None, Some(300_000.0));
+        let mut id = 0u64;
+        let mut batch = |gcc: &mut Gcc, index: u64| {
+            let at = epoch + Duration::from_millis(index * 100);
+            let reports: Vec<PacketReport> = (0..10)
+                .map(|n| {
+                    id += 1;
+                    let departure = at + Duration::from_millis(n * 10);
+                    report(id, departure, Some(index * 100 + n * 10 + 20))
+                })
+                .collect();
+            gcc.on_reports(at + Duration::from_millis(100), &reports);
+        };
+        for index in 0..20 {
+            batch(&mut gcc, index);
+        }
+        assert!(gcc.target_bitrate() <= 300_000.0);
+
+        gcc.set_external_bounds(None, Some(5_000_000.0));
+        let right_after = gcc.target_bitrate();
+        assert!(
+            right_after <= 300_000.0 * 1.01,
+            "no jump to the new limit: {right_after}"
+        );
+        for index in 20..60 {
+            batch(&mut gcc, index);
+        }
+        let later = gcc.target_bitrate();
+        assert!(
+            later > right_after,
+            "the target climbs: {right_after} -> {later}"
+        );
+        assert!(
+            later < 5_000_000.0,
+            "by the increase, not to the limit: {later}"
+        );
     }
 
     /// The more pessimistic half wins. Here loss is catastrophic while delay is quiet, so the

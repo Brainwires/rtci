@@ -838,6 +838,10 @@ fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
         offer.contains("a=ecn-capable-rtp: rtp,leap ect=1\r\n"),
         "the offer states its methods, the configured one first:\n{offer}"
     );
+    // RFC 6679 section 6.1: "This attribute MUST NOT be used as an SDP session-level
+    // attribute"; it is in the media sections.
+    let session_part = offer.split("\r\nm=").next().unwrap_or_default();
+    assert!(!session_part.contains("a=ecn-capable-rtp"), "{offer}");
     assert!(
         world.answer.contains("a=ecn-capable-rtp: rtp ect=1\r\n"),
         "the answer picks one:\n{}",
@@ -965,5 +969,36 @@ fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
         .filter_map(|l| l.strip_prefix("a=ecn-capable-rtp:"))
         .collect();
     assert_eq!(methods, vec![" leap ect=1", " leap ect=1"], "{answer}");
+    Ok(())
+}
+
+/// RFC 6679 section 6.1.3: "RTP/AVPF or a profile based on it MUST be signalled": a section
+/// offered with ECN in the RTP/SAVP profile (no timely feedback) is answered without
+/// `a=ecn-capable-rtp`, while an RTP/SAVPF section of the same offer is answered with it.
+#[test]
+fn a_section_without_the_feedback_profile_is_answered_without_ecn() -> Result<()> {
+    let section = |mid: &str, proto: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/{proto} 96\n{}a=mid:{mid}\na=sendrecv\n\
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: rtp\n",
+            jsep_common::TRANSPORT
+        )
+    };
+    let offer = jsep_common::crlf(&format!(
+        "{}{}{}",
+        jsep_common::SESSION,
+        section("0", "SAVPF"),
+        section("1", "SAVP")
+    ));
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+    )?;
+    let answer = pc.create_answer(None)?.sdp;
+    let sections: Vec<&str> = answer.split("\r\nm=").skip(1).collect();
+    assert_eq!(sections.len(), 2, "{answer}");
+    assert!(sections[0].contains("a=ecn-capable-rtp:"), "{answer}");
+    assert!(!sections[1].contains("a=ecn-capable-rtp"), "{answer}");
     Ok(())
 }

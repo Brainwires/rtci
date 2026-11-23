@@ -1415,8 +1415,10 @@ impl H265Packet {
         sequence_number: u16,
         payload: &Bytes,
     ) -> Result<Bytes> {
+        // A repeated number is a duplicate, not a gap.
         if let Some(last) = self.last_sequence_number
             && sequence_number != last.wrapping_add(1)
+            && sequence_number != last
         {
             self.fu_buffer = None;
             self.fu_don = None;

@@ -383,6 +383,37 @@ impl RedEncoder {
         Ok(packet)
     }
 
+    /// The RED RTP packet for the media packet `primary` (RFC 2198 section 3): "a standard
+    /// RTP header ... where the payload type field indicates the redundant encoding" and the
+    /// other fields (sequence number, timestamp, marker, SSRC, CSRCs, extensions) are those of
+    /// the primary. Its payload is [`encode_packet`](Self::encode_packet) of the primary's.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_packet`](Self::encode_packet), and for a RED payload type above 127.
+    pub fn encode_rtp(
+        &mut self,
+        red_payload_type: u8,
+        primary: &crate::packet::Packet,
+    ) -> Result<crate::packet::Packet> {
+        if red_payload_type > RED_MAX_PAYLOAD_TYPE {
+            return Err(Error::Other(format!(
+                "RED payload type {red_payload_type} exceeds 127"
+            )));
+        }
+        let payload = self
+            .encode_packet(
+                primary.header.payload_type,
+                primary.header.timestamp,
+                primary.payload.clone(),
+            )?
+            .marshal()?
+            .freeze();
+        let mut header = primary.header.clone();
+        header.payload_type = red_payload_type;
+        Ok(crate::packet::Packet { header, payload })
+    }
+
     /// As [`encode_packet`](Self::encode_packet), marshalled.
     ///
     /// # Errors
@@ -408,6 +439,20 @@ pub struct RecoveredBlock {
     /// `true` for the primary of the packet fed in, `false` for data recovered from a
     /// redundant block (whose marker bit is unknown).
     pub primary: bool,
+}
+
+/// A block [`RedDecoder::decode_rtp`] delivers, with what of the RED packet's header
+/// applies to it (RFC 2198 section 4).
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct RecoveredMedia {
+    /// The block.
+    pub block: RecoveredBlock,
+    /// The marker bit: the RED packet's for its primary; `false` for recovered data, whose
+    /// marker "is lost" with its packet.
+    pub marker: bool,
+    /// The CSRC list of the RED packet, which "should be applied to the reconstructed
+    /// redundant data" as to the primary.
+    pub csrc: Vec<u32>,
 }
 
 /// The default number of recent deliveries a [`RedDecoder`] remembers.
@@ -508,6 +553,25 @@ impl RedDecoder {
             });
         }
         Ok(out)
+    }
+
+    /// [`decode`](Self::decode) of a RED RTP packet, each block with the marker bit and the
+    /// CSRC list section 4 gives it.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode`](Self::decode).
+    pub fn decode_rtp(&mut self, packet: &crate::packet::Packet) -> Result<Vec<RecoveredMedia>> {
+        let header = &packet.header;
+        Ok(self
+            .decode(header.sequence_number, header.timestamp, &packet.payload)?
+            .into_iter()
+            .map(|block| RecoveredMedia {
+                marker: block.primary && header.marker,
+                csrc: header.csrc.clone(),
+                block,
+            })
+            .collect())
     }
 
     fn remember_timestamp(&mut self, timestamp: u32, recovered: bool) {

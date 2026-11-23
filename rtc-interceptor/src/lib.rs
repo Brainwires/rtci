@@ -242,6 +242,7 @@ pub(crate) mod packet;
 pub(crate) mod report;
 pub(crate) mod rfc8888;
 pub(crate) mod rtcp_session;
+pub(crate) mod rtp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
 pub(crate) mod tst;
@@ -384,6 +385,7 @@ pub use rtcp_session::{
     RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH, RtcpBandwidth,
     RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
 };
+pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;
@@ -406,7 +408,7 @@ pub use ulpfec::{
 pub use wire_image::{MAX_HELD_WIRE_IMAGES, WireImageTap, WireImages, wire_image_tap};
 pub use xr::{
     DEFAULT_GMIN as XR_DEFAULT_GMIN, DEFAULT_INTERVAL as XR_DEFAULT_INTERVAL, JitterBufferMetrics,
-    RTCP_FB_XR, XrReportBuilder, XrReportInterceptor,
+    RTCP_FB_NACK_ECN, RTCP_FB_XR, RTCP_XR_ECN_SUMMARY, XrReportBuilder, XrReportInterceptor,
 };
 
 /// One interceptor of packet processing.

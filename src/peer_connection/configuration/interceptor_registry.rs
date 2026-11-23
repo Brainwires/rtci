@@ -138,15 +138,15 @@ use crate::rtp_transceiver::rtp_sender::rtcp_parameters::{
     TYPE_RTCP_FB_TRANSPORT_CC,
 };
 use crate::rtp_transceiver::rtp_sender::{
-    RTCPFeedback, RTCRtpCodec, RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
-    RTCRtpHeaderExtensionParameters, RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability,
+    RTCRtpHeaderExtensionEncryption, RTCRtpHeaderExtensionParameters, RtpCodecKind,
 };
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, SSRC};
 use interceptor::{
     BandwidthEstimator, CircuitBreakerBuilder, CircuitBreakerHandle, CongestionControlBuilder,
     CongestionControlHandle, Gcc, KeyFrameRequestInterceptor, NackGeneratorBuilder,
-    NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TstnResponderBuilder,
-    TwccReceiverBuilder, TwccSenderBuilder, XrReportBuilder,
+    NackResponderBuilder, PacerBuilder, PerRtpSession, Rfc8888Builder, RtcpSessionBuilder,
+    TstnResponderBuilder, TwccReceiverBuilder, TwccSenderBuilder, XrReportBuilder,
 };
 use std::time::Duration;
 
@@ -341,7 +341,9 @@ pub fn register_default_interceptors_with_options(
     // The per-packet feedback of both directions: what this endpoint's packets are numbered
     // with and reported in, and the reports about the remote's.
     register_congestion_feedback(media_engine, options.congestion_feedback)?;
-    let registry = with_congestion_feedback_senders(registry, options.congestion_feedback);
+    // Per transport, with the congestion controller below: each transport numbers its
+    // packets and is estimated on its own (the remote reports each transport's sequence).
+    let registry = with_congestion_feedback_senders(registry, options.congestion_feedback, true);
     let registry = with_congestion_feedback_recorders(registry, options.congestion_feedback);
 
     // A media sender implements TMMBR (RFC 8834 section 5.1.6), and it is in use where the
@@ -352,28 +354,46 @@ pub fn register_default_interceptors_with_options(
 
     // The estimator runs on whichever per-packet feedback each stream negotiated: RFC 8888
     // when the peer accepted `ack ccfb`, transport-wide congestion control otherwise.
-    let estimator = Gcc::default();
-    let initial_target = estimator.target_bitrate();
-    let (congestion_control, handle) = CongestionControlBuilder::new(estimator)
-        .with_circuit_breaker(circuit_breaker.clone())
-        .with_unnegotiated_tmmbr(options.unnegotiated_tmmbr)
-        .with_bandwidth_probing(options.bandwidth_probing)
-        .build_with_handle();
+    //
+    // One controller, bound and pacer per transport: each transport is a path of its own
+    // (RFC 8836 section 2; an RTP session each, RFC 8834 section 4.4). The handle reads the
+    // first transport's controller.
+    let initial_target = Gcc::default().target_bitrate();
+    let congestion_control_builder = {
+        let circuit_breaker = circuit_breaker.clone();
+        let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
+        let bandwidth_probing = options.bandwidth_probing;
+        move || {
+            CongestionControlBuilder::new(Gcc::default())
+                .with_circuit_breaker(circuit_breaker.clone())
+                .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
+                .with_bandwidth_probing(bandwidth_probing)
+        }
+    };
+    let (congestion_control, handle) = congestion_control_builder().build_with_handle();
+    let pacer_immediate_release = options.pacer_immediate_release;
     let registry = registry
-        .with(Slot::CongestionControl, congestion_control)
+        .with_per_rtp_session(
+            Slot::CongestionControl,
+            PerRtpSession::with_first(congestion_control, move || {
+                congestion_control_builder().build()
+            }),
+        )
         // The remote description's `b=TIAS` / `b=AS` bounds the estimate on its way to the
         // pacer (RFC 9429 section 5.10); the peer connection feeds it when an answer is
         // applied.
-        .with(
+        .with_per_rtp_session(
             Slot::Custom(REMOTE_BITRATE_LIMIT_SLOT),
-            RemoteBitrateLimitInterceptor::new(initial_target),
+            PerRtpSession::new(move || RemoteBitrateLimitInterceptor::new(initial_target)),
         )
-        .with(
+        .with_per_rtp_session(
             Slot::Pacer,
-            PacerBuilder::new()
-                .with_target_bitrate(initial_target)
-                .with_immediate_release(options.pacer_immediate_release)
-                .build(),
+            PerRtpSession::new(move || {
+                PacerBuilder::new()
+                    .with_target_bitrate(initial_target)
+                    .with_immediate_release(pacer_immediate_release)
+                    .build()
+            }),
         );
 
     let registry = configure_rtcp_reports(registry);
@@ -599,11 +619,21 @@ fn register_congestion_feedback(
 
 /// What numbers this endpoint's packets for the feedback about them. Only transport-wide
 /// congestion control needs anything: RFC 8888 reports against the RTP sequence number.
-fn with_congestion_feedback_senders(registry: Registry, feedback: CongestionFeedback) -> Registry {
-    if feedback.offers_twcc() {
-        registry.with(Slot::TwccSender, TwccSenderBuilder::new().build())
-    } else {
-        registry
+///
+/// `per_transport`: a numbering per transport (an RTP session each, RFC 8834 section 4.4),
+/// for a congestion controller that runs per transport too.
+fn with_congestion_feedback_senders(
+    registry: Registry,
+    feedback: CongestionFeedback,
+    per_transport: bool,
+) -> Registry {
+    match (feedback.offers_twcc(), per_transport) {
+        (false, _) => registry,
+        (true, false) => registry.with(Slot::TwccSender, TwccSenderBuilder::new().build()),
+        (true, true) => registry.with_per_rtp_session(
+            Slot::TwccSender,
+            PerRtpSession::new(|| TwccSenderBuilder::new().build()),
+        ),
     }
 }
 
@@ -614,13 +644,21 @@ fn with_congestion_feedback_recorders(
     registry: Registry,
     feedback: CongestionFeedback,
 ) -> Registry {
+    // Each transport's arrivals are reported on that transport (the remote numbers each
+    // transport on its own).
     let registry = if feedback.offers_twcc() {
-        registry.with(Slot::TwccReceiver, TwccReceiverBuilder::new().build())
+        registry.with_per_rtp_session(
+            Slot::TwccReceiver,
+            PerRtpSession::new(|| TwccReceiverBuilder::new().build()),
+        )
     } else {
         registry
     };
     if feedback.offers_rfc8888() {
-        registry.with(Slot::Rfc8888, Rfc8888Builder::new().build())
+        registry.with_per_rtp_session(
+            Slot::Rfc8888,
+            PerRtpSession::new(|| Rfc8888Builder::new().build()),
+        )
     } else {
         registry
     }
@@ -802,7 +840,9 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
 /// A `trr-int` this endpoint announces in its description replaces either value when the
 /// answer is applied.
 pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuilder) -> Registry {
-    registry.with(Slot::RtcpSession, session.build())
+    // An RTCP session per RTP session: one per transport when sections are not bundled
+    // (RFC 3550 section 6, RFC 8834 section 4.4).
+    registry.with_per_rtp_session(Slot::RtcpSession, session.build_per_rtp_session())
 }
 
 /// Adds the RTCP XR report blocks a receiver writes about each source (RFC 3611 section 4:
@@ -1328,7 +1368,8 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
     // The sequence numbers the send history keys on (TWCC only), and the other half of the
     // loop: what this endpoint reports about what it *receives*, so the remote's estimator has
     // something to work with. A stream is reported by one recorder, never both.
-    let registry = with_congestion_feedback_senders(registry, feedback);
+    // One estimator for the connection (`estimator` is one instance), so one numbering.
+    let registry = with_congestion_feedback_senders(registry, feedback, false);
     Ok(with_congestion_feedback_recorders(registry, feedback))
 }
 
@@ -1346,6 +1387,7 @@ pub(crate) fn create_stream_info(
     fec_format: Option<&crate::rtp_transceiver::rtp_sender::rtp_codec::FecFormat>,
     codec: &RTCRtpCodec,
     header_extensions: &[RTCRtpHeaderExtensionParameters],
+    section_codecs: &[RTCRtpCodecParameters],
 ) -> interceptor::StreamInfo {
     let rtp_header_extensions: Vec<interceptor::RTPHeaderExtension> = header_extensions
         .iter()
@@ -1384,9 +1426,20 @@ pub(crate) fn create_stream_info(
         sdp_fmtp_line_fec: fec_format
             .map(|format| format.sdp_fmtp_line.clone())
             .unwrap_or_default(),
-        // The other payload types of the section and their clock rates (RFC 7160) are not
-        // passed here yet: a stream is timed with its first codec's rate.
-        payload_clock_rates: vec![],
+        // RFC 7160 section 4.3 (RFC 8834 section 4.3): the other media formats of the m=
+        // section and their clock rates, for a source that switches between them on one SSRC.
+        // Repair formats are left out: RTX is de-encapsulated to the media format before the
+        // chain, and FEC has an SSRC of its own.
+        payload_clock_rates: section_codecs
+            .iter()
+            .filter(|c| {
+                c.payload_type != payload_type
+                    && !crate::peer_connection::handler::endpoint::is_repair_mime_type(
+                        &c.rtp_codec.mime_type,
+                    )
+            })
+            .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
+            .collect(),
     }
 }
 

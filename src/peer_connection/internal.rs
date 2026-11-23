@@ -345,6 +345,7 @@ impl RTCPeerConnection {
                 dtls_handler_context,
                 SrtpHandlerContext {
                     rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                    strict_rtcp_validity: setting_engine.strict_rtcp_validity,
                     ..Default::default()
                 },
             ),
@@ -1916,7 +1917,11 @@ impl RTCPeerConnection {
                 continue;
             };
             // A bundled section takes the tagged section's when it has none of its own.
+            // RFC 5506 section 4: reduced-size RTCP only "in sessions using the AVPF / SAVPF
+            // early or immediate feedback mode" (and 4.1: never with RTP/AVP or RTP/SAVP).
             let reduced_size = !is_rejected_media(answered)
+                && crate::peer_connection::sdp::is_avpf_section(offered)
+                && crate::peer_connection::sdp::is_avpf_section(answered)
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
@@ -2200,10 +2205,123 @@ impl RTCPeerConnection {
                 .collect()
         };
 
-        let mut controls = vec![
-            RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
-            RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
-        ];
+        // Each transport's SRTP context takes the flag of the sections it carries: reduced-size
+        // RTCP on a transport only when every live section on it negotiated it.
+        let mut per_transport: std::collections::HashMap<TransportId, bool> =
+            std::collections::HashMap::new();
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid);
+            let entry = per_transport.entry(id).or_insert(true);
+            *entry = *entry && transceiver.rtcp_reduced_size();
+        }
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle.srtp_handler_context.rtcp_reduced_size =
+                per_transport.get(&bundle.id).copied().unwrap_or(false);
+        }
+        let mut controls = vec![];
+        // The SSRCs of each transport's sections: the RTP session each stream runs in
+        // (RFC 8834 section 4.4: a transport per unbundled section, an RTCP session, a
+        // congestion controller and a pacer each), told before what is per session.
+        let mut assignments: std::collections::BTreeMap<usize, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for id in self.pipeline_context.transports.ids() {
+            assignments.entry(id.0).or_default();
+        }
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid).0;
+            let ssrcs = assignments.entry(id).or_default();
+            let mut add = |coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters| {
+                ssrcs.extend(coding.ssrc);
+                ssrcs.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                ssrcs.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+            };
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    add(&encoding.rtp_coding_parameters);
+                }
+            }
+            if let Some(receiver) = transceiver.receiver() {
+                for coding in receiver.get_coding_parameters() {
+                    add(coding);
+                }
+            }
+        }
+        for (session, ssrcs) in &assignments {
+            controls.push(
+                interceptor::RtpSessionAssignment {
+                    session: *session,
+                    ssrcs: ssrcs.clone(),
+                }
+                .into_packet(now),
+            );
+        }
+        // Reduced-size RTCP and the bandwidth are each RTCP session's: those of the sections
+        // on its transport. With one transport that is every section.
+        let single = self.pipeline_context.transports.len() == 1;
+        let per_session: Vec<(usize, bool, RtcpBandwidth)> = if single {
+            vec![(
+                self.pipeline_context.transports.default_id().0,
+                reduced_size,
+                bandwidth,
+            )]
+        } else {
+            self.pipeline_context
+                .transports
+                .ids()
+                .into_iter()
+                .map(|id| {
+                    let on = |t: &&RTCRtpTransceiverInternal| {
+                        live(t)
+                            && t.mid().as_ref().is_some_and(|mid| {
+                                self.pipeline_context.transports.transport_id_for(mid) == id
+                            })
+                    };
+                    let of = |value: fn(&RTCRemoteBandwidth) -> Option<u64>| {
+                        sum(self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .map(|t| value(&t.remote_bandwidth()))
+                            .collect())
+                    };
+                    let reduced = self.rtp_transceivers.iter().any(|t| on(&t))
+                        && self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .all(|t| t.rtcp_reduced_size());
+                    (
+                        id.0,
+                        reduced,
+                        RtcpBandwidth {
+                            session: of(|b| b.session_bitrate),
+                            rs: of(|b| b.rtcp_senders_bitrate),
+                            rr: of(|b| b.rtcp_receivers_bitrate),
+                        },
+                    )
+                })
+                .collect()
+        };
+        for (session, reduced_size, bandwidth) in per_session {
+            let tag = |mut packet: interceptor::TaggedPacket| {
+                packet
+                    .message
+                    .add(interceptor::RtpSession(session).attribute());
+                packet
+            };
+            controls.push(tag(
+                RtcpSessionControl::ReducedSize(reduced_size).into_packet(now)
+            ));
+            controls.push(tag(
+                RtcpSessionControl::Bandwidth(bandwidth).into_packet(now)
+            ));
+        }
         // A `trr-int` an earlier negotiation set and this one does not have is undone.
         controls.push(
             match trr_int {
@@ -2551,6 +2669,13 @@ impl RTCPeerConnection {
                         .iter()
                         .map(|f| (f.typ.as_str(), f.parameter.as_str())),
                 );
+                let rfc6679 = info.rtcp_feedback.iter().any(|f| {
+                    f.typ == interceptor::RTCP_FB_XR
+                        && f.parameter == interceptor::RTCP_XR_ECN_SUMMARY
+                });
+                self.pipeline_context
+                    .stats
+                    .set_outbound_rfc6679(info.ssrc, rfc6679);
                 self.pipeline_context
                     .stats
                     .set_outbound_ccfb(info.ssrc, ccfb, ecn);
@@ -3128,6 +3253,11 @@ impl RTCPeerConnection {
     }
 
     pub(super) fn unused_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
+        self.unused_ssrc_drawn(minted, &mut rand::random::<u32>)
+    }
+
+    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
+    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
         for transceiver in &self.rtp_transceivers {
             if let Some(sender) = transceiver.sender() {
@@ -3147,7 +3277,7 @@ impl RTCPeerConnection {
                 taken.extend(described_ssrcs(parsed));
             }
         }
-        let ssrc = unused_ssrc_from(std::iter::repeat_with(rand::random::<u32>), &taken);
+        let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
     }
@@ -3156,6 +3286,16 @@ impl RTCPeerConnection {
         &self,
         track: &MediaStreamTrack,
     ) -> Vec<RTCRtpEncodingParameters> {
+        self.send_encodings_from_track_drawn(track, &mut rand::random::<u32>)
+    }
+
+    /// [`send_encodings_from_track`](Self::send_encodings_from_track) with the SSRCs it mints
+    /// drawn from `draw`.
+    fn send_encodings_from_track_drawn(
+        &self,
+        track: &MediaStreamTrack,
+        draw: &mut dyn FnMut() -> SSRC,
+    ) -> Vec<RTCRtpEncodingParameters> {
         let (is_rtx_enabled, is_fec_enabled) = (
             self.media_engine
                 .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly),
@@ -3163,8 +3303,22 @@ impl RTCPeerConnection {
                 .is_fec_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly),
         );
 
-        let mut minted: Vec<SSRC> = vec![];
-        let mut new_ssrc = || self.unused_ssrc(&mut minted);
+        // RFC 4588 section 4: a minted RTX (or FEC) SSRC differs from every SSRC the track's
+        // own codings name, not only from those of other senders and remote descriptions.
+        let mut minted: Vec<SSRC> = track
+            .codings()
+            .iter()
+            .flat_map(|coding| {
+                let coding = &coding.rtp_coding_parameters;
+                [
+                    coding.ssrc,
+                    coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+                    coding.fec.as_ref().map(|fec| fec.ssrc),
+                ]
+            })
+            .flatten()
+            .collect();
+        let mut new_ssrc = || self.unused_ssrc_drawn(&mut minted, draw);
         track
             .codings()
             .iter()
@@ -4139,6 +4293,12 @@ impl RTCPeerConnection {
             })
             .flatten()
             .collect();
+        // RFC 4588 section 4: the original and the retransmission stream have two different
+        // SSRCs; nor may a FEC flow or another encoding share one (RFC 3550 section 8).
+        let mut named = HashSet::new();
+        if let Some(repeated) = minted.iter().find(|ssrc| !named.insert(**ssrc)) {
+            return Err(Error::ErrRTPSenderSsrcCollision(*repeated));
+        }
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
                 encoding.rtp_coding_parameters.ssrc = Some(self.unused_ssrc(&mut minted));
@@ -4693,6 +4853,89 @@ pub(crate) fn unused_ssrc_from(
 #[cfg(test)]
 mod unused_ssrc_test {
     use super::*;
+    use crate::peer_connection::configuration::media_engine::{
+        MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
+    };
+    use crate::rtp_transceiver::rtp_sender::rtp_codec::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
+
+    /// A peer connection with VP8 and RTX, so a sender gets an RTX flow.
+    fn vp8_with_rtx() -> RTCPeerConnection {
+        let mut media_engine = MediaEngine::default();
+        for (mime_type, payload_type, fmtp) in
+            [(MIME_TYPE_VP8, 96, ""), (MIME_TYPE_RTX, 97, "apt=96")]
+        {
+            media_engine
+                .register_codec(
+                    RTCRtpCodecParameters {
+                        rtp_codec: RTCRtpCodec {
+                            mime_type: mime_type.to_owned(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: fmtp.to_owned(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type,
+                    },
+                    RtpCodecKind::Video,
+                )
+                .unwrap();
+        }
+        RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .build(Instant::now())
+            .unwrap()
+    }
+
+    fn track(coding: RTCRtpCodingParameters) -> MediaStreamTrack {
+        MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: coding,
+                ..Default::default()
+            }],
+        )
+    }
+
+    /// RFC 4588 section 4: the original and the retransmission stream "MUST use two different
+    /// SSRC values". A minted RTX SSRC is drawn again when it is the SSRC the track names for
+    /// its media.
+    #[test]
+    fn a_minted_rtx_ssrc_is_never_the_tracks_own_media_ssrc() {
+        let pc = vp8_with_rtx();
+        let track = track(RTCRtpCodingParameters {
+            ssrc: Some(7),
+            ..Default::default()
+        });
+        let mut draws = [7u32, 9].into_iter();
+        let encodings = pc.send_encodings_from_track_drawn(&track, &mut || draws.next().unwrap());
+        let coding = &encodings[0].rtp_coding_parameters;
+        assert_eq!(Some(7), coding.ssrc);
+        assert_eq!(Some(9), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+    }
+
+    /// RFC 4588 section 4: encodings the application gives that name one SSRC for the media
+    /// and its retransmissions are refused.
+    #[test]
+    fn encodings_naming_one_ssrc_for_media_and_rtx_are_refused() {
+        let pc = vp8_with_rtx();
+        let coding = RTCRtpCodingParameters {
+            ssrc: Some(5),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 5 }),
+            ..Default::default()
+        };
+        let encodings = vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding.clone(),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            pc.normalize_sender_track(track(coding), encodings),
+            Err(Error::ErrRTPSenderSsrcCollision(5))
+        ));
+    }
 
     /// RFC 5104 section 4.2.1.2: the negotiated maximum is the local description's `b=TIAS`,
     /// else `b=AS` times 1000, of the receiving sections, the smallest when several state one.

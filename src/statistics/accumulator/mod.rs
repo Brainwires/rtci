@@ -1046,9 +1046,22 @@ impl RTCStatsAccumulator {
         }
     }
 
+    /// Records whether the outbound stream `ssrc` negotiated RFC 6679 ECN reports (the XR
+    /// ECN Summary Report, `a=rtcp-xr:ecn-sum`, which RFC 6679 section 7.1 requires whatever
+    /// the initiation; `nack ecn` adds the feedback packet). Set before
+    /// [`set_outbound_ccfb`](Self::set_outbound_ccfb), which decides the marking: a stream
+    /// that is not reported in RFC 8888 marks with these reports instead.
+    pub(crate) fn set_outbound_rfc6679(&mut self, ssrc: SSRC, negotiated: bool) {
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.rfc6679_negotiated = negotiated;
+        }
+    }
+
     /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback, and
     /// whether its section negotiated ECN (`ecn`: the initiation, RFC 6679 section 6.1.1,
     /// `a=ecn-capable-rtp`); with ECN on and both negotiated, its packets are sent ECT(1).
+    /// A stream that is not reported in RFC 8888 marks when it negotiated RFC 6679's own
+    /// reports ([`set_outbound_rfc6679`](Self::set_outbound_rfc6679)), ECN negotiated too.
     pub(crate) fn set_outbound_ccfb(
         &mut self,
         ssrc: SSRC,
@@ -1060,7 +1073,8 @@ impl RTCStatsAccumulator {
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
             stream.ect_codepoint = ecn_negotiated.map(|n| n.codepoint);
             stream.ccfb_negotiated = negotiated;
-            stream.ect1_marking = ecn && negotiated;
+            // RFC 8888 reports, or RFC 6679's own ECN reports, carry the marks back.
+            stream.ect1_marking = ecn && (negotiated || stream.rfc6679_negotiated);
             // A renegotiation that keeps `ack ccfb` keeps where the stream is in the
             // procedure; one that drops it ends it.
             if !stream.ect1_marking {

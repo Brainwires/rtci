@@ -140,6 +140,7 @@ fn opened_after_sdes_items(
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let now = Instant::now();
     if !sdes_items.is_empty() {

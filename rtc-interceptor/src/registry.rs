@@ -440,6 +440,23 @@ impl Registry {
         self
     }
 
+    /// Add an interceptor that keeps one instance per RTP session ([`PerRtpSession`]) at
+    /// `slot`. [`slots`](Self::slots) names it by the interceptor it holds.
+    ///
+    /// [`PerRtpSession`]: crate::PerRtpSession
+    pub fn with_per_rtp_session<T: Interceptor + 'static>(
+        mut self,
+        slot: Slot,
+        interceptor: crate::PerRtpSession<T>,
+    ) -> Self {
+        let name = short_type_name::<T>();
+        if let Some(displaced) = self.names.insert(slot, name.clone()) {
+            warn!("{slot:?} already held {displaced}; {name} replaced it");
+        }
+        self.interceptors.insert(slot, Box::new(interceptor));
+        self
+    }
+
     /// What this registry holds, wire-to-application: each interceptor's slot and its type name,
     /// in the order [`build`](Self::build) will compose them.
     ///
@@ -453,6 +470,11 @@ impl Registry {
             .iter()
             .map(|(slot, name)| (*slot, name.clone()))
             .collect()
+    }
+
+    /// Whether an interceptor sits at `slot`.
+    pub fn holds(&self, slot: Slot) -> bool {
+        self.names.contains_key(&slot)
     }
 
     /// Assemble the interceptor chain.
