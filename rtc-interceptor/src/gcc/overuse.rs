@@ -337,4 +337,39 @@ mod tests {
     }
 
     const DEFAULT_THRESHOLD_FOR_TEST: f64 = crate::gcc::threshold::DEFAULT_INITIAL_MS;
+    /// draft-ietf-rmcat-gcc-02 section 5.4 as written (`ThresholdTimeBase::Arrival`):
+    /// `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)| - del_var_th(i-1))`,
+    /// t(i) the arrival time of group i, the step not capped. Two groups 300 ms apart on the
+    /// receiver's clock, read 1 ms apart: the threshold moves by K_u * 300 ms * (20 - 12.5)
+    /// = 22.5 ms. The default (`Departure`) takes libwebrtc's step, here the 1 ms between the
+    /// readings.
+    #[test]
+    fn the_drafts_threshold_adapts_over_the_uncapped_arrival_gap() {
+        let epoch = Instant::now();
+        let mut draft = OveruseDetector::new().with_threshold_time_base(ThresholdTimeBase::Arrival);
+        draft.update_with_arrival(epoch, Duration::ZERO, 20.0);
+        draft.update_with_arrival(
+            epoch + Duration::from_millis(1),
+            Duration::from_millis(300),
+            20.0,
+        );
+        assert!(
+            (draft.threshold_ms() - 35.0).abs() < 1e-9,
+            "{}",
+            draft.threshold_ms()
+        );
+
+        let mut default = OveruseDetector::new();
+        default.update_with_arrival(epoch, Duration::ZERO, 20.0);
+        default.update_with_arrival(
+            epoch + Duration::from_millis(1),
+            Duration::from_millis(300),
+            20.0,
+        );
+        assert!(
+            (default.threshold_ms() - 12.575).abs() < 1e-9,
+            "{}",
+            default.threshold_ms()
+        );
+    }
 }

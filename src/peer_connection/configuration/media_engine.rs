@@ -103,9 +103,18 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
     };
     let asymmetric =
         |line: &str| parameter(line, "level-asymmetry-allowed").as_deref() == Some("1");
+    // RFC 6184 section 8.1: a format without `profile-level-id` is Constrained Baseline... at
+    // Level 1 ("the Baseline profile, without additional constraints at Level 1, MUST be
+    // inferred"); RFC 7742 section 6.2: the parameter is interpreted when received, so an
+    // offer without it is answered at no more than Level 1.
+    let profile_level_id = |line: &str| {
+        parameter(line, "profile-level-id").or_else(|| {
+            Some(crate::rtp_transceiver::fmtp::h264::DEFAULT_PROFILE_LEVEL_ID.to_owned())
+        })
+    };
     let (Some(local_id), Some(offered_id)) = (
-        parameter(local, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
-        parameter(offered, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+        profile_level_id(local).filter(|id| id.len() == 6 && id.is_ascii()),
+        profile_level_id(offered).filter(|id| id.len() == 6 && id.is_ascii()),
     ) else {
         return local.to_owned();
     };
@@ -129,6 +138,35 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// The fmtp line this endpoint writes for an H.264 format (RFC 7742 section 6.2):
+/// `profile-level-id` is always there ("Implementations MUST include this parameter within
+/// SDP"; a format registered without one is the RFC 6184 section 8.1 default, `42000a`, stated
+/// explicitly), and `sprop-parameter-sets` never is (parameter sets travel in-band: "WebRTC
+/// implementations MUST NOT include this parameter in the SDP they generate").
+fn h264_generated_fmtp(line: &str) -> String {
+    let mut parameters: Vec<String> = line
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            !p.split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("sprop-parameter-sets"))
+        })
+        .map(str::to_owned)
+        .collect();
+    let has_profile_level_id = parameters.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("profile-level-id"))
+    });
+    if !has_profile_level_id {
+        parameters.push(format!(
+            "profile-level-id={}",
+            crate::rtp_transceiver::fmtp::h264::DEFAULT_PROFILE_LEVEL_ID
+        ));
+    }
+    parameters.join(";")
 }
 
 /// The fmtp line of an H.265 answer: this endpoint's parameters (`local`) with a `level-id`
@@ -177,7 +215,7 @@ mod multi_codec_test;
 use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::sdp::{
     ATTR_KEY_SFRAME, ENCRYPT_URI, MediaDescriptionExt, SectionExtension,
-    codecs_from_media_description, is_unknown_application_media,
+    codecs_from_media_description, is_unknown_media_protocol,
     rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
@@ -300,6 +338,8 @@ pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 /// its own) sends during silence; static payload type 13 at 8000 Hz.
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_CN: &str = "audio/CN";
+/// MIME type for redundant audio data, RED (RFC 2198), as `a=rtpmap:<pt> red/48000/2`.
+pub const MIME_TYPE_RED: &str = "audio/red";
 
 /// SMPTE ST 336 (KLV) metadata MIME type
 ///
@@ -448,6 +488,12 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+    /// The header extension mappings (id, URI) of this endpoint's pending offer (RFC 9429
+    /// section 5.9: "For each specified RTP header extension, establish a mapping between
+    /// the extension ID and URI"): what a packet that arrives before the answer is read with
+    /// where no negotiated mapping says ([`Self::receive_header_extension_id`]). Empty
+    /// outside `have-local-offer` and `have-remote-pranswer`.
+    pub(crate) offered_header_extensions: Vec<(u16, String)>,
 
     /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
     /// See [`MediaEngine::set_flexfec_with_retransmission`].
@@ -509,6 +555,7 @@ impl MediaEngine {
             vp9_receiver_limits: Default::default(),
             rtcp_cname: Default::default(),
             audio_packet_time: Default::default(),
+            offered_header_extensions: Default::default(),
         }
     }
 
@@ -607,6 +654,21 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 111,
+            },
+            // Redundant audio data (RFC 2198) with Opus as the primary and the redundant
+            // encoding: RFC 8854 section 4.2 has a WebRTC endpoint support RED for audio, and
+            // Chromium and WebKit offer it in this form (`a=rtpmap:63 red/48000/2`,
+            // `a=fmtp:63 111/111`, after Opus). The RED interceptor the peer connection
+            // installs sends and takes apart its packets.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_RED.to_owned(),
+                    clock_rate: 48000,
+                    channels: 2,
+                    sdp_fmtp_line: "111/111".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 63,
             },
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -1196,6 +1258,25 @@ impl MediaEngine {
         }
 
         (0, false, false)
+    }
+
+    /// The id a received packet carries the header extension `uri` with: the negotiated one
+    /// (of either kind), else, while a local offer is pending, the one that offer maps it to
+    /// (RFC 3264 section 5.1: the offerer is prepared to receive as its offer describes
+    /// before the answer arrives). 0 when neither says.
+    pub(crate) fn receive_header_extension_id(&self, uri: &str) -> u16 {
+        if let Some((id, _)) = self
+            .negotiated_header_extensions
+            .iter()
+            .find(|(_, e)| e.uri == uri && (e.is_audio || e.is_video))
+        {
+            return *id;
+        }
+        self.offered_header_extensions
+            .iter()
+            .find(|(_, offered)| offered == uri)
+            .map(|(id, _)| *id)
+            .unwrap_or(0)
     }
 
     /// clone_to copies any user modifiable state of the MediaEngine
@@ -1853,7 +1934,7 @@ impl MediaEngine {
         for media in &desc.media_descriptions {
             // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
             // 8841 `DTLS/SCTP` data section): no codecs to read.
-            if media.is_webrtc_datachannel() || is_unknown_application_media(media) {
+            if media.is_webrtc_datachannel() || is_unknown_media_protocol(media) {
                 continue;
             }
 
@@ -2097,6 +2178,24 @@ impl MediaEngine {
         codec: &RTCRtpCodecParameters,
         answering: bool,
     ) -> String {
+        let line = self.local_fmtp_line_of_codec(typ, codec, answering);
+        if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            h264_generated_fmtp(&line)
+        } else {
+            line
+        }
+    }
+
+    fn local_fmtp_line_of_codec(
+        &self,
+        typ: RtpCodecKind,
+        codec: &RTCRtpCodecParameters,
+        answering: bool,
+    ) -> String {
         let registered = match typ {
             RtpCodecKind::Audio => &self.audio_codecs,
             RtpCodecKind::Video => &self.video_codecs,
@@ -2129,7 +2228,14 @@ impl MediaEngine {
         {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }
-        let local_line = local.rtp_codec.sdp_fmtp_line;
+        let mut local_line = local.rtp_codec.sdp_fmtp_line;
+        if local
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            local_line = h264_generated_fmtp(&local_line);
+        }
         if !answering {
             return local_line;
         }

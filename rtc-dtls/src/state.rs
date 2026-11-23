@@ -65,6 +65,9 @@ pub struct State {
     pub(crate) remote_certificate_types: Vec<ClientCertificateType>,
     /// Server: the ClientHello carried ec_point_formats, so the ServerHello may (RFC 8422 5.2).
     pub(crate) remote_offered_point_formats: bool,
+    /// The application protocol ALPN selected (RFC 7301), once the server's hello (DTLS
+    /// 1.2) or EncryptedExtensions (DTLS 1.3) has said: `None` without ALPN.
+    pub(crate) application_protocol: Option<String>,
     /// RFC 9146, DTLS 1.2. The connection id this client put in its ClientHello, kept so
     /// that a repeated ClientHello carries the same one.
     pub(crate) connection_id_offer: Option<Vec<u8>>,
@@ -210,6 +213,7 @@ impl State {
             remote_signature_schemes: vec![],
             remote_certificate_types: vec![],
             remote_offered_point_formats: false,
+            application_protocol: None,
             connection_id_offer: None,
             local_connection_id: None,
             remote_connection_id: None,
@@ -434,6 +438,14 @@ impl State {
     /// The SRTP protection profile negotiated through `use_srtp`.
     pub fn srtp_protection_profile(&self) -> SrtpProtectionProfile {
         self.srtp_protection_profile
+    }
+
+    /// The application protocol Application-Layer Protocol Negotiation selected (RFC 7301;
+    /// [`ConfigBuilder::with_alpn_protocols`](crate::config::ConfigBuilder::with_alpn_protocols)),
+    /// once the handshake has settled it: `None` when either side used no ALPN. Not kept by
+    /// [`marshal_binary`](Self::marshal_binary).
+    pub fn application_protocol(&self) -> Option<&str> {
+        self.application_protocol.as_deref()
     }
 
     /// The DTLS version the handshake negotiated, once it has: `None` before the ServerHello.

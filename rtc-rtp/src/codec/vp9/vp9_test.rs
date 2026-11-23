@@ -235,11 +235,9 @@ fn test_vp9_packet_unmarshal() -> Result<()> {
 
 #[test]
 fn test_vp9_payloader_payload() -> Result<()> {
-    let mut r0 = 8692;
     let mut rands = vec![];
-    for _ in 0..10 {
+    for r0 in (8692..).take(10) {
         rands.push(vec![(r0 >> 8) as u8 | 0x80, (r0 & 0xFF) as u8]);
-        r0 += 1;
     }
 
     let tests = vec![
@@ -419,7 +417,7 @@ pub(super) fn vp9_key_frame_640x480() -> Vec<u8> {
             bits.push(((value >> i) & 1) as u8);
         }
     }
-    while bits.len() % 8 != 0 {
+    while !bits.len().is_multiple_of(8) {
         bits.push(0);
     }
     let mut out: Vec<u8> = bits

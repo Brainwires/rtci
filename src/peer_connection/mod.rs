@@ -248,6 +248,7 @@ pub mod cryptex;
 /// S-NAPTR and SRV discovery of STUN and TURN servers (RFC 5928, RFC 8489 section 8).
 pub(crate) mod dns_discovery;
 mod dtls_sdp;
+mod early_media;
 pub mod event;
 pub(crate) mod handler;
 pub mod identity;
@@ -262,12 +263,10 @@ pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
-/// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
 pub mod turn_discovery;
 /// The TURN clients the engine runs itself (RFC 8656, RFC 7350, RFC 6062): who gathers from
 /// `turn:` servers over UDP, [`turn_streams::RelayGathering`].
 pub mod turn_streams;
-/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
@@ -313,7 +312,7 @@ use crate::peer_connection::sdp::{
     effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
     get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
     inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
-    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
+    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_media_protocol,
     media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates,
     remote_ice_options, remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin,
     validate_application_media_section, validate_dtls_attributes,
@@ -743,10 +742,18 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
     // receive it and act on it, and RFC 4585 section 6.3.1 the same of PLI: only the
     // application's encoder can answer a key-frame request, so a chain without the
     // interceptor that delivers them (which the chain's terminus would otherwise end) gets it.
-    if registry.holds(interceptor::Slot::KeyFrameRequests) {
+    let registry = if registry.holds(interceptor::Slot::KeyFrameRequests) {
         registry
     } else {
         configuration::interceptor_registry::configure_key_frame_requests(registry)
+    };
+    // RFC 2198 (RFC 8854 section 4.2): the default codecs offer RED for audio, and a peer
+    // that negotiates it sends RED packets: every chain takes them apart (and sends RED where
+    // it was negotiated) unless the application put its own interceptor in the slot.
+    if registry.holds(interceptor::Slot::Redundancy) {
+        registry
+    } else {
+        configuration::interceptor_registry::configure_audio_redundancy(registry)
     }
 }
 
@@ -873,6 +880,11 @@ pub struct RTCPeerConnection {
     /// descriptions `restart_ice` was called with. Offers restart ICE while the current local
     /// description still has one of them (`ice_restart_pending`).
     pub(crate) ice_credentials_to_replace: Vec<String>,
+    /// Every SSRC a local description of this connection has described for a local stream
+    /// (RFC 5576 section 5: an SSRC is not reused for another source, "SHOULD NOT" ever; and
+    /// section 8: an updated offer's new SSRCs differ from any used before): new SSRCs are
+    /// drawn outside it. Bounded by `internal::MAX_SSRC_HISTORY`.
+    pub(crate) ssrc_history: std::collections::HashSet<crate::rtp_transceiver::SSRC>,
     /// Whether `set_local_description` has succeeded once (a rollback included): from then
     /// on `set_configuration` refuses another `iceCandidatePoolSize` (W3C 4.4.1.5).
     pub(crate) local_description_was_set: bool,
@@ -1006,6 +1018,33 @@ impl RTCPeerConnection {
                 }
             }
         }
+        // RFC 5888 section 4: the identification-tag "MUST be unique within an SDP session
+        // description". Every mid a transceiver or a description of the session has is taken;
+        // a mid the application's generator returns is checked against them.
+        let mut mids_in_use: std::collections::HashSet<String> = self
+            .rtp_transceivers
+            .iter()
+            .filter_map(|t| t.mid().clone())
+            .collect();
+        for description in [
+            self.current_local_description.as_ref(),
+            self.pending_local_description.as_ref(),
+            self.current_remote_description.as_ref(),
+            self.pending_remote_description.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(parsed) = &description.parsed {
+                mids_in_use.extend(
+                    parsed
+                        .media_descriptions
+                        .iter()
+                        .filter_map(get_mid_value)
+                        .cloned(),
+                );
+            }
+        }
         for transceiver in &mut self.rtp_transceivers {
             if let Some(mid) = transceiver.mid()
                 && !mid.is_empty()
@@ -1023,6 +1062,19 @@ impl RTCPeerConnection {
                 // numeric mid so far; each call moves it on, so two new transceivers in one
                 // offer don't get the same argument.
                 let mid = generate(self.greater_mid);
+                // A mid is a token (RFC 5888 section 4, RFC 8866 section 9) and new.
+                if !is_sdp_token(&mid) {
+                    return Err(Error::Other(format!(
+                        "the mid generator returned {mid:?}, which is not an SDP token \
+                         (RFC 5888 section 4)"
+                    )));
+                }
+                if !mids_in_use.insert(mid.clone()) {
+                    return Err(Error::Other(format!(
+                        "the mid generator returned {mid:?}, which the session already uses \
+                         (RFC 5888 section 4: a mid is unique within a session description)"
+                    )));
+                }
                 if let Ok(numeric_mid) = mid.parse::<isize>() {
                     self.greater_mid = self.greater_mid.max(numeric_mid);
                 } else {
@@ -1455,6 +1507,19 @@ impl RTCPeerConnection {
             self.restore_description_snapshot(snapshot);
         } else {
             self.local_description_was_set = true;
+            if sdp_type != RTCSdpType::Rollback {
+                self.remember_local_ssrcs();
+            }
+            // RFC 3264 section 5.1, RFC 9429 section 5.9: an applied offer prepares the
+            // receivers for what it lists, before its answer arrives.
+            if sdp_type == RTCSdpType::Offer
+                && let Some(offer) = self
+                    .pending_local_description
+                    .as_ref()
+                    .and_then(|description| description.parsed.clone())
+            {
+                self.prepare_offered_receive(&offer);
+            }
             self.after_local_description(sdp_type);
             // The local description lists the candidates gathered so far, and it is the one
             // the application sends: they are conveyed with it (RFC 8838 section 10).
@@ -1535,6 +1600,15 @@ impl RTCPeerConnection {
             self.ice_transport_mut().role_determined = true;
         }
 
+        // W3C 4.4.1.4: a provisional answer updates the data max message size of an
+        // association that already exists (a final one does it with the negotiation below).
+        if local_description.sdp_type == RTCSdpType::Pranswer
+            && let Some(parsed) = &local_description.parsed
+            && let Some(remote) = self.remote_description().and_then(|d| d.parsed.clone())
+        {
+            self.update_sctp_max_message_size(parsed, &remote);
+        }
+
         // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"", each transceiver's
         // [[CurrentDirection]] is the direction it states. A final answer does that below with
         // the rest of the negotiation; a provisional one sets the directions alone.
@@ -1587,7 +1661,7 @@ impl RTCPeerConnection {
                 let kind = RtpCodecKind::from(media.media_name.media.as_str());
                 let mut direction = get_peer_direction(media);
                 if kind == RtpCodecKind::Unspecified
-                    || is_unknown_application_media(media)
+                    || is_unknown_media_protocol(media)
                     || direction == RTCRtpTransceiverDirection::Unspecified
                 {
                     continue;
@@ -1693,7 +1767,7 @@ impl RTCPeerConnection {
     ///
     /// How many RTP packets were discarded because no media section or track could take them
     /// (RFC 8830 section 3.1: the engine buffers no unassociated media, and says so; see
-    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`]). Not a W3C attribute: a fork
+    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`](crate::peer_connection::event::RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded)). Not a W3C attribute: a fork
     /// addition.
     pub fn discarded_rtp_packets(&self) -> u64 {
         self.pipeline_context
@@ -1826,6 +1900,13 @@ impl RTCPeerConnection {
                 Ok(()) => Ok(()),
                 Err(err) => {
                     self.restore_description_snapshot(snapshot);
+                    // The local offer is pending again; what its early media had bound was
+                    // unbound by the rollback and is established anew by the next packets.
+                    for transceiver in &mut self.rtp_transceivers {
+                        if let Some(receiver) = transceiver.receiver_mut() {
+                            receiver.reestablish_early_streams();
+                        }
+                    }
                     Err(err)
                 }
             };
@@ -1902,6 +1983,8 @@ impl RTCPeerConnection {
             // RFC 8859 section 4.7: packet times are the same for a payload type across a
             // BUNDLE group.
             crate::peer_connection::sdp::check_bundled_packet_times(&parsed)?;
+            // RFC 8859 section 4.3: IDENTICAL attributes agree across a BUNDLE group.
+            crate::peer_connection::sdp::check_bundled_identical_attributes(&parsed)?;
             // RFC 8839 section 4.4.2.1: an offer that is not an ICE restart keeps the ICE
             // attributes of the session.
             if remote_description.sdp_type == RTCSdpType::Offer
@@ -1983,6 +2066,7 @@ impl RTCPeerConnection {
         let snapshot = self.description_snapshot();
         let (sdp_type, prior_state) = (remote_description.sdp_type, self.signaling_state);
         let msid_sections = self.remote_sections_with_msid();
+        let renewed = self.sections_with_new_msid_appdata(remote_description.parsed.as_ref());
         let applied = self.apply_remote_description(
             now,
             remote_description,
@@ -1992,7 +2076,7 @@ impl RTCPeerConnection {
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
         } else {
-            self.after_remote_description(sdp_type, prior_state, msid_sections);
+            self.after_remote_description(sdp_type, prior_state, msid_sections, renewed);
             self.apply_ice_mismatch(now, sdp_type);
         }
         applied
@@ -2186,9 +2270,19 @@ impl RTCPeerConnection {
             }
 
             if lite_update {
+                // RFC 8839 section 4.4.2.2: the pair's local candidate is the transport
+                // address `a=remote-candidates` names (the offerer's remote is this agent).
+                let pinned = remote_candidates(parsed_remote_description)?
+                    .into_iter()
+                    .find_map(|(address, port)| {
+                        address
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .map(|ip| std::net::SocketAddr::new(ip, port))
+                    });
                 self.ice_transport_mut()
                     .agent
-                    .replace_remote_candidates(now, candidates);
+                    .replace_remote_candidates_pinning(now, candidates, pinned);
             } else {
                 // The description's candidate lines: candidates the application supplied, as
                 // much as those it trickles.
@@ -2458,8 +2552,19 @@ impl RTCPeerConnection {
         parsed: &::sdp::description::session::SessionDescription,
         answers: bool,
     ) -> Result<()> {
+        if self.setting_engine.bundled_fingerprints_agree {
+            sdp::check_bundled_fingerprints_agree(parsed)?;
+        }
         let mut mids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for media in &parsed.media_descriptions {
+        for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            // RFC 8866 section 5.7: "A session description MUST contain either at least one
+            // 'c=' line in each media description or a single 'c=' line at the session level."
+            if media.connection_information.is_none() && parsed.connection_information.is_none() {
+                return Err(Error::SdpInvalidValue(format!(
+                    "m= section {index} has no c= line and the session has none (RFC 8866 \
+                     section 5.7)"
+                )));
+            }
             let Some(mid) = get_mid_value(media).filter(|mid| !mid.is_empty()) else {
                 return Err(Error::ErrPeerConnRemoteDescriptionWithoutMidValue);
             };
@@ -2506,7 +2611,7 @@ impl RTCPeerConnection {
 
         for media in &parsed.media_descriptions {
             if !media.is_webrtc_datachannel()
-                && !is_unknown_application_media(media)
+                && !is_unknown_media_protocol(media)
                 && !is_rejected_media(media)
                 && RtpCodecKind::from(media.media_name.media.as_str()) != RtpCodecKind::Unspecified
             {
@@ -2626,6 +2731,7 @@ impl RTCPeerConnection {
         }
 
         check_bundled_payload_types(parsed)?;
+        check_pause_lines(parsed)?;
         self.check_remote_transports(parsed, answers)?;
         // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
         remote_candidates(parsed)?;
@@ -2857,8 +2963,7 @@ impl RTCPeerConnection {
                         // A section with no direction attribute, its own or the session's,
                         // is sendrecv (RFC 8866 section 6.7, RFC 3264 section 6.1).
                         let direction = effective_direction(parsed_remote_description, media);
-                        if kind == RtpCodecKind::Unspecified || is_unknown_application_media(media)
-                        {
+                        if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
                             continue;
                         }
 
@@ -2951,8 +3056,7 @@ impl RTCPeerConnection {
 
                         let kind = RtpCodecKind::from(media.media_name.media.as_str());
                         let mut direction = effective_direction(parsed_remote_description, media);
-                        if kind == RtpCodecKind::Unspecified || is_unknown_application_media(media)
-                        {
+                        if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
                             continue;
                         }
 
@@ -2995,6 +3099,18 @@ impl RTCPeerConnection {
                 self.propose_send_encodings(parsed_remote_description);
             }
 
+            // W3C 4.4.1.4: a provisional answer, too, updates the data max message size of
+            // an association that already exists.
+            if remote_description.sdp_type == RTCSdpType::Pranswer
+                && let Some(parsed_local_description) = self
+                    .local_description()
+                    .and_then(|desc| desc.parsed.clone())
+            {
+                self.update_sctp_max_message_size(
+                    &parsed_local_description,
+                    parsed_remote_description,
+                );
+            }
             if is_final_answer
                 && let Some(parsed_local_description) = self
                     .current_local_description
@@ -3046,6 +3162,14 @@ impl RTCPeerConnection {
                     parsed_remote_description,
                 )?;
                 self.sync_rtcp_sessions(now);
+            }
+
+            // RFC 9429 section 4.1.11: the final answer ends the dual processing of the
+            // current and the pending local description; a provisional one does not.
+            if is_final_answer {
+                self.settle_offered_receive();
+            } else if we_offer {
+                self.provisional_answer_received(parsed_remote_description);
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.
@@ -3209,6 +3333,15 @@ impl RTCPeerConnection {
             return Err(Error::SdpInvalidValue(
                 "ICE candidate contains CR, LF or NUL".to_owned(),
             ));
+        }
+        // RFC 8839 section 5.1: a received candidate line is checked against its grammar
+        // (the literal `typ`, a foundation of 1 to 32 ice-chars, a priority of at most 10
+        // digits, `raddr` / `rport` and the extension pairs), as the `a=candidate` lines of a
+        // description are (`check_attribute_lines`). An end-of-candidates indication has none.
+        if !candidate_value.is_empty() {
+            <::sdp::attribute::Candidate as ::sdp::attribute::TypedAttribute>::parse(
+                candidate_value,
+            )?;
         }
 
         // The media description the candidate is for: sdpMid wins over sdpMLineIndex. With
@@ -3819,6 +3952,16 @@ impl RTCPeerConnection {
         self.ice_transport()
             .find_candidate_pair(pair)
             .ok_or(Error::NotFoundError)
+    }
+
+    /// The application protocol the DTLS handshake of the connection's transport selected
+    /// with ALPN (RFC 8835 section 3.5, RFC 8833: `webrtc`, or `c-webrtc` when the remote
+    /// server selected it: a promise to keep the received media confidential that the
+    /// application must keep), once the association is up. `None` before that, or when the
+    /// peer used no ALPN, which RFC 8833 section 2 has the application take as `webrtc`.
+    /// [`SettingEngineBuilder::with_dtls_alpn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_alpn).
+    pub fn dtls_application_protocol(&self) -> Option<&str> {
+        self.dtls_transport().application_protocol()
     }
 
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
@@ -4527,7 +4670,7 @@ impl RTCPeerConnection {
     ///
     /// The send encodings are otherwise taken as W3C `addTransceiver` takes them: for audio
     /// `scale_resolution_down_by` and `max_framerate` are removed; at most
-    /// [`MAX_SEND_ENCODINGS`] are kept; video encodings without `scale_resolution_down_by`
+    /// [`MAX_SEND_ENCODINGS`](crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS) are kept; video encodings without `scale_resolution_down_by`
     /// get 1.0 when another has one and otherwise halve per layer from the last (4, 2, 1);
     /// a single encoding loses its rid. Without send encodings the sender has one, which the
     /// engine fills in.
@@ -4749,6 +4892,26 @@ impl RTCPeerConnection {
         self.trigger_negotiation_needed();
     }
 
+    /// W3C webrtc 4.4.1.4 for a provisional answer: "If description ... or an SCTP
+    /// association already exists, update the data max message size" from what the
+    /// description pair negotiates for the running association's ports.
+    fn update_sctp_max_message_size(
+        &mut self,
+        local: &::sdp::description::session::SessionDescription,
+        remote: &::sdp::description::session::SessionDescription,
+    ) {
+        if let SctpNegotiation::Association {
+            local_port,
+            remote_port,
+            remote_max_message_size,
+        } = negotiated_sctp(local, remote)
+            && self.sctp_transport().negotiated_ports == Some((local_port, remote_port))
+        {
+            self.sctp_transport_mut()
+                .update_max_message_size(remote_max_message_size);
+        }
+    }
+
     /// Brings the SCTP transport in line with what a completed offer/answer exchange
     /// negotiated for the data section (RFC 8841 sections 10.3 and 10.4).
     ///
@@ -4928,17 +5091,18 @@ impl RTCPeerConnection {
 /// remote description whose bundled sections give one payload type two configurations (media
 /// type, encoding name, clock rate, channels or format parameters) is refused: the payload
 /// type could not tell the streams' format.
-/// The `a=rtcp-fb` lines a section gives payload type `pt` (its own and the `*` ones), each as
-/// its feedback type and parameters with single spaces.
-fn rtcp_fb_lines(
+/// The `a=<key>` lines (`rtcp-fb`, `imageattr`) a section gives payload type `pt` (its own
+/// and the `*` ones), each as what follows the format, with single spaces.
+fn per_payload_type_lines(
     media: &::sdp::description::media::MediaDescription,
+    key: &str,
     pt: u8,
 ) -> std::collections::BTreeSet<String> {
     let pt = pt.to_string();
     media
         .attributes
         .iter()
-        .filter(|a| a.key == "rtcp-fb")
+        .filter(|a| a.key == key)
         .filter_map(|a| a.value.as_deref())
         .filter_map(|value| value.split_once(' '))
         .filter(|(format, _)| *format == pt || *format == "*")
@@ -4960,6 +5124,39 @@ fn has_setup_value(parsed: &::sdp::description::session::SessionDescription, val
             .any(|m| !is_rejected_media(m) && states(&m.attributes))
 }
 
+/// RFC 7728 section 9: "There MUST NOT be more than one 'a=rtcp-fb' line with 'pause'
+/// applicable to a single payload type in the SDP, unless the additional line uses '*' as the
+/// payload type". A section with two explicit `ccm pause` lines for one payload type, or two
+/// `*` ones, is refused.
+pub(crate) fn check_pause_lines(
+    parsed: &::sdp::description::session::SessionDescription,
+) -> Result<()> {
+    for (index, media) in parsed.media_descriptions.iter().enumerate() {
+        let mut formats: Vec<&str> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == "rtcp-fb")
+            .filter_map(|a| a.value.as_deref())
+            .filter_map(|value| {
+                let mut words = value.split_whitespace();
+                let format = words.next()?;
+                (words.next()?.eq_ignore_ascii_case("ccm")
+                    && words.next()?.eq_ignore_ascii_case("pause"))
+                .then_some(format)
+            })
+            .collect();
+        formats.sort_unstable();
+        if let Some(pair) = formats.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(Error::SdpInvalidValue(format!(
+                "m= section {index}: two a=rtcp-fb lines with pause for payload type {} \
+                 (RFC 7728 section 9)",
+                pair[0]
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_bundled_payload_types(
     parsed: &::sdp::description::session::SessionDescription,
 ) -> Result<()> {
@@ -4970,7 +5167,10 @@ fn check_bundled_payload_types(
             (
                 String,
                 RTCRtpCodecParameters,
-                std::collections::BTreeSet<String>,
+                (
+                    std::collections::BTreeSet<String>,
+                    std::collections::BTreeSet<String>,
+                ),
             ),
         > = std::collections::HashMap::new();
         // draft-ietf-avtcore-rtp-sframe-03 section 6: "If BUNDLE is in use and the "a=sframe"
@@ -5000,7 +5200,14 @@ fn check_bundled_payload_types(
                         codec.payload_type
                     )));
                 }
-                let feedback = rtcp_fb_lines(media, codec.payload_type);
+                let feedback = (
+                    per_payload_type_lines(media, "rtcp-fb", codec.payload_type),
+                    per_payload_type_lines(
+                        media,
+                        crate::peer_connection::sdp::ATTR_KEY_IMAGEATTR,
+                        codec.payload_type,
+                    ),
+                );
                 match seen.get(&codec.payload_type) {
                     None => {
                         seen.insert(codec.payload_type, (kind.clone(), codec, feedback));
@@ -5016,8 +5223,9 @@ fn check_bundled_payload_types(
                                     &b.mime_type,
                                     &b.sdp_fmtp_line,
                                 ))
-                            // RFC 8859 appendix A: `a=rtcp-fb` is IDENTICAL-PER-PT too, so the
-                            // payload type has the same lines (in any order) in each.
+                            // RFC 8859 section 4.7 and appendix A: `a=rtcp-fb` and
+                            // `a=imageattr` are IDENTICAL-PER-PT too, so the payload type has
+                            // the same lines of each (in any order) in every section.
                             && *seen_feedback == feedback;
                         if !same {
                             return Err(Error::SdpInvalidValue(format!(
@@ -5302,7 +5510,7 @@ mod tests {
             pc.ice_transport_mut()
                 .generate_restart_credentials(
                     "newufrag".to_owned(),
-                    "newpasswordlongenough".to_owned(),
+                    "newpasswordlongenough22".to_owned(),
                 )
                 .expect("stage restart");
             pc.apply_ice_restart(Instant::now())
@@ -6116,6 +6324,45 @@ a=rtcp-mux\r\n";
         assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
     }
 
+    /// RFC 5761 section 5.1.3: with RTP and RTCP multiplexed, "ICE connectivity checks MUST
+    /// only be done for the RTP component". A remote candidate of the RTCP component (2),
+    /// trickled or in the description, is not given to the ICE agent, so no pair and no check
+    /// is made for it; the RTP component's candidates are.
+    #[test]
+    fn remote_rtcp_component_candidates_get_no_checks() {
+        let mut pc = media_pc();
+        // The default candidate (RTP, the m= line's address) and the RTCP one beside it.
+        let sdp = PER_SECTION_UFRAG_OFFER.replacen(
+            "a=rtcp-mux\r\n",
+            "a=rtcp-mux\r\n\
+             a=candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\r\n\
+             a=candidate:1 2 udp 2113929470 203.0.113.100 10101 typ host\r\n",
+            1,
+        );
+        pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &sdp))
+            .unwrap();
+        // The offer's transport parameters, its candidates with them, are applied with the
+        // answer.
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+        let components = |pc: &RTCPeerConnection| {
+            pc.ice_transport()
+                .get_remote_candidates()
+                .iter()
+                .map(|c| (c.port, c.component))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtcp = "candidate:8 2 udp 2113929470 203.0.113.8 10108 typ host";
+        pc.add_remote_candidate(candidate(rtcp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtp = "candidate:9 1 udp 2113929471 203.0.113.9 10109 typ host";
+        pc.add_remote_candidate(candidate(rtp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1), (10109, 1)]);
+    }
+
     /// RFC 8838 section 14: a remote candidate that follows the end-of-candidates indication
     /// of its generation is ignored: the ICE agent does not take it and the remote
     /// description does not show it after `a=end-of-candidates`.
@@ -6579,5 +6826,65 @@ a=rtcp-mux\r\n";
         let offer = pc.create_offer(None).unwrap();
         assert!(offer.sdp.contains("a=mid:custom_0\r\n"), "{}", offer.sdp);
         assert!(offer.sdp.contains("a=mid:custom_1\r\n"), "{}", offer.sdp);
+    }
+
+    /// RFC 5888 section 4: a mid "MUST be unique within an SDP session description", and is a
+    /// token. A generator that returns a mid the session already has (another new
+    /// transceiver's, or one of a description), or something that is not a token, makes
+    /// `create_offer` fail instead of writing it.
+    #[test]
+    fn a_mid_generator_that_repeats_a_mid_or_returns_no_token_fails_the_offer() {
+        let peer = |generate: fn(isize) -> String| {
+            let mut me = MediaEngine::default();
+            me.register_default_codecs().unwrap();
+            let setting_engine = SettingEngineBuilder::new()
+                .with_mid_generator(generate)
+                .build();
+            RTCPeerConnectionBuilder::new()
+                .with_media_engine(me)
+                .with_setting_engine(setting_engine)
+                .build(Instant::now())
+                .unwrap()
+        };
+        let recvonly = || Some(crate::rtp_transceiver::RTCRtpTransceiverInit::recvonly());
+
+        let mut pc = peer(|_| "same".to_owned());
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, recvonly())
+            .unwrap();
+        pc.add_transceiver_from_kind(RtpCodecKind::Video, recvonly())
+            .unwrap();
+        assert!(pc.create_offer(None).is_err());
+
+        let mut pc = peer(|_| "two words".to_owned());
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, recvonly())
+            .unwrap();
+        assert!(pc.create_offer(None).is_err());
+
+        // A mid of the remote description: the answerer takes "0" from the offer, then its
+        // generator returns "0" again for a transceiver of its own.
+        let mut offerer = peer(|max| format!("{}", max + 1));
+        offerer
+            .add_transceiver_from_kind(RtpCodecKind::Audio, recvonly())
+            .unwrap();
+        let offer = offerer.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=mid:0\r\n"), "{}", offer.sdp);
+        let mut answerer = peer(|_| "0".to_owned());
+        let now = Instant::now();
+        answerer.set_remote_description(now, offer).unwrap();
+        let answer = answerer.create_answer(None).unwrap();
+        answerer.set_local_description(now, answer).unwrap();
+        answerer
+            .add_transceiver_from_kind(RtpCodecKind::Video, recvonly())
+            .unwrap();
+        assert!(answerer.create_offer(None).is_err());
+
+        let mut pc = peer(|max| format!("m{}", max + 1));
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, recvonly())
+            .unwrap();
+        pc.add_transceiver_from_kind(RtpCodecKind::Video, recvonly())
+            .unwrap();
+        let offer = pc.create_offer(None).unwrap();
+        assert!(offer.sdp.contains("a=mid:m0\r\n"), "{}", offer.sdp);
+        assert!(offer.sdp.contains("a=mid:m1\r\n"), "{}", offer.sdp);
     }
 }

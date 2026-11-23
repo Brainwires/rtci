@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC TURN in Rust"
+description = "Sans-I/O TURN client (RFC 8656, RFC 6062 TCP allocations) for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-turn"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "turn", "relay", "nat-traversal", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
 
 [features]
 default = ["crypto-ring"]

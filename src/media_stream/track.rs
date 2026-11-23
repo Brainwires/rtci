@@ -735,6 +735,12 @@ impl MediaStreamTrack {
         self.remote = true;
     }
 
+    /// A new track made from this one is live (RFC 8830 section 3: a new msid-appdata, a new
+    /// track).
+    pub(crate) fn renew(&mut self) {
+        self.ready_state = MediaStreamTrackState::Live;
+    }
+
     /// Records a received video frame of `width` x `height` and the frame-rate estimate in the
     /// track's settings (webrtc-pc 9.3.1).
     pub(crate) fn record_received_frame(

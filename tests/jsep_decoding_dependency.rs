@@ -135,3 +135,38 @@ fn a_dependency_on_a_format_the_answer_drops_is_removed() -> TestResult {
     assert!(answer.sdp.lines().any(|l| l == "a=group:DDP L1 L2"));
     Ok(())
 }
+
+/// Section 5.2.1: with several codecs in a section "the media streams MUST have the same
+/// dependency structure whatever the payload type". An offer whose enhancement section depends
+/// on the base layer by the same relation for each of its formats is answered with that
+/// relation for each format the answer keeps: no format of the section loses or changes it.
+#[test]
+fn every_format_of_a_section_keeps_the_same_dependency_structure() -> TestResult {
+    let mut pc = default_peer()?;
+    let sdp = crlf(&format!(
+        "{SESSION}a=group:DDP L1 L2\n{}{}",
+        section("L1", "96", ""),
+        section("L2", "98 100", "a=depend:98 lay L1:96; 100 lay L1:96\n")
+    ));
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp)?)?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    let formats: Vec<&str> = sections[1][0].split_whitespace().skip(3).collect();
+    assert!(
+        formats.contains(&"98") && formats.contains(&"100"),
+        "both formats answered: {}",
+        answer.sdp
+    );
+    let depend: Vec<&str> = sections[1]
+        .iter()
+        .filter(|l| l.starts_with("a=depend"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        depend,
+        vec!["a=depend:98 lay L1:96; 100 lay L1:96"],
+        "{}",
+        answer.sdp
+    );
+    Ok(())
+}

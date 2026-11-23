@@ -437,10 +437,12 @@ jobs:
         run: cargo package --package rtc-crypto --allow-dirty
       - name: Package crates with no rtc-crypto dependency
         run: cargo package --package rtc-shared --allow-dirty
-      # Crates depending on rtc-crypto cannot be packaged until rtc-crypto 0.21.0 exists on
-      # crates.io: `cargo package` resolves the dependency graph against the registry and the
-      # path dependency is stripped from the published manifest. This is expected for a newly
-      # introduced crate, not a regression. This step asserts the failure is exactly that
+      # Crates depending on rtc-crypto cannot be packaged one at a time until rtc-crypto at
+      # this workspace's version is on crates.io: `cargo package -p` resolves the dependency
+      # graph against the registry and the path dependency is stripped from the published
+      # manifest. This is expected before the first publish, not a regression (docs/releasing.md
+      # packages the whole workspace in one call, which resolves the workspace's own crates
+      # locally). This step asserts the failure is exactly that
       # missing-version resolution error and nothing else, so a different packaging break is
       # still caught.
       - name: Confirm dependents block only on rtc-crypto publication

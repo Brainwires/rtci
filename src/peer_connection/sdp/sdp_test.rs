@@ -663,12 +663,12 @@ fn an_application_section_that_is_neither_data_channel_nor_rtp_is_unknown() {
         ("UDP/BFCP", "*", true),
     ] {
         assert_eq!(
-            is_unknown_application_media(&section(proto, fmt)),
+            is_unknown_media_protocol(&section(proto, fmt)),
             unknown,
             "m=application 9 {proto} {fmt}"
         );
     }
-    assert!(!is_unknown_application_media(&media("audio", vec![])));
+    assert!(!is_unknown_media_protocol(&media("audio", vec![])));
     assert_eq!(
         unknown_media_name(&section("DTLS/SCTP", "5000")).map(|name| name.to_string()),
         Some("application 9 DTLS/SCTP 5000".to_owned())

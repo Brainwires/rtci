@@ -548,7 +548,6 @@ fn test_candidate_pair_stats() -> Result<()> {
         },
         rel_addr: "4.3.2.1".to_owned(),
         rel_port: 43211,
-        ..Default::default()
     }
     .new_candidate_peer_reflexive()?;
 
@@ -654,7 +653,7 @@ fn test_local_candidate_stats() -> Result<()> {
     }
     .new_candidate_server_reflexive()?;
 
-    let expected = vec![host_local.clone(), srflx_local.clone()];
+    let expected = [host_local.clone(), srflx_local.clone()];
     a.local_candidates.push(host_local);
     a.local_candidates.push(srflx_local);
 
@@ -745,7 +744,6 @@ fn test_remote_candidate_stats() -> Result<()> {
         },
         rel_addr: "4.3.2.1".to_owned(),
         rel_port: 43211,
-        ..Default::default()
     }
     .new_candidate_peer_reflexive()?;
 

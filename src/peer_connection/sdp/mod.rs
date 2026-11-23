@@ -519,6 +519,73 @@ pub(crate) fn check_bundled_packet_times(desc: &SessionDescription) -> Result<()
     Ok(())
 }
 
+/// RFC 8859 section 4.3: an attribute of the IDENTICAL category is "repeated across all the
+/// media descriptions under multiplexing" with the same value. RFC 9143 section 7.1.3 lets
+/// an answer or a subsequent offer carry it in the tagged section only, from where it applies
+/// to every bundled section (the note of section 4.3: such attributes "might not always be
+/// explicitly encoded across all media descriptions"), so an absence is not a disagreement.
+/// Two bundled sections that both carry one with different values are. A section that
+/// carries one its tagged section lacks is not refused: RFC 9429 section 5.2.2 itself writes
+/// `a=rtcp-mux-only` in a section a later offer adds and not in the tagged one, and a tagged
+/// data section carries none of the RTP session's attributes. The category is rtc-sdp's
+/// table (`sdp::attribute::mux`). The browser descriptions recorded by the interop harness
+/// never disagree (Firefox carries `a=rtcp-rsize` and `a=extmap-allow-mixed` in the tagged
+/// section only: absences).
+pub(crate) fn check_bundled_identical_attributes(desc: &SessionDescription) -> Result<()> {
+    use ::sdp::attribute::mux::{MuxCategory, category};
+    let values = |media: &MediaDescription, key: &str| -> Option<Vec<String>> {
+        let mut found: Vec<String> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == key)
+            .map(|a| {
+                a.value
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        found.sort();
+        (!found.is_empty()).then_some(found)
+    };
+    for media in &desc.media_descriptions {
+        if is_rejected_media(media) {
+            continue;
+        }
+        let Some(tagged) = tagged_section(desc, media) else {
+            continue;
+        };
+        if std::ptr::eq(tagged, media) {
+            continue;
+        }
+        let mut keys: Vec<&str> = media.attributes.iter().map(|a| a.key.as_str()).collect();
+        keys.dedup();
+        for key in keys {
+            if category(key) != Some(MuxCategory::Identical) {
+                continue;
+            }
+            let Some(own) = values(media, key) else {
+                continue;
+            };
+            let mid = get_mid_value(media).map(String::as_str).unwrap_or_default();
+            let tag = get_mid_value(tagged)
+                .map(String::as_str)
+                .unwrap_or_default();
+            if let Some(theirs) = values(tagged, key)
+                && theirs != own
+            {
+                return Err(Error::SdpInvalidValue(format!(
+                    "a={key} differs between the bundled sections {mid} and {tag} (RFC 8859 \
+                     section 4.3: IDENTICAL category)"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The Ta a description proposes (`a=ice-pacing`, RFC 8839 section 5.5: session level, a
 /// value in milliseconds of 1 to 10 digits); `None` when it proposes none or the value is not
 /// one (section 5.5: an agent that does not understand it uses the default).
@@ -580,6 +647,116 @@ pub(crate) struct TrackDetails {
     pub(crate) rids: Vec<String>,
     /// What each rid's `a=rid` line restricts the stream to (RFC 8851 section 5).
     pub(crate) rid_restrictions: HashMap<String, RTCRtpRidRestrictions>,
+    /// The further simulcast streams of the track an `a=ssrc-group:SIM` names, after the
+    /// first one (`ssrc`).
+    pub(crate) ssrc_layers: Vec<SsrcLayer>,
+    /// With `rids`: the streams the section also declares by SSRC (`a=ssrc`, each `SIM`
+    /// member one), with the repair flows `a=ssrc-group:FID` / `FEC-FR` pair them with, in
+    /// the order of their `a=ssrc` lines. RFC 9143 section 9.2 associates a packet whose SSRC
+    /// the section declares with the section; a packet of one that carries no RID is received
+    /// as a stream without a rid.
+    pub(crate) declared_ssrcs: Vec<SsrcLayer>,
+}
+
+/// The `ssrc-group` semantics of simulcast streams sent as SSRCs of one track, without
+/// RFC 8853 rids (registered in RFC 5576's registry by libwebrtc's use; "SIM").
+const SEMANTIC_TOKEN_SIMULCAST: &str = "SIM";
+
+/// A stream an m= section declares by SSRC with its repair flows (RFC 5576 section 4.2, RFC
+/// 4588 section 8.1): one simulcast stream of an `a=ssrc-group:SIM` track, or a declared
+/// stream of a section with `a=rid`.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SsrcLayer {
+    pub(crate) ssrc: SSRC,
+    pub(crate) rtx_ssrc: Option<SSRC>,
+    pub(crate) fec_ssrc: Option<SSRC>,
+}
+
+/// What the `a=ssrc-group` lines of a media section say (RFC 5576 section 4.2): a group
+/// lists one or more ssrc-ids, and any number of them.
+#[derive(Default, Debug)]
+struct SsrcGroups {
+    /// The RTX flow of each primary: the second id of its `FID` group (RFC 4588 section 8.6).
+    rtx: HashMap<SSRC, SSRC>,
+    /// The FEC repair flow of each source of a `FEC-FR` group (RFC 5956 section 4.3).
+    fec: HashMap<SSRC, SSRC>,
+    /// Every SSRC that is a repair flow of another, not a track of its own.
+    repair_flows: HashSet<SSRC>,
+    /// The members of each `SIM` group, in order.
+    simulcast: Vec<Vec<SSRC>>,
+}
+
+impl SsrcGroups {
+    fn of(media: &MediaDescription) -> Self {
+        let mut lists: Vec<(&str, Vec<SSRC>)> = vec![];
+        for value in media
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_SSRC_GROUP)
+            .filter_map(|a| a.value.as_deref())
+        {
+            let mut tokens = value.split(' ');
+            let semantics = tokens.next().unwrap_or_default();
+            let Ok(ids) = tokens
+                .map(str::parse::<SSRC>)
+                .collect::<std::result::Result<Vec<_>, _>>()
+            else {
+                log::warn!("a=ssrc-group:{value}: an ssrc-id is not a number");
+                continue;
+            };
+            if !ids.is_empty() {
+                lists.push((semantics, ids));
+            }
+        }
+
+        let mut groups = SsrcGroups::default();
+        // `FID` (RFC 5888 section 8.4, RFC 4588 section 8.6): the first id is the source,
+        // every further one a flow of the same source, the first of them its RTX flow.
+        let mut primaries: HashSet<SSRC> = HashSet::new();
+        for (semantics, ids) in &lists {
+            if *semantics == SEMANTIC_TOKEN_FLOW_IDENTIFICATION && ids.len() >= 2 {
+                groups.rtx.entry(ids[0]).or_insert(ids[1]);
+                groups.repair_flows.extend(&ids[1..]);
+                primaries.insert(ids[0]);
+            } else if *semantics == SEMANTIC_TOKEN_SIMULCAST {
+                primaries.extend(ids);
+            }
+        }
+        // `FEC-FR` (RFC 5956 sections 4.1, 4.3): one or more source flows and the additive
+        // repair flows that protect them. The first id is a source (as WebRTC writes it,
+        // `FEC-FR <source> <repair>`, RFC 8627 section 6); a further id is a source too when
+        // it is a primary of its own (an `FID` source or a `SIM` stream, as `S1 S2 R2` in
+        // section 4.2), a repair flow otherwise.
+        for (semantics, ids) in &lists {
+            if *semantics != SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK || ids.len() < 2 {
+                continue;
+            }
+            let (mut sources, mut repairs): (Vec<SSRC>, Vec<SSRC>) = (vec![], vec![]);
+            for (i, ssrc) in ids.iter().enumerate() {
+                if i == 0 || primaries.contains(ssrc) {
+                    sources.push(*ssrc);
+                } else {
+                    repairs.push(*ssrc);
+                }
+            }
+            let Some(&repair) = repairs.first() else {
+                continue;
+            };
+            for source in sources {
+                groups.fec.entry(source).or_insert(repair);
+            }
+            groups.repair_flows.extend(repairs);
+        }
+        groups.simulcast = lists
+            .into_iter()
+            .filter(|(semantics, ids)| *semantics == SEMANTIC_TOKEN_SIMULCAST && ids.len() >= 2)
+            .map(|(_, ids)| ids)
+            .collect();
+        for members in &mut groups.simulcast {
+            members.retain(|ssrc| !groups.repair_flows.contains(ssrc));
+        }
+        groups
+    }
 }
 
 pub(crate) fn track_details_for_ssrc(
@@ -609,8 +786,6 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         // `slot_by_ssrc` finds a track by SSRC (unique within the section) without a scan.
         let mut track_slots: Vec<Option<TrackDetails>> = vec![];
         let mut slot_by_ssrc: HashMap<SSRC, usize> = HashMap::new();
-        let mut rtx_repair_flows = HashMap::new();
-        let mut fec_repair_flows = HashMap::new();
 
         // The section's `a=msid` lines (RFC 8830 section 2), read before anything else: they
         // name the track's streams whatever a legacy `a=ssrc:<n> msid:` attribute says.
@@ -641,83 +816,17 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         let codec_type = RtpCodecKind::from(media.media_name.media.as_str());
-        if codec_type == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
+        if codec_type == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
             continue;
         }
 
+        // RFC 5576 section 4.2: a group "MUST list at least one <ssrc-id> for a group and MAY
+        // list any number of additional ones". Read before the `a=ssrc` lines, wherever the
+        // groups stand in the section.
+        let groups = SsrcGroups::of(media);
+
         for attr in &media.attributes {
             match attr.key.as_str() {
-                ATTR_KEY_SSRC_GROUP => {
-                    if let Some(value) = &attr.value {
-                        let split: Vec<&str> = value.split(' ').collect();
-                        if split[0] == SEMANTIC_TOKEN_FLOW_IDENTIFICATION {
-                            // Add rtx ssrcs to blacklist, to avoid adding them as tracks
-                            // Essentially lines like `a=ssrc-group:FID 2231627014 632943048` are processed by this section
-                            // as this declares that the second SSRC (632943048) is a rtx repair flow (RFC4588) for the first
-                            // (2231627014) as specified in RFC5576
-                            if split.len() == 3 {
-                                let base_ssrc = match split[1].parse::<u32>() {
-                                    Ok(ssrc) => ssrc,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                let rtx_repair_flow = match split[2].parse::<u32>() {
-                                    Ok(n) => n,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                rtx_repair_flows.insert(rtx_repair_flow, base_ssrc);
-                                // Remove if rtx was added as track before
-                                if let Some(slot) = slot_by_ssrc.remove(&rtx_repair_flow) {
-                                    track_slots[slot] = None;
-                                }
-
-                                if let Some(track) = slot_by_ssrc
-                                    .get(&base_ssrc)
-                                    .and_then(|&slot| track_slots[slot].as_mut())
-                                {
-                                    track.rtx_ssrc = Some(rtx_repair_flow);
-                                }
-                            }
-                        } else if split[0] == SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK {
-                            // Similar to above, lines like `a=ssrc-group:FEC-FR aaaaa bbbbb`
-                            // means for video ssrc aaaaa, there's a FEC track bbbbb
-                            if split.len() == 3 {
-                                let base_ssrc = match split[1].parse::<u32>() {
-                                    Ok(ssrc) => ssrc,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                let fec_repair_flow = match split[2].parse::<u32>() {
-                                    Ok(n) => n,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                fec_repair_flows.insert(fec_repair_flow, base_ssrc);
-                                // Remove if fec was added as track before
-                                if let Some(slot) = slot_by_ssrc.remove(&fec_repair_flow) {
-                                    track_slots[slot] = None;
-                                }
-
-                                if let Some(track) = slot_by_ssrc
-                                    .get(&base_ssrc)
-                                    .and_then(|&slot| track_slots[slot].as_mut())
-                                {
-                                    track.fec_ssrc = Some(fec_repair_flow);
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Handle `a=msid:<stream_id> <track_label>` The first value is the same as MediaStream.id
                 // in the browser and can be used to figure out which tracks belong to the same stream. The browser should
                 // figure this out automatically when an ontrack event is emitted on RTCPeerConnection.
@@ -735,11 +844,8 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                             }
                         };
 
-                        if rtx_repair_flows.contains_key(&ssrc) {
-                            continue; // This ssrc is a RTX repair flow, ignore
-                        }
-                        if fec_repair_flows.contains_key(&ssrc) {
-                            continue; // This ssrc is a FEC repair flow, ignore
+                        if groups.repair_flows.contains(&ssrc) {
+                            continue; // A repair flow (RTX, FEC) of a primary, not a track.
                         }
 
                         // The source-level msid of a description without `a=msid` lines
@@ -776,21 +882,35 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
             };
         }
 
-        for (repair_ssrc, base_ssrc) in rtx_repair_flows {
-            if let Some(track) = slot_by_ssrc
-                .get(&base_ssrc)
-                .and_then(|&slot| track_slots[slot].as_mut())
-            {
-                track.rtx_ssrc = Some(repair_ssrc);
+        for track in track_slots.iter_mut().flatten() {
+            if let Some(ssrc) = track.ssrc {
+                track.rtx_ssrc = groups.rtx.get(&ssrc).copied();
+                track.fec_ssrc = groups.fec.get(&ssrc).copied();
             }
         }
 
-        for (repair_ssrc, base_ssrc) in fec_repair_flows {
-            if let Some(track) = slot_by_ssrc
-                .get(&base_ssrc)
-                .and_then(|&slot| track_slots[slot].as_mut())
-            {
-                track.fec_ssrc = Some(repair_ssrc);
+        // RFC 5576 section 4.2 with the `SIM` semantics: the sources of a group are the
+        // simulcast streams of one track, the first one's track; the others are its further
+        // layers, each with its repair flows.
+        for members in &groups.simulcast {
+            let mut present = members
+                .iter()
+                .filter_map(|ssrc| slot_by_ssrc.get(ssrc).map(|&slot| (*ssrc, slot)));
+            let Some((_, keeper)) = present.next() else {
+                continue;
+            };
+            let layers: Vec<(SSRC, usize)> = present.collect();
+            for (ssrc, slot) in layers {
+                if slot == keeper || track_slots[slot].take().is_none() {
+                    continue;
+                }
+                if let Some(track) = track_slots[keeper].as_mut() {
+                    track.ssrc_layers.push(SsrcLayer {
+                        ssrc,
+                        rtx_ssrc: groups.rtx.get(&ssrc).copied(),
+                        fec_ssrc: groups.fec.get(&ssrc).copied(),
+                    });
+                }
             }
         }
 
@@ -817,9 +937,10 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
-        // we will need to override tracks, and remove ssrcs.
-        // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
-        // and 'a=ssrc' lines.
+        // the section is one track whose streams are its rids. Its `a=ssrc` lines (Firefox
+        // and Pion write them beside 'rid' and 'simulcast') are kept on that track as the
+        // SSRCs the section declares (RFC 9143 section 9.2): a packet that carries a RID is
+        // bound by its rid, one that carries none by its declared SSRC.
         if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             // The streams the remote side sends: its `send` rids. A `recv` rid is one of this
             // endpoint's own streams, which the remote side takes.
@@ -838,6 +959,22 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     rid_restrictions: rids
                         .iter()
                         .map(|r| (r.id.clone(), r.to_restrictions()))
+                        .collect(),
+                    // Each track's SSRC, then its further `SIM` streams: every one a
+                    // declared primary with its own repair flows.
+                    declared_ssrcs: tracks_in_media_section
+                        .iter()
+                        .flat_map(|track| {
+                            track
+                                .ssrc
+                                .map(|ssrc| SsrcLayer {
+                                    ssrc,
+                                    rtx_ssrc: track.rtx_ssrc,
+                                    fec_ssrc: track.fec_ssrc,
+                                })
+                                .into_iter()
+                                .chain(track.ssrc_layers.iter().cloned())
+                        })
                         .collect(),
                     ..Default::default()
                 };
@@ -886,7 +1023,7 @@ pub(crate) fn media_msid(media: &MediaDescription) -> Option<(Vec<MediaStreamId>
         let (Some(id), appdata, None) = (tokens.next(), tokens.next(), tokens.next()) else {
             continue;
         };
-        if !is_sdp_token(id) || appdata.is_some_and(|appdata| !is_sdp_token(appdata)) {
+        if !is_msid_token(id) || appdata.is_some_and(|appdata| !is_msid_token(appdata)) {
             continue;
         }
         found = true;
@@ -954,6 +1091,32 @@ fn track_details_from_sdp_pairs_repair_flows_by_lookup() {
         assert_eq!(track.track_id, format!("track{i}"));
         assert_eq!(track.mid, "0");
     }
+}
+
+/// RFC 5576 section 4.2: a group "MAY list any number of additional" ids. A `FID` group of
+/// three is a source and two further flows of it, the first of them its RTX flow; a `FEC-FR`
+/// group of three is one source and two additive repair flows (RFC 5956 section 4.1). No flow
+/// a group names as a repair flow is a track.
+#[test]
+fn groups_of_three_ids_name_one_source_and_its_flows() {
+    let mut media = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_MID.to_owned(), "0".to_owned())
+        .with_property_attribute(ATTR_KEY_SEND_RECV.to_owned())
+        .with_value_attribute(ATTR_KEY_SSRC_GROUP.to_owned(), "FID 4 14 24".to_owned())
+        .with_value_attribute(ATTR_KEY_SSRC_GROUP.to_owned(), "FEC-FR 4 34 44".to_owned());
+    media.media_name.media = "video".to_owned();
+    for ssrc in [4, 14, 24, 34, 44] {
+        media = media.with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} msid:stream track"),
+        );
+    }
+    let tracks = track_details_from_sdp(&SessionDescription::default().with_media(media));
+    assert_eq!(tracks.len(), 1, "{tracks:?}");
+    assert_eq!(tracks[0].ssrc, Some(4));
+    assert_eq!(tracks[0].rtx_ssrc, Some(14));
+    assert_eq!(tracks[0].fec_ssrc, Some(34));
+    assert!(tracks[0].ssrc_layers.is_empty());
 }
 
 #[test]
@@ -1367,7 +1530,11 @@ impl RTCPeerConnection {
                 .any(|c| is_fec_mime_type(&c.rtp_codec.mime_type)),
         };
         let mut ccfb = false;
+        let mut nack_ecn = false;
         let mut rrtr = false;
+        // The `xr-format`s other than `rcvr-rtt` the section's formats have (RFC 3611 section
+        // 5.1), in the order met: `ecn-sum` with ECN (RFC 6679 section 6.3).
+        let mut xr_formats: Vec<String> = vec![];
         for codec in &codecs {
             let name = codec
                 .rtp_codec
@@ -1405,8 +1572,20 @@ impl RTCPeerConnection {
                     ccfb = true;
                     continue;
                 }
+                // RFC 6679 section 6.2: the ECN feedback packet (`nack ecn`) applies to the
+                // RTP session, so it is written once, for every format, below.
+                if feedback.typ == crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK
+                    && feedback.parameter
+                        == crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                {
+                    nack_ecn = true;
+                    continue;
+                }
                 // XR formats are `a=rtcp-xr` (below), never `a=rtcp-fb` lines.
                 if feedback.typ == RTCP_FB_XR {
+                    if !xr_formats.contains(&feedback.parameter) {
+                        xr_formats.push(feedback.parameter.clone());
+                    }
                     continue;
                 }
                 // Receiver reference times: `a=rtcp-xr`, below; an `a=rtcp-fb ... rrtr` line
@@ -1500,24 +1679,42 @@ impl RTCPeerConnection {
                 format!("* {TYPE_RTCP_FB_ACK} {RTCP_FB_ACK_CCFB}"),
             );
         }
+        if nack_ecn {
+            media = media.with_value_attribute(
+                ATTR_KEY_RTCP_FB.to_owned(),
+                format!(
+                    "* {} {}",
+                    crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK,
+                    crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                ),
+            );
+        }
         // RFC 3611 section 5: XR use is signalled with `a=rtcp-xr`. An offer asks for
         // receiver reference times when this endpoint takes them (`rcvr-rtt=all`, both ways);
         // an answer to an offer with the attribute states what it takes of it, an empty
         // attribute for nothing (section 5.2: "it SHOULD include an empty 'a=rtcp-xr'
         // attribute"); an answer to an offer without it has none (section 5.1: omitted when
         // XR is not used).
+        // The other formats (`ecn-sum`, RFC 6679 section 7.1: "the "rtcp-xr" attribute with
+        // the "ecn-sum" parameter MUST also be used") follow in the same attribute: an
+        // answer's feedback is already what the offer had of them.
+        let with_xr_formats = |first: Option<String>| -> Option<String> {
+            let formats: Vec<String> = first.into_iter().chain(xr_formats.clone()).collect();
+            (!formats.is_empty()).then(|| formats.join(" "))
+        };
         let rtcp_xr = match &media_section.offered_rtcp_xr {
-            None if is_offer => rrtr.then(|| format!("{XR_FORMAT_RCVR_RTT}=all")),
+            None if is_offer => with_xr_formats(rrtr.then(|| format!("{XR_FORMAT_RCVR_RTT}=all"))),
             None => None,
-            Some(offered) => Some(if rrtr {
-                offered
-                    .iter()
-                    .find(|f| is_rcvr_rtt(f))
-                    .cloned()
-                    .unwrap_or_else(|| format!("{XR_FORMAT_RCVR_RTT}=all"))
-            } else {
-                String::new()
-            }),
+            Some(offered) => Some(
+                with_xr_formats(rrtr.then(|| {
+                    offered
+                        .iter()
+                        .find(|f| is_rcvr_rtt(f))
+                        .cloned()
+                        .unwrap_or_else(|| format!("{XR_FORMAT_RCVR_RTT}=all"))
+                }))
+                .unwrap_or_default(),
+            ),
         };
         if let Some(rtcp_xr) = rtcp_xr {
             media = media.with_value_attribute(ATTR_KEY_RTCP_XR.to_owned(), rtcp_xr);
@@ -1910,7 +2107,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast,
             repair_flows,
             params.msid_appdata,
-        );
+        )?;
         // RFC 8853 section 5.1: one line, each direction at most once.
         let mut sc_attr = vec![];
         if !recv_sc_list.is_empty() {
@@ -1948,7 +2145,7 @@ impl RTCPeerConnection {
         write_ssrc_attributes_for_simulcast: bool,
         repair_flows: RepairFlows,
         msid_appdata: bool,
-    ) -> MediaDescription {
+    ) -> Result<MediaDescription> {
         let cname = media_engine.rtcp_cname.as_str();
         // Every transceiver has a sender; one that has neither a track nor a sending
         // direction is not described (RFC 9429 section 5.2.1).
@@ -1982,6 +2179,19 @@ impl RTCPeerConnection {
             }
             if stream_ids.is_empty() {
                 stream_ids.push("-".to_owned());
+            }
+            // RFC 8830 section 2: `msid-id = 1*64token-char` and `msid-appdata =
+            // 1*64token-char`. A stream or track id the application chose that is not one
+            // cannot be written: the line would not parse (a space would even make it three
+            // tokens), so the description is not made. The track id is checked also without
+            // appdata: the source-level `msid` attribute carries it.
+            for id in stream_ids.iter().chain(std::iter::once(&track_id)) {
+                if !is_msid_token(id) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "the id {id:?} cannot be written in a=msid: an msid-id or appdata is 1 \
+                         to 64 token characters (RFC 8830 section 2)"
+                    )));
+                }
             }
             // The source-level `msid` (RFC 8830 appendix A) names the same first stream.
             let source_stream = stream_ids[0].clone();
@@ -2075,7 +2285,7 @@ impl RTCPeerConnection {
             None => {}
         }
 
-        media
+        Ok(media)
     }
 }
 
@@ -2165,7 +2375,7 @@ pub(crate) fn section_multiplexes_rtcp(
 
 /// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
 /// neither rejected nor bundle-only (RFC 9143 sections 7.2 and 7.3.1).
-fn tagged_section<'a>(
+pub(crate) fn tagged_section<'a>(
     desc: &'a SessionDescription,
     media: &MediaDescription,
 ) -> Option<&'a MediaDescription> {
@@ -2557,6 +2767,7 @@ impl RTCPeerConnection {
 
         let answer_payload_types = answer_payload_types(media_engine, media_sections);
         let mut candidates_added = false;
+        let offers_over_tcp = params.bundle.is_offer() && params.sctp_over_tcp;
         for m in media_sections.iter() {
             // RFC 8829 §5.3.1: reflect rejected m-lines (port=0) in the answer.
             // These must appear in the same position as in the offer to preserve m-line indexing.
@@ -2671,6 +2882,17 @@ impl RTCPeerConnection {
                     params,
                 )?;
                 d = d1;
+                // RFC 9429 section 5.1.2: the offered profile "is determined by the protocol
+                // associated with the current default or selected ICE candidate", as for the
+                // data section (`sctp_over_tcp`, RFC 8841 section 12.2): `TCP/DTLS/RTP/SAVPF`
+                // (RFC 7850) when that candidate is a TCP one. An answer repeats the offer's.
+                if offers_over_tcp
+                    && let Some(desc) = d.media_descriptions.last_mut()
+                    && desc.media_name.protos == ["UDP", "TLS", "RTP", "SAVPF"]
+                {
+                    desc.media_name.protos =
+                        ["TCP", "DTLS", "RTP", "SAVPF"].map(str::to_owned).to_vec();
+                }
                 should_add_id
             };
 
@@ -2982,6 +3204,7 @@ impl RTCPeerConnection {
             d = d
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }
+        make_msid_pairs_unique(&mut d);
 
         Ok(d)
     }
@@ -3128,7 +3351,29 @@ pub(crate) fn validate_dtls_attributes(
 /// set that every section overrides applies to nothing and is not compared. A value that does
 /// not follow the attribute's syntax is [`Error::ErrSessionDescriptionInvalidFingerprint`],
 /// wherever it sits.
+///
+/// With BUNDLE, `a=fingerprint` is of the TRANSPORT category (RFC 8859 section 4.5 and
+/// appendix A): the group's transport is set up from its tagged section, so that section's
+/// fingerprints are the group's, and what the other bundled sections carry is not used (RFC
+/// 9143 section 7.1.3: their transport attributes are the offerer's proposal for transports
+/// BUNDLE replaces). They are therefore not compared, unless
+/// [`check_bundled_fingerprints_agree`] is asked for.
 pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCDtlsFingerprint>> {
+    fingerprints_in_force(desc, false)
+}
+
+/// The hardening of `SettingEngineBuilder::with_bundled_fingerprints_agreeing`: every bundled
+/// section's fingerprints must agree with the tagged section's, as those of sections outside
+/// the group already must ([`Error::ErrSessionDescriptionConflictingFingerprints`]). Stricter
+/// than RFC 8859 section 4.5, which takes the tagged section's and ignores the others.
+pub(crate) fn check_bundled_fingerprints_agree(desc: &SessionDescription) -> Result<()> {
+    fingerprints_in_force(desc, true).map(|_| ())
+}
+
+fn fingerprints_in_force(
+    desc: &SessionDescription,
+    every_bundled_section: bool,
+) -> Result<Vec<RTCDtlsFingerprint>> {
     let parse =
         |attributes: &[sdp::description::common::Attribute]| -> Result<Vec<RTCDtlsFingerprint>> {
             let mut fingerprints = vec![];
@@ -3167,8 +3412,14 @@ pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCD
     let mut rejected = vec![];
     for m in &desc.media_descriptions {
         let media_level = parse(&m.attributes)?;
+        // A bundled section other than its group's tagged one: its transport attributes are
+        // not the group's (RFC 8859 section 4.5). Still parsed, so a malformed value refuses
+        // the description wherever it sits.
+        let untagged = tagged_section(desc, m).is_some_and(|tagged| !std::ptr::eq(tagged, m));
         if is_rejected_media(m) {
             rejected.push(media_level);
+        } else if untagged && !every_bundled_section {
+            continue;
         } else if media_level.is_empty() {
             in_force.push(session_level.clone());
         } else {
@@ -3194,6 +3445,90 @@ pub(crate) fn extract_fingerprints(desc: &SessionDescription) -> Result<Vec<RTCD
     }
 
     Ok(in_force.swap_remove(0))
+}
+
+/// RFC 8830 section 2: "Multiple media descriptions with the same value for 'msid-id' and
+/// 'msid-appdata' are not permitted". W3C webrtc-pc lets one track be sent by several
+/// transceivers (`addTransceiver(track)` twice), and the appdata this endpoint writes is the
+/// track id (`with_msid_appdata`), so two sections would carry the same pair. Both allow
+/// distinct appdata: a section whose `a=msid` repeats an earlier section's pair has its
+/// appdata (and its source-level `msid`) made unique with a suffix, `<track id>-<n>`, kept
+/// within the 64 token characters. The same sections give the same result every time, so a
+/// later offer keeps the lines (RFC 9429 section 5.2.2). A line without appdata (the RFC 9429
+/// form) is not a pair: the RFC 9429 section 5.2.1 examples have one stream in two sections.
+fn make_msid_pairs_unique(desc: &mut SessionDescription) {
+    let mut used: HashSet<(String, String)> = HashSet::new();
+    for media in &mut desc.media_descriptions {
+        // The line is `a=msid:<id> <appdata>`: written as a property attribute whose key
+        // holds it all (`add_sender_sdp`), or parsed as key `msid` and a value.
+        let msid_value = |a: &sdp::description::common::Attribute| -> Option<String> {
+            if a.key == "msid" {
+                a.value.clone()
+            } else {
+                a.key
+                    .strip_prefix("msid:")
+                    .filter(|_| a.value.is_none())
+                    .map(str::to_owned)
+            }
+        };
+        let pairs: Vec<(String, String)> = media
+            .attributes
+            .iter()
+            .filter_map(|a| {
+                let value = msid_value(a)?;
+                let (id, appdata) = value.split_once(' ')?;
+                Some((id.to_owned(), appdata.to_owned()))
+            })
+            .collect();
+        let Some(appdata) = pairs.first().map(|(_, appdata)| appdata.clone()) else {
+            continue;
+        };
+        let clashes = |appdata: &str, used: &HashSet<(String, String)>| {
+            pairs
+                .iter()
+                .any(|(id, _)| used.contains(&(id.clone(), appdata.to_owned())))
+        };
+        let mut unique = appdata.clone();
+        let mut n = 1u32;
+        while clashes(&unique, &used) {
+            let suffix = format!("-{n}");
+            let keep = appdata.len().min(64 - suffix.len());
+            unique = format!("{}{suffix}", &appdata[..keep]);
+            n += 1;
+        }
+        for (id, _) in &pairs {
+            used.insert((id.clone(), unique.clone()));
+        }
+        if unique == appdata {
+            continue;
+        }
+        for a in media.attributes.iter_mut() {
+            if a.value.is_none()
+                && let Some(id) = a
+                    .key
+                    .strip_prefix("msid:")
+                    .and_then(|v| v.split_once(' '))
+                    .map(|(id, _)| id.to_owned())
+            {
+                a.key = format!("msid:{id} {unique}");
+                continue;
+            }
+            let Some(value) = a.value.as_mut() else {
+                continue;
+            };
+            if a.key == "msid" {
+                if let Some((id, _)) = value.split_once(' ') {
+                    *value = format!("{id} {unique}");
+                }
+            } else if a.key == ATTR_KEY_SSRC
+                && let Some((ssrc, source)) = value.split_once(' ')
+                && let Some(msid) = source.strip_prefix("msid:")
+                && let Some((id, _)) = msid.split_once(' ')
+            {
+                *value = format!("{ssrc} msid:{id} {unique}");
+            }
+        }
+    }
 }
 
 /// Inserts `a=<key>[:<value>]` at the end of m-section `index` of an SDP text, keeping every
@@ -3241,6 +3576,11 @@ pub(crate) struct RemoteIceDetails {
 /// m-section that is only reachable through its BUNDLE group also has port zero).
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+}
+
+/// Whether `s` can be an `msid-id` or `msid-appdata` (RFC 8830 section 2: `1*64token-char`).
+pub(crate) fn is_msid_token(s: &str) -> bool {
+    s.len() <= 64 && is_sdp_token(s)
 }
 
 /// Whether `s` is a `token` of RFC 8866 section 9: one or more of the characters
@@ -4252,17 +4592,24 @@ pub(crate) fn into_legacy_data_section(media: &mut MediaDescription) {
 }
 
 /// Whether `media` is an `m=application` line that is neither a data channel section
-/// (RFC 8841, or the drafts before it) nor application media over RTP: an application
-/// protocol this endpoint does not know. It is answered like a media type this endpoint does not know, rejected with its
-/// own m= line, and gets no transceiver.
-pub(crate) fn is_unknown_application_media(media_desc: &MediaDescription) -> bool {
-    media_desc.media_name.media == MEDIA_SECTION_APPLICATION
-        && !media_desc.is_webrtc_datachannel()
-        && !media_desc
-            .media_name
-            .protos
-            .iter()
-            .any(|proto| proto == "RTP")
+/// (RFC 8841, or the drafts before it) nor application media over RTP, or an `m=audio` /
+/// `m=video` line whose protocol is not RTP (RFC 8866 section 5.14: "the interpretation of
+/// the media format depends on the value of the <proto> sub-field", so the formats of
+/// `m=audio 9 udptl t38` are no payload types): a protocol this endpoint does not know. It is
+/// answered like a media type this endpoint does not know, rejected with its own m= line, and
+/// gets no transceiver. An audio or video section built in code without a protocol (every
+/// parsed m= line has one) is read as RTP.
+pub(crate) fn is_unknown_media_protocol(media_desc: &MediaDescription) -> bool {
+    let rtp = media_desc
+        .media_name
+        .protos
+        .iter()
+        .any(|proto| proto == "RTP");
+    match media_desc.media_name.media.as_str() {
+        MEDIA_SECTION_APPLICATION => !media_desc.is_webrtc_datachannel() && !rtp,
+        "audio" | "video" => !rtp && !media_desc.media_name.protos.is_empty(),
+        _ => false,
+    }
 }
 
 /// The `a=sctp-port` of a data channel section (RFC 8841 section 5): `Ok(None)` when the
@@ -4767,13 +5114,14 @@ pub(crate) fn codecs_from_media_description(
 }
 
 /// The m= line of a section whose media type this endpoint doesn't know (not audio or
-/// video), for a rejection that reproduces it. An `m=application` line is reproduced too:
+/// video, or audio or video over a protocol that is not RTP), for a rejection that
+/// reproduces it. An `m=application` line is reproduced too:
 /// a data channel section keeps its proto (`TCP/DTLS/SCTP` stays that), and one that is not
 /// a data channel section (the pre-RFC `DTLS/SCTP 5000` form, application media over RTP)
 /// is not answered as if it had been one.
 pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> {
     let kind = media.media_name.media.as_str();
-    if matches!(kind, "audio" | "video") {
+    if matches!(kind, "audio" | "video") && !is_unknown_media_protocol(media) {
         return None;
     }
     let mut name = media.media_name.clone();
@@ -5419,8 +5767,8 @@ pub(crate) fn update_sdp_origin(
         if d.marshal() == *last_generated {
             return;
         }
-        origin.session_version = origin.session_version.wrapping_add(1);
-        d.origin.session_version = origin.session_version;
+        origin.session_version = origin.session_version.incremented();
+        d.origin.session_version = origin.session_version.clone();
     }
     *last_generated = d.marshal();
 }

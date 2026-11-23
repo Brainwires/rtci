@@ -25,10 +25,12 @@
 #[cfg(test)]
 mod pause_resume_test;
 
+use crate::rtcp_session::{RepeatInRegularReports, RtcpSessionControl, RtcpSessionEvent};
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Interceptor, Packet, TaggedPacket};
 use rtcp::goodbye::Goodbye;
 use rtcp::receiver_report::ReceiverReport;
+use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
 use rtcp::transport_feedbacks::pause_resume::{PauseResume, PauseResumeEntry, PauseResumeType};
 use sansio::Protocol;
@@ -49,6 +51,35 @@ pub const PAUSE_DEFAULT_ROUND_TRIP_TIME: Duration = Duration::from_millis(500);
 /// How often PAUSED is repeated after the first one: "PAUSED MUST also be included in (at
 /// least) the next two regular RTCP reports" (section 8.2).
 pub const PAUSED_REPETITIONS: u8 = 2;
+
+/// The fewest times a local-pause PAUSED is repeated after the first one (RFC 7728 section
+/// 6.4: "a sufficient number of times to reach a high probability that the message is
+/// correctly delivered"); more when the receivers report loss
+/// ([`local_pause_repetitions`]).
+pub const LOCAL_PAUSED_MIN_REPETITIONS: u8 = PAUSED_REPETITIONS + 1;
+
+/// The most times a local-pause PAUSED is repeated after the first one, whatever the loss.
+pub const LOCAL_PAUSED_MAX_REPETITIONS: u8 = 10;
+
+/// The probability that every copy of a local-pause PAUSED is lost, which the repetitions
+/// are chosen to stay under (section 6.4's "high probability" of delivery: 99.9 %).
+pub const LOCAL_PAUSED_LOSS_TARGET: f64 = 1e-3;
+
+/// How many times a local-pause PAUSED is repeated after the first one when the receivers
+/// report `fraction_lost` (the RFC 3550 report block's fraction, out of 256) on the stream:
+/// the fewest repetitions `n` for which all `n + 1` copies are lost with a probability of at
+/// most [`LOCAL_PAUSED_LOSS_TARGET`], between [`LOCAL_PAUSED_MIN_REPETITIONS`] and
+/// [`LOCAL_PAUSED_MAX_REPETITIONS`] (RFC 7728 section 6.4).
+pub fn local_pause_repetitions(fraction_lost: u8) -> u8 {
+    let loss = f64::from(fraction_lost) / 256.0;
+    let mut repetitions = LOCAL_PAUSED_MIN_REPETITIONS;
+    while repetitions < LOCAL_PAUSED_MAX_REPETITIONS
+        && loss.powi(i32::from(repetitions) + 1) > LOCAL_PAUSED_LOSS_TARGET
+    {
+        repetitions += 1;
+    }
+    repetitions
+}
 
 /// The interval at which PAUSED is repeated and after which a participant that sent nothing
 /// for five of them has timed out (RFC 3550 section 6.3.5), unless the builder says otherwise:
@@ -320,6 +351,7 @@ pub struct PauseResumeBuilder {
     round_trip_time: Duration,
     report_interval: Duration,
     dither_max: Duration,
+    repeat_in_regular_reports: bool,
 }
 
 impl Default for PauseResumeBuilder {
@@ -328,6 +360,7 @@ impl Default for PauseResumeBuilder {
             round_trip_time: PAUSE_DEFAULT_ROUND_TRIP_TIME,
             report_interval: PAUSE_DEFAULT_REPORT_INTERVAL,
             dither_max: Duration::ZERO,
+            repeat_in_regular_reports: true,
         }
     }
 }
@@ -339,8 +372,11 @@ impl PauseResumeBuilder {
         Self::default()
     }
 
-    /// The round trip to the peer, used for the hold-off period and the retransmission of
-    /// requests (`2 * RTT + T_dither_max`).
+    /// The round trip to the peer assumed until one is measured, used for the hold-off period
+    /// and the retransmission of requests (`2 * RTT + T_dither_max`). Once the RTCP session
+    /// reports round trips ([`RtcpSessionEvent::RoundTripTime`]), the longest one measured is
+    /// used instead (RFC 7728 section 6.2: "RTT is the longest round trip known to the RTP
+    /// stream sender").
     pub fn with_round_trip_time(mut self, round_trip_time: Duration) -> Self {
         self.round_trip_time = round_trip_time;
         self
@@ -360,6 +396,18 @@ impl PauseResumeBuilder {
         self
     }
 
+    /// How PAUSED is repeated (RFC 7728 sections 6.3, 6.4, 8.2). `true`, the default: the
+    /// first PAUSED is written with a [`RepeatInRegularReports`], so the RTCP session
+    /// ([`Slot::RtcpSession`](crate::Slot::RtcpSession)) carries it again in the next Regular
+    /// compound packets, "the next two regular RTCP reports" (section 8.2), and drops what is
+    /// still owed when the stream leaves the state. `false`: the interceptor writes each
+    /// repetition itself, one [`Self::with_report_interval`] apart, for a chain without the
+    /// RTCP session.
+    pub fn with_repeats_in_regular_reports(mut self, repeat_in_regular_reports: bool) -> Self {
+        self.repeat_in_regular_reports = repeat_in_regular_reports;
+        self
+    }
+
     /// The interceptor and its handle.
     pub fn build(self) -> (PauseResumeInterceptor, PauseResumeHandle) {
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -372,6 +420,10 @@ impl PauseResumeBuilder {
                 initially_paused: HashSet::new(),
                 local_ssrcs: Vec::new(),
                 last_heard: HashMap::new(),
+                round_trips: HashMap::new(),
+                cnames: HashMap::new(),
+                fraction_lost: HashMap::new(),
+                stop_repeating: Vec::new(),
                 fallback_ssrc: rand::random(),
                 now: None,
                 read_queue: VecDeque::new(),
@@ -422,9 +474,15 @@ struct SenderStream {
     dropped: u16,
     /// The extended sequence number of the last packet sent.
     highest: Option<u32>,
-    /// PAUSED indications still owed, and when the next one is.
+    /// PAUSED indications still owed, and when the next one is (without the RTCP session's
+    /// repetitions, [`PauseResumeBuilder::with_repeats_in_regular_reports`]).
     paused_left: u8,
     next_paused: Option<Instant>,
+    /// The RTCP session repeats this stream's PAUSED.
+    repeating: bool,
+    /// The repetitions are to stop: the stream left the paused states.
+    stop_repeating: bool,
+    ssrc: u32,
 }
 
 impl SenderStream {
@@ -494,6 +552,15 @@ pub struct PauseResumeInterceptor {
     /// When each remote SSRC was last heard from (RTP or RTCP), for the time-out of a
     /// requester (section 6.3.2).
     last_heard: HashMap<u32, Instant>,
+    /// The round trip the RTCP session measured to the receiver of each local SSRC.
+    round_trips: HashMap<u32, Duration>,
+    /// The CNAME of each remote SSRC, from the RTCP session (section 6.2: one CNAME across
+    /// the received SSRCs is a single receiver).
+    cnames: HashMap<u32, String>,
+    /// The latest fraction lost the receivers reported on each local SSRC.
+    fraction_lost: HashMap<u32, u8>,
+    /// Keys whose repetitions the RTCP session is to stop (a stream left the paused states).
+    stop_repeating: Vec<u32>,
     fallback_ssrc: u32,
     now: Option<Instant>,
     read_queue: VecDeque<TaggedPacket>,
@@ -513,6 +580,25 @@ impl PauseResumeInterceptor {
                 entries,
             })])),
         });
+    }
+
+    /// RTT for `2 * RTT + T_dither_max` (sections 6.2, 8.1): "the longest round trip known",
+    /// the configured one until one is measured.
+    fn round_trip_time(&self) -> Duration {
+        self.round_trips
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(self.config.round_trip_time)
+    }
+
+    /// Section 6.2: whether the received SSRCs show more than one CNAME, i.e. several
+    /// receivers.
+    fn several_receivers(&self) -> bool {
+        let mut cnames = self.cnames.values();
+        cnames
+            .next()
+            .is_some_and(|first| cnames.any(|other| other != first))
     }
 
     fn request_ssrc(&self) -> u32 {
@@ -542,30 +628,72 @@ impl PauseResumeInterceptor {
     }
 
     /// Section 6.1: "When entering the state, the current PauseID MUST be incremented".
+    /// Repetitions of PAUSED still owed stop (sections 6.3: "as long as it is then still in
+    /// paused state", 6.4: "stopping such repetition whenever leaving the state").
     fn enter_playing(stream: &mut SenderStream) {
         stream.state = SenderState::Playing;
         stream.pause_id = stream.pause_id.wrapping_add(1);
         stream.paused_left = 0;
         stream.next_paused = None;
+        stream.stop_repeating |= std::mem::take(&mut stream.repeating);
     }
 
-    /// Paused (section 6.3) or local paused (6.4): PAUSED now, and `repeats` more.
+    /// Tells the RTCP session to stop the repetitions of the streams that left the paused
+    /// states.
+    fn flush_stop_repeating(&mut self, now: Instant) {
+        for stream in self.senders.values_mut() {
+            if std::mem::take(&mut stream.stop_repeating) {
+                self.stop_repeating.push(stream.ssrc);
+            }
+        }
+        for key in std::mem::take(&mut self.stop_repeating) {
+            self.write_queue
+                .push_back(RtcpSessionControl::StopRepeating { key }.into_packet(now));
+        }
+    }
+
+    /// Paused (section 6.3) or local paused (6.4): PAUSED now, and `repeats` more, in the
+    /// next Regular RTCP packets of the session (or, without it, one report interval apart).
     fn enter_paused(&mut self, now: Instant, ssrc: u32, state: SenderState, repeats: u8) {
         let interval = self.config.report_interval;
+        let in_regular = self.config.repeat_in_regular_reports;
         let Some(stream) = self.senders.get_mut(&ssrc) else {
             return;
         };
         stream.state = state;
-        stream.paused_left = repeats;
-        stream.next_paused = (repeats > 0).then(|| now + interval);
         let entry = PauseResumeEntry::paused(ssrc, stream.pause_id, stream.highest.unwrap_or(0));
-        if stream.capability.peer_receives(PauseResumeType::Paused) {
+        if !stream.capability.peer_receives(PauseResumeType::Paused) {
+            return;
+        }
+        if in_regular {
+            stream.paused_left = 0;
+            stream.next_paused = None;
+            stream.repeating = repeats > 0;
+            stream.stop_repeating = false;
+            self.write_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(PauseResume {
+                    sender_ssrc: ssrc,
+                    entries: vec![entry],
+                })]))
+                .with(Attribute::Custom(Arc::new(RepeatInRegularReports {
+                    key: ssrc,
+                    count: repeats,
+                }))),
+            });
+        } else {
+            stream.paused_left = repeats;
+            stream.next_paused = (repeats > 0).then(|| now + interval);
             self.send(now, ssrc, vec![entry]);
         }
     }
 
     /// The sender's side of the requests of one compound packet (sections 8.1, 8.3, 8.4).
     fn on_requests(&mut self, now: Instant, requester: u32, entries: &[PauseResumeEntry]) {
+        let several_receivers = self.several_receivers();
+        let round_trip_time = self.round_trip_time();
+        let dither_max = self.config.dither_max;
         let mut refused: Vec<(u32, u16)> = vec![];
         let mut paused_now: Vec<u32> = vec![];
         for entry in entries {
@@ -579,10 +707,13 @@ impl PauseResumeInterceptor {
             let is_current = entry.pause_id == current;
             match (entry.typ, stream.state) {
                 (PauseResumeType::Pause, SenderState::Playing) if is_current => {
-                    let hold_off = if stream.capability.nowait {
+                    // Section 6.2: 0 with `nowait`, unless the sender learned that there are
+                    // several receivers after all: then "it MUST change the hold-off period
+                    // to be based on the above formula instead".
+                    let hold_off = if stream.capability.nowait && !several_receivers {
                         Duration::ZERO
                     } else {
-                        self.config.round_trip_time * 2 + self.config.dither_max
+                        round_trip_time * 2 + dither_max
                     };
                     if hold_off.is_zero() {
                         paused_now.push(entry.target_ssrc);
@@ -693,6 +824,20 @@ impl PauseResumeInterceptor {
         }
     }
 
+    /// Section 6.4 for the local stream `ssrc`, from the loss its receivers last reported.
+    fn local_pause_repetitions(&self, ssrc: u32) -> u8 {
+        local_pause_repetitions(self.fraction_lost.get(&ssrc).copied().unwrap_or(0))
+    }
+
+    /// The report blocks a remote SR or RR carries about the local streams.
+    fn observe_report_blocks(&mut self, reports: &[ReceptionReport]) {
+        for report in reports {
+            if self.senders.contains_key(&report.ssrc) {
+                self.fraction_lost.insert(report.ssrc, report.fraction_lost);
+            }
+        }
+    }
+
     fn run_commands(&mut self, now: Instant) {
         let commands = std::mem::take(&mut lock(&self.shared).commands);
         for command in commands {
@@ -748,12 +893,15 @@ impl PauseResumeInterceptor {
                             }
                         }
                         SenderState::Playing | SenderState::Pausing { .. } => {
-                            // "SHALL be repeated a sufficient number of times".
+                            // "SHALL be repeated a sufficient number of times to reach a high
+                            // probability that the message is correctly delivered": as many
+                            // as the loss the receivers report on the stream needs.
+                            let repetitions = self.local_pause_repetitions(ssrc);
                             self.enter_paused(
                                 now,
                                 ssrc,
                                 SenderState::LocalPaused { requester: None },
-                                PAUSED_REPETITIONS + 1,
+                                repetitions,
                             );
                         }
                     }
@@ -775,12 +923,8 @@ impl PauseResumeInterceptor {
                         .is_some_and(|stream| matches!(stream.state, SenderState::Playing))
                     {
                         // Announced as a local pause is (section 6.4).
-                        self.enter_paused(
-                            now,
-                            ssrc,
-                            SenderState::InitiallyPaused,
-                            PAUSED_REPETITIONS + 1,
-                        );
+                        let repetitions = self.local_pause_repetitions(ssrc);
+                        self.enter_paused(now, ssrc, SenderState::InitiallyPaused, repetitions);
                     }
                 }
             }
@@ -790,7 +934,7 @@ impl PauseResumeInterceptor {
     fn run_timers(&mut self, now: Instant) {
         let interval = self.config.report_interval;
         let timeout = interval * 5;
-        let retransmit = self.config.round_trip_time * 2 + self.config.dither_max;
+        let retransmit = self.round_trip_time() * 2 + self.config.dither_max;
         let last_heard = self.last_heard.clone();
         let mut pause_now = vec![];
         let mut paused_due = vec![];
@@ -941,6 +1085,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
                         // Section 6.3.1: the requester left; the stream is resumed.
                         for left in &bye.sources {
                             self.last_heard.remove(left);
+                            self.cnames.remove(left);
                             for stream in self.senders.values_mut() {
                                 if matches!(
                                     stream.state,
@@ -960,9 +1105,26 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
                         }
                     } else if let Some(report) = packet.as_any().downcast_ref::<ReceiverReport>() {
                         self.last_heard.insert(report.ssrc, now);
+                        self.observe_report_blocks(&report.reports);
                     } else if let Some(report) = packet.as_any().downcast_ref::<SenderReport>() {
                         self.last_heard.insert(report.ssrc, now);
+                        self.observe_report_blocks(&report.reports);
                     }
+                }
+                // What the RTCP session learned: round trips (section 6.2: "the longest
+                // round trip known") and the CNAMEs of the remote sources (section 6.2: one
+                // CNAME across the received SSRCs is a single receiver).
+                match msg.message.custom::<RtcpSessionEvent>() {
+                    Some(RtcpSessionEvent::RoundTripTime { ssrc, rtt }) => {
+                        self.round_trips.insert(*ssrc, *rtt);
+                    }
+                    Some(RtcpSessionEvent::RemoteCname { ssrc, cname }) => {
+                        self.cnames.insert(*ssrc, cname.clone());
+                    }
+                    Some(RtcpSessionEvent::SourceTimedOut { ssrc }) => {
+                        self.cnames.remove(ssrc);
+                    }
+                    _ => {}
                 }
                 if deliver && !msg.message.has(&Attribute::DeliverToApplication) {
                     msg.message.attributes.push(Attribute::DeliverToApplication);
@@ -971,6 +1133,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
         }
         self.publish();
         self.read_queue.push_back(msg);
+        self.flush_stop_repeating(now);
         Ok(())
     }
 
@@ -988,6 +1151,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
         }
         // A local pause asked for before this packet applies to it.
         self.run_commands(msg.now);
+        self.flush_stop_repeating(msg.now);
         if let Packet::Rtp(packet) = &mut msg.message.packet
             && let Some(stream) = self.senders.get_mut(&packet.header.ssrc)
         {
@@ -1012,6 +1176,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
         self.now = Some(self.now.map_or(now, |n| n.max(now)));
         self.run_commands(now);
         self.run_timers(now);
+        self.flush_stop_repeating(now);
         self.publish();
         Ok(())
     }
@@ -1076,6 +1241,9 @@ impl Interceptor for PauseResumeInterceptor {
                     highest: None,
                     paused_left: 0,
                     next_paused: None,
+                    repeating: false,
+                    stop_repeating: false,
+                    ssrc: info.ssrc,
                 })
                 .capability = capability;
             self.publish();
@@ -1084,7 +1252,15 @@ impl Interceptor for PauseResumeInterceptor {
 
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
         self.local_ssrcs.retain(|ssrc| *ssrc != info.ssrc);
-        self.senders.remove(&info.ssrc);
+        if self
+            .senders
+            .remove(&info.ssrc)
+            .is_some_and(|stream| stream.repeating)
+        {
+            self.stop_repeating.push(info.ssrc);
+        }
+        self.fraction_lost.remove(&info.ssrc);
+        self.round_trips.remove(&info.ssrc);
         self.publish();
     }
 }

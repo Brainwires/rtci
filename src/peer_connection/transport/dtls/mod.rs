@@ -103,6 +103,17 @@ pub(crate) struct DtlsTransport {
     pub(crate) failure: Option<crate::peer_connection::rtc_error::RTCError>,
     /// The SRTP key lifetime the setting engine sets, if any (`DtlsHandler::key_lifetime`).
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// `SettingEngineBuilder::with_dtls_connection_id`: the length of the connection id this
+    /// side asks the peer to send (RFC 9146, RFC 9147 section 9); `None` keeps the DTLS
+    /// crate's default (the extension, asking for none).
+    pub(crate) connection_id_length: Option<usize>,
+    /// ALPN with the RFC 8833 identifiers (`SettingEngineBuilder::with_dtls_alpn`).
+    pub(crate) alpn: bool,
+    /// The application protocol the association's handshake selected (RFC 7301).
+    pub(crate) application_protocol: Option<String>,
+    /// The ICE selected pair the association last sent on, to tell a new path (RFC 9147
+    /// section 9) from the first selection.
+    pub(crate) selected_pair_id: Option<String>,
 
     // The peer's certificate chain in DER form, retained at handshake completion so
     // `get_remote_certificates()` has something to return. Previously the bytes reached
@@ -159,6 +170,12 @@ pub(crate) struct DtlsTransport {
     pub(crate) replay_protection: ReplayProtection,
 }
 
+/// The ALPN identifier of WebRTC (RFC 8833 section 2): DTLS-SRTP keys and data channels.
+pub(crate) const ALPN_WEBRTC: &str = "webrtc";
+/// The ALPN identifier of confidential WebRTC (RFC 8833 section 2), offered beside
+/// `webrtc` by a client that is not aware of a need for confidentiality.
+pub(crate) const ALPN_C_WEBRTC: &str = "c-webrtc";
+
 pub(crate) struct RTCDtlsTransportConfig {
     pub(crate) id: RTCTransportId,
     pub(crate) ice_transport_id: RTCTransportId,
@@ -208,6 +225,13 @@ fn generate_tls_id(crypto_provider: &Arc<dyn RTCCryptoProvider>) -> Result<Strin
 }
 
 impl DtlsTransport {
+    /// The application protocol the DTLS handshake's ALPN selected (RFC 7301, RFC 8833
+    /// `webrtc` or `c-webrtc`), once the association is up: `None` when the peer used no
+    /// ALPN, which RFC 8833 section 2 has taken as `webrtc`.
+    pub(crate) fn application_protocol(&self) -> Option<&str> {
+        self.application_protocol.as_deref()
+    }
+
     pub(crate) fn new(config: RTCDtlsTransportConfig) -> Result<Self> {
         let RTCDtlsTransportConfig {
             id,
@@ -254,6 +278,10 @@ impl DtlsTransport {
             fingerprint_mismatch: Arc::default(),
             failure: None,
             srtp_key_lifetime: None,
+            connection_id_length: None,
+            alpn: true,
+            application_protocol: None,
+            selected_pair_id: None,
             remote_certificates: vec![],
             remote_dtls_parameters: None,
             remote_tls_id: None,
@@ -460,6 +488,9 @@ impl DtlsTransport {
                     self.dtls_cipher_suites.clone()
                 })
                 .with_client_auth(ClientAuthType::RequireAnyClientCert)
+                // RFC 8122 section 6.2: no client certificate ends the handshake with
+                // bad_certificate.
+                .with_bad_certificate_for_a_missing_client_certificate(true)
                 .with_insecure_skip_verify(true)
                 .with_insecure_verification(self.allow_insecure_verification_algorithm)
                 .with_verify_peer_certificate(verify_peer_certificate)
@@ -478,6 +509,17 @@ impl DtlsTransport {
                 // no tickets and keeps no session cache (and so accepts no resumption: it has
                 // no key to open a ticket with and no session to find); as a client it keeps
                 // nothing and offers no PSK, session id or ticket.
+                .with_connection_id(self.connection_id_length.or(Some(0)))
+                // RFC 8835 section 3.5 (RFC 8833 section 2): a client offers both WebRTC
+                // identifiers, a server selects `webrtc`; it never promises the media
+                // confidentiality of `c-webrtc`.
+                .with_alpn_protocols(match (self.alpn, self.dtls_role) {
+                    (false, _) => vec![],
+                    (true, RTCDtlsRole::Client) => {
+                        vec![ALPN_WEBRTC.to_owned(), ALPN_C_WEBRTC.to_owned()]
+                    }
+                    (true, _) => vec![ALPN_WEBRTC.to_owned()],
+                })
                 .with_session_tickets(0)
                 .with_session_cache(None)
                 .with_session_store(None)
@@ -1092,6 +1134,18 @@ mod tests {
         assert!(result.is_err());
         // State must remain unchanged on error.
         assert_eq!(t.state, RTCDtlsTransportState::Connecting);
+    }
+
+    /// RFC 8122 section 6.2: the peer connection's DTLS server ends a handshake whose client
+    /// sends no certificate with bad_certificate (the DTLS option, tested in
+    /// `conn_conformance_test.rs::client_without_a_certificate_for_the_requested_algorithms_sends_none`).
+    #[test]
+    fn the_handshake_config_ends_a_missing_client_certificate_with_bad_certificate() {
+        let t = auto_role_transport();
+        let config = t
+            .make_handshake_config(&dummy_params(RTCDtlsRole::Auto))
+            .unwrap();
+        assert!(config.bad_certificate_for_a_missing_client_certificate());
     }
 
     #[test]

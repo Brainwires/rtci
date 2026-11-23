@@ -606,6 +606,43 @@ fn a_low_starting_sender_gets_feedback_every_100_ms() {
     }
 }
 
+/// The measurement behind the default of `with_immediate_congestion_feedback` (RFC 4585
+/// section 3.5.2 as written is `false`): three simulcast layers at 300 kbit/s, the start of a
+/// browser's simulcast send, transport-wide feedback, both timings. Held to one Early packet
+/// per regular interval, feedback reaches the sender less often and with longer gaps than as
+/// it is built. Run with `--nocapture` for the figures.
+#[test]
+fn rfc_4585_timing_of_congestion_feedback_measured_against_immediate() {
+    let mut figures = vec![];
+    for generators in [Generators::EarlyAllowance, Generators::Default] {
+        let measured = measure_layers(
+            300_000.0,
+            3,
+            CongestionFeedbackFormat::TransportCc,
+            generators,
+            false,
+        );
+        println!(
+            "{generators:?}: {:.2} feedback datagrams/s, longest gap {} ms, longest report delay {} ms, coverage {:.3}",
+            measured.feedback_datagrams_per_second,
+            measured.longest_gap.as_millis(),
+            measured.longest_report_delay.as_millis(),
+            measured.coverage,
+        );
+        figures.push(measured);
+        println!(
+            "{generators:?}: a Gcc sender with three layers reaches 2 Mbit/s from 300 kbit/s after {:?}",
+            ramp(generators)
+        );
+    }
+    let (rfc, immediate) = (&figures[0], &figures[1]);
+    assert!(
+        rfc.feedback_datagrams_per_second < immediate.feedback_datagrams_per_second,
+        "RFC 4585 timing sends fewer feedback datagrams"
+    );
+    assert!(rfc.longest_gap > immediate.longest_gap);
+}
+
 /// The engine's own congestion controller standing in for a browser's: a `Gcc` sender with
 /// bandwidth probing and RTX, three simulcast layers sharing its target (a seventh, two
 /// sevenths and four sevenths), fed only by what the engine's receiver (RTCP session and

@@ -152,16 +152,132 @@ fn over_limit(what: &str, limit: usize) -> Error {
 /// the version of the Session Description Protocol.
 pub type Version = isize;
 
+/// A decimal number of any length, `1*DIGIT`: the `<sess-id>` and `<sess-version>` of an
+/// `o=` line (RFC 8866 section 9). The grammar sets no upper bound, so a compliant
+/// description may carry values beyond 64 bits (RFC 9429 section 5.2.1 has a JSEP endpoint
+/// generate them within 64 bits, and section 5.8 has it accept compliant SDP that does not
+/// follow its generation rules).
+///
+/// It keeps the digits as written, leading zeros included, so a description is written back
+/// as it was read; equality and order are those of the numbers.
+#[derive(Debug, Clone)]
+pub struct SdpDecimal(String);
+
+impl SdpDecimal {
+    /// `value` when it is `1*DIGIT`.
+    pub fn parse(value: &str) -> Option<Self> {
+        (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| SdpDecimal(value.to_owned()))
+    }
+
+    /// The digits as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The number, when it fits 64 bits.
+    pub fn to_u64(&self) -> Option<u64> {
+        self.0.parse().ok()
+    }
+
+    /// The digits without leading zeros ("0" for zero).
+    fn significant(&self) -> &str {
+        let trimmed = self.0.trim_start_matches('0');
+        if trimmed.is_empty() { "0" } else { trimmed }
+    }
+
+    /// The number plus one (RFC 3264 section 8: the version "MUST increment by one"), with
+    /// no upper bound.
+    pub fn incremented(&self) -> Self {
+        let mut digits: Vec<u8> = self.significant().bytes().collect();
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+        SdpDecimal(String::from_utf8(digits).unwrap_or_default())
+    }
+}
+
+impl Default for SdpDecimal {
+    fn default() -> Self {
+        SdpDecimal("0".to_owned())
+    }
+}
+
+impl From<u64> for SdpDecimal {
+    fn from(value: u64) -> Self {
+        SdpDecimal(value.to_string())
+    }
+}
+
+impl FromStr for SdpDecimal {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        SdpDecimal::parse(value).ok_or_else(|| syntax("1*DIGIT", value))
+    }
+}
+
+impl fmt::Display for SdpDecimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq for SdpDecimal {
+    fn eq(&self, other: &Self) -> bool {
+        self.significant() == other.significant()
+    }
+}
+
+impl Eq for SdpDecimal {}
+
+impl std::hash::Hash for SdpDecimal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.significant().hash(state);
+    }
+}
+
+impl PartialOrd for SdpDecimal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SdpDecimal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let (a, b) = (self.significant(), other.significant());
+        a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+    }
+}
+
+impl PartialEq<u64> for SdpDecimal {
+    fn eq(&self, other: &u64) -> bool {
+        self.to_u64() == Some(*other)
+    }
+}
+
 /// Origin defines the structure for the "o=" field which provides the
 /// originator of the session plus a session identifier and version number.
 #[derive(Debug, Default, Clone)]
 pub struct Origin {
     /// The originator's user name, or `-` when withheld.
     pub username: String,
-    /// A globally unique session identifier.
-    pub session_id: u64,
-    /// Incremented on each modification of the session description.
-    pub session_version: u64,
+    /// A globally unique session identifier, `1*DIGIT` of any length.
+    pub session_id: SdpDecimal,
+    /// Incremented on each modification of the session description; `1*DIGIT` of any
+    /// length.
+    pub session_version: SdpDecimal,
     /// The network type, always `IN` in practice.
     pub network_type: String,
     /// The address type, `IP4` or `IP6`.
@@ -190,8 +306,8 @@ impl Origin {
     pub fn new() -> Self {
         Origin {
             username: "".to_owned(),
-            session_id: 0,
-            session_version: 0,
+            session_id: SdpDecimal::default(),
+            session_version: SdpDecimal::default(),
             network_type: "".to_owned(),
             address_type: "".to_owned(),
             unicast_address: "".to_owned(),
@@ -321,10 +437,11 @@ pub struct SessionDescription {
     /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.4>
     pub session_information: Option<Information>,
 
-    /// `u=<uri>`
+    /// `u=<uri>`: an RFC 3986 `URI-reference`, absolute or relative (RFC 8866 section 9:
+    /// `uri-field = %x75 "=" uri CRLF`, `uri = URI-reference`).
     ///
     /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.5>
-    pub uri: Option<Url>,
+    pub uri: Option<String>,
 
     /// `e=<email-address>`, any number of lines.
     ///
@@ -466,7 +583,8 @@ impl fmt::Display for SessionDescription {
 ///
 /// A type letter RFC 8866 does not define (section 5: such a description is ignored or
 /// rejected whole), a line that is not `<type>=<value>`, NUL, a bare CR, text that is not
-/// UTF-8 (`a=charset` is not supported), session-level lines out of order, and a
+/// UTF-8 when the description names no other set with `a=charset` (`unmarshal`, from bytes),
+/// session-level lines out of order, and a
 /// description without `v=`, `o=`, `s=` or `t=`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParseOptions {
@@ -517,11 +635,14 @@ impl SessionDescription {
             version: 0,
             origin: Origin {
                 username: "-".to_string(),
-                session_id: new_session_id(),
-                session_version: SystemTime::now() // Exemption: wall-clock is correct here to generate random SDP session version
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_else(|_| Duration::from_secs(0))
-                    .subsec_nanos() as u64,
+                session_id: new_session_id().into(),
+                session_version: u64::from(
+                    SystemTime::now() // Exemption: wall-clock is correct here to generate random SDP session version
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_else(|_| Duration::from_secs(0))
+                        .subsec_nanos(),
+                )
+                .into(),
                 network_type: "IN".to_string(),
                 address_type: "IP4".to_string(),
                 unicast_address: "0.0.0.0".to_string(),
@@ -695,9 +816,15 @@ impl SessionDescription {
         if bytes.len() > MAX_SDP_SIZE {
             return Err(over_limit("bytes", MAX_SDP_SIZE));
         }
-        let text = core::str::from_utf8(&bytes)
-            .map_err(|_| Error::SdpInvalidSyntax("the description is not UTF-8".to_owned()))?;
-        Self::parse_with_options(text, options)
+        let text = decode(&bytes)?;
+        Self::parse_with_options(&text, options)
+    }
+
+    /// The character set the session name and information are in (RFC 8866 section 6.10,
+    /// `a=charset`): UTF-8 when the description names none.
+    pub fn charset(&self) -> Charset {
+        self.attribute(ATTR_KEY_CHARSET)
+            .map_or(Charset::Utf8, |name| Charset::named(name))
     }
 
     /// Parses a session description from text, with the leniencies `options` names.
@@ -739,6 +866,158 @@ impl SessionDescription {
             })?;
         }
         parser.finish().map_err(unlocated)
+    }
+}
+
+/// RFC 3986 section 4.1 `URI-reference`: a URI, or a relative reference (RFC 8866 section
+/// 9 has `uri = URI-reference`). An absolute one is what the `url` crate parses; a relative
+/// one has only the characters of the grammar (unreserved, sub-delims, `:` `@` `/` `?` `#`
+/// `[` `]`, and `%` with two hex digits) and no `:` in its first segment (`path-noscheme`).
+fn is_uri_reference(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let ok = b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?#[]".contains(&b);
+        if b == b'%' {
+            if !bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                || !bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
+            {
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        if !ok {
+            return false;
+        }
+        i += 1;
+    }
+    let first_segment = value.split(['/', '?', '#']).next().unwrap_or_default();
+    match first_segment.split_once(':') {
+        // A scheme: the reference is a URI.
+        Some((scheme, _)) => {
+            scheme
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+                && scheme
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
+                && Url::parse(value).is_ok()
+        }
+        None => true,
+    }
+}
+
+/// The `a=charset` attribute (RFC 8866 section 6.10).
+pub const ATTR_KEY_CHARSET: &str = "charset";
+
+/// The character set of a description's charset-dependent fields (`s=`, `i=`), from its
+/// `a=charset` (RFC 8866 section 6.10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Charset {
+    /// ISO-10646 in UTF-8, the default.
+    Utf8,
+    /// ISO-8859-1.
+    Latin1,
+    /// US-ASCII.
+    Ascii,
+    /// A character set this crate does not support (or not a registered one): its strings
+    /// are octet strings (RFC 8866 section 6.10: "If the identifier is not recognized or not
+    /// supported, all strings that are affected by it SHOULD be regarded as octet strings"),
+    /// each octet read as the character of that code point.
+    Other(String),
+}
+
+impl Charset {
+    /// The character set `name` identifies. RFC 8866 section 6.10: the identifier "MUST be
+    /// compared against identifiers from the 'Name' or 'Preferred MIME Name' field of the
+    /// registry using a case-insensitive comparison"; the aliases of the IANA Character Sets
+    /// registry for the three sets are recognised too.
+    pub fn named(name: &str) -> Self {
+        const UTF8: [&str; 2] = ["UTF-8", "csUTF8"];
+        const LATIN1: [&str; 10] = [
+            "ISO-8859-1",
+            "ISO_8859-1:1987",
+            "ISO_8859-1",
+            "iso-ir-100",
+            "latin1",
+            "l1",
+            "IBM819",
+            "CP819",
+            "csISOLatin1",
+            "ISO-8859-1:1987",
+        ];
+        const ASCII: [&str; 11] = [
+            "US-ASCII",
+            "ANSI_X3.4-1968",
+            "iso-ir-6",
+            "ANSI_X3.4-1986",
+            "ISO_646.irv:1991",
+            "ISO646-US",
+            "us",
+            "IBM367",
+            "cp367",
+            "csASCII",
+            "ASCII",
+        ];
+        let name = name.trim();
+        let is = |names: &[&str]| names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        if is(&UTF8) {
+            Charset::Utf8
+        } else if is(&LATIN1) {
+            Charset::Latin1
+        } else if is(&ASCII) {
+            Charset::Ascii
+        } else {
+            Charset::Other(name.to_owned())
+        }
+    }
+}
+
+/// The `a=charset` value of a description's session part, read from its bytes (the
+/// attribute is ASCII, whatever set it names).
+fn declared_charset(bytes: &[u8]) -> Option<Charset> {
+    for line in bytes.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.starts_with(b"m=") {
+            return None;
+        }
+        if let Some(value) = line.strip_prefix(b"a=charset:") {
+            return core::str::from_utf8(value).ok().map(Charset::named);
+        }
+    }
+    None
+}
+
+/// The text of a description given as bytes. RFC 8866 section 5: "the 'a=charset' attribute
+/// ... is used to specify the character set"; without one, or with UTF-8, the text is UTF-8
+/// and other bytes refuse it. ISO-8859-1 is decoded as such, US-ASCII must be 7-bit, and an
+/// unsupported set's text is kept as octets (each byte the character of its code point; RFC
+/// 8866 section 6.10). Every other field is ASCII in all of these.
+fn decode(bytes: &[u8]) -> Result<std::borrow::Cow<'_, str>> {
+    match declared_charset(bytes) {
+        None | Some(Charset::Utf8) => core::str::from_utf8(bytes)
+            .map(std::borrow::Cow::Borrowed)
+            .map_err(|_| Error::SdpInvalidSyntax("the description is not UTF-8".to_owned())),
+        Some(Charset::Ascii) => {
+            if bytes.is_ascii() {
+                Ok(std::borrow::Cow::Owned(
+                    bytes.iter().map(|&b| char::from(b)).collect(),
+                ))
+            } else {
+                Err(Error::SdpInvalidSyntax(
+                    "a=charset:US-ASCII and a byte above 127 (RFC 8866 section 6.10)".to_owned(),
+                ))
+            }
+        }
+        Some(Charset::Latin1 | Charset::Other(_)) => Ok(std::borrow::Cow::Owned(
+            bytes.iter().map(|&b| char::from(b)).collect(),
+        )),
     }
 }
 
@@ -975,7 +1254,10 @@ impl Parser {
             }
             b'i' => self.desc.session_information = Some(self.text("i=", value)?),
             b'u' => {
-                self.desc.uri = Some(Url::parse(value).map_err(|_| syntax("u=", value))?);
+                if !is_uri_reference(value) {
+                    return Err(syntax("u=", value));
+                }
+                self.desc.uri = Some(value.to_owned());
             }
             b'e' => {
                 if !self.options.loose_fields && !is_email_address(value) {
@@ -1140,10 +1422,13 @@ impl Parser {
         }
         Ok(Origin {
             username: username.to_owned(),
-            // The grammar has no upper bound; RFC 9429 section 5.2.1 keeps both within
-            // 64 bits, and so does this type.
-            session_id: grammar::digits("o= sess-id", session_id)?,
-            session_version: grammar::digits("o= sess-version", session_version)?,
+            // The grammar has no upper bound (RFC 8866 section 9: `1*DIGIT`), and nor has
+            // this type: RFC 9429 section 5.8 accepts compliant SDP beyond the 64 bits
+            // section 5.2.1 generates.
+            session_id: SdpDecimal::parse(session_id)
+                .ok_or_else(|| syntax("o= sess-id", session_id))?,
+            session_version: SdpDecimal::parse(session_version)
+                .ok_or_else(|| syntax("o= sess-version", session_version))?,
             network_type: network_type.to_owned(),
             address_type: address_type.to_owned(),
             unicast_address: address.to_owned(),

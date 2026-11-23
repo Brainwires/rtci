@@ -359,6 +359,39 @@ fn process_server_hello(
     // ClientHello did not carry was refused above.)
     state.local_connection_id = None;
     state.remote_connection_id = None;
+    // RFC 7301 section 3.1: the ServerHello names exactly one protocol, one this client
+    // offered (an ALPN extension the ClientHello did not carry was refused above).
+    state.application_protocol = None;
+    for extension in &h.extensions {
+        match extension.as_alpn() {
+            Some(Ok(protocols)) => match protocols.as_slice() {
+                [protocol] if cfg.alpn_protocols.contains(protocol) => {
+                    state.application_protocol = Some(protocol.clone());
+                }
+                _ => {
+                    return Err((
+                        Some(Alert {
+                            alert_level: AlertLevel::Fatal,
+                            alert_description: AlertDescription::IllegalParameter,
+                        }),
+                        Some(Error::Other(
+                            "the server selected an application protocol not offered".to_owned(),
+                        )),
+                    ));
+                }
+            },
+            Some(Err(error)) => {
+                return Err((
+                    Some(Alert {
+                        alert_level: AlertLevel::Fatal,
+                        alert_description: AlertDescription::DecodeError,
+                    }),
+                    Some(error),
+                ));
+            }
+            None => {}
+        }
+    }
     for extension in &h.extensions {
         match extension.as_connection_id() {
             Some(Ok(connection_id)) => {

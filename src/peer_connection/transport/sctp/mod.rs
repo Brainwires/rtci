@@ -406,6 +406,10 @@ impl SctpTransport {
         let outcome = if !self.is_started {
             SctpNegotiationOutcome::Started
         } else if self.negotiated_ports == Some((local_port, remote_port)) {
+            // W3C webrtc 4.4.1.4: an answer that continues the association "update[s] the
+            // data max message size" from the remote description's `max-message-size`
+            // (RFC 8841 section 6.1), which a renegotiation may change.
+            self.update_max_message_size(remote_max_message_size);
             return Ok(SctpNegotiationOutcome::Unchanged);
         } else {
             // RFC 8841 section 9.3: "The existing SCTP association is closed, and the new
@@ -569,6 +573,35 @@ impl SctpTransport {
         }
         if let Some(mtu) = mtu {
             association.set_path_mtu(mtu);
+        }
+    }
+
+    /// This endpoint's `canSendSize` (W3C webrtc 6.1.1.2): the configured ceiling, or
+    /// `MAX_MESSAGE_SIZE` for a configured 0 (see `start`).
+    fn can_send_size(&self) -> u32 {
+        match self.max_message_size.as_usize() as u32 {
+            0 => SctpMaxMessageSize::MAX_MESSAGE_SIZE,
+            configured => configured,
+        }
+    }
+
+    /// W3C webrtc 6.1.1.2, "update the data max message size", for a running association:
+    /// `[[MaxMessageSize]]` from the remote's `max-message-size` and `canSendSize`, and the
+    /// association's send limit with it.
+    pub(crate) fn update_max_message_size(&mut self, remote_max_message_size: u32) {
+        if !self.is_started {
+            return;
+        }
+        let max_message_size =
+            SctpTransport::calc_message_size(remote_max_message_size, self.can_send_size());
+        self.negotiated_max_message_size = Some(max_message_size);
+        self.negotiated_max_buffer_size = Some(
+            remote_max_message_size
+                .max(self.can_send_size())
+                .max(DEFAULT_SEND_BUFFER_SIZE),
+        );
+        for association in self.sctp_associations.values_mut() {
+            association.set_max_message_size(max_message_size);
         }
     }
 

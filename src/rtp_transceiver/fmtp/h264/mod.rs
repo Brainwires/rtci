@@ -5,7 +5,7 @@ use super::*;
 
 /// `profile-level-id` of a format without one (RFC 6184 section 8.1: "the Baseline profile,
 /// without additional constraints at Level 1, MUST be inferred").
-const DEFAULT_PROFILE_LEVEL_ID: &str = "42000a";
+pub(crate) const DEFAULT_PROFILE_LEVEL_ID: &str = "42000a";
 
 /// `packetization-mode` of a format without one (RFC 6184 section 8.1: "When the value of
 /// packetization-mode is equal to 0 or packetization-mode is not present, the single NAL mode

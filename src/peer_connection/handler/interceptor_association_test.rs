@@ -388,6 +388,134 @@ fn a_later_mid_moves_an_ssrc_to_its_section() {
     assert_eq!(ssrcs(&transceivers[1]), vec![Some(0xbbbb)]);
 }
 
+/// RFC 9143 section 9.2 and RFC 7941 section 4.2.6: a stream the remote description
+/// declares for section 1 moves to section 2 when its packets name mid 2; a reordered packet
+/// still naming mid 1, older than the one that moved it, does not move it back; a newer one
+/// naming mid 1 again does.
+#[test]
+fn a_declared_ssrc_follows_its_newest_mid() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare(&mut transceivers[0], 0xcccc);
+    let arrival = |mid: &'static str| Arrival {
+        ssrc: 0xcccc,
+        payload_type: VP8,
+        mid: Some(mid),
+    };
+    let holder = |transceivers: &[RTCRtpTransceiverInternal]| -> Vec<usize> {
+        (0..transceivers.len())
+            .filter(|&i| receive_codings(transceivers, i).contains(&(Some(0xcccc), None)))
+            .collect()
+    };
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[(arrival("1"), 10), (arrival("2"), 12), (arrival("1"), 11)],
+    );
+    assert_eq!(
+        holder(&after),
+        vec![1],
+        "moved to mid 2; the older packet did not move it back"
+    );
+
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare(&mut transceivers[0], 0xcccc);
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[(arrival("1"), 10), (arrival("2"), 12), (arrival("1"), 13)],
+    );
+    assert_eq!(
+        holder(&after),
+        vec![0],
+        "a newer packet naming mid 1 moves it back"
+    );
+}
+
+/// What a remote description declaring `ssrc` for the section leaves on its receiver: the
+/// coding and the track's encoding, the codec still unknown.
+fn declare(transceiver: &mut RTCRtpTransceiverInternal, ssrc: u32) {
+    let coding = RTCRtpCodingParameters {
+        ssrc: Some(ssrc),
+        ..Default::default()
+    };
+    let receiver = transceiver.receiver_mut().as_mut().unwrap();
+    receiver.set_coding_parameters(vec![coding.clone()]);
+    receiver.set_track(MediaStreamTrack::new(
+        "stream".to_string(),
+        "declared".to_string(),
+        "label".to_string(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding,
+            active: true,
+            ..Default::default()
+        }],
+    ));
+}
+
+/// [`opened`] with the sequence number of each arrival given.
+fn opened_in_order(
+    mut transceivers: Vec<RTCRtpTransceiverInternal>,
+    arrivals: &[(Arrival, u16)],
+) -> (Vec<(usize, u32)>, Vec<RTCRtpTransceiverInternal>) {
+    let media_engine = media_engine();
+    let mut stats = RTCStatsAccumulator::new();
+    let mut ctx = InterceptorHandlerContext {
+        is_dtls_handshake_complete: true,
+        ..Default::default()
+    };
+    let mut chain = Registry::new().build();
+    let mut handler = InterceptorHandler::new(
+        &mut ctx,
+        &mut transceivers,
+        &media_engine,
+        &mut chain,
+        &mut stats,
+        None,
+    );
+    let now = Instant::now();
+    for (arrival, sequence_number) in arrivals {
+        let mut header = rtp::Header {
+            version: 2,
+            payload_type: arrival.payload_type,
+            sequence_number: *sequence_number,
+            timestamp: 1000,
+            ssrc: arrival.ssrc,
+            ..Default::default()
+        };
+        if let Some(mid) = arrival.mid {
+            header
+                .set_extension(MID_ID, Bytes::from_static(mid.as_bytes()))
+                .expect("extension");
+        }
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp::Packet {
+                    header,
+                    payload: Bytes::from_static(&[1, 2, 3]),
+                }))),
+            })
+            .expect("handle_read");
+        while handler.poll_read().is_some() {}
+    }
+    let mut opened = vec![];
+    while let Some(event) = handler.poll_event() {
+        if let RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+            RTCTrackEvent::OnOpen(init),
+        )) = event.event
+        {
+            opened.push((init.receiver_id.0, init.ssrc));
+        }
+    }
+    (opened, transceivers)
+}
+
 /// RFC 9143 section 9.2: an RTCP SDES packet with a MID item maps the chunk's SSRC to the m=
 /// section the MID names. A stream of that SSRC whose packets carry no MID, and whose payload
 /// type two sections receive, then has its section. A MID that names no section maps nothing.
@@ -649,4 +777,100 @@ fn a_retransmission_stream_is_associated_again_after_the_original_moved() {
         vec![(Some(0xbbbb), Some(0xb0b0))],
         "the new RTX stream repairs the new original"
     );
+}
+
+/// The receiver of a track whose remote description declared the simulcast streams `ssrcs`
+/// (RFC 5576 `a=ssrc-group:SIM`): one coding per stream.
+fn declare_layers(transceiver: &mut RTCRtpTransceiverInternal, ssrcs: &[u32]) {
+    let codings: Vec<RTCRtpCodingParameters> = ssrcs
+        .iter()
+        .map(|ssrc| RTCRtpCodingParameters {
+            ssrc: Some(*ssrc),
+            ..Default::default()
+        })
+        .collect();
+    let receiver = transceiver.receiver_mut().as_mut().unwrap();
+    receiver.set_coding_parameters(codings.clone());
+    receiver.set_track(MediaStreamTrack::new(
+        "stream".to_string(),
+        "declared".to_string(),
+        "label".to_string(),
+        RtpCodecKind::Video,
+        codings
+            .into_iter()
+            .map(|rtp_coding_parameters| RTCRtpEncodingParameters {
+                rtp_coding_parameters,
+                active: true,
+                ..Default::default()
+            })
+            .collect(),
+    ));
+}
+
+/// RFC 5576 section 4.2 (`a=ssrc-group:SIM`): the declared simulcast streams of a track are
+/// received as its layers. Each stream's packets, without a MID, stay with the track's
+/// receiver, and none takes over another's coding (RFC 7160 4.1's single-stream rule is for a
+/// receiver of one stream).
+#[test]
+fn the_declared_streams_of_a_sim_group_are_layers_of_one_receiver() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare_layers(&mut transceivers[0], &[0x5101, 0x5102, 0x5103]);
+    let arrival = |ssrc: u32| Arrival {
+        ssrc,
+        payload_type: VP8,
+        mid: None,
+    };
+    let (_, after) = opened(
+        transceivers,
+        &[
+            arrival(0x5101),
+            arrival(0x5102),
+            arrival(0x5103),
+            arrival(0x5102),
+        ],
+    );
+    assert_eq!(
+        receive_codings(&after, 0),
+        vec![
+            (Some(0x5101), None),
+            (Some(0x5102), None),
+            (Some(0x5103), None)
+        ]
+    );
+    assert_eq!(receive_codings(&after, 1), vec![]);
+}
+
+/// RFC 9143 section 9.2: a packet's MID re-associates its SSRC with the m= section it names,
+/// for one simulcast layer of a receiver too: the layer whose later packet names mid 2 moves
+/// to that section's free receiver, and the other layers stay where they were.
+#[test]
+fn a_later_mid_moves_one_simulcast_layer_to_its_section() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare_layers(&mut transceivers[0], &[0x6101, 0x6102, 0x6103]);
+    let arrival = |ssrc: u32, mid: &'static str| Arrival {
+        ssrc,
+        payload_type: VP8,
+        mid: Some(mid),
+    };
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[
+            (arrival(0x6101, "1"), 10),
+            (arrival(0x6102, "1"), 10),
+            (arrival(0x6103, "1"), 10),
+            (arrival(0x6102, "2"), 11),
+        ],
+    );
+    assert_eq!(
+        receive_codings(&after, 0),
+        vec![(Some(0x6101), None), (Some(0x6103), None)],
+        "the other layers stay"
+    );
+    assert_eq!(receive_codings(&after, 1), vec![(Some(0x6102), None)]);
 }

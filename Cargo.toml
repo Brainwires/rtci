@@ -29,11 +29,8 @@ authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
 # The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).
 rust-version = "1.89"
-license = "MIT/Apache-2.0"
-homepage = "https://webrtc.rs"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/webrtc-rs/rtc"
-keywords = ["sansio", "networking", "protocols"]
-categories = ["network-programming"]
 
 [workspace.dependencies]
 crypto = { version = "0.22.0", path = "rtc-crypto", package = "rtc-crypto", default-features = false }
@@ -53,7 +50,9 @@ shared = { version = "0.22.0", path = "rtc-shared", package = "rtc-shared", defa
 srtp = { version = "0.22.0", path = "rtc-srtp", package = "rtc-srtp", default-features = false }
 stun = { version = "0.22.0", path = "rtc-stun", package = "rtc-stun", default-features = false }
 turn = { version = "0.22.0", path = "rtc-turn", package = "rtc-turn", default-features = false }
-signal = { version = "0.22.0", path = "examples/signal", package = "rtc-signal" }
+# The examples' signalling helper is not published: path only, so `cargo publish` drops the
+# root crate's dev-dependency on it.
+signal = { path = "examples/signal", package = "rtc-signal" }
 stream-driver = { version = "0.22.0", path = "examples/stream-driver", package = "rtc-stream-driver" }
 
 # common dependencies
@@ -131,17 +130,27 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Sans-I/O WebRTC implementation in Rust"
+description = "A sans-I/O WebRTC implementation: peer connections with ICE, DTLS-SRTP, SCTP data channels, RTP/RTCP and JSEP negotiation"
 license.workspace = true
-documentation = "https://docs.rs/rtc"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "sans-io", "rtp", "ice", "dtls"]
+categories = ["network-programming", "multimedia"]
 readme = "README.md"
-# The test environment's interop peers (other languages, third-party test-image content) are
-# not part of the crate.
-exclude = ["scripts/test-env/peers/"]
+# The published crate is the library: its sources, the two test files its unit tests include,
+# the README and the licence texts. The examples, integration tests, fixtures, documentation,
+# test environment and CI files stay in the repository (`cargo publish` drops the example and
+# test targets whose files are not in the package).
+include = [
+    "/src/**",
+    "/tests/fixtures/browser-sdp/firefox-152--simulcast-three-rids-send--1-offer.sdp",
+    "/tests/testdata/rsa_2048_offerer_key.pem",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs", "pem", "turn-tls-webpki-roots"]
 
 [features]
 default = ["crypto-ring"]

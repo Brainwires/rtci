@@ -33,11 +33,27 @@ struct Pair {
     sent: Vec<u16>,
     /// The PAUSE-RESUME entries each side wrote: (from the sender?, entry).
     messages: Vec<(bool, PauseResumeEntry)>,
+    /// The repetitions the sender asked the RTCP session for.
+    repeats: Vec<RepeatInRegularReports>,
+    /// The repetitions the sender asked the RTCP session to stop, by key.
+    stops: Vec<u32>,
 }
 
 impl Pair {
     fn new(sender_parameter: &str, receiver_parameter: &str) -> Self {
-        let (mut sender, sender_handle) = PauseResumeBuilder::new().build();
+        Self::with_sender(
+            PauseResumeBuilder::new(),
+            sender_parameter,
+            receiver_parameter,
+        )
+    }
+
+    fn with_sender(
+        sender: PauseResumeBuilder,
+        sender_parameter: &str,
+        receiver_parameter: &str,
+    ) -> Self {
+        let (mut sender, sender_handle) = sender.build();
         let (mut receiver, receiver_handle) = PauseResumeBuilder::new()
             .with_report_interval(Duration::from_secs(5))
             .build();
@@ -56,7 +72,22 @@ impl Pair {
             next_sequence_number: 1000,
             sent: vec![],
             messages: vec![],
+            repeats: vec![],
+            stops: vec![],
         }
+    }
+
+    /// The sender reads what the RTCP session tells the chain.
+    fn session_event(&mut self, event: RtcpSessionEvent) {
+        self.sender
+            .handle_read(TaggedPacket {
+                now: self.now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                    .with(Attribute::Custom(Arc::new(event))),
+            })
+            .unwrap();
+        while self.sender.poll_read().is_some() {}
     }
 
     fn rtcp(&self, sender_ssrc: u32, entries: Vec<PauseResumeEntry>) -> TaggedPacket {
@@ -76,6 +107,14 @@ impl Pair {
             let mut moved = false;
             while let Some(out) = self.sender.poll_write() {
                 moved = true;
+                if let Some(repeat) = out.message.custom::<RepeatInRegularReports>() {
+                    self.repeats.push(*repeat);
+                }
+                if let Some(RtcpSessionControl::StopRepeating { key }) =
+                    out.message.custom::<RtcpSessionControl>()
+                {
+                    self.stops.push(*key);
+                }
                 match &out.message.packet {
                     Packet::Rtp(packet) => {
                         self.sent.push(packet.header.sequence_number);
@@ -211,15 +250,152 @@ fn with_nowait_the_stream_pauses_at_once() {
     assert_eq!(pair.of(true, PauseResumeType::Paused).len(), 1);
 }
 
-/// Section 8.2: "PAUSED MUST also be included in (at least) the next two regular RTCP
-/// reports": two more, one report interval apart, and no more.
+/// Sections 6.3 and 8.2: "PAUSED MUST also be included in (at least) the next two regular
+/// RTCP reports". The interceptor writes PAUSED once and asks the RTCP session, which knows
+/// when a regular report leaves, to carry it in the next two; when the stream plays again the
+/// repetitions still owed stop ("as long as it is then still in paused state").
 #[test]
 fn paused_is_repeated_twice() {
     let mut pair = Pair::new("pause nowait", "pause nowait");
     pair.receiver_handle.pause(MEDIA);
     pair.advance(Duration::from_millis(1));
     pair.advance(PAUSE_DEFAULT_REPORT_INTERVAL * 4);
+    assert_eq!(pair.of(true, PauseResumeType::Paused).len(), 1);
+    assert_eq!(
+        pair.repeats,
+        vec![RepeatInRegularReports {
+            key: MEDIA,
+            count: PAUSED_REPETITIONS
+        }]
+    );
+    assert!(pair.stops.is_empty());
+    pair.receiver_handle.resume(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Playing));
+    assert_eq!(pair.stops, vec![MEDIA]);
+}
+
+/// [`PauseResumeBuilder::with_repeats_in_regular_reports`] `false`, for a chain without the
+/// RTCP session: the interceptor repeats PAUSED itself, twice, one report interval apart.
+#[test]
+fn without_the_rtcp_session_paused_is_repeated_on_the_report_interval() {
+    let mut pair = Pair::with_sender(
+        PauseResumeBuilder::new().with_repeats_in_regular_reports(false),
+        "pause nowait",
+        "pause nowait",
+    );
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    pair.advance(PAUSE_DEFAULT_REPORT_INTERVAL * 4);
     assert_eq!(pair.of(true, PauseResumeType::Paused).len(), 3);
+    assert!(pair.repeats.is_empty());
+}
+
+/// Section 6.2: the hold-off period is `2 * RTT + T_dither_max` with "RTT the longest round
+/// trip known to the RTP stream sender": once the RTCP session measured round trips, the
+/// longest one, not the configured 500 ms.
+#[test]
+fn the_hold_off_period_takes_the_longest_measured_round_trip() {
+    let mut pair = Pair::new("pause", "pause");
+    pair.session_event(RtcpSessionEvent::RoundTripTime {
+        ssrc: MEDIA,
+        rtt: Duration::from_millis(300),
+    });
+    pair.session_event(RtcpSessionEvent::RoundTripTime {
+        ssrc: 0x0200,
+        rtt: Duration::from_millis(1500),
+    });
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    pair.advance(Duration::from_millis(2900));
+    assert_eq!(
+        pair.sender_handle.state(MEDIA),
+        Some(PauseState::Pausing),
+        "2 * 1.5 s have not passed"
+    );
+    pair.advance(Duration::from_millis(200));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+}
+
+/// Section 6.2: a hold-off period set to 0 (`nowait`) is "an incorrect decision" once the
+/// sender learns there are several receivers, judged by "observing only a single CNAME across
+/// all received SSRCs": with two CNAMEs the formula applies again; several SSRCs of one CNAME
+/// are still a single receiver.
+#[test]
+fn nowait_with_several_receivers_waits_the_hold_off_period() {
+    let mut pair = Pair::new("pause nowait", "pause nowait");
+    for ssrc in [RECEIVER, 0x0C0C] {
+        pair.session_event(RtcpSessionEvent::RemoteCname {
+            ssrc,
+            cname: "one".to_owned(),
+        });
+    }
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+
+    let mut pair = Pair::new("pause nowait", "pause nowait");
+    for (ssrc, cname) in [(RECEIVER, "one"), (0x0C0C, "two")] {
+        pair.session_event(RtcpSessionEvent::RemoteCname {
+            ssrc,
+            cname: cname.to_owned(),
+        });
+    }
+    pair.receiver_handle.pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Pausing));
+    pair.advance(Duration::from_millis(1000));
+    assert_eq!(pair.sender_handle.state(MEDIA), Some(PauseState::Paused));
+}
+
+/// Section 6.4: the local-pause PAUSED "SHALL be repeated a sufficient number of times to
+/// reach a high probability that the message is correctly delivered": three repetitions
+/// without loss, more as the receivers report loss on the stream, so that every copy is lost
+/// with a probability of at most 0.1 %.
+#[test]
+fn local_pause_repetitions_follow_the_reported_loss() {
+    assert_eq!(local_pause_repetitions(0), 3);
+    assert_eq!(
+        local_pause_repetitions(26),
+        3,
+        "10 %: 10^-4 with four copies"
+    );
+    assert_eq!(
+        local_pause_repetitions(77),
+        5,
+        "30 %: 0.3^6 < 10^-3 < 0.3^5"
+    );
+    assert_eq!(local_pause_repetitions(128), 9, "50 %: ten copies");
+    assert_eq!(local_pause_repetitions(255), LOCAL_PAUSED_MAX_REPETITIONS);
+
+    let mut pair = Pair::new("pause", "pause");
+    pair.write_rtp();
+    let report = TaggedPacket {
+        now: pair.now,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(ReceiverReport {
+            ssrc: RECEIVER,
+            reports: vec![ReceptionReport {
+                ssrc: MEDIA,
+                fraction_lost: 128,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })])),
+    };
+    pair.sender.handle_read(report).unwrap();
+    pair.sender_handle.local_pause(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(
+        pair.repeats,
+        vec![RepeatInRegularReports {
+            key: MEDIA,
+            count: 9
+        }]
+    );
+    pair.sender_handle.local_resume(MEDIA);
+    pair.advance(Duration::from_millis(1));
+    assert_eq!(pair.stops, vec![MEDIA], "leaving the state stops them");
 }
 
 /// Sections 6.1 and 8.3: a RESUME with the current PauseID plays the stream again with the

@@ -704,6 +704,30 @@ governed_behaviours! {
     },
     // ---- RTP / RTCP ----
     {
+        id: "track.msid-appdata-change-renews-track",
+        setting: "SettingEngineBuilder::with_msid_appdata_change_renews_track",
+        clause: "RFC 8830 3 (W3C webrtc-pc 5.3)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc pc/sdp_offer_answer.cc::SdpOfferAnswerHandler::ApplyRemoteDescriptionUpdateTransceiverState @ a222406d (lines 2815-2838): a remote section's msid gives the receiver its stream ids only (media_desc->streams()[0].stream_ids()), and a track event is fired when the receiver gains a stream or starts receiving, never for a new msid-appdata",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_msid_appdata_change_renews_track(v),
+        read: |s: &SettingEngine| s.msid_appdata_change_renews_track,
+    },
+    {
+        id: "track.source-departure-ends-track",
+        setting: "SettingEngineBuilder::with_source_departure_ends_track",
+        clause: "RFC 8830 3 (W3C webrtc-pc 9.3)",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtcp_receiver.cc::RTCPReceiver::HandleBye @ a222406d (lines 643-661): an RTCP BYE clears the round-trip times, the sender's report blocks, the last FIR and its receiver reference times; nothing there ends the track",
+        evidence: Source,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_source_departure_ends_track(v),
+        read: |s: &SettingEngine| s.source_departure_ends_track,
+    },
+    {
         id: "rtp.ssrc-per-clock-rate",
         setting: "SettingEngineBuilder::with_ssrc_per_clock_rate",
         clause: "RFC 7160 4.1",
@@ -1405,6 +1429,26 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::rapid_synchronisation",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 6051 ntp-64 offered; Chromium answers without it",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_bundled_fingerprints_agreeing",
+        class: NotGovernedClass::Same,
+        note: "off: a bundled section's a=fingerprint is not used, the tagged section's is (RFC 8859 TRANSPORT, RFC 9143 7.1.3); `true` is a hardening beyond the RFCs, in no profile. libwebrtc the same: pc/jsep_transport_controller.cc::JsepTransportController::ApplyDescription_n @ a222406d (lines 868-892) points a bundled non-tagged section at the tagged section's transport and skips its transport description (\"continue;  // Skip code below.\")",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_cryptex_required_on_every_bundled_section",
+        class: NotGovernedClass::Same,
+        note: "off: a BUNDLE group's Cryptex is read from its tagged section (RFC 8859 TRANSPORT, RFC 9143 7.1.3); `true` is the JSEP stack's earlier strict reading, in no profile. libwebrtc reads it from the group's first RTP section too: pc/jsep_transport_controller.cc::BundleUsesCryptex @ a222406d (lines 80-90), used for jsep_description.transport_desc.cryptex (lines 918-921); Chromium's cryptex_policy is kDisabled by default",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_alpn",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_connection_id",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further",
     },
     NotGoverned {
         setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",

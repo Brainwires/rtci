@@ -1222,7 +1222,6 @@ impl StreamTable {
     }
 }
 
-/// Happy Eyeballs (RFC 8305): address order and staggered connection attempts.
 pub mod happy_eyeballs;
 
 #[cfg(test)]

@@ -120,3 +120,74 @@ fn one_cname_is_in_every_source_attribute_and_in_the_rtcp_parameters() -> TestRe
     assert_ne!(default_peer()?.rtcp_cname(), cname);
     Ok(())
 }
+
+/// RFC 8839 sections 4.2.1.2, 4.3.1 and 4.3.2: "each candidate for a data stream" is a
+/// `candidate` attribute in that stream's m= section, in offers and answers. With a transport
+/// per section (`max-compat`, no BUNDLE: RFC 9429 section 4.1.1) each section lists its own
+/// transport's candidates, and only those; under BUNDLE the candidates are TRANSPORT attributes
+/// (RFC 8859 section 5.13, RFC 9143 section 7.1.3), written once for the group in the tagged
+/// section, as the browsers write them (`tests/fixtures/browser-sdp/`).
+#[test]
+fn each_section_with_a_transport_lists_that_transports_candidates() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+
+    let candidates_of = |section: &[String]| -> Vec<String> {
+        section
+            .iter()
+            .filter_map(|l| l.strip_prefix("a=candidate:"))
+            .map(|c| c.split(' ').nth(4).unwrap_or_default().to_owned())
+            .collect()
+    };
+    let add = |pc: &mut rtc::peer_connection::RTCPeerConnection, mid: &str, address: &str| {
+        pc.add_local_candidate(RTCIceCandidateInit {
+            candidate: format!("candidate:1 1 udp 2130706431 {address} 50000 typ host"),
+            sdp_mid: Some(mid.to_owned()),
+            ..Default::default()
+        })
+    };
+
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_bundle_policy(RTCBundlePolicy::MaxCompat)
+                .build(),
+        )
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(Instant::now(), offer)?;
+    add(&mut pc, "0", "192.0.2.10")?;
+    add(&mut pc, "1", "192.0.2.11")?;
+    let sdp = pc.local_description().expect("local description").sdp;
+    let sections = jsep_common::media_sections(&sdp);
+    assert_eq!(sections.len(), 2, "{sdp}");
+    assert_eq!(candidates_of(&sections[0]), vec!["192.0.2.10"], "{sdp}");
+    assert_eq!(candidates_of(&sections[1]), vec!["192.0.2.11"], "{sdp}");
+
+    // Bundled: the default policy puts both sections on the first transport; its candidates
+    // are written in the tagged section, the first.
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("first", 0x0303_0101))?;
+    pc.add_track(video_track("second", 0x0303_0102))?;
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:1 1 udp 2130706431 192.0.2.12 50000 typ host".to_owned(),
+        ..Default::default()
+    })?;
+    let offer = pc.create_offer(None)?;
+    let sections = jsep_common::media_sections(&offer.sdp);
+    assert!(offer.sdp.contains("a=group:BUNDLE 0 1"), "{}", offer.sdp);
+    assert_eq!(
+        candidates_of(&sections[0]),
+        vec!["192.0.2.12"],
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
