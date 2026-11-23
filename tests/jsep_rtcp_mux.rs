@@ -507,3 +507,47 @@ fn a_subsequent_offer_with_rtcp_mux_in_the_tagged_section_only_is_taken() -> Tes
     }
     Ok(())
 }
+
+/// RFC 9429 section 5.8.3: "If an 'm=' section was present in the previous answer, the state
+/// of RTP/RTCP multiplexing MUST match what was previously negotiated". Under the "negotiate"
+/// policy a new section without `a=rtcp-mux` is answered rejected, but a later offer that
+/// drops it for a section negotiated with it is refused, and changes nothing.
+#[test]
+fn a_later_offer_cannot_stop_multiplexing_a_negotiated_section() -> TestResult {
+    let now = Instant::now();
+    let mux = "a=rtcp-mux\n";
+    let mut pc = peer_with(RTCRtcpMuxPolicy::Negotiate)?;
+    pc.set_remote_description(now, offer("0 1", &[audio("0", mux), video("1", mux)])?)?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+
+    let later = |version: u32, group: &str, sections: &[String]| {
+        RTCSessionDescription::offer(crlf(&format!(
+            "{}a=group:BUNDLE {group}\n{}",
+            SESSION.replace(" 2 IN IP4", &format!(" {version} IN IP4")),
+            sections.concat()
+        )))
+    };
+    let refused =
+        pc.set_remote_description(now, later(3, "0", &[audio("0", mux), video("1", "")])?);
+    assert!(
+        matches!(&refused, Err(Error::SdpInvalidValue(why)) if why.contains("previous answer")),
+        "{refused:?}"
+    );
+    assert!(pc.pending_remote_description().is_none());
+
+    // A section that is new may still come without it: answered rejected.
+    pc.set_remote_description(
+        now,
+        later(
+            3,
+            "0 1",
+            &[audio("0", mux), video("1", mux), video("2", "")],
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert_ne!(port_of(&sections[1]), 0, "{}", answer.sdp);
+    assert_eq!(port_of(&sections[2]), 0, "{}", answer.sdp);
+    Ok(())
+}

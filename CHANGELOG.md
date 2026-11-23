@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: sweep of the JSEP MUST rows (`conf/jsep-50-rfc9429-sweep`, jsep12).
+  - A `rollback` description whose SDP is not empty is refused by `set_local_description`
+    and `set_remote_description` (RFC 9429 section 4.1.10: "The contents MUST be empty").
+    `SettingEngineBuilder::with_rollback_content_ignored(true)` is W3C's reading (the `sdp`
+    member "is unused" for a rollback).
+  - A later remote offer that drops `a=rtcp-mux` for a section the last answer accepted is
+    refused under every RTCP mux policy (RFC 9429 section 5.8.3; under "negotiate" it was
+    answered rejected).
+  - A transceiver that loses its track and sending direction keeps the `a=msid` lines its
+    section had (RFC 9429 sections 5.2.2, 5.3.2): offers and answers change on the wire.
+  - An answer's `t=` line is the offer's (RFC 3264 section 6; WebRTC offers say `t=0 0`,
+    which is unchanged).
+  - `set_remote_description` runs `SessionDescription::validate` (RFC 9429 section 5.8: a
+    line that is not well formed rejects the description, even when its value is ignored):
+    a malformed value of any attribute rtc-sdp has a type for (`a=rtcp`, `a=rtpmap`,
+    `a=fmtp`, `a=rtcp-fb`, `a=ssrc`, `a=rid`, ...) now refuses the description instead of
+    being skipped where it is used.
+  - A remote `a=group` line (any semantics) naming a mid that no m= line has is ignored as a
+    whole (RFC 5888 section 6); it used to be kept with the unknown tags skipped.
+  - Under `with_disable_media_engine_multiple_codecs(true)` an SFrame section still adds its
+    own numbering to the negotiated list (draft-ietf-avtcore-rtp-sframe-03 section 6): its
+    sender no longer falls back to the plain section's payload types.
+  - New tests pin behaviour the audit had untested: candidates and `a=end-of-candidates` in
+    the tagged section only, the relay policy's suppressed related address, a description's
+    `a=end-of-candidates` reaching the ICE agent, `a=rtcp` parsed, mandatory values inherited
+    from the session level, later offers listing only the endpoint's own feedback, the
+    sender following its section's formats and a later answer (RFC 9143 section 9.1, RFC
+    3264 sections 8.3.2 and 8.3.4).
 - **jsep**: train fixes for the JSEP stack (`conf/jsep-44-train-fixes`, merged with tcp-10,
   mt-8 and sec-11).
   - `a=msid` lines carry the sender's track id again by default (`a=msid:<stream> <track>`,

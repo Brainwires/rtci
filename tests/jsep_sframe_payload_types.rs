@@ -224,3 +224,58 @@ fn a_remote_offer_reusing_a_payload_type_across_sframe_and_plain_sections_is_ref
     assert_disjoint(&answer.sdp);
     Ok(())
 }
+
+/// With one section per kind negotiated (`with_disable_media_engine_multiple_codecs(true)`)
+/// the SFrame section still keeps its own numbering: the offerer's SFrame sender sends among
+/// the SFrame section's payload types of the answer, not the plain section's.
+#[test]
+fn the_sframe_numbering_survives_single_section_negotiation() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    let peer = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_disable_media_engine_multiple_codecs(true)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    let mut offerer = peer()?;
+    offerer.add_track(video_track("plain", 0x5f03_0101))?;
+    let sframe = offerer.add_track(video_track("sframe", 0x5f03_0202))?;
+    offerer
+        .rtp_transceiver(RTCRtpTransceiverId::from(sframe))
+        .expect("transceiver")
+        .set_transform_use_sframe(true)?;
+    let mut answerer = peer()?;
+    let (_, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_disjoint(&answer);
+    let sections = media_sections(&answer);
+    let (plain, expected) = (
+        media_payload_types(&sections[0]),
+        media_payload_types(&sections[1]),
+    );
+    let codecs: Vec<u8> = offerer
+        .rtp_sender(sframe)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(|c| c.payload_type)
+        .collect();
+    assert!(
+        codecs.iter().any(|pt| expected.contains(pt)),
+        "the SFrame sender has the SFrame section's formats: {codecs:?}\n{answer}"
+    );
+    assert!(
+        codecs.iter().all(|pt| !plain.contains(pt)),
+        "and none of the plain section's: {codecs:?}\n{answer}"
+    );
+    Ok(())
+}

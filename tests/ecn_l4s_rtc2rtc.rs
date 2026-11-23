@@ -18,7 +18,7 @@ mod jsep_common;
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{EcnFailure, EcnInitiation, EcnMarking, Registry};
+use rtc::interceptor::{EcnFailure, EcnInitiation, Registry};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
