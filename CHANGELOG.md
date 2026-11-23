@@ -24,11 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)` keeps the
   candidates and the addresses, for an application with one fixed socket. Rows RFC8842-5.1-1,
   -2, -3 `tested` (`tests/dtls_association_new_three_tuple.rs`). The tests that set up a new
-  association gather on new ports (`World::regather`, `Pair::regather`).
-  `renewing_the_dtls_association_renews_every_transport` keeps the previous addresses: after a
-  restart that discards the local candidates, unbundled transports given new ones select no
-  pair, with this change or with `with_discard_local_candidates_during_ice_restart(true)` before
-  it (an ICE issue under investigation).
+  association gather on new ports (`World::regather`, `Pair::regather`), with several
+  transports too (`renewing_the_dtls_association_renews_every_transport`).
 
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
@@ -435,6 +432,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
 ### Bug Fixes
+
+- **rtc** (multi-transport ICE restart, `conf/mt-9-restart-drops-candidates`): with several
+  transports (sections outside a BUNDLE group, several BUNDLE groups), a transport other than
+  the default one wrote every local candidate its agent held into an offer or answer that
+  restarts ICE on it, where the default transport lists none in the offer and, in the answer,
+  only those of the new generation. After a restart that drops the local candidates
+  (`with_discard_local_candidates_during_ice_restart`, or a new DTLS association: RFC 8842
+  section 6, "a completely new set of ICE candidates that were not recently used for any other
+  DTLS association") the peer's agent of that transport took the dead candidate into the new
+  generation, checked it first and kept the pair of the new candidates, of the same
+  foundation, frozen behind it: the transport selected no pair within 10 s. Each transport now
+  lists the candidates the restart rule gives it (`restart_offered_local_candidates`, used by
+  `offered_local_candidates` and `write_transport_attributes`). Tests:
+  `tests/multi_transport_rtc2rtc.rs::a_restart_that_drops_the_local_candidates_reconnects_every_transport`
+  (two and three transports, shared and unique credentials),
+  `a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbundled_sections`,
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`, and
+  `renewing_the_dtls_association_renews_every_transport`, which now gathers on new ports.
+
+- **rtc** (multi-transport routing during an ICE restart): a datagram is routed to the
+  transport that gathered on its local address; one on an address no transport holds a
+  candidate on went to the default transport. After a restart that dropped the local
+  candidates the previous selected pair still carries the data until the new generation
+  selects a pair (RFC 8445 section 9; RFC 8839 section 4.4.3.1.1: "The agent will continue to
+  send media using this pair"), so the data of another transport's previous path went to the
+  default transport and was lost: two RTP packets per renewal in
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`. The local address of a
+  transport's media path now counts as one it is on (`transport_set.rs`, `on_address`).
+
+- **rtc** (engine-run TURN, RFC 8842 section 5.1): after a new DTLS association deleted the
+  engine's allocation, the TURN link allocated again from the transport's first UDP base, the
+  host candidate of the association it replaced, whose address the new association refuses.
+  It now starts only from a base the new association may use, the one the application gathers
+  for it. Test: `tests/turn_udp.rs::a_new_dtls_association_deletes_the_engine_allocation_and_allocates_again`.
 
 - **rtc**: a stream whose SSRC the remote description declares for an m= section with
   `a=rid` / `a=simulcast` is received when its packets carry no RID

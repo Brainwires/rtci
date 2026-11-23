@@ -202,7 +202,9 @@ fn on_address(bundle: &TransportBundle, local: SocketAddr) -> bool {
         .get_local_candidates()
         .iter()
         .any(|candidate| candidate.addr() == local || candidate.base_addr() == local)
-        || agent.media_path().is_some_and(|path| path.local_addr == local)
+        || agent
+            .media_path()
+            .is_some_and(|path| path.local_addr == local)
 }
 
 impl TransportSet {
