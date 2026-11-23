@@ -116,6 +116,16 @@ stage_env() {
       echo "received $what does NOT decode with GStreamer (see gst-decode-$file.log)" >> "$REPORT"; rc=1
     fi
   }
+  # The audio pipeline's headless example: synthetic speech through processing, Opus, two
+  # peer connections over a 5 % loss / 40 ms jitter link, the jitter buffer; its WAV output
+  # and the Opus packets that arrived (as Ogg, for GStreamer's independent decoder).
+  if cargo run -q -p rtc-audio --example audio-loopback -- --seconds 10 --loss 0.05 --jitter-ms 40 \
+      --output "$A/audio-loopback.wav" --ogg "$M/received-audio-pipeline.ogg" > "$A/audio-loopback.log" 2>&1; then
+    grep -E '^AUDIO-LOOPBACK' "$A/audio-loopback.log" >> "$REPORT"
+  else
+    echo "audio-loopback example FAILED (see audio-loopback.log)" >> "$REPORT"; rc=1
+  fi
+  decode received-audio-pipeline.ogg "Opus from the audio pipeline (opusdec)" oggdemux ! opusparse ! opusdec
   decode received-vp8.ivf "VP8 (vp8dec)" ivfparse ! vp8dec
   decode received-opus-multi.ogg "Opus from multi-packet pages (opusdec)" oggdemux ! opusparse ! opusdec
   decode received-h264-slices.h264 "multi-slice H.264 (avdec_h264)" h264parse ! avdec_h264
