@@ -160,6 +160,7 @@ pub(crate) mod data_channel_event;
 pub(crate) mod ice_error_event;
 pub(crate) mod ice_event;
 pub(crate) mod track_event;
+pub(crate) mod transport_event;
 
 pub use crate::peer_connection::states_events::ICE_SERVER_UNREACHABLE;
 pub use data_channel_event::RTCDataChannelEvent;
@@ -168,6 +169,7 @@ pub use ice_event::RTCPeerConnectionIceEvent;
 pub use track_event::{
     RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
 };
+pub use transport_event::{RTCTransportEvent, RTCTransportEventKind};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///
@@ -541,6 +543,20 @@ pub enum RTCPeerConnectionEvent {
     /// Not a W3C event: a fork addition.
     OnSsrcCollision(crate::rtp_transceiver::SSRC),
 
+    /// RTP media of this SSRC arrived that no media section or track could take, and was
+    /// discarded: the first such packet of each SSRC (at most 64 SSRCs per connection are
+    /// reported).
+    ///
+    /// RFC 8830 section 3.1: media of a peer that signals no `a=msid` (or arrives before the
+    /// description that places it) may need buffering until it can be associated; "If the
+    /// implementation wishes to limit this buffering, it MUST signal to the user that media
+    /// has been discarded". The engine buffers none: a packet whose stream cannot be bound to
+    /// a receiver (RFC 9143 section 9.2: "Otherwise, drop the packet") is dropped at once and
+    /// this event says so. `RTCPeerConnection::discarded_rtp_packets` counts every one.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnUnassociatedRtpDiscarded(crate::rtp_transceiver::SSRC),
+
     /// W3C `RTCIceTransport` `statechange`: the connection's ICE transport changed state.
     ///
     /// Comes before the `OnIceConnectionStateChangeEvent` and the
@@ -612,10 +628,10 @@ pub enum RTCPeerConnectionEvent {
 
     /// The SRTP master key of this side's outbound (`outbound` true) or the peer's inbound
     /// stream has used fifteen sixteenths of its lifetime (RFC 3711 section 9.2): `remaining`
-    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. At the limit the
-    /// connection's DTLS transport fails (a new DTLS association cannot be had from a browser
-    /// peer without an ICE restart with new DTLS parameters), so an application that will
-    /// reach it restarts the session first. Not a W3C event: a fork addition.
+    /// more packets of `rtcp` (SRTCP) or RTP may be protected with it. The connection then
+    /// asks for a new DTLS association by itself (RFC 5764 section 4.4; negotiation-needed
+    /// follows), unless `SettingEngineBuilder::with_srtp_automatic_rekeying(false)`. At the
+    /// limit the connection's DTLS transport fails. Not a W3C event: a fork addition.
     OnSrtpKeyLifetimeExpiring {
         /// Whether it is the key this side sends with.
         outbound: bool,
@@ -629,6 +645,46 @@ pub enum RTCPeerConnectionEvent {
     /// extensions or CSRCs were not protected with it (RFC 9335 section 5.2); the packet was
     /// dropped. Not a W3C event: a fork addition.
     OnCryptexRequiredViolation(u32),
+
+    /// An event of one of the connection's transports, with the transport's ids: the ICE
+    /// transport's `statechange`, `gatheringstatechange` and `selectedcandidatepairchange`,
+    /// the candidate pair events, and the DTLS transport's `statechange` and `error` (W3C
+    /// webrtc-pc 5.5, 5.6; webrtc-extensions 7).
+    ///
+    /// Fired for every transport, the default one included. The single-transport variants
+    /// (`OnIceTransportStateChange`, `OnIceGathererStateChange`,
+    /// `OnSelectedCandidatePairChange`, `OnIceCandidatePair*`, `OnDtlsTransportStateChange`,
+    /// `OnDtlsTransportError`) name no transport and are fired for the default transport only
+    /// (the one every section is on while all are bundled), each right before its
+    /// `OnTransportEvent`.
+    OnTransportEvent(RTCTransportEvent),
+    /// A packet from the peer was discarded by SRTP: a replay (`replay` true), or one whose
+    /// authentication tag did not verify (RFC 3711 section 3.3, steps 2 and 5: "the event
+    /// SHOULD be logged"; the engine also logs it at `warn`). `ssrc` and `index` (the RTP
+    /// sequence number or the SRTCP index) are what the packet says, unauthenticated for an
+    /// authentication failure. At most 64 such events wait per SRTP context: a flood of
+    /// forged packets is not queued without bound. Not a W3C event: a fork addition.
+    OnSrtpPacketDiscarded {
+        /// SRTCP (`true`) or SRTP.
+        rtcp: bool,
+        /// The SSRC the packet names.
+        ssrc: u32,
+        /// Its sequence number or SRTCP index.
+        index: u64,
+        /// A replay; otherwise an authentication failure.
+        replay: bool,
+    },
+    /// The ECN validation of the outbound stream `ssrc` detected a failure (RFC 6679 sections
+    /// 7.2.1 and 7.4.2: an initiation that failed, or ECT packets lost after it). The stream
+    /// sends Not-ECT, initiates again later, or keeps ECN off, as `failure` says. The RFC asks
+    /// for such failures to be logged "to enable follow up": they are, and this hands them to
+    /// the application as well. Not a W3C event: a fork addition.
+    OnEcnFailure {
+        /// The outbound stream.
+        ssrc: u32,
+        /// What was detected.
+        failure: interceptor::EcnFailure,
+    },
 }
 
 /// Reserved for future use.

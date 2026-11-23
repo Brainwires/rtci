@@ -289,6 +289,41 @@ fn an_answered_rid_may_tighten_but_not_loosen_the_offer() -> TestResult {
     Ok(())
 }
 
+/// RFC 8851 section 8: the rid restrictions "impose additional restrictions beyond those
+/// communicated in other techniques": an encoding is sent under the smaller of its answered
+/// rid limits and the answer's VP8 `max-fr` / `max-fs` and `b=TIAS`.
+#[test]
+fn an_encoding_is_sent_under_the_tighter_of_its_rid_format_and_bandwidth_limits() -> TestResult {
+    let (mut pc, sender, answer) = offered_three_layers()?;
+    let answer = edited(
+        &answer,
+        "a=rtpmap:96 VP8/90000\n",
+        "a=rtpmap:96 VP8/90000\na=fmtp:96 max-fr=15;max-fs=3600\n",
+    );
+    let at = answer.find("m=video").expect("a video section");
+    let c_line = at + answer[at..].find("c=IN IP4 0.0.0.0\n").expect("a c= line");
+    let answer = format!(
+        "{}c=IN IP4 0.0.0.0\nb=TIAS:800000\n{}",
+        &answer[..c_line],
+        &answer[c_line + "c=IN IP4 0.0.0.0\n".len()..]
+    );
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::answer(crlf(&answer))?,
+    )?;
+    let mut rtp_sender = pc.rtp_sender(sender).expect("sender");
+    let f = rtp_sender.send_restrictions("f").expect("encoding f");
+    assert_eq!(f.max_width, Some(1280), "the rid's width is the tighter");
+    assert_eq!(f.max_height, Some(2704), "int(sqrt(3600 * 8)) macroblocks");
+    assert_eq!(f.max_fps, Some(15), "VP8 max-fr");
+    assert_eq!(f.max_fs, Some(3600 * 256), "VP8 max-fs in pixels");
+    assert_eq!(f.max_br, Some(800_000), "b=TIAS");
+    let q = rtp_sender.send_restrictions("q").expect("encoding q");
+    assert_eq!(q.max_width, Some(320));
+    assert!(rtp_sender.send_restrictions("x").is_none());
+    Ok(())
+}
+
 /// RFC 8853 section 5.2 / 5.3.2: the pause mark `~` needs RFC 7728, which the engine does not
 /// negotiate: by default it is not repeated in an answer, with `with_rid_pause_marks(true)` it
 /// is.
@@ -473,5 +508,298 @@ fn a_pt_restriction_keeps_the_formats_of_the_section_and_an_answered_pause_mark_
     let encodings = &s.get_parameters().encodings;
     assert_eq!(encodings.len(), 2);
     assert!(encodings.iter().all(|e| e.active), "no encoding is paused");
+    Ok(())
+}
+
+fn w3c_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    Ok(RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_w3c_simulcast_answer(true)
+                .build(),
+        )
+        .build(Instant::now())?)
+}
+
+/// W3C webrtc-pc row 4.4.2-39, the W3C form as a setting: with `with_w3c_simulcast_answer` a
+/// remote `a=simulcast` line that names a rid twice is taken with the rid at its first place
+/// (by default it refuses the description: RFC 8853 section 5.2), and the answer's `a=rid`
+/// lines carry no restrictions (by default they keep the offered ones: RFC 8851 section 6.3).
+#[test]
+fn the_w3c_answer_form_reduces_a_repeated_rid_and_sets_no_restrictions() -> TestResult {
+    let mut pc = w3c_peer()?;
+    pc.set_remote_description(
+        Instant::now(),
+        remote_offer(
+            "sendonly",
+            "a=rid:f send max-width=1280\na=rid:h send max-width=640\na=simulcast:send f;h;f\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv"],
+        "{}",
+        answer.sdp
+    );
+    assert_eq!(
+        lines_with(&answer.sdp, "a=simulcast:"),
+        vec!["a=simulcast:recv f;h"]
+    );
+
+    // The default, for contrast: the same offer is refused, and restrictions are echoed.
+    let mut pc = default_peer()?;
+    assert!(
+        pc.set_remote_description(
+            Instant::now(),
+            remote_offer(
+                "sendonly",
+                "a=rid:f send\na=rid:h send\na=simulcast:send f;h;f\n"
+            )?,
+        )
+        .is_err()
+    );
+    let (mut offerer, _) = simulcast_sender(&[("f", Some(1280)), ("h", Some(640))])?;
+    let mut answerer = w3c_peer()?;
+    let (_, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        lines_with(&answer, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv"],
+        "{answer}"
+    );
+    Ok(())
+}
+
+/// RFC 8853 section 5.3.1: an offerer may ask to receive simulcast; it is then "prepared to
+/// receive" each stream. `set_receive_simulcast` writes the `recv` rids and `a=simulcast:recv`;
+/// a simulcast sender answers with the streams it has, and the offerer's receiver takes them
+/// as its layers.
+#[test]
+fn an_offer_can_ask_to_receive_simulcast() -> TestResult {
+    let mut offerer = default_peer()?;
+    let id = offerer.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+    )?;
+    let mut transceiver = offerer.rtp_transceiver(id).expect("the transceiver");
+    assert!(
+        transceiver
+            .set_receive_simulcast(vec!["f".to_owned()])
+            .is_err()
+    );
+    assert!(
+        transceiver
+            .set_receive_simulcast(vec!["f".to_owned(), "f".to_owned()])
+            .is_err()
+    );
+    transceiver.set_receive_simulcast(vec!["f".to_owned(), "h".to_owned(), "q".to_owned()])?;
+
+    let (mut answerer, _) = simulcast_sender(&[("f", None), ("h", None), ("q", None)])?;
+    let (offer, answer) = exchange(&mut offerer, &mut answerer)?;
+    assert_eq!(
+        lines_with(&offer, "a=rid:"),
+        vec!["a=rid:f recv", "a=rid:h recv", "a=rid:q recv"],
+        "{offer}"
+    );
+    assert_eq!(
+        lines_with(&offer, "a=simulcast:"),
+        vec!["a=simulcast:recv f;h;q"]
+    );
+    assert_eq!(
+        lines_with(&answer, "a=simulcast:"),
+        vec!["a=simulcast:send f;h;q"],
+        "{answer}"
+    );
+
+    let receiver = offerer.get_receivers().next().expect("a receiver");
+    let receiver = offerer.rtp_receiver(receiver).expect("receiver");
+    let layers: Vec<String> = receiver
+        .track()
+        .codings()
+        .iter()
+        .map(|c| c.rtp_coding_parameters.rid.clone())
+        .collect();
+    assert_eq!(layers, vec!["f", "h", "q"]);
+    Ok(())
+}
+
+/// RFC 9429 section 5.2.1: for a sender with several encodings, "an 'a=rid' line for each
+/// encoding ... If the application has not set an rid ..., an rid-id value MUST be generated".
+/// Encodings stated to be simulcast layers (`with_simulcast_layers`) are offered as layers
+/// with generated rids (no user data, one byte each), rids the application set are kept;
+/// encodings without rids and without that statement stay codec alternatives of one stream
+/// (`codec_negotiation.rs::test_add_track_negotiates_non_first_codec`).
+#[test]
+fn simulcast_layers_without_rids_get_generated_rids() -> TestResult {
+    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    for (given, expected) in [
+        (["", "", ""], ["0", "1", "2"]),
+        (["", "1", ""], ["0", "1", "2"]),
+        (["0", "", "hi"], ["0", "1", "hi"]),
+    ] {
+        let mut pc = default_peer()?;
+        let encodings = given
+            .iter()
+            .map(|rid| RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    rid: (*rid).to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(
+                RTCRtpTransceiverInit::with_direction(RTCRtpTransceiverDirection::Sendonly)
+                    .with_simulcast_layers(encodings),
+            ),
+        )?;
+        let offer = pc.create_offer(None)?.sdp;
+        let rid_lines: Vec<String> = expected.iter().map(|r| format!("a=rid:{r} send")).collect();
+        assert_eq!(
+            lines_with(&offer, "a=rid:"),
+            rid_lines,
+            "{given:?}\n{offer}"
+        );
+        assert_eq!(
+            lines_with(&offer, "a=simulcast:"),
+            [format!("a=simulcast:send {}", expected.join(";"))],
+            "{given:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The scale factors of the sender's encodings, in order.
+fn sent_scales(pc: &mut RTCPeerConnection, sender: RTCRtpSenderId) -> Vec<Option<f64>> {
+    pc.rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings
+        .iter()
+        .map(|e| e.scale_resolution_down_by)
+        .collect()
+}
+
+/// W3C webrtc-pc "set the RTCSessionDescription" (`proposedSendEncodings`): a remote offer to
+/// receive simulcast promotes a sender with one rid-less encoding to the offered layers, in the
+/// offer's order, scaled down by 2^(n - index - 1); the answer sends them; at most
+/// `MAX_SEND_ENCODINGS` are taken; a rollback restores the rid-less encoding
+/// (`[[LastStableRidlessSendEncodings]]`).
+#[test]
+fn a_remote_offer_to_receive_simulcast_promotes_a_unicast_sender() -> TestResult {
+    let (mut pc, sender) = {
+        let mut pc = default_peer()?;
+        let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0001))?;
+        (pc, sender)
+    };
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+    let now = Instant::now();
+    let offer = || {
+        remote_offer(
+            "recvonly",
+            "a=rid:q recv\na=rid:h recv\na=rid:f recv\na=simulcast:recv q;h;f\n",
+        )
+    };
+    pc.set_remote_description(now, offer()?)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("q", None), ("h", None), ("f", None)])
+    );
+    assert_eq!(
+        sent_scales(&mut pc, sender),
+        [Some(4.0), Some(2.0), Some(1.0)]
+    );
+
+    // Rolled back: the rid-less encoding again.
+    pc.set_remote_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(sent_layers(&mut pc, sender), layers(&[("", None)]));
+
+    // Answered: the layers are sent.
+    pc.set_remote_description(now, offer()?)?;
+    let answer = pc.create_answer(None)?;
+    assert_eq!(
+        lines_with(&answer.sdp, "a=rid:"),
+        vec!["a=rid:q send", "a=rid:h send", "a=rid:f send"],
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(now, answer)?;
+    assert_eq!(sent_layers(&mut pc, sender).len(), 3);
+
+    // Truncated to the supported number of encodings.
+    let mut pc = default_peer()?;
+    let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0002))?;
+    let ids: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
+    let mut extra: String = ids.iter().map(|id| format!("a=rid:{id} recv\n")).collect();
+    extra.push_str(&format!("a=simulcast:recv {}\n", ids.join(";")));
+    pc.set_remote_description(now, remote_offer("recvonly", &extra)?)?;
+    assert_eq!(
+        sent_layers(&mut pc, sender).len(),
+        rtc::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+    );
+    Ok(())
+}
+
+/// W3C `proposedSendEncodings`: "Remove any RTCRtpEncodingParameters dictionaries in
+/// proposedSendEncodings if their rid member is the same as a rid member of an earlier one",
+/// in the W3C answer form, which takes an `a=simulcast` line that repeats a rid.
+#[test]
+fn proposed_send_encodings_drop_a_repeated_rid() -> TestResult {
+    let mut pc = w3c_peer()?;
+    let sender = pc.add_track(jsep_common::video_track("unicast", 0x0516_0003))?;
+    pc.set_remote_description(
+        Instant::now(),
+        remote_offer(
+            "recvonly",
+            "a=rid:h recv\na=rid:f recv\na=simulcast:recv h;f;h\n",
+        )?,
+    )?;
+    assert_eq!(
+        sent_layers(&mut pc, sender),
+        layers(&[("h", None), ("f", None)])
+    );
+    Ok(())
+}
+
+/// W3C webrtc-pc 4.4.1.6 / 5.4.1: a sender's simulcast envelope "may be narrowed ... but cannot
+/// be reexpanded"; a remote description that asks it for a stream outside it "attempted to
+/// renegotiate RIDs" and is refused with InvalidAccessError. Naming fewer of its rids is fine.
+#[test]
+fn a_remote_offer_that_renegotiates_rids_is_an_invalid_access_error() -> TestResult {
+    let (mut pc, _) = simulcast_sender(&[("f", None), ("h", None)])?;
+    let now = Instant::now();
+    pc.set_remote_description(
+        now,
+        remote_offer(
+            "recvonly",
+            "a=rid:f recv\na=rid:h recv\na=simulcast:recv f;h\n",
+        )?,
+    )?;
+    let answer = pc.create_answer(None)?;
+    pc.set_local_description(now, answer)?;
+
+    let reoffer = |version: u32, extra: &str| -> Result<RTCSessionDescription, Error> {
+        let offer = remote_offer("recvonly", extra)?;
+        RTCSessionDescription::offer(
+            offer
+                .sdp
+                .replace(" 2 IN IP4", &format!(" {version} IN IP4")),
+        )
+    };
+    let expanded = pc.set_remote_description(
+        now,
+        reoffer(
+            3,
+            "a=rid:f recv\na=rid:h recv\na=rid:x recv\na=simulcast:recv f;h;x\n",
+        )?,
+    );
+    assert_eq!(expanded.err(), Some(Error::InvalidAccessError));
+    pc.set_remote_description(now, reoffer(3, "a=rid:f recv\na=simulcast:recv f\n")?)?;
     Ok(())
 }

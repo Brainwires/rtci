@@ -6,6 +6,7 @@ use super::queue_limit::QueueLimitDetector;
 use super::rate_calc::RateCalculator;
 use super::rate_control::RateController;
 use super::slope::SlopeEstimator;
+use super::threshold::ThresholdTimeBase;
 use crate::cc::estimator::{BandwidthEstimator, EstimatorStats};
 use crate::rtpfb::acknowledgement::PacketReport;
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
@@ -131,6 +132,7 @@ pub struct Gcc {
     /// [`with_loss_at_queue_limit_as_overuse`](Self::with_loss_at_queue_limit_as_overuse)).
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
+    threshold_time_base: ThresholdTimeBase,
 }
 
 impl Default for Gcc {
@@ -191,6 +193,7 @@ impl Gcc {
             probed_at: None,
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
+            threshold_time_base: ThresholdTimeBase::default(),
         }
     }
 
@@ -229,6 +232,21 @@ impl Gcc {
     pub fn with_feedback_timeout(mut self, feedback_timeout: Duration) -> Self {
         self.feedback_timeout = feedback_timeout;
         self
+    }
+
+    /// The time step of the adaptive threshold (draft-ietf-rmcat-gcc-02 section 5.4):
+    /// [`ThresholdTimeBase::Departure`] (libwebrtc, the default) or the draft's
+    /// [`ThresholdTimeBase::Arrival`].
+    pub fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
+        self.threshold_time_base = time_base;
+        self.detector = self.detector.with_threshold_time_base(time_base);
+        self
+    }
+
+    /// See [`ThresholdTimeBase`]: the time step of the adaptive threshold (draft-ietf-rmcat-gcc-02
+    /// section 5.4), libwebrtc's departure gaps by default.
+    pub fn threshold_time_base(&self) -> ThresholdTimeBase {
+        self.threshold_time_base
     }
 
     /// Whether the loss-based estimate As_hat is held at or below the delay-based estimate
@@ -293,6 +311,19 @@ impl Gcc {
 }
 
 impl BandwidthEstimator for Gcc {
+    /// RFC 6679 section 7.3.3: CE marks counted by the receiver's ECN reports go to the
+    /// loss-based controller as losses would; the target can only fall by them.
+    fn on_congestion_marks(&mut self, now: Instant, marked: u64, packets: u64) {
+        if marked == 0 || packets == 0 {
+            return;
+        }
+        let packets = packets.min(usize::MAX as u64) as usize;
+        let marked = (marked.min(packets as u64)) as usize;
+        self.loss_control.update(now, marked, packets);
+        let loss_target = self.loss_control.target();
+        self.target = self.target.min(loss_target).clamp(self.min, self.max);
+    }
+
     fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
         if reports.is_empty() {
             return;
@@ -323,9 +354,11 @@ impl BandwidthEstimator for Gcc {
             }
             if let Some(trend) = self.slope.accumulate(report) {
                 self.deltas = (self.deltas + 1).min(MAX_SCALED_DELTAS);
-                usage = self
-                    .detector
-                    .update(trend.at, trend.estimate_ms * f64::from(self.deltas));
+                usage = self.detector.update_with_arrival(
+                    trend.at,
+                    trend.arrival,
+                    trend.estimate_ms * f64::from(self.deltas),
+                );
             }
         }
 
@@ -438,7 +471,7 @@ impl BandwidthEstimator for Gcc {
         // Delay measurements across two paths mean nothing, and neither does where the old
         // path converged: start the delay side over, at the current target.
         self.slope = SlopeEstimator::new();
-        self.detector = OveruseDetector::new();
+        self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
         self.deltas = 0;
         self.arrival_anchor = None;
@@ -569,6 +602,70 @@ mod tests {
         assert!(marked < 1_000_000.0, "15% marked: {marked}");
         assert!(clean >= 1_000_000.0, "no marks, no losses: {clean}");
         assert!(marked < 0.8 * clean, "{marked} vs {clean}");
+    }
+
+    /// RFC 6679 section 7.3.3: CE marks counted by RFC 6679 ECN reports (no per-packet
+    /// marks) bring the target down as the same share of losses would; reports without marks
+    /// leave it where it was.
+    #[test]
+    fn ce_marks_from_ecn_counters_lower_the_target_as_losses_do() {
+        let epoch = Instant::now();
+        let run = |marked: u64| {
+            let mut gcc = Gcc::new(1_000_000.0, 100_000.0, 10_000_000.0);
+            for batch in 0..20u64 {
+                gcc.on_congestion_marks(epoch + Duration::from_millis(batch * 200), marked, 20);
+            }
+            gcc.target_bitrate()
+        };
+        let marked = run(3);
+        let clean = run(0);
+        assert!(marked < 0.8 * 1_000_000.0, "15% marked: {marked}");
+        assert_eq!(clean, 1_000_000.0, "no marks: {clean}");
+    }
+
+    /// RFC 5104 section 5: after a TMMBR raises (or lifts) the limit, "the sender ... SHALL
+    /// use congestion control" to go up: the target does not jump to the new limit but climbs
+    /// by the estimator's own increase as feedback shows the path carries it.
+    #[test]
+    fn a_raised_limit_is_climbed_to_by_congestion_control_not_jumped_to() {
+        let epoch = Instant::now();
+        let mut gcc = Gcc::new(300_000.0, 50_000.0, 10_000_000.0);
+        gcc.set_external_bounds(None, Some(300_000.0));
+        let mut id = 0u64;
+        let mut batch = |gcc: &mut Gcc, index: u64| {
+            let at = epoch + Duration::from_millis(index * 100);
+            let reports: Vec<PacketReport> = (0..10)
+                .map(|n| {
+                    id += 1;
+                    let departure = at + Duration::from_millis(n * 10);
+                    report(id, departure, Some(index * 100 + n * 10 + 20))
+                })
+                .collect();
+            gcc.on_reports(at + Duration::from_millis(100), &reports);
+        };
+        for index in 0..20 {
+            batch(&mut gcc, index);
+        }
+        assert!(gcc.target_bitrate() <= 300_000.0);
+
+        gcc.set_external_bounds(None, Some(5_000_000.0));
+        let right_after = gcc.target_bitrate();
+        assert!(
+            right_after <= 300_000.0 * 1.01,
+            "no jump to the new limit: {right_after}"
+        );
+        for index in 20..60 {
+            batch(&mut gcc, index);
+        }
+        let later = gcc.target_bitrate();
+        assert!(
+            later > right_after,
+            "the target climbs: {right_after} -> {later}"
+        );
+        assert!(
+            later < 5_000_000.0,
+            "by the increase, not to the limit: {later}"
+        );
     }
 
     /// The more pessimistic half wins. Here loss is catastrophic while delay is quiet, so the

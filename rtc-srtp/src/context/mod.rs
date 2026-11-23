@@ -3,6 +3,8 @@ mod context_test;
 #[cfg(test)]
 mod cryptex_test;
 #[cfg(test)]
+mod discard_events_test;
+#[cfg(test)]
 mod header_extension_test;
 #[cfg(test)]
 mod key_lifetime_test;
@@ -256,6 +258,8 @@ pub struct Context {
     /// Whether SRTCP packets are encrypted when protected (the E flag).
     srtcp_encryption: bool,
     events: VecDeque<ContextEvent>,
+    /// Received packets discarded as replays or for failed authentication, by reason.
+    discarded: [u64; 2],
     /// Keys the digests of protected packets kept per sending SSRC (see [`SentIndexes`]).
     sent_digest_hasher: RandomState,
 }
@@ -376,6 +380,7 @@ impl Context {
             encrypted_header_extensions: EncryptedHeaderExtensions::default(),
             srtcp_encryption: true,
             events: VecDeque::new(),
+            discarded: [0; 2],
             sent_digest_hasher: RandomState::new(),
         })
     }
@@ -475,6 +480,54 @@ impl Context {
     /// The next thing the context has to tell the application; see [`ContextEvent`].
     pub fn poll_event(&mut self) -> Option<ContextEvent> {
         self.events.pop_front()
+    }
+
+    /// How many received packets were discarded so far: (replays, authentication failures)
+    /// (RFC 3711 section 3.3).
+    pub fn discarded_packets(&self) -> (u64, u64) {
+        (self.discarded[0], self.discarded[1])
+    }
+
+    /// Records the outcome of unprotecting a packet: a replay or an authentication failure
+    /// is counted, logged and reported (RFC 3711 section 3.3, steps 2 and 5: "the event
+    /// SHOULD be logged").
+    pub(crate) fn note_unprotect_result<T>(
+        &mut self,
+        kind: PacketKind,
+        ssrc: u32,
+        index: u64,
+        result: Result<T>,
+    ) -> Result<T> {
+        let reason = match &result {
+            Err(Error::SrtpSsrcDuplicated(..) | Error::SrtcpSsrcDuplicated(..)) => {
+                DiscardReason::Replay
+            }
+            Err(
+                Error::ErrFailedToVerifyAuthTag
+                | Error::RtpFailedToVerifyAuthTag
+                | Error::RtcpFailedToVerifyAuthTag,
+            ) => DiscardReason::AuthenticationFailed,
+            _ => return result,
+        };
+        let slot = match reason {
+            DiscardReason::Replay => 0,
+            _ => 1,
+        };
+        self.discarded[slot] = self.discarded[slot].saturating_add(1);
+        let pending = self
+            .events
+            .iter()
+            .filter(|event| matches!(event, ContextEvent::PacketDiscarded { .. }))
+            .count();
+        if pending < MAX_PENDING_DISCARD_EVENTS {
+            self.events.push_back(ContextEvent::PacketDiscarded {
+                kind,
+                ssrc,
+                index,
+                reason,
+            });
+        }
+        result
     }
 
     /// Adds a master key under `mki` (RFC 3711 section 8.1). Packets carrying that MKI are
@@ -752,6 +805,7 @@ impl Context {
             encrypted_header_extensions: EncryptedHeaderExtensions::default(),
             srtcp_encryption: true,
             events: VecDeque::new(),
+            discarded: [0; 2],
             sent_digest_hasher: RandomState::new(),
         }
     }

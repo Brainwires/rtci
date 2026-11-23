@@ -862,3 +862,79 @@ fn receiver_state_stays_bounded_over_many_events() {
         assert!(out.len() <= 4);
     }
 }
+
+/// RFC 4733 section 2.5.1.5: consecutive events packed into one packet. The RTP timestamp is
+/// the beginning of the first event, M is set (the packet records the beginning of events), and
+/// each event's E bit and duration are what it would have alone. A receiver recovers each
+/// event's start from the first one's and the durations before it.
+#[test]
+fn consecutive_events_packed_into_one_packet_keep_each_events_own_report() {
+    use TelephoneEventReport::*;
+    let allowed = EventSet::dtmf();
+    let packets =
+        packed_telephone_event_packets(&allowed, &[(1, 10, 800), (2, 10, 400), (3, 12, 0)], 5000)
+            .unwrap();
+    assert_eq!(packets.len(), TELEPHONE_EVENT_END_REPEATS);
+    assert!(
+        packets.windows(2).all(|w| w[0] == w[1]),
+        "sent three times, identical"
+    );
+    let packet = &packets[0];
+    assert!(packet.marker);
+    assert_eq!(packet.timestamp, 5000);
+    assert_eq!(
+        packet.events,
+        vec![
+            ev(1, true, 10, 800),
+            ev(2, true, 10, 400),
+            ev(3, true, 12, 1)
+        ]
+    );
+
+    let mut receiver = TelephoneEventReceiver::new();
+    let reports = receiver
+        .receive(packet.timestamp, packet.marker, &packet.payload().unwrap())
+        .unwrap();
+    let started: Vec<(u8, u32)> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Started {
+                event, timestamp, ..
+            } => Some((*event, *timestamp)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![(1, 5000), (2, 5800), (3, 6200)]);
+    let ended: Vec<(u8, u32)> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Ended {
+                event,
+                total_duration,
+            } => Some((*event, *total_duration)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, vec![(1, 800), (2, 400), (3, 1)]);
+    // The repeats change nothing.
+    for repeat in &packets[1..] {
+        let again = receiver
+            .receive(repeat.timestamp, repeat.marker, &repeat.payload().unwrap())
+            .unwrap();
+        assert!(
+            again.iter().all(|r| !matches!(r, Started { .. })),
+            "{again:?}"
+        );
+    }
+}
+
+/// Packing keeps the sender's other rules: only events the receiver allows, nothing long
+/// enough to need segments, and at least one event.
+#[test]
+fn packing_refuses_what_a_packet_cannot_carry() {
+    let allowed = EventSet::dtmf();
+    assert!(packed_telephone_event_packets(&allowed, &[], 0).is_err());
+    assert!(packed_telephone_event_packets(&allowed, &[(16, 0, 100)], 0).is_err());
+    assert!(packed_telephone_event_packets(&allowed, &[(1, 64, 100)], 0).is_err());
+    assert!(packed_telephone_event_packets(&allowed, &[(1, 0, 0x1_0000)], 0).is_err());
+}

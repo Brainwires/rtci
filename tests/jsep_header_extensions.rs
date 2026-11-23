@@ -422,3 +422,74 @@ fn extmap_allow_mixed_at_media_level_is_answered() -> TestResult {
     assert!(sdp.contains("a=extmap-allow-mixed"), "{sdp}");
     Ok(())
 }
+
+/// W3C webrtc-pc 5.2 / 5.3 `getParameters`: the header extensions are those this media
+/// section negotiated, for sending (the sender) and for receiving (the receiver), not every
+/// extension of the kind; none before an answer. Two video sections, abs-send-time offered in
+/// the first only.
+#[test]
+fn parameters_list_the_header_extensions_of_their_own_section() -> TestResult {
+    let mut pc = peer_with(&[MID, ABS])?;
+    let first = pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    {
+        let sender = pc
+            .rtp_transceiver(first)
+            .and_then(|t| t.sender())
+            .expect("a sender");
+        let before = pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .clone();
+        assert!(before.is_empty(), "none negotiated yet: {before:?}");
+    }
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0 1
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=sendrecv
+a=extmap:1 {MID}
+a=extmap:2 {ABS}
+a=rtpmap:96 VP8/90000
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:1
+a=sendrecv
+a=extmap:1 {MID}
+a=rtpmap:96 VP8/90000
+"
+    ));
+    answer(&mut pc, offer)?;
+    let mut uris = |index: usize| -> (Vec<String>, Vec<String>) {
+        let ids: Vec<_> = pc.get_transceivers().collect();
+        let t = pc.rtp_transceiver(ids[index]).expect("t");
+        let (sender, receiver) = (t.sender().expect("s"), t.receiver().expect("r"));
+        let mut send: Vec<String> = pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .map(|e| e.uri.clone())
+            .collect();
+        let mut recv: Vec<String> = pc
+            .rtp_receiver(receiver)
+            .expect("receiver")
+            .get_parameters()
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .map(|e| e.uri.clone())
+            .collect();
+        send.sort();
+        recv.sort();
+        (send, recv)
+    };
+    let mut both = vec![ABS.to_owned(), MID.to_owned()];
+    both.sort();
+    assert_eq!(uris(0), (both.clone(), both));
+    assert_eq!(uris(1), (vec![MID.to_owned()], vec![MID.to_owned()]));
+    Ok(())
+}

@@ -145,8 +145,13 @@ test("DTLS and SRTP are negotiated", async ({ page }) => {
     return t;
   }, WS);
   expect(t.dtlsState).toBe("connected");
+  // Which version, suite and SRTP profile each browser cell settled on, for the train's log:
+  // the engine offers AEAD_AES_256_GCM first and the TLS 1.3 suites before the 1.2 ones.
+  console.log(
+    `[${test.info().project.name}] negotiated tlsVersion=${t.tlsVersion} dtlsCipher=${t.dtlsCipher} srtpCipher=${t.srtpCipher}`,
+  );
   // Chromium and Firefox report the negotiated suites; WebKit may not fill them in.
-  if (t.dtlsCipher !== undefined) expect(t.dtlsCipher).toMatch(/AES_128_GCM|CHACHA20/);
+  if (t.dtlsCipher !== undefined) expect(t.dtlsCipher).toMatch(/AES_128_GCM|AES_256_GCM|CHACHA20/);
   if (t.srtpCipher !== undefined) expect(t.srtpCipher).toMatch(/AES|AEAD/);
 });
 
@@ -197,6 +202,33 @@ test("reflect audio Opus", async ({ page }) => {
   }, WS);
   expect(r.error, JSON.stringify(r)).toBeUndefined();
   expect(r.mimeType.toLowerCase()).toBe("audio/opus");
+});
+
+// The engine sends transport-wide congestion control feedback only for a stream whose section
+// negotiated `a=rtcp-fb:... transport-cc` (draft-holmer-rmcat-transport-wide-cc-extensions
+// section 2.3), not on the header extension alone: every browser's video offer must carry
+// both, and the Rust answer must keep both, or the browser's sender gets no feedback.
+test("transport-cc: the browser's video offer negotiates it and Rust keeps it", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, { media: "reflect", video: "VP8" });
+    const tr = s.pc.addTransceiver(Interop.canvasStream().getVideoTracks()[0], { direction: "sendrecv" });
+    Interop.prefer(tr, "video", "video/VP8");
+    await s.negotiate();
+    const section = (sdp) => (sdp.split(/\r?\nm=/).find((m) => /^video /.test(m) || /^m=video /.test(m)) || "");
+    const feedback = (sdp) => /a=rtcp-fb:(\d+|\*) transport-cc/.test(section(sdp));
+    const extension = (sdp) => /a=extmap:\d+(\/\w+)? http:\/\/www\.ietf\.org\/id\/draft-holmer-rmcat-transport-wide-cc-extensions-01/.test(section(sdp));
+    const offer = s.pc.localDescription.sdp;
+    const answer = s.pc.remoteDescription.sdp;
+    s.close();
+    return {
+      offered: { feedback: feedback(offer), extension: extension(offer) },
+      answered: { feedback: feedback(answer), extension: extension(answer) },
+      offer: section(offer),
+      answer: section(answer),
+    };
+  }, WS);
+  expect(r.offered, JSON.stringify(r)).toEqual({ feedback: true, extension: true });
+  expect(r.answered, JSON.stringify(r)).toEqual({ feedback: true, extension: true });
 });
 
 // ---- media: Rust sends GStreamer-encoded files, the browser decodes ----

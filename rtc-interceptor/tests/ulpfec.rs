@@ -999,3 +999,56 @@ fn a_packet_on_an_ssrc_the_red_receiver_does_not_know_passes_through_untouched()
     assert_eq!(&stranger, rtp_of(&delivered[0]));
     assert!(!delivered[0].has(&Attribute::RecoveredByFec));
 }
+
+/// RFC 5109 section 14 ("indicated out of band") with RFC 5956 section 4.3: a remote stream
+/// whose signalled repair flow (`a=ssrc-group:FEC-FR`) has the `ulpfec` format is a separate
+/// FEC stream, even for a receiver built for the RED carriage (the default set's); a repair
+/// flow of another format (FlexFEC) is left to its own decoder.
+#[test]
+fn a_ulpfec_repair_flow_the_signalling_groups_is_decoded_as_a_separate_stream() {
+    let (mut sender, _) = stream_chains(2);
+    let start = Instant::now();
+    let wire = send(
+        &mut sender,
+        start,
+        &[media(10, 9000, false, 20), media(11, 9000, true, 20)],
+    );
+    assert_eq!(3, wire.len(), "two media packets and one FEC packet");
+
+    let receiver_for = |mime_type_fec: &str| {
+        let mut receiver = Registry::new()
+            .with(
+                Slot::FecDecoder,
+                UlpfecReceiveBuilder::red(RED_PT, FEC_PT).build(),
+            )
+            .build();
+        let mut info = stream_info("video/VP8", true);
+        info.mime_type_fec = mime_type_fec.to_owned();
+        receiver.bind_remote_stream(&info);
+        receiver
+    };
+
+    // Packet 11 is lost.
+    let arrived = [wire[0].clone(), wire[2].clone()];
+    let mut receiver = receiver_for("video/ulpfec");
+    let delivered = receive(&mut receiver, start, &arrived);
+    let sequence_numbers: Vec<u16> = delivered
+        .iter()
+        .map(|m| rtp_of(m).header.sequence_number)
+        .collect();
+    assert_eq!(
+        vec![10, 11],
+        sequence_numbers,
+        "11 rebuilt; the FEC packet swallowed"
+    );
+    assert!(delivered[1].has(&Attribute::RecoveredByFec));
+
+    let mut receiver = receiver_for("video/flexfec-03");
+    let delivered = receive(&mut receiver, start, &arrived);
+    assert_eq!(
+        2,
+        delivered.len(),
+        "not ULPFEC: the repair flow passes untouched"
+    );
+    assert!(delivered.iter().all(|m| !m.has(&Attribute::RecoveredByFec)));
+}

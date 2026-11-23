@@ -5,6 +5,8 @@ mod report_blocks_test;
 
 /// Delay Since Last Receiver Report blocks, for round-trip time between receivers.
 pub mod dlrr;
+/// ECN Summary Report blocks (RFC 6679 section 5.2).
+pub mod ecn;
 /// Packet Receipt Times blocks.
 pub mod prt;
 /// Loss and Duplicate RLE blocks, which run-length encode per-packet receipt.
@@ -19,6 +21,7 @@ pub mod unknown;
 pub mod vm;
 
 pub use dlrr::{DLRRReport, DLRRReportBlock};
+pub use ecn::{EcnSummaryReport, EcnSummaryReportBlock};
 pub use prt::PacketReceiptTimesReportBlock;
 pub use rle::{
     Chunk, ChunkType, DuplicateRLEReportBlock, LossRLEReportBlock, RLEReportBlock,
@@ -68,6 +71,8 @@ pub enum BlockType {
     StatisticsSummary, // 6, RFC 3611, section 4.6
     /// VoIP Metrics report block ([RFC 3611] §4.7).
     VoIPMetrics, // 7, RFC 3611, section 4.7
+    /// ECN Summary Report block ([RFC 6679] §5.2).
+    EcnSummary, // 13, RFC 6679, section 5.2
     /// A block type this crate does not model, with its type octet.
     Other(u8),
 }
@@ -83,6 +88,7 @@ impl From<u8> for BlockType {
             5 => BlockType::DLRR,
             6 => BlockType::StatisticsSummary,
             7 => BlockType::VoIPMetrics,
+            13 => BlockType::EcnSummary,
             other => BlockType::Other(other),
         }
     }
@@ -99,6 +105,7 @@ impl From<BlockType> for u8 {
             BlockType::DLRR => 5,
             BlockType::StatisticsSummary => 6,
             BlockType::VoIPMetrics => 7,
+            BlockType::EcnSummary => 13,
             BlockType::Other(other) => other,
         }
     }
@@ -115,6 +122,7 @@ impl fmt::Display for BlockType {
             BlockType::DLRR => "DLRRReportBlockType",
             BlockType::StatisticsSummary => "StatisticsSummaryReportBlockType",
             BlockType::VoIPMetrics => "VoIPMetricsReportBlockType",
+            BlockType::EcnSummary => "EcnSummaryReportBlockType",
             _ => "UnknownReportBlockType",
         };
         write!(f, "{s}")
@@ -315,6 +323,9 @@ impl ExtendedReport {
                 .map(|b| Box::new(b) as Box<dyn Packet>),
             BlockType::VoIPMetrics => {
                 VoIPMetricsReportBlock::unmarshal(raw_block).map(|b| Box::new(b) as Box<dyn Packet>)
+            }
+            BlockType::EcnSummary => {
+                EcnSummaryReportBlock::unmarshal(raw_block).map(|b| Box::new(b) as Box<dyn Packet>)
             }
             _ => Err(Error::WrongType),
         };

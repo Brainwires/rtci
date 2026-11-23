@@ -554,10 +554,122 @@ pub(crate) fn find_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecF
         })
 }
 
+/// The FEC format of a remote stream's `FEC-FR` repair flow in `haystack`: as
+/// [`find_fec_format`], and else ULPFEC (`video/ulpfec`) as a stream of its own (RFC 5109
+/// section 14.1, SSRC-multiplexed in the session as RFC 5956 section 4.3 groups it). Only the
+/// receive side reads it: the engine sends ULPFEC in RED unless the application builds the
+/// separate stream itself, so a local ULPFEC registration mints no repair SSRC.
+pub(crate) fn find_receive_fec_format(haystack: &[RTCRtpCodecParameters]) -> Option<FecFormat> {
+    find_fec_format(haystack).or_else(|| {
+        haystack
+            .iter()
+            .find(|c| {
+                c.rtp_codec.mime_type.eq_ignore_ascii_case(
+                    crate::peer_connection::configuration::media_engine::MIME_TYPE_ULP_FEC,
+                )
+            })
+            .map(|c| FecFormat {
+                payload_type: c.payload_type,
+                mime_type: c.rtp_codec.mime_type.clone(),
+                sdp_fmtp_line: c.rtp_codec.sdp_fmtp_line.clone(),
+            })
+    })
+}
+
 /// The payload type of the FEC format in `haystack` ([`find_fec_format`]).
 #[cfg(test)]
 pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
     find_fec_format(haystack).map(|format| format.payload_type)
+}
+
+/// The RTCP feedback a packet is, as the `a=rtcp-fb` entry (type, first word of the
+/// parameter) that negotiates it: NACK, PLI, SLI, RPSI (RFC 4585), FIR, TMMBR / TMMBN, TSTR /
+/// TSTN, VBCM (RFC 5104), LRR (`ccm lrr`), REMB (`goog-remb`), transport-wide congestion
+/// control (`transport-cc`), RFC 8888 (`ack ccfb`) and the RFC 6679 ECN feedback (`nack ecn`).
+/// `None` for what is not feedback (SR, RR, SDES, BYE, APP, XR) and for feedback this endpoint
+/// has no negotiation rule for.
+pub(crate) fn feedback_negotiating(
+    packet: &dyn rtcp::Packet,
+) -> Option<(&'static str, &'static str)> {
+    use rtcp::payload_feedbacks::{
+        full_intra_request::FullIntraRequest,
+        layer_refresh_request::LayerRefreshRequest,
+        picture_loss_indication::PictureLossIndication,
+        receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
+        reference_picture_selection_indication::ReferencePictureSelectionIndication,
+        slice_loss_indication::SliceLossIndication,
+        temporal_spatial_tradeoff::{
+            TemporalSpatialTradeoffNotification, TemporalSpatialTradeoffRequest,
+        },
+        video_back_channel_message::VideoBackChannelMessage,
+    };
+    use rtcp::transport_feedbacks::{
+        cc_feedback_report::CcFeedbackReport,
+        ecn_feedback::EcnFeedback,
+        tmmb::{TemporaryMaximumBitrateNotification, TemporaryMaximumBitrateRequest},
+        transport_layer_cc::TransportLayerCc,
+        transport_layer_nack::TransportLayerNack,
+    };
+    let any = packet.as_any();
+    Some(if any.is::<TransportLayerNack>() {
+        ("nack", "")
+    } else if any.is::<PictureLossIndication>() {
+        ("nack", "pli")
+    } else if any.is::<SliceLossIndication>() {
+        ("nack", "sli")
+    } else if any.is::<ReferencePictureSelectionIndication>() {
+        ("nack", "rpsi")
+    } else if any.is::<EcnFeedback>() {
+        ("nack", "ecn")
+    } else if any.is::<FullIntraRequest>() {
+        ("ccm", "fir")
+    } else if any.is::<TemporaryMaximumBitrateRequest>()
+        || any.is::<TemporaryMaximumBitrateNotification>()
+    {
+        ("ccm", "tmmbr")
+    } else if any.is::<TemporalSpatialTradeoffRequest>()
+        || any.is::<TemporalSpatialTradeoffNotification>()
+    {
+        ("ccm", "tstr")
+    } else if any.is::<VideoBackChannelMessage>() {
+        ("ccm", "vbcm")
+    } else if any.is::<LayerRefreshRequest>() {
+        ("ccm", "lrr")
+    } else if any.is::<ReceiverEstimatedMaximumBitrate>() {
+        ("goog-remb", "")
+    } else if any.is::<TransportLayerCc>() {
+        ("transport-cc", "")
+    } else if any.is::<CcFeedbackReport>() {
+        ("ack", "ccfb")
+    } else {
+        return None;
+    })
+}
+
+/// RFC 4585 section 4.2 ("no feedback messages other than those listed ... MUST be used") and
+/// RFC 5104 section 7.2 ("MUST NOT use other CCM messages than those indicated"): the first
+/// of `packets` whose feedback type `negotiated` (the feedback of a section's negotiated
+/// codecs) does not list, as its `a=rtcp-fb` type and parameter.
+pub(crate) fn unnegotiated_feedback(
+    packets: &[Box<dyn rtcp::Packet>],
+    negotiated: &[RTCRtpCodecParameters],
+) -> Option<(&'static str, &'static str)> {
+    packets
+        .iter()
+        .filter_map(|packet| feedback_negotiating(packet.as_ref()))
+        .find(|(typ, parameter)| {
+            !negotiated
+                .iter()
+                .flat_map(|codec| &codec.rtp_codec.rtcp_feedback)
+                .any(|f| {
+                    f.typ.eq_ignore_ascii_case(typ)
+                        && f.parameter
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .eq_ignore_ascii_case(parameter)
+                })
+        })
 }
 
 /// Computes the intersection of two RTCP feedback lists.
@@ -603,6 +715,32 @@ fn tmmbr_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<RTCPFeedback
     })
 }
 
+/// `Some` when `a` (this endpoint's) and `b` (the peer's) are both `ccm pause` lines: the
+/// negotiated line (RFC 7728 section 9.1), or `None` when the peer's cannot be answered.
+fn pause_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<Option<RTCPFeedback>> {
+    if a.typ != TYPE_RTCP_FB_CCM || b.typ != TYPE_RTCP_FB_CCM {
+        return None;
+    }
+    let (ours, theirs) = (
+        interceptor::PauseCapability::parse(&a.parameter)?,
+        interceptor::PauseCapability::parse(&b.parameter),
+    );
+    let Some(theirs) = theirs else {
+        return b
+            .parameter
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case(interceptor::RTCP_FB_CCM_PAUSE))
+            .then_some(None);
+    };
+    Some(
+        interceptor::PauseCapability::negotiate(&ours, &theirs).map(|negotiated| RTCPFeedback {
+            typ: TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: negotiated.parameter(),
+        }),
+    )
+}
+
 pub(crate) fn rtcp_feedback_intersection(
     a: &[RTCPFeedback],
     b: &[RTCPFeedback],
@@ -610,6 +748,15 @@ pub(crate) fn rtcp_feedback_intersection(
     let mut out = vec![];
     for a_feedback in a {
         for b_feeback in b {
+            // RFC 7728 section 9.1: `ccm pause` is answered with the complementary `config`
+            // and `nowait` only when both sides have it; a `config` the section does not
+            // define removes the line.
+            if let Some(pause) = pause_intersection(a_feedback, b_feeback) {
+                if let Some(pause) = pause {
+                    out.push(pause);
+                }
+                break;
+            }
             if a_feedback.typ == b_feeback.typ
                 && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
             {
@@ -846,5 +993,56 @@ mod rtx_apt_test {
         assert_eq!(parse_rtx_apt("apt=notanumber"), None);
         // Out of the u8 payload-type range.
         assert_eq!(parse_rtx_apt("apt=300"), None);
+    }
+
+    fn tmmbr(parameter: &str) -> Vec<super::RTCPFeedback> {
+        vec![super::RTCPFeedback {
+            typ: super::TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: parameter.to_owned(),
+        }]
+    }
+
+    /// RFC 5104 section 7.2: "the highest value from offer and answer SHALL be used", and
+    /// section 7.1: without `smaxpr` the rate "defaults to infinity". This endpoint's offered
+    /// `smaxpr` against a remote answer: a higher answered value wins, a lower one loses, and
+    /// an answer without one leaves the session without a limit (infinity is the highest).
+    #[test]
+    fn the_session_maximum_packet_rate_is_the_highest_of_offer_and_answer() {
+        let ours = tmmbr("tmmbr smaxpr=120");
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=200")),
+            tmmbr("tmmbr smaxpr=200")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=60")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr")),
+            tmmbr("tmmbr")
+        );
+        // An answerer without a limit of its own keeps the offered one: the highest of the
+        // two is the offer's, which it states (section 7.2 forbids only adding one).
+        assert_eq!(
+            super::rtcp_feedback_intersection(&tmmbr("tmmbr"), &tmmbr("tmmbr smaxpr=120")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+    }
+
+    /// RFC 3611 section 5.1: `rcvr-rtt=<mode>[:<max size>]` reaches the stream as the remote
+    /// side signalled it, mode and maximum DLRR size included, whatever form this endpoint
+    /// registered, so that the RTCP session keeps its DLRR blocks within the peer's maximum.
+    #[test]
+    fn the_remote_rcvr_rtt_mode_and_maximum_are_negotiated() {
+        let rrtr = |parameter: &str| {
+            vec![super::RTCPFeedback {
+                typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                parameter: parameter.to_owned(),
+            }]
+        };
+        assert_eq!(
+            super::rtcp_feedback_intersection(&rrtr("rcvr-rtt=all"), &rrtr("rcvr-rtt=sender:64")),
+            rrtr("rcvr-rtt=sender:64")
+        );
     }
 }

@@ -279,3 +279,43 @@ a=rtpmap:{format}
     }
     Ok(())
 }
+
+/// RFC 9429 section 5.3.1: under must-bundle, an offered section that "is not the first 'm='
+/// section and is not in the first section's BUNDLE group" is rejected in the answer; the
+/// group's sections are accepted. Under balanced the section outside the group gets a
+/// transport of its own.
+#[test]
+fn must_bundle_rejects_a_section_outside_the_first_sections_group() -> TestResult {
+    let section = |media: &str, mid: &str, format: &str| {
+        format!(
+            "m={media} 9 UDP/TLS/RTP/SAVPF {}
+{TRANSPORT}a=mid:{mid}
+a=sendrecv
+a=rtpmap:{format}
+",
+            format.split(' ').next().unwrap_or_default()
+        )
+    };
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0 1\n{}{}{}",
+        section("audio", "0", "111 opus/48000/2"),
+        section("video", "1", "96 VP8/90000"),
+        section("video", "2", "97 VP9/90000"),
+    ));
+    for (policy, accepted) in [
+        (Some(RTCBundlePolicy::MustBundle), [true, true, false]),
+        (Some(RTCBundlePolicy::Balanced), [true, true, true]),
+    ] {
+        let mut pc = peer_with(policy, false)?;
+        pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer.clone())?)?;
+        let answer = pc.create_answer(None)?;
+        let ports: Vec<bool> = media_sections(&answer.sdp)
+            .iter()
+            .map(|s| port_of(s) != 0)
+            .collect();
+        assert_eq!(ports, accepted, "{policy:?}:\n{}", answer.sdp);
+        assert_eq!(group(&answer.sdp), ["a=group:BUNDLE 0 1"], "{}", answer.sdp);
+        pc.set_local_description(Instant::now(), answer)?;
+    }
+    Ok(())
+}

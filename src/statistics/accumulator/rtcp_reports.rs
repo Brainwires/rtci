@@ -5,7 +5,9 @@
 //! What each packet means for the stats is decided here, next to the accumulators it updates.
 
 use super::RTCStatsAccumulator;
-use rtcp::extended_report::{DLRRReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock};
+use rtcp::extended_report::{
+    DLRRReportBlock, EcnSummaryReportBlock, ExtendedReport, ReceiverReferenceTimeReportBlock,
+};
 use rtcp::header::{FORMAT_CCFB, PacketType};
 use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
@@ -13,6 +15,7 @@ use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
 use rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtcp::transport_feedbacks::ecn_feedback::EcnFeedback;
 use rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use std::time::Instant;
 
@@ -48,6 +51,70 @@ impl RTCStatsAccumulator {
     /// * An RFC 8888 report block describes, packet by packet, how the remote received one of
     ///   our outbound streams: ECN marks, losses and recoveries (the remote-inbound object).
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
+        // RFC 6679 section 7.2.3: under the leap of faith, a receiver report that does not
+        // report on a stream (or reports everything lost) shows no reception of it; the
+        // stream's validation waits for a second such report in a row. A report that is full
+        // (31 blocks) may have left the stream for the next one, and says nothing.
+        let reports: Vec<&dyn rtcp::Packet> = packets
+            .iter()
+            .map(|packet| packet.as_ref())
+            .filter(|packet| {
+                let any = packet.as_any();
+                (any.is::<ReceiverReport>() || any.is::<SenderReport>())
+                    && reception_reports(*packet).len() < 31
+            })
+            .collect();
+        if !reports.is_empty() {
+            let received: Vec<u32> = reports
+                .iter()
+                .flat_map(|packet| reception_reports(*packet))
+                .filter(|report| report.fraction_lost < 255)
+                .map(|report| report.ssrc)
+                .collect();
+            for (ssrc, stream) in self.outbound_rtp_streams.iter_mut() {
+                if let Some(validation) = stream.ecn_validation.as_deref_mut() {
+                    if received.contains(ssrc) {
+                        validation.on_reception_reported();
+                    } else {
+                        validation.on_report_without_reception(now);
+                    }
+                }
+            }
+        }
+        // RFC 6679 section 7.2.1: a reception report about a stream that is initiating ECN,
+        // in a compound packet with no ECN report about it, ends the initiation when it shows
+        // more than three probes should have arrived (the receiver does not do ECN feedback).
+        let ecn_reported: Vec<u32> = packets
+            .iter()
+            .flat_map(|packet| {
+                let feedback = packet
+                    .as_any()
+                    .downcast_ref::<EcnFeedback>()
+                    .map(|f| f.media_ssrc);
+                let summaries: Vec<u32> = packet
+                    .as_any()
+                    .downcast_ref::<ExtendedReport>()
+                    .map(|xr| {
+                        xr.reports
+                            .iter()
+                            .filter_map(|b| b.as_any().downcast_ref::<EcnSummaryReportBlock>())
+                            .flat_map(|b| b.reports.iter().map(|r| r.ssrc))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                feedback.into_iter().chain(summaries)
+            })
+            .collect();
+        for report in packets.iter().flat_map(|p| reception_reports(p.as_ref())) {
+            if !ecn_reported.contains(&report.ssrc)
+                && let Some(stream) = self.outbound_rtp_streams.get_mut(&report.ssrc)
+                && !stream.ccfb_negotiated
+                && let Some(validation) = stream.ecn_validation.as_deref_mut()
+            {
+                validation.on_reception_report_without_ecn(now, report.last_sequence_number);
+            }
+        }
+
         // The sender reports first, wherever they stand in the compound packet: a sender
         // report ends the round trip time its stream had (webrtc-stats 8.10: none "if the
         // latest SR does not contain the DLRR report block"), and the DLRR block that came
@@ -109,6 +176,38 @@ impl RTCStatsAccumulator {
                 && let Some(stream) = self.outbound_rtp_streams.get_mut(&nack.media_ssrc)
             {
                 stream.on_nack_received();
+            }
+
+            // RFC 6679 sections 5.1 and 5.2: the receiver's ECN counters about one of our
+            // outbound streams. An XR ECN Summary Report carries no sequence number; the
+            // reception report about the same SSRC in the compound packet gives it.
+            if let Some(feedback) = packet.as_any().downcast_ref::<EcnFeedback>()
+                && let Some(stream) = self.outbound_rtp_streams.get_mut(&feedback.media_ssrc)
+            {
+                stream.on_ecn_counters_received(
+                    feedback.extended_highest_sequence_number,
+                    feedback.counters,
+                    now,
+                );
+            }
+            if let Some(xr) = packet.as_any().downcast_ref::<ExtendedReport>() {
+                let summaries = xr
+                    .reports
+                    .iter()
+                    .filter_map(|block| block.as_any().downcast_ref::<EcnSummaryReportBlock>())
+                    .flat_map(|block| &block.reports);
+                for summary in summaries {
+                    let highest = packets
+                        .iter()
+                        .flat_map(|p| reception_reports(p.as_ref()))
+                        .find(|report| report.ssrc == summary.ssrc)
+                        .map(|report| report.last_sequence_number);
+                    if let Some(highest) = highest
+                        && let Some(stream) = self.outbound_rtp_streams.get_mut(&summary.ssrc)
+                    {
+                        stream.on_ecn_counters_received(highest, summary.counters, now);
+                    }
+                }
             }
 
             if let Some(pli) = packet.as_any().downcast_ref::<PictureLossIndication>()

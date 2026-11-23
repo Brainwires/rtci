@@ -549,3 +549,37 @@ fn a_recovered_packet_stops_the_nack_generator_asking_for_it() {
         "the generator asked for a packet FEC had already rebuilt: {asked_for:?}"
     );
 }
+
+/// Draft-03 sections 5.1 and 5.2.1: the `repair-window` of the section's fmtp, bound with the
+/// stream, bounds how long received media is held for recovery: a repair packet arriving
+/// later than the window after the media it needs recovers nothing; inside it, it does.
+#[test]
+fn the_negotiated_repair_window_bounds_recovery() {
+    let run = |repair_after: std::time::Duration| {
+        let media = block(100, 5);
+        let repair = encode(&media, 1);
+        let mut harness = Harness::new();
+        harness.chain.bind_remote_stream(&StreamInfo {
+            ssrc: MEDIA_SSRC,
+            ssrc_fec: Some(REPAIR_SSRC),
+            payload_type: 96,
+            payload_type_fec: Some(REPAIR_PT),
+            clock_rate: 90_000,
+            sdp_fmtp_line_fec: "repair-window=200000".to_owned(),
+            ..Default::default()
+        });
+        for packet in media.iter().filter(|p| p.header.sequence_number != 102) {
+            harness.receive(packet);
+        }
+        harness.epoch += repair_after;
+        for packet in &repair {
+            harness.receive(packet);
+        }
+        harness.seen_sequence_numbers().contains(&102)
+    };
+    assert!(
+        run(std::time::Duration::from_millis(150)),
+        "inside the 200 ms window"
+    );
+    assert!(!run(std::time::Duration::from_millis(250)), "outside it");
+}

@@ -77,4 +77,9 @@ pub struct RTCPeerConnectionIceErrorEvent {
     ///
     /// Textual description of the error that occurred.
     pub error_text: String,
+
+    /// The id of the ICE transport whose gathering failed. Not a W3C member. The application
+    /// may set it when it reports the error; left `None`, the connection fills it with the
+    /// transport one of whose local candidates has `address`, or else the default transport.
+    pub ice_transport: Option<crate::peer_connection::transport::RTCTransportId>,
 }

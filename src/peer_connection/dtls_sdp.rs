@@ -3,9 +3,11 @@
 //! (RFC 8827 section 5).
 
 use crate::peer_connection::RTCPeerConnection;
+use crate::peer_connection::sdp::get_mid_value;
 use crate::peer_connection::sdp::{
     ATTR_KEY_TLS_ID, extract_tls_id, has_rtp_media, is_rejected_media,
 };
+use crate::peer_connection::transport_layout::description_for;
 use sdp::description::common::Attribute;
 use sdp::description::session::{ATTR_KEY_IDENTITY, SessionDescription};
 use shared::error::{Error, Result};
@@ -124,12 +126,26 @@ impl RTCPeerConnection {
                 || (has_rtp_media(&d)
                     && self.dtls_transport().is_started()
                     && !self.dtls_transport().can_key_srtp());
+            // Every other transport stages the `tls-id` of the new association it was asked
+            // for (`renew_dtls_association`), which `write_transport_attributes` writes in its
+            // sections (RFC 8842 section 5.5, per transport).
+            let default = self.pipeline_context.transports.default_id();
+            for id in self.pipeline_context.transports.ids() {
+                if id != default {
+                    self.with_transport(id, |pc| pc.dtls_transport_mut().offer_tls_id(false))?;
+                }
+            }
             self.dtls_transport_mut().offer_tls_id(new_association)?
         } else {
             let offered = self
                 .remote_description()
                 .and_then(|remote| remote.parsed.as_ref())
-                .and_then(|parsed| extract_tls_id(parsed).ok().flatten());
+                // The default transport's: each transport of the offer has its own.
+                .and_then(|parsed| {
+                    extract_tls_id(&self.default_transport_view(parsed))
+                        .ok()
+                        .flatten()
+                });
             if offered.is_none() {
                 return Ok(d);
             }
@@ -147,15 +163,58 @@ impl RTCPeerConnection {
                 _ => self.dtls_transport().local_tls_id.clone(),
             }
         };
-        if let Some(tagged) = d
-            .media_descriptions
-            .iter_mut()
-            .find(|m| !is_rejected_media(m))
-        {
-            tagged
-                .attributes
-                .push(Attribute::new(ATTR_KEY_TLS_ID.to_owned(), Some(tls_id)));
+        // Each transport is a DTLS association of its own (RFC 8842 section 5: a `tls-id` per
+        // association), written on the first section it carries.
+        let mut values = vec![(self.pipeline_context.transports.default_id(), tls_id)];
+        if self.pipeline_context.transports.len() > 1 {
+            let default = self.pipeline_context.transports.default_id();
+            let remote = self.remote_description().and_then(|r| r.parsed.clone());
+            for id in self.pipeline_context.transports.ids() {
+                if id == default {
+                    continue;
+                }
+                let mids = self.pipeline_context.transports.mids_on(id);
+                let value = if is_offer {
+                    let part = description_for(&d, &mids);
+                    let closed = self.transport_closed;
+                    self.with_transport(id, |pc| {
+                        let new_association = closed
+                            || (has_rtp_media(&part)
+                                && pc.dtls_transport().is_started()
+                                && !pc.dtls_transport().can_key_srtp());
+                        pc.dtls_transport_mut().offer_tls_id(new_association)
+                    })?
+                } else {
+                    let offered = remote.as_ref().and_then(|parsed| {
+                        extract_tls_id(&description_for(parsed, &mids))
+                            .ok()
+                            .flatten()
+                    });
+                    if offered.is_none() {
+                        continue;
+                    }
+                    self.dtls_transport_of(id).local_tls_id.clone()
+                };
+                values.push((id, value));
+            }
         }
+        for (id, value) in values {
+            let transports = &self.pipeline_context.transports;
+            let single = transports.len() == 1;
+            if let Some(tagged) = d.media_descriptions.iter_mut().find(|m| {
+                !is_rejected_media(m)
+                    && (single
+                        || get_mid_value(m)
+                            .is_some_and(|mid| transports.transport_id_for(mid) == id))
+            }) {
+                tagged
+                    .attributes
+                    .push(Attribute::new(ATTR_KEY_TLS_ID.to_owned(), Some(value)));
+            }
+        }
+        // The other transports' sections, each with its association's `tls-id` (RFC 8842
+        // section 5: one per transport).
+        self.write_transport_attributes(&mut d);
         Ok(d)
     }
 }

@@ -124,6 +124,12 @@ struct ProtectedStream {
     encoder: FlexFec03Encoder,
     /// Media packets awaiting a full block.
     block: Vec<rtp::Packet>,
+    /// When the block's first packet left, and the transport it left on.
+    block_started: Option<(Instant, shared::TransportContext)>,
+    /// The negotiated `repair-window` (draft section 5.1, "the time that spans the source
+    /// packets and the corresponding repair packets"): a block is closed and protected no
+    /// later than this after its first packet left.
+    repair_window: Option<std::time::Duration>,
     /// The repair stream's send clock: its rate, and the timestamp it carries at `epoch`.
     clock: RepairClock,
 }
@@ -222,14 +228,41 @@ impl FlexFec03SendInterceptor {
         transport: shared::TransportContext,
         rtp_packet: &rtp::Packet,
     ) {
-        let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc) else {
+        let ssrc = rtp_packet.header.ssrc;
+        // A block whose window ended before this packet left is protected first.
+        self.close_expired_block(ssrc, now);
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
 
         stream.block.push(rtp_packet.clone());
+        stream.block_started.get_or_insert((now, transport));
         if (stream.block.len() as u32) < self.num_media_packets {
             return;
         }
+        self.complete_block(ssrc, now, transport);
+    }
+
+    /// Protects the block of `ssrc` now if its repair window ran out by `now`.
+    fn close_expired_block(&mut self, ssrc: u32, now: Instant) {
+        let Some(stream) = self.streams.get(&ssrc) else {
+            return;
+        };
+        if let (Some(window), Some((started, transport))) =
+            (stream.repair_window, stream.block_started)
+            && !stream.block.is_empty()
+            && now.saturating_duration_since(started) >= window
+        {
+            self.complete_block(ssrc, (started + window).min(now), transport);
+        }
+    }
+
+    /// Encodes the block of `ssrc` gathered so far and queues its repair packets.
+    fn complete_block(&mut self, ssrc: u32, now: Instant, transport: shared::TransportContext) {
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
+            return;
+        };
+        stream.block_started = None;
         // The repair packets carry the send clock at `now`: the instant the block's last packet
         // was written with (from the wire tap, the instant the pacer released it).
         let timestamp = stream.clock.timestamp_at(now);
@@ -323,12 +356,22 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFec03SendInterceptor {
         self.write_queue.pop_front()
     }
 
-    fn handle_timeout(&mut self, _now: Instant) -> Result<(), Self::Error> {
+    /// A block whose repair window ends is protected then, with what it has: its repair
+    /// packets must not leave later than the window after its first packet.
+    fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        let ssrcs: Vec<u32> = self.streams.keys().copied().collect();
+        for ssrc in ssrcs {
+            self.close_expired_block(ssrc, now);
+        }
         Ok(())
     }
 
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        None
+        self.streams
+            .values()
+            .filter(|stream| !stream.block.is_empty())
+            .filter_map(|stream| Some(stream.block_started?.0 + stream.repair_window?))
+            .min()
     }
 }
 
@@ -351,6 +394,10 @@ impl Interceptor for FlexFec03SendInterceptor {
                             self.initial_sequence_number.unwrap_or_else(rand::random),
                         ),
                     block: Vec::new(),
+                    block_started: None,
+                    repair_window: crate::FlexFecParameters::parse(&info.sdp_fmtp_line_fec)
+                        .repair_window
+                        .filter(|window| !window.is_zero()),
                     clock: RepairClock {
                         // The FlexFEC rate is negotiated equal to the media's (section 5.1);
                         // 90 kHz is the video clock when a stream names none.

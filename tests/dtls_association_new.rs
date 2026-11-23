@@ -1,5 +1,5 @@
 //! When a description asks for a new DTLS association, one is established (RFC 8842 section
-//! 3.1), with or without an ICE restart:
+//! 3.1):
 //!
 //! > A new DTLS association must be established between two endpoints after a successful SDP
 //! > offer/answer exchange in the following cases: the negotiated DTLS setup roles change; or
@@ -16,6 +16,12 @@
 //! credentials (so that the exchange is not an ICE restart), and its own certificate, `tls-id`
 //! or `a=setup`, as the test needs. B offers first and its successor offers again, so the ICE
 //! roles stay as they were too (B's side controlling): the peer that stays restarts nothing.
+//!
+//! A new association on the same ICE session is RFC 8842 section 3.1 read alone: RFC 9429
+//! sections 5.8.3 and 5.11 (and RFC 8842 section 6) ask for an ICE restart with it, and a peer
+//! connection refuses such a description unless
+//! `with_dtls_new_association_without_ice_restart(true)` is set. A uses that setting here; the
+//! default is in `jsep_dtls_restart.rs`.
 
 mod dtls_sdp_common;
 
@@ -65,7 +71,8 @@ fn connected(
     a_answering_role: Option<RTCDtlsRole>,
     legacy: bool,
 ) -> Result<(World, RTCCertificate, String)> {
-    let mut setting_engine = SettingEngineBuilder::new();
+    let mut setting_engine =
+        SettingEngineBuilder::new().with_dtls_new_association_without_ice_restart(true);
     if let Some(role) = a_answering_role {
         setting_engine = setting_engine.with_answering_dtls_role(role);
     }
@@ -304,6 +311,7 @@ fn a_successor_is_connected_whichever_agent_wins_the_ice_role_conflict() -> Resu
                 A,
                 SettingEngineBuilder::new()
                     .with_ice_tie_breaker(a_tie_breaker)
+                    .with_dtls_new_association_without_ice_restart(true)
                     .build(),
             )?,
             peer_b(&b_certificate)?,

@@ -20,6 +20,7 @@ use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::internal::RTCRtpTransceiverInternal;
 use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpTransceiverId};
 use sdp::description::session::SessionDescription;
+use std::collections::HashSet;
 
 /// What applying a description tells the application, in the order W3C 4.4.1.6 fires it:
 /// mutes, then stream removals and additions, then track events.
@@ -94,6 +95,19 @@ impl RTCPeerConnection {
             let direction = get_peer_direction(&parsed.media_descriptions[index]);
             transceiver.set_receptive(receives(direction));
             if !matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
+                // RFC 3264 section 5.1: once the offer is sent the offerer "MUST be prepared
+                // to receive media" as it describes; the receive codecs follow the answer.
+                if sdp_type == RTCSdpType::Offer
+                    && let Some(receiver) = transceiver.receiver_mut()
+                {
+                    let offered = parsed.media_descriptions[index]
+                        .media_name
+                        .formats
+                        .iter()
+                        .filter_map(|format| format.parse().ok())
+                        .collect();
+                    receiver.set_offered_payload_types(offered);
+                }
                 continue;
             }
             if does_not_receive(direction) && transceiver.fired_direction().is_some_and(receives) {
@@ -117,7 +131,9 @@ impl RTCPeerConnection {
         &mut self,
         sdp_type: RTCSdpType,
         prior_state: RTCSignalingState,
+        msid_sections: HashSet<String>,
     ) {
+        let mut ended = Vec::new();
         let mut changes = RemoteTrackChanges::default();
         if sdp_type == RTCSdpType::Rollback {
             // Rolling back a remote offer: every transceiver goes back to the streams of the
@@ -153,11 +169,50 @@ impl RTCPeerConnection {
                 } else {
                     vec![]
                 };
+                // RFC 8830 section 3: "When a session description is updated to no longer list
+                // any 'msid' attribute on a specific media description, the recipient can
+                // signal to its application that the corresponding MediaStreamTrack has
+                // ended", under `with_msid_removal_ends_track(true)`. By default the W3C
+                // webrtc-pc model governs: the track stays, in the session's default stream,
+                // and is muted only when the section stops sending (RFC 8830 section 3 too: a
+                // direction change "will not end the MediaStreamTrack").
+                if receives(direction)
+                    && media_msid(media).is_none()
+                    && get_mid_value(media).is_some_and(|mid| msid_sections.contains(mid))
+                {
+                    ended.push(id);
+                }
                 self.process_remote_tracks(id, direction, msids, &mut changes);
             }
         }
         self.announce_remote_track_changes(changes);
+        for id in ended {
+            if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
+                receiver.end_track();
+            }
+            self.announce_receiver_track_ended(id);
+        }
         self.after_description();
+    }
+
+    /// The mids of the remote description's media sections that list an `a=msid`, when the
+    /// removal of every such line ends the track (`with_msid_removal_ends_track`); empty
+    /// otherwise.
+    pub(super) fn remote_sections_with_msid(&self) -> HashSet<String> {
+        if !self.setting_engine.msid_removal_ends_track {
+            return HashSet::new();
+        }
+        self.remote_description()
+            .and_then(|description| description.parsed.as_ref())
+            .map(|parsed| {
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .filter(|media| media_msid(media).is_some())
+                    .filter_map(|media| get_mid_value(media).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// W3C 5.1.1 "process remote tracks".

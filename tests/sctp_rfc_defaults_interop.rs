@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::data_channel::RTCDataChannelId;
+use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
@@ -148,6 +148,125 @@ async fn the_default_association_falls_back_for_a_peer_without_interleaving_or_z
             message.len()
         );
     }
+
+    webrtc_pc.close().await?;
+    rtc_pc.close()?;
+    Ok(())
+}
+
+/// RFC 3758 4.1 TR3 against a peer that numbers messages the old way: an ordered channel with a
+/// 20 ms lifetime to the `webrtc` 0.17 echo peer. Thirty messages are written and left in the
+/// queue past their lifetime, so `rtc` drops each one it had not sent yet without a TSN or a
+/// stream sequence number; the three written after that take the next numbers. The peer must
+/// deliver those three, in order, and nothing out of order: a gap in the stream's sequence
+/// numbers without a FORWARD TSN would stall the ordered stream on the peer for good.
+#[tokio::test]
+async fn an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent() -> Result<()> {
+    common::install_crypto_provider();
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let local_addr = socket.local_addr()?;
+    let mut rtc_pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(RTCConfigurationBuilder::new().build())
+        .with_setting_engine(SettingEngineBuilder::new().build())
+        .build(Instant::now())?;
+    rtc_pc.create_data_channel(
+        "lifetime",
+        Some(RTCDataChannelInit {
+            ordered: true,
+            max_packet_life_time: Some(20),
+            ..Default::default()
+        }),
+    )?;
+    let candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: local_addr.ip().to_string(),
+            port: local_addr.port(),
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    rtc_pc.add_local_candidate(
+        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?,
+    )?;
+    let offer = rtc_pc.create_offer(None)?;
+    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
+    let webrtc_pc = echoing_webrtc_peer().await?;
+    webrtc_pc
+        .set_remote_description(WebrtcRTCSessionDescription::offer(offer.sdp)?)
+        .await?;
+    let answer = webrtc_pc.create_answer(None).await?;
+    webrtc_pc.set_local_description(answer).await?;
+    let mut gathering_done = webrtc_pc.gathering_complete_promise().await;
+    let _ = timeout(Duration::from_secs(5), gathering_done.recv()).await;
+    let answer = webrtc_pc
+        .local_description()
+        .await
+        .expect("local description should be set");
+    rtc_pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp)?,
+    )?;
+
+    let mut io = Io {
+        socket,
+        local_addr,
+        buf: vec![0u8; 2000],
+        received: Vec::new(),
+        opened: None,
+    };
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    let channel = loop {
+        if let Some(channel) = io.opened {
+            break channel;
+        }
+        io.turn(&mut rtc_pc, deadline).await?;
+    };
+
+    let message = |n: u32| {
+        let mut m = n.to_be_bytes().to_vec();
+        m.resize(1000, n as u8);
+        m
+    };
+    for n in 0..30 {
+        rtc_pc
+            .data_channel(channel)
+            .expect("the channel")
+            .send(Instant::now(), BytesMut::from(&message(n)[..]))?;
+    }
+    // Nothing is written meanwhile: every message still queued outlives its 20 ms.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for n in 30..33 {
+        rtc_pc
+            .data_channel(channel)
+            .expect("the channel")
+            .send(Instant::now(), BytesMut::from(&message(n)[..]))?;
+    }
+    while !io
+        .received
+        .iter()
+        .any(|m| m.len() == 1000 && m[..4] == 32u32.to_be_bytes())
+    {
+        io.turn(&mut rtc_pc, deadline).await?;
+    }
+    let numbers: Vec<u32> = io
+        .received
+        .iter()
+        .map(|m| {
+            assert_eq!(m.len(), 1000, "an echoed message is whole");
+            u32::from_be_bytes([m[0], m[1], m[2], m[3]])
+        })
+        .collect();
+    assert!(
+        numbers.windows(2).all(|w| w[0] < w[1]),
+        "the ordered stream is delivered in order: {numbers:?}"
+    );
+    assert!(
+        numbers.ends_with(&[30, 31, 32]),
+        "the three messages written after the expiry come back: {numbers:?}"
+    );
 
     webrtc_pc.close().await?;
     rtc_pc.close()?;

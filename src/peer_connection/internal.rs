@@ -11,11 +11,12 @@ use crate::peer_connection::handler::transport_set::{
     TransportId, TransportSet, aggregate_connection_state,
 };
 use crate::peer_connection::sdp::answered_extension_directions;
+use crate::peer_connection::sdp::ecn;
 use crate::peer_connection::sdp::has_bundle_attribute;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
     ATTR_KEY_RTCP_MUX_ONLY, BundleMode, MediaSection, PopulateSdpParams,
-    add_candidates_to_media_descriptions, bundle_group_mids, effective_direction,
+    add_candidates_to_media_descriptions, bundle_group_mids, bundle_groups, effective_direction,
     extmap_allow_mixed_in, get_application_media, get_application_media_section_sctp_port,
     get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
     is_rejected_media, is_rtp_profile, is_unknown_application_media,
@@ -92,6 +93,11 @@ pub(super) struct PendingRemoteTransport {
     pub(super) new_dtls_role: Option<RTCDtlsRole>,
     /// This offer staged the answer's new `tls-id`.
     pub(super) staged_tls_id: bool,
+    /// The transports other than the default one the offer restarts ICE on or asks a new DTLS
+    /// association of, each on its own (RFC 9429 section 5.3.1, RFC 8842 section 5.3, per
+    /// transport): the gathering state it had before the restart credentials of the answer
+    /// were staged on it (`None`: no restart), and whether the answer's `tls-id` was staged.
+    pub(super) other_restarts: Vec<(TransportId, Option<RTCIceGatheringState>, bool)>,
 }
 
 /// See [`RTCPeerConnection::description_snapshot`].
@@ -263,6 +269,11 @@ impl RTCPeerConnection {
         setting_engine.crypto_provider = Some(crypto_provider.clone());
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
+        let engine_srflx = super::srflx::EngineSrflx::new(
+            &agent_config.urls,
+            streams_settings.reflexive,
+            turn_tls.client_config().ok().flatten(),
+        );
         let engine_turn = super::turn_streams::EngineTurn::new(
             &agent_config.urls,
             streams_settings.turn,
@@ -344,6 +355,7 @@ impl RTCPeerConnection {
                 dtls_handler_context,
                 SrtpHandlerContext {
                     rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                    strict_rtcp_validity: setting_engine.strict_rtcp_validity,
                     ..Default::default()
                 },
             ),
@@ -361,7 +373,8 @@ impl RTCPeerConnection {
                 setting_engine.ecn,
                 setting_engine.ecn_initiation,
                 rand::rng().random(),
-            ),
+            )
+            .with_ecn_marking(setting_engine.ecn_marking),
             announced_ice_connection_state: RTCIceConnectionState::New,
             now,
         };
@@ -398,6 +411,7 @@ impl RTCPeerConnection {
             ice_credentials_to_replace: Vec::new(),
             local_description_was_set: false,
             transport_closed: false,
+            seen_selected_pair_changes: 0,
             identity_assertion: None,
             peer_identity: None,
             last_stable_state: None,
@@ -407,7 +421,11 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
-            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
+            streams: super::streams::EngineStreams::new(
+                streams_settings,
+                engine_turn,
+                engine_srflx,
+            ),
         })
     }
 
@@ -499,6 +517,14 @@ impl RTCPeerConnection {
         } else {
             None
         };
+        // `with_nominated_candidates_only`: the RFC 8839 section 4.4.1.2.2 form of a later
+        // offer, the selected pair's local candidate alone.
+        let only = only.or_else(|| {
+            (offer && self.setting_engine.nominated_candidates_only)
+                .then(|| self.ice_transport().agent.get_selected_candidate_pair())
+                .flatten()
+                .map(|(local, _)| (local.address().to_owned(), local.port()))
+        });
         Ok(match only {
             Some((address, port)) => candidates
                 .into_iter()
@@ -569,9 +595,75 @@ impl RTCPeerConnection {
                 .interceptor_handler_context
                 .ssrcs_replaced,
         );
-        if lite || ssrcs {
+        let pair_changes = self
+            .pipeline_context
+            .transports
+            .default()
+            .ice_handler_context
+            .selected_pair_changes;
+        let aligning = pair_changes != self.seen_selected_pair_changes && {
+            self.seen_selected_pair_changes = pair_changes;
+            self.needs_alignment_offer()
+        };
+        if lite || ssrcs || aligning {
             self.trigger_negotiation_needed();
         }
+    }
+
+    /// RFC 8839 section 4.3.4: "If there are one or more pairs that do not match, and the
+    /// peer did not indicate support for the 'ice2' ice-option, the controlling agent MUST
+    /// generate a subsequent offer in which the connection address, port, and transport
+    /// protocol in the 'c=' and 'm=' lines ... match the corresponding local information of
+    /// the nominated pair". True while this full, controlling agent's selected pair is not the
+    /// default destination of its current local description (a real candidate, not the trickle
+    /// placeholder) and the peer's description has no `ice2`; the next offer names the pair
+    /// (`selected_pair_in_sdp`).
+    pub(crate) fn needs_alignment_offer(&self) -> bool {
+        let ice = self.ice_transport();
+        if self.setting_engine.candidates.ice_lite
+            || ice.role() != RTCIceRole::Controlling
+            || ice.has_pending_restart()
+        {
+            return false;
+        }
+        let Some(remote) = self.remote_description().and_then(|r| r.parsed.as_ref()) else {
+            return false;
+        };
+        if remote_ice_options(remote)
+            .iter()
+            .any(|option| option == "ice2")
+        {
+            return false;
+        }
+        let Some((local, _)) = ice.agent.get_selected_candidate_pair() else {
+            return false;
+        };
+        let Some(section) = self
+            .current_local_description
+            .as_ref()
+            .and_then(|d| d.parsed.as_ref())
+            .and_then(|parsed| {
+                parsed
+                    .media_descriptions
+                    .iter()
+                    .find(|m| !is_rejected_media(m))
+            })
+        else {
+            return false;
+        };
+        let port = section.media_name.port.value;
+        let address = section
+            .connection_information
+            .as_ref()
+            .and_then(|c| c.address.as_ref())
+            .map(|a| a.address.as_str());
+        // A trickled description's placeholder (`9` and `0.0.0.0` / `::`, RFC 8838 section
+        // 5.1, RFC 8839 section 4.2.5 item 2) names no default candidate: there is nothing
+        // to align. Browsers trickle and write no `ice2`; they get no extra offer.
+        if port == 9 && matches!(address, Some("0.0.0.0") | Some("::")) {
+            return false;
+        }
+        !(port == local.port() as isize && address == Some(local.address()))
     }
 
     /// The fingerprints of every local certificate: W3C `RTCPeerConnection` writes an
@@ -661,12 +753,12 @@ impl RTCPeerConnection {
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
 
         let params = PopulateSdpParams {
-            media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
+            media_description_fingerprint: !self.setting_engine.sdp_session_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
             is_extmap_allow_mixed: true,
             connection_role: DEFAULT_DTLS_ROLE_OFFER.to_connection_role(),
             ice_gathering_state: self.ice_transport().ice_gathering_state,
-            bundle: BundleMode::Offer,
+            bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
             bundle_policy: self.effective_bundle_policy(),
@@ -679,13 +771,18 @@ impl RTCPeerConnection {
             sctp_over_tcp: self.offers_sctp_over_tcp(&candidates),
             ignore_rid_pause_for_recv: false,
             rid_pause_marks: self.setting_engine.rid_pause_marks,
+            video_receive_limits: self.setting_engine.video_receive_limits,
+            codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
+            w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
+            msid_appdata: !self.setting_engine.msid_appdata_omitted,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
-            ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ice_pacing: self.stated_ice_pacing(),
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
+            ecn: self.signalled_ecn(),
         };
         let mut d = RTCPeerConnection::populate_sdp(
             d,
@@ -887,15 +984,50 @@ impl RTCPeerConnection {
                     if let Some(&i) = transceiver_by_mid.get(mid_value.as_str()) {
                         // RFC 9429 Section 5.2.2: an offer rejects a stopped transceiver's m=
                         // section. An answer doesn't: a transceiver stopped after the offer
-                        // arrived answers inactive, and is rejected by the next offer (W3C
-                        // `stop()`).
-                        if include_unmatched && self.rtp_transceivers[i].stopped() {
+                        // arrived is W3C "stopping", which "will not affect createAnswer" (W3C
+                        // webrtc-pc 5.4 `stop()`, "to avoid problems with RFC 8843": the section
+                        // may be the BUNDLE-tagged one); it answers inactive, and is rejected by
+                        // the next offer. With `with_stopping_transceiver_rejected_in_answer`
+                        // the answer rejects it (RFC 9429 section 5.3.1), unless it is the
+                        // offerer's BUNDLE tag, which keeps the W3C form.
+                        let rejected_by_answer = !include_unmatched
+                            && self.setting_engine.stopping_transceiver_rejected_in_answer
+                            && remote_parsed.as_ref().is_some_and(|parsed| {
+                                bundle_groups(parsed)
+                                    .iter()
+                                    .all(|group| group.first() != Some(&mid_value.as_str()))
+                            });
+                        if (include_unmatched || rejected_by_answer)
+                            && self.rtp_transceivers[i].stopped()
+                        {
                             media_sections.push(MediaSection {
                                 mid: mid_value.to_owned(),
                                 rejected: true,
                                 rejected_kind: media.media_name.media.clone(),
                                 stopped: true,
                                 transceiver_index: usize::MAX,
+                                ..Default::default()
+                            });
+                            continue;
+                        }
+                        // draft-ietf-avtcore-rtp-sframe-03 section 6: "An answerer that
+                        // requires SFrame MUST reject m-sections that do not have the
+                        // "a=sframe" SDP attribute"; an offerer whose `a=sframe` an answer
+                        // left out "SHOULD close it in subsequent offers".
+                        let sframe_closed = if include_unmatched {
+                            self.rtp_transceivers[i].sframe_refused()
+                        } else {
+                            self.rtp_transceivers[i].use_sframe() == Some(true)
+                                && !media
+                                    .has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME)
+                        };
+                        if sframe_closed {
+                            media_sections.push(MediaSection {
+                                mid: mid_value.to_owned(),
+                                rejected: true,
+                                rejected_kind: media.media_name.media.clone(),
+                                transceiver_index: usize::MAX,
+                                offered_protos: offered_protos(media),
                                 ..Default::default()
                             });
                             continue;
@@ -950,6 +1082,13 @@ impl RTCPeerConnection {
                                 None
                             } else {
                                 media_rtcp_xr(media)
+                            },
+                            offered_ecn: if include_unmatched {
+                                None
+                            } else {
+                                remote_parsed
+                                    .as_ref()
+                                    .and_then(|parsed| ecn::section_ecn_capability(parsed, media))
                             },
                             ..Default::default()
                         });
@@ -1022,13 +1161,32 @@ impl RTCPeerConnection {
                     ..Default::default()
                 });
             }
-            BundleMode::Offer
+            // The BUNDLE groups of the most recent answer stay (RFC 9429 section 5.2.2).
+            [
+                &self.current_local_description,
+                &self.current_remote_description,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|d| d.sdp_type == RTCSdpType::Answer)
+            .and_then(|d| d.parsed.as_ref())
+            .map_or_else(BundleMode::initial_offer, |answer| {
+                // The groups the application asked for (RFC 9143 sections 7.5.1, 7.5.2).
+                let requested = |want: bool| -> Vec<String> {
+                    self.rtp_transceivers
+                        .iter()
+                        .filter(|t| !t.stopped() && t.bundle_request() == Some(want))
+                        .filter_map(|t| t.mid().clone())
+                        .collect()
+                };
+                BundleMode::following(answer).with_requests(&requested(false), &requested(true))
+            })
         } else {
             // The offered BUNDLE group, whatever other `a=group` lines the offer has
             // (RFC 9429 section 5.3.1); none when the offer has none.
             remote_parsed
                 .as_ref()
-                .map_or(BundleMode::Answer(None), BundleMode::answering)
+                .map_or(BundleMode::Answer(vec![]), BundleMode::answering)
         };
 
         let dtls_fingerprints = self.local_dtls_fingerprints()?;
@@ -1062,7 +1220,7 @@ impl RTCPeerConnection {
         };
 
         let params = PopulateSdpParams {
-            media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
+            media_description_fingerprint: !self.setting_engine.sdp_session_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
             is_extmap_allow_mixed,
             connection_role,
@@ -1083,10 +1241,14 @@ impl RTCPeerConnection {
             sctp_over_tcp,
             ignore_rid_pause_for_recv,
             rid_pause_marks: self.setting_engine.rid_pause_marks,
+            video_receive_limits: self.setting_engine.video_receive_limits,
+            codec_video_receive_limits: self.setting_engine.codec_video_receive_limits.clone(),
+            w3c_simulcast_answer: self.setting_engine.w3c_simulcast_answer,
+            msid_appdata: !self.setting_engine.msid_appdata_omitted,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
                 .write_ssrc_attributes_for_simulcast,
-            ice_pacing: self.ice_transport().agent.proposed_pacing(),
+            ice_pacing: self.stated_ice_pacing(),
             ls_groups: if include_unmatched {
                 [
                     &self.current_local_description,
@@ -1103,6 +1265,7 @@ impl RTCPeerConnection {
             },
             selected_destination,
             remote_candidates,
+            ecn: self.signalled_ecn(),
         };
         let mut d = RTCPeerConnection::populate_sdp(
             d,
@@ -1116,6 +1279,18 @@ impl RTCPeerConnection {
         )?;
         if include_unmatched {
             self.plan_offer_transports(&d)?;
+        } else if let Some(offer) = self
+            .remote_description()
+            .and_then(|remote| remote.parsed.as_ref())
+        {
+            // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
+            // answer accepts.
+            crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
+            // RFC 3264 section 6: "The 't=' line in the answer MUST be equal to the ones in
+            // the offer" (a WebRTC offer says `t=0 0`, which the answer has already).
+            if !offer.time_descriptions.is_empty() {
+                d.time_descriptions = offer.time_descriptions.clone();
+            }
         }
         self.write_transport_attributes(&mut d);
         Ok(d)
@@ -1223,7 +1398,25 @@ impl RTCPeerConnection {
         sd: &RTCSessionDescription,
         op: StateChangeOp,
         next_state: RTCSignalingState,
+        now: Instant,
     ) -> Result<()> {
+        // A remote answer keeps the ICE restart of the local offer it answers; a rollback of
+        // that offer takes it back (RFC 9429 section 5.7).
+        if op == StateChangeOp::SetRemote
+            && matches!(sd.sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer)
+        {
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.commit_local_ice_restart());
+            }
+        }
+        if sd.sdp_type == RTCSdpType::Rollback
+            && self.signaling_state == RTCSignalingState::HaveLocalOffer
+        {
+            for id in self.pipeline_context.transports.ids() {
+                self.with_transport(id, |pc| pc.revert_local_ice_restart(now));
+            }
+        }
+
         // A remote offer applied in the stable state: what the last completed exchange
         // negotiated is remembered, so that a rollback can bring it back (W3C: the
         // [[LastStableState...]] slots). An offer applied over a pending one keeps what was
@@ -1267,6 +1460,16 @@ impl RTCPeerConnection {
                 // Undo what the abandoned offer changed (RFC 9429, Section 5.7). Its transport
                 // part was never applied: what it staged for the answer is dropped.
                 self.drop_pending_remote_transport();
+                // W3C: a rolled-back remote offer gives back the rid-less encoding it replaced
+                // with proposed simulcast encodings.
+                for transceiver in &mut self.rtp_transceivers {
+                    if let Some(sender) = transceiver.sender_mut()
+                        && sender.restore_ridless_send_encodings()
+                        && !sender.bound_streams().is_empty()
+                    {
+                        sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
+                    }
+                }
                 self.rollback_transceivers()?;
                 self.restore_last_stable_state();
                 // The transports the offer added go with it.
@@ -1321,6 +1524,11 @@ impl RTCPeerConnection {
             self.last_offer.clear();
             self.last_answer.clear();
             self.last_stable_state = None;
+            for transceiver in &mut self.rtp_transceivers {
+                if let Some(sender) = transceiver.sender_mut() {
+                    sender.forget_ridless_send_encodings();
+                }
+            }
         }
 
         let changed = self.signaling_state != next_state;
@@ -1515,9 +1723,9 @@ impl RTCPeerConnection {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous = self.pipeline_context.transports.active_id();
-        self.pipeline_context.transports.set_active(id);
+        self.pipeline_context.activate_transport(id);
         let result = f(self);
-        self.pipeline_context.transports.set_active(previous);
+        self.pipeline_context.activate_transport(previous);
         result
     }
 
@@ -1687,7 +1895,9 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
-            self.rtp_transceivers[i].note_remote_sframe(media.has_attribute("sframe"));
+            self.rtp_transceivers[i].note_remote_sframe(
+                media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
+            );
             let of = |bandwidth_type: &str| {
                 media
                     .bandwidth
@@ -1751,7 +1961,11 @@ impl RTCPeerConnection {
                 continue;
             };
             // A bundled section takes the tagged section's when it has none of its own.
+            // RFC 5506 section 4: reduced-size RTCP only "in sessions using the AVPF / SAVPF
+            // early or immediate feedback mode" (and 4.1: never with RTP/AVP or RTP/SAVP).
             let reduced_size = !is_rejected_media(answered)
+                && crate::peer_connection::sdp::is_avpf_section(offered)
+                && crate::peer_connection::sdp::is_avpf_section(answered)
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
@@ -1774,8 +1988,8 @@ impl RTCPeerConnection {
             self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
             self.rtp_transceivers[i].apply_sframe_answer(
                 we_offered,
-                offered.has_attribute("sframe"),
-                answered.has_attribute("sframe"),
+                offered.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
+                answered.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
             );
         }
     }
@@ -1789,6 +2003,86 @@ impl RTCPeerConnection {
     /// The encodings that stay take the restrictions of the answer's `a=rid` line. In a
     /// remote answer, a line that does not keep to what the offer said (RFC 8851 section 6.4)
     /// is discarded, so its stream goes.
+    /// W3C webrtc-pc "set the RTCSessionDescription", a remote offer that asks to receive
+    /// simulcast (`a=simulcast:recv`, the first alternative of each stream) on a section whose
+    /// transceiver's sender has a lone encoding without a rid: the sender is "promoted to
+    /// simulcast" with `proposedSendEncodings`, one encoding per offered rid in the offer's
+    /// order, duplicates removed, at most [`MAX_SEND_ENCODINGS`], the one at `index` of `n`
+    /// scaled down by 2^(n - index - 1) (video). The lone encoding is kept as
+    /// `[[LastStableRidlessSendEncodings]]` for a rollback; the answer then keeps the layers it
+    /// answers (`apply_simulcast_answer`).
+    ///
+    /// [`MAX_SEND_ENCODINGS`]: crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS
+    pub(super) fn propose_send_encodings(&mut self, offer: &SessionDescription) {
+        use super::sdp::SimulcastDirection;
+        use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
+        let transceiver_by_mid =
+            RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+        let mut minted = vec![];
+        for media in &offer.media_descriptions {
+            if is_rejected_media(media) {
+                continue;
+            }
+            let Some(&i) =
+                get_mid_value(media).and_then(|mid| transceiver_by_mid.get(mid.as_str()))
+            else {
+                continue;
+            };
+            let mut rids: Vec<String> = vec![];
+            for rid in get_rids(media) {
+                if rid.direction == SimulcastDirection::Recv
+                    && rid.simulcast
+                    && !rids.contains(&rid.id)
+                {
+                    rids.push(rid.id);
+                }
+            }
+            rids.truncate(MAX_SEND_ENCODINGS);
+            if rids.is_empty() {
+                continue;
+            }
+            let kind = self.rtp_transceivers[i].kind();
+            let Some(base) = self.rtp_transceivers[i]
+                .sender()
+                .as_ref()
+                .and_then(|sender| match sender.send_encodings() {
+                    [lone] if lone.rtp_coding_parameters.rid.is_empty() => Some(lone.clone()),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let n = rids.len();
+            let mut proposed = Vec::with_capacity(n);
+            for (index, rid) in rids.into_iter().enumerate() {
+                let mut encoding = base.clone();
+                let coding = &mut encoding.rtp_coding_parameters;
+                coding.rid = rid;
+                if index > 0 {
+                    coding.ssrc = Some(self.unused_ssrc(&mut minted));
+                    if let Some(rtx) = coding.rtx.as_mut() {
+                        rtx.ssrc = self.unused_ssrc(&mut minted);
+                    }
+                    if let Some(fec) = coding.fec.as_mut() {
+                        fec.ssrc = self.unused_ssrc(&mut minted);
+                    }
+                }
+                if kind == RtpCodecKind::Video {
+                    encoding.scale_resolution_down_by = Some(f64::from(1u32 << (n - index - 1)));
+                }
+                proposed.push(encoding);
+            }
+            minted.extend(proposed.iter().filter_map(|e| e.rtp_coding_parameters.ssrc));
+            let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                continue;
+            };
+            sender.propose_send_encodings(proposed);
+            if !sender.bound_streams().is_empty() {
+                sender.rebind_local_streams(&self.media_engine, self.interceptor.as_mut());
+            }
+        }
+    }
+
     pub(super) fn apply_negotiated_simulcast(
         &mut self,
         offer: &SessionDescription,
@@ -1955,10 +2249,123 @@ impl RTCPeerConnection {
                 .collect()
         };
 
-        let mut controls = vec![
-            RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
-            RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
-        ];
+        // Each transport's SRTP context takes the flag of the sections it carries: reduced-size
+        // RTCP on a transport only when every live section on it negotiated it.
+        let mut per_transport: std::collections::HashMap<TransportId, bool> =
+            std::collections::HashMap::new();
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid);
+            let entry = per_transport.entry(id).or_insert(true);
+            *entry = *entry && transceiver.rtcp_reduced_size();
+        }
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle.srtp_handler_context.rtcp_reduced_size =
+                per_transport.get(&bundle.id).copied().unwrap_or(false);
+        }
+        let mut controls = vec![];
+        // The SSRCs of each transport's sections: the RTP session each stream runs in
+        // (RFC 8834 section 4.4: a transport per unbundled section, an RTCP session, a
+        // congestion controller and a pacer each), told before what is per session.
+        let mut assignments: std::collections::BTreeMap<usize, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for id in self.pipeline_context.transports.ids() {
+            assignments.entry(id.0).or_default();
+        }
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid).0;
+            let ssrcs = assignments.entry(id).or_default();
+            let mut add = |coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters| {
+                ssrcs.extend(coding.ssrc);
+                ssrcs.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                ssrcs.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+            };
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    add(&encoding.rtp_coding_parameters);
+                }
+            }
+            if let Some(receiver) = transceiver.receiver() {
+                for coding in receiver.get_coding_parameters() {
+                    add(coding);
+                }
+            }
+        }
+        for (session, ssrcs) in &assignments {
+            controls.push(
+                interceptor::RtpSessionAssignment {
+                    session: *session,
+                    ssrcs: ssrcs.clone(),
+                }
+                .into_packet(now),
+            );
+        }
+        // Reduced-size RTCP and the bandwidth are each RTCP session's: those of the sections
+        // on its transport. With one transport that is every section.
+        let single = self.pipeline_context.transports.len() == 1;
+        let per_session: Vec<(usize, bool, RtcpBandwidth)> = if single {
+            vec![(
+                self.pipeline_context.transports.default_id().0,
+                reduced_size,
+                bandwidth,
+            )]
+        } else {
+            self.pipeline_context
+                .transports
+                .ids()
+                .into_iter()
+                .map(|id| {
+                    let on = |t: &&RTCRtpTransceiverInternal| {
+                        live(t)
+                            && t.mid().as_ref().is_some_and(|mid| {
+                                self.pipeline_context.transports.transport_id_for(mid) == id
+                            })
+                    };
+                    let of = |value: fn(&RTCRemoteBandwidth) -> Option<u64>| {
+                        sum(self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .map(|t| value(&t.remote_bandwidth()))
+                            .collect())
+                    };
+                    let reduced = self.rtp_transceivers.iter().any(|t| on(&t))
+                        && self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .all(|t| t.rtcp_reduced_size());
+                    (
+                        id.0,
+                        reduced,
+                        RtcpBandwidth {
+                            session: of(|b| b.session_bitrate),
+                            rs: of(|b| b.rtcp_senders_bitrate),
+                            rr: of(|b| b.rtcp_receivers_bitrate),
+                        },
+                    )
+                })
+                .collect()
+        };
+        for (session, reduced_size, bandwidth) in per_session {
+            let tag = |mut packet: interceptor::TaggedPacket| {
+                packet
+                    .message
+                    .add(interceptor::RtpSession(session).attribute());
+                packet
+            };
+            controls.push(tag(
+                RtcpSessionControl::ReducedSize(reduced_size).into_packet(now)
+            ));
+            controls.push(tag(
+                RtcpSessionControl::Bandwidth(bandwidth).into_packet(now)
+            ));
+        }
         // A `trr-int` an earlier negotiation set and this one does not have is undone.
         controls.push(
             match trr_int {
@@ -1968,6 +2375,21 @@ impl RTCPeerConnection {
             .into_packet(now),
         );
         controls.push(RemoteBitrateLimit(send_limit.map(|limit| limit as f64)).into_packet(now));
+        // RFC 5104 section 4.2.1.2: a TMMBR "MUST NOT exceed the negotiated value": what this
+        // endpoint's own description says it receives (`b=TIAS`, else `b=AS`).
+        let receiving: HashSet<String> = self
+            .rtp_transceivers
+            .iter()
+            .filter(live)
+            .filter(|t| t.current_direction().has_recv())
+            .filter_map(|t| t.mid().clone())
+            .collect();
+        controls.push(
+            interceptor::TmmbrControl::NegotiatedMaximum(negotiated_receive_maximum(
+                local, &receiving,
+            ))
+            .into_packet(now),
+        );
         for (payload_type_rtx, rtx_time) in rtx_times(&local_sections) {
             controls.push(
                 NackControl::LocalRtxTime {
@@ -2058,10 +2480,12 @@ impl RTCPeerConnection {
             .iter()
             .filter_map(|m| get_mid_value(m).filter(|mid| !mid.is_empty()).cloned())
             .collect();
+        let mut numbered = false;
         for (index, media) in parsed.media_descriptions.iter_mut().enumerate() {
             if get_mid_value(media).is_some_and(|mid| !mid.is_empty()) {
                 continue;
             }
+            numbered = true;
             let mid = match local.get(index).cloned().flatten() {
                 Some(mid) if !taken.contains(&mid) => mid,
                 _ => {
@@ -2079,9 +2503,34 @@ impl RTCPeerConnection {
                 value: Some(mid),
             });
         }
+        // RFC 5888 section 6: "If the identification-tag attribute is not present in each "m"
+        // line of the session description, grouping of media lines MUST NOT be performed."
+        if numbered {
+            parsed.attributes.retain(|a| a.key != ATTR_KEY_GROUP);
+        }
     }
 
     /// The mids of the pending and current local descriptions.
+    /// Whether a local or remote description that is applied (pending or current) has a
+    /// media section with `mid`: the transceiver's [[Mid]] is set then (W3C webrtc-pc 4.4.1.6).
+    pub(crate) fn applied_description_has_mid(&self, mid: &str) -> bool {
+        [
+            &self.pending_local_description,
+            &self.current_local_description,
+            &self.pending_remote_description,
+            &self.current_remote_description,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.parsed.as_ref())
+        .any(|parsed| {
+            parsed
+                .media_descriptions
+                .iter()
+                .any(|m| get_mid_value(m).is_some_and(|value| value == mid))
+        })
+    }
+
     pub(super) fn local_description_mids(&self) -> HashSet<String> {
         let mut mids = HashSet::new();
         for desc in [
@@ -2142,6 +2591,43 @@ impl RTCPeerConnection {
             Option<u32>,
             RTCRtpTransceiverId,
         )> = Vec::new();
+
+        // W3C webrtc-pc 4.4.1.6: once stable, an encoding's codec that the answer did not
+        // negotiate for sending is removed.
+        for transceiver in self.rtp_transceivers.iter_mut() {
+            if let Some(sender) = transceiver.sender_mut() {
+                sender.drop_unnegotiated_encoding_codecs();
+            }
+        }
+
+        // RFC 9429 section 5.11 (RFC 7160 section 4.1): a started stream whose new codec has
+        // another clock rate gets a new SSRC (and so does its RTX stream), moved as a collision
+        // moves one: the old SSRC says BYE, what the application still writes with it goes out
+        // with the new one, and later descriptions say `previous-ssrc`.
+        let clock_rate_changes: Vec<(usize, Vec<SSRC>)> = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.stopped())
+            .filter_map(|(i, t)| {
+                let sender = t.sender().as_ref()?;
+                (sender.is_negotiated() && sender.has_sent())
+                    .then(|| (i, sender.clock_rate_changed_ssrcs(&self.media_engine)))
+            })
+            .filter(|(_, ssrcs)| !ssrcs.is_empty())
+            .collect();
+        let mut minted = vec![];
+        for (i, ssrcs) in clock_rate_changes {
+            for old in ssrcs {
+                let new = self.unused_ssrc(&mut minted);
+                let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                    continue;
+                };
+                if sender.replace_ssrc(old, new) == Some(old) {
+                    self.stats_mut().replace_outbound_rtp_stream(old, new);
+                }
+            }
+        }
 
         for (transceiver_id, transceiver) in self.rtp_transceivers.iter_mut().enumerate() {
             // Get kind and mid before mutable borrow of sender
@@ -2220,19 +2706,86 @@ impl RTCPeerConnection {
             let Some(sender) = transceiver.sender().as_ref() else {
                 continue;
             };
+            let ecn = self.negotiated_ecn(transceiver.mid().as_deref());
             for info in sender.bound_streams() {
                 let ccfb = negotiates_ccfb(
                     info.rtcp_feedback
                         .iter()
                         .map(|f| (f.typ.as_str(), f.parameter.as_str())),
                 );
+                let rfc6679 = info.rtcp_feedback.iter().any(|f| {
+                    f.typ == interceptor::RTCP_FB_XR
+                        && f.parameter == interceptor::RTCP_XR_ECN_SUMMARY
+                });
                 self.pipeline_context
                     .stats
-                    .set_outbound_ccfb(info.ssrc, ccfb);
+                    .set_outbound_rfc6679(info.ssrc, rfc6679);
+                self.pipeline_context
+                    .stats
+                    .set_outbound_ccfb(info.ssrc, ccfb, ecn);
             }
         }
 
         Ok(())
+    }
+
+    /// The Ta a description states in `a=ice-pacing` (RFC 8839 sections 4.3.1, 4.3.2: a full
+    /// implementation "SHOULD include an 'ice-pacing' attribute" in offers and answers, a lite
+    /// one "MUST NOT"): the proposed one, else the default 50 ms (RFC 8445 section 14.2).
+    pub(super) fn stated_ice_pacing(&self) -> Option<std::time::Duration> {
+        if self.setting_engine.candidates.ice_lite {
+            return None;
+        }
+        Some(
+            self.ice_transport()
+                .agent
+                .proposed_pacing()
+                .unwrap_or(std::time::Duration::from_millis(50)),
+        )
+    }
+
+    /// The initiation an offer or answer states in `a=ecn-capable-rtp` (RFC 6679 section 6.1):
+    /// `None` when ECN is off, or used without signalling.
+    pub(super) fn signalled_ecn(&self) -> Option<interceptor::EcnInitiation> {
+        (self.setting_engine.ecn && !self.setting_engine.ecn_without_signalling)
+            .then_some(self.setting_engine.ecn_initiation)
+    }
+
+    /// Whether the streams of the section `mid` may send ECT, and how they initiate it
+    /// (RFC 6679 section 6.1.1): both current descriptions' sections carry
+    /// `a=ecn-capable-rtp` with a method this endpoint implements, and the peer reads the
+    /// marks. With `with_ecn_without_signalling` the configured initiation, whatever the
+    /// descriptions say. `None` without ECN; the statistics also need `ack ccfb` to mark.
+    pub(super) fn negotiated_ecn(&self, mid: Option<&str>) -> Option<ecn::NegotiatedEcn> {
+        if !self.setting_engine.ecn {
+            return None;
+        }
+        if self.setting_engine.ecn_without_signalling {
+            // What browsers that send L4S do: ECT(1) on `ack ccfb` alone.
+            return Some(ecn::NegotiatedEcn {
+                initiation: self.setting_engine.ecn_initiation,
+                preference: Some(interceptor::EctPreference::Ect1),
+            });
+        }
+        let mid = mid?;
+        let local = self.current_local_description.as_ref()?;
+        let remote = self.current_remote_description.as_ref()?;
+        fn section<'a>(
+            d: &'a RTCSessionDescription,
+            mid: &str,
+        ) -> Option<(&'a SessionDescription, &'a MediaDescription)> {
+            let parsed = d.parsed.as_ref()?;
+            let media = parsed
+                .media_descriptions
+                .iter()
+                .find(|m| get_mid_value(m).map(String::as_str) == Some(mid))?;
+            Some((parsed, media))
+        }
+        ecn::negotiated_initiation(
+            section(local, mid)?,
+            section(remote, mid)?,
+            local.sdp_type == RTCSdpType::Answer,
+        )
     }
 
     pub(super) fn start_rtp(&mut self, remote_desc: RTCSessionDescription) -> Result<()> {
@@ -2518,6 +3071,11 @@ impl RTCPeerConnection {
                 return true;
             }
         }
+        // A peer without `ice2`: the controlling agent's offer aligns the default destination
+        // with the nominated pair (RFC 8839 section 4.3.4).
+        if self.needs_alignment_offer() {
+            return true;
+        }
         // Two lite agents, this one controlling, chose a pair among several: the updated
         // candidate exchange of RFC 8445 section 8.2 is an offer.
         if self
@@ -2739,6 +3297,11 @@ impl RTCPeerConnection {
     }
 
     pub(super) fn unused_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
+        self.unused_ssrc_drawn(minted, &mut rand::random::<u32>)
+    }
+
+    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
+    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
         for transceiver in &self.rtp_transceivers {
             if let Some(sender) = transceiver.sender() {
@@ -2758,7 +3321,7 @@ impl RTCPeerConnection {
                 taken.extend(described_ssrcs(parsed));
             }
         }
-        let ssrc = unused_ssrc_from(std::iter::repeat_with(rand::random::<u32>), &taken);
+        let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
     }
@@ -2767,6 +3330,16 @@ impl RTCPeerConnection {
         &self,
         track: &MediaStreamTrack,
     ) -> Vec<RTCRtpEncodingParameters> {
+        self.send_encodings_from_track_drawn(track, &mut rand::random::<u32>)
+    }
+
+    /// [`send_encodings_from_track`](Self::send_encodings_from_track) with the SSRCs it mints
+    /// drawn from `draw`.
+    fn send_encodings_from_track_drawn(
+        &self,
+        track: &MediaStreamTrack,
+        draw: &mut dyn FnMut() -> SSRC,
+    ) -> Vec<RTCRtpEncodingParameters> {
         let (is_rtx_enabled, is_fec_enabled) = (
             self.media_engine
                 .is_rtx_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly),
@@ -2774,8 +3347,22 @@ impl RTCPeerConnection {
                 .is_fec_enabled(track.kind(), RTCRtpTransceiverDirection::Sendonly),
         );
 
-        let mut minted: Vec<SSRC> = vec![];
-        let mut new_ssrc = || self.unused_ssrc(&mut minted);
+        // RFC 4588 section 4: a minted RTX (or FEC) SSRC differs from every SSRC the track's
+        // own codings name, not only from those of other senders and remote descriptions.
+        let mut minted: Vec<SSRC> = track
+            .codings()
+            .iter()
+            .flat_map(|coding| {
+                let coding = &coding.rtp_coding_parameters;
+                [
+                    coding.ssrc,
+                    coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+                    coding.fec.as_ref().map(|fec| fec.ssrc),
+                ]
+            })
+            .flatten()
+            .collect();
+        let mut new_ssrc = || self.unused_ssrc_drawn(&mut minted, draw);
         track
             .codings()
             .iter()
@@ -2830,15 +3417,82 @@ impl RTCPeerConnection {
     /// The gathering state does move here, because SDP generation reads it and a restart offer
     /// must not claim end-of-candidates.
     pub(super) fn stage_ice_restart(&mut self) -> Result<()> {
-        let (local_ufrag, local_pwd) = (
-            self.setting_engine.candidates.username_fragment.clone(),
-            self.setting_engine.candidates.password.clone(),
-        );
+        // Fixed credentials from the settings are the default transport's.
+        let (local_ufrag, local_pwd) = if self.pipeline_context.transports.active_id()
+            == self.pipeline_context.transports.default_id()
+        {
+            (
+                self.setting_engine.candidates.username_fragment.clone(),
+                self.setting_engine.candidates.password.clone(),
+            )
+        } else {
+            self.restart_credentials_for_other_transport()
+        };
         self.ice_transport_mut()
             .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
         Ok(())
+    }
+
+    /// The credentials a transport other than the default one restarts with: the ones the
+    /// default transport has staged when the transports share theirs and it restarts too
+    /// (`with_unique_transport_credentials` off), else new ones (empty: generated).
+    fn restart_credentials_for_other_transport(&self) -> (String, String) {
+        if self.setting_engine.unique_transport_credentials {
+            return (String::new(), String::new());
+        }
+        let default = self.ice_transport_of(self.pipeline_context.transports.default_id());
+        if !default.has_pending_restart() {
+            return (String::new(), String::new());
+        }
+        let staged = default.agent.get_local_credentials();
+        (staged.ufrag.clone(), staged.pwd.clone())
+    }
+
+    /// `restartIce` and an offer of this side that restarts ICE: every transport stages new
+    /// credentials (W3C restartIce: "all ICE transports"), the default one first so that the
+    /// others can take its credentials when they share them.
+    pub(super) fn stage_ice_restart_on_every_transport(&mut self) -> Result<()> {
+        let default = self.pipeline_context.transports.default_id();
+        self.with_transport(default, |pc| pc.stage_ice_restart())?;
+        for id in self.pipeline_context.transports.ids() {
+            if id != default {
+                self.with_transport(id, |pc| pc.stage_ice_restart())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the ICE restart every transport has staged (`set_local_description`); a
+    /// transport with none staged is left alone. A local offer's (`revertible`) can be taken
+    /// back by its rollback ([`Self::revert_local_ice_restart`]).
+    pub(super) fn apply_staged_ice_restarts(
+        &mut self,
+        now: Instant,
+        revertible: bool,
+    ) -> Result<()> {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| {
+                if !pc.ice_transport().has_pending_restart() {
+                    Ok(())
+                } else if revertible {
+                    pc.apply_local_offer_ice_restart(now)
+                } else {
+                    pc.apply_ice_restart(now)
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether any transport has an ICE restart staged.
+    pub(super) fn any_ice_restart_staged(&self) -> bool {
+        self.pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .any(|id| self.ice_transport_of(id).has_pending_restart())
     }
 
     /// Drops the transport part of the pending remote offer
@@ -2854,6 +3508,63 @@ impl RTCPeerConnection {
         }
         if pending.staged_tls_id {
             self.dtls_transport_mut().staged_local_tls_id = None;
+        }
+        for (id, gathering, staged_tls_id) in pending.other_restarts {
+            if self.pipeline_context.transports.transport(id).is_none() {
+                continue;
+            }
+            self.with_transport(id, |pc| {
+                if let Some(gathering) = gathering {
+                    pc.ice_transport_mut().discard_restart_credentials();
+                    pc.ice_transport_mut().ice_gathering_state = gathering;
+                }
+                if staged_tls_id {
+                    pc.dtls_transport_mut().staged_local_tls_id = None;
+                }
+            });
+        }
+    }
+
+    /// Applies the ICE restart a local offer staged (`create_offer`) so that a rollback of
+    /// the offer can take it back ([`Self::revert_local_ice_restart`]; RFC 9429 section 5.7:
+    /// "any resources allocated by the abandoned local description are discarded").
+    pub(super) fn apply_local_offer_ice_restart(&mut self, now: Instant) -> Result<()> {
+        let keep_local_candidates = !self
+            .setting_engine
+            .candidates
+            .discard_local_candidates_during_ice_restart;
+        if self
+            .ice_transport()
+            .gathering_before_local_restart
+            .is_none()
+        {
+            let announced = self.announced_gathering();
+            self.ice_transport_mut().gathering_before_local_restart = Some(announced);
+        }
+        self.ice_transport_mut()
+            .agent
+            .apply_restart_revertible(now, keep_local_candidates)
+    }
+
+    /// The answer to the local offer arrived: its ICE restart is kept.
+    pub(super) fn commit_local_ice_restart(&mut self) {
+        self.ice_transport_mut().agent.commit_restart();
+        self.ice_transport_mut().gathering_before_local_restart = None;
+    }
+
+    /// The local offer was rolled back: the ICE session goes on as before its restart, with
+    /// its credentials, candidates and selected pair, and the gathering state it had (RFC 9429
+    /// section 5.7). A no-op when the offer restarted nothing.
+    pub(super) fn revert_local_ice_restart(&mut self, now: Instant) {
+        let gathering = self
+            .ice_transport_mut()
+            .gathering_before_local_restart
+            .take();
+        if !self.ice_transport_mut().agent.revert_restart(now) {
+            return;
+        }
+        if let Some(gathering) = gathering {
+            self.restore_announced_gathering(gathering);
         }
     }
 
@@ -3034,7 +3745,7 @@ impl RTCPeerConnection {
             // They belong to the new generation too (W3C 5.6, RFC 8838 section 9: the peer
             // discards the candidates of the old one), so one not yet announced for it is
             // announced now, once. Anything else the agent refused stays silent.
-            let gathering = self.ice_gathering_state();
+            let gathering = self.active_announced().gathering;
             let kept = self
                 .ice_transport()
                 .agent
@@ -3045,7 +3756,7 @@ impl RTCPeerConnection {
             match kept {
                 Some(kept)
                     if gathering == RTCIceGatheringState::Gathering
-                        && !self.announced.announced_candidates.iter().any(
+                        && !self.active_announced().announced_candidates.iter().any(
                             |(generation, announced)| {
                                 *generation == ufrag && *announced == kept.to_string()
                             },
@@ -3058,10 +3769,11 @@ impl RTCPeerConnection {
         };
 
         for mut rtc_candidate in added {
-            self.announced
+            let announced = self.active_announced_mut();
+            announced
                 .announced_candidates
                 .retain(|(generation, _)| *generation == ufrag);
-            self.announced
+            announced
                 .announced_candidates
                 .push((ufrag.clone(), rtc_candidate.to_string()));
             // Register local candidate with stats accumulator
@@ -3105,6 +3817,7 @@ impl RTCPeerConnection {
                 RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
                     candidate: Some(rtc_candidate),
                     url: url.map(str::to_owned),
+                    ice_transport: Some(self.ice_transport().id),
                 }),
             );
         }
@@ -3121,10 +3834,17 @@ impl RTCPeerConnection {
     /// stats object names resolves in the same report). Pairs the agent no longer holds (an ICE
     /// restart drops them) are dropped from the stats too.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_ice_agent_stats_on_active(now));
+        }
+    }
+
+    /// `update_ice_agent_stats` for the active transport's agent.
+    fn update_ice_agent_stats_on_active(&mut self, now: Instant) {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3239,7 +3959,7 @@ impl RTCPeerConnection {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3327,6 +4047,13 @@ impl RTCPeerConnection {
     ///
     /// This is called automatically by `get_stats()`.
     pub(super) fn update_transport_stats(&mut self) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_transport_stats_on_active());
+        }
+    }
+
+    /// `update_transport_stats` for the active transport.
+    fn update_transport_stats_on_active(&mut self) {
         let dtls_state = self.dtls_transport().state();
         // webrtc-stats `iceLocalUsernameFragment`: the local username fragment in use for
         // message validation, which is the ICE agent's current one: the first description's,
@@ -3691,6 +4418,12 @@ impl RTCPeerConnection {
             })
             .flatten()
             .collect();
+        // RFC 4588 section 4: the original and the retransmission stream have two different
+        // SSRCs; nor may a FEC flow or another encoding share one (RFC 3550 section 8).
+        let mut named = HashSet::new();
+        if let Some(repeated) = minted.iter().find(|ssrc| !named.insert(**ssrc)) {
+            return Err(Error::ErrRTPSenderSsrcCollision(*repeated));
+        }
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
                 encoding.rtp_coding_parameters.ssrc = Some(self.unused_ssrc(&mut minted));
@@ -4206,6 +4939,31 @@ a=mid:2\r\n";
 /// make the report grow to.
 const MAX_UNRESOLVED_MDNS_CANDIDATE_STATS: usize = 320;
 
+/// The most this endpoint has said it receives in the sections `mids` of its description
+/// `local`: per section `b=TIAS` (bits per second, RFC 3890), else `b=AS` times 1000 (RFC 8866
+/// section 5.8), the smallest of the sections that state one, so that no TMMBR exceeds any of
+/// them (RFC 5104 section 4.2.1.2). `None` when none does.
+pub(crate) fn negotiated_receive_maximum(
+    local: &SessionDescription,
+    mids: &HashSet<String>,
+) -> Option<u64> {
+    local
+        .media_descriptions
+        .iter()
+        .filter(|media| get_mid_value(media).is_some_and(|mid| mids.contains(mid)))
+        .filter_map(|media| {
+            let of = |bandwidth_type: &str| {
+                media
+                    .bandwidth
+                    .iter()
+                    .find(|b| !b.experimental && b.bandwidth_type == bandwidth_type)
+                    .map(|b| b.bandwidth)
+            };
+            of("TIAS").or_else(|| of("AS").map(|kbps| kbps.saturating_mul(1000)))
+        })
+        .min()
+}
+
 /// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
 pub(crate) fn unused_ssrc_from(
     draws: impl IntoIterator<Item = SSRC>,
@@ -4220,6 +4978,110 @@ pub(crate) fn unused_ssrc_from(
 #[cfg(test)]
 mod unused_ssrc_test {
     use super::*;
+    use crate::peer_connection::configuration::media_engine::{
+        MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
+    };
+    use crate::rtp_transceiver::rtp_sender::rtp_codec::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
+
+    /// A peer connection with VP8 and RTX, so a sender gets an RTX flow.
+    fn vp8_with_rtx() -> RTCPeerConnection {
+        let mut media_engine = MediaEngine::default();
+        for (mime_type, payload_type, fmtp) in
+            [(MIME_TYPE_VP8, 96, ""), (MIME_TYPE_RTX, 97, "apt=96")]
+        {
+            media_engine
+                .register_codec(
+                    RTCRtpCodecParameters {
+                        rtp_codec: RTCRtpCodec {
+                            mime_type: mime_type.to_owned(),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: fmtp.to_owned(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type,
+                    },
+                    RtpCodecKind::Video,
+                )
+                .unwrap();
+        }
+        RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .build(Instant::now())
+            .unwrap()
+    }
+
+    fn track(coding: RTCRtpCodingParameters) -> MediaStreamTrack {
+        MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: coding,
+                ..Default::default()
+            }],
+        )
+    }
+
+    /// RFC 4588 section 4: the original and the retransmission stream "MUST use two different
+    /// SSRC values". A minted RTX SSRC is drawn again when it is the SSRC the track names for
+    /// its media.
+    #[test]
+    fn a_minted_rtx_ssrc_is_never_the_tracks_own_media_ssrc() {
+        let pc = vp8_with_rtx();
+        let track = track(RTCRtpCodingParameters {
+            ssrc: Some(7),
+            ..Default::default()
+        });
+        let mut draws = [7u32, 9].into_iter();
+        let encodings = pc.send_encodings_from_track_drawn(&track, &mut || draws.next().unwrap());
+        let coding = &encodings[0].rtp_coding_parameters;
+        assert_eq!(Some(7), coding.ssrc);
+        assert_eq!(Some(9), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+    }
+
+    /// RFC 4588 section 4: encodings the application gives that name one SSRC for the media
+    /// and its retransmissions are refused.
+    #[test]
+    fn encodings_naming_one_ssrc_for_media_and_rtx_are_refused() {
+        let pc = vp8_with_rtx();
+        let coding = RTCRtpCodingParameters {
+            ssrc: Some(5),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 5 }),
+            ..Default::default()
+        };
+        let encodings = vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: coding.clone(),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            pc.normalize_sender_track(track(coding), encodings),
+            Err(Error::ErrRTPSenderSsrcCollision(5))
+        ));
+    }
+
+    /// RFC 5104 section 4.2.1.2: the negotiated maximum is the local description's `b=TIAS`,
+    /// else `b=AS` times 1000, of the receiving sections, the smallest when several state one.
+    #[test]
+    fn the_negotiated_receive_maximum_is_the_smallest_local_limit() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\nb=AS:800\r\na=mid:0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\nb=TIAS:500000\r\nb=AS:900\r\na=mid:1\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
+        let local = SessionDescription::unmarshal(&mut std::io::Cursor::new(sdp)).unwrap();
+        let mids = |m: &[&str]| m.iter().map(|m| (*m).to_owned()).collect::<HashSet<_>>();
+        assert_eq!(
+            negotiated_receive_maximum(&local, &mids(&["0"])),
+            Some(800_000)
+        );
+        assert_eq!(
+            negotiated_receive_maximum(&local, &mids(&["0", "1", "2"])),
+            Some(500_000)
+        );
+        assert_eq!(negotiated_receive_maximum(&local, &mids(&["2"])), None);
+    }
 
     /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another
     /// local stream has is drawn again.

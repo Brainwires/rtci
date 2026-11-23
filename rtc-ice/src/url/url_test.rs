@@ -152,6 +152,7 @@ fn test_ipv6_host_is_written_in_brackets() {
             username: String::new(),
             password: String::new(),
             proto: ProtoType::Udp,
+            explicit_port: true,
         };
         assert_eq!(url.to_string(), format!("stun:[{host}]:3478"));
         let parsed = Url::parse_url(&url.to_string()).unwrap();
@@ -180,4 +181,21 @@ fn test_a_stuns_url_with_an_ip_address_is_rejected() -> Result<()> {
     assert_eq!(Url::parse_url("stun:192.0.2.1")?.host, "192.0.2.1");
     assert_eq!(Url::parse_url("stuns:example.org")?.host, "example.org");
     Ok(())
+}
+
+/// RFC 5928 section 3, RFC 7064 section 3.2: whether the URI gives the port decides how the
+/// server is found (SRV / NAPTR without one), so the parser records it.
+#[test]
+fn the_parser_records_whether_the_port_was_given() {
+    for (raw, explicit, port) in [
+        ("stun:stun.example.org", false, 3478),
+        ("stun:stun.example.org:3478", true, 3478),
+        ("turns:turn.example.org?transport=tcp", false, 5349),
+        ("turn:turn.example.org:443?transport=tcp", true, 443),
+        ("stuns:stun.example.org", false, 5349),
+        ("stun:[2001:db8::1]", false, 3478),
+    ] {
+        let url = Url::parse_url(raw).unwrap();
+        assert_eq!((url.explicit_port, url.port), (explicit, port), "{raw}");
+    }
 }

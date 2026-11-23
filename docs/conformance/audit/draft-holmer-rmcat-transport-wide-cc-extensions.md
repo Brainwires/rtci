@@ -23,7 +23,7 @@ T5 are in `rtc-rtcp`; T6 is unchanged (libwebrtc behaviour, a decision).
 
 Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 
-- MUST: tested 35 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 0
+- MUST: tested 36 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - SHOULD: tested 1 / untested 0 / partial 2 / missing 0 / violated 0 / n-a 0
 - MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -35,7 +35,7 @@ Totals (MUST includes MUST NOT/SHALL; SHOULD includes SHOULD NOT/RECOMMENDED):
 | TWCC-2.2-3 | 2.2 | MUST | The number increases by 1 per packet sent on the socket, wrapping at 16 bits | tested | `twcc/sender.rs:105-106` | `a_bound_stream_is_numbered_consecutively`, `test_twcc_sender_sequence_wraparound` | Holds for the packets that are numbered (see 2.2-2) |
 | TWCC-2.2-4 | 2.2 | MUST (implied) | A receiver reads the number from every packet carrying the negotiated extension, whatever its SSRC | tested | `twcc/receiver.rs:141-170` | `test_twcc_receiver_records_unbound_ssrcs`, `test_twcc_receiver_ignores_unbound_ssrcs_without_any_binding`, `handle_rtp_message_drops_rtx_probe_packet` | |
 | TWCC-2.3-1 | 2.3 | MUST | Use is signalled with `a=extmap:<id> http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01` | tested | `twcc/mod.rs:15-22`, `interceptor_registry.rs:473-503` | `test_stream_supports_twcc`, `tests/extmap_renegotiation.rs` | |
-| TWCC-2.3-2 | 2.3 | MUST (de facto) | Feedback is sent only when `a=rtcp-fb:<pt> transport-cc` is negotiated | partial | `twcc/receiver.rs:203-215` | `test_twcc_receiver_ignores_streams_without_twcc` | The receiver keys on the header extension alone; `transport-cc` in `info.rtcp_feedback` is not checked. Not in the draft text; libwebrtc requires both |
+| TWCC-2.3-2 | 2.3 | MUST (de facto) | Feedback is sent only when `a=rtcp-fb:<pt> transport-cc` is negotiated | tested | `twcc/receiver.rs` (`bind_remote_stream`: header extension and `transport-cc` feedback) | `a_stream_with_the_extension_but_no_transport_cc_feedback_gets_no_report`, `the_extension_alone_setting_reports_a_stream_without_transport_cc_feedback` | A remote stream is reported only when `transport-cc` is in its negotiated feedback beside the header extension (RFC 4585 4.2, as libwebrtc). `TwccReceiverBuilder::with_feedback_on_extension_alone(true)` reports on the extension alone |
 | TWCC-3-1 | 3 | MUST | The receiver records an arrival timestamp and the transport-wide number of each packet received | tested | `twcc/receiver.rs:156-168`, `twcc/recorder.rs:112-134` | `test_twcc_receiver_feedback_contains_packet_info`, `test_recorder_basic` | |
 | TWCC-3-2 | 3 | MUST | The sender keeps a map of in-flight packets and looks up each one's send time on feedback | tested | `rtpfb/history.rs:38-112`, `cc/interceptor.rs:137-146` | `reports_carry_the_transport_wide_sequence_numbers`, `every_departing_packet_is_recorded_at_its_release_instant` | |
 | TWCC-3-3 | 3 | MUST | Lost feedback: the packets it would have reported are ignored, not counted as lost or received | tested | `rtpfb/history.rs` `take_reports` (only packets a feedback described are reported; the rest are released without a verdict, counted by `unreported()`) | `packets_whose_feedback_was_lost_are_not_reported_as_lost`, `packets_of_a_lost_feedback_packet_are_not_reported_as_lost`, `a_stream_the_feedback_does_not_cover_is_not_counted_as_lost` | A packet is a loss only when a feedback reported it not received |

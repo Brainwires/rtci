@@ -127,6 +127,9 @@ pub struct OutboundRtpStreamAccumulator {
     pub ecn: bool,
     /// The stream's codec negotiated RFC 8888 feedback (`a=rtcp-fb:<pt> ack ccfb`).
     pub ccfb_negotiated: bool,
+    /// Whether the stream negotiated RFC 6679 ECN reports (`a=rtcp-xr:ecn-sum`, with or
+    /// without `nack ecn`), the ECN feedback of a stream not reported in RFC 8888.
+    pub rfc6679_negotiated: bool,
     /// The stream's RTP packets (and its RTX packets) may be sent ECT(1): ECN is on and RFC
     /// 8888 feedback, which reports CE marks back, is negotiated. Which ones are is
     /// `ecn_validation`'s decision.
@@ -134,6 +137,11 @@ pub struct OutboundRtpStreamAccumulator {
     /// RFC 6679 sections 7.2-7.4 for the stream, fed from the RFC 8888 reports (RFC 8888
     /// section 7); `Some` while `ect1_marking`.
     pub ecn_validation: Option<Box<interceptor::EcnValidation>>,
+    /// The ECT codepoint the receiver asked for (`ect=`, RFC 6679 section 6.1).
+    pub ect_preference: Option<interceptor::EctPreference>,
+    /// Every marked packet goes out ECT(1) (L4S, or the receiver asked for it): a Not-ECT
+    /// report of a marked packet is bleaching of ECT(1).
+    pub sends_ect1: bool,
     /// RTP packets sent with ECT(1).
     pub packets_sent_with_ect1: u64,
     /// What the RFC 8888 reports received from the remote say about the stream.
@@ -218,6 +226,23 @@ impl OutboundRtpStreamAccumulator {
         self.packets_sent_with_ect1 += 1;
     }
 
+    /// What an RFC 6679 report about the stream says (an RTCP ECN Feedback packet or an XR ECN
+    /// Summary Report with the reception report it rides with): the stream's ECN validation
+    /// runs on it, unless the stream is reported in RFC 8888, which reports every packet.
+    pub fn on_ecn_counters_received(
+        &mut self,
+        extended_highest: u32,
+        counters: rtcp::transport_feedbacks::ecn_feedback::EcnCounters,
+        now: Instant,
+    ) {
+        if self.ccfb_negotiated {
+            return;
+        }
+        if let Some(validation) = self.ecn_validation.as_deref_mut() {
+            validation.on_counters(now, extended_highest, counters);
+        }
+    }
+
     /// Counts what an RFC 8888 report block from the remote, arriving at `now`, says about the
     /// stream.
     pub fn on_ccfb_block_received(&mut self, block: &CcFeedbackReportBlock, now: Instant) {
@@ -238,7 +263,7 @@ impl OutboundRtpStreamAccumulator {
         self.ccfb_received
             .get_or_insert_with(|| Box::new(CcfbTally::new()))
             .on_report_block_marked(block, |sequence_number| {
-                validation.is_some_and(|v| v.was_marked(sequence_number))
+                self.sends_ect1 && validation.is_some_and(|v| v.was_marked(sequence_number))
             });
     }
 

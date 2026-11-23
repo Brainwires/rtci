@@ -21,7 +21,7 @@ use log::{debug, trace, warn};
 use rustc_hash::FxHashMap;
 use shared::TransportContext;
 use shared::error::{Error, Result};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Returns `true` if the given MIME type identifies a repair codec (RTX or FEC)
@@ -120,9 +120,68 @@ fn receiver_track_has_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) 
 #[derive(Default)]
 pub(crate) struct EndpointHandlerContext {
     pub(crate) ssrc_owners: SsrcOwners,
+    /// The sequence numbers each inbound stream delivered lately: a packet that arrives a
+    /// second time (an RTX or NACK retransmission of one that arrived after all, a datagram
+    /// the network duplicated) reaches the application once.
+    pub(crate) delivered: HashMap<SSRC, DeliveredWindow>,
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    /// RTP packets discarded because no receiver could take them (RFC 8830 section 3.1).
+    pub(crate) discarded_rtp_packets: u64,
+    /// The SSRCs `OnUnassociatedRtpDiscarded` was fired for, at most
+    /// [`MAX_DISCARD_REPORTED_SSRCS`].
+    pub(crate) discard_reported_ssrcs: Vec<SSRC>,
+}
+
+/// How many SSRCs get an `OnUnassociatedRtpDiscarded` event: a peer cannot make the
+/// connection keep an unbounded set by sending from ever new SSRCs.
+pub(crate) const MAX_DISCARD_REPORTED_SSRCS: usize = 64;
+/// At most this many inbound streams are tracked for duplicates.
+const MAX_DELIVERY_WINDOWS: usize = 1024;
+
+/// The last [`DeliveredWindow::SPAN`] sequence numbers of a stream, and which of them were
+/// delivered.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeliveredWindow {
+    highest: Option<u16>,
+    bits: [u64; 16],
+}
+
+impl DeliveredWindow {
+    const SPAN: u16 = 1024;
+
+    fn slot(sequence_number: u16) -> (usize, u64) {
+        let index = usize::from(sequence_number % Self::SPAN);
+        (index / 64, 1 << (index % 64))
+    }
+
+    /// Whether `sequence_number` is delivered for the first time (and records it). One older
+    /// than the window is let through: nothing is known about it.
+    pub(crate) fn first_delivery(&mut self, sequence_number: u16) -> bool {
+        let (word, bit) = Self::slot(sequence_number);
+        let Some(highest) = self.highest else {
+            self.highest = Some(sequence_number);
+            self.bits[word] |= bit;
+            return true;
+        };
+        let ahead = sequence_number.wrapping_sub(highest);
+        if ahead != 0 && ahead < 0x8000 {
+            for step in 1..=ahead.min(Self::SPAN) {
+                let (w, b) = Self::slot(highest.wrapping_add(step));
+                self.bits[w] &= !b;
+            }
+            self.highest = Some(sequence_number);
+            self.bits[word] |= bit;
+            return true;
+        }
+        if highest.wrapping_sub(sequence_number) >= Self::SPAN {
+            return true;
+        }
+        let first = self.bits[word] & bit == 0;
+        self.bits[word] |= bit;
+        first
+    }
 }
 
 /// EndpointHandler implements DataChannel/Media Endpoint handling
@@ -292,6 +351,35 @@ impl<'a> EndpointHandler<'a> {
 
         let ssrc = rtp_packet.header.ssrc;
 
+        // RFC 3550 section 5.1: "A receiver MUST ignore packets with payload types that it
+        // does not understand." The first packet of a stream binds it only with a negotiated
+        // payload type (`InterceptorHandler::bind_declared_ssrc`); a later one is held to the
+        // same set here.
+        if !self.payload_type_negotiated(ssrc, rtp_packet.header.payload_type) {
+            debug!(
+                "drop rtp packet ssrc = {} with payload type {} not negotiated for it",
+                ssrc, rtp_packet.header.payload_type
+            );
+            return Ok(());
+        }
+
+        // RFC 7587 section 4.1 (and RFC 3550 section 6.4.1's duplicates): the receiver is
+        // "prepared to receive duplicate RTP packets" and passes at most one copy on. A
+        // retransmission whose original arrived too, or an original after its retransmission,
+        // is a duplicate past SRTP's replay window (they were different SRTP packets); it
+        // went through the chain, so the congestion feedback still saw it arrive.
+        if self.ctx.delivered.len() < MAX_DELIVERY_WINDOWS || self.ctx.delivered.contains_key(&ssrc)
+        {
+            let window = self.ctx.delivered.entry(ssrc).or_default();
+            if !window.first_delivery(rtp_packet.header.sequence_number) {
+                debug!(
+                    "drop rtp packet ssrc = {} seq = {}: delivered already",
+                    ssrc, rtp_packet.header.sequence_number
+                );
+                return Ok(());
+            }
+        }
+
         // The packet was counted on its stream when it arrived, before the interceptor chain
         // (`InterceptorHandler::handle_read`).
         if let Some(track_id) = self.find_track_id(ssrc, Some(&rtp_packet.header)) {
@@ -304,7 +392,21 @@ impl<'a> EndpointHandler<'a> {
                 })),
             });
         } else {
+            // RFC 8830 section 3.1: media that cannot be associated is not buffered; the
+            // application is told that it was discarded.
             debug!("drop rtp packet ssrc = {}", ssrc);
+            self.ctx.discarded_rtp_packets += 1;
+            if !self.ctx.discard_reported_ssrcs.contains(&ssrc)
+                && self.ctx.discard_reported_ssrcs.len() < MAX_DISCARD_REPORTED_SSRCS
+            {
+                self.ctx.discard_reported_ssrcs.push(ssrc);
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc),
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -444,6 +546,31 @@ impl<'a> EndpointHandler<'a> {
     // `StreamEstablisher`, driven by the interceptor handler *before* the chain sees the packet.
     // By the time a packet reaches here the SSRC is registered on the receiver's track, so all
     // that is left is to name the track it belongs to.
+    /// Whether `payload_type` is one the receiver that owns `ssrc` negotiated: the payload
+    /// types of its receive codecs, the negotiated set of its m= section, and while a local
+    /// offer is pending the payload types it lists for the section (RFC 3264 section 5.1: a
+    /// remote that adopts a new codec from a renegotiating offer may send it before this
+    /// endpoint has the answer). An SSRC no receiver
+    /// owns, or a receiver with no codecs yet, is left to [`Self::find_track_id`].
+    fn payload_type_negotiated(&mut self, ssrc: SSRC, payload_type: PayloadType) -> bool {
+        let Some(id) =
+            self.ctx
+                .ssrc_owners
+                .find(ssrc, self.rtp_transceivers, receiver_track_has_ssrc)
+        else {
+            return true;
+        };
+        let Some(receiver) = self.rtp_transceivers[id].receiver() else {
+            return true;
+        };
+        let codecs = receiver.get_codec_preferences();
+        codecs.is_empty()
+            || codecs
+                .iter()
+                .any(|codec| codec.payload_type == payload_type)
+            || receiver.offered_payload_types().contains(&payload_type)
+    }
+
     fn find_track_id(
         &mut self,
         ssrc: SSRC,
@@ -579,9 +706,10 @@ mod endpoint_rtcp_routing_test;
 #[cfg(test)]
 mod rtx_test {
     use super::{
-        EndpointHandler, EndpointHandlerContext, Instant, Packet, RTCMessageInternal,
-        RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpTransceiverInternal, RTPMessage,
-        TrackPacket, TransportContext, deencapsulate_rtx, resolve_rtx_primary,
+        EndpointHandler, EndpointHandlerContext, Instant, Packet, RTCEventInternal,
+        RTCMessageInternal, RTCPeerConnectionEvent, RTCRtpCodecParameters, RTCRtpCodingParameters,
+        RTCRtpTransceiverInternal, RTPMessage, TrackPacket, TransportContext, deencapsulate_rtx,
+        resolve_rtx_primary,
     };
     use crate::media_stream::track::MediaStreamTrack;
     use crate::rtp_transceiver::rtp_sender::{
@@ -857,11 +985,20 @@ mod rtx_test {
         payload_type: u8,
         payload: &'static [u8],
     ) -> Option<(String, rtp::Packet)> {
+        // Each packet a sequence number of its own: the endpoint delivers a sequence number
+        // once (RFC 7587 section 4.1).
+        thread_local!(static NEXT: std::cell::Cell<u16> = const { std::cell::Cell::new(1000) });
+        let sequence_number = NEXT.with(|next| {
+            let n = next.get();
+            next.set(n.wrapping_add(1));
+            n
+        });
         let mut stats = RTCStatsAccumulator::new();
         let packet = rtp::Packet {
             header: rtp::Header {
                 payload_type,
                 ssrc,
+                sequence_number,
                 ..Default::default()
             },
             payload: Bytes::from_static(payload),
@@ -877,6 +1014,37 @@ mod rtx_test {
             })) => Some((track_id, packet)),
             _ => panic!("expected an RTP TrackPacket"),
         }
+    }
+
+    /// RFC 3550 section 5.1: a packet on a bound stream with a payload type its m= section
+    /// did not negotiate is ignored; one with a negotiated payload type is delivered.
+    #[test]
+    fn a_packet_with_a_payload_type_not_negotiated_for_its_stream_is_ignored() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 111, b"other").is_none());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"media").is_some());
+    }
+
+    /// RFC 3264 section 5.1: while this endpoint's renegotiating offer is pending, a payload
+    /// type it offers for the section is received although the receive codecs (the last
+    /// answer's) do not have it yet; once the answer sets them, it is held to those again.
+    #[test]
+    fn a_payload_type_of_the_pending_local_offer_is_received_until_the_answer() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_offered_payload_types(vec![96, 97, 98]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_some());
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_codec_preferences(vec![codec(96, "video/VP8", "")]);
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"vp8").is_some());
     }
 
     #[test]
@@ -935,6 +1103,37 @@ mod rtx_test {
 
         transceivers.remove(0);
         assert_eq!(track_of(&mut transceivers, 1000), None);
+    }
+
+    /// RFC 8830 section 3.1: "If the implementation wishes to limit this buffering, it MUST
+    /// signal to the user that media has been discarded". A packet no receiver can take is
+    /// dropped, counted, and reported once per SSRC.
+    #[test]
+    fn media_no_receiver_takes_is_discarded_and_reported_once_per_ssrc() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        let discarded_events = |ctx: &EndpointHandlerContext| -> Vec<u32> {
+            ctx.event_outs
+                .iter()
+                .filter_map(|e| match &e.event {
+                    RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc),
+                    ) => Some(*ssrc),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, &[0xDE]).is_some());
+        assert_eq!(ctx.discarded_rtp_packets, 0);
+        assert!(discarded_events(&ctx).is_empty());
+
+        for _ in 0..3 {
+            assert!(dispatch(&mut ctx, &mut transceivers, 3000, 96, &[0xDE]).is_none());
+        }
+        assert!(dispatch(&mut ctx, &mut transceivers, 3001, 96, &[0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 4);
+        assert_eq!(discarded_events(&ctx), vec![3000, 3001]);
     }
 
     #[test]

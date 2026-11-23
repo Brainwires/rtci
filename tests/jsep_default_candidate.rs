@@ -53,8 +53,10 @@ fn an_initial_offer_without_candidates_has_the_dummy_destination() -> TestResult
 
 /// RFC 8839 section 4.2.1.2: the `m=` / `c=` lines carry the default candidate, "the
 /// relayed candidate (if ...), server-reflexive candidates (if available), and finally host
-/// candidates"; RFC 9143 section 7.2: every bundled section that is not bundle-only has the
-/// BUNDLE transport's address and port; the `a=rtcp` line follows (RFC 5761 section 5.1.3).
+/// candidates"; the `a=rtcp` line follows (RFC 5761 section 5.1.3). RFC 9143 section 7.2:
+/// every bundled section that is not bundle-only has an address of its own: under `balanced`
+/// the video section, the first of its type, is a transport of its own (RFC 9429 section
+/// 5.2.1), which has gathered nothing, so it keeps the dummy destination.
 #[test]
 fn an_offer_with_candidates_states_the_default_candidate_in_each_bundled_section() -> TestResult {
     let mut pc = default_peer()?;
@@ -62,21 +64,25 @@ fn an_offer_with_candidates_states_the_default_candidate_in_each_bundled_section
     pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
     add_candidate(&mut pc, HOST)?;
     let offer = pc.create_offer(None)?.sdp;
-    for section in media_sections(&offer) {
-        assert_eq!(5000, port_of(&section), "{offer}");
-        assert_eq!(
-            (Some("IN IP4 10.0.0.1"), vec!["5000 IN IP4 10.0.0.1"]),
-            destination(&section),
-            "{offer}"
-        );
-    }
+    let sections = media_sections(&offer);
+    assert_eq!(5000, port_of(&sections[0]), "{offer}");
+    assert_eq!(
+        (Some("IN IP4 10.0.0.1"), vec!["5000 IN IP4 10.0.0.1"]),
+        destination(&sections[0]),
+        "{offer}"
+    );
+    assert_eq!(9, port_of(&sections[1]), "{offer}");
+    assert_eq!(
+        (Some("IN IP4 0.0.0.0"), vec!["9 IN IP4 0.0.0.0"]),
+        destination(&sections[1]),
+        "the video transport's own (dummy) destination: {offer}"
+    );
 
     add_candidate(&mut pc, SRFLX)?;
     let offer = pc.create_offer(None)?.sdp;
-    for section in media_sections(&offer) {
-        assert_eq!(6000, port_of(&section), "server-reflexive wins: {offer}");
-        assert_eq!(Some("IN IP4 203.0.113.7"), destination(&section).0);
-    }
+    let section = &media_sections(&offer)[0];
+    assert_eq!(6000, port_of(section), "server-reflexive wins: {offer}");
+    assert_eq!(Some("IN IP4 203.0.113.7"), destination(section).0);
     Ok(())
 }
 

@@ -119,7 +119,30 @@ fn connected(
     rtc::data_channel::RTCDataChannelId,
     rtc::data_channel::RTCDataChannelId,
 )> {
-    let (mut pair, local) = Pair::connected(answerer_role, "data")?;
+    // The exchanges below replace the DTLS association on the ICE session they have: RFC
+    // 8842 section 3.1 alone, which a peer connection accepts only with this setting (RFC
+    // 9429 sections 5.8.3 and 5.11 ask for an ICE restart with it).
+    let engine = |role: RTCDtlsRole| {
+        SettingEngineBuilder::new()
+            .with_answering_dtls_role(role)
+            .with_dtls_new_association_without_ice_restart(true)
+    };
+    let offerer_role = match answerer_role {
+        RTCDtlsRole::Client => RTCDtlsRole::Server,
+        _ => RTCDtlsRole::Client,
+    };
+    let mut pair = Pair::with_setting_engines(
+        "127.0.0.1:50010",
+        engine(offerer_role),
+        "127.0.0.1:50011",
+        engine(answerer_role),
+    )?;
+    let local = pair.offerer.pc.create_data_channel("data", None)?.id();
+    pair.negotiate()?;
+    assert!(
+        pair.run_until(|p| !p.offerer.opened().is_empty() && !p.answerer.opened().is_empty())?,
+        "the first channel never opened"
+    );
     let remote = pair.answerer.opened()[0];
     // Records of the association being replaced may still arrive at its successor.
     pair.offerer.tolerate_read_errors = true;

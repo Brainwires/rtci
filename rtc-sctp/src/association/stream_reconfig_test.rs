@@ -301,3 +301,77 @@ fn reset_requests_and_responses_travel_in_re_config_chunks_only() {
     assert!(in_reconfig.contains(&13), "{in_reconfig:?}");
     assert!(in_reconfig.contains(&16), "{in_reconfig:?}");
 }
+
+/// The RE-CONFIG chunk the peer sends with an Outgoing SSN Reset Request and an Incoming SSN
+/// Reset Request (an allowed pair, RFC 6525 3.1), each parameter padded to four bytes.
+fn outgoing_and_incoming_reset_request(a: &Association, rsn: u32, stream: u16) -> Bytes {
+    let mut outgoing = rsn.to_be_bytes().to_vec();
+    outgoing.extend_from_slice(&a.my_next_rsn.wrapping_sub(1).to_be_bytes());
+    outgoing.extend_from_slice(&a.peer_last_tsn.to_be_bytes());
+    outgoing.extend_from_slice(&stream.to_be_bytes());
+    let mut incoming = rsn.wrapping_add(1).to_be_bytes().to_vec();
+    incoming.extend_from_slice(&stream.to_be_bytes());
+    let mut value = raw_tlv(13, &outgoing);
+    while !value.len().is_multiple_of(4) {
+        value.push(0);
+    }
+    value.extend_from_slice(&raw_tlv(14, &incoming));
+    packet_to(a, &[raw_chunk(CT_RECONFIG.0, 0, &value)])
+}
+
+/// RFC 6525 5.2.2 E6 and 5.2.3 F2: the answering RE-CONFIG is sent once the incoming
+/// RE-CONFIG chunk has been processed completely. A chunk with an Outgoing SSN Reset Request
+/// and an Incoming SSN Reset Request for the same stream (an allowed pair, section 3.1) is
+/// answered with one RE-CONFIG chunk that carries the responses to both: the first is
+/// performed (stream 1 is reset, and this side resets its own direction of it in turn,
+/// RFC 8831 6.7, in a request of its own), and the second then has nothing left to do.
+#[test]
+fn a_re_config_chunk_is_answered_after_all_of_it_is_processed() {
+    let mut link = connected_link(504);
+    let now = link.now;
+    link.client
+        .conn()
+        .open_stream(1, PPI)
+        .unwrap()
+        .write_sctp(now, &Bytes::from_static(b"x"), PPI)
+        .unwrap();
+    let deadline = link.now + Duration::from_secs(5);
+    assert!(link.run_until(deadline, |l| !l.server.received.is_empty()));
+    let now = link.now;
+    link.server
+        .conn()
+        .stream(1)
+        .unwrap()
+        .write_sctp(now, &Bytes::from_static(b"y"), PPI)
+        .unwrap();
+    let deadline = link.now + Duration::from_secs(5);
+    assert!(link.run_until(deadline, |l| !l.client.received.is_empty()));
+    link.run_for(Duration::from_secs(1));
+
+    let now = link.now;
+    let a = link.server.conn();
+    let _ = sent_datagrams(a, now);
+    let rsn = a.peer_rsn_window.expect("known from the INIT").1;
+    let raw = outgoing_and_incoming_reset_request(a, rsn, 1);
+    inject(a, now, raw);
+    let answers = chunks_of_type(&sent_datagrams(a, now), CT_RECONFIG.0);
+    let params: Vec<Vec<(u16, Vec<u8>)>> = answers.iter().map(|c| tlvs(&c[4..])).collect();
+    let answered: Vec<u32> = params
+        .first()
+        .unwrap_or_else(|| panic!("no answering RE-CONFIG: {params:?}"))
+        .iter()
+        .filter(|(t, _)| *t == 16)
+        .map(|(_, v)| u32::from_be_bytes([v[0], v[1], v[2], v[3]]))
+        .collect();
+    assert_eq!(
+        answered,
+        vec![rsn, rsn.wrapping_add(1)],
+        "one chunk answers both requests: {params:?}"
+    );
+    let own_reset = params
+        .iter()
+        .flatten()
+        .find(|(t, _)| *t == 13)
+        .unwrap_or_else(|| panic!("this side resets its direction of stream 1: {params:?}"));
+    assert_eq!(own_reset.1[12..14], 1u16.to_be_bytes());
+}

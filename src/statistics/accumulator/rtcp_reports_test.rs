@@ -267,3 +267,187 @@ fn jitter_without_a_clock_rate_is_left_out() {
     let json = serde_json::to_value(&inbound).unwrap();
     assert!(json.get("jitter").is_none(), "{json}");
 }
+
+/// An accumulator with ECN on (RFC 6679 initiation by RTP and RTCP) and one outbound stream
+/// that negotiated `a=rtcp-xr:ecn-sum` but no RFC 8888 feedback.
+fn ecn_call() -> RTCStatsAccumulator {
+    let mut stats =
+        RTCStatsAccumulator::for_connection(true, interceptor::EcnInitiation::RtpAndRtcp, [1, 2]);
+    stats.get_or_create_outbound_rtp_streams(OUT_SSRC, RtpCodecKind::Video, "0", "", 0, None, 0);
+    stats.set_outbound_rfc6679(OUT_SSRC, true);
+    // ECN negotiated with `a=ecn-capable-rtp` (RFC 6679 section 6.1.1).
+    stats.set_outbound_ccfb(
+        OUT_SSRC,
+        false,
+        Some(crate::peer_connection::sdp::ecn::NegotiatedEcn {
+            initiation: interceptor::EcnInitiation::RtpAndRtcp,
+            preference: Some(interceptor::EctPreference::Ect0),
+        }),
+    );
+    stats
+}
+
+/// RFC 6679 section 7.2.1 with sections 5.2 and 7.3.1: a stream whose ECN reports are RFC
+/// 6679's (no RFC 8888) sends ECT probes; once an XR ECN Summary Report, read with the
+/// reception report of its compound packet, counts them ECT, it marks every packet.
+#[test]
+fn an_ecn_summary_counting_the_probes_ect_makes_every_packet_go_out_ect() {
+    use rtcp::extended_report::{EcnSummaryReport, EcnSummaryReportBlock, ExtendedReport};
+    use rtcp::transport_feedbacks::ecn_feedback::EcnCounters;
+
+    let mut stats = ecn_call();
+    let mut now = Instant::now();
+    let mut probes = 0u32;
+    for seq in 0..40u16 {
+        if stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_some() {
+            probes += 1;
+        }
+        now += Duration::from_millis(20);
+    }
+    assert!((2..40).contains(&probes), "a fraction are probes: {probes}");
+
+    let rr = ReceiverReport {
+        ssrc: 9,
+        reports: vec![ReceptionReport {
+            last_sequence_number: 39,
+            ..block(OUT_SSRC)
+        }],
+        ..Default::default()
+    };
+    let xr = ExtendedReport {
+        sender_ssrc: 9,
+        reports: vec![Box::new(EcnSummaryReportBlock {
+            reports: vec![EcnSummaryReport {
+                ssrc: OUT_SSRC,
+                counters: EcnCounters {
+                    ect1: probes,
+                    not_ect: 40 - probes as u16,
+                    ..Default::default()
+                },
+            }],
+        })],
+    };
+    stats.on_rtcp_received(&[Box::new(rr), Box::new(xr)], now);
+
+    let marked = (40..60u16)
+        .filter(|&seq| stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_some())
+        .count();
+    assert_eq!(marked, 20, "every packet once the initiation succeeded");
+}
+
+/// Without ECN reports of either kind negotiated nothing is marked (RFC 6679 section 7.1:
+/// the summary "MUST also be used").
+#[test]
+fn a_stream_without_ecn_reports_sends_nothing_ect() {
+    let mut stats = ecn_call();
+    stats.set_outbound_rfc6679(OUT_SSRC, false);
+    stats.set_outbound_ccfb(
+        OUT_SSRC,
+        false,
+        Some(crate::peer_connection::sdp::ecn::NegotiatedEcn {
+            initiation: interceptor::EcnInitiation::RtpAndRtcp,
+            preference: Some(interceptor::EctPreference::Ect0),
+        }),
+    );
+    let now = Instant::now();
+    assert!((0..40u16).all(|seq| stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_none()));
+}
+
+/// ECN negotiated with the leap-of-faith initiation and no `ect=` (ECT(0) implied).
+fn leap_negotiated() -> crate::peer_connection::sdp::ecn::NegotiatedEcn {
+    crate::peer_connection::sdp::ecn::NegotiatedEcn {
+        initiation: interceptor::EcnInitiation::LeapOfFaith,
+        preference: None,
+    }
+}
+
+/// RFC 6679 section 7.3.1: a sender "SHOULD use ECT(0)", unless the receiver's `ect=`
+/// (section 6.1) asks for ECT(1) or a random choice; the L4S setting sends ECT(1) whatever
+/// it asked. Only ECT(1) packets count as `packetsSentWithEct1`.
+#[test]
+fn a_marking_stream_sends_ect0_unless_the_receiver_asks_for_ect1() {
+    use shared::EcnCodepoint;
+    let leap = || {
+        let mut stats = RTCStatsAccumulator::for_connection(
+            true,
+            interceptor::EcnInitiation::LeapOfFaith,
+            [1, 2],
+        );
+        stats.get_or_create_outbound_rtp_streams(
+            OUT_SSRC,
+            RtpCodecKind::Video,
+            "0",
+            "",
+            0,
+            None,
+            0,
+        );
+        stats.set_outbound_rfc6679(OUT_SSRC, true);
+        stats.set_outbound_ccfb(OUT_SSRC, false, Some(leap_negotiated()));
+        stats
+    };
+    let now = Instant::now();
+    let marks = |stats: &mut RTCStatsAccumulator, from: u16| -> Vec<EcnCodepoint> {
+        (from..from + 64)
+            .filter_map(|seq| stats.ecn_for_rtp_sent(OUT_SSRC, seq, now))
+            .collect()
+    };
+
+    let mut stats = leap();
+    let sent = marks(&mut stats, 0);
+    assert_eq!(sent.len(), 64);
+    assert!(sent.iter().all(|m| *m == EcnCodepoint::Ect0), "{sent:?}");
+    assert_eq!(
+        stats.outbound_rtp_streams[&OUT_SSRC].packets_sent_with_ect1,
+        0
+    );
+
+    stats.set_outbound_ect_preference(OUT_SSRC, Some(interceptor::EctPreference::Ect1));
+    assert!(
+        marks(&mut stats, 64)
+            .iter()
+            .all(|m| *m == EcnCodepoint::Ect1)
+    );
+    assert_eq!(
+        stats.outbound_rtp_streams[&OUT_SSRC].packets_sent_with_ect1,
+        64
+    );
+
+    stats.set_outbound_ect_preference(OUT_SSRC, Some(interceptor::EctPreference::Random));
+    let random = marks(&mut stats, 128);
+    assert!(random.contains(&EcnCodepoint::Ect0) && random.contains(&EcnCodepoint::Ect1));
+
+    let mut l4s = leap().with_ecn_marking(interceptor::EcnMarking::L4s);
+    l4s.set_outbound_ccfb(OUT_SSRC, false, Some(leap_negotiated()));
+    assert!(marks(&mut l4s, 0).iter().all(|m| *m == EcnCodepoint::Ect1));
+}
+
+/// RFC 6679 section 7.2.1: a reception report showing that more than three ECT probes should
+/// have arrived, in a compound packet with no ECN report about the stream, fails the
+/// initiation: the receiver does not report ECN, and nothing is marked any more.
+#[test]
+fn a_receiver_report_without_an_ecn_report_fails_the_initiation() {
+    let mut stats = ecn_call();
+    let mut now = Instant::now();
+    let probes = (0..40u16)
+        .filter(|&seq| {
+            let marked = stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_some();
+            now += Duration::from_millis(20);
+            marked
+        })
+        .count();
+    assert!(probes > 3, "{probes}");
+    let rr = ReceiverReport {
+        ssrc: 9,
+        reports: vec![ReceptionReport {
+            last_sequence_number: 39,
+            ..block(OUT_SSRC)
+        }],
+        ..Default::default()
+    };
+    stats.on_rtcp_received(&[Box::new(rr)], now);
+    assert!(
+        (40..80u16).all(|seq| stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_none()),
+        "no probe after the failure"
+    );
+}

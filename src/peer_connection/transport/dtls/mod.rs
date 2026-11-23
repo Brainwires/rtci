@@ -51,7 +51,7 @@ pub(crate) fn webrtc_default_cipher_suites() -> Vec<CipherSuiteId> {
 }
 
 /// Whether two remote fingerprint lists name the same certificates (order and hex case aside).
-fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool {
+pub(crate) fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool {
     let normalize = |list: &[RTCDtlsFingerprint]| {
         let mut v: Vec<(String, String)> = list
             .iter()
@@ -63,16 +63,17 @@ fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool
     normalize(a) == normalize(b)
 }
 
-/// The DTLS-SRTP profiles offered when the application configures none: the GCM ones and
-/// AES_CM with the 80-bit tag. Not `SRTP_AES128_CM_HMAC_SHA1_32`: RFC 3711 section 9.5 allows
+/// The DTLS-SRTP profiles offered when the application configures none: the GCM ones, the
+/// 256-bit key first (RFC 3711 section 9.2: keys "as large as possible"; RFC 6188 section 6:
+/// AES-256 where the highest security is wanted), and AES_CM with the 80-bit tag. Not `SRTP_AES128_CM_HMAC_SHA1_32`: RFC 3711 section 9.5 allows
 /// the 32-bit tag only where its two conditions hold (forgery of a packet does no harm worth
 /// more than 2^-32, and the payload's integrity is not needed), which the engine cannot know
 /// of any session; an application that knows sets it with
 /// `SettingEngineBuilder::with_srtp_protection_profiles`.
 pub(crate) fn default_srtp_protection_profiles() -> Vec<SrtpProtectionProfile> {
     vec![
-        SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
         SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm,
+        SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
         SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
     ]
 }

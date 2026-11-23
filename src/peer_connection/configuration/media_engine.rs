@@ -175,8 +175,9 @@ mod media_engine_test;
 mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
-    ENCRYPT_URI, MediaDescriptionExt, SectionExtension, codecs_from_media_description,
-    is_unknown_application_media, rtp_extensions_from_media_description,
+    ATTR_KEY_SFRAME, ENCRYPT_URI, MediaDescriptionExt, SectionExtension,
+    codecs_from_media_description, is_unknown_application_media,
+    rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
@@ -435,6 +436,12 @@ pub struct MediaEngine {
     pub(crate) negotiated_video_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_audio_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_application_codecs: Vec<RTCRtpCodecParameters>,
+    /// The payload types of the negotiated lists that number an SFrame section's formats
+    /// (`a=sframe`, draft-ietf-avtcore-rtp-sframe-03 section 6): the SFrame sections of a
+    /// connection number their formats apart from the plain ones ("payload types for media
+    /// encodings that are relevant for SFrame MUST NOT be reused between the two media
+    /// sections" of one BUNDLE group), so the lists hold a format once per numbering.
+    pub(crate) sframe_payload_types: Vec<PayloadType>,
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
@@ -821,7 +828,16 @@ impl MediaEngine {
                     // The AV1 RTP payload format's SDP parameter is `profile` (AV1 RTP spec,
                     // section 7.2); `profile-id` is VP9's.
                     sdp_fmtp_line: "profile=0".to_owned(),
-                    rtcp_feedback: video_rtcp_feedback.clone(),
+                    // Layer Refresh Request (`ccm lrr`), which the AV1 RTP payload format names
+                    // for its scalable streams, besides the video feedback of every codec.
+                    rtcp_feedback: video_rtcp_feedback
+                        .iter()
+                        .cloned()
+                        .chain([RTCPFeedback {
+                            typ: "ccm".to_owned(),
+                            parameter: "lrr".to_owned(),
+                        }])
+                        .collect(),
                 },
                 payload_type: 41,
             },
@@ -921,6 +937,27 @@ impl MediaEngine {
                  (RFC 5761 section 4)",
                 codec.payload_type, codec.rtp_codec.mime_type
             )));
+        }
+        // RFC 8627 section 5.1 (draft-03 section 5.1): `repair-window` is required. A FlexFEC
+        // format registered without one is offered with the window its receiver uses when a
+        // line has none (`interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW`, 10 s).
+        let mut codec = codec;
+        if crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
+            &codec.rtp_codec.mime_type,
+        ) && interceptor::FlexFecParameters::parse(&codec.rtp_codec.sdp_fmtp_line)
+            .repair_window
+            .is_none()
+        {
+            let window = interceptor::FlexFecParameters::with_repair_window(
+                interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW,
+            )
+            .to_fmtp();
+            let line = codec.rtp_codec.sdp_fmtp_line.trim();
+            codec.rtp_codec.sdp_fmtp_line = if line.is_empty() {
+                window
+            } else {
+                format!("{line};{window}")
+            };
         }
         match typ {
             RtpCodecKind::Audio => {
@@ -1390,13 +1427,132 @@ impl MediaEngine {
     }
 
     pub(crate) fn push_codecs(&mut self, codecs: Vec<RTCRtpCodecParameters>, typ: RtpCodecKind) {
+        self.push_section_codecs(codecs, typ, false);
+    }
+
+    /// [`Self::push_codecs`] for one remote section, `sframe` when it carries `a=sframe`: its
+    /// formats are merged with the entries of the same numbering (SFrame or plain) only, so a
+    /// format an SFrame section numbers apart from a plain section keeps both numbers.
+    pub(crate) fn push_section_codecs(
+        &mut self,
+        codecs: Vec<RTCRtpCodecParameters>,
+        typ: RtpCodecKind,
+        sframe: bool,
+    ) {
+        let sframe_payload_types = self.sframe_payload_types.clone();
         let negotiated = match typ {
             RtpCodecKind::Audio => &mut self.negotiated_audio_codecs,
             RtpCodecKind::Video => &mut self.negotiated_video_codecs,
             RtpCodecKind::Application => &mut self.negotiated_application_codecs,
             RtpCodecKind::Unspecified => return,
         };
-        MediaEngine::merge_negotiated_codecs(negotiated, codecs);
+        let before = negotiated.len();
+        MediaEngine::merge_negotiated_codecs(negotiated, codecs, |payload_type| {
+            sframe_payload_types.contains(&payload_type) == sframe
+        });
+        if sframe {
+            let added: Vec<PayloadType> = negotiated[before..]
+                .iter()
+                .map(|c| c.payload_type)
+                .collect();
+            self.sframe_payload_types.extend(added);
+        }
+    }
+
+    /// The formats a section of `kind` offers and matches against: those of the negotiated
+    /// list (the registered ones before any negotiation) in the section's numbering, SFrame
+    /// (`sframe`) or plain. An SFrame section of a connection that has negotiated none yet
+    /// numbers the registered formats with payload types no registered or negotiated format
+    /// uses ([`Self::sframe_numbering`]).
+    pub(crate) fn codecs_for_section(
+        &self,
+        kind: RtpCodecKind,
+        sframe: bool,
+    ) -> Vec<RTCRtpCodecParameters> {
+        let numbered: Vec<RTCRtpCodecParameters> = self
+            .get_codecs_by_kind(kind)
+            .into_iter()
+            .filter(|codec| self.sframe_payload_types.contains(&codec.payload_type) == sframe)
+            .collect();
+        if sframe && numbered.is_empty() {
+            return self.sframe_numbering(kind);
+        }
+        numbered
+    }
+
+    /// The registered formats of `kind` renumbered for an SFrame section: each registered
+    /// format (audio first, then video, so that the kinds do not share a number either) takes
+    /// the next dynamic payload type (96 to 127, then 35 to 63; never 64 to 95, RFC 5761
+    /// section 4) that no registered or negotiated format uses. RTX `apt` and RED's
+    /// redundancy list follow the renumbering. The numbering is the same every time while
+    /// the registration and the negotiated lists are.
+    pub(crate) fn sframe_numbering(&self, kind: RtpCodecKind) -> Vec<RTCRtpCodecParameters> {
+        let taken: std::collections::HashSet<PayloadType> = [
+            &self.audio_codecs,
+            &self.video_codecs,
+            &self.negotiated_audio_codecs,
+            &self.negotiated_video_codecs,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|codec| codec.payload_type)
+        .collect();
+        let mut free = (96..=127u8)
+            .chain(35..=63u8)
+            .filter(|pt| !taken.contains(pt));
+        let mut map: Vec<(RtpCodecKind, PayloadType, PayloadType)> = vec![];
+        for k in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+            for codec in self.registered_codecs_by_kind(k) {
+                if let Some(pt) = free.next() {
+                    map.push((k, codec.payload_type, pt));
+                }
+            }
+        }
+        let renumber = |pt: PayloadType| {
+            map.iter()
+                .find(|(k, old, _)| *k == kind && *old == pt)
+                .map(|(_, _, new)| *new)
+        };
+        self.registered_codecs_by_kind(kind)
+            .iter()
+            .filter_map(|codec| {
+                let mut codec = codec.clone();
+                codec.payload_type = renumber(codec.payload_type)?;
+                match repair_family(&codec.rtp_codec) {
+                    "rtx" => {
+                        let apt = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)?;
+                        let apt = renumber(apt)?;
+                        let rest: Vec<String> = codec
+                            .rtp_codec
+                            .sdp_fmtp_line
+                            .split(';')
+                            .map(str::trim)
+                            .filter(|p| {
+                                !p.is_empty() && !p.to_ascii_lowercase().starts_with("apt=")
+                            })
+                            .map(str::to_owned)
+                            .collect();
+                        codec.rtp_codec.sdp_fmtp_line = std::iter::once(format!("apt={apt}"))
+                            .chain(rest)
+                            .collect::<Vec<_>>()
+                            .join(";");
+                    }
+                    "red" if !codec.rtp_codec.sdp_fmtp_line.trim().is_empty() => {
+                        let list: Option<Vec<String>> = codec
+                            .rtp_codec
+                            .sdp_fmtp_line
+                            .trim()
+                            .split('/')
+                            .map(|pt| pt.trim().parse().ok().and_then(renumber))
+                            .map(|pt| pt.map(|pt: PayloadType| pt.to_string()))
+                            .collect();
+                        codec.rtp_codec.sdp_fmtp_line = list?.join("/");
+                    }
+                    _ => {}
+                }
+                Some(codec)
+            })
+            .collect()
     }
 
     /// Adds the formats of one remote media section to the negotiated list of its kind.
@@ -1423,6 +1579,7 @@ impl MediaEngine {
     fn merge_negotiated_codecs(
         negotiated: &mut Vec<RTCRtpCodecParameters>,
         incoming: Vec<RTCRtpCodecParameters>,
+        same_numbering: impl Fn(PayloadType) -> bool,
     ) {
         let is_rtx = |codec: &RTCRtpCodecParameters| repair_family(&codec.rtp_codec) == "rtx";
 
@@ -1437,7 +1594,8 @@ impl MediaEngine {
             }
             let known = merged.iter().any(|existing| {
                 existing.payload_type == codec.payload_type
-                    || same_format(&existing.rtp_codec, &codec.rtp_codec)
+                    || (same_numbering(existing.payload_type)
+                        && same_format(&existing.rtp_codec, &codec.rtp_codec))
             });
             if !known {
                 take[i] = true;
@@ -1525,6 +1683,12 @@ impl MediaEngine {
             }
 
             let mut codecs = codecs_from_media_description(media)?;
+            // RFC 4585 section 4.1: no feedback outside an AVPF-based profile.
+            if !crate::peer_connection::sdp::is_avpf_section(media) {
+                for codec in &mut codecs {
+                    codec.rtp_codec.rtcp_feedback.clear();
+                }
+            }
 
             let add_if_new = |existing_codecs: &mut Vec<RTCRtpCodecParameters>,
                               codec: &RTCRtpCodecParameters| {
@@ -1602,6 +1766,14 @@ impl MediaEngine {
                             .is_some_and(|apt| removed.contains(&apt)))
             });
 
+            // RFC 8627 section 5.1 (and draft-ietf-payload-flexible-fec-scheme-03 section 5.1):
+            // `repair-window` is a required parameter, so a FlexFEC format without one is not
+            // negotiated. Section 5.2.1: "the receiver ... MUST reject" a repair window it
+            // cannot support: one longer than the window this endpoint registered.
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                matches.retain(|codec| self.repair_window_supported(codec, typ));
+            }
+
             // RFC 8627 section 1.1.7: offered FlexFEC and another RTP retransmission method,
             // the answer contains only FlexFEC.
             if !self.flexfec_with_retransmission {
@@ -1615,11 +1787,25 @@ impl MediaEngine {
                 }
             }
 
+            // RFC 2198 section 5: the encodings a RED format names in its fmtp
+            // (`<primary>/<redundant>...`) "MUST" be formats of the m= line too, and section
+            // 3: of RED's own clock rate. A RED format naming one that is not, or one this
+            // endpoint did not negotiate, carries blocks that cannot be decoded, and is not
+            // negotiated. A RED format without an fmtp line (libwebrtc's `video/red`) names
+            // none.
+            for matches in [&mut exact_matches, &mut partial_matches] {
+                let negotiated = matches.clone();
+                matches.retain(|codec| red_encodings_negotiated(codec, &negotiated));
+            }
+
             // use exact matches when they exist, otherwise fall back to partial
+            // An SFrame section's formats are numbered apart from the plain ones
+            // (draft-ietf-avtcore-rtp-sframe-03 section 6).
+            let sframe = media.has_attribute(ATTR_KEY_SFRAME);
             if !exact_matches.is_empty() {
-                self.push_codecs(exact_matches, typ);
+                self.push_section_codecs(exact_matches, typ, sframe);
             } else if !partial_matches.is_empty() {
-                self.push_codecs(partial_matches, typ);
+                self.push_section_codecs(partial_matches, typ, sframe);
             } else {
                 // no match, not negotiated
                 continue;
@@ -1629,6 +1815,48 @@ impl MediaEngine {
         }
 
         Ok(())
+    }
+
+    /// Whether a remote FlexFEC format (`codec`, RFC 8627 or draft-03) has the required
+    /// `repair-window` (section 5.1) and it is no longer than the one this endpoint registered
+    /// for the format (section 5.2.1). Any other format passes.
+    fn repair_window_supported(&self, codec: &RTCRtpCodecParameters, typ: RtpCodecKind) -> bool {
+        let mime_type = &codec.rtp_codec.mime_type;
+        if !crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(mime_type) {
+            return true;
+        }
+        let Some(remote) =
+            interceptor::FlexFecParameters::parse(&codec.rtp_codec.sdp_fmtp_line).repair_window
+        else {
+            log::debug!(
+                "{mime_type} payload type {} without repair-window: not negotiated (RFC 8627 \
+                 section 5.1)",
+                codec.payload_type
+            );
+            return false;
+        };
+        let registered = match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            _ => &self.application_codecs,
+        };
+        let supported = registered
+            .iter()
+            .filter(|local| local.rtp_codec.mime_type.eq_ignore_ascii_case(mime_type))
+            .filter_map(|local| {
+                interceptor::FlexFecParameters::parse(&local.rtp_codec.sdp_fmtp_line).repair_window
+            })
+            .max()
+            .unwrap_or(interceptor::FLEXFEC_MAX_REPAIR_WINDOW);
+        if remote > supported {
+            log::debug!(
+                "{mime_type} payload type {}: repair window {remote:?} longer than the \
+                 {supported:?} this endpoint supports: not negotiated (RFC 8627 section 5.2.1)",
+                codec.payload_type
+            );
+            return false;
+        }
+        true
     }
 
     /// The `a=fmtp` parameters this endpoint states for `codec`, a format of a media section it
@@ -1700,6 +1928,16 @@ impl MediaEngine {
             h265_answer_fmtp(&local_line, &codec.rtp_codec.sdp_fmtp_line)
         } else {
             local_line
+        }
+    }
+
+    /// The codecs registered for `typ`, whatever negotiation made of them.
+    pub(crate) fn registered_codecs_by_kind(&self, typ: RtpCodecKind) -> &[RTCRtpCodecParameters] {
+        match typ {
+            RtpCodecKind::Audio => &self.audio_codecs,
+            RtpCodecKind::Video => &self.video_codecs,
+            RtpCodecKind::Application => &self.application_codecs,
+            RtpCodecKind::Unspecified => &[],
         }
     }
 
@@ -1905,6 +2143,90 @@ fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
         && a.clock_rate == b.clock_rate
         && a.channels == b.channels
         && parameters(a) == parameters(b)
+}
+
+/// RFC 8834 section 4.3: where payload types associate RTP streams with m= lines (the
+/// sections of one BUNDLE group share an RTP session), "the payload type numbers MUST be
+/// unique across the signalling contexts"; RFC 9143 section 9.1 says the same of a BUNDLE
+/// group. Given the sections of one group (their mid and the formats their m= line lists),
+/// the payload types that two sections use for different formats, each with the mids that
+/// use it. Empty when the group's payload types are consistent. For the SDP layer, which
+/// refuses such a remote offer (or reads the packets by MID, not by payload type).
+pub(crate) fn payload_types_reused_across_sections(
+    sections: &[(&str, &[RTCRtpCodecParameters])],
+) -> Vec<(PayloadType, Vec<String>)> {
+    let mut conflicts: Vec<(PayloadType, Vec<String>)> = vec![];
+    for (i, (mid, codecs)) in sections.iter().enumerate() {
+        for codec in codecs.iter() {
+            for (other_mid, other_codecs) in &sections[i + 1..] {
+                let clash = other_codecs.iter().any(|other| {
+                    other.payload_type == codec.payload_type
+                        && !same_format(&other.rtp_codec, &codec.rtp_codec)
+                });
+                if !clash {
+                    continue;
+                }
+                let entry = match conflicts
+                    .iter_mut()
+                    .find(|(pt, _)| *pt == codec.payload_type)
+                {
+                    Some(entry) => entry,
+                    None => {
+                        conflicts.push((codec.payload_type, vec![]));
+                        conflicts.last_mut().expect("just pushed")
+                    }
+                };
+                for m in [*mid, *other_mid] {
+                    if !entry.1.iter().any(|known| known == m) {
+                        entry.1.push(m.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    conflicts
+}
+
+#[cfg(test)]
+mod payload_type_reuse_test {
+    use super::*;
+
+    fn codec(payload_type: PayloadType, mime_type: &str, clock_rate: u32) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels: 0,
+                sdp_fmtp_line: String::new(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    /// RFC 8834 section 4.3: one payload type names one format across the m= lines of an
+    /// RTP session; the same format under one number in two sections is fine.
+    #[test]
+    fn a_payload_type_naming_two_formats_in_one_group_is_found() {
+        let audio = [
+            codec(111, MIME_TYPE_OPUS, 48000),
+            codec(96, MIME_TYPE_PCMU, 8000),
+        ];
+        let video = [
+            codec(96, MIME_TYPE_VP8, 90000),
+            codec(97, MIME_TYPE_VP9, 90000),
+        ];
+        let more_video = [codec(97, MIME_TYPE_VP9, 90000)];
+        let conflicts = payload_types_reused_across_sections(&[
+            ("0", &audio),
+            ("1", &video),
+            ("2", &more_video),
+        ]);
+        assert_eq!(conflicts, vec![(96, vec!["0".to_owned(), "1".to_owned()])]);
+        assert!(
+            payload_types_reused_across_sections(&[("1", &video), ("2", &more_video)]).is_empty()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2159,4 +2481,28 @@ mod register_feedback_test {
         assert_eq!(1, count(&me, "transport-cc", ""));
         assert!(me.audio_codecs[0].rtp_codec.rtcp_feedback.is_empty());
     }
+}
+
+/// Whether `codec`, when it is a RED format (RFC 2198), names in its fmtp only formats of
+/// `negotiated` with its own clock rate. Any other format, and a RED format without an fmtp
+/// line, passes.
+pub(crate) fn red_encodings_negotiated(
+    codec: &RTCRtpCodecParameters,
+    negotiated: &[RTCRtpCodecParameters],
+) -> bool {
+    let red = &codec.rtp_codec;
+    if !red.mime_type.to_ascii_lowercase().ends_with("/red") {
+        return true;
+    }
+    let fmtp = red.sdp_fmtp_line.trim();
+    if fmtp.is_empty() {
+        return true;
+    }
+    rtp::codec::red::parse_red_fmtp(fmtp).is_ok_and(|payload_types| {
+        payload_types.iter().all(|pt| {
+            negotiated.iter().any(|named| {
+                named.payload_type == *pt && named.rtp_codec.clock_rate == red.clock_rate
+            })
+        })
+    })
 }

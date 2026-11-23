@@ -608,3 +608,127 @@ fn a_stream_with_decoding_order_numbers_is_received_in_decoding_order() -> Resul
     assert_eq!(annex_b(&expected), out.freeze());
     Ok(())
 }
+
+// --- Several RTP streams of one bitstream: MRST and MRMT (4.3, 4.6, 6) ---
+
+/// A single NAL unit packet of layer `layer` (type 1, TID 1) with DONL `don`; the NAL unit's
+/// one octet of payload is `mark`.
+fn layered_with_donl(layer: u8, don: u16, mark: u8) -> Bytes {
+    let [high, low] = don.to_be_bytes();
+    Bytes::from(vec![0x02, (layer << 3) | 1, high, low, mark])
+}
+
+/// The same packet without DONL.
+fn layered(layer: u8, mark: u8) -> Bytes {
+    Bytes::from(vec![0x02, (layer << 3) | 1, mark])
+}
+
+fn marks(units: &[H265NalUnit]) -> Vec<u8> {
+    units.iter().map(|unit| unit.data[2]).collect()
+}
+
+/// RFC 7798 section 4.3: "Receivers MUST support all of SRST, MRST, and MRMT"; section 6:
+/// with `sprop-max-don-diff` above 0 the NAL units of all the RTP streams of a bitstream go
+/// into one de-packetization buffer and leave by AbsDon (section 4.6, derived along each
+/// stream), whenever condition A holds. A base layer stream carries the even decoding order
+/// numbers and an enhancement layer stream the odd ones, across the DON wrap, and each
+/// enhancement packet arrives before the base packet that precedes it in decoding order.
+#[test]
+fn nal_units_of_several_rtp_streams_are_passed_on_in_cross_stream_decoding_order() -> Result<()> {
+    const BASE: u32 = 0x1000;
+    const ENHANCEMENT: u32 = 0x2000;
+    let mut receiver = H265MultiStreamDepacketizer::new(100);
+    receiver.add_stream(BASE, 2);
+    receiver.add_stream(ENHANCEMENT, 2);
+
+    let arrivals: [(u32, u8, u16, u16); 8] = [
+        (ENHANCEMENT, 1, 10, 65535),
+        (BASE, 0, 20, 65534),
+        (ENHANCEMENT, 1, 11, 1),
+        (BASE, 0, 21, 0),
+        (ENHANCEMENT, 1, 12, 3),
+        (BASE, 0, 22, 2),
+        (ENHANCEMENT, 1, 13, 5),
+        (BASE, 0, 23, 4),
+    ];
+    let mut out = vec![];
+    let mut released_while_receiving = 0;
+    for (stream, layer, sequence_number, don) in arrivals {
+        let units = receiver.push(
+            stream,
+            sequence_number,
+            0,
+            &layered_with_donl(layer, don, don as u8),
+        )?;
+        released_while_receiving += units.len();
+        out.extend(units);
+    }
+    assert!(
+        released_while_receiving >= 4,
+        "condition A passes NAL units on while the streams play, not only at the end"
+    );
+    out.extend(receiver.flush());
+    let expected: Vec<u8> = [65534u16, 65535, 0, 1, 2, 3, 4, 5]
+        .iter()
+        .map(|don| *don as u8)
+        .collect();
+    assert_eq!(expected, marks(&out));
+    // Each NAL unit keeps the layer of the stream it came in.
+    assert!(
+        out.iter()
+            .all(|unit| (unit.data[1] >> 3 == 1) == (unit.don.unwrap() % 2 == 1))
+    );
+    Ok(())
+}
+
+/// RFC 7798 section 6, `sprop-max-don-diff` 0 for every stream: "the NAL units carried in the
+/// multiple RTP streams are passed to the decoder in their NTP timestamp order", of the same
+/// timestamp the dependee stream's first, one stream's in transmission order. Duplicated and
+/// outdated packets are removed. The enhancement stream's packet of each access unit arrives
+/// first.
+#[test]
+fn without_decoding_order_numbers_several_streams_are_ordered_by_ntp_timestamp_and_dependency()
+-> Result<()> {
+    const BASE: u32 = 1;
+    const ENHANCEMENT: u32 = 2;
+    let mut receiver = H265MultiStreamDepacketizer::new(0);
+    receiver.add_stream(BASE, 0);
+    receiver.add_stream(ENHANCEMENT, 0);
+
+    // (stream, layer, sequence number, NTP timestamp, mark): mark 0xA_ is the base layer's
+    // NAL unit of access unit _, 0xB_ the enhancement layer's.
+    let arrivals: [(u32, u8, u16, u64, u8); 9] = [
+        (ENHANCEMENT, 1, 500, 100, 0xB1),
+        (BASE, 0, 7, 100, 0xA1),
+        (ENHANCEMENT, 1, 501, 200, 0xB2),
+        (BASE, 0, 8, 200, 0xA2),
+        // A duplicate and an outdated packet.
+        (BASE, 0, 8, 200, 0xA2),
+        (ENHANCEMENT, 1, 500, 100, 0xB1),
+        (BASE, 0, 9, 300, 0xA3),
+        (BASE, 0, 10, 300, 0xA4),
+        (ENHANCEMENT, 1, 502, 300, 0xB3),
+    ];
+    let mut out = vec![];
+    for (stream, layer, sequence_number, ntp, mark) in arrivals {
+        out.extend(receiver.push(stream, sequence_number, ntp, &layered(layer, mark))?);
+    }
+    out.extend(receiver.flush());
+    assert_eq!(vec![0xA1, 0xB1, 0xA2, 0xB2, 0xA3, 0xA4, 0xB3], marks(&out));
+    Ok(())
+}
+
+/// A packet of a stream that was not added gives nothing, and the buffer stays bounded however
+/// long a dependee stays silent.
+#[test]
+fn the_multi_stream_receiver_is_bounded() -> Result<()> {
+    let mut receiver = H265MultiStreamDepacketizer::new(0);
+    receiver.add_stream(1, 0);
+    receiver.add_stream(2, 0);
+    assert!(receiver.push(9, 0, 0, &layered(0, 1))?.is_empty());
+    for n in 0..(MAX_DEPACKETIZATION_NAL_UNITS as u16 + 100) {
+        receiver.push(2, n, u64::from(n), &layered(1, 1))?;
+        assert!(receiver.len() <= MAX_DEPACKETIZATION_NAL_UNITS);
+    }
+    Ok(())
+}
