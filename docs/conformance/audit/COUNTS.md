@@ -9,17 +9,17 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4041 | 300 | 346 | 198 | 35 | 610 | 5530 |
-| SHOULD | 656 | 82 | 80 | 76 | 6 | 325 | 1225 |
-| MAY | 385 | 33 | 36 | 131 | 0 | 165 | 750 |
+| MUST | 4076 | 274 | 341 | 193 | 35 | 611 | 5530 |
+| SHOULD | 657 | 82 | 80 | 75 | 6 | 325 | 1225 |
+| MAY | 386 | 33 | 36 | 130 | 0 | 165 | 750 |
 | PROC | 57 | 3 | 4 | 3 | 0 | 0 | 67 |
-| all | 5139 | 418 | 466 | 408 | 41 | 1100 | 7572 |
+| all | 5176 | 392 | 461 | 401 | 41 | 1101 | 7572 |
 
 ## Per file
 
 | File | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|
-| `av1-rtp.md` | MUST | 57 | 1 | 1 | 0 | 0 | 12 | 71 |
+| `av1-rtp.md` | MUST | 58 | 0 | 1 | 0 | 0 | 12 | 71 |
 | `av1-rtp.md` | SHOULD | 13 | 0 | 1 | 0 | 0 | 1 | 15 |
 | `av1-rtp.md` | MAY | 7 | 0 | 0 | 0 | 0 | 3 | 10 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MUST | 33 | 1 | 2 | 0 | 0 | 0 | 36 |
@@ -65,9 +65,9 @@ is a procedure step without a keyword.
 | `rfc4588.md` | MUST | 22 | 1 | 3 | 0 | 0 | 12 | 38 |
 | `rfc4588.md` | SHOULD | 6 | 1 | 3 | 1 | 0 | 2 | 13 |
 | `rfc4588.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
-| `rfc4733.md` | MUST | 17 | 1 | 4 | 3 | 0 | 1 | 26 |
-| `rfc4733.md` | SHOULD | 7 | 0 | 0 | 4 | 0 | 6 | 17 |
-| `rfc4733.md` | MAY | 0 | 1 | 0 | 5 | 0 | 1 | 7 |
+| `rfc4733.md` | MUST | 21 | 1 | 2 | 0 | 0 | 2 | 26 |
+| `rfc4733.md` | SHOULD | 8 | 0 | 0 | 3 | 0 | 6 | 17 |
+| `rfc4733.md` | MAY | 1 | 1 | 0 | 4 | 0 | 1 | 7 |
 | `rfc5104.md` | MUST | 39 | 1 | 4 | 0 | 0 | 8 | 52 |
 | `rfc5104.md` | SHOULD | 3 | 0 | 1 | 3 | 0 | 4 | 11 |
 | `rfc5104.md` | MAY | 7 | 0 | 1 | 2 | 0 | 2 | 12 |
@@ -102,7 +102,7 @@ is a procedure step without a keyword.
 | `rfc6062.md` | MUST | 19 | 0 | 0 | 0 | 0 | 5 | 24 |
 | `rfc6062.md` | MAY | 3 | 0 | 0 | 0 | 0 | 1 | 4 |
 | `rfc6062.md` | PROC | 10 | 0 | 0 | 0 | 0 | 0 | 10 |
-| `rfc6184.md` | MUST | 45 | 8 | 3 | 0 | 0 | 17 | 73 |
+| `rfc6184.md` | MUST | 55 | 0 | 1 | 0 | 0 | 17 | 73 |
 | `rfc6184.md` | SHOULD | 8 | 1 | 4 | 4 | 0 | 12 | 29 |
 | `rfc6184.md` | MAY | 6 | 0 | 2 | 2 | 0 | 5 | 15 |
 | `rfc6188.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 5 |
@@ -141,7 +141,7 @@ is a procedure step without a keyword.
 | `rfc7164.md` | MAY | 0 | 0 | 0 | 3 | 0 | 0 | 3 |
 | `rfc7496.md` | MUST | 4 | 0 | 1 | 1 | 0 | 0 | 6 |
 | `rfc7496.md` | MAY | 2 | 0 | 0 | 1 | 0 | 1 | 4 |
-| `rfc7587.md` | MUST | 8 | 3 | 1 | 0 | 0 | 8 | 20 |
+| `rfc7587.md` | MUST | 11 | 0 | 1 | 0 | 0 | 8 | 20 |
 | `rfc7587.md` | SHOULD | 1 | 0 | 1 | 0 | 0 | 8 | 10 |
 | `rfc7587.md` | MAY | 2 | 0 | 0 | 1 | 0 | 0 | 3 |
 | `rfc7627.md` | MUST | 8 | 0 | 0 | 0 | 0 | 3 | 11 |
@@ -152,13 +152,13 @@ is a procedure step without a keyword.
 | `rfc7714.md` | MUST | 30 | 4 | 2 | 0 | 0 | 3 | 39 |
 | `rfc7714.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 1 | 3 |
 | `rfc7714.md` | MAY | 4 | 0 | 0 | 0 | 0 | 1 | 5 |
-| `rfc7741.md` | MUST | 42 | 2 | 0 | 2 | 0 | 2 | 48 |
+| `rfc7741.md` | MUST | 45 | 0 | 0 | 1 | 0 | 2 | 48 |
 | `rfc7741.md` | SHOULD | 6 | 1 | 0 | 4 | 0 | 3 | 14 |
 | `rfc7741.md` | MAY | 7 | 2 | 0 | 1 | 0 | 1 | 11 |
 | `rfc7742.md` | MUST | 3 | 2 | 4 | 0 | 0 | 9 | 18 |
 | `rfc7742.md` | SHOULD | 0 | 0 | 1 | 1 | 0 | 4 | 6 |
 | `rfc7742.md` | MAY | 1 | 1 | 1 | 1 | 0 | 1 | 5 |
-| `rfc7798.md` | MUST | 42 | 9 | 3 | 2 | 0 | 23 | 79 |
+| `rfc7798.md` | MUST | 52 | 0 | 2 | 2 | 0 | 23 | 79 |
 | `rfc7798.md` | SHOULD | 4 | 2 | 4 | 1 | 0 | 2 | 13 |
 | `rfc7798.md` | MAY | 2 | 0 | 2 | 6 | 0 | 9 | 19 |
 | `rfc7874.md` | MUST | 4 | 1 | 0 | 3 | 0 | 1 | 9 |
@@ -288,7 +288,7 @@ is a procedure step without a keyword.
 | `rfc9605.md` | MUST | 25 | 1 | 0 | 3 | 0 | 3 | 32 |
 | `rfc9605.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `rfc9605.md` | MAY | 4 | 0 | 2 | 0 | 0 | 0 | 6 |
-| `rfc9628.md` | MUST | 47 | 3 | 2 | 1 | 0 | 6 | 59 |
+| `rfc9628.md` | MUST | 51 | 0 | 2 | 0 | 0 | 6 | 59 |
 | `rfc9628.md` | SHOULD | 6 | 1 | 0 | 1 | 0 | 2 | 10 |
 | `rfc9628.md` | MAY | 2 | 1 | 0 | 3 | 0 | 0 | 6 |
 | `rfc9653.md` | MUST | 10 | 1 | 0 | 0 | 0 | 4 | 15 |

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **media conformance**: payload formats.
+  - The default VP9 formats state `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6:
+    a receiver "MUST" provide both); new `media_engine::VP9_RECEIVER_LIMITS`. Offers and
+    answers with the default codecs change accordingly.
+  - Two VP8 formats that differ only in `max-fr` / `max-fs` match (RFC 7741 section 6.2.2:
+    receiver capabilities, declarative); they were a mismatch.
 - **media conformance**: RTCP feedback and extended reports.
   - The TWCC receiver follows draft-holmer-rmcat-transport-wide-cc-extensions-01 section
     3.1.1 when a late packet moves the base sequence number back: packets an earlier feedback
@@ -1446,6 +1452,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: `rtp::codec::tone` (`Tone`, `ToneSender`): the `audio/tone` payload
+  of RFC 4733 section 4 and its sending rule.
 - **media conformance**: RFC 3611 report blocks, RFC 5104 trade-off and back channel,
   RPSI and LRR helpers.
   - `XrReportInterceptor` / `XrReportBuilder` (`Slot::ExtendedReports`,
@@ -2359,6 +2367,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
+  a later packet of it (the segment began at the first packet to arrive and the earlier ones
+  were released as consumed); NAL units now come out in sequence-number order from the start
+  (RFC 6184 sections 5.6, 5.8; RFC 7798 section 6).
 - **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
   `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
   randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course
