@@ -2275,6 +2275,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-2-pion`): Pion (`github.com/pion/webrtc/v4` v4.2.29, MIT)
+  is a peer of the interop matrix (`scripts/test-env/peers/pion`). The test image carries Go
+  1.27.4 (by SHA-256) and every module `peers/pion/image/go.sum` pins; the peer builds offline
+  at run time. Its media come from the environment's fixtures (IVF, H.264 Annex B, Ogg Opus)
+  through Pion's own packetizers, with Pion's default interceptors (NACK, RTCP reports, TWCC
+  feedback) and its transport-wide sequence numbers on what it sends.
+
 - **interop** (branch `conf/peers-1-harness`): the interop matrix takes non-browser peers.
   A peer is a program around an independent WebRTC stack (`scripts/test-env/peers/<name>/`:
   `peer.json` with its pinned version, licence, upstream and the capabilities it lacks, and a

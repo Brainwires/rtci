@@ -11,6 +11,7 @@ n/a. The claims these cells prove are rows of [conformance/w6.md](conformance/w6
 |---|---|---|---|---|---|
 | Chromium, Firefox, WebKit | browsers | the Playwright 1.64.1 image's builds | - | [playwright](https://github.com/microsoft/playwright) | `interop/*.spec.mjs`, headless |
 | webrtc-rs `webrtc` | Rust, the pre-sans-I/O line (its own DTLS, SCTP, ICE) | 0.17.3 | MIT OR Apache-2.0 | [webrtc-rs/webrtc](https://github.com/webrtc-rs/webrtc) | `tests/*_interop.rs`, in-process, every platform CI tests |
+| Pion (`pion`) | Go; its own ICE, DTLS, SCTP, SRTP, RTP and interceptors | `github.com/pion/webrtc/v4` v4.2.29 (pion/ice v4.4.9, pion/dtls v3.1.16, pion/sctp v1.12.1, pion/srtp v3.1.3, pion/interceptor v0.1.51; `peers/pion/image/go.sum`), Go 1.27.4 | MIT | [pion/webrtc](https://github.com/pion/webrtc) | `peers/pion`, in the test image, built offline from the image's module cache |
 
 The browsers' media stacks largely descend from libwebrtc. The peers below are independent
 implementations, each pinned to an exact release, run by the same signalling as the browser page.
