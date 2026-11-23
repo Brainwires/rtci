@@ -196,7 +196,10 @@ pub struct StreamInfo {
     /// The MIME type of every format of the stream's m= section by payload type, repair and
     /// redundancy formats included, for an interceptor that acts on a format the stream does
     /// not name itself: the RED interceptor finds the section's `red` format here (RFC 2198
-    /// section 5). Empty when the binder did not say.
+    /// section 5). For a local stream the peer connection lists them in the order of the
+    /// remote description's m= line, the remote side's order of preference (RFC 3264 sections
+    /// 5.1 and 6.1), which decides whether the RED interceptor sends RED. Empty when the
+    /// binder did not say.
     pub section_mime_types: Vec<(u8, String)>,
 }
 

@@ -2,6 +2,7 @@ use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::interceptor_registry::create_stream_info;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::rtp_transceiver::PayloadType;
 use crate::rtp_transceiver::SSRC;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS;
@@ -61,6 +62,11 @@ pub(crate) struct RTCRtpSenderInternal {
     send_encodings: Vec<RTCRtpEncodingParameters>,
     /// Negotiated codec parameters
     send_codecs: Vec<RTCRtpCodecParameters>,
+    /// The payload types of the remote description's m= line, in its order (RFC 3264 sections
+    /// 5.1 and 6.1: the order of preference); empty until a remote description set
+    /// `send_codecs`. `send_codecs` lists exact matches before partial ones, so the streams
+    /// bound to the interceptors list their section's formats in this order instead.
+    remote_format_order: Vec<PayloadType>,
 
     /// Cached parameters returned by get_parameters()
     last_returned_parameters: Option<RTCRtpSendParameters>,
@@ -884,7 +890,29 @@ impl RTCRtpSenderInternal {
     /// * `codecs` - Vector of codec parameters in preference order
     pub(crate) fn set_codec_preferences(&mut self, codecs: Vec<RTCRtpCodecParameters>) {
         self.send_codecs = codecs;
+        self.remote_format_order.clear();
         self.last_returned_parameters = None;
+    }
+
+    /// Records the order of the remote description's m= line whose formats
+    /// [`Self::set_codec_preferences`] just set, for the streams bound to the interceptors.
+    pub(crate) fn set_remote_format_order(&mut self, order: Vec<PayloadType>) {
+        self.remote_format_order = order;
+    }
+
+    /// The negotiated codecs in the remote description's order of preference, the ones it
+    /// does not list (none, once negotiated) last.
+    fn codecs_in_remote_order(&self) -> Vec<RTCRtpCodecParameters> {
+        let mut codecs = self.send_codecs.clone();
+        if !self.remote_format_order.is_empty() {
+            codecs.sort_by_key(|codec| {
+                self.remote_format_order
+                    .iter()
+                    .position(|pt| *pt == codec.payload_type)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        codecs
     }
 
     /// Configures RTX (retransmission) and FEC (forward error correction) for all encodings.
@@ -1072,6 +1100,9 @@ impl RTCRtpSenderInternal {
     /// its cache (header extensions do not invalidate it) nor its transaction id is touched.
     fn local_stream_infos(&self, media_engine: &MediaEngine) -> Vec<StreamInfo> {
         let codecs = &self.send_codecs;
+        // The section's formats as the remote side ordered them: the RED interceptor sends
+        // RED when the remote side lists it ahead of the stream's codec.
+        let section_codecs = self.codecs_in_remote_order();
         let header_extensions = media_engine
             .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly)
             .header_extensions;
@@ -1127,7 +1158,7 @@ impl RTCRtpSenderInternal {
                     fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
-                    codecs,
+                    &section_codecs,
                 );
                 info.initially_paused = !coding.rtp_coding_parameters.rid.is_empty()
                     && self
