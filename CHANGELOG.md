@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
     section 5.2.2): the formats of the most recent answer first in its order, then every
     other registered format the local preferences allow (the application's
-    `setCodecPreferences`, or the codec of the track a sender was made for). The answer's
-    format list no longer limits later offers. Negotiated payload types are kept; a format
+    `setCodecPreferences`, or the codec of the track a sender was made for). The format
+    list a remote description left no longer acts as a codec preference: it limits neither
+    later offers nor what a later remote description negotiates. Negotiated payload types are kept; a format
     that comes back keeps its registered payload type unless a negotiated format has it, and
     then takes a free dynamic one (its RTX `apt` follows). The formats a remote answer
     accepts are now negotiated also without `MediaEngine::set_multi_codec_negotiation`, so

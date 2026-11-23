@@ -1547,8 +1547,11 @@ impl MediaEngine {
         let mut primaries: std::collections::HashMap<PayloadType, PayloadType> =
             std::collections::HashMap::new();
         let is_rtx = |codec: &RTCRtpCodec| repair_family(codec) == "rtx";
+        // A registered format is matched against the negotiated ones only: two registered
+        // formats of one codec (H.264 profiles) are both offered.
+        let negotiated = out.clone();
         for codec in registered.iter().filter(|c| !is_rtx(&c.rtp_codec)) {
-            match codec_parameters_fuzzy_search(&codec.rtp_codec, &out) {
+            match codec_parameters_fuzzy_search(&codec.rtp_codec, &negotiated) {
                 (negotiated, CodecMatch::Exact) => {
                     primaries.insert(codec.payload_type, negotiated.payload_type);
                 }

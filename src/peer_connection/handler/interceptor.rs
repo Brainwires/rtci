@@ -2291,8 +2291,15 @@ mod boundary_tests {
                 ..Default::default()
             })],
         );
-        assert_eq!(1, reads.len(), "the report did not reach the RTP layer");
         assert!(stats.inbound_rtp_streams.is_empty());
+        let reached = reads.iter().any(|read| {
+            matches!(&read.message.packet, Packet::Rtcp(packets) if packets.iter().any(|p| {
+                p.as_any()
+                    .downcast_ref::<SenderReport>()
+                    .is_some_and(|sr| sr.ssrc == 0x7777)
+            }))
+        });
+        assert!(reached, "the report did not reach the RTP layer");
     }
 }
 

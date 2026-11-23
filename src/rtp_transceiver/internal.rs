@@ -896,12 +896,20 @@ impl RTCRtpTransceiverInternal {
         // An SFrame section's formats are matched in the SFrame numbering, a plain one's in
         // the plain numbering (draft-ietf-avtcore-rtp-sframe-03 section 6).
         let sframe = media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME);
-        let mut filtered_codecs = if self.preferred_codecs.is_empty() {
+        // The local preferences only: the list an earlier remote description left does not
+        // narrow what a later one negotiates (RFC 9429 section 5.2.2, a format a later offer
+        // brings back).
+        let mut filtered_codecs = if self.local_codec_preferences.is_empty() {
             vec![]
         } else {
             Self::match_remote_codecs(
                 remote_codecs.clone(),
-                self.codecs_in_numbering(media_engine, sframe),
+                RTCRtpReceiverInternal::get_codecs(
+                    &self.local_codec_preferences,
+                    self.kind(),
+                    media_engine,
+                    sframe,
+                ),
             )
         };
         if filtered_codecs.is_empty() {
