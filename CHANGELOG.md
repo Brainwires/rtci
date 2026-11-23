@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: `RTCRtpSender::send_restrictions(rid)` (new, additive): the limits an encoding is
+  to be sent under, the smaller of each of its answered `a=rid` restrictions and the remote
+  description's VP8 `max-fr` / `max-fs`, H.264 `max-fs` / `max-mbps` / `max-br` and the
+  section's `b=TIAS` / `b=AS` (RFC 8851 section 8). An offered separate FEC session
+  (`a=group:FEC` / `FEC-FR`, RFC 5109 section 14.3) is refused with its group (unchanged
+  behaviour, now tested).
 - **jsep**: ECN negotiation, early media, packet times, SSRCs on a clock-rate change.
   - With `SettingEngineBuilder::with_ecn(true)` ECN is negotiated with `a=ecn-capable-rtp`
     (RFC 8888 section 7, RFC 6679 section 6.1): every RTP section of an offer with an AVPF

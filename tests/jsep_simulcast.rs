@@ -289,6 +289,41 @@ fn an_answered_rid_may_tighten_but_not_loosen_the_offer() -> TestResult {
     Ok(())
 }
 
+/// RFC 8851 section 8: the rid restrictions "impose additional restrictions beyond those
+/// communicated in other techniques": an encoding is sent under the smaller of its answered
+/// rid limits and the answer's VP8 `max-fr` / `max-fs` and `b=TIAS`.
+#[test]
+fn an_encoding_is_sent_under_the_tighter_of_its_rid_format_and_bandwidth_limits() -> TestResult {
+    let (mut pc, sender, answer) = offered_three_layers()?;
+    let answer = edited(
+        &answer,
+        "a=rtpmap:96 VP8/90000\n",
+        "a=rtpmap:96 VP8/90000\na=fmtp:96 max-fr=15;max-fs=3600\n",
+    );
+    let at = answer.find("m=video").expect("a video section");
+    let c_line = at + answer[at..].find("c=IN IP4 0.0.0.0\n").expect("a c= line");
+    let answer = format!(
+        "{}c=IN IP4 0.0.0.0\nb=TIAS:800000\n{}",
+        &answer[..c_line],
+        &answer[c_line + "c=IN IP4 0.0.0.0\n".len()..]
+    );
+    pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::answer(crlf(&answer))?,
+    )?;
+    let mut rtp_sender = pc.rtp_sender(sender).expect("sender");
+    let f = rtp_sender.send_restrictions("f").expect("encoding f");
+    assert_eq!(f.max_width, Some(1280), "the rid's width is the tighter");
+    assert_eq!(f.max_height, Some(2704), "int(sqrt(3600 * 8)) macroblocks");
+    assert_eq!(f.max_fps, Some(15), "VP8 max-fr");
+    assert_eq!(f.max_fs, Some(3600 * 256), "VP8 max-fs in pixels");
+    assert_eq!(f.max_br, Some(800_000), "b=TIAS");
+    let q = rtp_sender.send_restrictions("q").expect("encoding q");
+    assert_eq!(q.max_width, Some(320));
+    assert!(rtp_sender.send_restrictions("x").is_none());
+    Ok(())
+}
+
 /// RFC 8853 section 5.2 / 5.3.2: the pause mark `~` needs RFC 7728, which the engine does not
 /// negotiate: by default it is not repeated in an answer, with `with_rid_pause_marks(true)` it
 /// is.

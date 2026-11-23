@@ -454,6 +454,64 @@ impl RTCRtpSender<'_> {
         }
     }
 
+    /// The limits the encoding `rid` (`""`: the first encoding) is to be sent under: its
+    /// `a=rid` restrictions (as the remote answer left them) combined with the receiver limits
+    /// of the remote description's format parameters for the codec it is sent with (VP8
+    /// `max-fr`, `max-fs`; H.264 `max-fs`, `max-mbps`, `max-br`) and the section's `b=TIAS` /
+    /// `b=AS`, the smaller of each pair (RFC 8851 section 8: the rid restrictions "impose
+    /// additional restrictions beyond those communicated in other techniques"). `a=imageattr`
+    /// is [`send_resolution`](Self::send_resolution)'s. `None` when the sender has no such
+    /// encoding. The engine has no encoder; the application's encoder applies this.
+    ///
+    /// Not a W3C method: a fork addition.
+    pub fn send_restrictions(&mut self, rid: &str) -> Option<RTCRtpRidRestrictions> {
+        let parameters = self.get_parameters();
+        let encoding = parameters
+            .encodings
+            .iter()
+            .find(|e| rid.is_empty() || e.rtp_coding_parameters.rid == rid)?;
+        let restrictions = encoding.rtp_coding_parameters.rid_restrictions.clone();
+        let codec = parameters.rtp_parameters.codecs.first().cloned();
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .clone();
+        let section = mid.and_then(|mid| {
+            let parsed = self.peer_connection.remote_description()?.parsed.as_ref()?;
+            parsed
+                .media_descriptions
+                .iter()
+                .find(|m| crate::peer_connection::sdp::get_mid_value(m) == Some(&mid))
+                .cloned()
+        });
+        let (mime_type, fmtp) = match &codec {
+            Some(codec) => {
+                let prefix = format!("{} ", codec.payload_type);
+                let remote_fmtp = section.as_ref().and_then(|m| {
+                    m.attributes
+                        .iter()
+                        .filter(|a| a.key == "fmtp")
+                        .find_map(|a| a.value.as_deref()?.strip_prefix(&prefix))
+                        .map(str::to_owned)
+                });
+                (
+                    codec.rtp_codec.mime_type.clone(),
+                    remote_fmtp.unwrap_or_else(|| codec.rtp_codec.sdp_fmtp_line.clone()),
+                )
+            }
+            None => (String::new(), String::new()),
+        };
+        Some(
+            crate::peer_connection::sdp::send_limits::combined_send_restrictions(
+                &restrictions,
+                &mime_type,
+                &fmtp,
+                section
+                    .as_ref()
+                    .and_then(crate::peer_connection::sdp::send_limits::section_bandwidth),
+            ),
+        )
+    }
+
     /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
     ///
     /// `Some(track)`: the sender sends `track` from now on. Its encodings and their SSRCs,
