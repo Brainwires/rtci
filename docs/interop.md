@@ -46,7 +46,10 @@ RFC text.
 Train 10 round 5 (PR #47, head 8945a520): Pion 42 pass, 6 n/a, 1 failing; str0m 43 / 6 / 0; aiortc
 35 / 13 / 1. The two failing cells have their verdicts in the cells; `conf/peers-6-train-fixes`
 6a937864 (round 6) fixes the RTCP cell's count and has the Pion peer write MID / RID, with the
-RID-less form kept as an expected failure. A cell named "(peer offers)" has the peer make the offer,
+RID-less form kept as an expected failure. With aiortc built from upstream main at 0ee2bd29 and
+coturn 4.6.3 (`conf/testenv-2-coturn-aiortc`, peer projects only, GitHub-hosted `agent-test` run
+45242039359): aiortc 36 pass, 14 n/a, 0 failing; Pion 44 / 6 / 0; str0m 43 / 7 / 0; the relay
+cells over TLS pass with the TLS clamp gone (the peers' TLS version is not reported). A cell named "(peer offers)" has the peer make the offer,
 "(Rust offers)" has Rust make it.
 
 | Cell | Pion | str0m | aiortc |
