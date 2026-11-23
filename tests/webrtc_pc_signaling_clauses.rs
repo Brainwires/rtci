@@ -1041,8 +1041,8 @@ fn without_random_lines(sdp: &str) -> Vec<&str> {
         .collect()
 }
 
-/// W3C 4.2.6: RTCAnswerOptions has no members, so the engine's extra
-/// `voice_activity_detection` member changes nothing in the answer.
+/// W3C 4.2.6: RTCAnswerOptions has no members: the default options (the empty dictionary)
+/// answer as no options do.
 #[test]
 fn answer_options_leave_the_answer_unchanged() -> TestResult {
     let mut offerer = default_peer()?;
@@ -1053,7 +1053,10 @@ fn answer_options_leave_the_answer_unchanged() -> TestResult {
     let plain = answerer.create_answer(None)?;
     let with_vad = answerer.create_answer(Some(
         rtc::peer_connection::configuration::RTCAnswerOptions {
-            voice_activity_detection: Some(true),
+            // W3C 4.2.6: the dictionary has no members. The one this API has is RFC 9429
+            // section 5.3.3.1's, and left unset (the empty dictionary) it changes nothing; set,
+            // it asks for silence suppression (`tests/jsep_voice_activity_detection.rs`).
+            voice_activity_detection: None,
         },
     ))?;
     assert_eq!(

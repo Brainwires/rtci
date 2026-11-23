@@ -956,7 +956,18 @@ impl RTCPeerConnection {
         // A new transport after the last one was closed (every m-section rejected) is a new ICE
         // session: the offer carries new credentials and `set_local_description` restarts the
         // agent, so none of the closed transport's candidates or selected pair carry over.
-        if is_ice_restart_requested || self.transport_closed {
+        // An offer that asks for a new DTLS association because the current one cannot key
+        // SRTP (set up for data channels only, RFC 5764 section 4.1; `add_dtls_association_
+        // attributes`) is part of an ICE restart: RFC 9429 section 5.8.3, a changed tls-id
+        // "MUST be part of an ICE restart, together with new ufrag and password values";
+        // RFC 8842 section 6.
+        let new_srtp_association = self.rtp_transceivers.iter().any(|t| !t.stopped())
+            && self.dtls_transport().is_started()
+            && !self.dtls_transport().can_key_srtp();
+        // So is one the application asked for (`renew_dtls_association`).
+        let new_srtp_association = new_srtp_association
+            || (self.dtls_transport().renewal_requested && self.dtls_transport().is_started());
+        if is_ice_restart_requested || self.transport_closed || new_srtp_association {
             self.stage_ice_restart()?;
         }
 
@@ -4704,7 +4715,6 @@ impl RTCPeerConnection {
         Ok(self.get_stats(now, selector))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

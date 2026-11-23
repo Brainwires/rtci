@@ -30,10 +30,17 @@ fn world() -> Result<World> {
     Ok(World::new(peer("10.0.0.1:5000")?, peer("10.0.0.2:5000")?))
 }
 
-/// The one `tls-id` of a description.
+/// The `tls-id` of a description's first transport. Each transport (each set of ICE
+/// credentials: an initial offer under the `balanced` policy has one per media type) is a DTLS
+/// association with a `tls-id` of its own (RFC 8842 section 5), stated once.
 fn tls_id(sdp: &str) -> String {
     let mut values = attribute_values(sdp, "tls-id");
-    assert_eq!(values.len(), 1, "one a=tls-id in\n{sdp}");
+    let transports: HashSet<String> = attribute_values(sdp, "ice-ufrag").into_iter().collect();
+    assert_eq!(
+        values.len(),
+        transports.len().max(1),
+        "one a=tls-id per transport in\n{sdp}"
+    );
     values.remove(0)
 }
 
@@ -80,7 +87,7 @@ fn the_initial_offer_carries_a_random_tls_id() -> Result<()> {
 /// m-section, in the offer and in the answer; and it is a media-level attribute, never a
 /// session-level or an `a=ssrc` one.
 #[test]
-fn the_tls_id_sits_on_the_bundle_tag_section_only() -> Result<()> {
+fn the_tls_id_sits_on_the_first_section_of_each_transport() -> Result<()> {
     let mut world = world()?;
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
@@ -98,9 +105,23 @@ fn the_tls_id_sits_on_the_bundle_tag_section_only() -> Result<()> {
             3,
             "three m-sections in\n{sdp}"
         );
-        assert_eq!(sdp.matches("tls-id").count(), 1, "{sdp}");
+        // One per transport (RFC 8842 section 5), on the first section of its transport: the
+        // sections are the transport's when they carry its ICE credentials.
         let sections: Vec<&str> = sdp.split("\r\nm=").collect();
         assert!(!sections[0].contains("a=tls-id:"), "session level:\n{sdp}");
+        let mut seen: HashSet<String> = HashSet::new();
+        for section in &sections[1..] {
+            let ufrag = section
+                .lines()
+                .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+                .map(str::to_owned);
+            let first_of_transport = ufrag.clone().is_some_and(|u| seen.insert(u));
+            assert_eq!(
+                section.matches("a=tls-id:").count(),
+                usize::from(first_of_transport),
+                "the first section of each transport, once:\n{sdp}"
+            );
+        }
         assert!(
             sections[1].contains("\r\na=tls-id:"),
             "first section:\n{sdp}"
@@ -296,7 +317,8 @@ fn a_malformed_tls_id_is_refused() -> Result<()> {
     }
 
     // IDENTICAL: a second section that repeats the attribute repeats the value.
-    let own = tls_id(&offer);
+    // The last section's transport's value: the attribute is appended to that section.
+    let own = attribute_values(&offer, "tls-id").pop().expect("a tls-id");
     assert!(offer.ends_with("\r\n"));
     let both = format!("{offer}a=tls-id:{own}\r\n");
     assert!(apply(both)?, "the same tls-id on both sections was refused");

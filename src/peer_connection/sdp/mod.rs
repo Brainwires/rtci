@@ -2910,8 +2910,16 @@ pub(crate) fn is_valid_tls_id(value: &str) -> bool {
 /// BUNDLE-tag m-section, and any other section that repeats it must give the same value. A
 /// value outside the syntax, or two sections of the one transport that disagree, make the
 /// description [`Error::ErrSessionDescriptionInvalidTlsId`]. No peer is required to send it.
+///
+/// Each transport is a DTLS association of its own (RFC 8842 section 5), so sections on
+/// different transports may state different values: sections are on one transport when they
+/// share ICE credentials (an initial BUNDLE offer gives each section that is not bundle-only
+/// its own, RFC 9143 section 7.2; a section outside every group has its own). The value
+/// returned is the first section's that states one: the description (or the part of it,
+/// `transport_layout::description_for`) the caller sets up starts with its transport.
 pub(crate) fn extract_tls_id(desc: &SessionDescription) -> Result<Option<String>> {
-    let mut found: Option<&str> = None;
+    let mut first: Option<&str> = None;
+    let mut by_transport: HashMap<Option<&str>, &str> = HashMap::new();
     for m in &desc.media_descriptions {
         for attribute in m.attributes.iter().filter(|a| a.key == ATTR_KEY_TLS_ID) {
             let value = attribute
@@ -2922,13 +2930,17 @@ pub(crate) fn extract_tls_id(desc: &SessionDescription) -> Result<Option<String>
             if is_rejected_media(m) {
                 continue;
             }
-            if found.is_some_and(|found| found != value) {
+            let (ufrag, _) = media_ice_credentials(desc, m);
+            if by_transport
+                .insert(ufrag, value)
+                .is_some_and(|earlier| earlier != value)
+            {
                 return Err(Error::ErrSessionDescriptionInvalidTlsId);
             }
-            found = Some(value);
+            first.get_or_insert(value);
         }
     }
-    Ok(found.map(str::to_owned))
+    Ok(first.map(str::to_owned))
 }
 
 /// Whether the description has an RTP media section that is not rejected: such a session needs

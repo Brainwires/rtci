@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: the JSEP description rules hold for every transport (merge of the JSEP stack with
+  several transports and BUNDLE groups). Each DTLS association states its own `a=tls-id`, on
+  the first section of its transport (RFC 8842 section 5), and a remote description's values
+  are checked per transport (sections with the same ICE credentials); the refusal of a new
+  tls-id or fingerprint without an ICE restart, an answer's `a=ice-mismatch`, and the shared
+  default destination of bundled sections apply to the transport each section is on. An offer
+  that asks for a new DTLS association because the current one cannot key SRTP (data channels
+  first, media added later) is an ICE restart (RFC 9429 section 5.8.3): it carries new ICE
+  credentials. Tests that counted one `a=tls-id` per description count one per transport.
 - **jsep**: ECN signalling follow-ups. A BUNDLE group negotiates one initiation method (a
   bundled section takes the tagged section's `a=ecn-capable-rtp`, RFC 6679 section 7.2).
   Offers and answers state `ect=1`, and a stream marks with the codepoint the peer's `ect=`

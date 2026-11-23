@@ -1158,6 +1158,9 @@ fn a_remote_candidate_with_grammar_extensions_is_added_and_checked() -> Result<(
     let answer = answerer.pc.create_answer(None)?;
     answerer.pc.set_local_description(start, answer)?;
     answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+    // The application takes the candidate's event to trickle it: only then is it paired (RFC
+    // 8838 section 10).
+    while answerer.pc.poll_event().is_some() {}
     let mut extended = host("127.0.0.1:6004".parse()?)?;
     extended.username_fragment = None;
     extended.candidate = format!(
@@ -1201,6 +1204,9 @@ fn a_remote_address_the_filter_refuses_is_never_checked() -> Result<()> {
         let answer = answerer.pc.create_answer(None)?;
         answerer.pc.set_local_description(start, answer)?;
         answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+        // The application takes the candidate's event to trickle it: only then is it paired
+        // (RFC 8838 section 10).
+        while answerer.pc.poll_event().is_some() {}
         let remote: SocketAddr = format!("127.0.0.1:{port}").parse()?;
         let _ = answerer.pc.add_remote_candidate(host(remote)?);
 
