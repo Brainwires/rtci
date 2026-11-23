@@ -3919,8 +3919,9 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
 ///   line is discarded" (`section_rids`).
 ///
 /// Unless `strict`, white space at the end of a value is not held against it
-/// (`SettingEngineBuilder::with_strict_sdp_attribute_grammar`: webrtc-rs 0.17 and Pion end an
-/// `a=rtcp-fb` without parameters with a space).
+/// (`SettingEngineBuilder::with_strict_sdp_attribute_grammar`: webrtc-rs 0.17.x ends an
+/// `a=rtcp-fb` without parameters with a space, against RFC 4585 section 4.2's
+/// `rtcp-fb-param`; Pion did before v4.1.5).
 pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> Result<()> {
     let lines = desc.attributes.iter().chain(
         desc.media_descriptions

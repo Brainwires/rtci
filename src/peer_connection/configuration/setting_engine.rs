@@ -2500,11 +2500,14 @@ impl SettingEngineBuilder {
     /// RFC 9429 section 5.8: a line that is not well formed rejects the description, even
     /// when its value is then ignored; every attribute is checked against its grammar either
     /// way. By default white space at the end of a value is not held against it: webrtc-rs
-    /// 0.17 (and Pion) write a feedback without parameters as `a=rtcp-fb:96 goog-remb ` (a
-    /// trailing space), which the strict reading refuses
+    /// 0.17.x writes a feedback without parameters as `a=rtcp-fb:96 goog-remb ` (a trailing
+    /// space, which RFC 4585 section 4.2's `rtcp-fb-param` does not allow: a space must be
+    /// followed by a token), and the strict reading refuses it
     /// (`tests/media_rejection_interop.rs::test_video_only_webrtc_offerer_rtc_answerer`:
     /// "a=rtcp-fb: `96 goog-remb `"), so an engine that reads them strictly cannot answer
-    /// their offers. `true` is the strict RFC form.
+    /// its offers. webrtc-rs fixed it on its default branch (`rtc` commit 718d405), as Pion
+    /// did in v4.1.5 (pion/webrtc#3207, PR #3218); 0.17.x still writes it. `true` is the
+    /// strict RFC form.
     pub fn with_strict_sdp_attribute_grammar(mut self, strict: bool) -> Self {
         self.0.strict_sdp_attribute_grammar = strict;
         self
