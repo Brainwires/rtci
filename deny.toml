@@ -1,6 +1,6 @@
-# cargo-deny: security advisories for the whole workspace graph, dev-dependencies and examples
-# included. Run by .github/workflows/audit.yml after `cargo generate-lockfile`, so it sees what a
-# fresh build would resolve today.
+# cargo-deny: security advisories, licences, bans and sources for the whole workspace graph,
+# dev-dependencies and examples included. Run by .github/workflows/audit.yml after
+# `cargo generate-lockfile`, so it sees what a fresh build would resolve today.
 #
 # The library's own graph (normal and build dependencies, every feature) is checked separately
 # against .github/deny-library.toml, which ignores nothing: an advisory there always fails CI.
@@ -12,3 +12,35 @@ ignore = [
     { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (no vulnerability). Dev-dependency only, interop tests: webrtc 0.17.3 -> webrtc-util -> nix 0.26; not in the library's dependency graph." },
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no vulnerability, no fixed release). Dev-dependency only: log timestamps in examples and tests; not in the library's dependency graph." },
 ]
+
+# Permissive licences only: no GPL, LGPL or AGPL anywhere in the graph (dev-dependencies and
+# examples included). Run by .github/workflows/audit.yml with `check licenses bans sources`.
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# The list is the allowed set, not an inventory of what the graph uses today.
+unused-allowed-license = "allow"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    # webpki-roots (optional feature `turn-tls-webpki-roots`): the Mozilla root list.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

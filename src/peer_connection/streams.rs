@@ -189,12 +189,15 @@ impl EngineStreams {
     }
 
     /// The connection for a datagram the agent of `transport` sends from `local` to `remote`.
-    /// A connection known to carry another transport is not it.
+    /// A connection known to carry another transport is not it, and with `named_only` (a
+    /// datagram that is not STUN, on a connection with several transports) neither is one
+    /// whose transport is not known yet: its 5-tuple may be another transport's too.
     fn connection_for(
         &self,
         local: SocketAddr,
         remote: SocketAddr,
         transport: TransportId,
+        named_only: bool,
     ) -> Option<StreamId> {
         let active = local.port() == ACTIVE_PORT && self.active.contains(&local.ip());
         let mut connecting = None;
@@ -202,12 +205,10 @@ impl EngineStreams {
             if c.tag != ICE_TCP || c.remote != remote || c.state == StreamState::Closing {
                 continue;
             }
-            if self
-                .connection_transport
-                .get(&c.id)
-                .is_some_and(|t| *t != transport)
-            {
-                continue;
+            match self.connection_transport.get(&c.id) {
+                Some(t) if *t != transport => continue,
+                None if named_only => continue,
+                _ => {}
             }
             let fits = if active {
                 self.active_connections.contains(&c.id) && c.local.ip() == local.ip()
@@ -337,13 +338,26 @@ impl RTCPeerConnection {
             let transport = tcp_context(local, info.remote);
             // The connection's transport; for one accepted on a port several transports
             // share, the one its first check names (RFC 8445 section 7.2.2).
+            // Only what names its transport ties the connection to one: anything else on a
+            // port several transports share (DTLS on a connection the peer reopened, RFC 6544
+            // section 11.1) could be either's, and waits for a check to name it.
             let on = match self.streams.connection_transport.get(&id) {
                 Some(on) => *on,
-                None => {
-                    let on = self.pipeline_context.transports.route(&transport, &message);
-                    self.streams.connection_transport.insert(id, on);
-                    on
-                }
+                None => match self
+                    .pipeline_context
+                    .transports
+                    .route_named(&transport, &message)
+                {
+                    Some(on) => {
+                        self.streams.connection_transport.insert(id, on);
+                        on
+                    }
+                    None => {
+                        debug!("{id}: a frame before a check names its transport: dropped");
+                        self.streams.unroutable += 1;
+                        continue;
+                    }
+                },
             };
             if !demultiplexable(first) {
                 debug!("{id}: a frame that is neither STUN, DTLS nor RTP: framing lost, reset");
@@ -834,7 +848,9 @@ impl RTCPeerConnection {
             return Some(msg);
         }
         let remote = msg.transport.peer_addr;
-        let id = match self.streams.connection_for(local, remote, on) {
+        let named_only = msg.message.first().is_none_or(|first| *first > 3)
+            && self.pipeline_context.transports.ids().len() > 1;
+        let id = match self.streams.connection_for(local, remote, on, named_only) {
             Some(id) => Some(id),
             None if local.port() == ACTIVE_PORT && self.streams.active.contains(&local.ip()) => {
                 // RFC 6544 section 7.1: an active candidate opens its connection from that
@@ -875,6 +891,14 @@ impl RTCPeerConnection {
             // A passive candidate only answers on connections it accepted.
             None => None,
         };
+        // A check or its answer from this transport's agent names the connection its own.
+        if let Some(id) = id
+            && !named_only
+            && !self.streams.connection_transport.contains_key(&id)
+            && self.pipeline_context.transports.ids().len() > 1
+        {
+            self.streams.connection_transport.insert(id, on);
+        }
         let sent =
             id.is_some_and(|id| matches!(self.streams.table.send(id, &msg.message), Ok(true)));
         if !sent {
@@ -911,7 +935,7 @@ impl RTCPeerConnection {
                 // Nothing of this transport is closed until the pair has one again.
                 match self
                     .streams
-                    .connection_for(path.local_addr, path.peer_addr, *t)
+                    .connection_for(path.local_addr, path.peer_addr, *t, false)
                 {
                     Some(id) => Some(id),
                     None => continue,
@@ -956,5 +980,89 @@ impl RTCPeerConnection {
         for listener in listeners {
             self.streams.table.stop_listening(listener);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer_connection::RTCPeerConnectionBuilder;
+
+    fn binding_request(username: &str) -> Vec<u8> {
+        let mut attribute = vec![0x00, 0x06];
+        attribute.extend_from_slice(&(username.len() as u16).to_be_bytes());
+        attribute.extend_from_slice(username.as_bytes());
+        attribute.resize(attribute.len().next_multiple_of(4), 0);
+        let mut message = vec![0x00, 0x01];
+        message.extend_from_slice(&(attribute.len() as u16).to_be_bytes());
+        message.extend_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+        message.extend_from_slice(&[7; 12]);
+        message.extend_from_slice(&attribute);
+        message
+    }
+
+    fn framed(message: &[u8]) -> Vec<u8> {
+        Framing::Rfc4571.encode(message).unwrap()
+    }
+
+    /// Two transports whose passive candidates share one port (a driver's shared listener):
+    /// a connection accepted there that brings DTLS before any check (an active side
+    /// reopening it, RFC 6544 section 11.1) is tied to no transport by a guess from the
+    /// peer's address; the check that follows names its transport (RFC 8445 section 7.2.2).
+    #[test]
+    fn a_frame_before_a_check_on_a_shared_port_ties_the_connection_to_no_transport() {
+        let now = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(now)
+            .expect("a default peer connection builds");
+        let default = pc.pipeline_context.transports.default_id();
+        let other = pc.add_transport().expect("a second transport");
+        let shared: SocketAddr = "10.0.0.1:7000".parse().unwrap();
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                let candidate = ice::candidate::unmarshal_candidate(
+                    "candidate:1 1 tcp 2128609279 10.0.0.1 7000 typ host tcptype passive",
+                )
+                .unwrap();
+                pc.ice_transport_mut()
+                    .add_local_candidate(candidate)
+                    .expect("the shared passive candidate is added")
+            });
+        }
+        let listener = pc
+            .streams
+            .table
+            .listen(shared, Framing::Rfc4571, ICE_TCP, false);
+        pc.handle_stream_event(
+            now,
+            StreamEvent::Listening {
+                listener,
+                local: shared,
+            },
+        )
+        .unwrap();
+        let peer: SocketAddr = "10.0.0.2:50000".parse().unwrap();
+        let id = pc
+            .handle_stream_accepted(now, listener, shared, peer)
+            .expect("the connection is taken");
+
+        pc.handle_stream_read(now, id, &framed(&[0x16, 0xfe, 0xfd, 0, 0]))
+            .unwrap();
+        assert_eq!(
+            pc.streams.connection_transport.get(&id),
+            None,
+            "DTLS names no transport"
+        );
+        assert_eq!(pc.streams.unroutable, 1, "and is given to none");
+
+        let ufrag = pc
+            .ice_transport_of(other)
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone();
+        pc.handle_stream_read(now, id, &framed(&binding_request(&format!("{ufrag}:peer"))))
+            .unwrap();
+        assert_eq!(pc.streams.connection_transport.get(&id), Some(&other));
     }
 }
