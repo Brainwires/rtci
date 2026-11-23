@@ -1522,6 +1522,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
+  engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
+  answer, while the mapped address may be used (the NAT binding lives as long as the
+  connection), and is closed once ICE of its transport has completed (it was closed at the
+  answer). A connection that carries the request but brings no answer within Ti is reset (RST)
+  and one new connection is opened to the same server; a connection that fails or ends before
+  its answer moves on to the server's next address at once. After an ICE restart (mt-8, per
+  transport) the new generation asks each server again, over a kept connection when there is
+  one, instead of announcing the address the previous generation learned.
+
 - **peer connection** (mt-8): ICE restart and DTLS per transport. `restart_ice()` (W3C
   restartIce) restarts every transport: the next offer gives each new credentials (one new
   pair shared by all unless `with_unique_transport_credentials`), and each restarts when the

@@ -273,6 +273,7 @@ impl RTCPeerConnection {
         self.start_turn_links();
         self.route_stream_writes();
         self.close_unused_tcp_connections();
+        self.close_settled_srflx_connections();
         self.streams.table.poll_command()
     }
 
@@ -500,6 +501,8 @@ impl RTCPeerConnection {
             let active = gather.active_added;
             for (addr, tcp_type) in bound {
                 self.add_engine_tcp_candidate(on, addr, tcp_type);
+                // A new ICE generation asks the STUN servers again (`srflx::EngineSrflx::add`).
+                self.gather_srflx_tcp(on, addr, tcp_type);
             }
             if active {
                 self.add_engine_tcp_candidate(
