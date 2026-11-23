@@ -215,6 +215,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
 
+### Bug fixes
+
+- **pacer**: media is no longer held behind a probe cluster's padding
+  (`conf/early-2-late-last-packet`). The NACK responder writes a cluster as a burst of
+  padding-only packets when the congestion controller asks for it, and the pacer queued them
+  in line with the media, so every packet the application wrote during the cluster waited for
+  all of it: about 180 ms for a 6000-octet cluster at 200 kbit/s. Padding-only packets (RFC
+  3550 section 5.1) now wait in a queue of their own and leave only when no other packet waits;
+  media written during a cluster leaves first, at the cluster's rate and with its mark, as in
+  libwebrtc's pacer. This was the intermittent failure of
+  `early_media_rtc2rtc::simulcast_streams_an_offer_asks_for_are_received_before_the_answer`
+  (about 1 run in 25): the five-second application-limited probe fell on the last writes of the
+  low layer, whose last one or two packets left 140 to 180 ms after they were written, past the
+  test's 100 ms settle (`media_leaves_ahead_of_queued_padding`).
+- **nack**: what the NACK responder makes on the read leg (a retransmission a NACK asks for, a
+  probe cluster's padding) is due at once: `poll_timeout` returns the instant it was made while
+  it waits. A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+  `poll_timeout` and sleep), so these packets waited for whatever woke the driver next; in the
+  failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
+  write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
+  `the_padding_of_a_probe_cluster_is_due_at_once`).
+- **interceptor**: `DefaultInterceptorOptions::rtcp_random` (taken from
+  `conf/pacer-1-queue-time`): the RTCP sessions of the default set draw their random numbers
+  (report interval variation, early-feedback dither, SSRC, CNAME) from a crypto provider's
+  `random()`; `rand` without one. With the setting engine's seeded provider given here too, a
+  two-peer run on a virtual clock replays.
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
