@@ -40,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     3), bare encodings on a RED stream (RFC 2198 5), CSRC audio levels (RFC 6465 4), the
     default audio level extension and its V bit (RFC 6464 4), the SRTCP fields in
     `avg_rtcp_size` (RFC 5124 2, 2.3), H.264 de-interleaving order against the RFC 6184 7.2.2
-    procedure.
+    procedure. `H264DeinterleavingBuffer::with_literal_pdon(true)`: RFC 6184 7.2.2's PDON
+    initialised to 0 (the default starts it at the DON before the earliest one buffered;
+    RFC6184-7.2.2-1 stays `partial`, owner decision).
   - FLEXFEC03-4.2-17 and FLEXFEC03-5.1-5 are `n/a`: superseded by RFC 8627. Open MUST rows
-    67 to 44.
+    67 to 45.
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT

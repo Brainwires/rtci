@@ -545,3 +545,23 @@ fn a_stream_numbered_from_don_0_leaves_in_decoding_order() {
         );
     }
 }
+
+/// `with_literal_pdon(true)` is RFC 6184 section 7.2.2 as written, PDON initialised to 0: for
+/// a stream numbered from DON 0, and one wrapping through 0, the buffer passes NAL units on
+/// exactly as the RFC procedure does, DON 0 after the others.
+#[test]
+fn with_the_literal_pdon_the_order_is_the_rfc_procedures_from_don_0() {
+    for first in [0u16, 65534] {
+        let sent: Vec<(u16, u8)> = [1u16, 0, 3, 2, 5, 4]
+            .iter()
+            .map(|&n| (first.wrapping_add(n), n as u8))
+            .collect();
+        let mut buffer = H264DeinterleavingBuffer::new(2, None).with_literal_pdon(true);
+        let mut out = vec![];
+        for (don, tag) in &sent {
+            out.extend(buffer.push(unit(*don, slice(*tag))));
+        }
+        out.extend(buffer.flush());
+        assert_eq!(rfc_6184_order(2, &sent), tags(&out), "from DON {first}");
+    }
+}
