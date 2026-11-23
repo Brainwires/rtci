@@ -445,6 +445,12 @@ pub struct MediaEngine {
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
+    /// The header extension mappings (id, URI) of this endpoint's pending offer (RFC 9429
+    /// section 5.9: "For each specified RTP header extension, establish a mapping between
+    /// the extension ID and URI"): what a packet that arrives before the answer is read with
+    /// where no negotiated mapping says ([`Self::receive_header_extension_id`]). Empty
+    /// outside `have-local-offer` and `have-remote-pranswer`.
+    pub(crate) offered_header_extensions: Vec<(u16, String)>,
 
     /// Whether RTP retransmission (RFC 4588) is negotiated beside RFC 8627 FlexFEC.
     /// See [`MediaEngine::set_flexfec_with_retransmission`].
@@ -1139,6 +1145,25 @@ impl MediaEngine {
         }
 
         (0, false, false)
+    }
+
+    /// The id a received packet carries the header extension `uri` with: the negotiated one
+    /// (of either kind), else, while a local offer is pending, the one that offer maps it to
+    /// (RFC 3264 section 5.1: the offerer is prepared to receive as its offer describes
+    /// before the answer arrives). 0 when neither says.
+    pub(crate) fn receive_header_extension_id(&self, uri: &str) -> u16 {
+        if let Some((id, _)) = self
+            .negotiated_header_extensions
+            .iter()
+            .find(|(_, e)| e.uri == uri && (e.is_audio || e.is_video))
+        {
+            return *id;
+        }
+        self.offered_header_extensions
+            .iter()
+            .find(|(_, offered)| offered == uri)
+            .map(|(id, _)| *id)
+            .unwrap_or(0)
     }
 
     /// clone_to copies any user modifiable state of the MediaEngine

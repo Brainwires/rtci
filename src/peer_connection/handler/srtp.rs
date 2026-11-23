@@ -362,7 +362,7 @@ impl<'a>
                         "serialized rtp/rtcp is never written past srtp unprotected".to_string(),
                     ));
                 }
-                RTPMessage::TrackPacket(_) => {
+                RTPMessage::TrackPacket(_) | RTPMessage::SessionRtcp(..) => {
                     return Err(Error::Other(
                         "application level track message should never reach here".to_string(),
                     ));

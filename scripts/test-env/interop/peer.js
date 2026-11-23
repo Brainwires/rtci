@@ -92,6 +92,12 @@
       errors: [],
       remoteOffers: 0,
       ignoredOffers: 0,
+      // The answers this side sent to Rust's offers.
+      answersSent: 0,
+      // Awaited between applying this side's answer and sending it: a test holds the answer
+      // back while the browser, which sends from the moment it applied the answer, is already
+      // sending (media that overtakes its answer, RFC 3264 section 5.1).
+      beforeAnswer: null,
       makingOffer: false,
       sentScenario: false,
       localCandidates: [],
@@ -172,7 +178,9 @@
           s.descriptions.push(["received", "offer", sdp]);
           await pc.setRemoteDescription({ type: "offer", sdp });
           await pc.setLocalDescription();
+          if (s.beforeAnswer) await s.beforeAnswer();
           sendDescription("answer", pc.localDescription.sdp);
+          s.answersSent++;
         } else if (m.type === "candidate") {
           // Trickled by the Rust side (its engine-gathered TCP candidates).
           if (m.candidate && m.candidate.candidate) await pc.addIceCandidate(m.candidate);

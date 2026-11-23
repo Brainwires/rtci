@@ -11,11 +11,11 @@ deployed peer cannot interoperate with it (`RULES.md`).
 
 | Level | tested | setting | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|
-| MUST | 4940 | 12 | 21 | 90 | 23 | 1 | 658 | 5745 |
+| MUST | 4945 | 12 | 21 | 85 | 23 | 1 | 658 | 5745 |
 | SHOULD | 834 | 0 | 18 | 65 | 47 | 4 | 326 | 1294 |
 | MAY | 440 | 0 | 22 | 34 | 109 | 0 | 171 | 776 |
 | PROC | 61 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6275 | 12 | 63 | 192 | 180 | 5 | 1155 | 7882 |
+| all | 6280 | 12 | 63 | 187 | 180 | 5 | 1155 | 7882 |
 
 ## RFC behaviour tested
 
@@ -24,7 +24,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5087 | 4952 | 97.3 | 4940 | 97.1 |
+| MUST | 5087 | 4957 | 97.4 | 4945 | 97.2 |
 | SHOULD | 968 | 834 | 86.2 | 834 | 86.2 |
 | MAY | 605 | 440 | 72.7 | 440 | 72.7 |
 | PROC | 67 | 61 | 91.0 | 61 | 91.0 |
@@ -55,7 +55,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc2198.md` | MUST | 11 | 0 | 0 | 1 | 0 | 0 | 1 | 13 |
 | `rfc2198.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | `rfc2198.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
-| `rfc3264.md` | MUST | 44 | 0 | 0 | 3 | 0 | 0 | 8 | 55 |
+| `rfc3264.md` | MUST | 46 | 0 | 0 | 1 | 0 | 0 | 8 | 55 |
 | `rfc3264.md` | SHOULD | 8 | 0 | 1 | 1 | 1 | 0 | 2 | 13 |
 | `rfc3264.md` | MAY | 21 | 0 | 0 | 0 | 2 | 0 | 2 | 25 |
 | `rfc3389.md` | MUST | 8 | 0 | 0 | 0 | 0 | 0 | 1 | 9 |
@@ -318,7 +318,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc9335.md` | MUST | 20 | 0 | 2 | 1 | 0 | 0 | 0 | 23 |
 | `rfc9335.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `rfc9335.md` | MAY | 1 | 0 | 1 | 2 | 0 | 0 | 0 | 4 |
-| `rfc9429.md` | MUST | 273 | 7 | 0 | 17 | 0 | 0 | 12 | 309 |
+| `rfc9429.md` | MUST | 276 | 7 | 0 | 14 | 0 | 0 | 12 | 309 |
 | `rfc9429.md` | SHOULD | 10 | 0 | 0 | 2 | 0 | 1 | 6 | 19 |
 | `rfc9429.md` | MAY | 4 | 0 | 0 | 0 | 2 | 0 | 3 | 9 |
 | `rfc9443.md` | MUST | 5 | 0 | 0 | 0 | 0 | 0 | 2 | 7 |

@@ -45,6 +45,9 @@ pub struct Peer {
     pub events: Vec<String>,
     /// The RTP packets it received, as (payload type, SSRC), in order.
     pub rtp: Vec<(u8, u32)>,
+    /// The RTP packets it received, as (the id of the track they were delivered to, header),
+    /// in order.
+    pub packets: Vec<(String, rtc::rtp::header::Header)>,
 }
 
 impl Peer {
@@ -65,6 +68,11 @@ impl Peer {
             .with_media_engine(media_engine)
             .with_setting_engine(setting_engine)
             .build(Instant::now())?;
+        Self::from_connection(addr, pc)
+    }
+
+    /// A peer at `addr` around a connection the test built itself.
+    pub fn from_connection(addr: &str, pc: RTCPeerConnection) -> Result<Self> {
         Ok(Self {
             pc,
             addr: addr.parse()?,
@@ -74,6 +82,7 @@ impl Peer {
             written: Vec::new(),
             events: Vec::new(),
             rtp: Vec::new(),
+            packets: Vec::new(),
         })
     }
 
@@ -246,9 +255,11 @@ impl World {
                 while let Some(message) = peer.pc.poll_read() {
                     match message.message {
                         RTCMessage::DataChannelMessage(_, m) => peer.received.push(m.data.to_vec()),
-                        RTCMessage::RtpPacket(_, packet) => peer
-                            .rtp
-                            .push((packet.header.payload_type, packet.header.ssrc)),
+                        RTCMessage::RtpPacket(track, packet) => {
+                            peer.rtp
+                                .push((packet.header.payload_type, packet.header.ssrc));
+                            peer.packets.push((track, packet.header));
+                        }
                         _ => {}
                     }
                 }

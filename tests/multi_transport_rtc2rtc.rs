@@ -143,6 +143,8 @@ struct World {
     /// The (from address, SSRC, size) of each SRTP packet that travelled (the RTP header is in
     /// the clear).
     srtp: Vec<(SocketAddr, u32, usize)>,
+    /// The (from, to) addresses of every RTCP datagram written, delivered or lost.
+    rtcp: Vec<(SocketAddr, SocketAddr)>,
 }
 
 impl World {
@@ -182,6 +184,7 @@ impl World {
             misrouted: 0,
             trickling: vec![],
             srtp: vec![],
+            rtcp: vec![],
         })
     }
 
@@ -310,6 +313,11 @@ impl World {
         }
         let delivered = !in_flight.is_empty();
         for (from, to, data) in in_flight {
+            // RFC 7983 / RFC 5761 section 4: a first byte of 128..=191 and a packet type of
+            // 192..=223 is RTCP.
+            if data.len() >= 8 && (128..=191).contains(&data[0]) && (192..=223).contains(&data[1]) {
+                self.rtcp.push((from, to));
+            }
             if self.blocked.contains(&from) || self.blocked.contains(&to) {
                 continue;
             }
@@ -2595,5 +2603,221 @@ fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
         reported_estimates[0], reported_estimates[1],
         "each transport at a limit of its own: {reported_estimates:?}"
     );
+    Ok(())
+}
+
+/// RFC 3550 section 6, RFC 8834 section 4.4: an RTCP session runs on each transport that
+/// carries RTP m= sections, and on no other. Audio, video and data on three transports (the
+/// answer has no BUNDLE group): RTCP flows both ways on the audio and the video transport and
+/// never on the data transport, a receive-only endpoint's reports included (their reporting
+/// SSRC is no section's, and they go down their own session's transport). With the video
+/// transport's path cut, its DTLS association never completes: its RTCP session does not
+/// start, and nothing of it leaves on another transport.
+#[test]
+fn rtcp_runs_on_each_media_transport_and_never_on_the_data_transport() -> Result<()> {
+    for cut_video in [false, true] {
+        let what = format!("video path cut: {cut_video}");
+        let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+        world.negotiate(without_bundle_group)?;
+        world.gather()?;
+        for peer in &world.peers {
+            assert_eq!(3, peer.addrs.len(), "{what}: audio, video and data");
+        }
+        let addr = |world: &World, peer: usize, section: usize| world.peers[peer].addrs[section];
+        let (audio, video, data) = (0, 1, 2);
+        if cut_video {
+            let cut = addr(&world, 1, video);
+            world.blocked.insert(cut);
+            world.advance(Duration::from_secs(8))?;
+        } else {
+            world.run("connected with a data channel", |peers| {
+                peers.iter().all(|p| p.connected && p.channel.is_some())
+            })?;
+            world.advance(Duration::from_secs(8))?;
+        }
+        let on = |world: &World, section: usize| -> [usize; 2] {
+            let mut counts = [0; 2];
+            for (from, to) in &world.rtcp {
+                for (i, count) in counts.iter_mut().enumerate() {
+                    if *from == addr(world, i, section) || *to == addr(world, i, section) {
+                        *count += 1;
+                    }
+                }
+            }
+            counts
+        };
+        let from = |world: &World, peer: usize, section: usize| {
+            world
+                .rtcp
+                .iter()
+                .filter(|(from, _)| *from == addr(world, peer, section))
+                .count()
+        };
+        assert_eq!(
+            [0, 0],
+            on(&world, data),
+            "{what}: RTCP on the data transport"
+        );
+        for peer in 0..2 {
+            assert!(
+                from(&world, peer, audio) >= 2,
+                "{what}: peer {peer} on the audio transport: {:?}",
+                world.rtcp
+            );
+            let video_rtcp = from(&world, peer, video);
+            if cut_video {
+                assert_eq!(0, video_rtcp, "{what}: peer {peer}, video not keyed");
+            } else {
+                assert!(
+                    video_rtcp >= 2,
+                    "{what}: peer {peer} on the video transport"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// RFC 9143 section 7.2: "When the offerer assigns unique addresses:ports to multiple bundled
+/// 'm=' sections, the offerer needs to be prepared to receive bundled media on each unique
+/// address:port until it receives the associated answer". Under `max-compat` a later offer
+/// stages a transport of its own for the video section it adds, and lists the section in the
+/// BUNDLE group; the answerer bundles it and sends its video on the group's transport at
+/// once. That media reaches the offerer before the answer that says where the section went
+/// (RFC 3264 section 5.1): it is delivered, on the transport it arrived on, and the answer
+/// then moves the section there and closes the staged transport.
+#[test]
+fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_the_answer()
+-> Result<()> {
+    const VIDEO_SSRC: u32 = 0x00ea_7301;
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.negotiate_media(&[RtpCodecKind::Audio], true, |sdp| sdp)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    assert_eq!(world.peers[0].pc.ice_transport_sections().len(), 1);
+
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Video,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Recvonly,
+            streams: vec![],
+            send_encodings: vec![],
+        }),
+    )?;
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    assert_eq!(
+        world.peers[0].pc.ice_transport_sections().len(),
+        2,
+        "the offer stages a transport for the section it adds"
+    );
+    let video_mid = offer
+        .sdp
+        .split("\r\nm=")
+        .find(|section| section.starts_with("video"))
+        .and_then(|section| {
+            section
+                .lines()
+                .find_map(|l| l.strip_prefix("a=mid:").map(str::to_owned))
+        })
+        .context("the video section's mid")?;
+    assert!(
+        bundled_mids(&offer.sdp).contains(&video_mid),
+        "{}",
+        offer.sdp
+    );
+
+    world.peers[1]
+        .pc
+        .set_remote_description(now, offer.clone())?;
+    let sender = world.peers[1]
+        .pc
+        .add_track(rtc::media_stream::MediaStreamTrack::new(
+            "early-stream".to_owned(),
+            "early".to_owned(),
+            "early".to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                    ssrc: Some(VIDEO_SSRC),
+                    ..Default::default()
+                },
+                active: true,
+                ..Default::default()
+            }],
+        ))?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    assert!(
+        bundled_mids(&answer.sdp).contains(&video_mid),
+        "{}",
+        answer.sdp
+    );
+    let payload_type = world.peers[1]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs[0]
+        .payload_type;
+
+    let send = |world: &mut World, first: u16, count: u16| -> Result<()> {
+        for seq in first..first + count {
+            let now = world.now;
+            world.peers[1]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp(
+                    now,
+                    rtc::rtp::Packet {
+                        header: Header {
+                            version: 2,
+                            payload_type,
+                            sequence_number: seq,
+                            timestamp: u32::from(seq) * 3000,
+                            ssrc: VIDEO_SSRC,
+                            marker: true,
+                            ..Default::default()
+                        },
+                        payload: Bytes::from(vec![0x10u8; 100]),
+                    },
+                )?;
+            world.advance(Duration::from_millis(20))?;
+        }
+        world.advance(Duration::from_millis(100))
+    };
+    let received = |world: &World| -> Vec<u16> {
+        world.peers[0]
+            .rtp
+            .iter()
+            .filter(|header| header.ssrc == VIDEO_SSRC)
+            .map(|header| header.sequence_number)
+            .collect()
+    };
+
+    // The answer is half a second away.
+    send(&mut world, 1, 25)?;
+    assert_eq!(received(&world), (1..=25).collect::<Vec<u16>>());
+    assert_eq!(world.peers[0].pc.discarded_rtp_packets(), 0);
+
+    let now = world.now;
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    assert_eq!(
+        world.peers[0].pc.ice_transport_sections().len(),
+        1,
+        "the answer bundles the section: its staged transport is closed"
+    );
+    send(&mut world, 26, 5)?;
+    assert_eq!(received(&world), (1..=30).collect::<Vec<u16>>());
+    assert_eq!(world.peers[0].pc.discarded_rtp_packets(), 0);
     Ok(())
 }

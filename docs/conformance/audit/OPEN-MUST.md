@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting`): 4952 of 5087 (97.3 %).
-- Tested as the default (`tested`): 4940 of 5087 (97.1 %); `setting`: 12.
-- Open (not tested in any form): 135: 21 untested, 90 partial, 23 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting`): 4957 of 5087 (97.4 %).
+- Tested as the default (`tested`): 4945 of 5087 (97.2 %); `setting`: 12.
+- Open (not tested in any form): 130: 21 untested, 85 partial, 23 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 81 | 60 |
+| C | partly implemented | 76 | 55 |
 | D | not implemented | 23 | 19 |
 | E | cannot be met or observed inside this engine | 15 | 9 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 147 | 99 |
+| all | | 142 | 94 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 120 rows, 67 of size S, 43 of size M, 10 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 115 rows, 67 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 11 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 47 | 2 | 5 | 0 | 54 | 30 | 22 | 2 |
+| jsep (running) | 0 | 42 | 2 | 5 | 0 | 49 | 30 | 17 | 2 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -111,8 +111,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.1.4-11 | `w3c-webrtc-pc.md` | A description failing RFC 9429 5.8.3 semantic validation rejects with ... | partial | C | W3C error names (InvalidAccessError) for the 5.8.3 refusals (4.5.1-1); the checks themselves exist and are tested | S | jsep (running) |
 | WEBRTC-5.4-31 | `w3c-webrtc-pc.md` | codec dictionary match: sdpFmtpLine present on one side only is no ... | partial | C | Strict codec dictionary match in the media engine | S | jsep (running) |
 | WEBRTC-5.4-32 | `w3c-webrtc-pc.md` | codec dictionary match: symmetrical parameters must be equal; ... | partial | C | Symmetric / asymmetric fmtp parameter rules beyond H.264 | S | jsep (running) |
-| RFC3264-5.1-16 | `rfc3264.md` | The offerer is ready to receive on recvonly streams once the offer is ... | partial | C | Start receivers when the offer is applied (RFC9429-4.1.11-1) | M | jsep (running) |
-| RFC3264-5.1-17 | `rfc3264.md` | The offerer is ready to send and receive on sendrecv streams, and to ... | partial | C | As RFC3264-5.1-16 | M | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
 | RFC7728-6.3-3 | `rfc7728.md` | PAUSED is repeated in the next two regular RTCP reports while paused | partial | C | Carry PAUSED inside the regular compound packets | M | jsep (running) |
 | RFC7728-8.2-4 | `rfc7728.md` | PAUSED is also in the next two regular RTCP reports | partial | C | As RFC7728-6.3-3 | M | jsep (running) |
@@ -123,13 +121,10 @@ Sorted by class, then owner, size and ID.
 | RFC8839-4.2.4-1 | `rfc8839.md` | Ready to receive Binding requests on candidates once they are in an ... | partial | C | Answer checks with the local credentials before the answer arrives | M | jsep (running) |
 | RFC8851-6.2.2-6 | `rfc8851.md` | Restrictions incompatible with the codecs, or unsupported, discard ... | partial | C | Check restriction values against the codec (section 8) | M | jsep (running) |
 | RFC8851-6.4-1 | `rfc8851.md` | The offerer validates the answer's a=rid lines: no new restrictions, ... | partial | C | Codec compatibility of answered values (section 8) | M | jsep (running) |
-| RFC9429-4.1.11-1 | `rfc9429.md` | Current and pending local descriptions are both usable at once (e.g. ... | partial | C | Receive the formats and sections of a pending local offer | M | jsep (running) |
 | RFC9429-4.1.8-1 | `rfc9429.md` | A subsequent offer generates each existing stream's lines by the ... | partial | C | Umbrella of the 5.2.2 rows | M | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | partial | C | Umbrella of the 5.3.1 rows | M | jsep (running) |
-| RFC9429-5.11-5 | `rfc9429.md` | Reception is prepared for every payload type of the local description | partial | C | Prepare reception of every payload type before the first packet | M | jsep (running) |
 | RFC9429-5.2.1-28 | `rfc9429.md` | FEC mechanisms of RFC 8854 7 are supported and offered | partial | C | Offer RED / ULPFEC by default (they exist now; the note's D1 is stale) | M | jsep (running) |
 | RFC9429-5.3-1 | `rfc9429.md` | createAnswer output is compatible with the remote description and RFC ... | partial | C | Umbrella | M | jsep (running) |
-| RFC9429-5.9-4 | `rfc9429.md` | A local offer prepares reception of every offered format, extension ... | partial | C | As RFC9429-4.1.11-1 | M | jsep (running) |
 | WEBRTC-4.4.2-43 | `w3c-webrtc-pc.md` | setLocalDescription: current and pending local descriptions stay ... | partial | C | As RFC9429-4.1.11-1 | M | jsep (running) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella of the open 4.4.1.4 / 4.4.2 rows | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |

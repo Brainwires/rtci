@@ -1460,6 +1460,9 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Rollback) => {
                 self.pending_local_description = None;
                 self.pending_remote_description = None;
+                // What a local offer prepared the receivers for goes with it, before the
+                // transceivers it associated lose their mids.
+                self.roll_back_offered_receive();
                 // Undo what the abandoned offer changed (RFC 9429, Section 5.7). Its transport
                 // part was never applied: what it staged for the answer is dropped.
                 self.drop_pending_remote_transport();
@@ -2550,7 +2553,7 @@ impl RTCPeerConnection {
     /// Collects the set of mids associated by the current (last stable) local and remote
     /// descriptions. Used by rollback to distinguish transceivers associated by a prior,
     /// already-negotiated exchange from those associated only by the description being rolled back.
-    fn current_description_mids(&self) -> HashSet<String> {
+    pub(super) fn current_description_mids(&self) -> HashSet<String> {
         let mut mids = HashSet::new();
         for desc in [
             self.current_local_description.as_ref(),
@@ -2785,6 +2788,14 @@ impl RTCPeerConnection {
     pub(super) fn start_rtp(&mut self, remote_desc: RTCSessionDescription) -> Result<()> {
         self.start_rtp_senders()?;
 
+        // The simulcast streams a local offer asked for and no media has claimed yet: the
+        // answer says below which streams there are, if any.
+        for transceiver in &mut self.rtp_transceivers {
+            if let Some(receiver) = transceiver.receiver_mut() {
+                receiver.drop_offered_layers();
+            }
+        }
+
         let incoming_tracks = if let Some(parsed) = &remote_desc.parsed {
             track_details_from_sdp(parsed)
         } else {
@@ -2806,6 +2817,10 @@ impl RTCPeerConnection {
                     // the MID/RID header extension needed to learn them again.
                     continue;
                 }
+
+                // What media that arrived before this answer established (RFC 3264 section
+                // 5.1), carried over into the track the answer describes.
+                let early = receiver.early_codings();
 
                 // An `a=msid` without appdata names no track: "the recipient can assign the
                 // track ID itself" (RFC 8830 section 3; RFC 9429 section 5.2.1 has senders
@@ -2909,6 +2924,9 @@ impl RTCPeerConnection {
                 }
 
                 receiver.set_coding_parameters(receive_codings);
+                if let Some(early) = early {
+                    receiver.adopt_early_codings(early);
+                }
             }
         }
 

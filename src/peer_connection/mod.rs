@@ -248,6 +248,7 @@ pub mod cryptex;
 /// S-NAPTR and SRV discovery of STUN and TURN servers (RFC 5928, RFC 8489 section 8).
 pub(crate) mod dns_discovery;
 mod dtls_sdp;
+mod early_media;
 pub mod event;
 pub(crate) mod handler;
 pub mod identity;
@@ -1502,6 +1503,16 @@ impl RTCPeerConnection {
             if sdp_type != RTCSdpType::Rollback {
                 self.remember_local_ssrcs();
             }
+            // RFC 3264 section 5.1, RFC 9429 section 5.9: an applied offer prepares the
+            // receivers for what it lists, before its answer arrives.
+            if sdp_type == RTCSdpType::Offer
+                && let Some(offer) = self
+                    .pending_local_description
+                    .as_ref()
+                    .and_then(|description| description.parsed.clone())
+            {
+                self.prepare_offered_receive(&offer);
+            }
             self.after_local_description(sdp_type);
             // The local description lists the candidates gathered so far, and it is the one
             // the application sends: they are conveyed with it (RFC 8838 section 10).
@@ -1679,6 +1690,7 @@ impl RTCPeerConnection {
                     parsed_local_description,
                     parsed_remote_description,
                 )?;
+                self.sync_rtcp_sessions(now);
             }
 
             // webrtc-extensions 4.1: the answer sets each transceiver's negotiated header
@@ -1872,6 +1884,13 @@ impl RTCPeerConnection {
                 Ok(()) => Ok(()),
                 Err(err) => {
                     self.restore_description_snapshot(snapshot);
+                    // The local offer is pending again; what its early media had bound was
+                    // unbound by the rollback and is established anew by the next packets.
+                    for transceiver in &mut self.rtp_transceivers {
+                        if let Some(receiver) = transceiver.receiver_mut() {
+                            receiver.reestablish_early_streams();
+                        }
+                    }
                     Err(err)
                 }
             };
@@ -3098,6 +3117,15 @@ impl RTCPeerConnection {
                     parsed_local_description,
                     parsed_remote_description,
                 )?;
+                self.sync_rtcp_sessions(now);
+            }
+
+            // RFC 9429 section 4.1.11: the final answer ends the dual processing of the
+            // current and the pending local description; a provisional one does not.
+            if is_final_answer {
+                self.settle_offered_receive();
+            } else if we_offer {
+                self.provisional_answer_received(parsed_remote_description);
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.

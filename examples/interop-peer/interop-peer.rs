@@ -378,6 +378,9 @@ struct Session {
     /// This side's offer is outstanding (have-local-offer).
     have_local_offer: bool,
     rollbacks: u64,
+    /// The RTP packets delivered before the answer to this side's last offer was applied
+    /// (RFC 3264 section 5.1: media may overtake the answer).
+    rtp_before_answer: u64,
     /// The DTLS transports (id, state) when this side last made an offer; those when it made
     /// the offer it last rolled back, and right after that rollback (RFC 9429 5.7: the
     /// rollback restores what the offer changed).
@@ -468,6 +471,7 @@ impl Session {
             rust_dc: None,
             have_local_offer: false,
             rollbacks: 0,
+            rtp_before_answer: 0,
             transports_at_offer: vec![],
             transports_at_rolled_back_offer: vec![],
             transports_after_rollback: vec![],
@@ -766,6 +770,7 @@ impl Session {
                 let answer = RTCSessionDescription::answer(
                     v["sdp"].as_str().unwrap_or_default().to_owned(),
                 )?;
+                self.rtp_before_answer = self.rtp_by_key.values().sum();
                 self.pc.set_remote_description(Instant::now(), answer)?;
                 self.have_local_offer = false;
             }
@@ -786,9 +791,29 @@ impl Session {
                             .collect()
                     })
                     .unwrap_or_default();
-                if tracks.is_empty() {
+                // Sections this side only receives in ("audio" / "video"): what the browser
+                // sends there may arrive before its answer does.
+                let receive: Vec<RtpCodecKind> = v["receive"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|kind| match kind.as_str() {
+                                Some("audio") => Some(RtpCodecKind::Audio),
+                                Some("video") => Some(RtpCodecKind::Video),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if tracks.is_empty() && receive.is_empty() {
                     let dc = self.pc.create_data_channel("from-rust", None)?;
                     self.rust_dc = Some(dc.id());
+                }
+                for kind in receive {
+                    self.pc.add_transceiver_from_kind(
+                        kind,
+                        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+                    )?;
                 }
                 for name in tracks {
                     self.add_send_track(&name.to_ascii_uppercase(), true)?;
@@ -847,6 +872,8 @@ impl Session {
                     "state": self.state,
                     "cryptex": self.pc.cryptex_negotiated(),
                     "rollbacks": self.rollbacks,
+                    "rtpBeforeAnswer": self.rtp_before_answer,
+                    "discardedRtp": self.pc.discarded_rtp_packets(),
                     "transportsAtRolledBackOffer": self.transports_at_rolled_back_offer,
                     "transportsAfterRollback": self.transports_after_rollback,
                     "local_sdp": answer,
