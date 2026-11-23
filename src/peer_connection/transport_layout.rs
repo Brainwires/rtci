@@ -109,6 +109,17 @@ impl RTCPeerConnection {
     /// credentials), a DTLS transport with the connection's certificates, and SRTP contexts
     /// that follow the connection's header encryption.
     pub(crate) fn add_transport(&mut self) -> Result<TransportId> {
+        let own_credentials = self.setting_engine.unique_transport_credentials;
+        let (ice, dtls, srtp) = self.new_transport_parts(own_credentials)?;
+        Ok(self.pipeline_context.transports.insert(ice, dtls, srtp))
+    }
+
+    /// What a new transport is made of, with the connection's settings. `own_credentials`:
+    /// ICE credentials of its own, else the first transport's.
+    fn new_transport_parts(
+        &mut self,
+        own_credentials: bool,
+    ) -> Result<(IceHandlerContext, DtlsHandlerContext, SrtpHandlerContext)> {
         let now = self.pipeline_context.now;
         let mut agent_config =
             internal::ice_agent_config(&self.configuration, &self.setting_engine)?;
@@ -116,7 +127,7 @@ impl RTCPeerConnection {
         // unless each transport is to have its own (RFC 9429 section 5.2.1;
         // `with_unique_transport_credentials`). Fixed ones from the settings are the first
         // transport's.
-        if self.setting_engine.unique_transport_credentials {
+        if own_credentials {
             agent_config.local_ufrag = String::new();
             agent_config.local_pwd = String::new();
         } else {
@@ -153,11 +164,84 @@ impl RTCPeerConnection {
         };
         srtp.set_cryptex(default_srtp.cryptex);
         srtp.set_encrypted_header_extensions(default_srtp.encrypted_header_extensions);
-        Ok(self.pipeline_context.transports.insert(
+        Ok((
             IceHandlerContext::new(ice_transport),
             DtlsHandlerContext::new(dtls_transport),
             srtp,
         ))
+    }
+
+    /// Closes the transport `id`, which no m= section uses any more (W3C webrtc-pc "set a
+    /// session description", once stable: "close the RTCDtlsTransports and their associated
+    /// RTCIceTransports. This results in events firing on these objects"): its DTLS and ICE
+    /// `statechange` to "closed", then its ICE agent is closed and the transport dropped.
+    ///
+    /// The set always holds a transport, the one a later description sets up. So the last
+    /// one is not taken out but replaced, in its place, by a new one: a new ICE agent with
+    /// credentials of its own (a new generation; a closed agent cannot restart), a new DTLS
+    /// transport and new SRTP contexts, in the state "new" with nothing announced. The local
+    /// candidates the application gathered are the new agent's too, as an ICE restart keeps
+    /// them (unless `with_discard_local_candidates_during_ice_restart`): the application's
+    /// sockets are what they were, and its gathering for the new generation announces them.
+    fn close_transport(&mut self, id: TransportId) -> Result<()> {
+        log::debug!("transport {id:?} carries no m= section any more: closed");
+        self.with_transport(id, |pc| pc.announce_transport_closed());
+        let closed = if self.pipeline_context.transports.len() > 1 {
+            self.pipeline_context.remove_transport(id)
+        } else {
+            let kept: Vec<ice::candidate::Candidate> = if self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart
+            {
+                vec![]
+            } else {
+                self.ice_transport_of(id)
+                    .agent
+                    .get_local_candidates_to_signal()
+            };
+            // Its own credentials: there is no other transport to share them with, and the
+            // closed one's belong to its generation.
+            let (mut ice, dtls, srtp) = self.new_transport_parts(true)?;
+            for candidate in kept {
+                if let Err(err) = ice.ice_transport.add_local_candidate(candidate) {
+                    log::debug!("a local candidate is not kept for the new transport: {err}");
+                }
+            }
+            let closed = self.pipeline_context.transports.renew(id, ice, dtls, srtp);
+            self.pipeline_context.sync_transport_stats();
+            closed
+        };
+        if let Some(mut bundle) = closed {
+            let _ = sansio::Protocol::close(&mut bundle.ice_handler_context.ice_transport.agent);
+        }
+        Ok(())
+    }
+
+    /// W3C webrtc-pc "set a session description", once the state is stable after an answer:
+    /// the transports "no longer referenced by a non-stopped transceiver" are closed. An
+    /// answer that leaves no m= section (every one rejected: RFC 9429 section 5.11, "unless a
+    /// non-rejected "m=" section is bundled with this "m=" section, discard any associated
+    /// ICE components") leaves no transport in use: each is closed, the last of them replaced
+    /// by the one the next description sets up ([`Self::close_transport`]).
+    pub(crate) fn close_transports_without_sections(&mut self) -> Result<()> {
+        // What the description queued for the peer (the RTCP BYE of each stream that stopped,
+        // the SCTP ABORT of a rejected data section) leaves over the transports it was
+        // queued for, before they go.
+        self.flush_writes();
+        let default = self.pipeline_context.transports.default_id();
+        // The others first: the default one, which is replaced, is the one that stays.
+        let mut ids = self.pipeline_context.transports.ids();
+        ids.retain(|id| *id != default);
+        ids.push(default);
+        for id in ids {
+            self.close_transport(id)?;
+        }
+        self.pipeline_context.describe_section_transports();
+        // The connection's states are aggregates over the transports there are now.
+        self.update_gathering_state();
+        self.update_aggregate_connection_states();
+        Ok(())
     }
 
     /// The ICE credentials a transport added beside the first one takes when the transports
@@ -228,13 +312,7 @@ impl RTCPeerConnection {
         let default = transports.default_id();
         for id in transports.ids() {
             if id != default && self.pipeline_context.transports.mids_on(id).is_empty() {
-                log::debug!("transport {id:?} carries no m= section any more: closed");
-                self.with_transport(id, |pc| pc.announce_transport_closed());
-                if let Some(mut bundle) = self.pipeline_context.remove_transport(id) {
-                    let _ = sansio::Protocol::close(
-                        &mut bundle.ice_handler_context.ice_transport.agent,
-                    );
-                }
+                self.close_transport(id)?;
             }
         }
         self.pipeline_context.describe_section_transports();

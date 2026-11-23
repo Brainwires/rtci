@@ -83,7 +83,7 @@ impl RTCPeerConnection {
             .local_description()
             .and_then(|description| description.parsed)
         else {
-            self.after_description();
+            self.after_description(sdp_type);
             return;
         };
         let mut changes = RemoteTrackChanges::default();
@@ -111,7 +111,7 @@ impl RTCPeerConnection {
             transceiver.set_fired_direction(Some(direction));
         }
         self.announce_remote_track_changes(changes);
-        self.after_description();
+        self.after_description(sdp_type);
     }
 
     /// W3C 4.4.1.6 for a remote description that was just applied (and for a rollback,
@@ -196,7 +196,7 @@ impl RTCPeerConnection {
             }
             self.announce_receiver_track_ended(id);
         }
-        self.after_description();
+        self.after_description(sdp_type);
     }
 
     /// The transceivers whose receiver a remote description `parsed` gives a new
@@ -352,7 +352,7 @@ impl RTCPeerConnection {
     /// description stopped is ended (W3C 5.4 "stop sending and receiving"; a stopped
     /// transceiver has no associated remote streams), and in a stable state the remote
     /// streams are what a later rollback returns to.
-    fn after_description(&mut self) {
+    fn after_description(&mut self, sdp_type: RTCSdpType) {
         let stable = self.signaling_state == RTCSignalingState::Stable;
         for id in 0..self.rtp_transceivers.len() {
             let transceiver = &mut self.rtp_transceivers[id];
@@ -371,6 +371,10 @@ impl RTCPeerConnection {
                 receiver.end_track();
                 self.announce_receiver_track_ended(id);
             }
+        }
+        // Last: what the description leaves for queued tasks.
+        if stable && sdp_type == RTCSdpType::Answer {
+            self.close_unused_transports();
         }
     }
 

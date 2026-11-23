@@ -283,6 +283,8 @@ mod set_remote_description_test;
 pub mod state;
 pub mod transport;
 #[cfg(test)]
+mod transport_close_test;
+#[cfg(test)]
 mod upstream_peer_connection_test;
 #[cfg(test)]
 pub(crate) mod util_test;
@@ -889,10 +891,6 @@ pub struct RTCPeerConnection {
     /// Whether `set_local_description` has succeeded once (a rollback included): from then
     /// on `set_configuration` refuses another `iceCandidatePoolSize` (W3C 4.4.1.5).
     pub(crate) local_description_was_set: bool,
-    /// The last completed offer/answer rejected every m-section, which closes the transport
-    /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
-    /// credentials starts new ICE and DTLS associations.
-    transport_closed: bool,
     /// How many selected-pair changes of the ICE handler were looked at for the RFC 8839
     /// section 4.3.4 alignment offer (`announce_lite_candidate_update`).
     seen_selected_pair_changes: u64,
@@ -995,7 +993,7 @@ impl RTCPeerConnection {
         if is_ice_restart_requested {
             // Every transport restarts (W3C restartIce, RFC 9429 section 5.2.2 per transport).
             self.stage_ice_restart_on_every_transport()?;
-        } else if self.transport_closed || new_srtp_association {
+        } else if new_srtp_association {
             self.stage_ice_restart()?;
         }
 
@@ -2151,8 +2149,6 @@ impl RTCPeerConnection {
                 .media_descriptions
                 .iter()
                 .any(|m| !is_rejected_media(m) && m.has_attribute(ATTR_KEY_END_OF_CANDIDATES));
-            // A description that sets up a transport consumes the closure of the last one.
-            let new_association = std::mem::take(&mut self.transport_closed);
             let remote_is_lite = is_lite_set(parsed_remote_description);
             let local_ice_role = self.local_ice_role(remote_is_lite, we_offer);
             let remote_dtls_parameters = RTCDtlsParameters {
@@ -2166,18 +2162,15 @@ impl RTCPeerConnection {
             // 4.1).
             self.dtls_transport_mut().srtp_required = has_rtp_media(parsed_remote_description);
 
-            // After the transport was closed, the description that sets one up again starts
-            // a new ICE session even when the peer keeps its ICE credentials: some browsers
-            // hold one ufrag/pwd per session, not per transport (Firefox), so a new m-section
-            // after every one was rejected arrives with the old credentials but new
-            // candidates and a new DTLS association. Keeping the old session left the agent on
-            // the closed transport's selected pair, sending the DTLS handshake there.
+            // A transport that was closed (every m= section rejected) is not this one: it was
+            // replaced by a new one (`close_transports_without_sections`), which starts as the
+            // first did, whatever credentials the peer uses for it (some browsers hold one
+            // ufrag/pwd per session, not per transport: Firefox).
             let ice_restart = deferred_ice_restart.unwrap_or_else(|| {
                 transports_started
-                    && (new_association
-                        || self
-                            .ice_transport()
-                            .have_remote_credentials_change(&remote_ufrag, &remote_pwd))
+                    && self
+                        .ice_transport()
+                        .have_remote_credentials_change(&remote_ufrag, &remote_pwd)
             });
             // The local half of a restart was applied with this side's description (the
             // offerer's offer, the answerer's answer): the transport takes the peer's new
@@ -2207,9 +2200,9 @@ impl RTCPeerConnection {
                 // restart unless" a full agent became lite, or a role conflict is
                 // repaired, which the agent does by itself). So whoever offers later, the
                 // ICE agent keeps its role, except that with one lite and one full agent
-                // the full one is controlling, and that a transport set up again after it
-                // was closed is a new session: its roles are determined as the first
-                // time, by who offers. (`local_ice_role`, which follows the offerer, is
+                // the full one is controlling. (A transport set up after the last one was
+                // closed is a new one, not started yet: its roles are determined as the
+                // first time, by who offers. `local_ice_role`, which follows the offerer, is
                 // what the DTLS role is derived from when `a=setup` leaves it open.)
                 let local_is_lite = self.setting_engine.candidates.ice_lite;
                 self.ice_transport_mut()
@@ -2221,8 +2214,6 @@ impl RTCPeerConnection {
                     } else {
                         RTCIceRole::Controlling
                     })
-                } else if new_association {
-                    Some(local_ice_role)
                 } else if lite_update {
                     // RFC 8839 section 4.4.2.2: "if the agent believed it was controlling, but
                     // the offer contained the 'remote-candidates' attribute, both agents
@@ -2243,8 +2234,8 @@ impl RTCPeerConnection {
 
                 // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
                 // too, unless the description changes the roles, the fingerprints or the
-                // `tls-id`, or sets up a transport that was closed; then a new association
-                // replaces it, with or without an ICE restart.
+                // `tls-id`; then a new association replaces it, with or without an ICE
+                // restart.
                 let association = self.dtls_transport_mut().update_remote(
                     local_ice_role,
                     remote_dtls_parameters.clone(),
@@ -2252,7 +2243,7 @@ impl RTCPeerConnection {
                     DtlsRemoteUpdate {
                         we_offer,
                         ice_restart,
-                        transport_closed: new_association,
+                        transport_closed: false,
                     },
                 )?;
                 if association == DtlsAssociationUpdate::New {
@@ -2373,10 +2364,9 @@ impl RTCPeerConnection {
         }
         let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
         let ice_restart = transports_started
-            && (self.transport_closed
-                || self
-                    .ice_transport()
-                    .have_remote_credentials_change(&ufrag, &pwd));
+            && self
+                .ice_transport()
+                .have_remote_credentials_change(&ufrag, &pwd);
         // The answer carries the new local credentials: staged now, applied with the answer.
         // Credentials an offer of this side staged already are the ones it carries.
         let staged_restart = if ice_restart && !self.ice_transport().has_pending_restart() {
@@ -2396,7 +2386,7 @@ impl RTCPeerConnection {
             DtlsRemoteUpdate {
                 we_offer: false,
                 ice_restart,
-                transport_closed: self.transport_closed,
+                transport_closed: false,
             },
             has_rtp_media(parsed),
         );
@@ -2776,7 +2766,6 @@ impl RTCPeerConnection {
         fingerprints: &[RTCDtlsFingerprint],
     ) -> Result<()> {
         if self.setting_engine.dtls_new_association_without_ice_restart
-            || self.transport_closed
             || self.ice_transport_of(transport).state() == RTCIceTransportState::New
             // Only an association in use is "continued" or "torn down": one that is not set up
             // yet, or that closed or failed, is simply started anew (section 5.11, third item).
