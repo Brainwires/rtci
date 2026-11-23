@@ -448,6 +448,16 @@ impl World {
         kinds: &[RtpCodecKind],
         edit: impl Fn(String) -> String,
     ) -> Result<(Vec<RTCRtpSenderId>, String)> {
+        self.negotiate_media(kinds, true, edit)
+    }
+
+    /// `negotiate_kinds`, with the data channel only when `data`.
+    fn negotiate_media(
+        &mut self,
+        kinds: &[RtpCodecKind],
+        data: bool,
+        edit: impl Fn(String) -> String,
+    ) -> Result<(Vec<RTCRtpSenderId>, String)> {
         let mut senders = vec![];
         for kind in kinds.iter().copied() {
             let transceiver = self.peers[0].pc.add_transceiver_from_kind(
@@ -469,7 +479,9 @@ impl World {
                     .expect("a sendonly transceiver has a sender"),
             );
         }
-        self.peers[0].pc.create_data_channel("data", None)?;
+        if data {
+            self.peers[0].pc.create_data_channel("data", None)?;
+        }
         let now = self.now;
         let offer = self.peers[0].pc.create_offer(None)?;
         self.peers[0].pc.set_local_description(now, offer.clone())?;
@@ -2358,4 +2370,71 @@ fn balanced_answered_without_bundle_a_rollback_keeps_every_transport() -> Result
 #[test]
 fn balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports() -> Result<()> {
     a_rollback_keeps_the_unbundled_transports(video_outside_the_group)
+}
+
+/// RFC 9429 section 5.7, a rollback of an offer that added a transport for a data section:
+/// audio and video run on transports of their own (`balanced`, answered without BUNDLE, no
+/// data channel yet); peer 0 opens a data channel and offers, the new `m=application` section
+/// in a BUNDLE group of its own with a transport of its own (as the interop peer's offer in the
+/// browser glare scenario), then rolls the offer back. The rollback takes that transport back:
+/// the transports are the two there were, connected, and the data section is on none. A
+/// following offer and answer open the data channel, and RTP of both senders still arrives.
+#[test]
+fn a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section() -> Result<()> {
+    let mut world = World::with_credentials(RTCBundlePolicy::Balanced, false)?;
+    let kinds = [RtpCodecKind::Audio, RtpCodecKind::Video];
+    let (senders, _) = world.negotiate_media(&kinds, false, without_bundle_group)?;
+    world.gather()?;
+    world.run("both transports connected", |peers| {
+        peers.iter().all(|p| {
+            p.connected
+                && p.pc.dtls_transports().len() == 2
+                && p.pc
+                    .dtls_transports()
+                    .iter()
+                    .all(|t| t.state() == RTCDtlsTransportState::Connected)
+        })
+    })?;
+    let before = dtls_states(&world.peers[0]);
+
+    let now = world.now;
+    world.peers[0].pc.create_data_channel("late", None)?;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    assert_eq!(
+        world.peers[0].pc.dtls_transports().len(),
+        3,
+        "the data section has a transport of its own:\n{}",
+        offer.sdp
+    );
+    world.peers[0]
+        .pc
+        .set_local_description(now, RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(
+        dtls_states(&world.peers[0]),
+        before,
+        "the rollback takes the data section's transport back"
+    );
+    assert_eq!(world.peers[0].pc.ice_transport_sections().len(), 2);
+
+    world.renegotiate()?;
+    world.gather_new()?;
+    world.run("the data channel open on both sides", |peers| {
+        peers.iter().all(|p| p.channel.is_some())
+    })?;
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    world.peers[1].rtp.clear();
+    for seq in 40..=45 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("audio and video after the rollback", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
+    Ok(())
 }

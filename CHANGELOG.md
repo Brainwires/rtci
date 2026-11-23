@@ -1815,9 +1815,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport, whose `a=tls-id` the answer's then seemed to replace. The ICE connection state
   and the connection state (W3C 4.3.3, 4.3.4) are aggregated again when an answer or a
   rollback closes a transport: one that closed before it connected held the connection at
-  "connecting". Tests:
+  "connecting". A rollback of an offer that gave a new data section a transport of its own
+  (its own BUNDLE group) left that transport in place: the layout took off their transports
+  only the sections a transceiver has, never the data section, so the browser glare scenario
+  found three transports after the rollback. Every section outside the layout's groups is
+  taken off now. Tests:
   `balanced_answered_without_bundle_a_rollback_keeps_every_transport`,
-  `balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports`.
+  `balanced_video_answered_outside_the_group_a_rollback_keeps_both_transports`,
+  `a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section`.
 - **interop** (mt-11): the browser scenarios that start with `request-offer` sent their
   scenario only with the browser's first offer, after the Rust peer had set its own; the peer
   then changed its header encryption policy, which webrtc-extensions 10.2 refuses
