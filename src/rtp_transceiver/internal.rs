@@ -552,8 +552,22 @@ impl RTCRtpTransceiverInternal {
 
     /// Codecs returns list of supported codecs
     pub(crate) fn get_codecs(&self, media_engine: &MediaEngine) -> Vec<RTCRtpCodecParameters> {
-        let codecs =
-            RTCRtpReceiverInternal::get_codecs(&self.preferred_codecs, self.kind(), media_engine);
+        self.codecs_in_numbering(media_engine, self.use_sframe == Some(true))
+    }
+
+    /// [`Self::get_codecs`] in the SFrame numbering (`sframe`) or the plain one
+    /// (draft-ietf-avtcore-rtp-sframe-03 section 6).
+    fn codecs_in_numbering(
+        &self,
+        media_engine: &MediaEngine,
+        sframe: bool,
+    ) -> Vec<RTCRtpCodecParameters> {
+        let codecs = RTCRtpReceiverInternal::get_codecs(
+            &self.preferred_codecs,
+            self.kind(),
+            media_engine,
+            sframe,
+        );
         // RFC 2198 section 5: the encodings a RED format names "MUST" also be formats of the
         // m= line (and of RED's clock rate, section 3): a RED format whose fmtp names one the
         // section does not list is left out of what this section offers and matches.
@@ -789,15 +803,21 @@ impl RTCRtpTransceiverInternal {
         // replace them in the remote's order and with the engine's payload types. When nothing
         // the application preferred was offered, the whole engine is matched instead, as with no
         // preferences, rather than leaving the section with no codec at all.
+        // An SFrame section's formats are matched in the SFrame numbering, a plain one's in
+        // the plain numbering (draft-ietf-avtcore-rtp-sframe-03 section 6).
+        let sframe = media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME);
         let mut filtered_codecs = if self.preferred_codecs.is_empty() {
             vec![]
         } else {
-            Self::match_remote_codecs(remote_codecs.clone(), self.get_codecs(media_engine))
+            Self::match_remote_codecs(
+                remote_codecs.clone(),
+                self.codecs_in_numbering(media_engine, sframe),
+            )
         };
         if filtered_codecs.is_empty() {
             filtered_codecs = Self::match_remote_codecs(
                 remote_codecs,
-                media_engine.get_codecs_by_kind(self.kind),
+                media_engine.codecs_for_section(self.kind, sframe),
             );
         }
 

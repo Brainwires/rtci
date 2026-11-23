@@ -1018,7 +1018,8 @@ impl RTCPeerConnection {
                             self.rtp_transceivers[i].sframe_refused()
                         } else {
                             self.rtp_transceivers[i].use_sframe() == Some(true)
-                                && !media.has_attribute("sframe")
+                                && !media
+                                    .has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME)
                         };
                         if sframe_closed {
                             media_sections.push(MediaSection {
@@ -1872,7 +1873,9 @@ impl RTCPeerConnection {
             else {
                 continue;
             };
-            self.rtp_transceivers[i].note_remote_sframe(media.has_attribute("sframe"));
+            self.rtp_transceivers[i].note_remote_sframe(
+                media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
+            );
             let of = |bandwidth_type: &str| {
                 media
                     .bandwidth
@@ -1963,8 +1966,8 @@ impl RTCPeerConnection {
             self.rtp_transceivers[i].set_extmap_allow_mixed(mixed);
             self.rtp_transceivers[i].apply_sframe_answer(
                 we_offered,
-                offered.has_attribute("sframe"),
-                answered.has_attribute("sframe"),
+                offered.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
+                answered.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME),
             );
         }
     }

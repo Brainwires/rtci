@@ -4851,6 +4851,14 @@ fn check_bundled_payload_types(
     for group in crate::peer_connection::sdp::bundle_groups(parsed) {
         let mut seen: std::collections::HashMap<u8, (String, RTCRtpCodecParameters)> =
             std::collections::HashMap::new();
+        // draft-ietf-avtcore-rtp-sframe-03 section 6: "If BUNDLE is in use and the "a=sframe"
+        // attribute is present for a media section but not for another media section of the
+        // same BUNDLE, payload types for media encodings that are relevant for SFrame MUST
+        // NOT be reused between the two media sections." Repair formats (RTX, FEC, RED) are
+        // not relevant for SFrame; the media formats, numbered in SFrame sections (`true`)
+        // and plain ones (`false`).
+        let mut media_numbering: std::collections::HashMap<u8, bool> =
+            std::collections::HashMap::new();
         for media in parsed.media_descriptions.iter().filter(|m| {
             is_live_rtp_section(m)
                 && get_mid_value(m).is_some_and(|mid| group.contains(&mid.as_str()))
@@ -4859,7 +4867,17 @@ fn check_bundled_payload_types(
                 continue;
             };
             let kind = media.media_name.media.to_ascii_lowercase();
+            let sframe = media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME);
             for codec in codecs {
+                if !crate::rtp_transceiver::rtp_sender::rtp_codec::is_repair_codec(&codec.rtp_codec)
+                    && *media_numbering.entry(codec.payload_type).or_insert(sframe) != sframe
+                {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "payload type {} numbers a format of an SFrame section and of a plain \
+                         section of one BUNDLE group (draft-ietf-avtcore-rtp-sframe-03 section 6)",
+                        codec.payload_type
+                    )));
+                }
                 match seen.get(&codec.payload_type) {
                     None => {
                         seen.insert(codec.payload_type, (kind.clone(), codec));

@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     negotiated.
   - A local offer's ICE restart is applied on every transport that staged one and stays
     revertible there until the answer (RFC 9429 section 5.7 with per-transport restarts).
+- **jsep**: SFrame payload types under BUNDLE (draft-ietf-avtcore-rtp-sframe-03 section 6).
+  An SFrame section numbers its formats apart from the plain sections: offers renumber the
+  registered formats with payload types no registered or negotiated format uses (RTX `apt`
+  and RED's list follow), the negotiated lists keep a format once per numbering, and each
+  section matches, answers and sends in its own. A remote description whose SFrame and plain
+  sections of one BUNDLE group share a media payload type is refused. Offers with an SFrame
+  section differ on the wire.
 - **jsep**: the SDP halves of media rows. A remote description whose bundled sections give one
   payload type two configurations is refused (RFC 9143 section 9.1.1, RFC 8834 section 4.3;
   Chromium refuses it too). FlexFEC (RFC 8627 and draft-03): a remote format without the

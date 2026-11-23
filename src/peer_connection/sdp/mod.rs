@@ -352,6 +352,8 @@ use url::Url;
 
 /// `a=bundle-only` (RFC 8843 §6).
 pub(crate) const ATTR_KEY_BUNDLE_ONLY: &str = "bundle-only";
+/// `a=sframe` (draft-ietf-avtcore-rtp-sframe-03 section 6).
+pub(crate) const ATTR_KEY_SFRAME: &str = "sframe";
 /// `a=ice-options` (RFC 8839 §5.6).
 pub(crate) const ATTR_KEY_ICE_OPTIONS: &str = "ice-options";
 /// `a=ice-pacing` (RFC 8839 §5.5).
@@ -1270,6 +1272,10 @@ pub(crate) struct AddTransceiverSdpParams {
     /// `SettingEngineBuilder::with_ecn` with the initiation it prefers, unless ECN is used
     /// without signalling (`with_ecn_without_signalling`): `a=ecn-capable-rtp` is written.
     ecn: Option<interceptor::EcnInitiation>,
+    /// Every payload type the remote offer's sections use: a format an answer adds (RFC
+    /// 9429 section 5.3.1) never takes one of them, which in a BUNDLE group would give one
+    /// payload type two configurations (RFC 9143 section 9.1.1).
+    offered_payload_types: HashSet<u8>,
 }
 
 impl RTCPeerConnection {
@@ -1337,7 +1343,7 @@ impl RTCPeerConnection {
         // draft-ietf-avtcore-rtp-sframe-03 section 6 / webrtc-encoded-transform 2.1: the
         // transceiver's media is SFrame-encrypted.
         if transceiver.describe_sframe(is_offer) {
-            media = media.with_property_attribute("sframe".to_owned());
+            media = media.with_property_attribute(ATTR_KEY_SFRAME.to_owned());
         }
 
         let codecs = transceiver.get_codecs(media_engine);
@@ -1422,14 +1428,42 @@ impl RTCPeerConnection {
         // goes with a primary of the answer, and none of them takes feedback (RFC 4585 section
         // 4.2: the answer adds none). Each keeps its registered payload type unless the
         // section already uses it, then takes a free dynamic one.
+        // An SFrame section adds them in its own numbering (draft-ietf-avtcore-rtp-sframe-03
+        // section 6); a renumbered one takes a dynamic payload type no registered, SFrame or
+        // offered format uses.
         if !is_offer
             && !transceiver.has_application_codec_preferences()
             && let Some(offered) = &media_section.offered_codecs
             && !codecs.is_empty()
         {
+            let sframe = transceiver.use_sframe() == Some(true);
             let mut used: HashSet<u8> = codecs.iter().map(|c| c.payload_type).collect();
             used.extend(offered.iter().map(|c| c.payload_type));
-            for available in media_engine.registered_codecs_by_kind(transceiver.kind()) {
+            used.extend(params.offered_payload_types.iter().copied());
+            let mut reserved = used.clone();
+            for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+                reserved.extend(
+                    media_engine
+                        .registered_codecs_by_kind(kind)
+                        .iter()
+                        .map(|c| c.payload_type),
+                );
+                reserved.extend(
+                    media_engine
+                        .sframe_numbering(kind)
+                        .iter()
+                        .map(|c| c.payload_type),
+                );
+            }
+            reserved.extend(media_engine.sframe_payload_types.iter().copied());
+            let available_formats = if sframe {
+                media_engine.codecs_for_section(transceiver.kind(), true)
+            } else {
+                media_engine
+                    .registered_codecs_by_kind(transceiver.kind())
+                    .to_vec()
+            };
+            for available in &available_formats {
                 if crate::rtp_transceiver::rtp_sender::rtp_codec::is_repair_codec(
                     &available.rtp_codec,
                 ) || is_fec_mime_type(&available.rtp_codec.mime_type)
@@ -1441,7 +1475,7 @@ impl RTCPeerConnection {
                     continue;
                 }
                 let payload_type = if used.contains(&available.payload_type) {
-                    match (96..=127u8).find(|pt| !used.contains(pt)) {
+                    match (96..=127u8).find(|pt| !reserved.contains(pt)) {
                         Some(pt) => pt,
                         None => break,
                     }
@@ -1449,6 +1483,7 @@ impl RTCPeerConnection {
                     available.payload_type
                 };
                 used.insert(payload_type);
+                reserved.insert(payload_type);
                 let name = available
                     .rtp_codec
                     .mime_type
@@ -2459,6 +2494,12 @@ impl RTCPeerConnection {
         // their own transport parameters, for the bundle policy.
         let mut with_transport: Vec<String> = vec![];
 
+        let offered_payload_types: HashSet<u8> = media_sections
+            .iter()
+            .filter_map(|m| m.offered_codecs.as_ref())
+            .flatten()
+            .map(|codec| codec.payload_type)
+            .collect();
         let mut candidates_added = false;
         for m in media_sections.iter() {
             // RFC 8829 §5.3.1: reflect rejected m-lines (port=0) in the answer.
@@ -2561,6 +2602,7 @@ impl RTCPeerConnection {
                     is_offer: params.bundle.is_offer(),
                     rtcp_mux_only: params.rtcp_mux_only,
                     ecn: params.ecn,
+                    offered_payload_types: offered_payload_types.clone(),
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,
