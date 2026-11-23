@@ -665,3 +665,56 @@ fn feedback_an_answer_adds_is_not_enabled() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn a_rolled_back_remote_offer_takes_the_transports_it_added_with_it() -> Result<()> {
+    let mut pc = peer()?;
+    // RFC 9429 section 5.7: the ICE and DTLS state a rolled-back description set up is
+    // discarded; the transport the unbundled offer's second section got goes with it.
+    let first = format!("{ICE}{FINGERPRINT}");
+    let second =
+        format!("a=ice-ufrag:Zz9x\r\na=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz\r\n{FINGERPRINT}");
+    let offer = format!(
+        "{SESSION}{}{}",
+        video("0", &first, ""),
+        video("1", &second, "")
+    );
+    pc.set_remote_description(Instant::now(), description(RTCSdpType::Offer, &offer))?;
+    assert_eq!(pc.pipeline_context.transports.len(), 2);
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 1);
+    assert_eq!(pc.ice_transport_sections(), vec![]);
+    Ok(())
+}
+
+#[test]
+fn a_rolled_back_max_compat_offer_takes_its_transports_with_it() -> Result<()> {
+    use crate::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_bundle_policy(RTCBundlePolicy::MaxCompat)
+                .build(),
+        )
+        .build(Instant::now())?;
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendrecv,
+                streams: vec![],
+                send_encodings: vec![],
+            }),
+        )?;
+    }
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(Instant::now(), offer)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 2);
+    assert_eq!(pc.ice_transport_sections().len(), 2);
+    pc.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(pc.pipeline_context.transports.len(), 1);
+    Ok(())
+}
