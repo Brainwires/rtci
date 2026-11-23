@@ -448,6 +448,7 @@ pub struct Agent {
     pub(crate) nomination_acceptance: NominationAcceptance,
     /// What a nomination that times out leads to.
     pub(crate) failed_nomination: FailedNomination,
+    pub(crate) pacing_group: Option<Arc<PacingGroup>>,
     /// The controlling agent's consent checks carry USE-CANDIDATE (libwebrtc).
     pub(crate) nominate_on_consent_checks: bool,
     /// Error responses to unauthenticated requests, or nothing.
@@ -691,6 +692,7 @@ impl Agent {
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
             failed_nomination: config.failed_nomination,
+            pacing_group: config.pacing_group.clone(),
             nominate_on_consent_checks: config.nominate_on_consent_checks,
             unauthenticated_requests: config.unauthenticated_requests,
             unauthenticated_response_tokens: MAX_UNAUTHENTICATED_RESPONSE_BURST,

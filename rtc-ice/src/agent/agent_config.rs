@@ -141,6 +141,43 @@ pub enum NominationAcceptance {
     Latest,
 }
 
+/// A pacing budget several agents share (RFC 8445 Section 14.2: "all agents together send
+/// no more than one transaction per 5 ms" — the "global" Ta of an implementation that runs
+/// several agents). Give the same `Arc` to every agent (through
+/// [`AgentConfig::pacing_group`] or the peer connection's
+/// `SettingEngineBuilder::with_ice_pacing_group`): each starts a connectivity check only when
+/// none of them has started one in the last 5 ms, on top of its own Ta. An agent without a
+/// group paces alone, by its Ta.
+#[derive(Debug, Default)]
+pub struct PacingGroup {
+    next: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl PacingGroup {
+    /// A new budget, shared by every agent given it.
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// Takes the budget at `now` if it is free: `Ok(())`, or `Err(at)` with when it next is.
+    pub(crate) fn take(
+        &self,
+        now: std::time::Instant,
+    ) -> std::result::Result<(), std::time::Instant> {
+        let mut next = self
+            .next
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *next {
+            Some(at) if at > now => Err(at),
+            _ => {
+                *next = Some(now + MIN_TA);
+                Ok(())
+            }
+        }
+    }
+}
+
 /// What an agent does when a nomination fails (RFC 8445 Section 7.2.5.2): the controlling
 /// agent's check with USE-CANDIDATE on a valid pair, or the controlled agent's check that a
 /// received USE-CANDIDATE triggered (Section 7.3.1.5). The check fails when its transaction times out (`Rc` requests, the
@@ -350,6 +387,10 @@ pub struct AgentConfig {
     /// pair and the checklist fail; [`FailedNomination::Retry`] nominates the pair again
     /// while the peer is heard from.
     pub failed_nomination: FailedNomination,
+
+    /// A pacing budget shared with other agents (RFC 8445 Section 14.2), if the application
+    /// runs several: see [`PacingGroup`]. `None`, the default, paces this agent alone.
+    pub pacing_group: Option<std::sync::Arc<PacingGroup>>,
 
     /// The controlling agent's consent checks on the selected pair carry USE-CANDIDATE, as
     /// libwebrtc's do. Off by default: RFC 8445 Section 7.1.2 asks for the attribute "in order

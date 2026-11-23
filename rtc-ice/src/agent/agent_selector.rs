@@ -575,6 +575,19 @@ impl Agent {
             None => None,
         };
         if let Some(pair_index) = pair_index {
+            // Section 14.2: with other agents, one transaction per 5 ms for all of them.
+            if let Some(group) = &self.pacing_group
+                && let Err(at) = group.take(now)
+            {
+                // (A triggered check taken off the queue goes back at its head.)
+                let p = self.candidate_pairs[pair_index];
+                if p.triggered {
+                    self.triggered_queue
+                        .push_front((p.local_index, p.remote_index));
+                }
+                self.next_check_at = at;
+                return;
+            }
             self.start_check(now, pair_index);
             self.next_check_at = now + self.ta;
         }

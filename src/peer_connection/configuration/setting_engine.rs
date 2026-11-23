@@ -291,6 +291,8 @@ pub struct IceBehaviour {
     pub nominate_on_consent_checks: bool,
     /// See [`SettingEngineBuilder::with_ice_pacing`].
     pub pacing: Option<Duration>,
+    /// See [`SettingEngineBuilder::with_ice_pacing_group`].
+    pub pacing_group: Option<std::sync::Arc<ice::PacingGroup>>,
     /// See [`SettingEngineBuilder::with_ice_unauthenticated_requests`].
     pub unauthenticated_requests: UnauthenticatedRequests,
     /// See [`SettingEngineBuilder::with_ice_data_from_selected_pair_only`].
@@ -1404,6 +1406,18 @@ impl SettingEngineBuilder {
     /// higher of the two proposals.
     pub fn with_ice_pacing(mut self, ta: Option<Duration>) -> Self {
         self.0.ice.pacing = ta;
+        self
+    }
+
+    /// A pacing budget this peer connection's ICE agent shares with others' (RFC 8445 section
+    /// 14.2: "all agents together send no more than one transaction per 5 ms"). An application
+    /// that runs several peer connections gives each the same [`ice::PacingGroup`]; without one
+    /// (the default) each agent paces by its own Ta only.
+    pub fn with_ice_pacing_group(
+        mut self,
+        group: Option<std::sync::Arc<ice::PacingGroup>>,
+    ) -> Self {
+        self.0.ice.pacing_group = group;
         self
     }
 

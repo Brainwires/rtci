@@ -1711,3 +1711,56 @@ fn test_a_nomination_answered_from_another_address_fails_the_checklist() {
     assert_eq!(a.checklist_state(), ChecklistState::Failed);
     assert!(a.get_selected_candidate_pair().is_none());
 }
+
+/// RFC 8445 Section 14.2: "all agents together send no more than one transaction per 5 ms".
+/// Two agents of one application share a `PacingGroup`: stepped together, every new
+/// transaction (a check's first request) of either starts at least 5 ms after the previous
+/// one of both; without the group the two agents start theirs at the same instants.
+#[test]
+fn test_agents_that_share_a_pacing_group_start_one_transaction_per_5_ms_together() {
+    let start = Instant::now();
+    let starts = |group: Option<std::sync::Arc<PacingGroup>>| {
+        let cfg = || AgentConfig {
+            ta: Some(Duration::from_millis(5)),
+            pacing_group: group.clone(),
+            ..config(true)
+        };
+        let mut agents = [
+            agent_with(start, cfg(), &[(1, 500), (2, 400), (3, 300)]),
+            agent_with(start, cfg(), &[(4, 500), (5, 400), (6, 300)]),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let mut times = vec![];
+        for ms in 0..100 {
+            let now = start + Duration::from_millis(ms);
+            for a in agents.iter_mut() {
+                a.handle_timeout(now).unwrap();
+                while let Some(t) = a.poll_write() {
+                    let mut m = Message {
+                        raw: t.message.to_vec(),
+                        ..Message::default()
+                    };
+                    m.decode().unwrap();
+                    if m.typ == BINDING_REQUEST && seen.insert(m.transaction_id) {
+                        times.push(now);
+                    }
+                }
+            }
+        }
+        times
+    };
+    let shared = starts(Some(PacingGroup::new()));
+    assert!(shared.len() >= 6, "every pair is checked: {}", shared.len());
+    for w in shared.windows(2) {
+        assert!(
+            w[1].duration_since(w[0]) >= Duration::from_millis(5),
+            "{:?} apart",
+            w[1].duration_since(w[0])
+        );
+    }
+    let alone = starts(None);
+    assert!(
+        alone.windows(2).any(|w| w[1] == w[0]),
+        "without the group two agents start together"
+    );
+}

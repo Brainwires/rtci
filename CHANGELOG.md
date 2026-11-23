@@ -482,6 +482,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair up after 30 s of silence (`FailedNomination::Retry`); before, the pair failed, or the
   agent with it at the 30 s timer. `AgentConfig` has a new field, `failed_nomination`: a struct
   literal without `..Default::default()` no longer compiles.
+- **ice**: `ice::PacingGroup`, `AgentConfig::pacing_group` and
+  `SettingEngineBuilder::with_ice_pacing_group`: agents that share one start at most one
+  transaction per 5 ms together (RFC 8445 section 14.2). `AgentConfig` has a new field: a
+  struct literal without `..Default::default()` no longer compiles.
+- **mdns**: `Mdns::handle_datagram(msg, destination)`: a datagram with the destination of its
+  IP header, for drivers that read it. Then RFC 6762 sections 6 and 11 apply as written: a
+  unicast response is taken only for a recent QU question, and one that arrived at the mDNS
+  multicast address is on-link whatever its source.
 - **turn**: `Client::update_credentials` with a new username no longer re-keys live
   allocations: they keep the username (and password) that created them, as RFC 8656 section 5
   asks of every request about an allocation; the new username is for the next `allocate`.

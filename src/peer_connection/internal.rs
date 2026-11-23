@@ -208,6 +208,7 @@ impl RTCPeerConnection {
             failed_nomination: setting_engine.ice.failed_nomination,
             nominate_on_consent_checks: setting_engine.ice.nominate_on_consent_checks,
             ta: setting_engine.ice.pacing,
+            pacing_group: setting_engine.ice.pacing_group.clone(),
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
             data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
             send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
