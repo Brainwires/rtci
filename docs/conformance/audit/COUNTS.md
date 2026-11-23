@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4434 | 145 | 262 | 112 | 22 | 615 | 5590 |
-| SHOULD | 683 | 75 | 73 | 72 | 6 | 328 | 1237 |
+| MUST | 4436 | 144 | 261 | 112 | 22 | 615 | 5590 |
+| SHOULD | 686 | 73 | 73 | 71 | 6 | 328 | 1237 |
 | MAY | 391 | 33 | 36 | 128 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5566 | 256 | 374 | 315 | 28 | 1111 | 7650 |
+| all | 5571 | 253 | 373 | 314 | 28 | 1111 | 7650 |
 
 ## Per file
 
@@ -59,8 +59,8 @@ is a procedure step without a keyword.
 | `rfc3711.md` | MUST | 86 | 0 | 0 | 0 | 0 | 7 | 93 |
 | `rfc3711.md` | SHOULD | 10 | 2 | 2 | 0 | 0 | 2 | 16 |
 | `rfc3711.md` | MAY | 9 | 0 | 0 | 3 | 0 | 3 | 15 |
-| `rfc3758.md` | MUST | 38 | 0 | 1 | 0 | 0 | 4 | 43 |
-| `rfc3758.md` | SHOULD | 10 | 1 | 0 | 1 | 0 | 2 | 14 |
+| `rfc3758.md` | MUST | 39 | 0 | 0 | 0 | 0 | 4 | 43 |
+| `rfc3758.md` | SHOULD | 12 | 0 | 0 | 0 | 0 | 2 | 14 |
 | `rfc3758.md` | MAY | 8 | 0 | 0 | 1 | 0 | 0 | 9 |
 | `rfc4585.md` | MUST | 51 | 2 | 3 | 0 | 0 | 11 | 67 |
 | `rfc4585.md` | SHOULD | 4 | 1 | 2 | 0 | 0 | 5 | 12 |
@@ -123,7 +123,7 @@ is a procedure step without a keyword.
 | `rfc6465.md` | MUST | 7 | 0 | 0 | 1 | 0 | 2 | 10 |
 | `rfc6465.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 2 | 3 |
 | `rfc6465.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `rfc6525.md` | MUST | 62 | 1 | 0 | 0 | 0 | 0 | 63 |
+| `rfc6525.md` | MUST | 63 | 0 | 0 | 0 | 0 | 0 | 63 |
 | `rfc6525.md` | SHOULD | 11 | 0 | 0 | 0 | 0 | 1 | 12 |
 | `rfc6525.md` | MAY | 5 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 | 39 |
@@ -281,7 +281,7 @@ is a procedure step without a keyword.
 | `rfc9147.md` | SHOULD | 39 | 7 | 6 | 0 | 0 | 8 | 60 |
 | `rfc9147.md` | MAY | 17 | 2 | 0 | 0 | 0 | 5 | 24 |
 | `rfc9260.md` | MUST | 287 | 0 | 0 | 0 | 0 | 28 | 315 |
-| `rfc9260.md` | SHOULD | 150 | 5 | 8 | 4 | 0 | 23 | 190 |
+| `rfc9260.md` | SHOULD | 151 | 4 | 8 | 4 | 0 | 23 | 190 |
 | `rfc9260.md` | MAY | 29 | 0 | 5 | 23 | 0 | 15 | 72 |
 | `rfc9335.md` | MUST | 20 | 2 | 1 | 0 | 0 | 0 | 23 |
 | `rfc9335.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 0 | 1 |

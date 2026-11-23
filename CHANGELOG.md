@@ -1317,6 +1317,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp**: an outgoing message takes its Stream Sequence Number (and its I-DATA Message
+  Identifier) when its first fragment leaves the send queue, no longer when it is written. An
+  ordered message whose lifetime runs out before it is sent is dropped without a TSN, a stream
+  sequence number or a FORWARD TSN (RFC 3758 section 4.1 TR3, TR4); the next message of the
+  stream takes the number. New `StreamEvent::MessageAbandoned { id, transmitted }` for every
+  abandoned message (TR3: the upper layer is told).
 - **sctp**, **peer_connection**: path MTU discovery (RFC 8899 DPLPMTUD, RFC 8261 section 4,
   RFC 8831 section 5), on by default. Once established an association confirms its packet
   size with a probe (a HEARTBEAT and a PAD chunk, RFC 4820, of exactly the size tried),

@@ -1548,6 +1548,15 @@ impl Association {
     /// unregister_stream un-registers a stream from the association
     /// The caller should hold the association write lock.
     fn unregister_stream(&mut self, stream_identifier: StreamId, reason: AssociationError) {
+        if let Some(s) = self.streams.get_mut(&stream_identifier) {
+            // What the stream wrote and has not sent yet still goes, numbered by the stream
+            // it was written to.
+            let generation = s.generation;
+            self.pending_queue
+                .number_messages(stream_identifier, generation, false, |unordered| {
+                    s.next_message_numbers(unordered)
+                });
+        }
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
             self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
@@ -5161,11 +5170,25 @@ impl Association {
         );
         let mut released_per_stream = FxHashMap::default();
         let mut changed = false;
+        let transmitted = !inflight.is_empty();
         let tail = self.pending_queue.drain_message(message.id)?;
+        // The stream the message was written to, if it is still the stream of that id.
+        let stream = tail
+            .first()
+            .or_else(|| {
+                inflight
+                    .first()
+                    .and_then(|tsn| self.inflight_queue.get(*tsn))
+            })
+            .filter(|c| self.is_current_stream_data(c))
+            .map(|c| c.stream_identifier);
+        // A message none of which was sent goes without TSNs, unless it is ordered and has
+        // its Stream Sequence Number already: the peer then waits for that number, and only
+        // a FORWARD TSN past it lets the stream go on.
         let assign_tsns = !inflight.is_empty()
             || tail
                 .first()
-                .is_some_and(|c| !c.beginning_fragment || !c.unordered);
+                .is_some_and(|c| !c.beginning_fragment || (!c.unordered && !c.numbers_pending));
         for mut c in tail {
             self.note_dequeued(&c);
             if assign_tsns {
@@ -5197,6 +5220,14 @@ impl Association {
             }
         }
         self.release_stream_buffers(&released_per_stream);
+        if changed && let Some(id) = stream {
+            // RFC 3758 4.1 TR3: the upper layer is told.
+            self.events
+                .push_back(Event::Stream(StreamEvent::MessageAbandoned {
+                    id,
+                    transmitted,
+                }));
+        }
         Ok(changed)
     }
 
@@ -5241,9 +5272,9 @@ impl Association {
     /// Timed(0) permits first transmissions until an actual retry is considered.
     ///
     /// RFC 3758 4.1 (TR3, TR4): the lifetime is checked before every transmission, the first
-    /// included, of ordered messages too. An ordered message has its stream sequence number
-    /// from the moment it was written, so abandoning it takes a TSN and a FORWARD TSN, which
-    /// `abandon_message` sees to.
+    /// included, of ordered messages too. A message takes its Stream Sequence Number when its
+    /// first fragment is sent, so one that expires before that is dropped without a TSN or a
+    /// FORWARD TSN; one that expires part sent is abandoned by `abandon_message` with them.
     fn pending_message_expired(&self, c: &ChunkPayloadData, now: Instant) -> bool {
         c.reliability.deadline() != c.created_at && self.timed_data_expired(c, now)
     }
@@ -5324,9 +5355,10 @@ impl Association {
                 // allocated, means there is no gap for the peer to reconcile and
                 // no ForwardTSN to send.
                 if self.pending_message_expired(c, now) {
-                    // Abandoning an ordered message takes TSNs: not past what may be
-                    // outstanding (see `MAX_OUTSTANDING_TSNS`).
+                    // Abandoning an ordered message that has its number takes TSNs: not
+                    // past what may be outstanding (see `MAX_OUTSTANDING_TSNS`).
                     if !unordered
+                        && !c.numbers_pending
                         && self.my_next_tsn.wrapping_sub(self.cumulative_tsn_ack_point)
                             > MAX_OUTSTANDING_TSNS
                     {
@@ -5661,12 +5693,35 @@ impl Association {
     }
 
     /// Move the chunk peeked with self.pending_queue.peek() to the inflight_queue.
+    /// The message whose first fragment is about to leave the pending queue takes its Stream
+    /// Sequence Number and Message Identifier now (RFC 3758 4.1 TR3: a message abandoned
+    /// while it waited took none).
+    fn number_next_message(&mut self) {
+        let Some(c) = self.pending_queue.peek() else {
+            return;
+        };
+        if !c.numbers_pending || !c.beginning_fragment {
+            return;
+        }
+        let (id, generation) = (c.stream_identifier, c.stream_generation);
+        let Some(s) = self.streams.get_mut(&id) else {
+            return;
+        };
+        if s.generation == generation {
+            self.pending_queue
+                .number_messages(id, generation, true, |unordered| {
+                    s.next_message_numbers(unordered)
+                });
+        }
+    }
+
     fn move_pending_data_chunk_to_inflight_queue(
         &mut self,
         beginning_fragment: bool,
         unordered: bool,
         now: Instant,
     ) -> Option<ChunkPayloadData> {
+        self.number_next_message();
         if let Some(mut c) = self.pending_queue.pop(beginning_fragment, unordered) {
             // Assign TSN
             c.tsn = self.generate_next_tsn();

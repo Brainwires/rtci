@@ -665,6 +665,71 @@ impl PendingQueue {
         self.only_part_sent = only;
     }
 
+    /// Numbers the messages of `stream` (of its incarnation `generation`) that have no numbers
+    /// yet, in the order the stream sends them: the one at its head only, or every one.
+    /// `number` is called with whether each message is unordered and returns its Stream
+    /// Sequence Number and Message Identifier. The fragments of a message all get the same
+    /// numbers. Returns how many messages were numbered.
+    pub(crate) fn number_messages(
+        &mut self,
+        stream: u16,
+        generation: u64,
+        head_only: bool,
+        mut number: impl FnMut(bool) -> (u16, u32),
+    ) -> usize {
+        let Some(q) = self.streams.get_mut(&stream) else {
+            return 0;
+        };
+        let mut numbered = 0;
+        for (_, entry) in q.entries.iter_mut() {
+            let PendingEntry::Message(message) = entry else {
+                if head_only {
+                    break;
+                }
+                continue;
+            };
+            let (pending, unordered, message_generation) = match message {
+                QueuedMessage::Whole(c) => (c.numbers_pending, c.unordered, c.stream_generation),
+                QueuedMessage::Fragmented {
+                    snapshot,
+                    fragments,
+                    ..
+                } => (
+                    fragments.front().is_some_and(|c| c.numbers_pending),
+                    snapshot.unordered,
+                    snapshot.stream_generation,
+                ),
+            };
+            if pending && message_generation == generation {
+                let (ssn, mid) = number(unordered);
+                match message {
+                    QueuedMessage::Whole(c) => {
+                        c.stream_sequence_number = ssn;
+                        c.mid = mid;
+                        c.numbers_pending = false;
+                    }
+                    QueuedMessage::Fragmented {
+                        snapshot,
+                        fragments,
+                        ..
+                    } => {
+                        snapshot.stream_sequence_number = ssn;
+                        for c in fragments.iter_mut() {
+                            c.stream_sequence_number = ssn;
+                            c.mid = mid;
+                            c.numbers_pending = false;
+                        }
+                    }
+                }
+                numbered += 1;
+            }
+            if head_only {
+                break;
+            }
+        }
+        numbered
+    }
+
     /// Gives every message still queued new numbers, in the order its stream sends them:
     /// `number` is called with the stream of each message and whether it is unordered, and
     /// returns its Stream Sequence Number and Message Identifier (RFC 6525 5.2.4 G5, 5.2.7
@@ -681,6 +746,10 @@ impl PendingQueue {
                     continue;
                 };
                 match message {
+                    // It is numbered when it leaves, from the stream's counters.
+                    QueuedMessage::Whole(c) if c.numbers_pending => {}
+                    QueuedMessage::Fragmented { fragments, .. }
+                        if fragments.front().is_some_and(|c| c.numbers_pending) => {}
                     QueuedMessage::Whole(c) => {
                         let (ssn, mid) = number(c.stream_identifier, c.unordered);
                         if !c.unordered {
