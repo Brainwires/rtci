@@ -1269,6 +1269,13 @@ impl RTCPeerConnection {
         )?;
         if include_unmatched {
             self.plan_offer_transports(&d)?;
+        } else if let Some(offer) = self
+            .remote_description()
+            .and_then(|remote| remote.parsed.as_ref())
+        {
+            // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
+            // answer accepts.
+            crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
         }
         self.write_transport_attributes(&mut d);
         Ok(d)

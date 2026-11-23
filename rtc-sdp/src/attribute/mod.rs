@@ -65,7 +65,7 @@ mod validate;
 #[cfg(test)]
 mod attribute_test;
 
-pub use grouping::{Group, Mid, Msid, MsidSemantic};
+pub use grouping::{Depend, Dependency, DependencyType, Group, Mid, Msid, MsidSemantic};
 pub use ice::{
     Candidate, IceOptions, IcePacing, IcePwd, IceUfrag, RemoteCandidate, RemoteCandidates,
 };

@@ -3525,6 +3525,134 @@ pub(crate) fn described_ssrcs(desc: &SessionDescription) -> HashSet<SSRC> {
     ssrcs
 }
 
+/// The decoding dependencies of a description (RFC 5583): for each media section in an
+/// `a=group:DDP` group, its mid and its `a=depend` (section 5.2.2). A group whose sections do
+/// not all state the same dependency type ("In a DDP group, all media streams MUST have the
+/// same type of decoding dependency") is left out, as is a malformed `a=depend`.
+pub(crate) fn decoding_dependencies(
+    desc: &SessionDescription,
+) -> Vec<(String, sdp::attribute::Depend)> {
+    use sdp::attribute::{Depend, TypedAttribute};
+    let mut out: Vec<(String, Depend)> = vec![];
+    for group in desc
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_GROUP)
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| {
+            let mut tokens = value.split_whitespace();
+            (tokens.next() == Some("DDP")).then(|| tokens.map(str::to_owned).collect::<Vec<_>>())
+        })
+    {
+        let members: Vec<(String, Depend)> = desc
+            .media_descriptions
+            .iter()
+            .filter_map(|m| {
+                let mid = get_mid_value(m)?;
+                if !group.contains(mid) {
+                    return None;
+                }
+                let depend = m
+                    .attribute(Depend::NAME)
+                    .flatten()
+                    .and_then(|v| Depend::parse(v).ok())?;
+                Some((mid.clone(), depend))
+            })
+            .collect();
+        let mut types = members
+            .iter()
+            .flat_map(|(_, d)| d.dependencies.iter().map(|dependency| &dependency.typ));
+        let first = types.next();
+        if first.is_some() && types.all(|t| Some(t) == first) {
+            out.extend(members);
+        }
+    }
+    out
+}
+
+/// RFC 5583 section 6.1 (with RFC 5888 section 9.2, which it follows) in an answer to
+/// `offer`: an answerer that understands DDP keeps the offered dependencies ("The answerer
+/// cannot change the dependency relations") for what it accepts. Each offered DDP group is
+/// answered with the mids of its sections the answer accepts, when two remain, and each such
+/// section with the offer's `a=depend`, restricted to the formats the answer keeps in it and
+/// in the sections it depends on; a dependency left with none of the formats it needs is
+/// removed with its format's line, as the answerer "MAY remove media Operation Points".
+pub(crate) fn answer_decoding_dependencies(
+    offer: &SessionDescription,
+    answer: &mut SessionDescription,
+) {
+    use sdp::attribute::{Depend, TypedAttribute};
+    let offered = decoding_dependencies(offer);
+    if offered.is_empty() {
+        return;
+    }
+    let formats: HashMap<String, Vec<String>> = answer
+        .media_descriptions
+        .iter()
+        .filter(|m| !is_rejected_media(m))
+        .filter_map(|m| Some((get_mid_value(m)?.clone(), m.media_name.formats.clone())))
+        .collect();
+    let groups: Vec<Vec<String>> = offer
+        .attributes
+        .iter()
+        .filter(|a| a.key == ATTR_KEY_GROUP)
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| {
+            let mut tokens = value.split_whitespace();
+            (tokens.next() == Some("DDP")).then(|| {
+                tokens
+                    .filter(|mid| {
+                        formats.contains_key(*mid) && offered.iter().any(|(m, _)| m == mid)
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .filter(|group| group.len() >= 2)
+        .collect();
+    for group in &groups {
+        answer
+            .attributes
+            .push(sdp::description::common::Attribute::new(
+                ATTR_KEY_GROUP.to_owned(),
+                Some(format!("DDP {}", group.join(" "))),
+            ));
+    }
+    for media in &mut answer.media_descriptions {
+        let Some(mid) = get_mid_value(media).cloned() else {
+            continue;
+        };
+        if !groups.iter().any(|g| g.contains(&mid)) {
+            continue;
+        }
+        let Some((_, depend)) = offered.iter().find(|(m, _)| *m == mid) else {
+            continue;
+        };
+        let own = &formats[&mid];
+        let dependencies: Vec<_> = depend
+            .dependencies
+            .iter()
+            .filter(|d| own.contains(&d.fmt))
+            .filter_map(|d| {
+                let mut d = d.clone();
+                if let Some((on, fmts)) = &mut d.on {
+                    let kept = formats.get(on.as_str())?;
+                    fmts.retain(|f| kept.contains(f));
+                    if fmts.is_empty() || !groups.iter().any(|g| g.contains(on)) {
+                        return None;
+                    }
+                }
+                Some(d)
+            })
+            .collect();
+        if !dependencies.is_empty() {
+            *media = media
+                .clone()
+                .with_value_attribute(Depend::NAME.to_owned(), Depend { dependencies }.to_string());
+        }
+    }
+}
+
 /// The lip synchronization groups of a description (`a=group:LS`, RFC 5888 section 7), each
 /// its mids in order.
 pub(crate) fn ls_groups(desc: &SessionDescription) -> Vec<Vec<String>> {

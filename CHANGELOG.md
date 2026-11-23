@@ -2305,6 +2305,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **Decoding dependencies** (RFC 5583; RFC 7798 section 7.2.5; branch `conf/jsep-47-depend`).
+  `sdp::attribute::{Depend, Dependency, DependencyType}` parse and write `a=depend` (one
+  dependency per format; `lay`, `mdc` or another token). `RTCPeerConnection::
+  remote_decoding_dependencies` lists each section of a remote `a=group:DDP` with its
+  `a=depend` (a group mixing dependency types is not taken). An answer keeps the offered DDP
+  groups and dependencies for the sections and formats it accepts (section 6.1); it offers
+  none itself. Audit: `docs/conformance/audit/rfc5583.md`.
 - **RTP stream pause and resume** (RFC 7728; branch `conf/jsep-46-pause-resume`).
   `rtcp::transport_feedbacks::pause_resume::{PauseResume, PauseResumeEntry, PauseResumeType}`
   (RTPFB FMT 9, parsed by the packet parser); `interceptor::{PauseResumeInterceptor,

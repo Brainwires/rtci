@@ -1751,6 +1751,18 @@ impl RTCPeerConnection {
             .unwrap_or_default()
     }
 
+    /// The decoding dependencies of the current remote description (RFC 5583): each media
+    /// section of an `a=group:DDP` group, by mid, with its `a=depend` (which of its formats
+    /// depend, layered `lay` or multi-description `mdc`, on which formats of which other
+    /// section). What a receiver of layered H.265 (RFC 7798 MRMT, section 7.2.5) needs to
+    /// know which streams to decode together. Empty without a remote description or groups.
+    pub fn remote_decoding_dependencies(&self) -> Vec<(String, ::sdp::attribute::Depend)> {
+        self.remote_description()
+            .and_then(|r| r.parsed.as_ref())
+            .map(crate::peer_connection::sdp::decoding_dependencies)
+            .unwrap_or_default()
+    }
+
     /// Sets the remote description as part of the offer/answer negotiation.
     ///
     /// This changes the remote description associated with the connection. This description
