@@ -3865,6 +3865,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **rtc**: a data-channel-only connection sent RTCP. The RTCP session the peer connection
+  installs joined at the first DTLS handshake whatever was negotiated, and with no media SSRC
+  reported from one of its own: each peer sent a 56-byte SRTCP compound packet (an empty
+  receiver report and an SDES CNAME, AEAD_AES_256_GCM) about every 0.4 s, for the life of the
+  connection. Nothing left in the clear (SRTCP keeps the header and the sender SSRC readable
+  as RFC 3711 has it; without `use_srtp` on the association there were no keys and the SRTP
+  handler refused every packet), but there is no RTP session without an RTP m= section (RFC
+  3550 section 6, RFC 8834 section 4.1), and the reports gave away a random per-connection SSRC
+  and the connection's timing. After the last media section was removed the session also went
+  on reporting, from a new SSRC, for good. Each transport's RTCP session now joins when the
+  transport carries a negotiated RTP section (not rejected, not stopped, any direction) and its
+  DTLS association has SRTP keys, and leaves with one BYE when its last section goes; a media
+  section added again joins it afresh. `RtcpSessionBuilder::with_joins_on_start(true)` (what
+  `configure_rtcp_reports_with` builds) makes a session join on `RtcpSessionControl::Start`
+  only; `Leave` then `Start` joins again. The RTCP of each transport's session goes down that
+  transport: a receive-only session's empty reports went down the data transport. RTCP for a
+  transport without an RTP session is dropped before SRTP. Tests:
+  `tests/rtcp_session_scope_rtc2rtc.rs` (`a_data_channel_only_connection_sends_no_rtcp`,
+  `media_added_later_starts_rtcp_and_every_rtcp_packet_is_protected`,
+  `removing_all_media_ends_rtcp_with_one_goodbye_and_adding_media_starts_it_again`; all three
+  fail before the change), `multi_transport_rtc2rtc.rs::rtcp_runs_on_each_media_transport_and_never_on_the_data_transport`,
+  `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
+  `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
+  lossy-link run takes another course now (no RTCP on its data-only connection).
+
 - **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
   HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are
   incremented only for missing TSNs prior to the HTNA") was applied only outside Fast

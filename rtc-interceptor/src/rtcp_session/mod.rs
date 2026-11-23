@@ -255,6 +255,7 @@ pub struct RtcpSessionBuilder {
     point_to_point: Option<bool>,
     report_from_every_ssrc: bool,
     immediate_congestion_feedback: bool,
+    joins_on_start: bool,
     random: Box<dyn RtcpRandom>,
 }
 
@@ -272,6 +273,7 @@ impl Default for RtcpSessionBuilder {
             point_to_point: None,
             report_from_every_ssrc: false,
             immediate_congestion_feedback: true,
+            joins_on_start: false,
             random: Box::new(ThreadRandom),
         }
     }
@@ -377,6 +379,20 @@ impl RtcpSessionBuilder {
         self
     }
 
+    /// Whether the session joins only when told [`RtcpSessionControl::Start`] (`true`), or at
+    /// the first control, packet or stream it is given (`false`, the default).
+    ///
+    /// RFC 3550 section 6: RTCP is the control protocol of an RTP session, and there is none
+    /// until an RTP m= section is negotiated (RFC 8834 section 4.1). A peer connection knows
+    /// when that is, per transport, and joins the session then; with `true` nothing else makes
+    /// it join: until `Start` it sends nothing (no report, no SDES, no SSRC of its own), and
+    /// what is written to it as RTCP is dropped. After [`RtcpSessionControl::Leave`], a
+    /// `Start` joins it again (RTCP resumes from a new reporting SSRC).
+    pub fn with_joins_on_start(mut self, joins_on_start: bool) -> Self {
+        self.joins_on_start = joins_on_start;
+        self
+    }
+
     /// The source of the session's random numbers; a test supplies one that repeats.
     pub fn with_random(mut self, random: impl RtcpRandom + 'static) -> Self {
         self.random = Box::new(random);
@@ -413,6 +429,7 @@ impl RtcpSessionBuilder {
             point_to_point: template.point_to_point,
             report_from_every_ssrc: template.report_from_every_ssrc,
             immediate_congestion_feedback: template.immediate_congestion_feedback,
+            joins_on_start: template.joins_on_start,
             random: Box::new(random.clone()),
         };
         let first = make(&template).build();
@@ -439,6 +456,8 @@ impl RtcpSessionBuilder {
             report_from_every_ssrc: self.report_from_every_ssrc,
             random: self.random,
 
+            joins_on_start: self.joins_on_start,
+            start_given: false,
             started: false,
             left: false,
             locals: Vec::new(),
@@ -680,6 +699,10 @@ pub struct RtcpSessionInterceptor {
     report_from_every_ssrc: bool,
     random: Box<dyn RtcpRandom>,
 
+    /// [`RtcpSessionBuilder::with_joins_on_start`].
+    joins_on_start: bool,
+    /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
+    start_given: bool,
     started: bool,
     left: bool,
     /// In the order they were bound.
@@ -1147,9 +1170,34 @@ impl RtcpSessionInterceptor {
 
     // ---- joining ---------------------------------------------------------------------
 
+    /// Whether anything may make the session join: always, unless it joins on
+    /// [`RtcpSessionControl::Start`] only and has not been given it.
+    fn may_join(&self) -> bool {
+        !self.joins_on_start || self.start_given
+    }
+
+    /// [`RtcpSessionControl::Start`] after [`RtcpSessionControl::Leave`]: the session is
+    /// joined afresh (RFC 3550 section 6.3.2's initial state), with no members, nothing
+    /// pending and the next local SSRC it reports from a new one.
+    fn rejoin(&mut self) {
+        self.left = false;
+        self.started = false;
+        self.departing.clear();
+        self.pending.clear();
+        self.early_at = None;
+        self.bye = None;
+        self.members.clear();
+        self.pmembers = 0;
+        self.avg_rtcp_size = 0.0;
+        self.compound_sent = false;
+        self.reference_times.clear();
+        self.awaited = None;
+        self.unanswered_reduced_nacks = 0;
+    }
+
     /// Joins the session if it has not, and gives every participating SSRC its timer.
     fn sync(&mut self, now: Instant) {
-        if self.left {
+        if self.left || !self.may_join() {
             return;
         }
         self.sync_reporter();
@@ -2343,7 +2391,12 @@ impl RtcpSessionInterceptor {
 
     fn control(&mut self, now: Instant, control: &RtcpSessionControl) {
         match control {
-            RtcpSessionControl::Start => {}
+            RtcpSessionControl::Start => {
+                if self.left {
+                    self.rejoin();
+                }
+                self.start_given = true;
+            }
             RtcpSessionControl::Cname(cname) => self.cname = cname.clone(),
             RtcpSessionControl::Bandwidth(bandwidth) => self.bandwidth = *bandwidth,
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
@@ -2400,6 +2453,12 @@ impl RtcpSessionInterceptor {
                 }
             }
             RtcpSessionControl::Leave => {
+                // A session that joins on `Start` and was not given it has not joined: there
+                // is nothing to leave.
+                if !self.may_join() || self.left {
+                    return;
+                }
+                self.start_given = false;
                 // RFC 3550 6.6: every SSRC of an endpoint that leaves says BYE.
                 self.sync(now);
                 self.left = true;
@@ -2455,8 +2514,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
                 return Ok(());
             }
         }
-        if self.left {
-            // After the BYE nothing more is said (RFC 3550 6.1: BYE is the last packet).
+        if self.left || !self.may_join() {
+            // After the BYE nothing more is said (RFC 3550 6.1: BYE is the last packet), and
+            // before the session joins there is no RTP session to say it in.
             if matches!(msg.message.packet, Packet::Rtp(_)) {
                 self.write_queue.push_back(msg);
             }

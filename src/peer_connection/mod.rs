@@ -1627,6 +1627,7 @@ impl RTCPeerConnection {
                     parsed_local_description,
                     parsed_remote_description,
                 )?;
+                self.sync_rtcp_sessions(now);
             }
 
             // webrtc-extensions 4.1: the answer sets each transceiver's negotiated header
@@ -3012,6 +3013,7 @@ impl RTCPeerConnection {
                     parsed_local_description,
                     parsed_remote_description,
                 )?;
+                self.sync_rtcp_sessions(now);
             }
 
             // An answer applied: the stopped transceivers whose sections it left rejected go.
