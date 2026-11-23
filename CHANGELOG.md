@@ -1609,6 +1609,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept until the Cumulative TSN Ack covers it (it was dropped at the gap acknowledgement), and
   a SACK that no longer acknowledges it makes it outstanding again with a miss indication and
   T3-rtx; a SHUTDOWN is no renege.
+- **peer connection** (mt-2): a remote description whose sections have different ICE
+  credentials outside a BUNDLE group is applied, a transport per section, instead of refused
+  with `ErrSessionDescriptionConflictingIceUfrag`; an answer accepts a section offered outside
+  the BUNDLE group on its own transport instead of rejecting it with port 0 (it still does under
+  `must-bundle`). `iceConnectionState` is the W3C 4.3.4 aggregate: a connection whose only
+  transport was closed by a description now reports `new`, as the aggregate of closed
+  transports is, where it reported `closed`.
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound
@@ -2160,6 +2167,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/stream-driver` (`rtc-stream-driver`, not published) is a tokio driver for it,
   tested over loopback sockets. RFC 4571 audit: `docs/conformance/audit/rfc4571.md`.
 
+- **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
+  association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
+  new SRTP master keys and the key lifetime counts start over (RFC 3711 sections 9.2 and 11.3,
+  RFC 7714 sections 8.4 and 9.4). Call it on `OnSrtpKeyLifetimeExpiring`; an rtc peer takes
+  the new association, browsers ignore a new `tls-id`.
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
   BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,
