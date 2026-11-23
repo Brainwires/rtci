@@ -2275,6 +2275,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-3-str0m`): str0m 0.26.0 (MIT OR Apache-2.0, sans-I/O Rust,
+  with its pure-Rust `rust-crypto` backend: dimpl DTLS) is a peer of the interop matrix
+  (`scripts/test-env/peers/str0m`, a crate of its own outside the workspace, built `--locked` in
+  the test image; `cargo deny` with the repository's `deny.toml` passes on it). The program owns
+  the UDP socket, the TCP connections of its active ICE-TCP candidate (RFC 4571 framing) and the
+  clock, and reads the fixtures itself (IVF, H.264 Annex B, Ogg). New cells `DTLS 1.3: *` (plan
+  `config.dtls13`): a peer that prefers DTLS 1.3 negotiates it with the engine either side the
+  client; Pion's `peer.json` records that its DTLS is 1.2 only.
+
 - **interop** (branch `conf/peers-2-pion`): Pion (`github.com/pion/webrtc/v4` v4.2.29, MIT)
   is a peer of the interop matrix (`scripts/test-env/peers/pion`). The test image carries Go
   1.27.4 (by SHA-256) and every module `peers/pion/image/go.sum` pins; the peer builds offline

@@ -555,6 +555,24 @@ for (const dir of ["peer offers", "Rust offers"]) {
   });
 }
 
+// DTLS 1.3 where the peer's stack has it, set to prefer it (with 1.2 fallback where the stack
+// can): the engine offers both versions in one ClientHello and takes 1.3 from a ClientHello
+// that offers it (RFC 9147 5.3, RFC 8446 4.2.1), whichever side is the client.
+for (const dir of ["peer offers", "Rust offers"]) {
+  test(`DTLS 1.3: a peer that prefers it negotiates DTLS 1.3 with Rust (${dir})`, async () => {
+    const steps =
+      dir === "peer offers"
+        ? [{ op: "dc", label: "dtls13" }, { op: "offer" }, { op: "connected" }, { op: "echo", label: "dtls13", count: 10 }]
+        : [{ op: "request-offer" }, { op: "connected" }, { op: "await-channel", label: "from-rust", ms: 15000 }];
+    const r = await run(test.info().title, { config: { dtls13: true }, steps: [...steps, { op: "report" }] }, ["dtls13"]);
+    expectOk(r);
+    logNegotiated(r);
+    const t = (r.rust?.stats?.transports || []).find((x) => x.dtlsState === "connected");
+    expect(t?.tlsVersion, ctx(r, { rust: t })).toBe("FEFC");
+    if (r.dtls?.version) expect(r.dtls.version.toUpperCase(), ctx(r, { rust: t })).toBe("FEFC");
+  });
+}
+
 // ---- renegotiation adding and removing a track (RFC 9429 5.2.2, 5.3.1) ----
 
 test("renegotiation: the peer adds a video track, then removes it, audio keeps flowing", async () => {

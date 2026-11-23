@@ -38,6 +38,7 @@ browsers), with the mDNS cell in `lan-a` against the second interop-peer.
     "mdns": false,
     "tcp": false,
     "bundlePolicy": "balanced",
+    "dtls13": false,
     "caFile": "/run/rtc-env/ca.crt"
   },
   "media": "/run/rtc-env/media",
@@ -47,7 +48,8 @@ browsers), with the mDNS cell in `lan-a` against the second interop-peer.
 ```
 
 `scenario` goes to Rust with the first `offer` or `request-offer` message, as the page sends it.
-`trickle: false` waits for gathering to complete and sends no `candidate` message (every
+`dtls13: true` sets the stack to prefer DTLS 1.3 (with 1.2 fallback where it can); without
+it the stack keeps its default. `trickle: false` waits for gathering to complete and sends no `candidate` message (every
 candidate is in the description); `true` sends each candidate as it is gathered, after the
 description it belongs to. `mdns: true` hides host candidates behind mDNS names; `tcp: true`
 gathers ICE-TCP candidates. `caFile` is the CA the TURN-over-TLS server's certificate is signed
