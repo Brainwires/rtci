@@ -473,6 +473,24 @@ impl RTCRtpReceiver<'_> {
             .as_mut()
             .unwrap();
 
+        // RFC 4585 section 4.2, RFC 5104 section 7.2: only the feedback the section negotiated.
+        let codecs = receiver.get_codec_preferences();
+        if !self
+            .peer_connection
+            .setting_engine
+            .unnegotiated_rtcp_feedback
+            && !codecs.is_empty()
+            && let Some((typ, parameter)) =
+                crate::rtp_transceiver::rtp_sender::rtp_codec::unnegotiated_feedback(
+                    &packets, codecs,
+                )
+        {
+            return Err(shared::error::Error::ErrRTCPFeedbackNotNegotiated(
+                typ.to_owned(),
+                parameter.to_owned(),
+            ));
+        }
+
         let track_id = receiver.track().track_id().to_string();
         self.peer_connection.handle_write(TaggedRTCMessage {
             now,

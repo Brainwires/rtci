@@ -107,3 +107,39 @@ fn count_negotiation_needed(pc: &mut rtc::peer_connection::RTCPeerConnection) ->
     }
     count
 }
+
+/// W3C webrtc-pc 4.4.1.6: "If description is of type "answer" or "pranswer" ... Set
+/// transceiver.[[CurrentDirection]] to direction": a provisional answer sets it too, on the
+/// side that applies it locally and on the side that receives it.
+#[test]
+fn a_provisional_answer_sets_the_current_direction() -> TestResult {
+    let now = std::time::Instant::now();
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let offered = offerer.add_track(video_track("offered", 0x0101_0301))?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    answerer.set_remote_description(now, offer)?;
+    let answer = answerer.create_answer(None)?;
+    let pranswer = rtc::peer_connection::sdp::RTCSessionDescription::pranswer(answer.sdp)?;
+    answerer.set_local_description(now, pranswer.clone())?;
+    let answering = answerer.get_transceivers().next().expect("a transceiver");
+    assert_eq!(
+        answerer
+            .rtp_transceiver(answering)
+            .expect("transceiver")
+            .current_direction(),
+        Some(RTCRtpTransceiverDirection::Recvonly),
+        "the local pranswer's direction"
+    );
+    offerer.set_remote_description(now, pranswer)?;
+    assert_eq!(
+        offerer
+            .rtp_transceiver(RTCRtpTransceiverId::from(offered))
+            .expect("transceiver")
+            .current_direction(),
+        Some(RTCRtpTransceiverDirection::Sendonly),
+        "the remote pranswer's direction, reversed"
+    );
+    Ok(())
+}

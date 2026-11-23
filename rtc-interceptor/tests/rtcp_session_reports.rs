@@ -1138,3 +1138,57 @@ fn every_compound_packet_carries_the_mid_and_rids_of_each_stream() {
     assert!(sent.iter().any(Sent::is_compound));
     assert!(sent.iter().all(|s| identifiers(s).is_empty()));
 }
+
+/// RFC 7160 section 4.3: "receivers MUST be prepared to receive" a compound RTCP packet
+/// with several SR packets (a sender that switched clock rate reports each of its SSRCs).
+/// Each SR is taken: the next report blocks echo both, each with its own LSR.
+#[test]
+fn a_compound_packet_with_several_sender_reports_is_taken_in_full() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_remote_stream(&audio(0x0A));
+    chain.bind_remote_stream(&audio(0x0B));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    for (ssrc, seq) in [(0x0Au32, 1u16), (0x0B, 1)] {
+        chain.handle_read(rtp(base, ssrc, seq, 960)).unwrap();
+    }
+    let sr = |ssrc: u32, ntp_time: u64| -> Box<dyn rtcp::Packet> {
+        Box::new(SenderReport {
+            ssrc,
+            ntp_time,
+            rtp_time: 960,
+            packet_count: 1,
+            octet_count: 100,
+            ..Default::default()
+        })
+    };
+    let at = base + secs(0.1);
+    let _ = run(&mut chain, at);
+    chain
+        .handle_read(rtcp(
+            at,
+            vec![
+                sr(0x0A, 0x0001_0002_0003_0004),
+                sr(0x0B, 0x0005_0006_0007_0008),
+                sdes(0x0A, "remote"),
+            ],
+        ))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    let sent = run(&mut chain, at + secs(10.0));
+    let lsr = |ssrc: u32| -> Option<u32> {
+        sent.iter()
+            .flat_map(|s| s.get::<ReceiverReport>())
+            .flat_map(|rr| &rr.reports)
+            .chain(
+                sent.iter()
+                    .flat_map(|s| s.get::<SenderReport>())
+                    .flat_map(|sr| &sr.reports),
+            )
+            .filter(|block| block.ssrc == ssrc)
+            .map(|block| block.last_sender_report)
+            .find(|lsr| *lsr != 0)
+    };
+    assert_eq!(Some(0x0002_0003), lsr(0x0A));
+    assert_eq!(Some(0x0006_0007), lsr(0x0B));
+}

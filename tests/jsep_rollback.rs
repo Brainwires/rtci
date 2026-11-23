@@ -378,3 +378,52 @@ fn a_remote_offer_over_a_local_offer_rolls_it_back_unless_rollback_is_left_to_th
     assert!(signaling_states(&mut pc).is_empty());
     Ok(())
 }
+
+/// RFC 9429 section 4.1.10: a rollback's "contents MUST be empty". By default a rollback
+/// carrying SDP is refused by either method and the pending offer stays; with
+/// `with_rollback_content_ignored(true)` (W3C webrtc-pc: the `sdp` member "is unused") it
+/// rolls back all the same.
+#[test]
+fn a_rollback_with_contents_is_refused_unless_they_are_to_be_ignored() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+
+    let now = Instant::now();
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("v", 0x5e11_0101))?;
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(now, offer.clone())?;
+    let with_contents = || RTCSessionDescription::rollback(Some(offer.sdp.clone()));
+    assert!(pc.set_local_description(now, with_contents()?).is_err());
+    assert_eq!(pc.signaling_state(), RTCSignalingState::HaveLocalOffer);
+    pc.set_local_description(now, rollback())?;
+    assert_eq!(pc.signaling_state(), RTCSignalingState::Stable);
+
+    let mut answerer = default_peer()?;
+    answerer.set_remote_description(now, offer.clone())?;
+    assert!(
+        answerer
+            .set_remote_description(now, with_contents()?)
+            .is_err()
+    );
+    assert_eq!(
+        answerer.signaling_state(),
+        RTCSignalingState::HaveRemoteOffer
+    );
+
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    let mut lenient = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_rollback_content_ignored(true)
+                .build(),
+        )
+        .build(now)?;
+    lenient.set_remote_description(now, offer.clone())?;
+    lenient.set_remote_description(now, with_contents()?)?;
+    assert_eq!(lenient.signaling_state(), RTCSignalingState::Stable);
+    Ok(())
+}

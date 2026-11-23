@@ -13,14 +13,18 @@
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
 //!   connection state, its W3C stats counters and per-stream sequence coverage.
 //!
-//! The scenario (sent with the first offer) chooses what the peer does with media:
+//! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
+//! what the peer does with media:
 //! `{"media":"reflect","video":"VP8|VP9|H264|H265|AV1","audio":true}` sends back what it
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
 //! only counts (simulcast: packets per RID). `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
-//! 6544) and `"udp":false` leaves out the UDP one. `"cryptex":"negotiate"|"require"` sets the
+//! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
+//! its own TCP candidates and drive their connections through the stream interface and the
+//! tokio reference driver (`examples/stream-driver`), trickled to the browser; with
+//! `"udp_blocked":true` this peer neither sends nor takes ICE UDP. `"cryptex":"negotiate"|"require"` sets the
 //! RTCRtpHeaderEncryptionPolicy (RFC 9335). Every data channel message is echoed on its channel.
 //!
 //! An offer that arrives while this side has an offer outstanding (glare) is handled as the
@@ -261,6 +265,10 @@ struct Session {
     tcp_local: Option<SocketAddr>,
     tcp_out: HashMap<SocketAddr, TcpOut>,
     tcp_in: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    /// Scenario `engine_tcp`: the driver of the engine's own TCP connections.
+    driver: Option<stream_driver::StreamDriver>,
+    /// Scenario `udp_blocked`: no ICE datagram leaves or is taken.
+    udp_blocked: bool,
     candidates_added: bool,
     out: Vec<Value>,
     media: String,
@@ -285,8 +293,17 @@ struct Session {
     /// This side's offer is outstanding (have-local-offer).
     have_local_offer: bool,
     rollbacks: u64,
+    /// The DTLS transports (id, state) when this side last made an offer; those when it made
+    /// the offer it last rolled back, and right after that rollback (RFC 9429 5.7: the
+    /// rollback restores what the offer changed).
+    transports_at_offer: Vec<(String, String)>,
+    transports_at_rolled_back_offer: Vec<(String, String)>,
+    transports_after_rollback: Vec<(String, String)>,
     connected: bool,
     state: String,
+    /// The ICE transports whose DTLS transport reported "connected" in an
+    /// `OnTransportEvent` (one per transport of the connection).
+    transports_connected: std::collections::HashSet<String>,
     errors: Vec<String>,
 }
 
@@ -347,6 +364,8 @@ impl Session {
             tcp_listener: None,
             tcp_local: None,
             tcp_out: HashMap::new(),
+            driver: None,
+            udp_blocked: false,
             tcp_in,
             candidates_added: false,
             out: vec![],
@@ -362,8 +381,12 @@ impl Session {
             rust_dc: None,
             have_local_offer: false,
             rollbacks: 0,
+            transports_at_offer: vec![],
+            transports_at_rolled_back_offer: vec![],
+            transports_after_rollback: vec![],
             connected: false,
             state: "new".to_owned(),
+            transports_connected: Default::default(),
             errors: vec![],
         };
 
@@ -422,6 +445,7 @@ impl Session {
                         s.on_tcp_connection(stream, from);
                     }
                 }
+                input = driver_next(&mut s.driver) => s.on_driver_input(input),
                 Some((from, frame)) = tcp_in_rx.recv() => {
                     if let Some(local) = s.tcp_local {
                         s.feed(local, from, TransportProtocol::TCP, &frame);
@@ -437,6 +461,9 @@ impl Session {
     }
 
     fn feed(&mut self, local: SocketAddr, peer: SocketAddr, proto: TransportProtocol, data: &[u8]) {
+        if self.udp_blocked && proto == TransportProtocol::UDP && local == self.local {
+            return;
+        }
         let _ = self.pc.handle_read(TaggedBytesMut {
             now: Instant::now(),
             transport: TransportContext {
@@ -447,6 +474,30 @@ impl Session {
             },
             message: BytesMut::from(data),
         });
+    }
+
+    /// What the stream driver has for the engine (scenario `engine_tcp`).
+    fn on_driver_input(&mut self, input: stream_driver::DriverInput) {
+        let now = Instant::now();
+        match input {
+            stream_driver::DriverInput::Event(event) => {
+                let _ = self.pc.handle_stream_event(now, event);
+            }
+            stream_driver::DriverInput::Read { id, data } => {
+                let _ = self.pc.handle_stream_read(now, id, &data);
+            }
+            stream_driver::DriverInput::Accepted(accepted) => {
+                if let Some(id) = self.pc.handle_stream_accepted(
+                    now,
+                    accepted.listener,
+                    accepted.local,
+                    accepted.remote,
+                ) && let Some(driver) = self.driver.as_mut()
+                {
+                    driver.adopt(id, accepted);
+                }
+            }
+        }
     }
 
     /// A browser's active ICE-TCP connection to our passive candidate: RFC 4571 frames in both
@@ -491,6 +542,10 @@ impl Session {
             return Ok(());
         }
         self.candidates_added = true;
+        if self.scenario["engine_tcp"].as_bool().unwrap_or(false) {
+            self.driver = Some(stream_driver::StreamDriver::default());
+            self.udp_blocked = self.scenario["udp_blocked"].as_bool().unwrap_or(false);
+        }
         if self.scenario["udp"].as_bool().unwrap_or(true) {
             let host = CandidateHostConfig {
                 base_config: CandidateConfig {
@@ -562,23 +617,38 @@ impl Session {
         Ok(())
     }
 
+    /// The connection's DTLS transports: (id, state).
+    fn dtls_transport_states(&self) -> Vec<(String, String)> {
+        self.pc
+            .dtls_transports()
+            .iter()
+            .map(|t| (format!("{:?}", t.id()), t.state().to_string()))
+            .collect()
+    }
+
     fn send_offer(&mut self) -> Result<()> {
+        self.transports_at_offer = self.dtls_transport_states();
         self.add_candidates()?;
         let offer = self.pc.create_offer(None)?;
         self.pc
             .set_local_description(Instant::now(), offer.clone())?;
+        // The offer's other transports (RFC 9429 section 5.2.1: under `balanced` the first
+        // section of each media type has one) get their candidates, which the local
+        // description then lists.
+        self.add_transport_candidates()?;
+        let sdp = self
+            .pc
+            .local_description()
+            .map_or(offer.sdp, |description| description.sdp);
         self.have_local_offer = true;
-        self.out.push(json!({"type": "offer", "sdp": offer.sdp}));
+        self.out.push(json!({"type": "offer", "sdp": sdp}));
         Ok(())
     }
 
     fn on_signal(&mut self, v: Value) -> Result<()> {
         match v["type"].as_str().unwrap_or_default() {
             "offer" => {
-                if self.scenario.is_null() && !v["scenario"].is_null() {
-                    self.scenario = v["scenario"].clone();
-                    self.setup_scenario()?;
-                }
+                self.take_scenario(&v)?;
                 self.add_candidates()?;
                 // Glare: as the polite peer (RFC 9429 4.1.8.2, perfect negotiation), roll our
                 // own offer back, answer theirs, then offer again.
@@ -590,6 +660,8 @@ impl Session {
                     )?;
                     self.have_local_offer = false;
                     self.rollbacks += 1;
+                    self.transports_at_rolled_back_offer = self.transports_at_offer.clone();
+                    self.transports_after_rollback = self.dtls_transport_states();
                 }
                 let offer =
                     RTCSessionDescription::offer(v["sdp"].as_str().unwrap_or_default().to_owned())?;
@@ -618,6 +690,7 @@ impl Session {
                 self.pc.add_remote_candidate(c)?;
             }
             "request-offer" => {
+                self.take_scenario(&v)?;
                 let tracks: Vec<String> = v["tracks"]
                     .as_array()
                     .map(|a| {
@@ -657,8 +730,11 @@ impl Session {
                     "state": self.state,
                     "cryptex": self.pc.cryptex_negotiated(),
                     "rollbacks": self.rollbacks,
+                    "transportsAtRolledBackOffer": self.transports_at_rolled_back_offer,
+                    "transportsAfterRollback": self.transports_after_rollback,
                     "local_sdp": answer,
                     "stats": stats,
+                    "transportsConnected": self.transports_connected.len(),
                     "errors": self.errors,
                 }));
             }
@@ -728,12 +804,35 @@ impl Session {
                 })
             })
             .collect();
+        let transports: Vec<Value> = report
+            .iter()
+            .filter_map(|e| match e {
+                RTCStatsReportEntry::Transport(t) => Some(json!({
+                    "dtlsState": t.dtls_state.to_string(),
+                    "selectedCandidatePairId": t.selected_candidate_pair_id,
+                })),
+                _ => None,
+            })
+            .collect();
         json!({
+            "transports": transports,
             "inbound": inbound,
             "outbound": outbound,
             "remoteCandidates": remote_candidates,
             "candidatePairs": candidate_pairs,
         })
+    }
+
+    /// The scenario, from the first message that carries one: the browser's first offer, or
+    /// its first request for an offer of ours when this side offers first. It is set up
+    /// before this side sets any description, since some of it (the header encryption policy)
+    /// cannot change afterwards.
+    fn take_scenario(&mut self, v: &Value) -> Result<()> {
+        if self.scenario.is_null() && !v["scenario"].is_null() {
+            self.scenario = v["scenario"].clone();
+            self.setup_scenario()?;
+        }
+        Ok(())
     }
 
     fn setup_scenario(&mut self) -> Result<()> {
@@ -830,8 +929,22 @@ impl Session {
     }
 
     fn drive(&mut self) -> Result<()> {
+        if let Some(driver) = self.driver.as_mut() {
+            while let Some(command) = self.pc.poll_stream_command() {
+                driver.execute(command);
+            }
+            while let Some(transmit) = self.pc.poll_stream_transmit() {
+                driver.write(transmit);
+            }
+        }
         while let Some(m) = self.pc.poll_write() {
             let peer = m.transport.peer_addr;
+            if self.udp_blocked
+                && m.transport.transport_protocol == TransportProtocol::UDP
+                && m.transport.local_addr == self.local
+            {
+                continue;
+            }
             if m.transport.transport_protocol == TransportProtocol::TCP {
                 if let Some(out) = self.tcp_out.get(&peer) {
                     let _ = out.send(frame_packet(&m.message));
@@ -852,6 +965,16 @@ impl Session {
         }
         while let Some(e) = self.pc.poll_event() {
             match e {
+                // Scenario `engine_tcp`: the engine's TCP candidates come after the
+                // description; they are trickled (RFC 8838).
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ev) if self.driver.is_some() => {
+                    if let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
+                        && let Ok(init) = c.to_json()
+                    {
+                        self.out
+                            .push(json!({"type": "candidate", "candidate": init}));
+                    }
+                }
                 RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
                     let kind = self
                         .pc
@@ -872,6 +995,17 @@ impl Session {
                     if let Some(mut dc) = self.pc.data_channel(id) {
                         let _ = dc.send_text(Instant::now(), "hello-from-rust");
                     }
+                }
+                RTCPeerConnectionEvent::OnTransportEvent(event)
+                    if matches!(
+                        event.event,
+                        rtc::peer_connection::event::RTCTransportEventKind::DtlsStateChange(
+                            rtc::peer_connection::transport::RTCDtlsTransportState::Connected
+                        )
+                    ) =>
+                {
+                    self.transports_connected
+                        .insert(event.ice_transport.to_string());
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(st) => {
                     self.connected =
@@ -1073,6 +1207,15 @@ async fn recv_opt(
 ) -> std::io::Result<(usize, SocketAddr)> {
     match sock {
         Some(s) => s.recv_from(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn driver_next(
+    driver: &mut Option<stream_driver::StreamDriver>,
+) -> stream_driver::DriverInput {
+    match driver {
+        Some(d) => d.next().await,
         None => std::future::pending().await,
     }
 }

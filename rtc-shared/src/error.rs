@@ -2320,6 +2320,11 @@ pub enum Error {
     /// Sender cannot add encoding as rid is empty.
     #[error("Sender cannot add encoding as rid is empty")]
     ErrRTPSenderRidNil,
+    /// No `a=imageattr recv` line of the remote description can be satisfied for the
+    /// resolution the encoder produces (RFC 9429 section 3.6.2): the encoding is not to be
+    /// sent.
+    #[error("no a=imageattr line of the remote description can be satisfied")]
+    ErrImageAttrUnsatisfiable,
     /// Sender cannot add encoding as there is no base track.
     #[error("Sender cannot add encoding as there is no base track")]
     ErrRTPSenderNoBaseEncoding,
@@ -2329,6 +2334,15 @@ pub enum Error {
     /// Sender cannot encoding due to RID collision.
     #[error("Sender cannot encoding due to RID collision")]
     ErrRTPSenderRIDCollision,
+    /// Two streams of a sender's encodings (a media, RTX or FEC SSRC) name the same SSRC: RFC
+    /// 4588 section 4, "the original and retransmission streams ... MUST use two different
+    /// SSRC values"; RFC 3550 section 8, one SSRC per source.
+    #[error("sender encodings name SSRC {0} for more than one stream")]
+    ErrRTPSenderSsrcCollision(u32),
+    /// The application wrote RTCP feedback its section did not negotiate (RFC 4585 section
+    /// 4.2, RFC 5104 section 7.2): the `a=rtcp-fb` type and parameter it needs.
+    #[error("RTCP feedback `{0} {1}` was not negotiated for the stream")]
+    ErrRTCPFeedbackNotNegotiated(String, String),
     /// An encoding's rid is not 1 to 255 alphanumeric characters (RFC 8852 section 3.1, the
     /// RtpStreamId the rid is sent as; RFC 8851 section 10).
     #[error("Sender cannot add encoding as its rid is not 1 to 255 alphanumeric characters")]
@@ -2538,6 +2552,17 @@ pub enum Error {
     /// A provider-neutral cryptographic operation failed.
     #[error("crypto: {0}")]
     Crypto(String),
+    /// Stream transport: no connection or listener has this id (it was never opened, or it
+    /// is closed).
+    #[error("stream: unknown connection or listener")]
+    ErrUnknownStream,
+    /// Stream transport: the connection is closing or closed and takes no more data.
+    #[error("stream: connection closed")]
+    ErrStreamConnectionClosed,
+    /// Stream transport: a message too long for the connection's framing (RFC 4571: 65535
+    /// bytes).
+    #[error("stream: message too long for its framing")]
+    ErrStreamMessageTooLong,
     #[error("{0}")]
     /// An error that does not fit any other variant, carrying a description.
     Other(String),

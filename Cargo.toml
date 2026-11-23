@@ -27,6 +27,8 @@ opt-level = 0
 version = "0.22.0+brainwires.5"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 edition = "2024"
+# The lowest toolchain the workspace builds on (checked by the MSRV job of cargo.yml).
+rust-version = "1.89"
 license = "MIT/Apache-2.0"
 homepage = "https://webrtc.rs"
 repository = "https://github.com/webrtc-rs/rtc"
@@ -52,6 +54,7 @@ srtp = { version = "0.22.0", path = "rtc-srtp", package = "rtc-srtp", default-fe
 stun = { version = "0.22.0", path = "rtc-stun", package = "rtc-stun", default-features = false }
 turn = { version = "0.22.0", path = "rtc-turn", package = "rtc-turn", default-features = false }
 signal = { version = "0.22.0", path = "examples/signal", package = "rtc-signal" }
+stream-driver = { version = "0.22.0", path = "examples/stream-driver", package = "rtc-stream-driver" }
 
 # common dependencies
 sansio = "1"
@@ -127,6 +130,7 @@ name = "rtc"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Sans-I/O WebRTC implementation in Rust"
 license.workspace = true
 documentation = "https://docs.rs/rtc"
@@ -143,6 +147,9 @@ crypto-ring = ["crypto/crypto-ring", "dtls/crypto-ring", "rustls/ring", "rcgen/r
 openssl = ["srtp/openssl"]
 vendored-openssl = ["srtp/vendored-openssl"]
 pem = ["dtls/pem"]
+# The Mozilla root certificates (webpki-roots, CDLA-Permissive-2.0) for the engine's TURN-over-TLS
+# connections; without it the application gives roots or a verifier (`with_turn_tls`).
+turn-tls-webpki-roots = ["dep:webpki-roots"]
 crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "dtls/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "ice/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs", "srtp/crypto-aws-lc-rs", "turn/crypto-aws-lc-rs", "sframe/crypto-aws-lc-rs"]
 
 [dependencies]
@@ -170,8 +177,11 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rcgen.workspace = true
-rustls.workspace = true
+# `tls12`: the engine's TURN-over-TLS client offers TLS 1.2 beside TLS 1.3 (RFC 8656 3.1).
+rustls = { workspace = true, features = ["tls12"] }
 url.workspace = true
+# Feature `turn-tls-webpki-roots`: the Mozilla roots for TURN over TLS.
+webpki-roots = { version = "1", optional = true }
 hex.workspace = true
 base64.workspace = true
 pem.workspace = true
@@ -184,6 +194,7 @@ sansio.workspace = true
 shared.workspace = true
 ice.workspace = true
 signal.workspace = true
+stream-driver.workspace = true
 
 tokio.workspace = true
 env_logger.workspace = true

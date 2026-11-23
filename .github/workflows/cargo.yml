@@ -141,6 +141,13 @@ jobs:
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    # The whole workspace's test build of every feature set outgrew the hosted runner's disk
+    # ("No space left on device"): no incremental cache and no debug info (panics still print
+    # file:line). The `df -h` step at the end measures the headroom.
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +169,9 @@ jobs:
           cargo check --package rtc-srtp --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-stun --no-default-features --features ${{ matrix.backend }} --verbose
           cargo check --package rtc-sframe --no-default-features --features ${{ matrix.backend }} --verbose
+      - name: Disk left after the build
+        if: always()
+        run: df -h
 
   rtc_crypto_provider_matrix:
     name: rtc-crypto (${{ matrix.name }})
@@ -204,6 +214,13 @@ jobs:
   workspace_provider_matrix:
     name: Workspace (${{ matrix.name }})
     runs-on: ubuntu-latest
+    # The whole workspace's test build of every feature set outgrew the hosted runner's disk
+    # ("No space left on device"): no incremental cache and no debug info (panics still print
+    # file:line). The `df -h` step at the end measures the headroom.
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -234,6 +251,9 @@ jobs:
         run: cargo test --workspace --no-fail-fast ${{ matrix.args }} --verbose
       - name: Doctests
         run: cargo test --workspace --doc ${{ matrix.args }} --verbose
+      - name: Disk left after the build
+        if: always()
+        run: df -h
 
   standalone_crate_checks:
     name: Standalone crates (${{ matrix.backend }})
@@ -342,6 +362,25 @@ jobs:
           echo "rtc-stun packaging failed for an unexpected reason:"
           cat package.log
           exit 1
+
+  # The workspace builds on its declared `rust-version` (the workspace manifest), every
+  # feature. Dependencies resolve to versions that support that toolchain where one exists.
+  msrv:
+    name: MSRV (rust-version, all features)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Toolchain of the workspace's rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Check the workspace
+        run: cargo check --workspace --all-features --verbose
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy

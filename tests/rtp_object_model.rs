@@ -518,9 +518,10 @@ fn replace_track_keeps_the_msid_and_ssrcs_and_needs_no_negotiation() -> TestResu
     let offer = offerer.create_offer(None)?;
     let section = &media_sections(&offer.sdp)[0];
     assert!(
+        // The appdata is the sender's track id, which `replaceTrack` leaves alone.
         section
             .iter()
-            .any(|l| l.starts_with("a=msid:offered-stream ")),
+            .any(|l| l.starts_with("a=msid:offered-stream ") && !l.contains("replacement")),
         "{}",
         offer.sdp
     );
@@ -579,7 +580,7 @@ fn set_streams_sets_exactly_the_given_streams() -> TestResult {
     assert!(
         media_sections(&offer.sdp)[0]
             .iter()
-            .any(|l| l.starts_with("a=msid:- ")),
+            .any(|l| l == "a=msid:- video"),
         "no stream is signalled as `-`:\n{}",
         offer.sdp
     );
@@ -928,6 +929,71 @@ fn an_answer_made_while_stopping_still_answers_the_section() -> TestResult {
     let section = &media_sections(&answer.sdp)[0];
     assert_ne!(port_of(section), 0, "{}", answer.sdp);
     assert!(section.iter().any(|l| l == "a=inactive"), "{}", answer.sdp);
+    Ok(())
+}
+
+/// RFC 9429 section 5.3.1 as a setting (`with_stopping_transceiver_rejected_in_answer`): the
+/// answer rejects the section of a transceiver stopped after the offer arrived, and the
+/// offerer, applying it, stops its own transceiver. The offerer's BUNDLE-tagged section keeps
+/// the W3C form (answered `a=inactive`), so the group keeps its transport.
+#[test]
+fn an_answer_rejects_a_stopping_transceivers_section_when_asked() -> TestResult {
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    for (stopped_index, rejected) in [(1usize, true), (0, false)] {
+        let mut offerer = default_peer()?;
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let mut answerer = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_stopping_transceiver_rejected_in_answer(true)
+                    .build(),
+            )
+            .build(Instant::now())?;
+        let senders = [
+            offerer.add_track(video_track("first", 0x0e02_0101))?,
+            offerer.add_track(video_track("second", 0x0e02_0202))?,
+        ];
+        let now = Instant::now();
+        let offer = offerer.create_offer(None)?;
+        offerer.set_local_description(now, offer.clone())?;
+        answerer.set_remote_description(now, offer)?;
+        let id = answerer
+            .get_transceivers()
+            .nth(stopped_index)
+            .expect("a transceiver");
+        answerer.rtp_transceiver(id).expect("transceiver").stop()?;
+
+        let answer = answerer.create_answer(None)?;
+        let section = &media_sections(&answer.sdp)[stopped_index];
+        assert_eq!(
+            port_of(section) == 0,
+            rejected,
+            "section {stopped_index}:\n{}",
+            answer.sdp
+        );
+        if !rejected {
+            assert!(section.iter().any(|l| l == "a=inactive"), "{}", answer.sdp);
+        }
+        answerer.set_local_description(now, answer.clone())?;
+        offerer.set_remote_description(now, answer)?;
+        let offerer_side = RTCRtpTransceiverId::from(senders[stopped_index]);
+        let stopped = offerer
+            .rtp_transceiver(offerer_side)
+            .is_none_or(|transceiver| transceiver.is_stopped());
+        assert_eq!(
+            stopped, rejected,
+            "section {stopped_index}: the offerer's transceiver"
+        );
+        // The other section goes on.
+        let other = RTCRtpTransceiverId::from(senders[1 - stopped_index]);
+        assert!(
+            offerer
+                .rtp_transceiver(other)
+                .is_some_and(|transceiver| !transceiver.is_stopped())
+        );
+    }
     Ok(())
 }
 

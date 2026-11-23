@@ -16,6 +16,8 @@ pub struct DelayTrend {
     pub at: Instant,
     /// Bytes in the group this reading closed, for the received-rate calculation.
     pub size: usize,
+    /// When the group's last packet arrived, on the receiver's clock (t(i), section 5.3).
+    pub arrival: Duration,
 }
 
 /// Grouping plus filtering: acknowledgements in, a delay trend out.
@@ -73,6 +75,7 @@ impl SlopeEstimator {
             measurement_ms: delay.delta_ms,
             estimate_ms: self.kalman.update_with_period(delay.delta_ms, period_ms),
             at: delay.at,
+            arrival: delay.arrival,
             size: delay.size,
         }
     }

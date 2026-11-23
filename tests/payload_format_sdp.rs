@@ -38,6 +38,25 @@ fn default_offer() -> Result<String, Box<dyn std::error::Error>> {
     Ok(pc.create_offer(None)?.sdp)
 }
 
+/// The formats of the answer's video m= line that the offer listed (`offered`), in order. An
+/// answer lists the offered formats it takes first, then the registered ones the offer lacked
+/// (RFC 9429 section 5.3.1), which never reuse an offered number.
+fn answered_offered_formats<'a>(section: &'a str, offered: &str) -> Vec<&'a str> {
+    let offered: Vec<&str> = offered.split_whitespace().collect();
+    let formats: Vec<&str> = section.split_whitespace().skip(3).collect();
+    let answered: Vec<&str> = formats
+        .iter()
+        .copied()
+        .filter(|f| offered.contains(f))
+        .collect();
+    assert_eq!(
+        &formats[..answered.len()],
+        answered.as_slice(),
+        "the offered formats come first: {section}"
+    );
+    answered
+}
+
 /// `(media, payload type, encoding)` of every rtpmap, with the media of its section.
 fn rtpmaps(sdp: &str) -> Vec<(String, String, String)> {
     let mut media = String::new();
@@ -216,7 +235,11 @@ fn an_h264_mode_this_endpoint_does_not_have_is_not_answered() -> TestResult {
         .lines()
         .find(|l| l.starts_with("m=video"))
         .expect("a video section");
-    assert_eq!("m=video 9 UDP/TLS/RTP/SAVPF 96", section, "{sdp}");
+    assert_eq!(
+        answered_offered_formats(section, "100 96"),
+        vec!["96"],
+        "{sdp}"
+    );
     Ok(())
 }
 
@@ -265,7 +288,11 @@ fn an_h265_offer_with_an_unknown_parameter_is_answered() -> TestResult {
         .lines()
         .find(|l| l.starts_with("m=video"))
         .expect("a video section");
-    assert_eq!("m=video 9 UDP/TLS/RTP/SAVPF 110", section, "{sdp}");
+    assert_eq!(
+        answered_offered_formats(section, "110"),
+        vec!["110"],
+        "{sdp}"
+    );
     let parameters = fmtp(&sdp, "110");
     for configuration in ["profile-id=1", "tier-flag=0", "tx-mode=SRST"] {
         assert!(
@@ -293,7 +320,11 @@ fn a_vp9_profile_this_endpoint_does_not_have_is_not_answered() -> TestResult {
         .lines()
         .find(|l| l.starts_with("m=video"))
         .expect("a video section");
-    assert_eq!("m=video 9 UDP/TLS/RTP/SAVPF 96", section, "{sdp}");
+    assert_eq!(
+        answered_offered_formats(section, "98 96"),
+        vec!["96"],
+        "{sdp}"
+    );
     Ok(())
 }
 
@@ -313,7 +344,7 @@ fn a_vp8_offer_with_receiver_limits_is_answered() -> TestResult {
         .lines()
         .find(|l| l.starts_with("m=video"))
         .expect("a video section");
-    assert_eq!("m=video 9 UDP/TLS/RTP/SAVPF 96", section, "{sdp}");
+    assert_eq!(answered_offered_formats(section, "96"), vec!["96"], "{sdp}");
     Ok(())
 }
 

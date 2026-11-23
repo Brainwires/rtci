@@ -1,7 +1,7 @@
 //! Where the inbound RTCP path ends.
 
 use crate::Interceptor;
-use crate::{Attribute, Packet, StreamInfo, TaggedPacket};
+use crate::{Attribute, Packet, RtpSession, StreamInfo, TaggedPacket};
 use sansio::Protocol;
 use shared::error::Error;
 use std::collections::VecDeque;
@@ -87,10 +87,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NoopInterceptor {
         //    because an interceptor annotated it would be a surprise — but the packet carries on
         //    as an empty-RTCP carrier so the attributes reach the crate boundary.
         //
-        // Anything else ends here.
+        // Anything else ends here. The tag naming the RTP session a packet travels in
+        // ([`RtpSession`], put on by every per-session wrapper) is routing, not something for
+        // beyond the chain: a report that carries only that ends here too.
         if msg.message.has(&Attribute::DeliverToApplication) {
             self.read_queue.push_back(msg);
-        } else if !msg.message.attributes.is_empty() {
+        } else if msg
+            .message
+            .attributes
+            .iter()
+            .any(|attribute| !is_session_tag(attribute))
+        {
             msg.message.packet = Packet::Rtcp(Vec::new());
             self.read_queue.push_back(msg);
         }
@@ -109,6 +116,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NoopInterceptor {
     fn poll_write(&mut self) -> Option<Self::Wout> {
         self.write_queue.pop_front()
     }
+}
+
+/// Whether `attribute` is the [`RtpSession`] tag.
+fn is_session_tag(attribute: &Attribute) -> bool {
+    matches!(attribute, Attribute::Custom(value) if value.downcast_ref::<RtpSession>().is_some())
 }
 
 impl Interceptor for NoopInterceptor {
@@ -279,6 +291,26 @@ mod carrier_tests {
         let mut chain = Registry::new().build();
         chain.handle_read(annotated(None)).unwrap();
         assert!(chain.poll_read().is_none());
+    }
+
+    /// The tag a per-RTP-session wrapper puts on what it hands on names the transport; it is
+    /// not an annotation for beyond the chain. A report carrying only that still stops here,
+    /// while one with a real annotation besides keeps its tag on the carrier.
+    #[test]
+    fn a_report_tagged_only_with_its_rtp_session_still_stops_here() {
+        let mut chain = Registry::new().build();
+        chain
+            .handle_read(annotated(Some(RtpSession(1).attribute())))
+            .unwrap();
+        assert!(chain.poll_read().is_none());
+
+        let mut annotated_too = annotated(Some(RtpSession(1).attribute()));
+        annotated_too.message.add(Attribute::TargetBitrateChanged {
+            bits_per_second: 1.0,
+        });
+        chain.handle_read(annotated_too).unwrap();
+        let carrier = chain.poll_read().expect("the annotation gets through");
+        assert_eq!(RtpSession::of(&carrier.message), Some(1));
     }
 
     /// `DeliverToApplication` is the per-packet judgement its documentation always described:

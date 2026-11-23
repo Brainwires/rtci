@@ -99,8 +99,22 @@
       impolite: false,
       // Edits the answer from Rust before it is applied (a test of a wrong fingerprint).
       mungeAnswer: null,
+      // Edits an offer from Rust before it is applied (an answerer that does not bundle).
+      mungeRemoteOffer: null,
+      // Every description sent or applied, in order: [direction, type, sdp] (what a failing
+      // scenario reports).
+      descriptions: [],
     };
-    const send = (m) => ws.send(JSON.stringify(m));
+    // The scenario goes with the first offer or request for one, whichever this side sends
+    // first: the Rust side applies it before it sets any description (its header encryption
+    // policy, say, cannot change once one is set).
+    const send = (m) => {
+      if ((m.type === "offer" || m.type === "request-offer") && !s.sentScenario) {
+        m = { ...m, scenario };
+        s.sentScenario = true;
+      }
+      ws.send(JSON.stringify(m));
+    };
     // Trickled candidates follow the description they belong to (RFC 8838 section 4): one is
     // sent only once the Rust side has the description whose media section (mid) and ICE
     // ufrag it names. Until then it waits; one of a description that was never sent (a local
@@ -120,12 +134,8 @@
       held = keep;
     };
     const sendDescription = (type, sdp) => {
-      const msg = { type, sdp };
-      if (type === "offer" && !s.sentScenario) {
-        msg.scenario = scenario;
-        s.sentScenario = true;
-      }
-      send(msg);
+      s.descriptions.push(["sent", type, sdp]);
+      send({ type, sdp });
       sentSdp = sdp;
       flushCandidates();
     };
@@ -134,20 +144,34 @@
       held.push(e.candidate ? e.candidate.toJSON() : null);
       flushCandidates();
     };
-    ws.onmessage = async (ev) => {
-      const m = JSON.parse(ev.data);
+    // Messages are handled one at a time, in arrival order, as a signalling channel's are
+    // (perfect negotiation): an offer that follows an answer is looked at once the answer is
+    // applied, not while it still is, which would take it for a colliding one.
+    let inbox = Promise.resolve();
+    ws.onmessage = (ev) => {
+      inbox = inbox.then(() => handle(JSON.parse(ev.data)));
+    };
+    const handle = async (m) => {
       try {
         if (m.type === "answer") {
-          await pc.setRemoteDescription({ type: "answer", sdp: s.mungeAnswer ? s.mungeAnswer(m.sdp) : m.sdp });
+          const sdp = s.mungeAnswer ? s.mungeAnswer(m.sdp) : m.sdp;
+          s.descriptions.push(["received", "answer", sdp]);
+          await pc.setRemoteDescription({ type: "answer", sdp });
         } else if (m.type === "offer") {
           s.remoteOffers++;
           if (s.impolite && pc.signalingState !== "stable") {
             s.ignoredOffers++;
+            s.descriptions.push(["ignored", "offer", m.sdp]);
             return;
           }
-          await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+          const sdp = s.mungeRemoteOffer ? s.mungeRemoteOffer(m.sdp) : m.sdp;
+          s.descriptions.push(["received", "offer", sdp]);
+          await pc.setRemoteDescription({ type: "offer", sdp });
           await pc.setLocalDescription();
           sendDescription("answer", pc.localDescription.sdp);
+        } else if (m.type === "candidate") {
+          // Trickled by the Rust side (its engine-gathered TCP candidates).
+          if (m.candidate && m.candidate.candidate) await pc.addIceCandidate(m.candidate);
         } else if (m.type === "report") s.reports.push(m);
         else if (m.type === "error") s.errors.push(m.error);
       } catch (e) {
@@ -157,6 +181,7 @@
     // Makes an offer and applies it locally, without sending it.
     s.makeOffer = async () => {
       await pc.setLocalDescription(await pc.createOffer());
+      s.descriptions.push(["local", "offer", pc.localDescription.sdp]);
     };
     // Sends the local offer (munged by `mungeOffer` when given: what Rust receives, not what
     // this side applied) and waits for the answer.
@@ -166,7 +191,7 @@
       // A Rust-side error (an {"type":"error"} message) or a refused answer is the reason an
       // answer never applies: name them instead of only the timeout.
       await until(() => pc.signalingState === "stable", 15000, "the answer").catch((e) => {
-        throw new Error(`${e.message}; errors: ${JSON.stringify(s.errors)}`);
+        throw new Error(`${e.message}; errors: ${JSON.stringify(s.errors)}; descriptions: ${JSON.stringify(transportLines(s.descriptions))}`);
       });
     };
     s.negotiate = async (mungeOffer) => {
@@ -247,6 +272,30 @@
       head + (b.toUpperCase() === "00" ? "FF" : "00"));
   }
 
+  // The transport lines of each description in `descriptions` (session BUNDLE groups; per
+  // m= section its m= line, mid, ufrag, setup, bundle-only, tls-id and candidate count), for
+  // a failure report.
+  function transportLines(descriptions) {
+    return descriptions.map(([dir, type, sdp]) => {
+      const [session, ...media] = sdp.split(/\r?\nm=/);
+      const groups = [...session.matchAll(/^a=group:BUNDLE[^\r\n]*/gm)].map((g) => g[0]);
+      const sections = media.map((m) => {
+        const pick = (re) => (m.match(re) || [])[1];
+        return [
+          m.split(/\r?\n/)[0].split(" ").slice(0, 2).join(" "),
+          `mid=${pick(/^a=mid:(\S+)/m)}`,
+          `ufrag=${pick(/^a=ice-ufrag:(\S+)/m)}`,
+          `setup=${pick(/^a=setup:(\S+)/m)}`,
+          /^a=bundle-only/m.test(m) ? "bundle-only" : "",
+          pick(/^a=tls-id:(\S+)/m) ? `tls-id=${pick(/^a=tls-id:(\S+)/m).slice(0, 8)}` : "",
+          `candidates=${(m.match(/^a=candidate:/gm) || []).length}`,
+          pick(/^a=(sendrecv|sendonly|recvonly|inactive)\r?$/m) || "",
+        ].filter(Boolean).join(" ");
+      });
+      return `${dir} ${type}: ${groups.join(" | ") || "no group"} || ${sections.join(" || ")}`;
+    });
+  }
+
   // The m-lines of a description: kind, port, direction and mid.
   function mlines(sdp) {
     return sdp.split(/\r\n(?=m=)/).slice(1).map((sec) => ({
@@ -309,6 +358,6 @@
 
   window.Interop = {
     open, echo, until, sleep, canvasStream, audioStream, hasCodec, prefer, inbound, transport, sink, attachTransform,
-    selectedPair, wrongFingerprint, mlines,
+    selectedPair, wrongFingerprint, mlines, transportLines,
   };
 })();

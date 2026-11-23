@@ -148,6 +148,7 @@ fn events_after(message: TaggedRTCMessageInternal) -> (Vec<String>, MediaStreamT
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     handler.handle_read(message).expect("handle_read");
 

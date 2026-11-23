@@ -155,6 +155,38 @@ test("ICE-TCP: the browser's active candidate reaches Rust's passive one", async
   expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
 });
 
+test("ICE-TCP: built into the engine with UDP blocked, the browser reaches an engine-gathered TCP candidate", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    // The Rust side adds only a UDP host candidate and drops all ICE UDP; its engine gathers
+    // passive, simultaneous-open and active TCP candidates, trickles them, and drives the
+    // connections through the stream interface and the tokio reference driver.
+    const s = await Interop.open(ws, { engine_tcp: true, udp_blocked: true });
+    const dc = s.pc.createDataChannel("engine-tcp");
+    await s.negotiate();
+    const tcpCandidates = () => s.localCandidates.filter((c) => / tcp /i.test(c));
+    await Interop.until(() => tcpCandidates().length > 0 || s.pc.iceGatheringState === "complete", 10000, "gathering")
+      .catch(() => {});
+    if (tcpCandidates().length === 0) {
+      s.close();
+      return { noTcp: true, candidates: s.localCandidates };
+    }
+    await s.connected();
+    const e = await Interop.echo(dc, 30, 32768);
+    await e.wait(30, 20000);
+    const sel = await Interop.selectedPair(s.pc);
+    s.close();
+    return { echoed: e.got.length, local: sel?.local, remote: sel?.remote };
+  }, WS);
+  naBrowser(
+    r.noTcp,
+    "this browser gathered no TCP candidate",
+    `its icecandidate events: ${JSON.stringify(r.candidates)}`,
+  );
+  expect(r.echoed).toBe(30);
+  expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+  expect((r.remote?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+});
+
 // ---- the browser as the answerer for media ----
 
 test("Rust offers media, the browser answers and decodes it", async ({ page }) => {
@@ -407,18 +439,191 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
       sameTransport,
       echoed: e.got.length,
       rtp,
+      rust: { transportsConnected: report.transportsConnected, stats: report.stats },
       errors: report.errors,
     };
   }, WS);
   expect(r.grouped, "Rust answers an offer without a BUNDLE group without one").toBe(false);
-  expect(r.ufrags, JSON.stringify(r)).toBe(2);
+  // Rust's transports share one set of ICE credentials by default, as the browsers' do
+  // (SettingEngineBuilder::with_unique_transport_credentials); they are two transports still.
+  expect(r.ufrags, JSON.stringify(r)).toBe(1);
   expect(r.sameTransport, "video and data are on two transports").toBe(false);
   // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
   // transport objects only.
   if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  // Rust's side: each transport fired its own DTLS "connected" (OnTransportEvent) and has a
+  // transport stats object of its own with a selected candidate pair.
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  const rustTransports = r.rust.stats.transports.filter((t) => t.dtlsState === "connected");
+  expect(rustTransports.length, JSON.stringify(r.rust.stats.transports)).toBe(2);
+  expect(rustTransports.every((t) => t.selectedCandidatePairId !== ""), JSON.stringify(rustTransports)).toBe(true);
   expect(r.echoed, JSON.stringify(r)).toBe(1);
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
   expect(r.errors).toEqual([]);
+});
+
+// ---- bundlePolicy "balanced" (RFC 9429 4.1.1, 5.2.1; W3C webrtc-pc 4.2.4) ----
+
+// Rust's initial offer under the default policy gives the first section of each media type a
+// transport of its own (its own candidates; by default the session's one set of ICE
+// credentials, as the browsers write them). The browser gets the offer
+// without its BUNDLE group, as a peer that does not bundle would, and answers each section on
+// its own transport: audio and video each travel over theirs.
+test("balanced: Rust's offer has a transport per media type, answered without BUNDLE", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, {});
+    s.mungeRemoteOffer = (sdp) => sdp.replace(/^a=group:BUNDLE[^\r\n]*\r?\n/m, "");
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    s.send({ type: "request-offer", tracks: ["VP8", "OPUS"] });
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    await s.connected();
+    const video = await Interop.until(async () => {
+      const v = await Interop.inbound(s.pc, "video");
+      return v && v.framesDecoded > 15 && v;
+    }, 25000, "15 decoded frames").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+    const audio = await Interop.until(async () => {
+      const a = await Interop.inbound(s.pc, "audio");
+      return a && a.packetsReceived > 50 && a;
+    }, 15000, "50 audio packets").catch(() => Interop.inbound(s.pc, "audio"));
+    const offer = s.pc.remoteDescription.sdp;
+    const ufrags = new Set([...offer.matchAll(/^a=ice-ufrag:(\S+)/gm)].map((m) => m[1]));
+    const stats = await s.pc.getStats();
+    const transportStats = [...stats.values()].filter((x) => x.type === "transport");
+    const transports = transportStats.filter((x) => x.dtlsState === "connected").length;
+    const report = await s.report();
+    s.close();
+    return {
+      ufrags: ufrags.size,
+      transports,
+      transportStats: transportStats.length,
+      video,
+      audio,
+      rust: { transportsConnected: report.transportsConnected },
+      errors: report.errors.concat(s.errors),
+    };
+  }, WS);
+  expect(r.ufrags, "audio and video share the session's ICE credentials").toBe(1);
+  if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  expect(r.video.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.audio?.packetsReceived || 0, JSON.stringify(r.audio)).toBeGreaterThan(50);
+  expect(r.errors).toEqual([]);
+});
+
+// ---- bundlePolicy "balanced" against unbundled answers, with a rollback in each ----
+
+// Rust's default offer (a transport per media type) reaches the browser with `unbundle`
+// applied: no BUNDLE group at all (a peer that does not bundle), or a group without the video
+// section (a peer that answers only some sections unbundled), so audio and video run on two
+// transports. Then both sides offer at once, the browser being impolite: Rust rolls its offer
+// back (RFC 9429 5.7), answers the browser's, and offers again, and the browser applies that
+// offer. The rollback is checked where it happens, on the Rust side: its transports right
+// after the rollback are the ones it had when it made the offer, all still connected. The
+// browser's offer is sent as the browser wrote it: after an unbundled exchange, Chromium and
+// WebKit offer to bundle every section again, with the tagged section's ICE credentials on
+// the others (RFC 9143 7.5.1), which Rust accepts (RFC 9143 7.3); the same offer with its
+// group edited out is no description a peer could have made, and answering it breaks ICE
+// (train 8 round 7: the audio section's credentials changed, a restart to Rust), or
+// libwebrtc refuses the answer ("cannot remove m= section ... from already-established
+// BUNDLE group") when the edit takes the browser's tagged section out. Media keeps flowing
+// through all of it.
+async function balancedUnbundledWithRollback(page, unbundle) {
+  return page.evaluate(async ([ws, unbundleSrc]) => {
+    // eslint-disable-next-line no-new-func
+    const munge = new Function("sdp", "Interop", unbundleSrc);
+    const s = await Interop.open(ws, {});
+    // Rust's first offer only: the set-up of two transports.
+    s.mungeRemoteOffer = (sdp) => {
+      s.mungeRemoteOffer = null;
+      return munge(sdp, Interop);
+    };
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    s.send({ type: "request-offer", tracks: ["VP8", "OPUS"] });
+    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable", 15000, "Rust's offer");
+    await s.connected();
+    const media = async (frames, packets) => {
+      const video = await Interop.until(async () => {
+        const v = await Interop.inbound(s.pc, "video");
+        return v && v.framesDecoded > frames && v;
+      }, 25000, `${frames} decoded frames`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "video") }));
+      const audio = await Interop.until(async () => {
+        const a = await Interop.inbound(s.pc, "audio");
+        return a && a.packetsReceived > packets && a;
+      }, 15000, `${packets} audio packets`).catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+      return { video, audio };
+    };
+    const before = await media(15, 50);
+    const transportsOf = async () => {
+      const stats = await s.pc.getStats();
+      const all = [...stats.values()].filter((x) => x.type === "transport");
+      const connected = all.filter((x) => x.dtlsState === "connected").map((x) => x.id);
+      return { reported: all.length, connected: connected.length, ids: connected };
+    };
+    const transportsBefore = await transportsOf();
+    // Glare: the browser's offer is applied first, Rust is asked to offer right after.
+    s.impolite = true;
+    s.pc.addTransceiver("audio", { direction: "recvonly" });
+    await s.makeOffer();
+    s.send({ type: "request-offer" });
+    await s.sendOffer();
+    // Rust's offer after its rollback: the third, applied (only the colliding second one is
+    // ignored).
+    await Interop.until(() => s.pc.signalingState === "stable" && s.remoteOffers - s.ignoredOffers > 1, 20000, "Rust's offer after its rollback").catch(() => {});
+    const after = await media((before.video.framesDecoded || 15) + 30, (before.audio.packetsReceived || 50) + 100);
+    const transportsAfter = await transportsOf();
+    const report = await s.report();
+    s.close();
+    return {
+      before, after, transportsBefore, transportsAfter,
+      offers: s.remoteOffers, ignored: s.ignoredOffers,
+      rollbacks: report.rollbacks,
+      rust: {
+        transportsConnected: report.transportsConnected,
+        atRolledBackOffer: report.transportsAtRolledBackOffer,
+        afterRollback: report.transportsAfterRollback,
+        transports: report.stats.transports,
+      },
+      errors: report.errors.concat(s.errors),
+      descriptions: Interop.transportLines(s.descriptions),
+    };
+  }, [WS, unbundle]);
+}
+
+function expectBalancedUnbundled(r) {
+  // Every message carries the descriptions exchanged and both sides' transports.
+  const ctx = JSON.stringify({ descriptions: r.descriptions, rust: r.rust, transportsBefore: r.transportsBefore, transportsAfter: r.transportsAfter, ignored: r.ignored, offers: r.offers, before: r.before, after: r.after });
+  expect(r.before.video.error, ctx).toBeUndefined();
+  expect(r.before.audio.error, ctx).toBeUndefined();
+  if (r.transportsBefore.reported > 0) expect(r.transportsBefore.connected, ctx).toBe(2);
+  expect(r.rust.transportsConnected, ctx).toBeGreaterThanOrEqual(2);
+  expect(r.rollbacks, "Rust (polite) must have rolled its offer back").toBeGreaterThan(0);
+  expect(r.ignored, "the browser ignores only Rust's colliding offer").toBe(1);
+  expect(r.offers, "Rust offered again after its rollback").toBeGreaterThanOrEqual(3);
+  // The rollback keeps both transports: right after it Rust has the transports it had when it
+  // made the offer, each still connected.
+  expect(r.rust.atRolledBackOffer.length, ctx).toBeGreaterThanOrEqual(2);
+  expect(r.rust.afterRollback, ctx).toEqual(r.rust.atRolledBackOffer);
+  expect(r.rust.afterRollback.every(([, state]) => state === "connected"), ctx).toBe(true);
+  // Media flows through the browser's offer and Rust's re-offer.
+  expect(r.after.video.error, ctx).toBeUndefined();
+  expect(r.after.audio.error, ctx).toBeUndefined();
+  if (r.transportsAfter.reported > 0) expect(r.transportsAfter.connected, ctx).toBeGreaterThanOrEqual(1);
+  expect(r.errors).toEqual([]);
+}
+
+test("balanced, answered without BUNDLE: a rollback of Rust's offer keeps both transports", async ({ page }) => {
+  const r = await balancedUnbundledWithRollback(page, `return sdp.replace(/^a=group:BUNDLE[^\\r\\n]*\\r?\\n/m, "");`);
+  expectBalancedUnbundled(r);
+});
+
+test("balanced, video answered outside the group: a rollback of Rust's offer keeps both transports", async ({ page }) => {
+  const r = await balancedUnbundledWithRollback(
+    page,
+    `const video = Interop.mlines(sdp).filter((m) => m.kind === "video").map((m) => m.mid);
+     return sdp.replace(/^a=group:BUNDLE ([^\\r\\n]*)/m, (l, list) =>
+       "a=group:BUNDLE " + list.split(" ").filter((t) => !video.includes(t)).join(" "));`,
+  );
+  expectBalancedUnbundled(r);
 });
 
 // ---- a wrong DTLS fingerprint (RFC 5763 5, RFC 8122 5) ----

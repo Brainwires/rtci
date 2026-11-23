@@ -1244,5 +1244,47 @@ fn test_cached_record_of_another_host_is_not_served() {
     // ... and a question for it is not ours to answer.
     deliver(&mut conn, now, PEER, &question(UUID_2, TYPE_A, CLASS_IN));
     assert!(sent(&mut conn, base).is_empty());
-    assert!(conn.poll_timeout().is_none());
+    // The only timer left is the resolver's watch on that question going unanswered (RFC
+    // 6762 section 10.5).
+    assert_eq!(conn.poll_timeout(), Some(now + ms(10_000)));
+}
+
+// RFC 6762 section 6.3: "for query messages containing more than one question, all
+// (non-defensive) answers SHOULD be randomly delayed in the range 20-120 ms". With
+// `with_multi_question_delay` an A and AAAA query for our own name waits too; a one-question
+// query is still answered at once, and so is the two-question one without the option.
+#[test]
+fn test_multi_question_query_about_our_name_waits_20_to_120_ms_when_asked_to() {
+    let base = Instant::now();
+    let now = ms(10_000);
+    let mut conn = Mdns::new(
+        base,
+        config()
+            .with_multi_question_delay(true)
+            .with_local_names(vec![UUID_1.to_owned()])
+            .with_local_ip(ip(HOST)),
+    );
+    run(&mut conn, base, ms(0), now);
+    deliver(&mut conn, base + now, PEER, &query_for(UUID_1));
+    assert!(sent(&mut conn, base).is_empty(), "not at once");
+    let out = run(&mut conn, base, now, ms(20_000));
+    assert_eq!(out.len(), 1);
+    let waited = out[0].at - now;
+    assert!((ms(20)..=ms(120)).contains(&waited), "{waited:?}");
+
+    deliver(
+        &mut conn,
+        base + ms(20_000),
+        PEER,
+        &question(UUID_1, TYPE_A, CLASS_IN),
+    );
+    assert_eq!(sent(&mut conn, base).len(), 1, "one question: at once");
+
+    let mut plain = established(base, UUID_1, HOST);
+    deliver(&mut plain, base + now, PEER, &query_for(UUID_1));
+    assert_eq!(
+        sent(&mut plain, base).len(),
+        1,
+        "without the option: at once"
+    );
 }

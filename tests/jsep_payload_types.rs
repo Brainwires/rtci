@@ -74,7 +74,8 @@ a=fmtp:96 profile-id=0
     let sections = media_sections(&answer.sdp);
     assert_ne!(port_of(&sections[0]), 0, "{}", answer.sdp);
     let formats: Vec<&str> = sections[0][0].split(' ').skip(3).collect();
-    assert_eq!(formats, vec!["96"], "{}", answer.sdp);
+    // VP9 first; the formats the offer lacked may follow (RFC 9429 5.3.1).
+    assert_eq!(formats[0], "96", "{}", answer.sdp);
     assert!(!answer.sdp.contains("a=rtpmap:72 "), "{}", answer.sdp);
     pc.set_local_description(Instant::now(), answer)?;
     Ok(())

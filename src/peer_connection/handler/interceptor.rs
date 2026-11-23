@@ -13,7 +13,9 @@ use crate::peer_connection::message::internal::{
 };
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::negotiates_ccfb;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_fec_format, find_rtx_payload_type};
+use crate::rtp_transceiver::rtp_sender::rtp_codec::{
+    find_receive_fec_format, find_rtx_payload_type,
+};
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpRtxParameters,
 };
@@ -67,6 +69,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
     /// SSRC no description declares.
     pub(crate) sdes_mids: HashMap<SSRC, String>,
+    /// The SSRCs `bind_undeclared_ssrc` placed by itself (no description declares them): only
+    /// these move when a later MID names another section (RFC 9143 section 9.2).
+    pub(crate) placed_ssrcs: HashSet<SSRC>,
     /// A sender moved to another SSRC after a collision, and the negotiation-needed flag is
     /// still to be updated for the description that signals it.
     pub(crate) ssrcs_replaced: bool,
@@ -80,6 +85,10 @@ pub(crate) struct InterceptorHandlerContext {
     /// The wall clock paired with the engine's clock, taken once, for the timestamps of the
     /// receivers' synchronization and contributing sources.
     pub(crate) wall_clock: Option<SystemInstant>,
+    /// With several transports, the m= sections of the one the packets being read arrived on:
+    /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
+    /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
+    pub(crate) arrival_mids: Option<Vec<String>>,
     /// The congestion controller's last target, in bits per second: what
     /// `allocate_target_bitrate` divides again when the encodings change.
     pub(crate) target_bitrate: Option<f64>,
@@ -107,9 +116,11 @@ impl Default for InterceptorHandlerContext {
             remote_cnames: Default::default(),
             sdes_mids: Default::default(),
             ssrcs_replaced: false,
+            placed_ssrcs: Default::default(),
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
+            arrival_mids: None,
             target_bitrate: None,
         }
     }
@@ -122,6 +133,9 @@ pub(crate) struct InterceptorHandler<'a> {
     media_engine: &'a MediaEngine,
     interceptor: &'a mut dyn Interceptor,
     stats: &'a mut RTCStatsAccumulator,
+    /// The RTP session (transport) what is read now arrived on, while the connection has
+    /// more than one: it tags the packets for the per-session interceptors.
+    rtp_session: Option<usize>,
 }
 
 impl<'a> InterceptorHandler<'a> {
@@ -131,6 +145,7 @@ impl<'a> InterceptorHandler<'a> {
         media_engine: &'a MediaEngine,
         interceptor: &'a mut dyn Interceptor,
         stats: &'a mut RTCStatsAccumulator,
+        rtp_session: Option<usize>,
     ) -> Self {
         InterceptorHandler {
             ctx,
@@ -138,6 +153,7 @@ impl<'a> InterceptorHandler<'a> {
             media_engine,
             interceptor,
             stats,
+            rtp_session,
         }
     }
 
@@ -152,6 +168,16 @@ impl<'a> InterceptorHandler<'a> {
         now: Instant,
     ) {
         self.stats.on_rtcp_received(rtcp_packets, now);
+        // RFC 6679 sections 7.2.1 and 7.4.2: what the ECN validations detected goes to the
+        // application, as well as to the log, "to enable follow up".
+        for (ssrc, failure) in self.stats.take_ecn_failures() {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnEcnFailure { ssrc, failure },
+                ),
+            });
+        }
     }
 
     /// Process outgoing RTCP packets and update stats (see `RTCStatsAccumulator::on_rtcp_sent`).
@@ -221,11 +247,22 @@ impl<'a> InterceptorHandler<'a> {
             self.rtx_primary_for(rtp_header.ssrc, rtp_header.payload_type)
                 .unwrap_or((rtp_header.ssrc, rtp_header.payload_type))
         };
-        let owner = known.or_else(|| {
+        let mut owner = known.or_else(|| {
             self.ctx
                 .ssrc_owners
                 .find(ssrc, self.rtp_transceivers, receiver_declares_ssrc)
         });
+        // RFC 9143 section 9.2: a packet whose MID header extension names another m= section
+        // "update[s] the incoming SSRC mapping table" for its SSRC. A stream the engine bound
+        // by itself (an SSRC no description declares, the receiver's only one) moves to the
+        // section the MID names when that section's receiver has none yet.
+        if let Some(current) = owner {
+            self.reassociate_by_mid(current, ssrc, rtp_header);
+            owner =
+                self.ctx
+                    .ssrc_owners
+                    .cached(ssrc, self.rtp_transceivers, receiver_declares_ssrc);
+        }
 
         // Same order the endpoint's `find_track_id` used: a declared SSRC settles it, otherwise
         // the single-media-section shortcut, otherwise mid/rid.
@@ -238,6 +275,55 @@ impl<'a> InterceptorHandler<'a> {
             return;
         }
         self.bind_by_rid(now, ssrc, payload_type, rtp_header);
+    }
+
+    /// [`Self::ensure_remote_stream_bound`]: unbinds `ssrc` from the receiver of transceiver
+    /// `current` when the packet's MID header extension names another m= section whose
+    /// receiver is free, so that the SSRC is bound there instead (RFC 9143 section 9.2). Only
+    /// a stream the engine placed by itself moves: one the remote description declares for
+    /// `current`, or one of several streams (simulcast layers) of its receiver, stays.
+    fn reassociate_by_mid(&mut self, current: usize, ssrc: SSRC, rtp_header: &rtp::Header) {
+        let Some((mid, _, _)) = self.get_rtp_header_extension_ids(rtp_header) else {
+            return;
+        };
+        if mid.is_empty() {
+            return;
+        }
+        let Some(target) = self
+            .rtp_transceivers
+            .iter()
+            .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+        else {
+            return;
+        };
+        let placed = self.ctx.placed_ssrcs.contains(&ssrc);
+        let movable = |t: &RTCRtpTransceiverInternal| {
+            placed
+                && t.receiver().as_ref().is_some_and(|receiver| {
+                    let codings = receiver.track().codings();
+                    codings.len() == 1 && codings[0].rtp_coding_parameters.ssrc == Some(ssrc)
+                })
+        };
+        let free = |t: &RTCRtpTransceiverInternal| {
+            !t.stopped()
+                && t.receiver()
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.track().codings().is_empty())
+        };
+        if target == current
+            || !movable(&self.rtp_transceivers[current])
+            || !free(&self.rtp_transceivers[target])
+        {
+            return;
+        }
+        debug!("ssrc {ssrc} moves to the m= section with mid {mid} (RFC 9143 section 9.2)");
+        if let Some(receiver) = self.rtp_transceivers[current].receiver_mut() {
+            receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+            receiver.set_coding_parameters(vec![]);
+            receiver.track_mut().set_codings(vec![]);
+        }
+        self.ctx.ssrc_owners.remove(ssrc);
+        self.ctx.placed_ssrcs.remove(&ssrc);
     }
 
     /// RFC 9143 section 9.2: "If the RTCP packet is an SDES packet containing a MID item,
@@ -403,6 +489,7 @@ impl<'a> InterceptorHandler<'a> {
     fn process_session_event(&mut self, now: Instant, event: &RtcpSessionEvent) {
         match event {
             RtcpSessionEvent::RemoteCname { ssrc, cname } => {
+                self.stats.on_remote_cname(now, cname);
                 if self.ctx.remote_cnames.len() < MAX_REMOTE_CNAMES
                     || self.ctx.remote_cnames.contains_key(ssrc)
                 {
@@ -580,7 +667,7 @@ impl<'a> InterceptorHandler<'a> {
             payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -593,6 +680,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // Each repair flow is also bound in its own right, exactly as
@@ -612,6 +700,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -627,6 +716,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -684,8 +774,12 @@ impl<'a> InterceptorHandler<'a> {
                 // transceiver that is not stopped and receives this payload type. None, or
                 // more than one, and the packet belongs nowhere ("Otherwise, drop the
                 // packet").
+                let arrival = self.ctx.arrival_mids.as_deref();
                 let mut receiving = self.rtp_transceivers.iter().enumerate().filter(|(_, t)| {
                     !t.stopped()
+                        && arrival.is_none_or(|mids| {
+                            t.mid().as_ref().is_some_and(|mid| mids.contains(mid))
+                        })
                         && t.receiver().as_ref().is_some_and(|receiver| {
                             receiver
                                 .get_codec_preferences()
@@ -698,6 +792,16 @@ impl<'a> InterceptorHandler<'a> {
                     _ => return false,
                 }
             } else {
+                // The MID table of the transport the packet arrived on: a MID of another
+                // BUNDLE group's section names no section here.
+                if self
+                    .ctx
+                    .arrival_mids
+                    .as_ref()
+                    .is_some_and(|mids| !mids.contains(&mid))
+                {
+                    return false;
+                }
                 let Some(index) = self
                     .rtp_transceivers
                     .iter()
@@ -749,6 +853,9 @@ impl<'a> InterceptorHandler<'a> {
             ..Default::default()
         }];
         receiver.set_coding_parameters(receive_codings);
+        if self.ctx.placed_ssrcs.len() < MAX_REMOTE_CNAMES {
+            self.ctx.placed_ssrcs.insert(ssrc);
+        }
 
         let parameters = receiver.get_parameters(self.media_engine);
         // An undeclared SSRC arrived without any `a=ssrc-group` to associate it with, so there is
@@ -764,6 +871,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         let track_id = receiver.track().track_id().to_owned();
@@ -863,6 +971,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
@@ -876,6 +985,7 @@ impl<'a> InterceptorHandler<'a> {
             None,
             &repair_flow_codec(&codec.rtp_codec),
             &parameters.rtp_parameters.header_extensions,
+            &[],
         );
 
         // Attribute RTX packets to the primary stream's stats.
@@ -979,6 +1089,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &codec.rtp_codec,
                 &parameters.rtp_parameters.header_extensions,
+                &parameters.rtp_parameters.codecs,
             );
             self.stats.remove_inbound_rtp_stream(previous_ssrc);
             self.ctx.ssrc_owners.remove(previous_ssrc);
@@ -1013,7 +1124,7 @@ impl<'a> InterceptorHandler<'a> {
             codec.payload_type,
             &parameters.rtp_parameters.codecs,
         ));
-        let fec = fec_ssrc.zip(find_fec_format(&parameters.rtp_parameters.codecs));
+        let fec = fec_ssrc.zip(find_receive_fec_format(&parameters.rtp_parameters.codecs));
 
         RTCRtpReceiverInternal::interceptor_remote_stream_op(
             self.interceptor,
@@ -1026,6 +1137,7 @@ impl<'a> InterceptorHandler<'a> {
             fec.as_ref().map(|(_, fec_format)| fec_format),
             &codec.rtp_codec,
             &parameters.rtp_parameters.header_extensions,
+            &parameters.rtp_parameters.codecs,
         );
 
         // And each repair flow in its own right, as `interceptor_remote_streams_op` does: naming it
@@ -1045,6 +1157,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -1060,6 +1173,7 @@ impl<'a> InterceptorHandler<'a> {
                 None,
                 &repair_flow_codec(&codec.rtp_codec),
                 &parameters.rtp_parameters.header_extensions,
+                &[],
             );
         }
 
@@ -1489,6 +1603,9 @@ impl<'a>
                     sequence_number,
                 });
             }
+            if let Some(session) = self.rtp_session {
+                message.add(interceptor::RtpSession(session).attribute());
+            }
             self.interceptor.handle_read(TaggedPacket {
                 now: msg.now,
                 transport: msg.transport,
@@ -1872,6 +1989,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         let message = handler.poll_read();
 
@@ -1927,6 +2045,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         let mut delivered = Vec::new();
         while let Some(message) = handler.poll_read() {
@@ -1966,6 +2085,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         while handler.poll_read().is_some() {}
 
@@ -2001,6 +2121,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
 
         assert!(
@@ -2026,6 +2147,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             stats,
+            None,
         );
         handler
             .handle_read(TaggedRTCMessageInternal {
@@ -2350,6 +2472,7 @@ mod stream_binding_tests {
             &media_engine,
             interceptor,
             &mut stats,
+            None,
         );
 
         for sequence_number in 1..=packets {
@@ -2598,6 +2721,7 @@ mod stream_binding_tests {
                 &media_engine,
                 &mut interceptor,
                 &mut stats,
+                None,
             );
             handler
                 .handle_read(TaggedRTCMessageInternal {
@@ -2759,6 +2883,7 @@ mod stream_binding_tests {
                 &media_engine,
                 &mut interceptor,
                 stats,
+                None,
             );
             handler
                 .handle_read(TaggedRTCMessageInternal {

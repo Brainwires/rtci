@@ -455,6 +455,36 @@ mod tests {
         assert_eq!(rr.reports[0].total_lost, 0);
     }
 
+    /// RFC 4733 section 2.5.2.2: the jitter is computed over every packet of the SSRC, the
+    /// packets of a telephone event that repeat its timestamp included, each in its own clock
+    /// (`telephone-event/8000` on a 48 kHz Opus stream, RFC 7160 section 4.3).
+    #[test]
+    fn telephone_event_packets_with_a_repeated_timestamp_count_in_the_jitter() {
+        let mut stream = ReceiverStream::new(1, 48_000);
+        stream.set_payload_clock_rates(&[(101, 8_000)]);
+        let base = Instant::now();
+        let packet = |seq: u16, payload_type: u8, timestamp: u32| rtp::packet::Packet {
+            header: rtp::header::Header {
+                sequence_number: seq,
+                payload_type,
+                timestamp,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Opus every 20 ms on a steady path: no jitter.
+        for n in 0..5u16 {
+            let at = base + Duration::from_millis(20 * u64::from(n));
+            stream.process_rtp(at, &packet(n, 111, 960 * u32::from(n)));
+        }
+        // The event starts 20 ms after the last Opus packet and is repeated 50 ms later with
+        // the same timestamp: D = 0.05 s * 8000 = 400, J = 400 / 16.
+        stream.process_rtp(base + Duration::from_millis(100), &packet(5, 101, 4_800));
+        assert_eq!(0, stream.generate_report(base).reports[0].jitter);
+        stream.process_rtp(base + Duration::from_millis(150), &packet(6, 101, 4_800));
+        assert_eq!(25, stream.generate_report(base).reports[0].jitter);
+    }
+
     #[test]
     fn test_receiver_stream_jitter() {
         // Port of pion's TestReceiverInterceptor/jitter

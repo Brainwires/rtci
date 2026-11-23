@@ -386,6 +386,7 @@ impl<'a>
                                 crate::peer_connection::event::RTCPeerConnectionIceEvent {
                                     candidate: Some(rtc_candidate),
                                     url: None,
+                                    ice_transport: Some(self.ctx.ice_transport.id),
                                 },
                             ),
                         ),

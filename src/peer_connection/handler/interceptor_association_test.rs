@@ -140,6 +140,7 @@ fn opened_after_sdes_items(
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let now = Instant::now();
     if !sdes_items.is_empty() {
@@ -344,6 +345,47 @@ fn a_mid_decides_before_the_payload_type() {
         }],
     );
     assert_eq!(opened, vec![(2, 0xaaaa)]);
+}
+
+/// RFC 9143 section 9.2: the MID extension of a later packet re-associates an SSRC already
+/// bound: a stream placed in section 1 whose packets then name section 2 moves there, and
+/// section 1's receiver no longer has it.
+#[test]
+fn a_later_mid_moves_an_ssrc_to_its_section() {
+    let transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    let (opened, transceivers) = opened(
+        transceivers,
+        &[
+            Arrival {
+                ssrc: 0xbbbb,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xbbbb,
+                payload_type: VP8,
+                mid: Some("2"),
+            },
+        ],
+    );
+    assert_eq!(opened, vec![(0, 0xbbbb), (1, 0xbbbb)]);
+    let ssrcs = |t: &RTCRtpTransceiverInternal| -> Vec<Option<u32>> {
+        t.receiver()
+            .as_ref()
+            .map(|r| {
+                r.track()
+                    .codings()
+                    .iter()
+                    .map(|c| c.rtp_coding_parameters.ssrc)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(ssrcs(&transceivers[0]), vec![]);
+    assert_eq!(ssrcs(&transceivers[1]), vec![Some(0xbbbb)]);
 }
 
 /// RFC 9143 section 9.2: an RTCP SDES packet with a MID item maps the chunk's SSRC to the m=

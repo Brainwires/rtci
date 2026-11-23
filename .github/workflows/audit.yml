@@ -41,3 +41,7 @@ jobs:
       # limited to advisories that cannot reach the library, each with its reason.
       - name: Whole workspace
         run: cargo deny --config deny.toml check advisories
+      # Permissive licences only (no GPL, LGPL or AGPL), crates.io as the only source; every
+      # feature, so optional dependencies (webpki-roots) are covered.
+      - name: Licences, bans and sources
+        run: cargo deny --all-features --config deny.toml check licenses bans sources

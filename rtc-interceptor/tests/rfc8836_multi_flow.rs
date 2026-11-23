@@ -21,7 +21,9 @@
 //! Shares are goodput: the bits of a flow that arrived, over a window, as a fraction of the
 //! capacity. Run with `--nocapture` to read the numbers.
 
-use rtc_interceptor::{BandwidthEstimator, Gcc, PacketReport, ProbeController, probe_estimate};
+use rtc_interceptor::{
+    BandwidthEstimator, Gcc, PacketReport, ProbeController, ThresholdTimeBase, probe_estimate,
+};
 use rtcp::transport_feedbacks::cc_feedback_report::Ecn;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -228,6 +230,11 @@ impl GccFlow {
     /// Without bandwidth probing (`DefaultInterceptorOptions::bandwidth_probing` false).
     fn without_probing(mut self) -> Self {
         self.probing = None;
+        self
+    }
+
+    fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
+        self.gcc = self.gcc.with_threshold_time_base(time_base);
         self
     }
 
@@ -1001,4 +1008,40 @@ fn gcc_is_stable_behind_an_aqm() {
     assert!(mean >= 0.5, "{mean:.2}");
     assert!(low >= 0.25, "{low:.2}");
     assert!(p95_delay < Duration::from_millis(100), "{p95_delay:?}");
+}
+
+/// draft-ietf-rmcat-gcc-02 section 5.4 adapts the threshold over t(i) - t(i-1), the arrival
+/// times of the groups on the receiver's clock; libwebrtc (and `ThresholdTimeBase::Departure`,
+/// the default) over the departure gap, capped at 100 ms. Both forms on the scenarios above:
+/// the draft's form holds every bound those tests hold the default to. The shares and delays
+/// each run prints are the comparison recorded in the audit (GCC-5.4-4).
+#[test]
+fn the_draft_threshold_time_base_meets_the_same_bounds() {
+    const CAPACITY: f64 = 2_000_000.0;
+    for time_base in [ThresholdTimeBase::Departure, ThresholdTimeBase::Arrival] {
+        let flow = |start| GccFlow::new(300_000.0, start).with_threshold_time_base(time_base);
+
+        let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION));
+        world.gcc.push(flow(Duration::ZERO));
+        world.gcc.push(flow(Duration::from_millis(50)));
+        world.run(Duration::from_secs(90));
+        let (from, until) = (Duration::from_secs(60), Duration::from_secs(90));
+        let a = share(world.gcc[0].goodput.rate(from, until), CAPACITY);
+        let b = share(world.gcc[1].goodput.rate(from, until), CAPACITY);
+        let (mean, p95) = world.path.queueing_delay(from, until);
+        println!("{time_base:?}: two flows {a:.2} / {b:.2}, delay mean {mean:?} p95 {p95:?}");
+        assert!((0.25..=0.75).contains(&a) && (0.25..=0.75).contains(&b));
+        assert!(a + b >= 0.6);
+
+        let (reached, _, new) = a_late_flow(flow);
+        let reached = reached.unwrap_or(u64::MAX);
+        println!("{time_base:?}: late flow a fifth after {reached} s, share {new:.2}");
+        assert!(reached <= 5 && new >= 0.2);
+
+        for queue in [0.2, 0.05] {
+            let (gcc, tcp) = gcc_against_a_tcp_like_transfer(|| flow(Duration::ZERO), queue);
+            println!("{time_base:?}: against TCP-like, queue {queue} s: {gcc:.2} / {tcp:.2}");
+            assert!(gcc >= 0.05 && tcp >= 0.2);
+        }
+    }
 }

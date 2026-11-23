@@ -1,0 +1,27 @@
+[package]
+name = "rtc-stream-driver"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP / TLS) of WebRTC.rs's sans-I/O engine"
+license.workspace = true
+documentation = "https://docs.rs/rtc-stream-driver"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[features]
+# SRV and NAPTR lookups for `StreamCommand::ResolveRecords` (RFC 5928, RFC 8489 section 8)
+# and AAAA / A answered separately (`StreamEvent::ResolvedFamily`, RFC 8305 section 3), with
+# hickory-resolver (MIT OR Apache-2.0). Without it records are answered as none and both
+# families together, through the system resolver.
+dns-records = ["dep:hickory-resolver"]
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["ifaces"] }
+tokio.workspace = true
+socket2.workspace = true
+hickory-resolver = { version = "0.25", optional = true, default-features = false, features = ["tokio", "system-config"] }

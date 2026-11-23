@@ -81,6 +81,9 @@ pub(crate) struct RTCRtpSenderInternal {
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
+    /// W3C `[[LastStableRidlessSendEncodings]]`: the lone rid-less encoding a remote offer to
+    /// receive simulcast replaced by its proposed encodings, which a rollback restores.
+    last_stable_ridless_send_encodings: Option<Vec<RTCRtpEncodingParameters>>,
     /// The `RTCDTMFSender` of an audio sender: its slots and playout.
     pub(crate) dtmf: super::dtmf::DtmfState,
     /// Whether the last answer negotiated `a=extmap-allow-mixed` for the media section (RFC
@@ -366,6 +369,31 @@ impl RTCRtpSenderInternal {
         !self.send_encodings.is_empty()
     }
 
+    /// W3C "set the RTCSessionDescription", a remote offer to receive simulcast: the
+    /// sender's lone rid-less encoding is replaced by `proposed` (the "proposed envelope"),
+    /// and kept as `[[LastStableRidlessSendEncodings]]` for a rollback when none is kept yet.
+    pub(crate) fn propose_send_encodings(&mut self, proposed: Vec<RTCRtpEncodingParameters>) {
+        if self.last_stable_ridless_send_encodings.is_none() {
+            self.last_stable_ridless_send_encodings = Some(self.send_encodings.clone());
+        }
+        self.set_send_encodings(proposed);
+    }
+
+    /// A rollback of the remote offer that proposed encodings: the rid-less encoding comes
+    /// back. `true` when there was one to restore.
+    pub(crate) fn restore_ridless_send_encodings(&mut self) -> bool {
+        let Some(encodings) = self.last_stable_ridless_send_encodings.take() else {
+            return false;
+        };
+        self.set_send_encodings(encodings);
+        true
+    }
+
+    /// The negotiation completed: the proposed envelope is the sender's.
+    pub(crate) fn forget_ridless_send_encodings(&mut self) {
+        self.last_stable_ridless_send_encodings = None;
+    }
+
     /// webrtc-svc 3.2.3: the scalability mode the encoder of encoding `index` is configured
     /// with, which may differ from the one requested; `getParameters` returns it.
     pub(crate) fn set_configured_scalability_mode(
@@ -413,6 +441,30 @@ impl RTCRtpSenderInternal {
         }
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// W3C webrtc-pc 4.4.1.6, the signaling state is stable after an answer: "for each
+    /// encoding ... in [[SendEncodings]], if encoding.codec does not match any entry in
+    /// [[SendCodecs]], ... remove encoding.codec". Such an encoding is then sent with the codec
+    /// negotiation picked. Returns whether an encoding lost its codec.
+    pub(crate) fn drop_unnegotiated_encoding_codecs(&mut self) -> bool {
+        if self.send_codecs.is_empty() {
+            return false;
+        }
+        let mut dropped = false;
+        for encoding in &mut self.send_encodings {
+            if !encoding.codec.mime_type.is_empty()
+                && encoding_send_codec(&encoding.codec, &self.send_codecs).is_none()
+            {
+                encoding.codec = RTCRtpCodec::default();
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.last_returned_parameters = None;
+            self.sync_tracks();
+        }
+        dropped
     }
 
     /// W3C `addTrack` reusing this sender: the track becomes `[[SenderTrack]]` and what the
@@ -632,7 +684,6 @@ impl RTCRtpSenderInternal {
                 negotiated_header_extensions,
                 true,
             );
-
             rtp_parameters.codecs = if self.negotiated_not_sending {
                 vec![]
             } else {
@@ -968,6 +1019,7 @@ impl RTCRtpSenderInternal {
                     fec_format.as_ref(),
                     &codec.rtp_codec,
                     &header_extensions,
+                    codecs,
                 ));
             }
         }
@@ -1029,6 +1081,24 @@ impl RTCRtpSenderInternal {
         }
         self.bound_streams = infos;
         true
+    }
+
+    /// The SSRCs a renegotiation must replace because the codec its stream is sent with now
+    /// has another clock rate (RFC 9429 section 5.11: "If media is already being transmitted,
+    /// the same SSRC SHOULD be used unless the clock rate of the new codec is different, in
+    /// which case a new SSRC MUST be chosen, as specified in [RFC7160], Section 4.1"): each
+    /// such bound stream's SSRC, and its RTX SSRC, whose clock rate is the primary's.
+    pub(crate) fn clock_rate_changed_ssrcs(&self, media_engine: &MediaEngine) -> Vec<SSRC> {
+        let mut changed = vec![];
+        for info in self.local_stream_infos(media_engine) {
+            if let Some(bound) = self.bound_streams.iter().find(|b| b.ssrc == info.ssrc)
+                && bound.clock_rate != info.clock_rate
+            {
+                changed.push(info.ssrc);
+                changed.extend(bound.ssrc_rtx);
+            }
+        }
+        changed
     }
 
     /// Unbinds the streams this sender bound, with the information they were bound with.
@@ -1285,5 +1355,60 @@ pub(crate) fn restore_repair_ssrcs(
         if parameters.fec.is_none() {
             parameters.fec.clone_from(&saved.fec);
         }
+    }
+}
+
+#[cfg(test)]
+mod repair_ssrc_collision_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
+        RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
+    };
+
+    /// RFC 3550 section 8.2 for a repair flow (draft-ietf-payload-flexible-fec-scheme-03 4.2,
+    /// RFC 8627 4.2.1: "SSRC collisions ... resolved as in RFC 3550"; RFC 4588 section 4: only
+    /// the colliding stream picks a new SSRC): a collision on the FEC or the RTX SSRC moves
+    /// that SSRC alone, and names the primary stream whose streams are bound again.
+    #[test]
+    fn a_colliding_repair_ssrc_alone_moves_to_the_replacement() {
+        let encoding = RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(1000),
+                rtx: Some(RTCRtpRtxParameters { ssrc: 2000 }),
+                fec: Some(RTCRtpFecParameters { ssrc: 3000 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "label".to_owned(),
+            RtpCodecKind::Video,
+            vec![encoding.clone()],
+        );
+        let mut sender =
+            RTCRtpSenderInternal::new(RtpCodecKind::Video, track, vec![], vec![encoding]);
+
+        assert_eq!(
+            Some(1000),
+            sender.replace_ssrc(3000, 3333),
+            "the primary is named"
+        );
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(1000), coding.ssrc);
+        assert_eq!(Some(2000), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(3333), coding.fec.as_ref().map(|fec| fec.ssrc));
+
+        assert_eq!(Some(1000), sender.replace_ssrc(2000, 2222));
+        let coding = &sender.send_encodings()[0].rtp_coding_parameters;
+        assert_eq!(Some(2222), coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+        assert_eq!(Some(1000), coding.ssrc, "the media SSRC stays");
+        assert_eq!(
+            None,
+            sender.replace_ssrc(9999, 1),
+            "an SSRC the sender does not have"
+        );
     }
 }

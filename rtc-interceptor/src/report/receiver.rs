@@ -252,7 +252,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for ReceiverReportInterceptor {
                 if self.rrtr_streams.contains(ssrc) {
                     let baseline = *self
                         .time_baseline
-                        .get_or_insert_with(|| SystemInstant::now(now));
+                        .get_or_insert_with(|| SystemInstant::shared(now));
                     compound.push(Box::new(rtcp::extended_report::ExtendedReport {
                         sender_ssrc: stream.receiver_ssrc(),
                         reports: vec![Box::new(

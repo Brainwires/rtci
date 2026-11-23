@@ -418,3 +418,45 @@ fn rtcp_is_not_protected() {
 
     assert!(harness.repair_packets().is_empty());
 }
+
+/// Draft-03 section 5.1: `repair-window` is "the time that spans the source packets and the
+/// corresponding repair packets". A block not full when the window of its first packet ends
+/// is protected then, with what it has: the chain asks to be woken at that instant, and the
+/// repair packets leave no later.
+#[test]
+fn a_block_is_protected_when_its_repair_window_ends() {
+    let mut harness = Harness::new(10, 1);
+    harness.chain.bind_local_stream(&StreamInfo {
+        ssrc: MEDIA_SSRC,
+        ssrc_fec: Some(REPAIR_SSRC),
+        payload_type: MEDIA_PT,
+        payload_type_fec: Some(REPAIR_PT),
+        clock_rate: 90_000,
+        sdp_fmtp_line_fec: "repair-window=100000".to_owned(),
+        ..Default::default()
+    });
+    let start = harness.epoch;
+    for sequence_number in 1..=3 {
+        harness.send(sequence_number);
+        harness.epoch += std::time::Duration::from_millis(10);
+    }
+    assert!(harness.repair_packets().is_empty(), "3 of 10: not full");
+    let due = start + std::time::Duration::from_millis(100);
+    assert_eq!(harness.chain.poll_timeout(), Some(due));
+    harness.chain.handle_timeout(due).expect("handle_timeout");
+    while harness.chain.poll_write().is_some() {}
+    assert_eq!(
+        harness.repair_packets().len(),
+        1,
+        "the window closed the block"
+    );
+
+    // Without a window the block waits for its tenth packet.
+    let mut harness = Harness::new(10, 1);
+    harness.bind_protected();
+    for sequence_number in 1..=3 {
+        harness.send(sequence_number);
+    }
+    assert_eq!(harness.chain.poll_timeout(), None);
+    assert!(harness.repair_packets().is_empty());
+}

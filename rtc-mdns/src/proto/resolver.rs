@@ -69,10 +69,12 @@ impl Query {
 /// An address learned from a response.
 #[derive(Debug)]
 pub(super) struct Cached {
-    key: String,
-    addr: IpAddr,
-    received: Instant,
+    pub(super) key: String,
+    pub(super) addr: IpAddr,
+    pub(super) received: Instant,
     pub(super) expires: Instant,
+    /// Other hosts' queries this address would answer, unanswered (RFC 6762 section 10.5).
+    pub(super) unanswered: Option<super::reconfirm::Unanswered>,
 }
 
 impl Mdns {
@@ -345,6 +347,7 @@ impl Mdns {
         {
             cached.received = now;
             cached.expires = expires;
+            cached.unanswered = None;
             return;
         }
         if self.cache.len() >= MAX_CACHED_ADDRESSES {
@@ -372,6 +375,7 @@ impl Mdns {
             addr,
             received: now,
             expires,
+            unanswered: None,
         });
     }
 

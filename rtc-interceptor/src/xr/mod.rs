@@ -41,6 +41,14 @@ use std::time::{Duration, Instant};
 /// (one entry per format, the format as its parameter).
 pub const RTCP_FB_XR: &str = "xr";
 
+/// The `xr-format` of the RFC 6679 ECN Summary Report block (`a=rtcp-xr:ecn-sum`, section 6.3).
+/// The RTCP session writes the block ([`RtcpSessionInterceptor`](crate::RtcpSessionInterceptor)).
+pub const RTCP_XR_ECN_SUMMARY: &str = "ecn-sum";
+
+/// The `nack` parameter of the RFC 6679 RTCP ECN Feedback packet (`a=rtcp-fb:<pt> nack ecn`,
+/// section 6.2). The RTCP session writes the packet.
+pub const RTCP_FB_NACK_ECN: &str = "ecn";
+
 /// How often the blocks are written when no interval is configured: about once per regular
 /// RTCP report of a video session.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);

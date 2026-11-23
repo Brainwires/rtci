@@ -268,6 +268,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Driving the Engine
+
+An application author writes one loop around the connection. It has two halves; the second is
+needed only when the engine is to run TCP (ICE-TCP candidates, TURN over TCP or TLS) itself.
+
+**Datagrams** (the loop above): every UDP datagram read goes to `handle_read`, everything from
+`poll_write` goes out, deadlines go through `poll_timeout` / `handle_timeout`. A datagram
+tagged `TransportProtocol::TCP` there is one the application framed itself, for a TCP candidate
+it added on its own.
+
+**Streams** (`rtc::shared::stream`): the engine names its TCP connections and listeners by id
+and the application only owns the sockets. After each input:
+
+```text
+while let Some(command) = pc.poll_stream_command()  { /* Listen, Connect, Close, Reset, Resolve */ }
+while let Some(transmit) = pc.poll_stream_transmit() { /* write transmit.data on transmit.id */ }
+// what the sockets did:
+pc.handle_stream_event(now, event)?;   // Listening, Connected, Written, Closed, Reset, Resolved, ...
+pc.handle_stream_accepted(now, listener, local, remote)   // Some(id), or None: close the socket
+pc.handle_stream_read(now, id, &bytes)?;                  // any piece size; the engine reassembles
+```
+
+Once the application serves this interface, the engine gathers a passive, a simultaneous-open
+and an active TCP candidate for each UDP host address it is given (RFC 6544; per transport when
+sections are not bundled), frames with RFC 4571, connects to `turn:...?transport=tcp` and
+`turns:` servers (names resolved through `StreamCommand::Resolve`, Happy Eyeballs across the
+addresses) and closes the connections ICE no longer needs. With `stun:` / `stuns:` servers
+configured it also gathers the server-reflexive candidates: a Binding request from each UDP host
+candidate (out of `poll_write`, the answer taken out of `handle_read`; this needs no stream
+interface for a server given by address) and over TCP / TLS from its ICE-TCP listeners
+(`ReflexiveGathering::Application` leaves it to the application). A driver may answer a
+`Resolve` per family (`StreamEvent::ResolvedFamily`, AAAA and A as each arrives) so the race
+starts on the first answer (RFC 8305 section 3), or once with `StreamEvent::Resolved`. For a
+server URI without a port the engine first asks for its NAPTR and SRV records
+(`StreamCommand::ResolveRecords`, answered with `StreamEvent::ResolvedRecords`; RFC 5928, RFC
+8489 section 8); a driver that cannot look records up answers with none. `StreamEvent::Written` is the
+back-pressure signal: the engine holds a window of unacknowledged bytes per connection.
+`SettingEngineBuilder::with_tcp_candidate_gathering(false)` keeps the engine's TCP off; an
+application that never polls the stream interface gets no TCP candidate and nothing changes.
+
+**The reference driver** (`examples/stream-driver`, crate `rtc-stream-driver`, not published)
+implements the stream half on tokio, plus the socket choices a server makes:
+
+| Need | Where |
+| --- | --- |
+| Ports from a range (firewall rules) | `DriverConfig::tcp_port_range`, `sockets::bind_udp_in_range` / `bind_tcp_listener_in_range` with `PortRange::new(min, max)` |
+| One UDP port for many peer connections | `sockets::UfragMux`: register every `pc.ice_username_fragments()` entry after each local description; `route(from, datagram)` picks the connection |
+| One passive ICE-TCP port for many peer connections | `DriverConfig::shared_passive`, `sockets::accept_by_ufrag`, then `StreamDriver::adopt_shared` on the connection the first check names |
+| Which local addresses get candidates | `sockets::AddressFilter` (`bind_addresses`, `include_loopback`, `include_link_local`, `interface_filter`, `ip_filter`) and `local_addresses()` |
+| SRV / NAPTR lookups and per-family answers | feature `dns-records` (hickory-resolver) |
+| A server behind a 1:1 NAT | `SettingEngineBuilder::with_nat_1to1_ips(vec![external_ip], RTCIceCandidateType::Host)` (or `Srflx` to add a server-reflexive candidate beside each host one); it applies to the engine's TCP candidates too |
+
+Inside one peer connection the engine routes between its transports the same way a shared port
+routes between connections: by the ufrag the first Binding request names (RFC 8445 section
+7.2.2), so a shared port also works when sections are not bundled.
+
 ## Feeding ICE Candidates
 
 Because RTC does no I/O, it also does no candidate gathering: **you** bind the sockets, so **you** tell the connection
@@ -324,7 +380,20 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
 - ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
-- ✅ **ICE over TCP** - Active and passive
+- ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
+  opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
+- ✅ **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
+  commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
+  back-pressure; `examples/stream-driver` is a tokio driver for it
+- ✅ **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
+  interface: resolution by the driver, Happy Eyeballs (RFC 8305), TLS with rustls sans-I/O (ALPN `stun.turn`; roots or a
+  verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
+  `relayProtocol`; TURN over DTLS is not implemented
+- ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
+  ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
+  one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
+  check, `UfragMux`, `accept_by_ufrag`, `RTCPeerConnection::ice_username_fragment`); 1:1 NAT addresses
+  (`with_nat_1to1_ips`) apply to every host candidate, the engine's TCP ones included
 - ✅ **Simulcast** - RID-based simulcast, sending and receiving
 - ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
 - ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
