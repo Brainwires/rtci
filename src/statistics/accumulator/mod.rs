@@ -995,11 +995,17 @@ impl RTCStatsAccumulator {
         }
     }
 
-    /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback; with
-    /// ECN on, its packets are then sent ECT(1).
-    pub(crate) fn set_outbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
-        let ecn = self.ecn;
-        let initiation = self.ecn_initiation;
+    /// Records whether the outbound stream `ssrc`'s codec negotiated RFC 8888 feedback, and
+    /// whether its section negotiated ECN (`ecn`: the initiation, RFC 6679 section 6.1.1,
+    /// `a=ecn-capable-rtp`); with ECN on and both negotiated, its packets are sent ECT(1).
+    pub(crate) fn set_outbound_ccfb(
+        &mut self,
+        ssrc: SSRC,
+        negotiated: bool,
+        ecn_negotiated: Option<interceptor::EcnInitiation>,
+    ) {
+        let ecn = self.ecn && ecn_negotiated.is_some();
+        let initiation = ecn_negotiated.unwrap_or(self.ecn_initiation);
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
             stream.ccfb_negotiated = negotiated;
             stream.ect1_marking = ecn && negotiated;

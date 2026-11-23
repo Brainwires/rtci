@@ -1585,6 +1585,16 @@ impl RTCPeerConnection {
     ///
     /// # Specification
     ///
+    /// How many RTP packets were discarded because no media section or track could take them
+    /// (RFC 8830 section 3.1: the engine buffers no unassociated media, and says so; see
+    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`]). Not a W3C attribute: a fork
+    /// addition.
+    pub fn discarded_rtp_packets(&self) -> u64 {
+        self.pipeline_context
+            .endpoint_handler_context
+            .discarded_rtp_packets
+    }
+
     /// See [currentLocalDescription](https://www.w3.org/TR/webrtc/#dom-peerconnection-currentlocaldesc)
     pub fn current_local_description(&self) -> Option<RTCSessionDescription> {
         self.populate_local_candidates(self.current_local_description.as_ref())
@@ -1757,6 +1767,9 @@ impl RTCPeerConnection {
             validate_application_media_section(&parsed)?;
             // RFC 9429 section 5.10: an RTX format whose primary is not on the m= line.
             check_repair_primaries(&parsed)?;
+            // RFC 8859 section 4.7: packet times are the same for a payload type across a
+            // BUNDLE group.
+            crate::peer_connection::sdp::check_bundled_packet_times(&parsed)?;
             // RFC 8839 section 4.4.2.1: an offer that is not an ICE restart keeps the ICE
             // attributes of the session.
             if remote_description.sdp_type == RTCSdpType::Offer

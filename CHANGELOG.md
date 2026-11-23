@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: ECN negotiation, early media, packet times, SSRCs on a clock-rate change.
+  - With `SettingEngineBuilder::with_ecn(true)` ECN is negotiated with `a=ecn-capable-rtp`
+    (RFC 8888 section 7, RFC 6679 section 6.1): every RTP section of an offer with an AVPF
+    profile states the initiation methods (`rtp`, `leap`; the configured one first), an
+    answer states one where the offer had the attribute, and a stream marks ECT(1) only when
+    both sides' sections carry it, with the answer's method, and the peer's `mode` is not
+    `setonly`. It used to mark on `ack ccfb` alone, which new
+    `SettingEngineBuilder::with_ecn_without_signalling(true)` keeps (what browsers that send
+    L4S do). Offers and answers differ on the wire with ECN on.
+  - A remote description whose bundled sections state different `a=ptime` or `a=maxptime`
+    for one payload type is refused (RFC 8859 section 4.7).
+  - A started stream whose newly negotiated send codec has another clock rate moves to a new
+    SSRC (RFC 9429 section 5.11, RFC 7160 section 4.1), with its RTX stream, as a collision
+    moves one: later descriptions say `previous-ssrc`.
+  - New event `RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc)` and
+    `RTCPeerConnection::discarded_rtp_packets()`: RTP that no media section or track can take
+    is discarded, counted, and reported once per SSRC (RFC 8830 section 3.1).
 - **jsep**: SDP for the media work.
   - A section offered with `RTP/SAVP` (or `RTP/AVP`) is answered without `a=rtcp-fb` and
     `a=rtcp-rsize` (RFC 4585 section 4.1, RFC 5506 section 4.1).

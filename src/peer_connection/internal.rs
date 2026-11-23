@@ -9,6 +9,7 @@ use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::handler::transport_set::{TransportId, TransportSet};
 use crate::peer_connection::sdp::answered_extension_directions;
+use crate::peer_connection::sdp::ecn;
 use crate::peer_connection::sdp::has_bundle_attribute;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::{
@@ -720,6 +721,7 @@ impl RTCPeerConnection {
             ls_groups: vec![],
             selected_destination,
             remote_candidates,
+            ecn: self.signalled_ecn(),
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -992,6 +994,13 @@ impl RTCPeerConnection {
                             } else {
                                 media_rtcp_xr(media)
                             },
+                            offered_ecn: if include_unmatched {
+                                None
+                            } else {
+                                remote_parsed
+                                    .as_ref()
+                                    .and_then(|parsed| ecn::section_ecn_capability(parsed, media))
+                            },
                             ..Default::default()
                         });
                     } else {
@@ -1148,6 +1157,7 @@ impl RTCPeerConnection {
             },
             selected_destination,
             remote_candidates,
+            ecn: self.signalled_ecn(),
         };
         RTCPeerConnection::populate_sdp(
             d,
@@ -2243,6 +2253,35 @@ impl RTCPeerConnection {
             RTCRtpTransceiverId,
         )> = Vec::new();
 
+        // RFC 9429 section 5.11 (RFC 7160 section 4.1): a started stream whose new codec has
+        // another clock rate gets a new SSRC (and so does its RTX stream), moved as a collision
+        // moves one: the old SSRC says BYE, what the application still writes with it goes out
+        // with the new one, and later descriptions say `previous-ssrc`.
+        let clock_rate_changes: Vec<(usize, Vec<SSRC>)> = self
+            .rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.stopped())
+            .filter_map(|(i, t)| {
+                let sender = t.sender().as_ref()?;
+                (sender.is_negotiated() && sender.has_sent())
+                    .then(|| (i, sender.clock_rate_changed_ssrcs(&self.media_engine)))
+            })
+            .filter(|(_, ssrcs)| !ssrcs.is_empty())
+            .collect();
+        let mut minted = vec![];
+        for (i, ssrcs) in clock_rate_changes {
+            for old in ssrcs {
+                let new = self.unused_ssrc(&mut minted);
+                let Some(sender) = self.rtp_transceivers[i].sender_mut() else {
+                    continue;
+                };
+                if sender.replace_ssrc(old, new) == Some(old) {
+                    self.stats_mut().replace_outbound_rtp_stream(old, new);
+                }
+            }
+        }
+
         for (transceiver_id, transceiver) in self.rtp_transceivers.iter_mut().enumerate() {
             // Get kind and mid before mutable borrow of sender
             let kind = transceiver.kind();
@@ -2320,6 +2359,7 @@ impl RTCPeerConnection {
             let Some(sender) = transceiver.sender().as_ref() else {
                 continue;
             };
+            let ecn = self.negotiated_ecn(transceiver.mid().as_deref());
             for info in sender.bound_streams() {
                 let ccfb = negotiates_ccfb(
                     info.rtcp_feedback
@@ -2328,11 +2368,51 @@ impl RTCPeerConnection {
                 );
                 self.pipeline_context
                     .stats
-                    .set_outbound_ccfb(info.ssrc, ccfb);
+                    .set_outbound_ccfb(info.ssrc, ccfb, ecn);
             }
         }
 
         Ok(())
+    }
+
+    /// The initiation an offer or answer states in `a=ecn-capable-rtp` (RFC 6679 section 6.1):
+    /// `None` when ECN is off, or used without signalling.
+    pub(super) fn signalled_ecn(&self) -> Option<interceptor::EcnInitiation> {
+        (self.setting_engine.ecn && !self.setting_engine.ecn_without_signalling)
+            .then_some(self.setting_engine.ecn_initiation)
+    }
+
+    /// Whether the streams of the section `mid` may send ECT, and how they initiate it
+    /// (RFC 6679 section 6.1.1): both current descriptions' sections carry
+    /// `a=ecn-capable-rtp` with a method this endpoint implements, and the peer reads the
+    /// marks. With `with_ecn_without_signalling` the configured initiation, whatever the
+    /// descriptions say. `None` without ECN; the statistics also need `ack ccfb` to mark.
+    pub(super) fn negotiated_ecn(&self, mid: Option<&str>) -> Option<interceptor::EcnInitiation> {
+        if !self.setting_engine.ecn {
+            return None;
+        }
+        if self.setting_engine.ecn_without_signalling {
+            return Some(self.setting_engine.ecn_initiation);
+        }
+        let mid = mid?;
+        let local = self.current_local_description.as_ref()?;
+        let remote = self.current_remote_description.as_ref()?;
+        fn section<'a>(
+            d: &'a RTCSessionDescription,
+            mid: &str,
+        ) -> Option<(&'a SessionDescription, &'a MediaDescription)> {
+            let parsed = d.parsed.as_ref()?;
+            let media = parsed
+                .media_descriptions
+                .iter()
+                .find(|m| get_mid_value(m).map(String::as_str) == Some(mid))?;
+            Some((parsed, media))
+        }
+        ecn::negotiated_initiation(
+            section(local, mid)?,
+            section(remote, mid)?,
+            local.sdp_type == RTCSdpType::Answer,
+        )
     }
 
     pub(super) fn start_rtp(&mut self, remote_desc: RTCSessionDescription) -> Result<()> {

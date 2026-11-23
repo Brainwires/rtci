@@ -173,6 +173,7 @@ mod rejected_mline_tests {
             ls_groups: vec![],
             selected_destination: None,
             remote_candidates: vec![],
+            ecn: None,
             rid_pause_marks: false,
             video_receive_limits: None,
             codec_video_receive_limits: vec![],
@@ -297,6 +298,7 @@ mod rejected_mline_tests {
 }
 
 mod answer_check;
+pub(crate) mod ecn;
 pub(crate) mod imageattr;
 pub(crate) mod sdp_type;
 pub(crate) mod session_description;
@@ -461,6 +463,53 @@ pub(crate) fn media_packet_time(media: &MediaDescription) -> RTCPacketTime {
         ptime: value(ATTR_KEY_PTIME),
         maxptime: value(ATTR_KEY_MAXPTIME),
     }
+}
+
+/// RFC 8859 section 4.7: `a=ptime` and `a=maxptime` are IDENTICAL-PER-PT, they "MUST have
+/// identical values across all the media descriptions for a given RTP payload type when
+/// repeated": two sections of one BUNDLE group that both state one and share a payload type
+/// must state the same value. This endpoint writes one packet time for all its audio
+/// sections, so its own descriptions hold it; a remote description that breaks it is refused.
+pub(crate) fn check_bundled_packet_times(desc: &SessionDescription) -> Result<()> {
+    for group in bundle_groups(desc) {
+        let sections: Vec<&MediaDescription> = desc
+            .media_descriptions
+            .iter()
+            .filter(|m| {
+                !is_rejected_media(m)
+                    && get_mid_value(m).is_some_and(|mid| group.contains(&mid.as_str()))
+            })
+            .collect();
+        for (key, pick) in [
+            (
+                ATTR_KEY_PTIME,
+                (|t: RTCPacketTime| t.ptime) as fn(RTCPacketTime) -> Option<u32>,
+            ),
+            (ATTR_KEY_MAXPTIME, |t: RTCPacketTime| t.maxptime),
+        ] {
+            let mut by_pt: HashMap<&str, u32> = HashMap::new();
+            for media in &sections {
+                let Some(value) = pick(media_packet_time(media)) else {
+                    continue;
+                };
+                for pt in &media.media_name.formats {
+                    match by_pt.get(pt.as_str()) {
+                        Some(&other) if other != value => {
+                            return Err(Error::SdpInvalidValue(format!(
+                                "a={key} differs ({other} and {value}) for payload type {pt} \
+                                 across bundled sections (RFC 8859 section 4.7)"
+                            )));
+                        }
+                        Some(_) => {}
+                        None => {
+                            by_pt.insert(pt.as_str(), value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The Ta a description proposes (`a=ice-pacing`, RFC 8839 section 5.5: session level, a
@@ -1216,6 +1265,9 @@ pub(crate) struct AddTransceiverSdpParams {
     is_offer: bool,
     /// The RTCP mux policy is "require".
     rtcp_mux_only: bool,
+    /// `SettingEngineBuilder::with_ecn` with the initiation it prefers, unless ECN is used
+    /// without signalling (`with_ecn_without_signalling`): `a=ecn-capable-rtp` is written.
+    ecn: Option<interceptor::EcnInitiation>,
 }
 
 impl RTCPeerConnection {
@@ -1388,6 +1440,33 @@ impl RTCPeerConnection {
         };
         if let Some(rtcp_xr) = rtcp_xr {
             media = media.with_value_attribute(ATTR_KEY_RTCP_XR.to_owned(), rtcp_xr);
+        }
+        // RFC 6679 section 6.1.1 (RFC 8888 section 7): ECN for RTP. An offer states it in
+        // every RTP section (the attribute is IDENTICAL across a BUNDLE group, RFC 8859 section
+        // 7.4), an answer only where the offer had a method this endpoint implements. Section
+        // 6.1.3: only with a profile that has timely feedback (AVPF) and never over TCP.
+        if let Some(preferred) = params.ecn {
+            let feedback_profile = media_section.offered_protos.as_ref().is_none_or(|protos| {
+                protos
+                    .first()
+                    .is_some_and(|p| !p.eq_ignore_ascii_case("TCP"))
+                    && protos
+                        .iter()
+                        .any(|p| p.eq_ignore_ascii_case("AVPF") || p.eq_ignore_ascii_case("SAVPF"))
+            });
+            let value = if !feedback_profile {
+                None
+            } else if is_offer {
+                Some(ecn::offer_value(preferred))
+            } else {
+                media_section
+                    .offered_ecn
+                    .as_ref()
+                    .and_then(ecn::answer_value)
+            };
+            if let Some(value) = value {
+                media = media.with_value_attribute(ecn::ATTR_KEY_ECN_CAPABLE_RTP.to_owned(), value);
+            }
         }
         // RFC 8866 sections 6.4, 6.5 (RFC 7587 section 7 for Opus): the packet times this
         // endpoint wants to receive.
@@ -1975,8 +2054,9 @@ fn tagged_section<'a>(
 }
 
 /// The BUNDLE attributes this endpoint writes (RFC 8859 categories IDENTICAL and TRANSPORT).
-const BUNDLE_ATTRIBUTES: [&str; 10] = [
+const BUNDLE_ATTRIBUTES: [&str; 11] = [
     ATTR_KEY_RTCP,
+    ecn::ATTR_KEY_ECN_CAPABLE_RTP,
     "ice-ufrag",
     "ice-pwd",
     "ice-options",
@@ -2071,6 +2151,8 @@ pub(crate) struct MediaSection {
     /// In an answer, the `xr-format`s of the offered section's `a=rtcp-xr` (RFC 3611 section
     /// 5.2), `None` when it had none or in an offer.
     pub(crate) offered_rtcp_xr: Option<Vec<String>>,
+    /// In an answer, the offered section's `a=ecn-capable-rtp` (RFC 6679 section 6.1.1).
+    pub(crate) offered_ecn: Option<ecn::EcnCapability>,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).
@@ -2163,6 +2245,9 @@ pub(crate) struct PopulateSdpParams {
     /// The values of the `a=remote-candidates` lines (RFC 8839 sections 4.4.1.2.2, 5.2) an
     /// offer of the controlling agent carries once ICE has selected a pair.
     pub(crate) remote_candidates: Vec<String>,
+    /// ECN signalled with `a=ecn-capable-rtp`, preferring this initiation (RFC 6679 section
+    /// 6.1); `None` when ECN is off or used without signalling.
+    pub(crate) ecn: Option<interceptor::EcnInitiation>,
 }
 
 impl RTCPeerConnection {
@@ -2344,6 +2429,7 @@ impl RTCPeerConnection {
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle == BundleMode::Offer,
                     rtcp_mux_only: params.rtcp_mux_only,
+                    ecn: params.ecn,
                 };
                 let (d1, should_add_id) = RTCPeerConnection::add_transceiver_sdp(
                     d,

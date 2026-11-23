@@ -874,6 +874,24 @@ impl RTCRtpSenderInternal {
         true
     }
 
+    /// The SSRCs a renegotiation must replace because the codec its stream is sent with now
+    /// has another clock rate (RFC 9429 section 5.11: "If media is already being transmitted,
+    /// the same SSRC SHOULD be used unless the clock rate of the new codec is different, in
+    /// which case a new SSRC MUST be chosen, as specified in [RFC7160], Section 4.1"): each
+    /// such bound stream's SSRC, and its RTX SSRC, whose clock rate is the primary's.
+    pub(crate) fn clock_rate_changed_ssrcs(&self, media_engine: &MediaEngine) -> Vec<SSRC> {
+        let mut changed = vec![];
+        for info in self.local_stream_infos(media_engine) {
+            if let Some(bound) = self.bound_streams.iter().find(|b| b.ssrc == info.ssrc)
+                && bound.clock_rate != info.clock_rate
+            {
+                changed.push(info.ssrc);
+                changed.extend(bound.ssrc_rtx);
+            }
+        }
+        changed
+    }
+
     /// Unbinds the streams this sender bound, with the information they were bound with.
     pub(crate) fn unbind_local_streams(&mut self, interceptor: &mut dyn Interceptor) {
         for info in std::mem::take(&mut self.bound_streams) {

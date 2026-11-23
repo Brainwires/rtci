@@ -3,7 +3,8 @@
 //! The engine is sans-I/O, so the application's socket layer carries the IP header's ECN
 //! codepoint in `TransportContext::ecn`: it names the codepoint each received datagram arrived
 //! with, and the engine names the codepoint each datagram to send is to carry. With ECN on
-//! (`SettingEngineBuilder::with_ecn`) and `ack ccfb` negotiated, RTP media goes out ECT(1)
+//! (`SettingEngineBuilder::with_ecn`), `ack ccfb` and `a=ecn-capable-rtp` negotiated (RFC 6679
+//! section 6.1), RTP media goes out ECT(1)
 //! once ECN is initiated (RFC 8888 section 7, RFC 6679 section 7.2.1: a few probes first,
 //! every packet once the feedback shows they arrive marked; marking stops when the path
 //! clears it or drops marked packets, section 7.4) and nothing else is marked; the receiver counts ECT(1) / CE receptions, reports each packet's
@@ -71,6 +72,8 @@ struct Setup {
     nack: bool,
     /// `SettingEngineBuilder::with_ecn_initiation(EcnInitiation::LeapOfFaith)`.
     leap_of_faith: bool,
+    /// `SettingEngineBuilder::with_ecn_without_signalling(true)`.
+    unsignalled: bool,
 }
 
 struct Peer {
@@ -109,6 +112,7 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_ecn(setup.ecn)
+                    .with_ecn_without_signalling(setup.unsignalled)
                     .with_ecn_initiation(if setup.leap_of_faith {
                         EcnInitiation::LeapOfFaith
                     } else {
@@ -196,6 +200,8 @@ struct World {
     /// (from the sender, SSRC and sequence number if RTP, the ECN codepoint it was sent with)
     /// for every datagram either peer sent.
     sent: Vec<Sent>,
+    /// The answer's SDP.
+    answer: String,
 }
 
 impl World {
@@ -330,6 +336,7 @@ impl World {
             path: Path::default(),
             held: Vec::new(),
             sent: Vec::new(),
+            answer: String::new(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -356,6 +363,7 @@ impl World {
             .set_local_description(now, offer.clone())?;
         world.peers[1].pc.set_remote_description(now, offer)?;
         let answer = world.peers[1].pc.create_answer(None)?;
+        world.answer = answer.sdp.clone();
         world.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
@@ -474,6 +482,7 @@ const ECN_CCFB: Setup = Setup {
     ccfb: true,
     nack: false,
     leap_of_faith: false,
+    unsignalled: false,
 };
 
 /// The media packets the sender put on the wire, in order: (sequence number, sent ECT(1)).
@@ -800,5 +809,86 @@ fn leap_of_faith_initiation_marks_from_the_first_packet_and_still_stops_on_bleac
         media[media.len() - 30..].iter().all(|(_, m)| !m),
         "and not after"
     );
+    Ok(())
+}
+
+/// RFC 8888 section 7: "the SDP offer generated MUST include an "a=ecn-capable-rtp:"
+/// attribute to negotiate ECN support, along with an "a=rtcp-fb:" attribute with the "ack"
+/// parameter "ccfb"". RFC 6679 section 6.1.1: the offer lists the initiation methods in
+/// decreasing preference, the answer "its single preferred choice". The answer's method is
+/// the one used: leap of faith offered first and answered marks from the first packet.
+#[test]
+fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
+    let (world, _, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
+    assert!(offer.contains("a=rtcp-fb:* ack ccfb"), "{offer}");
+    assert!(
+        offer.contains("a=ecn-capable-rtp: rtp,leap\r\n"),
+        "the offer states its methods, the configured one first:\n{offer}"
+    );
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp: rtp\r\n"),
+        "the answer picks one:\n{}",
+        world.answer
+    );
+
+    let leap = Setup {
+        leap_of_faith: true,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(leap, ECN_CCFB)?;
+    assert!(offer.contains("a=ecn-capable-rtp: leap,rtp\r\n"), "{offer}");
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp: leap\r\n"),
+        "the answerer takes the offer's first method it implements:\n{}",
+        world.answer
+    );
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(200))?;
+    let media = media_on_the_wire(&world, ssrc);
+    assert!(
+        media.iter().all(|(_, m)| *m),
+        "leap of faith negotiated: every packet ECT(1)"
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 6.1.1: "If the attribute is removed in the answer, then ECN MUST NOT be
+/// used in any direction for that media flow". An answerer without ECN leaves it out, and the
+/// offerer, with ECN on and `ack ccfb` negotiated, marks nothing.
+#[test]
+fn an_answer_without_ecn_capable_rtp_marks_nothing() -> Result<()> {
+    let receiver = Setup {
+        ecn: false,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(ECN_CCFB, receiver)?;
+    assert!(offer.contains("a=ecn-capable-rtp:"), "{offer}");
+    assert!(
+        !world.answer.contains("a=ecn-capable-rtp"),
+        "{}",
+        world.answer
+    );
+    assert!(world.answer.contains("ack ccfb"), "{}", world.answer);
+    world.send_media(sender, Duration::from_millis(500))?;
+    assert!(world.sent.iter().all(|(_, _, ecn)| ecn.is_none()));
+    Ok(())
+}
+
+/// `with_ecn_without_signalling(true)`, what browsers that send L4S do: no
+/// `a=ecn-capable-rtp`, and a stream with `ack ccfb` marks all the same.
+#[test]
+fn without_signalling_ecn_is_used_on_ccfb_alone() -> Result<()> {
+    let setup = Setup {
+        unsignalled: true,
+        ..ECN_CCFB
+    };
+    let (mut world, sender, offer) = World::connected(setup, setup)?;
+    assert!(!offer.contains("a=ecn-capable-rtp"), "{offer}");
+    assert!(!world.answer.contains("a=ecn-capable-rtp"));
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(500))?;
+    let media = media_on_the_wire(&world, ssrc);
+    let from = marked_from(&media).expect("media is sent ECT(1)");
+    assert!(from.wrapping_sub(FIRST_SEQ) < 50);
     Ok(())
 }

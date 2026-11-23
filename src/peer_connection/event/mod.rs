@@ -541,6 +541,20 @@ pub enum RTCPeerConnectionEvent {
     /// Not a W3C event: a fork addition.
     OnSsrcCollision(crate::rtp_transceiver::SSRC),
 
+    /// RTP media of this SSRC arrived that no media section or track could take, and was
+    /// discarded: the first such packet of each SSRC (at most 64 SSRCs per connection are
+    /// reported).
+    ///
+    /// RFC 8830 section 3.1: media of a peer that signals no `a=msid` (or arrives before the
+    /// description that places it) may need buffering until it can be associated; "If the
+    /// implementation wishes to limit this buffering, it MUST signal to the user that media
+    /// has been discarded". The engine buffers none: a packet whose stream cannot be bound to
+    /// a receiver (RFC 9143 section 9.2: "Otherwise, drop the packet") is dropped at once and
+    /// this event says so. `RTCPeerConnection::discarded_rtp_packets` counts every one.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnUnassociatedRtpDiscarded(crate::rtp_transceiver::SSRC),
+
     /// W3C `RTCIceTransport` `statechange`: the connection's ICE transport changed state.
     ///
     /// Comes before the `OnIceConnectionStateChangeEvent` and the

@@ -491,6 +491,9 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// ECN is used on `ack ccfb` alone, without `a=ecn-capable-rtp`
+    /// ([`SettingEngineBuilder::with_ecn_without_signalling`]).
+    pub(crate) ecn_without_signalling: bool,
 }
 
 impl SettingEngine {
@@ -2263,7 +2266,8 @@ impl SettingEngineBuilder {
     ///
     /// With it on, the RTP packets of a stream whose codec negotiated RFC 8888 congestion
     /// control feedback (`a=rtcp-fb:<pt> ack ccfb`, see `configure_congestion_control_feedback`)
-    /// are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
+    /// and whose section negotiated ECN (`a=ecn-capable-rtp`, RFC 6679 section 6.1; see
+    /// [`with_ecn_without_signalling`](Self::with_ecn_without_signalling)) are sent ECT(1), the L4S identifier: a sender marks only where the receiver reports the
     /// CE marks back. As RFC 8888 section 7 requires, the stream first initiates ECN as RFC 6679
     /// section 7.2.1 has it (one packet in ten a probe, until the feedback shows the probes
     /// arrive ECT), then marks every packet (RTX included), and stops when the feedback shows
@@ -2287,6 +2291,23 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// With ECN on ([`with_ecn`](Self::with_ecn)), whether a stream marks on `ack ccfb` alone.
+    ///
+    /// By default ECN is negotiated as RFC 8888 section 7 and RFC 6679 section 6.1.1 have it:
+    /// every RTP section of an offer carries `a=ecn-capable-rtp` with the initiation methods
+    /// this endpoint implements (the one [`with_ecn_initiation`](Self::with_ecn_initiation)
+    /// names first), an answer carries it with one method where the offer had it, and a
+    /// stream marks only when both sides' sections carry it ("If the attribute is removed in
+    /// the answer, then ECN MUST NOT be used in any direction") and the peer can read the
+    /// field (its `mode` is not `setonly`); the answer's method is the initiation used.
+    ///
+    /// `true` is what browsers that send L4S do: no `a=ecn-capable-rtp` is written, and every
+    /// stream with `ack ccfb` negotiated marks, initiating as `with_ecn_initiation` says.
+    pub fn with_ecn_without_signalling(mut self, without_signalling: bool) -> Self {
+        self.0.ecn_without_signalling = without_signalling;
         self
     }
 

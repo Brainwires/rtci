@@ -322,6 +322,54 @@ fn packet_times_are_written_when_set_and_the_remote_ones_are_read() -> TestResul
     Ok(())
 }
 
+/// RFC 8859 section 4.7: `a=ptime` and `a=maxptime` are IDENTICAL-PER-PT, they "MUST have
+/// identical values across all the media descriptions for a given RTP payload type when
+/// repeated". A remote offer whose bundled audio sections share payload type 111 with
+/// different packet times is refused; the same sections outside a BUNDLE group, or stating
+/// the same value, are taken. This endpoint's own audio sections state one value.
+#[test]
+fn bundled_sections_state_one_packet_time_per_payload_type() -> TestResult {
+    let offer = |group: &str, second_ptime: u32| {
+        crlf(&format!(
+            "{SESSION}{group}m=audio 9 UDP/TLS/RTP/SAVPF 111\n{TRANSPORT}a=mid:0\na=sendrecv\n\
+             a=rtpmap:111 opus/48000/2\na=ptime:20\n\
+             m=audio 9 UDP/TLS/RTP/SAVPF 111\n{TRANSPORT}a=mid:1\na=sendrecv\n\
+             a=rtpmap:111 opus/48000/2\na=ptime:{second_ptime}\n"
+        ))
+    };
+    let bundle = "a=group:BUNDLE 0 1\n";
+    let mut pc = default_peer()?;
+    let refused = pc.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer(bundle, 40))?,
+    );
+    assert!(refused.is_err(), "a=ptime 20 and 40 for payload type 111");
+    for (group, ptime) in [(bundle, 20), ("", 40)] {
+        let mut pc = default_peer()?;
+        pc.set_remote_description(
+            Instant::now(),
+            RTCSessionDescription::offer(offer(group, ptime))?,
+        )?;
+    }
+
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    media_engine.set_audio_packet_time(RTCPacketTime {
+        ptime: Some(20),
+        maxptime: Some(120),
+    });
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    for _ in 0..2 {
+        pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    }
+    let sdp = pc.create_offer(None)?.sdp;
+    assert_eq!(sdp.matches("a=ptime:20\r\n").count(), 2, "{sdp}");
+    assert_eq!(sdp.matches("a=maxptime:120\r\n").count(), 2, "{sdp}");
+    Ok(())
+}
+
 /// The `a=rtcp-fb` values of payload type `pt` in `sdp`.
 fn feedback_of(sdp: &str, pt: &str) -> Vec<String> {
     let prefix = format!("a=rtcp-fb:{pt} ");

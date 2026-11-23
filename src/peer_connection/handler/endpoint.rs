@@ -123,7 +123,16 @@ pub(crate) struct EndpointHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    /// RTP packets discarded because no receiver could take them (RFC 8830 section 3.1).
+    pub(crate) discarded_rtp_packets: u64,
+    /// The SSRCs `OnUnassociatedRtpDiscarded` was fired for, at most
+    /// [`MAX_DISCARD_REPORTED_SSRCS`].
+    pub(crate) discard_reported_ssrcs: Vec<SSRC>,
 }
+
+/// How many SSRCs get an `OnUnassociatedRtpDiscarded` event: a peer cannot make the
+/// connection keep an unbounded set by sending from ever new SSRCs.
+pub(crate) const MAX_DISCARD_REPORTED_SSRCS: usize = 64;
 
 /// EndpointHandler implements DataChannel/Media Endpoint handling
 /// The transmits queue is now stored in RTCPeerConnection and passed by reference
@@ -293,7 +302,21 @@ impl<'a> EndpointHandler<'a> {
                 })),
             });
         } else {
+            // RFC 8830 section 3.1: media that cannot be associated is not buffered; the
+            // application is told that it was discarded.
             debug!("drop rtp packet ssrc = {}", ssrc);
+            self.ctx.discarded_rtp_packets += 1;
+            if !self.ctx.discard_reported_ssrcs.contains(&ssrc)
+                && self.ctx.discard_reported_ssrcs.len() < MAX_DISCARD_REPORTED_SSRCS
+            {
+                self.ctx.discard_reported_ssrcs.push(ssrc);
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc),
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -568,9 +591,10 @@ mod endpoint_rtcp_routing_test;
 #[cfg(test)]
 mod rtx_test {
     use super::{
-        EndpointHandler, EndpointHandlerContext, Instant, Packet, RTCMessageInternal,
-        RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpTransceiverInternal, RTPMessage,
-        TrackPacket, TransportContext, deencapsulate_rtx, resolve_rtx_primary,
+        EndpointHandler, EndpointHandlerContext, Instant, Packet, RTCEventInternal,
+        RTCMessageInternal, RTCPeerConnectionEvent, RTCRtpCodecParameters, RTCRtpCodingParameters,
+        RTCRtpTransceiverInternal, RTPMessage, TrackPacket, TransportContext, deencapsulate_rtx,
+        resolve_rtx_primary,
     };
     use crate::media_stream::track::MediaStreamTrack;
     use crate::rtp_transceiver::rtp_sender::{
@@ -924,6 +948,37 @@ mod rtx_test {
 
         transceivers.remove(0);
         assert_eq!(track_of(&mut transceivers, 1000), None);
+    }
+
+    /// RFC 8830 section 3.1: "If the implementation wishes to limit this buffering, it MUST
+    /// signal to the user that media has been discarded". A packet no receiver can take is
+    /// dropped, counted, and reported once per SSRC.
+    #[test]
+    fn media_no_receiver_takes_is_discarded_and_reported_once_per_ssrc() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        let discarded_events = |ctx: &EndpointHandlerContext| -> Vec<u32> {
+            ctx.event_outs
+                .iter()
+                .filter_map(|e| match &e.event {
+                    RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc),
+                    ) => Some(*ssrc),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, &[0xDE]).is_some());
+        assert_eq!(ctx.discarded_rtp_packets, 0);
+        assert!(discarded_events(&ctx).is_empty());
+
+        for _ in 0..3 {
+            assert!(dispatch(&mut ctx, &mut transceivers, 3000, 96, &[0xDE]).is_none());
+        }
+        assert!(dispatch(&mut ctx, &mut transceivers, 3001, 96, &[0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 4);
+        assert_eq!(discarded_events(&ctx), vec![3000, 3001]);
     }
 
     #[test]
