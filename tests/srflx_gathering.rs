@@ -350,7 +350,8 @@ fn a_mapped_address_equal_to_the_base_is_not_announced() -> Result<()> {
 /// candidate the engine connects to the server from the listener's own port (Appendix B,
 /// `reuse_address`), sends one Binding request over the stream (STUN's own framing), announces
 /// the mapped address as a server-reflexive passive candidate and its address on port 9 as a
-/// server-reflexive active one, and closes the connection.
+/// server-reflexive active one, and keeps the connection open: the NAT binding the address
+/// stands for lives as long as the connection (closed once ICE has completed, or on close).
 #[test]
 fn a_binding_request_over_tcp_from_the_passive_listener_yields_tcp_candidates() -> Result<()> {
     let server = a("192.0.2.10:3478");
@@ -425,12 +426,252 @@ fn a_binding_request_over_tcp_from_the_passive_listener_yields_tcp_candidates() 
             .any(|c| c.contains("203.0.113.5 9 typ srflx raddr 10.0.0.1 rport 9 tcptype active")),
         "{tcp:?}"
     );
+    let closed = |h: &Harness| {
+        h.commands.iter().any(|c| {
+            matches!(c, StreamCommand::Close { id: closed } | StreamCommand::Reset { id: closed }
+                if *closed == id)
+        })
+    };
+    assert!(
+        !closed(&h),
+        "RFC 8489 section 6.2.2: open while the mapped address may be used"
+    );
+    h.pc.close()?;
+    h.pump();
+    assert!(closed(&h), "closed with the peer connection");
+    Ok(())
+}
+
+/// Serves the TCP probe of a `stun:` server named `stun.rtc.test` up to its first
+/// connection: the listener bound at 10.0.0.1:7000, the name resolved to `servers` (the UDP
+/// probe's query too), one Ta passed. Returns the listener's address.
+fn tcp_probe_started(h: &mut Harness, servers: &[SocketAddr]) -> Result<SocketAddr> {
+    h.serve_streams = true;
+    h.add_host(HOST)?;
+    let listener = h
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            StreamCommand::Listen { listener, .. } => Some(*listener),
+            _ => None,
+        })
+        .expect("the passive listener");
+    let bound = a("10.0.0.1:7000");
+    h.pc.handle_stream_event(
+        h.now,
+        StreamEvent::Listening {
+            listener,
+            local: bound,
+        },
+    )?;
+    h.pump();
+    let queries: Vec<u64> = h
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            StreamCommand::Resolve { query, .. } => Some(*query),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        queries.len(),
+        2,
+        "the UDP and the TCP probe each resolve the name"
+    );
+    for query in queries {
+        h.pc.handle_stream_event(
+            h.now,
+            StreamEvent::Resolved {
+                query,
+                addresses: servers.to_vec(),
+            },
+        )?;
+    }
+    h.pump();
+    h.advance_to(h.now + Duration::from_millis(50));
+    Ok(bound)
+}
+
+/// The connections the engine asked for from `bound` to `server`, in order.
+fn connects(
+    h: &Harness,
+    bound: SocketAddr,
+    server: SocketAddr,
+) -> Vec<rtc::shared::stream::StreamId> {
+    h.commands
+        .iter()
+        .filter_map(|c| match c {
+            StreamCommand::Connect {
+                id, local, remote, ..
+            } if *local == bound && *remote == server => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RFC 8489 section 6.2.2 on a failed connection: a Binding connection that cannot be
+/// established, or ends before its answer, fails that address; the server's next address is
+/// tried at once, without waiting out Happy Eyeballs' Connection Attempt Delay (250 ms).
+#[test]
+fn a_failed_binding_connection_moves_on_to_the_servers_next_address() -> Result<()> {
+    let (first, second) = (a("192.0.2.10:3478"), a("192.0.2.11:3478"));
+    let mut h = Harness::new(
+        &["stun:stun.rtc.test:3478"],
+        SettingEngineBuilder::new()
+            .with_tcp_simultaneous_open(false)
+            .build(),
+    )?;
+    let bound = tcp_probe_started(&mut h, &[first, second])?;
+    let ids = connects(&h, bound, first);
+    assert_eq!(ids.len(), 1, "the first address first");
+    h.advance_to(h.now + Duration::from_millis(100));
+    assert!(
+        connects(&h, bound, second).is_empty(),
+        "the second waits its turn"
+    );
+    h.pc.handle_stream_event(h.now, StreamEvent::ConnectFailed { id: ids[0] })?;
+    h.pump();
+    let next = connects(&h, bound, second);
+    assert_eq!(next.len(), 1, "the failure starts the next address at once");
+
+    // That one connects but ends before its answer: no candidate, and gathering ends.
+    h.pc.handle_stream_event(
+        h.now,
+        StreamEvent::Connected {
+            id: next[0],
+            local: bound,
+        },
+    )?;
+    h.pump();
+    h.pc.handle_stream_event(h.now, StreamEvent::Closed { id: next[0] })?;
+    h.pump();
+    assert!(
+        h.srflx().iter().all(|c| !c.candidate.contains(" tcp ")),
+        "no TCP candidate without an answer"
+    );
+    assert!(
+        connects(&h, bound, first).len() == 1 && connects(&h, bound, second).len() == 1,
+        "each address is tried once"
+    );
+    Ok(())
+}
+
+/// RFC 8489 section 6.2.2: "if a transaction fails because an idle TCP connection doesn't
+/// work anymore, the client SHOULD send a RST and try to open a new TCP connection". A
+/// connection that carries the request but brings no answer within Ti (39.5 s) is reset and
+/// a new one opened to the same server; when that fails too, the probe has failed.
+#[test]
+fn a_binding_connection_that_brings_no_answer_is_reset_and_opened_again() -> Result<()> {
+    let server = a("192.0.2.10:3478");
+    let mut h = Harness::new(
+        &["stun:stun.rtc.test:3478"],
+        SettingEngineBuilder::new()
+            .with_tcp_simultaneous_open(false)
+            .build(),
+    )?;
+    let bound = tcp_probe_started(&mut h, &[server])?;
+    let first = connects(&h, bound, server);
+    assert_eq!(first.len(), 1);
+    h.pc.handle_stream_event(
+        h.now,
+        StreamEvent::Connected {
+            id: first[0],
+            local: bound,
+        },
+    )?;
+    h.pump();
+    let t = h.now;
+    h.advance_to(t + Duration::from_millis(39_400));
+    assert_eq!(connects(&h, bound, server).len(), 1, "waiting for Ti");
+    h.advance_to(t + Duration::from_millis(39_600));
     assert!(
         h.commands
             .iter()
-            .any(|c| matches!(c, StreamCommand::Close { id: closed } if *closed == id)),
-        "RFC 8489 section 6.2.2: the client closes the connection once done"
+            .any(|c| matches!(c, StreamCommand::Reset { id } if *id == first[0])),
+        "the connection is reset (RST), not closed"
     );
+    let again = connects(&h, bound, server);
+    assert_eq!(again.len(), 2, "a new connection to the same server");
+    h.pc.handle_stream_event(
+        h.now,
+        StreamEvent::Connected {
+            id: again[1],
+            local: bound,
+        },
+    )?;
+    h.pump();
+    h.advance_to(h.now + Duration::from_millis(39_600));
+    assert_eq!(
+        connects(&h, bound, server).len(),
+        2,
+        "one new connection only"
+    );
+    h.end_of_candidates()?;
+    assert!(h.gathering_complete(), "the probe has failed");
+    Ok(())
+}
+
+/// RFC 8445 section 9 with mt-8's ICE restart: the new generation's server-reflexive
+/// candidate comes from a new Binding transaction, not from the address the previous
+/// generation learned (the path that made the restart necessary may have a new mapping).
+#[test]
+fn an_ice_restart_asks_the_server_again() -> Result<()> {
+    let server = a("192.0.2.10:3478");
+    let mut h = Harness::new(&["stun:192.0.2.10:3478"], SettingEngine::default())?;
+    h.add_host(HOST)?;
+    let request = h.requests_to(server)[0].2.clone();
+    h.answer(&request, server, a(HOST), MAPPED);
+    assert_eq!(h.srflx().len(), 1);
+
+    h.pc.restart_ice();
+    let offer = h.pc.create_offer(None)?;
+    h.pc.set_local_description(h.now, offer)?;
+    h.pump();
+    let before = h.srflx().len();
+    h.add_host(HOST)?;
+    // New transactions start one Ta after the last (RFC 8445 section 5.1.1.2).
+    h.advance_to(h.now + Duration::from_millis(50));
+    let requests = h.requests_to(server);
+    assert_eq!(
+        requests.len(),
+        2,
+        "a new Binding request for the new generation"
+    );
+    assert_eq!(
+        h.srflx().len(),
+        before,
+        "the old mapped address is not announced again before the server answers"
+    );
+    h.answer(&requests[1].2.clone(), server, a(HOST), "203.0.113.5:61002");
+    let srflx = h.srflx();
+    assert!(
+        srflx[before..]
+            .iter()
+            .any(|c| c.candidate.contains("203.0.113.5 61002 typ srflx")),
+        "{srflx:?}"
+    );
+    Ok(())
+}
+
+/// The engine's own candidate and the application's: an application that gathers itself,
+/// on a base the engine asked about first, adds the same server-reflexive candidate the
+/// engine has already announced; it is announced once.
+#[test]
+fn the_applications_copy_of_the_engines_candidate_is_not_announced_twice() -> Result<()> {
+    let server = a("192.0.2.10:3478");
+    let mut h = Harness::new(&["stun:192.0.2.10:3478"], SettingEngine::default())?;
+    h.add_host(HOST)?;
+    let request = h.requests_to(server)[0].2.clone();
+    h.answer(&request, server, a(HOST), MAPPED);
+    h.pc.add_local_candidate(RTCIceCandidateInit {
+        candidate:
+            "candidate:2 1 udp 1694498815 203.0.113.5 61000 typ srflx raddr 10.0.0.1 rport 4000"
+                .to_owned(),
+        ..Default::default()
+    })?;
+    h.end_of_candidates()?;
+    assert_eq!(h.srflx().len(), 1, "{:?}", h.srflx());
+    assert!(h.gathering_complete());
     Ok(())
 }
 

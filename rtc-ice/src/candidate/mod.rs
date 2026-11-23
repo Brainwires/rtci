@@ -393,16 +393,37 @@ impl Candidate {
         // candidates for a particular component for a particular data stream
         // that have the same type, the local preference MUST be unique for each
         // one.
-        (1 << 24) * u32::from(self.candidate_type().preference())
+        (1 << 24) * u32::from(self.type_preference(self.candidate_type()))
             + (1 << 8) * u32::from(self.local_preference())
             + 256u32.saturating_sub(u32::from(self.component()))
     }
 
+    /// The type preference of `candidate_type` on this candidate's transport. RFC 6544
+    /// section 4.2: "the type preferences for the preferred transport protocol candidates
+    /// SHOULD be increased and/or the type preferences for the other transport protocol
+    /// candidates SHOULD be decreased ... changing type preference values by one for the other
+    /// transport protocol candidates is enough" when the candidate type matters more, and "For
+    /// RTP-based media streams, it is RECOMMENDED that UDP candidates are preferred over TCP
+    /// candidates". A TCP candidate takes the UDP type preference less one (host 125,
+    /// peer-reflexive 109, server-reflexive 99): a TCP host candidate still outranks a UDP
+    /// server-reflexive one, a UDP candidate outranks the TCP one of its type. A relayed TCP
+    /// candidate stays at 0 ("relayed candidates are still preferred lower than the other
+    /// candidate types"), below the UDP relayed one by its local preference.
+    pub fn type_preference(&self, candidate_type: CandidateType) -> u16 {
+        let preference = candidate_type.preference();
+        if self.network_type().is_tcp() {
+            preference.saturating_sub(1)
+        } else {
+            preference
+        }
+    }
+
     /// The priority this candidate would have as a peer-reflexive one: the value of the
     /// PRIORITY attribute in a connectivity check sent from it (RFC 8445 Section 7.1.1). The
-    /// peer-reflexive type preference, with this candidate's local preference and component.
+    /// peer-reflexive type preference (of its transport, RFC 6544 section 4.2), with this
+    /// candidate's local preference and component.
     pub fn peer_reflexive_priority(&self) -> u32 {
-        (u32::from(CandidateType::PeerReflexive.preference()) << 24)
+        (u32::from(self.type_preference(CandidateType::PeerReflexive)) << 24)
             | (self.priority() & 0x00ff_ffff)
     }
 

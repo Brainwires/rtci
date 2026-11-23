@@ -85,6 +85,15 @@ variables the tests read.
     side's connection as `failed`.
   - `testenv_ice_tcp`: ICE over TCP from an active candidate behind a symmetric NAT to a passive
     listener on the WAN, both agents TCP-only, each as the offerer.
+  - `testenv_turn_streams`: the engine's own TURN client, both peers behind symmetric NATs with
+    the relay policy, a data channel through coturn: over TCP and TLS (`examples/stream-driver`
+    serving the stream interface) and over DTLS (`turns:...?transport=udp`, RFC 7350: coturn's
+    DTLS listener on 5349/udp, the engine's DTLS association on each application's UDP socket).
+    And the engine's relayed TCP candidates (RFC 6062): an offerer behind a symmetric NAT with
+    only relayed TCP candidates and an answerer in `open-b` with only its ICE-TCP candidates,
+    connected through coturn's TCP allocation.
+  - `examples/stream-driver-loopback`: two peer connections over loopback TCP through the
+    reference driver, a data channel, 50 messages in order (the env stage runs the example).
   - `testenv_media_fixtures`: a multi-packet-per-page Ogg file and a four-slices-per-picture
     H.264 file sent over a real connection, checked byte for byte and for the RTP marker, and
     decoded by GStreamer after the trip.

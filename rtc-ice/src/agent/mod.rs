@@ -1077,7 +1077,7 @@ impl Agent {
         if self.lite && self.is_dual_stack_or_ipv6(c) {
             let precedence = rfc6724_precedence(c.addr().ip());
             let local_preference = (u16::from(precedence) << 8) | (255 - rank.min(255));
-            c.priority_override = (u32::from(c.candidate_type().preference()) << 24)
+            c.priority_override = (u32::from(c.type_preference(c.candidate_type())) << 24)
                 + (u32::from(local_preference) << 8)
                 + 256u32.saturating_sub(u32::from(c.component()));
         }
