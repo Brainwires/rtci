@@ -417,6 +417,12 @@ pub struct AgentConfig {
     /// `handle_timeout` that follows the candidate.
     pub multicast_dns_first_query_delay: Option<bool>,
 
+    /// Whether the agent's mDNS answers to a query of more than one question (an A and an
+    /// AAAA question for its name, as browsers ask) wait a random 20 to 120 ms (RFC 6762
+    /// Section 6.3). `None` is on, as the RFC recommends; `Some(false)` answers a query about
+    /// its own names only at once.
+    pub multicast_dns_multi_question_delay: Option<bool>,
+
     /// The driver hands every mDNS datagram to `handle_read` with the datagram's destination
     /// in `local_addr` (from `IP_PKTINFO` / `IPV6_PKTINFO`): `224.0.0.251:5353` or
     /// `[ff02::fb]:5353` for one that arrived on the group, the host's own address for one
@@ -443,4 +449,25 @@ pub struct AgentConfig {
     /// ICE agent MAY send data on any valid pair before selected pairs have been produced").
     /// Off by default: data is sent once a pair is selected.
     pub send_data_before_nomination: bool,
+
+    /// [`Agent::add_local_candidate`](crate::agent::Agent::add_local_candidate) holds the
+    /// candidate as [`Agent::add_unconveyed_local_candidate`](crate::agent::Agent::add_unconveyed_local_candidate)
+    /// does: unpaired until the caller says it has been conveyed to the peer (RFC 8838
+    /// Section 10). Off by default: a caller of `add_local_candidate` conveys the candidate
+    /// with that call. A driver that hands candidates to an application to trickle (the peer
+    /// connection does) turns it on.
+    pub hold_local_candidates_until_conveyed: bool,
+
+    /// The path MTU in bytes, when the application knows it. RFC 8489 Section 6.1: a STUN
+    /// message over UDP fits it; `None` assumes 576 bytes for IPv4 and 1280 for IPv6, the
+    /// RFC's figures when it is not known. A check that would not fit is not sent and its pair
+    /// fails; no other STUN message larger than that is sent over UDP.
+    pub path_mtu: Option<usize>,
+
+    /// The SOFTWARE attribute of the agent's connectivity checks and of its success responses
+    /// to the peer's (RFC 8489 Sections 6.1, 6.3.1.1: requests and responses "SHOULD" carry
+    /// one; Section 16.1.2: its use "SHOULD" be configurable). `None`: `rtc-ice` and its
+    /// version. `Some("")`: none, for an application that would not tell its software to the
+    /// path (Section 16.1.2).
+    pub software: Option<String>,
 }

@@ -256,7 +256,11 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
+pub(crate) mod streams;
 mod transport_layout;
+mod turn_streams;
+/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
+pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -847,6 +851,8 @@ pub struct RTCPeerConnection {
     /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
     /// congestion control; `priority.rs`).
     pub(crate) last_data_dscp: Option<u8>,
+    /// The engine's stream transports: its ICE-TCP candidates and their connections.
+    pub(crate) streams: streams::EngineStreams,
 }
 
 impl RTCPeerConnection {
@@ -1367,6 +1373,18 @@ impl RTCPeerConnection {
         } else {
             self.local_description_was_set = true;
             self.after_local_description(sdp_type);
+            // The local description lists the candidates gathered so far, and it is the one
+            // the application sends: they are conveyed with it (RFC 8838 section 10).
+            if sdp_type != RTCSdpType::Rollback {
+                // Every transport's: the description lists the candidates of each.
+                for bundle in self.pipeline_context.transports.iter_mut() {
+                    bundle
+                        .ice_handler_context
+                        .ice_transport
+                        .agent
+                        .all_local_candidates_conveyed();
+                }
+            }
         }
         applied
     }
@@ -3059,8 +3077,10 @@ impl RTCPeerConnection {
                 local_candidate.url.as_deref(),
                 local_candidate.relay_protocol,
             )?;
+            // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own.
+            self.gather_tcp_candidates(candidate_value);
         } else {
-            self.finish_local_gathering();
+            self.finish_local_gathering_after_streams();
         }
 
         Ok(())

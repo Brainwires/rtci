@@ -1030,8 +1030,19 @@ fn test_software_is_in_every_request() -> Result<()> {
     assert_eq!(software_of(&bind).as_deref(), Some("rtc test 1.0"));
     client.close()?;
 
-    // A client without one sends none.
-    let mut plain = new_client(TransportProtocol::UDP)?;
+    // A client whose SOFTWARE is set empty sends none (the default is `DEFAULT_SOFTWARE`).
+    let mut plain = Client::new(
+        ClientConfig {
+            turn_serv_addr: server_addr().to_string(),
+            local_addr: local_addr(),
+            transport_protocol: TransportProtocol::UDP,
+            username: USERNAME.to_owned(),
+            password: PASSWORD.to_owned(),
+            software: String::new(),
+            ..Default::default()
+        },
+        test_crypto_provider(),
+    )?;
     plain.allocate(now)?;
     assert!(!server.next_request(&mut plain).contains(ATTR_SOFTWARE));
     plain.close()

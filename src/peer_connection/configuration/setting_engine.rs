@@ -197,6 +197,8 @@ pub struct MulticastDNS {
     pub local_ip: Option<IpAddr>,
     /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
     pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_multi_question_delay`]. `None`: on.
+    pub multi_question_delay: Option<bool>,
     /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
     pub destination_reported: bool,
     /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
@@ -219,6 +221,7 @@ impl Default for MulticastDNS {
             local_name: "".to_string(),
             local_ip: None,
             first_query_delay: None,
+            multi_question_delay: None,
             destination_reported: false,
             unicast_response: false,
             rate_limit: None,
@@ -299,6 +302,8 @@ pub struct IceBehaviour {
     pub data_from_selected_pair_only: bool,
     /// See [`SettingEngineBuilder::with_ice_data_before_nomination`].
     pub send_data_before_nomination: bool,
+    /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
+    pub pair_before_conveyed: bool,
 }
 
 /// Replay attack protection window sizes.
@@ -476,6 +481,12 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
+    /// and the methods after it).
+    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
+    /// How the engine's TURN-over-TLS connections verify their server
+    /// ([`SettingEngineBuilder::with_turn_tls`]).
+    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
 }
 
 impl SettingEngine {
@@ -1311,6 +1322,15 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the mDNS answers to a query of more than one question (an A and an AAAA
+    /// question for a published name, as browsers ask) wait a random 20 to 120 ms (RFC 6762
+    /// section 6.3). On by default; `false` answers a query about the engine's own names only
+    /// at once.
+    pub fn with_multicast_dns_multi_question_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.multi_question_delay = Some(delay);
+        self
+    }
+
     /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
     /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
     /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
@@ -1465,6 +1485,19 @@ impl SettingEngineBuilder {
     /// arrives before the nomination does.
     pub fn with_ice_data_before_nomination(mut self, enabled: bool) -> Self {
         self.0.ice.send_data_before_nomination = enabled;
+        self
+    }
+
+    /// Pairs a local candidate as soon as it is added, before the application has it to
+    /// trickle. Off by default: RFC 8838 section 10 ("A Trickle ICE agent MUST NOT pair a local
+    /// candidate until it has been trickled to the remote party"), so a local candidate is
+    /// paired once the application has taken its `OnIceCandidateEvent` from
+    /// [`poll_event`](crate::sansio::Protocol::poll_event), or once a local description is
+    /// set (it lists the candidates gathered so far), whichever comes first. Turning this on
+    /// restores the earlier behaviour: checks may leave on a candidate the peer has not
+    /// heard of yet, which it then learns as peer-reflexive.
+    pub fn with_ice_pairing_before_candidates_are_conveyed(mut self, enabled: bool) -> Self {
+        self.0.ice.pair_before_conveyed = enabled;
         self
     }
 
@@ -2157,6 +2190,61 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Whether the engine gathers TCP host candidates itself (RFC 6544 section 4.1 says it
+    /// should be configurable; browsers gather them by default). On by default: for the
+    /// address of each UDP host candidate the application adds, the engine asks its driver
+    /// for listeners (`RTCPeerConnection::poll_stream_command`) and adds a passive and a
+    /// simultaneous-open candidate on them and an active one (port 9), whose connections it
+    /// opens itself. A driver that never serves the stream interface gets no TCP candidate.
+    /// `false`: no TCP candidate but those the application adds.
+    pub fn with_tcp_candidate_gathering(mut self, gather: bool) -> Self {
+        self.0.streams.tcp_candidates = gather;
+        self
+    }
+
+    /// Whether the gathered TCP candidates include a simultaneous-open one (RFC 6544 section
+    /// 5.1: one passive and one S-O host candidate per interface). On by default; its
+    /// listener and its connections bind with `reuse_address`. Browsers neither gather nor
+    /// pair them (they connect to one as to a passive candidate, which works).
+    pub fn with_tcp_simultaneous_open(mut self, simultaneous_open: bool) -> Self {
+        self.0.streams.simultaneous_open = simultaneous_open;
+        self
+    }
+
+    /// Whether the engine closes its ICE-TCP connections that carry no selected pair once ICE
+    /// has completed (RFC 6544 section 8, SHOULD). On by default.
+    pub fn with_tcp_close_unused_connections(mut self, close: bool) -> Self {
+        self.0.streams.close_unused_connections = close;
+        self
+    }
+
+    /// The limits of the engine's stream transports: the bytes of a connection the driver may
+    /// hold unwritten, the bytes queued beyond which a packet is dropped whole, and the number
+    /// of connections. See [`StreamConfig`](shared::stream::StreamConfig).
+    pub fn with_stream_limits(mut self, limits: shared::stream::StreamConfig) -> Self {
+        self.0.streams.limits = limits;
+        self
+    }
+
+    /// Whether the engine runs the configuration's `turns:` and `turn:...?transport=tcp`
+    /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
+    /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
+    /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
+    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
+    /// application's.
+    pub fn with_turn_over_streams(mut self, run: bool) -> Self {
+        self.0.streams.turn = run;
+        self
+    }
+
+    /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
+    /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
+    /// server is used.
+    pub fn with_turn_tls(mut self, tls: crate::peer_connection::turn_tls::TurnTlsConfig) -> Self {
+        self.0.turn_tls = tls;
         self
     }
 
