@@ -123,7 +123,7 @@ pub(super) struct DescriptionSnapshot {
 }
 
 /// The ICE agent configuration the connection's settings make, for each of its transports.
-pub(super) fn ice_agent_config(
+pub(crate) fn ice_agent_config(
     configuration: &RTCConfiguration,
     setting_engine: &SettingEngine,
 ) -> Result<AgentConfig> {
@@ -194,6 +194,7 @@ pub(super) fn ice_agent_config(
         data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
         send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
         hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
+        software: setting_engine.ice.software.clone(),
         nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
         nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
             RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,

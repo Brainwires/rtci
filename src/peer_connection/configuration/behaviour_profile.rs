@@ -1,0 +1,1263 @@
+//! Behaviour profiles: one switch for every default where the engine and an RFC, or the engine
+//! and libwebrtc (Chrome), choose differently.
+//!
+//! The engine's defaults follow the RFCs, except where a named browser or deployed peer cannot
+//! interoperate with the RFC form (the audit's `setting` verdict, `docs/conformance/audit/RULES.md`).
+//! Each such choice is an individual setting of [`SettingEngineBuilder`], [`MediaEngine`] or
+//! [`DefaultInterceptorOptions`]. A [`BehaviourProfile`] sets all of them at once:
+//!
+//! - [`BehaviourProfile::Rfc`]: the engine's defaults, unchanged. Nothing is different from a
+//!   configuration that never names a profile.
+//! - [`BehaviourProfile::Chrome`]: libwebrtc's (Chrome's) choice wherever the engine and
+//!   libwebrtc both do a thing and choose differently: a timer value, an ordering, a form on
+//!   the wire, a lenient or a strict acceptance rule. It never turns off a capability the engine
+//!   has and Chrome lacks (DTLS 1.3, SCTP message interleaving, RFC 8888 feedback, FlexFEC per
+//!   RFC 8627, ...): those negotiate down with a Chrome peer by themselves, so a `Chrome`
+//!   profile's offers are a superset of Chrome's.
+//! - [`BehaviourProfile::StrictRfc`]: the RFC form even where the engine's default is the
+//!   interoperable one (the audit's `setting` rows and a few RFC SHOULDs). For conformance
+//!   testing: it does **not** interoperate with browsers (Chromium, Firefox and WebKit refuse a
+//!   bundled section without `a=rtcp-mux`, and ignore a new `a=tls-id`).
+//!
+//! # One entry point
+//!
+//! ```
+//! use rtc::interceptor::Registry;
+//! use rtc::peer_connection::configuration::BehaviourProfile;
+//! use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let profile = BehaviourProfile::Chrome;
+//! let setting_engine = SettingEngineBuilder::new()
+//!     .with_behaviour_profile(profile)
+//!     // Individual settings still override the profile, when set after it.
+//!     .with_sctp_message_size_limit_without_interleaving(true)
+//!     .build();
+//! let mut media_engine = MediaEngine::for_profile(profile);
+//! media_engine.register_default_codecs()?;
+//! // Reads the media engine's profile.
+//! let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+//! # let _ = (setting_engine, registry);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # The `chrome-defaults` cargo feature
+//!
+//! With the feature on, [`BehaviourProfile::default()`] is [`BehaviourProfile::Chrome`], and so
+//! is every `Default` / `new()` of the three objects above. Cargo unifies features across a
+//! dependency graph: **one crate in a build that turns the feature on changes the defaults of
+//! every user of `rtc` in that build**, including libraries that never asked for it. Prefer the
+//! explicit [`SettingEngineBuilder::with_behaviour_profile`] call; read
+//! [`BehaviourProfile::compiled_default`] to see which default a build has.
+//!
+//! The table of every governed behaviour, with its clause, its value in each profile and the
+//! source of each Chrome value, is `docs/behaviour-profiles.md`, rendered from the tables of
+//! this module by `scripts/behaviour-profiles.py` (a gate of CI) and checked against the code by
+//! this module's tests.
+
+use std::fmt;
+use std::time::Duration;
+
+use crate::peer_connection::configuration::interceptor_registry::DefaultInterceptorOptions;
+use crate::peer_connection::configuration::media_engine::MediaEngine;
+use crate::peer_connection::configuration::setting_engine::{
+    SctpMaxMessageSize, SettingEngine, SettingEngineBuilder,
+};
+
+#[cfg(test)]
+#[path = "behaviour_profile_test.rs"]
+mod behaviour_profile_test;
+
+/// Which family of defaults a peer connection takes; see the [module](self) documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BehaviourProfile {
+    /// The engine's defaults: the RFCs' behaviour, and the interoperable form where a named
+    /// browser or deployed peer cannot take the RFC's (the audit's `setting` rows).
+    Rfc,
+    /// libwebrtc's (Chrome's) choice wherever both do the thing and choose differently.
+    Chrome,
+    /// The RFC form everywhere, including where browsers cannot interoperate with it. For
+    /// conformance testing; it does not interoperate with browsers.
+    StrictRfc,
+}
+
+impl BehaviourProfile {
+    /// Every profile, in the order of the table.
+    pub const ALL: [BehaviourProfile; 3] = [Self::Rfc, Self::Chrome, Self::StrictRfc];
+
+    /// The profile `Default` gives in this build: [`BehaviourProfile::Chrome`] when the
+    /// `chrome-defaults` cargo feature of `rtc` is on anywhere in the build's dependency graph,
+    /// [`BehaviourProfile::Rfc`] otherwise.
+    pub const fn compiled_default() -> Self {
+        if cfg!(feature = "chrome-defaults") {
+            Self::Chrome
+        } else {
+            Self::Rfc
+        }
+    }
+
+    /// The profile's name as the table and the interop peer write it: `rfc`, `chrome`,
+    /// `strict-rfc`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rfc => "rfc",
+            Self::Chrome => "chrome",
+            Self::StrictRfc => "strict-rfc",
+        }
+    }
+
+    /// The profile named `name` (as [`Self::name`] writes it; case and `_` / `-` aside).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase().replace('_', "-");
+        Self::ALL.into_iter().find(|profile| profile.name() == name)
+    }
+}
+
+impl Default for BehaviourProfile {
+    fn default() -> Self {
+        Self::compiled_default()
+    }
+}
+
+impl fmt::Display for BehaviourProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Where a Chrome value of the table comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Evidence {
+    /// Seen: in the recorded Chromium descriptions (`tests/fixtures/browser-sdp/chromium--*`)
+    /// or in a cell of the browser matrix.
+    Observed,
+    /// From knowledge of libwebrtc's source, not observed in this repository: marked
+    /// "unverified" in the table.
+    Unverified,
+}
+
+/// How a governed behaviour is set and read on the object that holds it.
+#[derive(Clone, Copy)]
+pub(crate) enum Hook {
+    Setting {
+        apply: fn(SettingEngineBuilder, BehaviourProfile) -> SettingEngineBuilder,
+        read: fn(&SettingEngine) -> String,
+    },
+    Media {
+        apply: fn(&mut MediaEngine, BehaviourProfile),
+        read: fn(&MediaEngine) -> String,
+    },
+    Interceptors {
+        apply: fn(&mut DefaultInterceptorOptions, BehaviourProfile),
+        read: fn(&DefaultInterceptorOptions) -> String,
+    },
+}
+
+/// One row of the table: a default that differs between the profiles.
+#[derive(Clone, Copy)]
+pub(crate) struct GovernedBehaviour {
+    /// A stable name of the behaviour.
+    pub(crate) id: &'static str,
+    /// The setting that selects it (the path of the method or field).
+    pub(crate) setting: &'static str,
+    /// The RFC / specification clause.
+    pub(crate) clause: &'static str,
+    /// The value under [`BehaviourProfile::Rfc`], as `{:?}` of the setting writes it.
+    pub(crate) rfc: &'static str,
+    /// The value under [`BehaviourProfile::Chrome`].
+    pub(crate) chrome: &'static str,
+    /// The value under [`BehaviourProfile::StrictRfc`].
+    pub(crate) strict_rfc: &'static str,
+    /// Where the Chrome value comes from.
+    pub(crate) chrome_source: &'static str,
+    pub(crate) evidence: Evidence,
+    pub(crate) hook: Hook,
+}
+
+impl GovernedBehaviour {
+    /// The table's value of this behaviour under `profile`.
+    pub(crate) fn value(&self, profile: BehaviourProfile) -> &'static str {
+        match profile {
+            BehaviourProfile::Rfc => self.rfc,
+            BehaviourProfile::Chrome => self.chrome,
+            BehaviourProfile::StrictRfc => self.strict_rfc,
+        }
+    }
+}
+
+/// Writes a value as it is, without the quotes `{:?}` puts on a string.
+struct Shown(String);
+
+impl fmt::Debug for Shown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn sctp_rto_shown(rto: Option<sctp::RtoConfig>) -> Shown {
+    Shown(match rto {
+        None => "None (1s / 1s / 60s)".to_owned(),
+        Some(rto) => format!("{:?} / {:?} / {:?}", rto.initial, rto.min, rto.max),
+    })
+}
+
+fn sctp_rto(initial_ms: u64, min_ms: u64, max_ms: u64) -> Option<sctp::RtoConfig> {
+    Some(sctp::RtoConfig {
+        initial: Duration::from_millis(initial_ms),
+        min: Duration::from_millis(min_ms),
+        max: Duration::from_millis(max_ms),
+    })
+}
+
+/// The table. Each row names the value of each profile twice: as the expression the profile
+/// applies, and as the text the table shows (`{:?}` of what `read` returns), which the tests
+/// compare. `scripts/behaviour-profiles.py` renders `docs/behaviour-profiles.md` from the
+/// literals: keep one `key: value` per line.
+macro_rules! governed_behaviours {
+    ($( {
+        id: $id:literal,
+        setting: $setting:literal,
+        clause: $clause:literal,
+        rfc: $rfc:expr => $rfc_text:literal,
+        chrome: $chrome:expr => $chrome_text:literal,
+        strict_rfc: $strict:expr => $strict_text:literal,
+        chrome_source: $source:literal,
+        evidence: $evidence:ident,
+        $target:ident: $apply:expr,
+        read: $read:expr $(,)?
+    } ),* $(,)?) => {
+        pub(crate) static GOVERNED: &[GovernedBehaviour] = &[ $(
+            GovernedBehaviour {
+                id: $id,
+                setting: $setting,
+                clause: $clause,
+                rfc: $rfc_text,
+                chrome: $chrome_text,
+                strict_rfc: $strict_text,
+                chrome_source: $source,
+                evidence: Evidence::$evidence,
+                hook: governed_behaviours!(@hook $target, $apply, $read, $rfc, $chrome, $strict),
+            }
+        ),* ];
+    };
+    (@hook apply_setting, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+        Hook::Setting {
+            apply: |builder, profile| {
+                let value = match profile {
+                    BehaviourProfile::Rfc => $rfc,
+                    BehaviourProfile::Chrome => $chrome,
+                    BehaviourProfile::StrictRfc => $strict,
+                };
+                ($apply)(builder, value)
+            },
+            read: |engine| format!("{:?}", ($read)(engine)),
+        }
+    };
+    (@hook apply_media, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+        Hook::Media {
+            apply: |media_engine, profile| {
+                let value = match profile {
+                    BehaviourProfile::Rfc => $rfc,
+                    BehaviourProfile::Chrome => $chrome,
+                    BehaviourProfile::StrictRfc => $strict,
+                };
+                ($apply)(media_engine, value)
+            },
+            read: |media_engine| format!("{:?}", ($read)(media_engine)),
+        }
+    };
+    (@hook apply_interceptors, $apply:expr, $read:expr, $rfc:expr, $chrome:expr, $strict:expr) => {
+        Hook::Interceptors {
+            apply: |options, profile| {
+                let value = match profile {
+                    BehaviourProfile::Rfc => $rfc,
+                    BehaviourProfile::Chrome => $chrome,
+                    BehaviourProfile::StrictRfc => $strict,
+                };
+                ($apply)(options, value)
+            },
+            read: |options| format!("{:?}", ($read)(options)),
+        }
+    };
+}
+
+use ice::{FailedNomination, NominationAcceptance};
+use interceptor::{EcnInitiation, EcnMarking, ThresholdTimeBase};
+
+governed_behaviours! {
+    // ---- ICE ----
+    {
+        id: "ice.nomination-acceptance",
+        setting: "SettingEngineBuilder::with_ice_nomination_acceptance",
+        clause: "RFC 8445 8.1.1",
+        rfc: NominationAcceptance::HighestPriority => "HighestPriority",
+        chrome: NominationAcceptance::Latest => "Latest",
+        strict_rfc: NominationAcceptance::HighestPriority => "HighestPriority",
+        chrome_source: "libwebrtc P2PTransportChannel: the controlled agent switches to the connection nominated last (renomination, the NOMINATION attribute) whatever its priority",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_nomination_acceptance(v),
+        read: |s: &SettingEngine| s.ice.nomination_acceptance,
+    },
+    {
+        id: "ice.failed-nomination",
+        setting: "SettingEngineBuilder::with_ice_failed_nomination",
+        clause: "RFC 8445 7.2.5.3.4",
+        rfc: FailedNomination::FailChecklist => "FailChecklist",
+        chrome: FailedNomination::Retry => "Retry",
+        strict_rfc: FailedNomination::FailChecklist => "FailChecklist",
+        chrome_source: "libwebrtc P2PTransportChannel: a connection that has been writable is kept and pinged (and nominated) again; one unanswered nomination does not fail the transport",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_failed_nomination(v),
+        read: |s: &SettingEngine| s.ice.failed_nomination,
+    },
+    {
+        id: "ice.nomination-on-consent-checks",
+        setting: "SettingEngineBuilder::with_ice_nomination_on_consent_checks",
+        clause: "RFC 8445 7.1.2, RFC 7675 5.1",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc Connection::Ping: the controlling agent's pings of the selected connection carry USE-CANDIDATE",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_nomination_on_consent_checks(v),
+        read: |s: &SettingEngine| s.ice.nominate_on_consent_checks,
+    },
+    {
+        id: "ice.data-before-nomination",
+        setting: "SettingEngineBuilder::with_ice_data_before_nomination",
+        clause: "RFC 8445 12.1 (MAY)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc P2PTransportChannel: the best writable connection becomes the selected one, and carries data, before a nomination completes",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_data_before_nomination(v),
+        read: |s: &SettingEngine| s.ice.send_data_before_nomination,
+    },
+    {
+        id: "ice.pairing-before-conveyed",
+        setting: "SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed",
+        clause: "RFC 8838 10",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc P2PTransportChannel::OnCandidatesReady: a gathered local candidate is paired at once, before the application has signalled it",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_pairing_before_candidates_are_conveyed(v),
+        read: |s: &SettingEngine| s.ice.pair_before_conveyed,
+    },
+    {
+        id: "ice.software-attribute",
+        setting: "SettingEngineBuilder::with_ice_software",
+        clause: "RFC 8489 6.1, 16.1.2",
+        rfc: None => "None",
+        chrome: Some(String::new()) => "Some(\"\")",
+        strict_rfc: None => "None",
+        chrome_source: "libwebrtc ConnectionRequest: connectivity checks carry USERNAME, PRIORITY, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE, MESSAGE-INTEGRITY and FINGERPRINT, no SOFTWARE",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_software(v),
+        read: |s: &SettingEngine| s.ice.software.clone(),
+    },
+    // ---- DTLS / SDP fingerprints ----
+    {
+        id: "dtls.lowercase-fingerprints",
+        setting: "SettingEngineBuilder::with_lowercase_fingerprints_accepted",
+        clause: "RFC 8122 5",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc SSLFingerprint::CreateUniqueFromRfc4572 decodes the hex digits of either case",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_lowercase_fingerprints_accepted(v),
+        read: |s: &SettingEngine| s.accept_lowercase_fingerprints,
+    },
+    {
+        id: "dtls.use-srtp-on-every-association",
+        setting: "SettingEngineBuilder::with_dtls_use_srtp_on_every_association",
+        clause: "RFC 5764 4.1",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "browser matrix (train round 8): Chromium offers use_srtp on a data-only association and keeps its first association when a media section is added (the \"Rust offers media\", \"rollback\" and \"glare\" cells)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_dtls_use_srtp_on_every_association(v),
+        read: |s: &SettingEngine| !s.dtls_use_srtp_only_with_media,
+    },
+    // ---- JSEP / SDP ----
+    {
+        id: "sdp.bundle-attributes-repeated",
+        setting: "SettingEngineBuilder::with_bundle_attributes_repeated",
+        clause: "RFC 9143 7.1.3, RFC 9429 5.2.2 / 5.3.1",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "Chromium answers and subsequent offers repeat a=ice-ufrag, a=ice-pwd, a=fingerprint, a=setup, a=rtcp-mux in every bundled section (fixture chromium--rust-offers-media-the-browser-answers-and-decodes-it--2-answer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_bundle_attributes_repeated(v),
+        read: |s: &SettingEngine| !s.bundle_attributes_tagged_only,
+    },
+    {
+        id: "sdp.unique-transport-credentials",
+        setting: "SettingEngineBuilder::with_unique_transport_credentials",
+        clause: "RFC 9429 5.2.1",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: true => "true",
+        chrome_source: "a Chromium answer without BUNDLE gives each transport an ice-ufrag / ice-pwd of its own (fixture chromium--balanced-rust-s-offer-has-a-transport-per-media-type-answered-without-bundle--1-answer.sdp); bundled sections share the tagged one's",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_unique_transport_credentials(v),
+        read: |s: &SettingEngine| s.unique_transport_credentials,
+    },
+    {
+        id: "sdp.msid-appdata",
+        setting: "SettingEngineBuilder::with_msid_appdata",
+        clause: "RFC 9429 5.2.1, RFC 8830 2",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "Chromium writes a=msid:<stream id> <track id> (fixture chromium--reflect-video-vp8--1-offer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_msid_appdata(v),
+        read: |s: &SettingEngine| !s.msid_appdata_omitted,
+    },
+    {
+        id: "jsep.max-bundle-as-must-bundle",
+        setting: "SettingEngineBuilder::with_max_bundle_as_must_bundle",
+        clause: "RFC 9429 4.1.1 (SHOULD ignore max-bundle)",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "Chrome honours RTCBundlePolicy max-bundle (W3C webrtc-pc 4.2.5)",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_max_bundle_as_must_bundle(v),
+        read: |s: &SettingEngine| !s.max_bundle_ignored,
+    },
+    {
+        id: "jsep.stopping-transceiver-rejected-in-answer",
+        setting: "SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer",
+        clause: "RFC 9429 5.3.1",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chrome follows W3C webrtc-pc 5.4 stop(): a stopping transceiver does not affect createAnswer",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_stopping_transceiver_rejected_in_answer(v),
+        read: |s: &SettingEngine| s.stopping_transceiver_rejected_in_answer,
+    },
+    {
+        id: "jsep.strict-attribute-grammar",
+        setting: "SettingEngineBuilder::with_strict_sdp_attribute_grammar",
+        clause: "RFC 9429 5.8",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc webrtc_sdp.cc trims and skips what it does not use in an attribute value",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_strict_sdp_attribute_grammar(v),
+        read: |s: &SettingEngine| s.strict_sdp_attribute_grammar,
+    },
+    {
+        id: "jsep.rollback-content-ignored",
+        setting: "SettingEngineBuilder::with_rollback_content_ignored",
+        clause: "RFC 9429 4.1.10 (W3C: sdp unused)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc CreateSessionDescription(kRollback, ...) makes the rollback without parsing the SDP",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rollback_content_ignored(v),
+        read: |s: &SettingEngine| s.rollback_content_ignored,
+    },
+    {
+        id: "jsep.w3c-simulcast-answer",
+        setting: "SettingEngineBuilder::with_w3c_simulcast_answer",
+        clause: "RFC 8853 5.2, RFC 8851 6.3 (W3C webrtc-pc 4.4.2)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "Chrome's createAnswer is W3C webrtc-pc's: repeated rids reduced to the first, answer rids without restrictions",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_w3c_simulcast_answer(v),
+        read: |s: &SettingEngine| s.w3c_simulcast_answer,
+    },
+    {
+        id: "sdp.rid-pause-marks",
+        setting: "SettingEngineBuilder::with_rid_pause_marks",
+        clause: "RFC 8853 5.2, 5.3.2",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc media_session.cc: an inactive simulcast layer is written paused (~) in a=simulcast without RFC 7728",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_rid_pause_marks(v),
+        read: |s: &SettingEngine| s.rid_pause_marks,
+    },
+    // ---- SCTP / data channels ----
+    {
+        id: "sctp.max-message-size",
+        setting: "SettingEngineBuilder::with_sctp_max_message_size",
+        clause: "RFC 8841 6.1",
+        rfc: SctpMaxMessageSize::Bounded(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE) => "Bounded(65536)",
+        chrome: SctpMaxMessageSize::Bounded(262_144) => "Bounded(262144)",
+        strict_rfc: SctpMaxMessageSize::Bounded(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE) => "Bounded(65536)",
+        chrome_source: "every Chromium description with a data section has a=max-message-size:262144 (fixture chromium--data-channel-ordered--1-offer.sdp)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_sctp_max_message_size(v),
+        read: |s: &SettingEngine| s.sctp_max_message_size,
+    },
+    {
+        id: "sctp.message-size-limit-without-interleaving",
+        setting: "SettingEngineBuilder::with_sctp_message_size_limit_without_interleaving",
+        clause: "RFC 8831 6.6 (SHOULD)",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chromium announces no interleaving and sends messages up to the peer's max-message-size (browser matrix: \"data channel 256 KiB message within both sides' max-message-size\" passes)",
+        evidence: Observed,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_sctp_message_size_limit_without_interleaving(v),
+        read: |s: &SettingEngine| s.sctp_message_size_limit_without_interleaving.unwrap_or(true),
+    },
+    {
+        id: "sctp.rto",
+        setting: "SettingEngineBuilder::with_sctp_rto",
+        clause: "RFC 9260 6.3.1, 16",
+        rfc: None => "None (1s / 1s / 60s)",
+        chrome: sctp_rto(500, 220, 60_000) => "500ms / 220ms / 60s",
+        strict_rfc: None => "None (1s / 1s / 60s)",
+        chrome_source: "dcsctp DcSctpOptions defaults (rto_initial 500 ms, rto_min 220 ms, rto_max 60 s), which libwebrtc's DcSctpTransport keeps",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v: Option<sctp::RtoConfig>| match v {
+            Some(rto) => b.with_sctp_rto(rto.initial, rto.min, rto.max),
+            None => b.without_sctp_rto(),
+        },
+        read: |s: &SettingEngine| sctp_rto_shown(s.sctp_rto),
+    },
+    {
+        id: "datachannel.send-before-ack",
+        setting: "SettingEngineBuilder::with_data_channel_send_before_ack",
+        clause: "RFC 8832 6 (MAY), W3C webrtc-pc 6.2 send()",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc SctpDataChannel::UpdateState: an in-band channel opens once its DATA_CHANNEL_OPEN is sent (kHandshakeWaitingForAck), so send() works before the ACK",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_data_channel_send_before_ack(v),
+        read: |s: &SettingEngine| s.data_channel_send_before_ack,
+    },
+    // ---- RTP / RTCP ----
+    {
+        id: "rtp.ssrc-per-clock-rate",
+        setting: "SettingEngineBuilder::with_ssrc_per_clock_rate",
+        clause: "RFC 7160 4.1",
+        rfc: true => "true",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc keeps a sender's SSRC when it switches to a codec of another clock rate (RtpSenderAudio / RtpSenderVideo)",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ssrc_per_clock_rate(v),
+        read: |s: &SettingEngine| !s.one_ssrc_across_clock_rates,
+    },
+    {
+        id: "rtcp.strict-validity",
+        setting: "SettingEngineBuilder::with_strict_rtcp_validity",
+        clause: "RFC 3550 A.2, 6.4.1",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc RtcpReceiver parses every packet of a compound packet whose lengths hold, padding anywhere",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_strict_rtcp_validity(v),
+        read: |s: &SettingEngine| s.strict_rtcp_validity,
+    },
+    {
+        id: "ecn.initiation",
+        setting: "SettingEngineBuilder::with_ecn_initiation",
+        clause: "RFC 6679 7.2.1, RFC 8888 7",
+        rfc: EcnInitiation::RtpAndRtcp => "RtpAndRtcp",
+        chrome: EcnInitiation::LeapOfFaith => "LeapOfFaith",
+        strict_rfc: EcnInitiation::RtpAndRtcp => "RtpAndRtcp",
+        chrome_source: "libwebrtc's L4S sending (RFC 8888 feedback with ECN, behind a field trial) marks every packet from the first",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_initiation(v),
+        read: |s: &SettingEngine| s.ecn_initiation,
+    },
+    {
+        id: "ecn.marking",
+        setting: "SettingEngineBuilder::with_ecn_marking",
+        clause: "RFC 6679 7.3.1, RFC 9331",
+        rfc: EcnMarking::Rfc6679 => "Rfc6679",
+        chrome: EcnMarking::L4s => "L4s",
+        strict_rfc: EcnMarking::Rfc6679 => "Rfc6679",
+        chrome_source: "libwebrtc's L4S sending marks ECT(1)",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_marking(v),
+        read: |s: &SettingEngine| s.ecn_marking,
+    },
+    {
+        id: "ecn.without-signalling",
+        setting: "SettingEngineBuilder::with_ecn_without_signalling",
+        clause: "RFC 6679 6.1.1, RFC 8888 7",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "no Chromium description carries a=ecn-capable-rtp (fixtures); libwebrtc's L4S marks on ack ccfb alone",
+        evidence: Unverified,
+        apply_setting: |b: SettingEngineBuilder, v| b.with_ecn_without_signalling(v),
+        read: |s: &SettingEngine| s.ecn_without_signalling,
+    },
+    // ---- media engine ----
+    {
+        id: "vp9.receiver-limits",
+        setting: "MediaEngine::set_vp9_receiver_limits",
+        clause: "RFC 9628 6",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "Chromium's VP9 formats carry profile-id only, no max-fr / max-fs (fixture chromium--reflect-video-vp9--1-offer.sdp)",
+        evidence: Observed,
+        apply_media: |m: &mut MediaEngine, v| m.set_vp9_receiver_limits(v),
+        read: |m: &MediaEngine| m.vp9_receiver_limits,
+    },
+    // ---- interceptors ----
+    {
+        id: "rtcp.t-rr-interval",
+        setting: "DefaultInterceptorOptions::rtcp_t_rr_interval",
+        clause: "RFC 4585 3.4, 4.2",
+        rfc: Duration::ZERO => "0ns",
+        chrome: Duration::from_secs(1) => "1s",
+        strict_rfc: Duration::ZERO => "0ns",
+        chrome_source: "libwebrtc RTCPSender sends regular reports about once a second for video (kDefaultVideoReportInterval) and every 5 s for audio, never at the RFC 4585 default of trr-int 0",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_t_rr_interval = v,
+        read: |o: &DefaultInterceptorOptions| o.rtcp_t_rr_interval,
+    },
+    {
+        id: "rtcp.immediate-congestion-feedback",
+        setting: "DefaultInterceptorOptions::rtcp_immediate_congestion_feedback",
+        clause: "RFC 4585 3.5.2",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc sends transport-wide feedback on its own timer, outside the RTCP report schedule",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_immediate_congestion_feedback = v,
+        read: |o: &DefaultInterceptorOptions| o.rtcp_immediate_congestion_feedback,
+    },
+    {
+        id: "rtcp.report-from-every-ssrc",
+        setting: "DefaultInterceptorOptions::rtcp_report_from_every_ssrc",
+        clause: "RFC 8108 5.1",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc reports the remote SSRCs once, from one local SSRC per RTCP packet",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_report_from_every_ssrc = v,
+        read: |o: &DefaultInterceptorOptions| o.rtcp_report_from_every_ssrc,
+    },
+    {
+        id: "twcc.rereport-received",
+        setting: "DefaultInterceptorOptions::twcc_rereport_received",
+        clause: "draft-holmer-rmcat-transport-wide-cc-extensions-01 3.1.1",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc TransportFeedback: a packet reported received is reported received again when the base sequence number moves back over it",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.twcc_rereport_received = v,
+        read: |o: &DefaultInterceptorOptions| o.twcc_rereport_received,
+    },
+    {
+        id: "gcc.threshold-time-base",
+        setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
+        clause: "draft-ietf-rmcat-gcc-02 5.4",
+        rfc: ThresholdTimeBase::Departure => "Departure",
+        chrome: ThresholdTimeBase::Departure => "Departure",
+        strict_rfc: ThresholdTimeBase::Arrival => "Arrival",
+        chrome_source: "libwebrtc TrendlineEstimator / OveruseDetector step the adaptive threshold by the send-time gaps",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_threshold_time_base = v,
+        read: |o: &DefaultInterceptorOptions| o.gcc_threshold_time_base,
+    },
+    {
+        id: "gcc.one-decrease-per-round-trip",
+        setting: "DefaultInterceptorOptions::gcc_one_decrease_per_round_trip",
+        clause: "draft-ietf-rmcat-gcc-02 5.5",
+        rfc: true => "true",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc AimdRateControl::TimeToReduceFurther lowers the estimate at most once per round trip",
+        evidence: Unverified,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_one_decrease_per_round_trip = v,
+        read: |o: &DefaultInterceptorOptions| o.gcc_one_decrease_per_round_trip,
+    },
+}
+
+/// Why a setting is not governed by the profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotGovernedClass {
+    /// A capability the engine has and Chrome lacks: the same in every profile (it negotiates
+    /// down with a Chrome peer, or a Chrome peer does not notice it).
+    EngineOnly,
+    /// Examined: the engine's default is libwebrtc's too, or the RFC form already.
+    Same,
+    /// Not a default with a libwebrtc counterpart: input the application gives (credentials,
+    /// filters, a provider, limits of its own deployment), or a setting with no default to
+    /// choose.
+    Input,
+    /// Deprecated and not read by the engine.
+    Deprecated,
+}
+
+/// A setting the profiles leave alone, and why.
+pub(crate) struct NotGoverned {
+    pub(crate) setting: &'static str,
+    pub(crate) class: NotGovernedClass,
+    pub(crate) note: &'static str,
+}
+
+/// Every setting of [`SettingEngineBuilder`], [`MediaEngine`] and
+/// [`DefaultInterceptorOptions`] that is not in [`GOVERNED`]. The completeness test fails when
+/// a setting is in neither. `scripts/behaviour-profiles.py` renders it: keep each entry's three
+/// fields on lines of their own.
+pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
+    // ---- engine-only capabilities (class 2) ----
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_message_interleaving",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8260 I-DATA announced; Chromium announces none, so it negotiates down to DATA chunks",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_path_mtu_discovery",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8899 PLPMTUD probes (HEARTBEAT + PAD); a peer without it answers the HEARTBEAT and nothing else changes",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_zero_checksum",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 9653 zero checksum, used only when the peer announces it too",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_weighted_fair_queueing",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8260 3.6 scheduling of the engine's own sends; not visible to the peer",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_disable_sdp_tls_id",
+        class: NotGovernedClass::EngineOnly,
+        note: "a=tls-id (RFC 8842) is written; Chromium writes none and ignores it",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_tcp_candidate_gathering",
+        class: NotGovernedClass::EngineOnly,
+        note: "engine-run ICE-TCP; the train's Chromium gathered no TCP candidate (matrix: \"ICE-TCP\" cells na-browser)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_tcp_simultaneous_open",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 6544 S-O candidates; libwebrtc gathers none and connects to one as to a passive candidate",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_tcp_close_unused_connections",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 6544 8 housekeeping of the engine's own ICE-TCP connections",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_turn_over_streams",
+        class: NotGovernedClass::EngineOnly,
+        note: "engine-run TURN over TCP / TLS",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_turn_tcp_relay",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 6062 TCP allocations; libwebrtc makes none",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_server_reflexive_gathering",
+        class: NotGovernedClass::EngineOnly,
+        note: "who gathers server-reflexive candidates (engine or application); a sans-I/O choice",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_relay_gathering",
+        class: NotGovernedClass::EngineOnly,
+        note: "who gathers relayed candidates (engine or application); a sans-I/O choice",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ecn",
+        class: NotGovernedClass::EngineOnly,
+        note: "ECN needs the application's socket layer; off in every profile (the ECN rows above apply when it is on)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srtp_automatic_rekeying",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 5764 4.4 re-keying by a new association; libwebrtc has none, and a browser peer ignores the new tls-id",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_video_receive_limits",
+        class: NotGovernedClass::EngineOnly,
+        note: "a=imageattr (RFC 6236); none by default in every profile, Chromium writes none",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_codec_video_receive_limits",
+        class: NotGovernedClass::EngineOnly,
+        note: "a=imageattr per codec; none by default",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_candidate_pair_proposals",
+        class: NotGovernedClass::EngineOnly,
+        note: "webrtc-extensions 7 icecandidatepairnominate; off in every profile (Chrome does not ship the event)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_unauthenticated_requests",
+        class: NotGovernedClass::Same,
+        note: "RFC 8489 9.1.3 error responses; libwebrtc answers 400 / 401 as well",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_data_from_selected_pair_only",
+        class: NotGovernedClass::Same,
+        note: "off: data from any valid pair is accepted (RFC 8445 12.2), as libwebrtc accepts it on any connection",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_pacing",
+        class: NotGovernedClass::Same,
+        note: "Ta 50 ms; libwebrtc's weak ping interval is 48 ms. Not changed: a value other than the default is written as a=ice-pacing, which Chromium never writes",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_pacing_group",
+        class: NotGovernedClass::Input,
+        note: "a budget shared between the application's peer connections",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_timeouts",
+        class: NotGovernedClass::Same,
+        note: "consent every 4 to 6 s and expiry at 30 s (RFC 7675). libwebrtc pings a stable connection every 2.5 s, which RFC 7675 5.1 forbids (\"MUST NOT ... less than 4 seconds\"): not expressible, see below",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_connection_attempts",
+        class: NotGovernedClass::Same,
+        note: "Rc 7 / RTO doubling (RFC 8489 6.2.1); libwebrtc's retransmission schedule is not this setting's form (see \"not expressible\")",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_mode",
+        class: NotGovernedClass::Same,
+        note: "QueryOnly: remote .local candidates resolved, host addresses written as they are. Chrome hides them behind mDNS names only for a page without media permission; with it (what an application is) it writes them",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sdp_media_level_fingerprints",
+        class: NotGovernedClass::Same,
+        note: "media level, as Chromium writes them (fixtures)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_implicit_rollback",
+        class: NotGovernedClass::Same,
+        note: "on, as browsers (perfect negotiation); RFC 9429 does not forbid it",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_msid_removal_ends_track",
+        class: NotGovernedClass::Same,
+        note: "off: W3C process remote tracks, what Chrome does; RFC 8830 3 is a \"can\"",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_nominated_candidates_only",
+        class: NotGovernedClass::Same,
+        note: "off: RFC 9429 5.2.2 (every gathered candidate), as Chromium; RFC 8839 4.4.1.2.2 says the opposite",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_new_association_without_ice_restart",
+        class: NotGovernedClass::Same,
+        note: "off (RFC 9429 5.8.3, 5.11); Chromium never asks for a new association",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_unnegotiated_header_extensions",
+        class: NotGovernedClass::Same,
+        note: "off: only negotiated ids are sent (RFC 8285 4.1.2), as libwebrtc",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_unnegotiated_rtcp_feedback",
+        class: NotGovernedClass::Same,
+        note: "off: only negotiated feedback (RFC 4585 4.2), as libwebrtc",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_rtcp_session_omitted",
+        class: NotGovernedClass::Same,
+        note: "off: RTCP is used (RFC 8834 4.1)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srtp_protection_profiles",
+        class: NotGovernedClass::Same,
+        note: "AEAD_AES_256_GCM, AEAD_AES_128_GCM, AES_CM_128_HMAC_SHA1_80: libwebrtc's order with GCM on (unverified); no 32-bit tag in either",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_cipher_suites",
+        class: NotGovernedClass::Same,
+        note: "DTLS 1.2 suites ECDSA-AES128-GCM, RSA-AES128-GCM, ECDSA-CHACHA20: BoringSSL's relative order (unverified); the TLS 1.3 suites in front belong to DTLS 1.3, an engine-only capability",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_answering_dtls_role",
+        class: NotGovernedClass::Same,
+        note: "an answer to actpass takes the client role (a=setup:active), as libwebrtc",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_max_streams",
+        class: NotGovernedClass::Same,
+        note: "65535, as browsers ask for",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_max_retransmissions",
+        class: NotGovernedClass::Same,
+        note: "RFC 9260's 10; dcsctp's max_retransmissions is 10 as well (unverified)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_data_channel_max_buffer_size",
+        class: NotGovernedClass::Same,
+        note: "W3C rule with a 16 MiB send buffer, Chromium's",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dcep_handshake_timeout",
+        class: NotGovernedClass::Same,
+        note: "none (RFC 8832 has none); libwebrtc has none",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ignore_rid_pause_for_recv",
+        class: NotGovernedClass::Same,
+        note: "applies with rid pause marks only",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_write_ssrc_attributes_for_simulcast",
+        class: NotGovernedClass::Same,
+        note: "off: rid-based simulcast sections carry no a=ssrc lines, as Chromium's (fixture chromium--simulcast-three-rids-reach-rust--1-offer.sdp)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_disable_media_engine_multiple_codecs",
+        class: NotGovernedClass::Same,
+        note: "off: each section negotiates its own formats (RFC 9429 5.10)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_non_interactive_video",
+        class: NotGovernedClass::Same,
+        note: "off: DSCP AF4x for video (RFC 8837), as browsers",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srtp_key_lifetime",
+        class: NotGovernedClass::Same,
+        note: "the profile's lifetime (RFC 5764 4.1.2, RFC 7714)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_disable_certificate_fingerprint_verification",
+        class: NotGovernedClass::Same,
+        note: "verification on in every profile (a security check)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_allow_insecure_verification_algorithm",
+        class: NotGovernedClass::Same,
+        note: "off in every profile (a security check)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_lite",
+        class: NotGovernedClass::Same,
+        note: "full ICE, as a browser",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_remote_candidate_scopes",
+        class: NotGovernedClass::Same,
+        note: "loopback / link-local remote candidates paired only within their scope (a hardening, kept in every profile)",
+    },
+    // ---- application input (no default to choose) ----
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_crypto_provider",
+        class: NotGovernedClass::Input,
+        note: "the cryptographic provider",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_turn_allocation_refresh_interval_cap",
+        class: NotGovernedClass::Input,
+        note: "a NAT keep-alive need of the deployment",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_host_acceptance_min_wait",
+        class: NotGovernedClass::Input,
+        note: "nomination wait for host pairs",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srflx_acceptance_min_wait",
+        class: NotGovernedClass::Input,
+        note: "nomination wait for server-reflexive pairs",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_prflx_acceptance_min_wait",
+        class: NotGovernedClass::Input,
+        note: "nomination wait for peer-reflexive pairs",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_relay_acceptance_min_wait",
+        class: NotGovernedClass::Input,
+        note: "nomination wait for relayed pairs",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_network_types",
+        class: NotGovernedClass::Input,
+        note: "which networks the application gathers on",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_nat_1to1_ips",
+        class: NotGovernedClass::Input,
+        note: "the deployment's public addresses",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_timeout",
+        class: NotGovernedClass::Input,
+        note: "mDNS query timeout",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_local_name",
+        class: NotGovernedClass::Input,
+        note: "a fixed mDNS name",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_local_ip",
+        class: NotGovernedClass::Input,
+        note: "the mDNS answer address",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_first_query_delay",
+        class: NotGovernedClass::Same,
+        note: "RFC 6762 5.2 delay on (mDNS rows are the engine's; Chrome's resolver is the platform's)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_multi_question_delay",
+        class: NotGovernedClass::Same,
+        note: "RFC 6762 6.3 delay on",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_destination_reported",
+        class: NotGovernedClass::Input,
+        note: "what the application's socket layer reports",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_unicast_response",
+        class: NotGovernedClass::Input,
+        note: "depends on the application's socket being the only one on port 5353",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_multicast_dns_rate_limit",
+        class: NotGovernedClass::Input,
+        note: "a limit shared between the application's peer connections",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_discard_local_candidates_during_ice_restart",
+        class: NotGovernedClass::Input,
+        note: "whether the application's sockets outlive an ICE restart",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_credentials",
+        class: NotGovernedClass::Input,
+        note: "fixed credentials for tests",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_tie_breaker",
+        class: NotGovernedClass::Input,
+        note: "a fixed tiebreaker for tests",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_remote_address_filter",
+        class: NotGovernedClass::Input,
+        note: "the host's network policy",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_replay_protection_window",
+        class: NotGovernedClass::Input,
+        note: "replay window",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srtp_replay_protection_window",
+        class: NotGovernedClass::Input,
+        note: "replay window",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_srtcp_replay_protection_window",
+        class: NotGovernedClass::Input,
+        note: "replay window",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_mid_generator",
+        class: NotGovernedClass::Input,
+        note: "the application's mid naming",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_max_receive_buffer_size",
+        class: NotGovernedClass::Input,
+        note: "memory per connection",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_sctp_mtu",
+        class: NotGovernedClass::Input,
+        note: "a known path budget (fixing it turns path MTU discovery off)",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_stream_limits",
+        class: NotGovernedClass::Input,
+        note: "limits of the engine's stream transports",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_turn_tls",
+        class: NotGovernedClass::Input,
+        note: "roots or a verifier for TURN over TLS",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_behaviour_profile",
+        class: NotGovernedClass::Input,
+        note: "the profile itself",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::without_sctp_rto",
+        class: NotGovernedClass::Input,
+        note: "back to the RFC 9260 timers (the sctp.rto row's Rfc value)",
+    },
+    // ---- deprecated, not read ----
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_include_loopback_candidate",
+        class: NotGovernedClass::Deprecated,
+        note: "not read: the engine gathers no host candidates",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_disable_media_engine_copy",
+        class: NotGovernedClass::Deprecated,
+        note: "not read",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_receive_mtu",
+        class: NotGovernedClass::Deprecated,
+        note: "not read",
+    },
+    // ---- media engine ----
+    NotGoverned {
+        setting: "MediaEngine::set_flexfec_with_retransmission",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8627 flexfec answering rule; Chromium negotiates flexfec-03 (always beside rtx), not the RFC format",
+    },
+    NotGoverned {
+        setting: "MediaEngine::set_audio_packet_time",
+        class: NotGovernedClass::Same,
+        note: "no a=ptime / a=maxptime, as Chromium (fixtures)",
+    },
+    NotGoverned {
+        setting: "MediaEngine::set_header_extension_encryption",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 6904 encrypted audio levels offered beside the clear ones; Chromium takes the clear ones",
+    },
+    // ---- interceptor options ----
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::congestion_feedback",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8888 (ack ccfb) offered beside transport-cc; Chromium answers transport-cc",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::unnegotiated_tmmbr",
+        class: NotGovernedClass::EngineOnly,
+        note: "TMMBR (RFC 5104) offered; Chromium answers no ccm tmmbr",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::pacer_immediate_release",
+        class: NotGovernedClass::Same,
+        note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget without waiting a tick too (unverified)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::bandwidth_probing",
+        class: NotGovernedClass::Same,
+        note: "probing on, as libwebrtc's ProbeController",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::rapid_synchronisation",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 6051 ntp-64 offered; Chromium answers without it",
+    },
+];
+
+/// What Chrome does that no setting of the engine can express.
+pub(crate) struct NotExpressible {
+    pub(crate) behaviour: &'static str,
+    pub(crate) chrome: &'static str,
+    pub(crate) needed: &'static str,
+}
+
+/// `scripts/behaviour-profiles.py` renders it: keep each entry's fields on lines of their own.
+pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
+    NotExpressible {
+        behaviour: "STUN / ICE retransmission timer",
+        chrome: "first retransmission after 250 ms (STUN_INITIAL_RTO), a fixed schedule of up to 8 sends (unverified)",
+        needed: "an RTO setting in rtc-ice / rtc-stun; the engine's RTO is at least 500 ms (RFC 8445 14.3, a MUST: \"RTO = MAX (500ms, ...)\")",
+    },
+    NotExpressible {
+        behaviour: "Consent / keepalive pings on the selected pair",
+        chrome: "every 2.5 s on a stable writable connection (STABLE_WRITABLE_CONNECTION_PING_INTERVAL; unverified)",
+        needed: "nothing that keeps RFC 7675 5.1: a period under 4 s is forbidden (MUST NOT), the engine raises it to 5 s",
+    },
+    NotExpressible {
+        behaviour: "TCP candidate type preference",
+        chrome: "fixed type preferences for TCP host candidates (ICE_TYPE_PREFERENCE_HOST_TCP 90; unverified)",
+        needed: "a candidate-priority policy in rtc-ice; the engine takes the UDP preference less one (RFC 6544 4.2)",
+    },
+    NotExpressible {
+        behaviour: "DTLS handshake retransmission timer",
+        chrome: "BoringSSL's DTLS timer, started from libwebrtc's initial timeout (unverified)",
+        needed: "a flight-interval setting on the setting engine; the engine starts at 400 ms (RFC 9147 5.8.2) or 1.5 RTT from ICE",
+    },
+    NotExpressible {
+        behaviour: "Payload type numbering and codec order",
+        chrome: "Chromium's numbering (opus 111, red 63, VP8 96, VP9 98 / 100, AV1 45, H264 102...; fixtures)",
+        needed: "a Chrome codec table; the application registers its own codecs with MediaEngine::register_codec. Payload types are negotiated, so this changes no behaviour",
+    },
+    NotExpressible {
+        behaviour: "Header extensions the engine does not implement",
+        chrome: "toffset, playout-delay, video-content-type, video-timing, color-space (fixtures)",
+        needed: "an implementation of each; offering them without one would announce what the engine does not send",
+    },
+    NotExpressible {
+        behaviour: "RTCP report interval per media type",
+        chrome: "regular reports about every 1 s for video and 5 s for audio (unverified)",
+        needed: "a per-kind interval in the RTCP session; the Chrome profile sets T_rr to 1 s for every section",
+    },
+    NotExpressible {
+        behaviour: "Candidate network-cost / generation attributes",
+        chrome: "a=candidate lines end with generation 0 network-cost 999 (fixtures)",
+        needed: "nothing to negotiate: extension attributes the engine ignores when it reads them",
+    },
+];
+
+/// Sets every governed setting of the setting engine to `profile`'s value.
+pub(crate) fn apply_to_setting_engine(
+    mut builder: SettingEngineBuilder,
+    profile: BehaviourProfile,
+) -> SettingEngineBuilder {
+    for row in GOVERNED {
+        if let Hook::Setting { apply, .. } = row.hook {
+            builder = apply(builder, profile);
+        }
+    }
+    builder
+}
+
+/// Sets every governed setting of the media engine to `profile`'s value.
+pub(crate) fn apply_to_media_engine(media_engine: &mut MediaEngine, profile: BehaviourProfile) {
+    for row in GOVERNED {
+        if let Hook::Media { apply, .. } = row.hook {
+            apply(media_engine, profile);
+        }
+    }
+}
+
+/// Sets every governed interceptor option to `profile`'s value.
+pub(crate) fn apply_to_interceptor_options(
+    options: &mut DefaultInterceptorOptions,
+    profile: BehaviourProfile,
+) {
+    for row in GOVERNED {
+        if let Hook::Interceptors { apply, .. } = row.hook {
+            apply(options, profile);
+        }
+    }
+}

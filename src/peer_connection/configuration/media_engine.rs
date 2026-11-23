@@ -174,6 +174,7 @@ mod media_engine_test;
 #[cfg(test)]
 mod multi_codec_test;
 
+use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::sdp::{
     ATTR_KEY_SFRAME, ENCRYPT_URI, MediaDescriptionExt, SectionExtension,
     codecs_from_media_description, is_unknown_application_media,
@@ -422,8 +423,10 @@ impl MediaEngineHeaderExtension {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct MediaEngine {
+    /// The behaviour profile of [`MediaEngine::for_profile`]; see [`MediaEngine::behaviour_profile`].
+    pub(crate) behaviour_profile: BehaviourProfile,
     // If we have attempted to negotiate a codec type yet.
     pub(crate) negotiated_video: bool,
     pub(crate) negotiated_audio: bool,
@@ -460,6 +463,60 @@ pub struct MediaEngine {
     /// The packet times this endpoint states in its audio sections; see
     /// [`MediaEngine::set_audio_packet_time`].
     pub(crate) audio_packet_time: RTCPacketTime,
+}
+
+/// A media engine with no codecs, its settings at the defaults of
+/// [`BehaviourProfile::default()`] (see [`MediaEngine::for_profile`]).
+impl Default for MediaEngine {
+    fn default() -> Self {
+        Self::for_profile(BehaviourProfile::default())
+    }
+}
+
+impl MediaEngine {
+    /// A media engine with no codecs, the settings a [`BehaviourProfile`] governs set to the
+    /// profile's values (`docs/behaviour-profiles.md`), and the profile kept for
+    /// [`register_default_interceptors`](crate::peer_connection::configuration::interceptor_registry::register_default_interceptors),
+    /// which reads it. Settings changed afterwards keep the values they are given.
+    pub fn for_profile(profile: BehaviourProfile) -> Self {
+        let mut media_engine = Self::rfc_base();
+        media_engine.behaviour_profile = profile;
+        crate::peer_connection::configuration::behaviour_profile::apply_to_media_engine(
+            &mut media_engine,
+            profile,
+        );
+        media_engine
+    }
+
+    /// The engine's own defaults, [`BehaviourProfile::Rfc`], whatever the build's default.
+    pub(crate) fn rfc_base() -> Self {
+        Self {
+            behaviour_profile: BehaviourProfile::Rfc,
+            negotiated_video: Default::default(),
+            negotiated_audio: Default::default(),
+            negotiated_application: Default::default(),
+            negotiate_multi_codecs: Default::default(),
+            video_codecs: Default::default(),
+            audio_codecs: Default::default(),
+            application_codecs: Default::default(),
+            negotiated_video_codecs: Default::default(),
+            negotiated_audio_codecs: Default::default(),
+            negotiated_application_codecs: Default::default(),
+            sframe_payload_types: Default::default(),
+            header_extensions: Default::default(),
+            negotiated_header_extensions: Default::default(),
+            flexfec_with_retransmission: Default::default(),
+            vp9_receiver_limits: Default::default(),
+            rtcp_cname: Default::default(),
+            audio_packet_time: Default::default(),
+        }
+    }
+
+    /// The behaviour profile this media engine was made for ([`Self::for_profile`]; that of
+    /// [`BehaviourProfile::default()`] for [`MediaEngine::default`]).
+    pub fn behaviour_profile(&self) -> BehaviourProfile {
+        self.behaviour_profile
+    }
 }
 
 /// The packet times of a media section, in milliseconds: `a=ptime`, the length of media one

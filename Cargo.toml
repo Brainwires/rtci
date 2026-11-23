@@ -150,6 +150,12 @@ pem = ["dtls/pem"]
 # The Mozilla root certificates (webpki-roots, CDLA-Permissive-2.0) for the engine's TURN-over-TLS
 # connections; without it the application gives roots or a verifier (`with_turn_tls`).
 turn-tls-webpki-roots = ["dep:webpki-roots"]
+# Makes `BehaviourProfile::default()` (and with it every `SettingEngine`, `MediaEngine` and
+# `DefaultInterceptorOptions` default) `BehaviourProfile::Chrome`: libwebrtc's defaults where
+# they differ from the RFCs' (docs/behaviour-profiles.md). Cargo unifies features: one crate of
+# a build that turns this on changes the defaults of every user of `rtc` in that build. Prefer
+# `SettingEngineBuilder::with_behaviour_profile`.
+chrome-defaults = []
 crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "dtls/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "ice/crypto-aws-lc-rs", "stun/crypto-aws-lc-rs", "srtp/crypto-aws-lc-rs", "turn/crypto-aws-lc-rs", "sframe/crypto-aws-lc-rs"]
 
 [dependencies]

@@ -117,6 +117,7 @@ use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
+use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use std::time::Duration;
@@ -304,6 +305,8 @@ pub struct IceBehaviour {
     pub send_data_before_nomination: bool,
     /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
     pub pair_before_conveyed: bool,
+    /// See [`SettingEngineBuilder::with_ice_software`].
+    pub software: Option<String>,
 }
 
 /// Replay attack protection window sizes.
@@ -326,7 +329,7 @@ pub struct ReplayProtection {
 ///
 /// Controls the maximum size of messages that can be sent through data channels.
 /// Per [RFC 8841](https://datatracker.ietf.org/doc/html/rfc8841), the default is 64KB.
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SctpMaxMessageSize {
     /// Fixed maximum message size in bytes.
@@ -404,8 +407,11 @@ impl Default for SctpMaxMessageSize {
 ///
 /// - [W3C WebRTC Spec](https://www.w3.org/TR/webrtc/)
 /// - [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SettingEngine {
+    /// The profile the settings were last set to ([`SettingEngineBuilder::with_behaviour_profile`]);
+    /// settings changed after it keep their own values.
+    pub(crate) behaviour_profile: BehaviourProfile,
     pub(crate) crypto_provider: Option<Arc<dyn RTCCryptoProvider>>,
     pub(crate) timeout: Timeout,
     pub(crate) data_channel: DataChannel,
@@ -548,6 +554,98 @@ pub struct SettingEngine {
     pub(crate) unnegotiated_rtcp_feedback: bool,
 }
 
+/// The engine's own defaults, [`BehaviourProfile::Rfc`], whatever the build's default profile.
+impl SettingEngine {
+    pub(crate) fn rfc_base() -> Self {
+        Self {
+            behaviour_profile: BehaviourProfile::Rfc,
+            crypto_provider: Default::default(),
+            timeout: Default::default(),
+            data_channel: Default::default(),
+            turn_allocation_refresh_interval_cap: Default::default(),
+            candidates: Default::default(),
+            ice: Default::default(),
+            multicast_dns: Default::default(),
+            replay_protection: Default::default(),
+            sdp_session_level_fingerprints: Default::default(),
+            disable_sdp_tls_id: Default::default(),
+            dtls_new_association_without_ice_restart: Default::default(),
+            msid_removal_ends_track: Default::default(),
+            stopping_transceiver_rejected_in_answer: Default::default(),
+            dtls_use_srtp_only_with_media: Default::default(),
+            accept_lowercase_fingerprints: Default::default(),
+            bundle_attributes_tagged_only: Default::default(),
+            max_bundle_ignored: Default::default(),
+            unique_transport_credentials: Default::default(),
+            explicit_rollback_only: Default::default(),
+            answering_dtls_role: Default::default(),
+            disable_certificate_fingerprint_verification: Default::default(),
+            allow_insecure_verification_algorithm: Default::default(),
+            disable_media_engine_copy: Default::default(),
+            disable_media_engine_multiple_codecs: Default::default(),
+            srtp_protection_profiles: Default::default(),
+            dtls_cipher_suites: Default::default(),
+            receive_mtu: Default::default(),
+            mid_generator: Default::default(),
+            sctp_max_message_size: Default::default(),
+            sctp_max_receive_buffer_size: Default::default(),
+            sctp_mtu: Default::default(),
+            sctp_path_mtu_discovery: Default::default(),
+            sctp_weighted_fair_queueing: Default::default(),
+            sctp_message_interleaving: Default::default(),
+            sctp_zero_checksum: Default::default(),
+            sctp_max_streams: Default::default(),
+            sctp_rto: Default::default(),
+            sctp_max_retransmissions: Default::default(),
+            sctp_message_size_limit_without_interleaving: Default::default(),
+            data_channel_max_buffer_size: Default::default(),
+            data_channel_send_before_ack: Default::default(),
+            non_interactive_video: Default::default(),
+            srtp_key_lifetime: Default::default(),
+            srtp_automatic_rekeying_off: Default::default(),
+            ignore_rid_pause_for_recv: Default::default(),
+            rid_pause_marks: Default::default(),
+            rollback_content_ignored: Default::default(),
+            strict_sdp_attribute_grammar: Default::default(),
+            w3c_simulcast_answer: Default::default(),
+            nominated_candidates_only: Default::default(),
+            msid_appdata_omitted: Default::default(),
+            video_receive_limits: Default::default(),
+            codec_video_receive_limits: Default::default(),
+            unnegotiated_header_extensions: Default::default(),
+            one_ssrc_across_clock_rates: Default::default(),
+            write_ssrc_attributes_for_simulcast: Default::default(),
+            ecn: Default::default(),
+            ecn_initiation: Default::default(),
+            ecn_without_signalling: Default::default(),
+            streams: Default::default(),
+            turn_tls: Default::default(),
+            ecn_marking: Default::default(),
+            rtcp_session_omitted: Default::default(),
+            strict_rtcp_validity: Default::default(),
+            unnegotiated_rtcp_feedback: Default::default(),
+        }
+    }
+
+    /// The behaviour profile the settings were last set to: the build's default profile
+    /// ([`BehaviourProfile::compiled_default`]) unless
+    /// [`SettingEngineBuilder::with_behaviour_profile`] named another. Settings changed after it
+    /// keep their own values.
+    pub fn behaviour_profile(&self) -> BehaviourProfile {
+        self.behaviour_profile
+    }
+}
+
+/// Every setting at the default of [`BehaviourProfile::default()`]: the RFC defaults, or
+/// Chrome's with the `chrome-defaults` cargo feature (see [`BehaviourProfile`]).
+impl Default for SettingEngine {
+    fn default() -> Self {
+        SettingEngineBuilder(Self::rfc_base())
+            .with_behaviour_profile(BehaviourProfile::default())
+            .build()
+    }
+}
+
 impl SettingEngine {
     /// The crypto provider configured on this engine, if any.
     ///
@@ -627,9 +725,37 @@ impl SettingEngine {
 pub struct SettingEngineBuilder(SettingEngine);
 
 impl SettingEngineBuilder {
-    /// A registry with every setting at its default.
+    /// A registry with every setting at its default: that of [`BehaviourProfile::default()`],
+    /// the RFC defaults unless the `chrome-defaults` cargo feature is on in the build.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets every setting a [`BehaviourProfile`] governs to the profile's value, as the table
+    /// `docs/behaviour-profiles.md` lists them; settings the profile does not govern keep
+    /// theirs. A setting changed after this call keeps the value it is given.
+    ///
+    /// The same profile goes to [`MediaEngine::for_profile`](crate::peer_connection::configuration::media_engine::MediaEngine::for_profile),
+    /// from which
+    /// [`register_default_interceptors`](crate::peer_connection::configuration::interceptor_registry::register_default_interceptors)
+    /// takes it, so that the whole peer connection follows one profile.
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::BehaviourProfile;
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_behaviour_profile(BehaviourProfile::Chrome)
+    ///     .build();
+    /// assert_eq!(setting_engine.behaviour_profile(), BehaviourProfile::Chrome);
+    /// ```
+    pub fn with_behaviour_profile(self, profile: BehaviourProfile) -> Self {
+        let mut builder =
+            crate::peer_connection::configuration::behaviour_profile::apply_to_setting_engine(
+                self, profile,
+            );
+        builder.0.behaviour_profile = profile;
+        builder
     }
 
     /// Selects the cryptographic provider used by peer connections built with this setting engine.
@@ -1560,6 +1686,17 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The SOFTWARE attribute (RFC 8489 section 14.14) of the ICE agent's connectivity checks
+    /// and of its success responses to the peer's: RFC 8489 sections 6.1 and 6.3.1.1 say
+    /// requests and responses "SHOULD" carry one, and section 16.1.2 that its use "SHOULD" be
+    /// configurable. `None`, the default, is `rtc-ice` and its version; `Some(String::new())`
+    /// sends none (what libwebrtc's checks carry, and what an application that would not name
+    /// its software to the path wants); any other value is sent as it is.
+    pub fn with_ice_software(mut self, software: Option<String>) -> Self {
+        self.0.ice.software = software;
+        self
+    }
+
     /// Sets a filter asked about every remote candidate's address (an mDNS candidate's once it
     /// resolves) before the ICE agent holds it; `false` drops the candidate, so no check is ever
     /// sent there. Use it to apply the host's own network policy to peer-chosen destinations.
@@ -2228,6 +2365,13 @@ impl SettingEngineBuilder {
     /// itself to report an unreachable peer sooner (a path ICE still thinks alive) lowers it.
     pub fn with_sctp_rto(mut self, initial: Duration, min: Duration, max: Duration) -> Self {
         self.0.sctp_rto = Some(sctp::RtoConfig { initial, min, max });
+        self
+    }
+
+    /// Back to RFC 9260's RTO.Initial, RTO.Min and RTO.Max (1, 1 and 60 seconds), undoing
+    /// [`Self::with_sctp_rto`] (or a profile that set them).
+    pub fn without_sctp_rto(mut self) -> Self {
+        self.0.sctp_rto = None;
         self
     }
 
