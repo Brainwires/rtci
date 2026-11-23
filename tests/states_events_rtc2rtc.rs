@@ -1236,6 +1236,9 @@ fn prohibited_remote_candidates_are_added_but_never_checked() -> Result<()> {
         let answer = answerer.pc.create_answer(None)?;
         answerer.pc.set_local_description(start, answer)?;
         answerer.pc.add_local_candidate(host(answerer.addr)?)?;
+        // The application takes the candidate's event to trickle it: only then is it paired
+        // (RFC 8838 section 10).
+        while answerer.pc.poll_event().is_some() {}
         let remote: SocketAddr = format!("127.0.0.1:{port}").parse()?;
         answerer.pc.add_remote_candidate(host(remote)?)?;
         assert!(

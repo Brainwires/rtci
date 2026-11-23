@@ -150,6 +150,9 @@
           await pc.setRemoteDescription({ type: "offer", sdp: s.mungeRemoteOffer ? s.mungeRemoteOffer(m.sdp) : m.sdp });
           await pc.setLocalDescription();
           sendDescription("answer", pc.localDescription.sdp);
+        } else if (m.type === "candidate") {
+          // Trickled by the Rust side (its engine-gathered TCP candidates).
+          if (m.candidate && m.candidate.candidate) await pc.addIceCandidate(m.candidate);
         } else if (m.type === "report") s.reports.push(m);
         else if (m.type === "error") s.errors.push(m.error);
       } catch (e) {

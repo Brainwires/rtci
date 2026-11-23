@@ -9,6 +9,7 @@
 //! `rate.rs`. Every decision is made against the instant the caller supplied.
 
 mod rate;
+mod reconfirm;
 mod resolver;
 mod responder;
 pub(crate) mod wire;
@@ -23,6 +24,7 @@ use shared::{TaggedBytesMut, TransportContext, TransportMessage, TransportProtoc
 use crate::config::{DEFAULT_QUERY_INTERVAL, MdnsConfig};
 use crate::message::RCode;
 use rate::Jitter;
+use reconfirm::Reconfirm;
 use resolver::{Cached, Query};
 use responder::{Goodbye, LocalRecord};
 use shared::error::{Error, Result};
@@ -289,6 +291,9 @@ pub struct Mdns {
     /// Addresses learned from responses. At most [`MAX_CACHED_ADDRESSES`].
     cache: Vec<Cached>,
 
+    /// Cached names being reconfirmed (RFC 6762 section 10.4).
+    reconfirms: Vec<Reconfirm>,
+
     /// Next query ID to assign
     next_query_id: QueryId,
 
@@ -408,6 +413,7 @@ impl Mdns {
             conflicts: VecDeque::new(),
             queries: Vec::new(),
             cache: Vec::new(),
+            reconfirms: Vec::new(),
             next_query_id: 1,
             query_interval,
             query_timeout: config.query_timeout,
@@ -534,6 +540,7 @@ impl Mdns {
             return;
         }
         self.cache.clear();
+        self.reconfirms.clear();
         self.restart_records();
         self.update_next_timeout();
     }
@@ -752,7 +759,8 @@ impl Mdns {
         let _ = self.flush_probes(now)
             && self.flush_records(now)
             && self.flush_goodbyes(now)
-            && self.flush_queries(now);
+            && self.flush_queries(now)
+            && self.flush_reconfirms(now);
     }
 
     fn update_next_timeout(&mut self) {
@@ -776,6 +784,7 @@ impl Mdns {
                 consider(When::At(at));
             }
         }
+        self.stale_deadlines(&mut consider);
         // What is due but could not be sent waits for the budget.
         if let (Some(at), Some(blocked)) = (next, self.blocked_until) {
             next = Some(at.max(blocked));
@@ -1089,6 +1098,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Mdns {
         self.start_queries(now);
         self.expire_queries(now);
         self.cache.retain(|cached| cached.expires > now);
+        self.expire_stale(now);
 
         self.flush(now);
         self.update_next_timeout();
@@ -1171,6 +1181,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Mdns {
         self.closed = true;
         self.queries.clear();
         self.cache.clear();
+        self.reconfirms.clear();
         self.write_outs.clear();
         self.event_outs.clear();
         self.queue_closing_goodbyes();
@@ -1188,6 +1199,8 @@ mod mdns_answer_trust_test;
 mod mdns_resolver_test;
 #[cfg(test)]
 mod mdns_responder_test;
+#[cfg(test)]
+mod mdns_stale_test;
 #[cfg(test)]
 mod mdns_test;
 #[cfg(test)]

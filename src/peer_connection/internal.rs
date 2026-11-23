@@ -165,6 +165,7 @@ pub(super) fn ice_agent_config(
         multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
         multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
         multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+        multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
         multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
         multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
         multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
@@ -186,6 +187,7 @@ pub(super) fn ice_agent_config(
         unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
         data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
         send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
+        hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
         nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
         nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
             RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -234,6 +236,8 @@ impl RTCPeerConnection {
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+        let streams_settings = setting_engine.streams;
+        let turn_tls = setting_engine.turn_tls.clone();
 
         // Each media section negotiates its own codecs unless the application asked for one
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
@@ -259,6 +263,11 @@ impl RTCPeerConnection {
         setting_engine.crypto_provider = Some(crypto_provider.clone());
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
+        let engine_turn = super::turn_streams::EngineTurn::new(
+            &agent_config.urls,
+            streams_settings.turn,
+            turn_tls,
+        );
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
@@ -399,6 +408,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
+            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
         })
     }
 
@@ -3934,7 +3944,7 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
 /// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
 /// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
 /// TURN URL.
-fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
+pub(super) fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("turns:") {
         return RTCIceServerTransportProtocol::Tls;

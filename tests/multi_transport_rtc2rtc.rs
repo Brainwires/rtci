@@ -58,12 +58,6 @@ struct Peer {
 }
 
 impl Peer {
-    /// A peer whose transports have ICE credentials of their own (RFC 9429 section 5.2.1,
-    /// `with_unique_transport_credentials(true)`).
-    fn new(ip: &str, policy: RTCBundlePolicy) -> Result<Self> {
-        Self::with_credentials(ip, policy, true)
-    }
-
     /// A peer whose transports have credentials of their own (`unique`) or share the first
     /// transport's (the default).
     fn with_credentials(ip: &str, policy: RTCBundlePolicy, unique: bool) -> Result<Self> {

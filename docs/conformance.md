@@ -168,6 +168,13 @@ Done (mt-5): `balanced` initial offers give the first section of each media type
 (`plan_offer_transports`). Done (mt-6): several BUNDLE groups, each a transport
 (`transport_groups`, `BundleMode` with the groups, `arrival_mids` for the per-group payload
 type and MID tables); a later offer keeps the groups of the most recent answer.
+Done (mt-7): the transports share the first transport's ICE credentials by default (browser
+form; Pion and webrtc-rs 0.17 refuse a description whose sections differ, so the `balanced`
+default offer of mt-5 did not reach them); `with_unique_transport_credentials(true)` is RFC
+9429 5.2.1's unique credentials, and the multi-transport tests run both. An end-of-candidates
+that names no section ends every transport's gathering, so a single-socket application
+completes. Routing on a shared port by the ICE username (stream-transport stack) needs the
+unique credentials.
 Left: an ICE restart or a new DTLS association of the other transports, consent and
 keepalives checked per transport, a section moved out of a group by this side's offer (RFC
 9143 7.5.2-1; no API asks for it), several transports on one local socket, and the congestion

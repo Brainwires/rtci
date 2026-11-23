@@ -2547,6 +2547,17 @@ pub enum Error {
     /// A provider-neutral cryptographic operation failed.
     #[error("crypto: {0}")]
     Crypto(String),
+    /// Stream transport: no connection or listener has this id (it was never opened, or it
+    /// is closed).
+    #[error("stream: unknown connection or listener")]
+    ErrUnknownStream,
+    /// Stream transport: the connection is closing or closed and takes no more data.
+    #[error("stream: connection closed")]
+    ErrStreamConnectionClosed,
+    /// Stream transport: a message too long for the connection's framing (RFC 4571: 65535
+    /// bytes).
+    #[error("stream: message too long for its framing")]
+    ErrStreamMessageTooLong,
     #[error("{0}")]
     /// An error that does not fit any other variant, carrying a description.
     Other(String),
