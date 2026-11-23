@@ -8,9 +8,9 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 652; rows that
   apply: 5093.
-- RFC behaviour tested (`tested` + `setting`): 4928 of 5093 (96.8 %).
-- Tested as the default (`tested`): 4916 of 5093 (96.5 %); `setting`: 12.
-- Open (not tested in any form): 165: 20 untested, 123 partial, 22 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting`): 4929 of 5093 (96.8 %).
+- Tested as the default (`tested`): 4917 of 5093 (96.5 %); `setting`: 12.
+- Open (not tested in any form): 164: 19 untested, 123 partial, 22 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -18,19 +18,18 @@ Verdicts and classes are defined in `RULES.md`.
 | B | implemented, lacking a test that fails without it | 13 | 12 |
 | C | partly implemented | 116 | 96 |
 | D | not implemented | 17 | 13 |
-| E | cannot be met or observed inside this engine | 18 | 14 |
+| E | cannot be met or observed inside this engine | 17 | 14 |
 | F | stale note: already tested on this tree | 1 | 1 |
-| all | | 177 | 147 |
+| all | | 176 | 147 |
 
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 147 rows, 99 of size S, 39 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 14 rows.
-- Never testable inside this engine (class E, reason stated): 4 rows:
+- Never testable inside this engine (class E, reason stated): 3 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
   - RFC7714-13.1-3 (`rfc7714.md`): Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
-  - RFC9653-4-3 (`rfc9653.md`): Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
 
 Class C rows that say "Owner decision" are implemented as a setting whose default differs
 for a reason that is not a failing cell or peer (measured performance, a design rule); they
@@ -46,7 +45,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | media (running) | 2 | 13 | 10 | 4 | 1 | 30 | 19 | 6 | 5 |
 | payload | 0 | 2 | 0 | 0 | 0 | 2 | 2 | 0 | 0 |
 | rtp | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| sctp | 0 | 0 | 2 | 1 | 0 | 3 | 1 | 1 | 1 |
+| sctp | 0 | 0 | 2 | 0 | 0 | 2 | 0 | 1 | 1 |
 | sdp | 0 | 6 | 0 | 0 | 0 | 6 | 6 | 0 | 0 |
 | security | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 1 | 1 | 1 | 0 | 0 | 3 | 2 | 0 | 1 |
@@ -234,12 +233,11 @@ Sorted by class, then owner, size and ID.
 | RFC2198-5-4 | `rfc2198.md` | A receiver that lists RED is prepared to receive the listed encodings ... | partial | E | RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream | S | media (running) |
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |
 | RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | missing | E | The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds | S | media (running) |
-| RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | untested | E | Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate | S | sctp |
 | RFC7874-3-11 | `rfc7874.md` | Gap between events is at least 30 ms (default 70 ms) | missing | F | Stale note: the 30 ms minimum gap is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes` (10 ms asked, 40 + 30 ms between tone changes); mutation-check and cite | S | media (running) |
 
 ## Closed since classified
 
-20 rows: 9 of class B, 2 of class C, 2 of class E, 7 of class F. The note of each row says how it was closed.
+21 rows: 9 of class B, 2 of class C, 3 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -256,6 +254,7 @@ Sorted by class, then owner, size and ID.
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | C | tested |
 | RFC5124-3.3.1-6 | `rfc5124.md` | A media section offered with another profile is rejected by an ... | E | n/a |
 | RFC8826-4.3-3 | `rfc8826.md` | No API extracts long-term keying material or reaches stored traffic ... | E | n/a |
+| RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | E | tested |
 | RFC5124-3.1-1 | `rfc5124.md` | The profile is identified as SAVPF in the m= proto field | F | tested |
 | RFC5124-5-2 | `rfc5124.md` | A master key is not reused across sessions/SSRC collisions (two-time ... | F | tested |
 | RFC7496-3-1 | `rfc7496.md` | RFC 3758 is REQUIRED to be implemented to implement these policies. | F | tested |

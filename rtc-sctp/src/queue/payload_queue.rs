@@ -339,6 +339,20 @@ impl PayloadQueue {
         self.n_bytes
     }
 
+    /// Marks every outstanding chunk for retransmission (RFC 9260 6.3.3 E3). Returns the
+    /// bytes of user data newly marked, which go back to the peer's rwnd (6.2.1 C).
+    pub(crate) fn mark_all_for_retransmission(&mut self) -> usize {
+        let mut newly = 0;
+        for c in self.chunk_map.values_mut() {
+            if !c.is_outstanding() || c.retransmit {
+                continue;
+            }
+            c.retransmit = true;
+            newly += c.user_data.len();
+        }
+        newly
+    }
+
     pub(crate) fn len(&self) -> usize {
         //assert_eq!(self.chunk_map.len(), self.length);
         self.chunk_map.len()

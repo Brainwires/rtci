@@ -524,6 +524,9 @@ pub struct Association {
     /// The TSNs marked for Fast Retransmit (their third miss indication) since the last
     /// Fast Retransmit packet. What of them does not fit that packet waits for cwnd.
     fast_retransmit_marked: Vec<u32>,
+    /// RFC 9260 6.1 A: when the peer's SACK closed its window (a_rwnd 0), the first zero
+    /// window probe waits one RTO from then.
+    zero_window_probe_at: Option<Instant>,
     /// The TSNs the last SACK showed the peer reneged on: they got their one miss indication
     /// there (RFC 9260 6.2.1 D iii), not another from the same SACK's Fast Retransmit count.
     reneged_in_last_sack: Vec<u32>,
@@ -706,6 +709,7 @@ impl Default for Association {
             last_data_sent: None,
             t3_single_packet: false,
             fast_retransmit_marked: vec![],
+            zero_window_probe_at: None,
             reneged_in_last_sack: vec![],
             acknowledging_by_shutdown: false,
             last_advertised_window: 0,
@@ -1048,10 +1052,12 @@ impl Association {
             .as_ref()
             .filter(|_| self.state() == AssociationState::Established)
             .and_then(|p| p.deadline());
-        match (self.timers.next_timeout(), pmtud) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // The first zero window probe's time, while there is DATA to probe with.
+        let probe = self.zero_window_probe_at;
+        [self.timers.next_timeout(), pmtud, probe]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Returns packets to transmit
@@ -1106,6 +1112,10 @@ impl Association {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
+        // RFC 9260 6.1 A: the first zero window probe may go now.
+        if self.zero_window_probe_at.is_some_and(|at| now >= at) {
+            self.zero_window_probe_at = None;
+        }
         for &timer in &Timer::VALUES {
             let (expired, failure, n_rtos) = self.timers.is_expired(timer, now);
             if !expired {
@@ -3591,6 +3601,7 @@ impl Association {
         // The bytes outstanding before this SACK: the congestion window may grow only when
         // it was in full use (RFC 9260 7.2.1, 7.2.2).
         let flight_before = u32::try_from(self.inflight_queue.get_num_bytes()).unwrap_or(u32::MAX);
+        let marked_before = self.fast_retransmit_marked.len();
 
         // Process selective ack
         let (bytes_acked_per_stream, total_bytes_acked, htna) =
@@ -3630,6 +3641,19 @@ impl Association {
         } else {
             self.rwnd = d.advertised_receiver_window_credit - bytes_outstanding;
         }
+        // RFC 9260 6.1 A: the receiver closed its window. The first zero window probe goes one
+        // RTO from now, and the probes sent while SACKs keep coming do not count as errors: the
+        // receiver may keep its window closed for as long as it likes.
+        if d.advertised_receiver_window_credit == 0 {
+            if self.zero_window_probe_at.is_none() {
+                self.zero_window_probe_at =
+                    Some(now + Duration::from_millis(self.rto_mgr.get_rto()));
+            }
+            self.timers.reset_retrans(Timer::T3RTX);
+            self.on_path_success();
+        } else {
+            self.zero_window_probe_at = None;
+        }
 
         // The highest TSN this SACK acknowledges: every outstanding TSN below it is one the
         // SACK reports missing (RFC 9260 7.2.4).
@@ -3664,6 +3688,17 @@ impl Association {
             self.advance_peer_ack_point();
             self.awake_write_loop();
         }
+
+        // RFC 9260 6.2.1 C: the chunks this SACK marked for retransmission go back to rwnd.
+        let marked: usize = self.fast_retransmit_marked
+            [marked_before.min(self.fast_retransmit_marked.len())..]
+            .iter()
+            .filter_map(|tsn| self.inflight_queue.get(*tsn))
+            .map(|c| c.user_data.len())
+            .sum();
+        self.rwnd = self
+            .rwnd
+            .saturating_add(u32::try_from(marked).unwrap_or(u32::MAX));
 
         self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
 
@@ -4800,6 +4835,10 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
                     chunk.nsent = c.nsent;
+                    // RFC 9260 6.2.1 B, for a Fast Retransmit too.
+                    self.rwnd = self
+                        .rwnd
+                        .saturating_sub(u32::try_from(c.user_data.len()).unwrap_or(u32::MAX));
                     self.stats.inc_fast_retrans();
                     trace!(
                         "[{}] fast-retransmit: tsn={} sent={} htna={}",
@@ -4934,7 +4973,6 @@ impl Association {
         now: Instant,
         raw_packets: &mut Vec<Bytes>,
     ) -> Result<()> {
-        let awnd = std::cmp::min(self.cwnd, self.rwnd);
         // RFC 9260 6.3.3 E3, 7.2.3: the retransmission that follows a T3-rtx expiry is the
         // earliest outstanding chunks that fit one packet, and that packet is alone in flight
         // until it is acknowledged. cwnd (one PMDCS) is counted in user bytes, which a second
@@ -4949,6 +4987,9 @@ impl Association {
             .inflight_queue
             .get_num_bytes()
             .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes());
+        // What this call retransmits, against rwnd (6.2.1 B: rwnd is the peer's buffer
+        // space, the bytes outstanding already taken out of it).
+        let mut retransmitted = 0usize;
         let mut chunks: Vec<ChunkPayloadData> = vec![];
         let mut done = false;
         let mut i = 0;
@@ -4978,6 +5019,7 @@ impl Association {
                         .get_num_bytes()
                         .saturating_sub(self.inflight_queue.marked_for_retransmission_bytes())
                         + chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
+                    retransmitted = chunks.iter().map(|c| c.user_data.len()).sum::<usize>();
                     packet_size = COMMON_HEADER_SIZE as usize
                         + chunks.iter().map(|c| c.wire_size()).sum::<usize>();
                     i += 1;
@@ -4998,13 +5040,17 @@ impl Association {
                     // Send it as a zero window probe
                     done = true;
                     chunks_remaining = true;
-                } else if in_flight + c.user_data.len() > awnd as usize && in_flight > 0 {
+                } else if (in_flight + c.user_data.len() > self.cwnd as usize && in_flight > 0)
+                    || (retransmitted + c.user_data.len() > self.rwnd as usize
+                        && !chunks.is_empty())
+                {
                     // With nothing in flight one chunk always goes, whatever its size.
                     chunks_remaining = true;
                     break;
                 }
 
                 in_flight += c.user_data.len();
+                retransmitted += c.user_data.len();
             } else {
                 break; // end of pending data
             }
@@ -5033,6 +5079,10 @@ impl Association {
                 c.retransmit = false;
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
+                // RFC 9260 6.2.1 B: a retransmitted chunk takes its size from rwnd again.
+                self.rwnd = self
+                    .rwnd
+                    .saturating_sub(u32::try_from(c.user_data.len()).unwrap_or(u32::MAX));
                 trace!(
                     "[{}] retransmitting tsn={} ssn={} sent={}",
                     self.side, c.tsn, c.stream_sequence_number, c.nsent
@@ -5473,10 +5523,13 @@ impl Association {
                 }
             }
 
-            // the data sender can always have one DATA chunk in flight to the receiver
+            // the data sender can always have one DATA chunk in flight to the receiver; after
+            // the receiver closed its window, from one RTO on (RFC 9260 6.1 A)
             if chunks.is_empty()
                 && self.inflight_queue.is_empty()
                 && !(suspended && !self.pending_queue.is_mid_message())
+                // Its time is cleared by `handle_timeout` once it has come.
+                && self.zero_window_probe_at.is_none()
             {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
@@ -5979,7 +6032,11 @@ impl Association {
                     self.use_path_mtu(mtu, false);
                 }
 
-                self.inflight_queue.mark_all_to_retrasmit();
+                // RFC 9260 6.2.1 C: what is marked for retransmission goes back to rwnd.
+                let marked = self.inflight_queue.mark_all_for_retransmission();
+                self.rwnd = self
+                    .rwnd
+                    .saturating_add(u32::try_from(marked).unwrap_or(u32::MAX));
                 self.t3_retransmit_pending = true;
                 self.awake_write_loop();
             }
@@ -6073,13 +6130,15 @@ impl Association {
     /// Whether no timers are running
     #[cfg(test)]
     pub(crate) fn is_idle(&self) -> bool {
-        Timer::VALUES
-            .iter()
-            // The heartbeat timer always runs on an established association.
-            .filter(|&&t| t != Timer::Heartbeat)
-            .filter_map(|&t| Some((t, self.timers.get(t)?)))
-            .min_by_key(|&(_, time)| time)
-            //.map_or(true, |(timer, _)| timer == Timer::Idle)
-            .is_none()
+        // A zero window probe waiting for its time (RFC 9260 6.1 A) is something to wake for.
+        self.zero_window_probe_at.is_none()
+            && Timer::VALUES
+                .iter()
+                // The heartbeat timer always runs on an established association.
+                .filter(|&&t| t != Timer::Heartbeat)
+                .filter_map(|&t| Some((t, self.timers.get(t)?)))
+                .min_by_key(|&(_, time)| time)
+                //.map_or(true, |(timer, _)| timer == Timer::Idle)
+                .is_none()
     }
 }
