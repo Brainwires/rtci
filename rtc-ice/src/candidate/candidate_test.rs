@@ -754,3 +754,27 @@ fn tcp_candidates_take_the_type_preference_less_one() {
     assert!(udp_relay.priority() > tcp_relay.priority());
     assert!(tcp_relay.priority() < udp_srflx.priority());
 }
+
+/// RFC 8839 section 5.1: an agent "MUST ignore any name/value pairs it doesn't understand"
+/// among the extension attributes, which come in any order; `tcptype` (RFC 6544 section 4.5)
+/// is one of them. It is read after `raddr` / `rport`, after other extensions (`generation`,
+/// `ufrag`, `network-id`) and before them, and the unknown pairs around it are skipped.
+#[test]
+fn test_tcptype_is_read_wherever_it_stands_among_the_extensions() -> Result<()> {
+    for line in [
+        "1 1 tcp 1518280447 192.0.2.1 9 typ host tcptype active",
+        "1 1 tcp 1518280447 192.0.2.1 9 typ host generation 0 ufrag Qx7a tcptype active",
+        "1 1 tcp 1518280447 192.0.2.1 9 typ host tcptype active generation 0 network-id 1",
+        "1 1 tcp 1518280447 192.0.2.1 9 typ host x-unknown y tcptype active",
+        "1 1 tcp 1518280447 198.51.100.7 9 typ srflx raddr 192.0.2.1 rport 9 generation 0 \
+         tcptype active",
+    ] {
+        let candidate = unmarshal_candidate(line)?;
+        assert_eq!(candidate.tcp_type(), TcpType::Active, "{line}");
+    }
+    let candidate =
+        unmarshal_candidate("1 1 udp 2130706431 192.0.2.1 5000 typ host generation 0 ufrag Qx7a")?;
+    assert_eq!(candidate.tcp_type(), TcpType::Unspecified);
+    assert_eq!(candidate.address(), "192.0.2.1");
+    Ok(())
+}

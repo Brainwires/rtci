@@ -333,3 +333,59 @@ fn a_sender_in_no_stream_is_written_with_a_dash() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 8830 section 2: `msid-id = 1*64token-char` and `msid-appdata = 1*64token-char`. A
+/// received line whose id or appdata is longer than 64 characters is not well formed and is
+/// ignored (section 2: such a line "SHOULD be ignored"; the track then takes the next line's
+/// stream). An id or track id of this side's that cannot be written (a space, more than 64
+/// characters) makes `create_offer` fail instead of writing a line that does not parse; 64
+/// characters are written.
+#[test]
+fn msid_ids_and_appdata_are_one_to_sixty_four_token_characters() -> TestResult {
+    let long = "s".repeat(65);
+    let mut pc = default_peer()?;
+    let (streams, _, _) = remote_track(
+        &mut pc,
+        offer(
+            &format!("a=msid:{long} track\na=msid:short {long}\na=msid:good track\n"),
+            "",
+        ),
+    )?;
+    assert_eq!(streams, vec!["good"]);
+
+    let offered = |stream: &str, track: &str| {
+        let mut pc = default_peer()?;
+        pc.add_track(rtc::media_stream::MediaStreamTrack::new(
+            stream.to_owned(),
+            track.to_owned(),
+            "label".to_owned(),
+            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            vec![rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+                rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                    ssrc: Some(0x0808_0808),
+                    ..Default::default()
+                },
+                codec: jsep_common::vp8(),
+                ..Default::default()
+            }],
+        ))?;
+        pc.create_offer(None)
+            .map(|offer| offer.sdp)
+            .map_err(Box::<dyn std::error::Error>::from)
+    };
+    for (stream, track) in [
+        ("my stream", "track"),
+        ("stream", "my track"),
+        (long.as_str(), "track"),
+        ("stream", long.as_str()),
+    ] {
+        assert!(offered(stream, track).is_err(), "{stream:?} / {track:?}");
+    }
+    let sixty_four = "s".repeat(64);
+    let sdp = offered(&sixty_four, &sixty_four)?;
+    assert!(
+        sdp.contains(&format!("a=msid:{sixty_four} {sixty_four}\r\n")),
+        "{sdp}"
+    );
+    Ok(())
+}

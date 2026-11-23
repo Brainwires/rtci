@@ -96,16 +96,18 @@ fn test_authentic_response_after_an_unauthentic_one_completes_the_check() {
 }
 
 /// An agent whose checks carry USERNAME `<250 chars>:<250 chars>` (long ufrags, as RFC 8839
-/// allows, within the 509 bytes of a STUN USERNAME): about 580 bytes of STUN, more than fits
-/// an IPv4 path of unknown MTU.
+/// allows a peer to receive, within the 509 bytes of a STUN USERNAME): about 580 bytes of
+/// STUN, more than fits an IPv4 path of unknown MTU. The agent refuses to be configured with
+/// a ufrag longer than the 32 characters it may send (RFC 8839 section 5.4), so the long one is
+/// put in place after construction.
 fn agent_with_long_ufrags(now: Instant, path_mtu: Option<usize>) -> Agent {
     let cfg = AgentConfig {
-        local_ufrag: "l".repeat(250),
         local_pwd: "p".repeat(32),
         path_mtu,
         ..config(true)
     };
     let mut a = bare_agent(now, cfg);
+    a.ufrag_pwd.local_credentials.ufrag = "l".repeat(250);
     a.add_remote_candidate(host(addr(REMOTE_A))).unwrap();
     a.start_connectivity_checks(now, true, "r".repeat(250), REMOTE_PWD.to_owned())
         .unwrap();

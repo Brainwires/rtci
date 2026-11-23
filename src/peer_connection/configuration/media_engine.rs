@@ -176,7 +176,7 @@ mod multi_codec_test;
 
 use crate::peer_connection::sdp::{
     ATTR_KEY_SFRAME, ENCRYPT_URI, MediaDescriptionExt, SectionExtension,
-    codecs_from_media_description, is_unknown_application_media,
+    codecs_from_media_description, is_unknown_media_protocol,
     rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
@@ -1796,7 +1796,7 @@ impl MediaEngine {
         for media in &desc.media_descriptions {
             // A data channel section, or an `m=application` line that is not RTP (the pre-RFC
             // 8841 `DTLS/SCTP` data section): no codecs to read.
-            if media.is_webrtc_datachannel() || is_unknown_application_media(media) {
+            if media.is_webrtc_datachannel() || is_unknown_media_protocol(media) {
                 continue;
             }
 

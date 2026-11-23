@@ -834,6 +834,21 @@ pub enum Error {
     #[error("local password is less than 128 bits long")]
     ErrLocalPwdInsufficientBits,
 
+    /// A local username fragment longer than 32 characters (RFC 8839 section 5.4: "MUST NOT
+    /// send") or with a character that is not an `ice-char` (letters, digits, `+`, `/`).
+    #[error("local username fragment is longer than 32 characters or not made of ice-chars")]
+    ErrLocalUfragInvalid,
+
+    /// A local password longer than 256 characters or with a character that is not an
+    /// `ice-char` (RFC 8839 section 5.4).
+    #[error("local password is longer than 256 characters or not made of ice-chars")]
+    ErrLocalPwdInvalid,
+
+    /// A local server-reflexive, peer-reflexive or relayed candidate without its related
+    /// address (RFC 8839 section 5.1: `raddr` and `rport` "MUST be present" for them).
+    #[error("a local srflx, prflx or relay candidate has no related address")]
+    ErrLocalCandidateWithoutRelatedAddress,
+
     /// Indicates an unsupported transport type was provided.
     #[error("invalid transport protocol type")]
     ErrProtoType,

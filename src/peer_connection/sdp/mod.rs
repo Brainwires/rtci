@@ -640,7 +640,7 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         let codec_type = RtpCodecKind::from(media.media_name.media.as_str());
-        if codec_type == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
+        if codec_type == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
             continue;
         }
 
@@ -885,7 +885,7 @@ pub(crate) fn media_msid(media: &MediaDescription) -> Option<(Vec<MediaStreamId>
         let (Some(id), appdata, None) = (tokens.next(), tokens.next(), tokens.next()) else {
             continue;
         };
-        if !is_sdp_token(id) || appdata.is_some_and(|appdata| !is_sdp_token(appdata)) {
+        if !is_msid_token(id) || appdata.is_some_and(|appdata| !is_msid_token(appdata)) {
             continue;
         }
         found = true;
@@ -1909,7 +1909,7 @@ impl RTCPeerConnection {
             write_ssrc_attributes_for_simulcast,
             repair_flows,
             params.msid_appdata,
-        );
+        )?;
         // RFC 8853 section 5.1: one line, each direction at most once.
         let mut sc_attr = vec![];
         if !recv_sc_list.is_empty() {
@@ -1947,7 +1947,7 @@ impl RTCPeerConnection {
         write_ssrc_attributes_for_simulcast: bool,
         repair_flows: RepairFlows,
         msid_appdata: bool,
-    ) -> MediaDescription {
+    ) -> Result<MediaDescription> {
         let cname = media_engine.rtcp_cname.as_str();
         // Every transceiver has a sender; one that has neither a track nor a sending
         // direction is not described (RFC 9429 section 5.2.1).
@@ -1981,6 +1981,19 @@ impl RTCPeerConnection {
             }
             if stream_ids.is_empty() {
                 stream_ids.push("-".to_owned());
+            }
+            // RFC 8830 section 2: `msid-id = 1*64token-char` and `msid-appdata =
+            // 1*64token-char`. A stream or track id the application chose that is not one
+            // cannot be written: the line would not parse (a space would even make it three
+            // tokens), so the description is not made. The track id is checked also without
+            // appdata: the source-level `msid` attribute carries it.
+            for id in stream_ids.iter().chain(std::iter::once(&track_id)) {
+                if !is_msid_token(id) {
+                    return Err(Error::SdpInvalidValue(format!(
+                        "the id {id:?} cannot be written in a=msid: an msid-id or appdata is 1 \
+                         to 64 token characters (RFC 8830 section 2)"
+                    )));
+                }
             }
             // The source-level `msid` (RFC 8830 appendix A) names the same first stream.
             let source_stream = stream_ids[0].clone();
@@ -2074,7 +2087,7 @@ impl RTCPeerConnection {
             None => {}
         }
 
-        media
+        Ok(media)
     }
 }
 
@@ -2164,7 +2177,7 @@ pub(crate) fn section_multiplexes_rtcp(
 
 /// The tagged section of the BUNDLE group `media` is in: the first tag of the group that is
 /// neither rejected nor bundle-only (RFC 9143 sections 7.2 and 7.3.1).
-fn tagged_section<'a>(
+pub(crate) fn tagged_section<'a>(
     desc: &'a SessionDescription,
     media: &MediaDescription,
 ) -> Option<&'a MediaDescription> {
@@ -2553,6 +2566,7 @@ impl RTCPeerConnection {
 
         let answer_payload_types = answer_payload_types(media_engine, media_sections);
         let mut candidates_added = false;
+        let offers_over_tcp = params.bundle.is_offer() && params.sctp_over_tcp;
         for m in media_sections.iter() {
             // RFC 8829 §5.3.1: reflect rejected m-lines (port=0) in the answer.
             // These must appear in the same position as in the offer to preserve m-line indexing.
@@ -2667,6 +2681,17 @@ impl RTCPeerConnection {
                     params,
                 )?;
                 d = d1;
+                // RFC 9429 section 5.1.2: the offered profile "is determined by the protocol
+                // associated with the current default or selected ICE candidate", as for the
+                // data section (`sctp_over_tcp`, RFC 8841 section 12.2): `TCP/DTLS/RTP/SAVPF`
+                // (RFC 7850) when that candidate is a TCP one. An answer repeats the offer's.
+                if offers_over_tcp
+                    && let Some(desc) = d.media_descriptions.last_mut()
+                    && desc.media_name.protos == ["UDP", "TLS", "RTP", "SAVPF"]
+                {
+                    desc.media_name.protos =
+                        ["TCP", "DTLS", "RTP", "SAVPF"].map(str::to_owned).to_vec();
+                }
                 should_add_id
             };
 
@@ -3221,6 +3246,11 @@ pub(crate) struct RemoteIceDetails {
 /// m-section that is only reachable through its BUNDLE group also has port zero).
 pub(crate) fn is_rejected_media(m: &MediaDescription) -> bool {
     m.media_name.port.value == 0 && !m.has_attribute(ATTR_KEY_BUNDLE_ONLY)
+}
+
+/// Whether `s` can be an `msid-id` or `msid-appdata` (RFC 8830 section 2: `1*64token-char`).
+pub(crate) fn is_msid_token(s: &str) -> bool {
+    s.len() <= 64 && is_sdp_token(s)
 }
 
 /// Whether `s` is a `token` of RFC 8866 section 9: one or more of the characters
@@ -4232,17 +4262,24 @@ pub(crate) fn into_legacy_data_section(media: &mut MediaDescription) {
 }
 
 /// Whether `media` is an `m=application` line that is neither a data channel section
-/// (RFC 8841, or the drafts before it) nor application media over RTP: an application
-/// protocol this endpoint does not know. It is answered like a media type this endpoint does not know, rejected with its
-/// own m= line, and gets no transceiver.
-pub(crate) fn is_unknown_application_media(media_desc: &MediaDescription) -> bool {
-    media_desc.media_name.media == MEDIA_SECTION_APPLICATION
-        && !media_desc.is_webrtc_datachannel()
-        && !media_desc
-            .media_name
-            .protos
-            .iter()
-            .any(|proto| proto == "RTP")
+/// (RFC 8841, or the drafts before it) nor application media over RTP, or an `m=audio` /
+/// `m=video` line whose protocol is not RTP (RFC 8866 section 5.14: "the interpretation of
+/// the media format depends on the value of the <proto> sub-field", so the formats of
+/// `m=audio 9 udptl t38` are no payload types): a protocol this endpoint does not know. It is
+/// answered like a media type this endpoint does not know, rejected with its own m= line, and
+/// gets no transceiver. An audio or video section built in code without a protocol (every
+/// parsed m= line has one) is read as RTP.
+pub(crate) fn is_unknown_media_protocol(media_desc: &MediaDescription) -> bool {
+    let rtp = media_desc
+        .media_name
+        .protos
+        .iter()
+        .any(|proto| proto == "RTP");
+    match media_desc.media_name.media.as_str() {
+        MEDIA_SECTION_APPLICATION => !media_desc.is_webrtc_datachannel() && !rtp,
+        "audio" | "video" => !rtp && !media_desc.media_name.protos.is_empty(),
+        _ => false,
+    }
 }
 
 /// The `a=sctp-port` of a data channel section (RFC 8841 section 5): `Ok(None)` when the
@@ -4747,13 +4784,14 @@ pub(crate) fn codecs_from_media_description(
 }
 
 /// The m= line of a section whose media type this endpoint doesn't know (not audio or
-/// video), for a rejection that reproduces it. An `m=application` line is reproduced too:
+/// video, or audio or video over a protocol that is not RTP), for a rejection that
+/// reproduces it. An `m=application` line is reproduced too:
 /// a data channel section keeps its proto (`TCP/DTLS/SCTP` stays that), and one that is not
 /// a data channel section (the pre-RFC `DTLS/SCTP 5000` form, application media over RTP)
 /// is not answered as if it had been one.
 pub(crate) fn unknown_media_name(media: &MediaDescription) -> Option<MediaName> {
     let kind = media.media_name.media.as_str();
-    if matches!(kind, "audio" | "video") {
+    if matches!(kind, "audio" | "video") && !is_unknown_media_protocol(media) {
         return None;
     }
     let mut name = media.media_name.clone();

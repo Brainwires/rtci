@@ -60,7 +60,7 @@ fn parsed(fixture: &Fixture) -> SessionDescription {
 #[test]
 fn the_fixtures_cover_every_writer_the_interop_tests_meet() {
     let names: Vec<String> = fixtures().into_iter().map(|f| f.name).collect();
-    for writer in ["firefox", "webrtc-rs-0.17"] {
+    for writer in ["chromium", "firefox", "webkit", "webrtc-rs-0.17"] {
         assert!(
             names.iter().any(|n| n.starts_with(writer)),
             "no fixture written by {writer}: {names:?}"
@@ -93,6 +93,8 @@ fn real_answers_take_a_dtls_role_and_bundled_payload_types_agree() {
         }
         crate::peer_connection::check_bundled_payload_types(&desc)
             .unwrap_or_else(|e| panic!("{}: {e}", fixture.name));
+        crate::peer_connection::check_pause_lines(&desc)
+            .unwrap_or_else(|e| panic!("{}: {e}", fixture.name));
     }
 }
 
@@ -100,6 +102,7 @@ fn real_answers_take_a_dtls_role_and_bundled_payload_types_agree() {
 /// the default codecs and settings.
 #[test]
 fn real_offers_are_accepted_as_remote_descriptions() {
+    let mut refused = vec![];
     for fixture in fixtures().into_iter().filter(|f| !f.answer) {
         let mut media_engine = MediaEngine::default();
         media_engine
@@ -109,12 +112,14 @@ fn real_offers_are_accepted_as_remote_descriptions() {
             .with_media_engine(media_engine)
             .build(Instant::now())
             .expect("a peer connection");
-        pc.set_remote_description(
+        if let Err(e) = pc.set_remote_description(
             Instant::now(),
             RTCSessionDescription::offer(fixture.sdp.clone()).expect("an offer"),
-        )
-        .unwrap_or_else(|e| panic!("{}: the offer is refused: {e}", fixture.name));
+        ) {
+            refused.push(format!("{}: the offer is refused: {e}", fixture.name));
+        }
     }
+    assert!(refused.is_empty(), "{refused:#?}");
 }
 
 /// The tolerances the default reading has over the strict one

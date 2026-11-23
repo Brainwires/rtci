@@ -512,6 +512,32 @@ enum MdnsHostName {
     Unpublished(String),
 }
 
+/// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s and `ice-pwd` 22 to 256, with
+/// "at least 24 bits" and "at least 128 bits of randomness"; an agent "MUST NOT send" a ufrag
+/// longer than 32 characters. Credentials the application supplies are held to that (the
+/// generated ones are 16 and 32 letters): too short is too few bits, other characters or a
+/// longer value are invalid.
+pub(crate) fn check_local_credentials(ufrag: &str, pwd: &str) -> Result<()> {
+    let ice_chars = |value: &str| {
+        value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    };
+    if ufrag.len() < 4 || ufrag.len() * 8 < 24 {
+        return Err(Error::ErrLocalUfragInsufficientBits);
+    }
+    if pwd.len() < 22 || pwd.len() * 8 < 128 {
+        return Err(Error::ErrLocalPwdInsufficientBits);
+    }
+    if ufrag.len() > 32 || !ice_chars(ufrag) {
+        return Err(Error::ErrLocalUfragInvalid);
+    }
+    if pwd.len() > 256 || !ice_chars(pwd) {
+        return Err(Error::ErrLocalPwdInvalid);
+    }
+    Ok(())
+}
+
 impl Agent {
     /// Creates a new Agent.
     ///
@@ -879,6 +905,19 @@ impl Agent {
                 candidate_type, self.candidate_types
             );
             return Ok(false);
+        }
+
+        // RFC 8839 section 5.1: "rel-addr and rel-port ... MUST be present for server
+        // reflexive, peer-reflexive and relayed candidates". A local one given without its
+        // related address would be signalled as `raddr  rport 0`: it is refused.
+        if matches!(
+            candidate_type,
+            CandidateType::ServerReflexive | CandidateType::Relay | CandidateType::PeerReflexive
+        ) && c
+            .related_address()
+            .is_none_or(|related| related.address.is_empty())
+        {
+            return Err(Error::ErrLocalCandidateWithoutRelatedAddress);
         }
 
         if c.candidate_type() == CandidateType::Host
@@ -2136,12 +2175,7 @@ impl Agent {
             pwd = generate_pwd_with_random(self.crypto_provider.random())?;
         }
 
-        if ufrag.len() * 8 < 24 {
-            return Err(Error::ErrLocalUfragInsufficientBits);
-        }
-        if pwd.len() * 8 < 128 {
-            return Err(Error::ErrLocalPwdInsufficientBits);
-        }
+        check_local_credentials(&ufrag, &pwd)?;
 
         self.ufrag_pwd.pending_local_credentials = Some(Credentials { ufrag, pwd });
 

@@ -19,7 +19,7 @@ use crate::peer_connection::sdp::{
     add_candidates_to_media_descriptions, bundle_group_mids, bundle_groups, effective_direction,
     extmap_allow_mixed_in, get_application_media, get_application_media_section_sctp_port,
     get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
-    is_rejected_media, is_rtp_profile, is_unknown_application_media,
+    is_rejected_media, is_rtp_profile, is_unknown_media_protocol,
     rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
@@ -411,6 +411,7 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            ssrc_history: HashSet::new(),
             local_description_was_set: false,
             transport_closed: false,
             seen_selected_pair_changes: 0,
@@ -941,7 +942,7 @@ impl RTCPeerConnection {
                     }
 
                     let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                    if kind == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
+                    if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
                         // A media type this endpoint doesn't know (RFC 8866
                         // lets <media> be any token): rejected with port 0,
                         // its media type, protocol and formats kept, so the
@@ -3384,6 +3385,33 @@ impl RTCPeerConnection {
         self.unused_ssrc_drawn(minted, &mut rand::random::<u32>)
     }
 
+    /// Adds the SSRCs of every local stream (each sender's encodings with their RTX and FEC
+    /// flows, and the streams it parked for other clock rates) to
+    /// [`ssrc_history`](RTCPeerConnection::ssrc_history), which [`unused_ssrc`](Self::unused_ssrc)
+    /// draws outside of. Called when a local description is applied: what it describes has
+    /// been used. Past [`MAX_SSRC_HISTORY`] entries nothing more is kept (a draw then only
+    /// avoids the SSRCs in use, as RFC 5576 section 8 requires at the least).
+    pub(super) fn remember_local_ssrcs(&mut self) {
+        let mut used: Vec<SSRC> = vec![];
+        for transceiver in &self.rtp_transceivers {
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    let coding = &encoding.rtp_coding_parameters;
+                    used.extend(coding.ssrc);
+                    used.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                    used.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+                }
+                used.extend(sender.parked_ssrcs());
+            }
+        }
+        for ssrc in used {
+            if self.ssrc_history.len() >= MAX_SSRC_HISTORY {
+                break;
+            }
+            self.ssrc_history.insert(ssrc);
+        }
+    }
+
     /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
     fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
@@ -3407,6 +3435,8 @@ impl RTCPeerConnection {
                 taken.extend(described_ssrcs(parsed));
             }
         }
+        // RFC 5576 sections 5 and 8: nor one a local stream used before.
+        taken.extend(&self.ssrc_history);
         let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
@@ -5056,6 +5086,10 @@ pub(crate) fn negotiated_receive_maximum(
 }
 
 /// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
+/// The most SSRCs [`RTCPeerConnection::ssrc_history`] keeps: enough for any session's streams
+/// and their renegotiations, small next to the 2^32 SSRC space.
+pub(crate) const MAX_SSRC_HISTORY: usize = 4096;
+
 pub(crate) fn unused_ssrc_from(
     draws: impl IntoIterator<Item = SSRC>,
     taken: &HashSet<SSRC>,
@@ -5172,6 +5206,35 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
             Some(500_000)
         );
         assert_eq!(negotiated_receive_maximum(&local, &mids(&["2"])), None);
+    }
+
+    /// RFC 5576 section 5: an SSRC is not reused for another source within the participant
+    /// timeout, and "SHOULD NOT" ever be; section 8: an updated offer's new SSRCs differ from
+    /// "any previously used". A local description that is applied records the SSRCs of every
+    /// local stream (the media and its RTX flow); a later draw of one of them, or of any other
+    /// SSRC the history holds, is drawn again, also once no stream has it any more.
+    #[test]
+    fn an_ssrc_used_before_is_not_drawn_again() {
+        let mut pc = vp8_with_rtx();
+        pc.add_track(track(RTCRtpCodingParameters {
+            ssrc: Some(7),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 8 }),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(pc.ssrc_history.is_empty());
+        let offer = pc.create_offer(None).unwrap();
+        pc.set_local_description(Instant::now(), offer).unwrap();
+        assert!(pc.ssrc_history.contains(&7), "{:?}", pc.ssrc_history);
+        assert!(pc.ssrc_history.contains(&8), "{:?}", pc.ssrc_history);
+
+        // An SSRC of an earlier stream that no sender has now.
+        pc.ssrc_history.insert(33);
+        let mut draws = [33u32, 7, 8, 41].into_iter();
+        assert_eq!(
+            41,
+            pc.unused_ssrc_drawn(&mut vec![], &mut || draws.next().unwrap())
+        );
     }
 
     /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another

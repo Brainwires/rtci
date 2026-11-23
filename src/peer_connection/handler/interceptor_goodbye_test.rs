@@ -182,3 +182,51 @@ fn a_bye_for_another_ssrc_changes_nothing() {
     assert_eq!(MediaStreamTrackState::Live, state);
     assert!(!muted);
 }
+
+/// RFC 3550 6.3.5: a source not heard from for five report intervals has timed out (the RTCP
+/// session's `SourceTimedOut`); RFC 8830 section 3 has the track whose SSRCs are gone ended
+/// "(BYE, timeout)". Under W3C webrtc 9.3 the timeout does what a BYE does: the track is
+/// muted, not ended. Another source's timeout changes nothing.
+#[test]
+fn a_timed_out_source_mutes_its_track_as_a_bye_does() {
+    for (ssrc, expected) in [
+        (SSRC, vec!["mute:remote-track".to_string()]),
+        (4242, vec![]),
+    ] {
+        let mut ctx = InterceptorHandlerContext {
+            is_dtls_handshake_complete: true,
+            ..Default::default()
+        };
+        let mut transceivers = vec![transceiver()];
+        let media_engine = MediaEngine::default();
+        let mut chain = NullChain;
+        let mut stats = RTCStatsAccumulator::default();
+        let mut handler = InterceptorHandler::new(
+            &mut ctx,
+            &mut transceivers,
+            &media_engine,
+            &mut chain,
+            &mut stats,
+            None,
+        );
+        handler.process_session_event(
+            Instant::now(),
+            &interceptor::RtcpSessionEvent::SourceTimedOut { ssrc },
+        );
+        let events: Vec<String> = std::iter::from_fn(|| handler.poll_event())
+            .filter_map(|event| match event.event {
+                RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                    RTCTrackEvent::OnMute(track_id),
+                )) => Some(format!("mute:{track_id}")),
+                RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                    RTCTrackEvent::OnClose(track_id),
+                )) => Some(format!("close:{track_id}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, expected, "ssrc {ssrc}");
+        let track = transceivers[0].receiver().as_ref().unwrap().track();
+        assert_eq!(MediaStreamTrackState::Live, track.ready_state());
+        assert_eq!(track.muted(), ssrc == SSRC);
+    }
+}

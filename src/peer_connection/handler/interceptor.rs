@@ -417,38 +417,48 @@ impl<'a> InterceptorHandler<'a> {
                 continue;
             };
             for &source in &goodbye.sources {
-                // The source left, whether it was a stream of its own or a contributor to a
-                // mixer's (a CSRC): no receiver lists it any more.
-                for transceiver in self.rtp_transceivers.iter_mut() {
-                    if let Some(receiver) = transceiver.receiver_mut() {
-                        receiver.forget_source(source);
-                    }
-                }
-                let Some(index) = self.rtp_transceivers.iter().position(|transceiver| {
-                    transceiver
-                        .receiver()
-                        .as_ref()
-                        .is_some_and(|receiver| receiver.track().ssrcs().any(|ssrc| ssrc == source))
-                }) else {
-                    continue;
-                };
-                let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
-                    continue;
-                };
-                let track = receiver.track_mut();
-                if track.muted() || track.ready_state() == MediaStreamTrackState::Ended {
-                    continue;
-                }
-                track.set_muted(true);
-                let track_id = track.track_id().clone();
-                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                    now,
-                    event: RTCEventInternal::RTCPeerConnectionEvent(
-                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(track_id)),
-                    ),
-                });
+                self.source_left(now, source);
             }
         }
+    }
+
+    /// A remote source has left the session: by a BYE (RFC 3550 6.6), or by the RTP timeout
+    /// (RFC 3550 6.3.5: nothing heard from it for five report intervals; the RTCP session's
+    /// `SourceTimedOut`). RFC 8830 section 3: a track whose SSRCs are all gone "has ended";
+    /// W3C webrtc 9.3, which governs track state under this API (RFC 9429 defers to it), has
+    /// the track muted (`OnMute`) instead, and only negotiation ends a remote track. Its next
+    /// RTP packet unmutes it.
+    fn source_left(&mut self, now: Instant, source: SSRC) {
+        // The source left, whether it was a stream of its own or a contributor to a mixer's
+        // (a CSRC): no receiver lists it any more.
+        for transceiver in self.rtp_transceivers.iter_mut() {
+            if let Some(receiver) = transceiver.receiver_mut() {
+                receiver.forget_source(source);
+            }
+        }
+        let Some(index) = self.rtp_transceivers.iter().position(|transceiver| {
+            transceiver
+                .receiver()
+                .as_ref()
+                .is_some_and(|receiver| receiver.track().ssrcs().any(|ssrc| ssrc == source))
+        }) else {
+            return;
+        };
+        let Some(receiver) = self.rtp_transceivers[index].receiver_mut() else {
+            return;
+        };
+        let track = receiver.track_mut();
+        if track.muted() || track.ready_state() == MediaStreamTrackState::Ended {
+            return;
+        }
+        track.set_muted(true);
+        let track_id = track.track_id().clone();
+        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+                RTCTrackEvent::OnMute(track_id),
+            )),
+        });
     }
 
     /// RFC 3550 6.1: every compound RTCP packet carries an SDES CNAME after its leading SR or
@@ -541,6 +551,8 @@ impl<'a> InterceptorHandler<'a> {
                     });
                 }
             }
+            // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE.
+            RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc),
             _ => {}
         }
     }

@@ -546,6 +546,8 @@ fn uri_email_and_phone_follow_their_grammars() {
 
 #[test]
 fn connection_data_follows_the_address_grammar_of_its_address_type() {
+    const LONG_LABEL: &str =
+        "c=IN IP4 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example\r\n";
     let c = |line: &str| session(&format!("{line}t=0 0\r\n"));
     let good = each(
         c,
@@ -559,6 +561,10 @@ fn connection_data_follows_the_address_grammar_of_its_address_type() {
             "c=IN IP6 host.example.com\r\n",
             // RFC 8866 section 5: an internationalized name is in its ASCII (ACE) form.
             "c=IN IP4 xn--bcher-kva.example\r\n",
+            // RFC 1034 / RFC 1035: a fully qualified name may end in the root's dot, and a
+            // label may start with a digit (RFC 1123 section 2.1).
+            "c=IN IP4 host.example.com.\r\n",
+            "c=IN IP4 61b445d2-6503.local\r\n",
             // RFC 8866 section 5.7: multicast, with a TTL for IPv4 and never for IPv6.
             "c=IN IP4 233.252.0.1/127\r\n",
             "c=IN IP4 233.252.0.1/0\r\n",
@@ -584,6 +590,14 @@ fn connection_data_follows_the_address_grammar_of_its_address_type() {
             "c=I/N IP4 0.0.0.0\r\n",
             "c=IN IP4 ::1\r\n",
             "c=IN IP4 a_b\r\n",
+            // RFC 8866 section 5: names "MUST comply with" RFC 1034 / RFC 1035: no empty
+            // label, none of more than 63 characters, no hyphen at either end of a label.
+            "c=IN IP4 host..example\r\n",
+            "c=IN IP4 -host.example\r\n",
+            "c=IN IP4 host-.example\r\n",
+            "c=IN IP6 host.-example\r\n",
+            "c=IN IP4 .example\r\n",
+            LONG_LABEL,
             "c=IN IP4 b\u{fc}cher.example\r\n",
             "c=IN IP6 b\u{fc}cher.example\r\n",
             "c=IN IP6 [::1]\r\n",
