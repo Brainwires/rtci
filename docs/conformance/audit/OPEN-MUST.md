@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4994 of 5084 (98.2 %).
-- Tested as the default (`tested`): 4971 of 5084 (97.8 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
-- Open (not tested in any form): 90: 19 untested, 50 partial, 20 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5004 of 5084 (98.4 %).
+- Tested as the default (`tested`): 4981 of 5084 (98.0 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Open (not tested in any form): 80: 19 untested, 41 partial, 19 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 9 | 0 |
-| C | partly implemented | 45 | 25 |
-| D | not implemented | 21 | 18 |
+| C | partly implemented | 36 | 16 |
+| D | not implemented | 20 | 17 |
 | E | cannot be met or observed inside this engine | 18 | 11 |
 | F | stale note: already tested on this tree | 5 | 0 |
-| all | | 113 | 68 |
+| all | | 103 | 58 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 80 rows, 47 of size S, 24 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 70 rows, 41 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 12 | 1 | 0 | 0 | 13 | 7 | 5 | 1 |
+| jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
@@ -89,17 +89,8 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | As RFC8842-5.1-1, for the answer | M | dtls-srtp |
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
 | RFC5761-5.1.3-4 | `rfc5761.md` | ICE checks run for the RTP component only once multiplexing is agreed | untested | C | Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6 | S | ice |
-| RFC5576-4.2-2 | `rfc5576.md` | A group lists at least one ssrc-id; MAY list more | partial | C | Use groups of three or more ids and `SIM` | S | jsep (running) |
-| RFC7728-6.2-2 | `rfc7728.md` | The hold-off period is 2 * RTT + T_dither_max, RTT the longest known | partial | C | Use the measured round trip | S | jsep (running) |
-| RFC7728-6.4-2 | `rfc7728.md` | The local-pause PAUSED is repeated a sufficient number of times | partial | C | Tune the repetitions to the observed loss | S | jsep (running) |
-| RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move one simulcast layer of a several-stream receiver to the section its MID names | S | jsep (running) |
-| RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
-| RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested | S | jsep (running) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
-| RFC7728-6.3-3 | `rfc7728.md` | PAUSED is repeated in the next two regular RTCP reports while paused | partial | C | As RFC7728-8.5-1 (the repeats ride the session's packets); still needed: tie the two repeats to the next two Regular packets (a session hook: attach to the next N regular compound packets) instead of a report-interval timer | M | jsep (running) |
-| RFC7728-8.2-4 | `rfc7728.md` | PAUSED is also in the next two regular RTCP reports | partial | C | As RFC7728-6.3-3 | M | jsep (running) |
-| RFC7728-8.5-1 | `rfc7728.md` | The messages follow the AVPF timing rules | partial | C | Lead (jsep16, read, not run): the RTCP session adopts every RTCP packet an upstream interceptor writes and schedules it by RFC 4585 3.5 (`RtcpSessionInterceptor::handle_write` -> `adopt`, `schedule_feedback`), and it sits closest to the wire (`Slot::RtcpSession`), so in the default chain PAUSE/RESUME already leave in its compound packets in the Early / Regular slots: an rtc2rtc test with pause negotiated that checks this would close it | M | jsep (running) |
 | RFC9429-5.1-1 | `rfc9429.md` | Offers and answers comply with the listed specifications (RFC 3264, ... | partial | C | Umbrella of the per-spec audits | L | jsep (running) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | partial | C | The draft's threshold time base is a setting (`Gcc::with_threshold_time_base`), not the default: it measured worse on queueing delay, no interop failure. Owner decision on the default | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | partial | C | Congestion feedback leaves at once by default (`with_immediate_congestion_feedback`): a browser sender did not climb past 300 kbit/s with RFC timing; no named failing cell. Owner decision | S | media (running) |
@@ -128,7 +119,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
 | WEBRTC-4.4.1.4-91 | `w3c-webrtc-pc.md` | Events fire in order: signalingstatechange, channel errors, mute, ... | partial | C | Queue the data channel errors of a description in the spec order | M | w3c |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | missing | D | ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833) | M | dtls-srtp |
-| RFC7728-6.2-4 | `rfc7728.md` | A sender with hold-off 0 that learns of several receivers uses the ... | missing | D | Detect several receivers (RFC7728-6.2-5) | M | jsep (running) |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | partial | D | A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it | S | media (running) |
 | RFC6464-4-2 | `rfc6464.md` | Signalled with vad=on, the V bit is in use and set by senders | missing | D | Write and read `vad=on` / `vad=off`; set the V bit | S | media (running) |
 | RFC6464-4-6 | `rfc6464.md` | The semantics (including vad) of an extension ID change within an RTP ... | untested | D | Track `vad` per extension ID; needs RFC6464-4-2 | S | media (running) |
