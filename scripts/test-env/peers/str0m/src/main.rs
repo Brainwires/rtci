@@ -519,23 +519,10 @@ impl Peer {
             }
             for f in frames {
                 busy = true;
-                // str0m's active candidate is announced on port 9 (RFC 6544 4.5); the
-                // connection's own address is the other form it may know it by.
-                let alt = SocketAddr::new(local.ip(), 9);
-                let input_local = Input::Receive(
-                    Instant::now(),
-                    Receive {
-                        proto: Protocol::Tcp,
-                        source: peer,
-                        destination: local,
-                        contents: f.as_slice().try_into().map_err(err("tcp"))?,
-                    },
-                );
-                let dest = if self.rtc.accepts(&input_local) {
-                    local
-                } else {
-                    alt
-                };
+                // A request or response belongs to the local candidate it arrived on, by its
+                // address (is Agent: `v.addr() == req.destination`): the active candidate's,
+                // announced with the discard port 9 (RFC 6544 4.5), not the connection's own.
+                let dest = SocketAddr::new(local.ip(), 9);
                 self.input(Protocol::Tcp, peer, dest, &f);
             }
         }
@@ -1442,7 +1429,16 @@ fn main() {
     let out = match Peer::new(plan) {
         Ok(mut p) => {
             let r = p.run();
-            p.result(r)
+            let out = p.result(r);
+            // A closing handshake, so Rust's side sees the session end cleanly.
+            let _ = p.ws.close(None);
+            for _ in 0..50 {
+                if p.ws.flush().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            out
         }
         Err(e) => {
             json!({"ok": false, "error": e, "na": null, "steps": [], "descriptions": [], "localCandidates": [], "rustErrors": []})
