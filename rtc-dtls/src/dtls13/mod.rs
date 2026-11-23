@@ -6,6 +6,7 @@
 //! association is run from here: its own record layer ([`record`]), key schedule
 //! ([`key_schedule`]) and handshake.
 
+pub(crate) mod certificate_checks;
 pub(crate) mod codec;
 pub(crate) mod conn;
 #[cfg(any(fuzzing, test))]
@@ -42,6 +43,8 @@ mod psk_test;
 mod record_test;
 #[cfg(test)]
 mod reliability_test;
+#[cfg(test)]
+mod rfc8446_conformance_test;
 
 /// DTLS 1.3 on the wire, in `supported_versions` (RFC 9147 section 5.3).
 pub(crate) const DTLS1_3_WIRE_VERSION: u16 = 0xfefc;

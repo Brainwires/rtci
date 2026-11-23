@@ -352,7 +352,33 @@ async fn rfc_8627_flexfec_recovers_every_dropped_packet() -> Result<()> {
     recovers_every_dropped_packet(Fec::Rfc8627).await
 }
 
+/// RFC 3711 section 10: "FEC [is] applied before SRTP processing on the sender side, and
+/// after SRTP processing on the receiver side". The loss happens on the wire this time: SRTP
+/// packets of the media SSRC are dropped after protection, as a network loses them. Their
+/// payload is rebuilt plaintext only because the repair packets were made from the plaintext
+/// RTP before SRTP protected both (and travel as SRTP themselves), and the receiver rebuilds
+/// after SRTP has authenticated and decrypted what arrived. FEC over the ciphertext on one
+/// side and over plaintext on the other recovers nothing that verifies.
+#[tokio::test]
+async fn fec_is_made_before_srtp_and_applied_after_it() -> Result<()> {
+    run_fec(Fec::Rfc8627, true).await
+}
+
 async fn recovers_every_dropped_packet(fec: Fec) -> Result<()> {
+    run_fec(fec, false).await
+}
+
+/// Whether `datagram` is an SRTP packet (RFC 7983: first byte 128 to 191, not RTCP) of
+/// `ssrc`; then its sequence number.
+fn srtp_sequence_number(datagram: &[u8], ssrc: SSRC) -> Option<u16> {
+    let is_rtp = datagram.len() >= 12
+        && (128..=191).contains(&datagram[0])
+        && !(200..=204).contains(&datagram[1]);
+    (is_rtp && datagram[8..12] == ssrc.to_be_bytes())
+        .then(|| u16::from_be_bytes([datagram[2], datagram[3]]))
+}
+
+async fn run_fec(fec: Fec, drop_on_the_wire: bool) -> Result<()> {
     common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -400,9 +426,14 @@ async fn recovers_every_dropped_packet(fec: Fec) -> Result<()> {
     let offerer_local_addr = offerer_socket.local_addr()?;
 
     let mut offerer_media_engine = media_engine(fec)?;
-    let offerer_registry = fec
-        .encoder(Registry::new())
-        .with(Slot::from(DROP_FILTER_SLOT), DropFilter::new(dropped_tx));
+    let offerer_registry = if drop_on_the_wire {
+        fec.encoder(Registry::new())
+    } else {
+        fec.encoder(Registry::new()).with(
+            Slot::from(DROP_FILTER_SLOT),
+            DropFilter::new(dropped_tx.clone()),
+        )
+    };
 
     let mut offerer_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())
@@ -482,6 +513,13 @@ async fn recovers_every_dropped_packet(fec: Fec) -> Result<()> {
 
     while start.elapsed() < deadline {
         while let Some(msg) = offerer_pc.poll_write() {
+            if drop_on_the_wire
+                && let Some(sequence_number) = srtp_sequence_number(&msg.message, MEDIA_SSRC)
+                && u64::from(sequence_number) % DROP_ONE_IN == 3
+            {
+                let _ = dropped_tx.send(sequence_number);
+                continue;
+            }
             offerer_socket
                 .send_to(&msg.message, msg.transport.peer_addr)
                 .await?;

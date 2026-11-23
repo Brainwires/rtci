@@ -449,6 +449,9 @@ pub struct SettingEngine {
     /// budget via rtc-sctp's `max_payload_size_for_mtu`. `None` uses the rtc-sctp
     /// default (`INITIAL_MTU`, 1191 — the TURN-relayed IPv6 minimum-MTU budget).
     pub(crate) sctp_mtu: Option<u32>,
+    /// SCTP path MTU discovery (RFC 8899 section 6.2.3): `Some` with the largest IP packet to
+    /// probe for, `None` off. Unset is the default, on up to 1500 bytes.
+    pub(crate) sctp_path_mtu_discovery: Option<Option<u32>>,
     /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6, RFC 8831 section
     /// 6.4). `None` is the default, on.
     pub(crate) sctp_weighted_fair_queueing: Option<bool>,
@@ -1968,15 +1971,16 @@ impl SettingEngineBuilder {
     /// headers, and 4 bytes of TURN ChannelData framing when relayed.
     ///
     /// Left unset, the budget follows the path: RFC 8831 section 5 says the initial path MTU
-    /// at the IP layer "SHOULD NOT exceed 1200 bytes for IPv4 and 1280 bytes for IPv6", and
-    /// the association does not probe for more, so an SCTP packet is what is left of that
-    /// under the headers of the selected candidate pair and the negotiated DTLS cipher suite
+    /// at the IP layer "SHOULD NOT exceed 1200 bytes for IPv4 and 1280 bytes for IPv6", so an
+    /// SCTP packet starts as what is left of that under the headers of the selected candidate pair and the negotiated DTLS cipher suite
     /// (1135 bytes over IPv4 and UDP with AES-GCM, 1195 over IPv6), recomputed when ICE
     /// selects another pair. Until a pair is selected it is 1191 (the TURN-relayed IPv6
     /// budget, webrtc-rs/rtc#178). Set this only for paths with a known different budget:
     /// raise it where the path genuinely carries more (fewer, larger packets cut per-packet
     /// overhead), lower it for tunnels with an even smaller MTU. A value set here is used as
-    /// it is on every path.
+    /// it is on every path, and path MTU discovery
+    /// ([`with_sctp_path_mtu_discovery`](Self::with_sctp_path_mtu_discovery)), which grows the
+    /// packets from the initial size otherwise, is off.
     ///
     /// The per-chunk payload budget is derived from this value by the inverse of the
     /// default derivation (minus the 12-byte common header and 16-byte DATA chunk header,
@@ -1985,6 +1989,23 @@ impl SettingEngineBuilder {
     /// representable padded DATA packet — are raised to 32 with a warning.
     pub fn with_sctp_mtu(mut self, mtu: u32) -> Self {
         self.0.sctp_mtu = Some(mtu);
+        self
+    }
+
+    /// SCTP path MTU discovery (RFC 8261 section 4, RFC 8831 section 5: SCTP over DTLS
+    /// "MUST" discover the path MTU without ICMP; RFC 8899 section 6.2.3 is the method).
+    /// Once the association is established it confirms the initial packet size (RFC 8831
+    /// section 5's 1200 / 1280-byte IP packet under the headers of the selected pair and
+    /// the DTLS record) with a probe, a HEARTBEAT and a PAD chunk (RFC 4820) of exactly the
+    /// size tried, then searches for larger packets up to `max_ip_packet` bytes at the IP
+    /// layer (the local interface MTU; 1500, Ethernet's, by default), comes back to the
+    /// initial size when the path stops carrying the larger one, and searches again every
+    /// 600 seconds and after ICE selects another pair. Probes carry no data and are lost
+    /// without consequence where the path is smaller. `None` turns it off: the packet size
+    /// then stays the initial one. A fixed [`with_sctp_mtu`](Self::with_sctp_mtu) turns it
+    /// off too.
+    pub fn with_sctp_path_mtu_discovery(mut self, max_ip_packet: Option<u32>) -> Self {
+        self.0.sctp_path_mtu_discovery = Some(max_ip_packet);
         self
     }
 

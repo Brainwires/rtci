@@ -23,6 +23,8 @@ mod mbedtls_cid_kat_test;
 mod openssl_kat_test;
 #[cfg(test)]
 mod openssl_recordings;
+#[cfg(test)]
+mod rfc5246_rows_test;
 
 use crate::alert::*;
 use crate::application_data::*;
