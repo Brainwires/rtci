@@ -1,0 +1,77 @@
+name: agent-test
+
+# A targeted test run on a GitHub-hosted runner, started by hand (workflow_dispatch) for one ref
+# and one command. It exists so that checking a change does not have to wait for a container slot
+# on our own machines: it never runs on the self-hosted pools, and it starts no other workflow.
+# Dispatch it through the ci tools with an owner, for example:
+#   ref: conf/some-branch   command: cargo test -p rtc-ice --no-fail-fast
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test
+        required: true
+        type: string
+      command:
+        description: Shell command to run at the repository root
+        required: true
+        type: string
+      os:
+        description: GitHub-hosted runner
+        required: false
+        default: ubuntu-latest
+        type: choice
+        options: [ ubuntu-latest, macos-latest, windows-latest ]
+      purpose:
+        description: Who asked and why (shown in the run name)
+        required: false
+        default: ''
+        type: string
+
+run-name: "agent-test ${{ inputs.ref }} ${{ inputs.purpose }}"
+
+concurrency:
+  group: agent-test-${{ inputs.ref }}-${{ inputs.command }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  run:
+    name: Run (${{ inputs.os }})
+    # GitHub-hosted only: this job must never take a slot on the self-hosted pools.
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: agent-test
+      - name: Run the command
+        shell: bash
+        env:
+          AGENT_COMMAND: ${{ inputs.command }}
+        run: |
+          set -o pipefail
+          echo "ref: $(git rev-parse HEAD)"
+          bash -c "$AGENT_COMMAND" 2>&1 | tee agent-test.log
+      - name: Test totals
+        if: always()
+        shell: bash
+        run: |
+          awk '/^test result:/ { for (i = 1; i <= NF; i++) { if ($(i+1) ~ /^passed/) p += $i; if ($(i+1) ~ /^failed/) f += $i; if ($(i+1) ~ /^ignored/) g += $i } n++ }
+               END { printf "test binaries %d, passed %d, failed %d, ignored %d\n", n, p, f, g }' agent-test.log | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^test .* \.\.\. FAILED|^---- .* stdout ----|panicked at' agent-test.log | head -60 || true
+      - name: Disk left after the build
+        if: always()
+        shell: bash
+        run: df -h . | tail -1
