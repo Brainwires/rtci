@@ -210,6 +210,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     5.3), and a repair packet that precedes its stream is dropped without being reported as
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
+- **peer connection**: one SSRC across clock rates is the default again
+  (`conf/media-23-clock-rate-default`). `SettingEngineBuilder::with_ssrc_per_clock_rate`
+  defaults to `false`; `true` is RFC 7160 section 4.1's SSRC per clock rate, as before. In the
+  browser matrix (train 9 round 4) Chromium and WebKit kept the track on the signalled SSRC and
+  counted no packet after a switch to a new one, in both offer directions; Firefox followed. The
+  RFC-form browser cells now run with `?ssrc_per_clock_rate=1` (interop-peer's query; `=0` is
+  gone) and are na-browser on Chromium and WebKit on that observation; the default cells check
+  one SSRC on every browser. Rows RFC7160-4.1-1 to 4.1-3 and RFC8834-4.3-6 are `partial`.
+- **peer connection**: `setCodecPreferences` no longer renumbers the codecs a sender's
+  `get_parameters()` lists. Before the first answer they carry the engine's payload types for
+  the preferred formats (they carried the 0 of each preference, so Opus read as PCMU's number);
+  once negotiated, the negotiated codecs stay until the next answer (W3C webrtc 4.4.1.4). The
+  browser matrix's clock-rate cells with Rust offering sent Opus on PCMU's payload type this
+  way: interop-peer took the number before the answer and kept it in its packetizer (it now also
+  puts the current number on every packet), and the cells check the format each phase was
+  decoded as.
+
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
     section 5.2.2): the formats of the most recent answer first in its order, then every

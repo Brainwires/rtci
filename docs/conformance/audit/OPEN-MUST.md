@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5000 of 5084 (98.3 %).
-- Tested as the default (`tested`): 4978 of 5084 (97.9 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 84: 19 untested, 45 partial, 19 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4996 of 5084 (98.3 %).
+- Tested as the default (`tested`): 4974 of 5084 (97.8 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 88: 19 untested, 49 partial, 19 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 9 | 0 |
-| C | partly implemented | 40 | 20 |
+| C | partly implemented | 44 | 20 |
 | D | not implemented | 20 | 17 |
 | E | cannot be met or observed inside this engine | 17 | 10 |
 | F | stale note: already tested on this tree | 5 | 0 |
-| all | | 106 | 61 |
+| all | | 110 | 61 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 74 rows, 45 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 78 rows, 49 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -44,6 +44,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
 | jsep (running) | 0 | 7 | 0 | 0 | 0 | 7 | 5 | 1 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
+| media (train 9) | 0 | 4 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | sctp | 0 | 0 | 1 | 1 | 1 | 3 | 2 | 0 | 1 |
@@ -108,6 +109,10 @@ Sorted by class, then owner, size and ID.
 | RFC5109-14-1 | `rfc5109.md` | The multiplexing configuration (separate stream or redundant ... | partial | C | Send side: derive the carriage (RED or separate stream) from the negotiated description instead of the application's choice | M | media (running) |
 | RFC7742-4-1 | `rfc7742.md` | An endpoint that can produce other orientations supports generating ... | partial | C | Attach CVO to the packets of a sender from the track's orientation | M | media (running) |
 | RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | partial | C | Tdr from the RFC 3550 6.2 algorithm instead of the report spacing | M | media (running) |
+| RFC7160-4.1-1 | `rfc7160.md` | A sender with RTCP on uses a different SSRC for each clock rate | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
+| RFC7160-4.1-2 | `rfc7160.md` | Send BYE and take a new SSRC when the clock rate switches back to one ... | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
+| RFC7160-4.1-3 | `rfc7160.md` | Next compound RTCP carries several SRs: current clock rate first, ... | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
+| RFC8834-4.3-6 | `rfc8834.md` | Sender changing between clock rates follows RFC 7160 4.1 | partial | C | The RFC 7160 4.1 form is the setting `with_ssrc_per_clock_rate(true)` since train 9 (browser matrix: libwebrtc does not follow a new SSRC); convert to `setting` once its RFC-form test is mutation-checked and the note takes RULES.md's form | S | media (train 9) |
 | RFC7742-6.2-10 | `rfc7742.md` | Parameter sets are signalled in-band; sprop-parameter-sets MUST NOT ... | partial | C | Strip `sprop-parameter-sets` from the answered H.264 fmtp | S | payload |
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | untested | C | Give an application-registered H.264 format without fmtp a `profile-level-id` | S | payload |
 | RFC8852-3-5 | `rfc8852.md` | Values are at most 255 octets and only ASCII alphanumerics (48-57, ... | partial | C | Read RID / RRID through the typed `RtpStreamId` codec in the handler, so a value that is not 1..255 alphanumerics is not used | S | rtp |

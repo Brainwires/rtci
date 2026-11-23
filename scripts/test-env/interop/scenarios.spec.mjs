@@ -845,12 +845,17 @@ test("getStats: RTP counters agree with the Rust side's", async ({ page }) => {
 
 // Rust sends an Opus track and streams the fixture; then it goes on with a 440 Hz tone in PCMU
 // (8 kHz) on the payload type the negotiation gave PCMU, then in PCMA (the same clock rate),
-// and then back to Opus. By default (RFC 7160 section 4.1: "MUST use a different SSRC for each
+// and then back to Opus. By default the stream stays on one SSRC. With `?ssrc_per_clock_rate=1`
+// (`with_ssrc_per_clock_rate(true)`, RFC 7160 section 4.1: "MUST use a different SSRC for each
 // different clock rate") the switch to 8 kHz moves the stream to a new SSRC, PCMA stays on it,
-// and the return to 48 kHz takes yet another one after a BYE; with `?ssrc_per_clock_rate=0` it
-// stays on one SSRC. Either way the browser's receiver must keep receiving and playing: what
-// it counts on its track's inbound-rtp and which SSRCs its getSynchronizationSources() saw
-// (webrtc-pc 5.3).
+// and the return to 48 kHz takes yet another one after a BYE. Either way the browser's receiver
+// must keep receiving and playing: what it counts on its track's inbound-rtp and which SSRCs
+// its getSynchronizationSources() saw (webrtc-pc 5.3).
+//
+// The one-SSRC form is the default because libwebrtc's receivers (Chromium, WebKit) do not
+// follow the new SSRC: in train 9 round 4 their track stayed on the signalled SSRC and counted
+// no packet from the switch on, in both offer directions, while Firefox followed. The RFC-form
+// cells are n/a there, on that observation, and a real check on Firefox.
 //
 // The section has to carry Opus, PCMU and PCMA: the scenario's `audio_codecs` sets them as
 // the Rust track's codec preferences (its encoding names Opus, which alone narrows the
@@ -969,10 +974,29 @@ function expectAudioFollowsTheSwitch(r) {
       expect(p.played, `${p.codec}: the browser played only concealment: ${JSON.stringify(r)}`).toBeGreaterThan(0);
     }
     expect(p.sources, `${p.codec}: the receiver saw no packet of SSRC ${p.wire}: ${JSON.stringify(r)}`).toContain(p.wire);
+    // The format the browser decoded the phase as: the payload type Rust put on its packets.
+    // (Opus once went out on PCMU's number when Rust offered: the payload type was read from
+    // the sender's parameters before the answer.)
+    const mime = p.inbound.find((x) => x.ssrc === p.wire)?.mime;
+    if (mime !== undefined) {
+      expect(mime.toLowerCase(), `${p.codec}: the browser decoded it as ${mime}: ${JSON.stringify(r)}`).toBe(`audio/${p.codec.toLowerCase()}`);
+    }
   }
 }
 
 function expectAnSsrcPerClockRate(r) {
+  // libwebrtc keeps a single-stream receiver on the signalled SSRC: the phases Rust sent under
+  // a new SSRC reach no track. n/a when that is what happened, so a libwebrtc that starts to
+  // follow makes the cell a pass.
+  const libwebrtc = /^(chromium|webkit)/.test(test.info().project.name);
+  const moved = [r.pcmu, r.pcma, r.back].filter((p) => p && r.opus && p.wire !== r.opus.wire);
+  const unfollowed = moved.filter((p) => p.packets <= 100);
+  naBrowser(
+    libwebrtc && r.opus?.packets > 75 && unfollowed.length > 0,
+    "libwebrtc keeps the track on the signalled SSRC and stops counting when Rust moves to a new SSRC for another clock rate",
+    `observed: Opus on SSRC ${r.opus?.wire} counted ${r.opus?.packets} packets; ` +
+      unfollowed.map((p) => `${p.codec} on SSRC ${p.wire} counted ${p.packets}, the receiver saw sources ${JSON.stringify(p.sources)}`).join("; "),
+  );
   expectAudioFollowsTheSwitch(r);
   expect(r.pcmu.wire, `8 kHz after 48 kHz is another SSRC (RFC 7160 4.1): ${JSON.stringify(r)}`).not.toBe(r.opus.wire);
   expect(r.pcma.wire, `PCMA after PCMU is the same clock rate, the same SSRC: ${JSON.stringify(r)}`).toBe(r.pcmu.wire);
@@ -984,20 +1008,20 @@ function expectOneSsrc(r) {
   expect(new Set([r.opus.wire, r.pcmu.wire, r.pcma.wire, r.back.wire]).size, JSON.stringify(r)).toBe(1);
 }
 
-test("a codec of another clock rate mid-stream: the browser follows Rust to each new SSRC", async ({ page }) => {
-  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, WS, true));
+test("a codec of another clock rate mid-stream: one SSRC, the default", async ({ page }) => {
+  expectOneSsrc(await audioClockRateSwitch(page, WS, true));
 });
 
-test("a codec of another clock rate mid-stream, one SSRC (with_ssrc_per_clock_rate(false))", async ({ page }) => {
-  expectOneSsrc(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=0`, true));
+test("a codec of another clock rate mid-stream, an SSRC per clock rate (with_ssrc_per_clock_rate(true)): the browser follows Rust to each new SSRC", async ({ page }) => {
+  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=1`, true));
 });
 
-test("a codec of another clock rate mid-stream, the browser offering: it follows Rust to each new SSRC", async ({ page }) => {
-  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, WS, false));
+test("a codec of another clock rate mid-stream, the browser offering: one SSRC, the default", async ({ page }) => {
+  expectOneSsrc(await audioClockRateSwitch(page, WS, false));
 });
 
-test("a codec of another clock rate mid-stream, the browser offering, one SSRC (with_ssrc_per_clock_rate(false))", async ({ page }) => {
-  expectOneSsrc(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=0`, false));
+test("a codec of another clock rate mid-stream, the browser offering, an SSRC per clock rate (with_ssrc_per_clock_rate(true)): it follows Rust to each new SSRC", async ({ page }) => {
+  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=1`, false));
 });
 
 // ---- the browser's SSRCs unsignalled: RTX found by its payload type (RFC 4588 5.3) ----
