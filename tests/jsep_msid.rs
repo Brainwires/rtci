@@ -162,3 +162,68 @@ fn local_msid_lines_have_no_appdata_unless_asked() -> TestResult {
     }
     Ok(())
 }
+
+/// The track's ready state after `pc` applied `offer` and answered it.
+fn track_state(
+    pc: &mut RTCPeerConnection,
+    offer: String,
+) -> Result<rtc::media_stream::MediaStreamTrackState, Box<dyn std::error::Error>> {
+    remote_track(pc, offer)?;
+    let id = pc.get_transceivers().next().expect("transceiver");
+    let receiver = pc
+        .rtp_transceiver(id)
+        .expect("transceiver")
+        .receiver()
+        .expect("receiver");
+    Ok(pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .track()
+        .ready_state())
+}
+
+/// RFC 8830 section 3: "When a session description is updated to no longer list any 'msid'
+/// attribute on a specific media description, the recipient can signal to its application
+/// that the corresponding MediaStreamTrack has ended." By default the W3C model governs: the
+/// section still sends, so the track stays live, in the session's default stream. With
+/// `with_msid_removal_ends_track(true)` it ends; a section that stops sending (recvonly
+/// here, msid gone with it) only changes direction, which "will not end the
+/// MediaStreamTrack" either way.
+#[test]
+fn a_section_that_drops_its_msid_ends_the_track_only_when_asked() -> TestResult {
+    use rtc::media_stream::MediaStreamTrackState::{Ended, Live};
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    let peer = |ends: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_msid_removal_ends_track(ends)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    let with_msid = || offer("a=msid:stream\n", "");
+    for ends in [false, true] {
+        let mut pc = peer(ends)?;
+        assert_eq!(track_state(&mut pc, with_msid())?, Live);
+        let after = track_state(&mut pc, offer("", ""))?;
+        assert_eq!(after, if ends { Ended } else { Live }, "ends {ends}");
+
+        let mut pc = peer(ends)?;
+        assert_eq!(track_state(&mut pc, with_msid())?, Live);
+        let recvonly = with_msid()
+            .replace("a=sendonly\r\n", "a=recvonly\r\n")
+            .replace("a=msid:stream\r\n", "");
+        assert_eq!(
+            track_state(&mut pc, recvonly)?,
+            Live,
+            "ends {ends}: recvonly"
+        );
+    }
+    Ok(())
+}

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: a later remote description that asks for a new DTLS association is part of an ICE
+  restart (RFC 9429 sections 5.8.3 and 5.11, RFC 8842 section 6). `set_remote_description`
+  refuses a re-offer, or the answer to one, whose `a=tls-id` differs from the one in use without
+  new ICE credentials, and an answer that changes the remote fingerprint without them, while an
+  association is connecting or connected; such descriptions used to set up a new association on
+  the ICE session they had. New `SettingEngineBuilder::with_dtls_new_association_without_ice_restart(true)`
+  keeps that (RFC 8842 section 3.1 read alone).
+- **jsep**: new settings and an init helper for the owner's open decisions.
+  - `SettingEngineBuilder::with_msid_removal_ends_track(true)`: a still-sending remote section that
+    lists no `a=msid` any more ends its receiver's track (RFC 8830 section 3). The default keeps
+    the W3C model (the track stays, in the session's default stream).
+  - `RTCRtpTransceiverInit::with_simulcast_layers(encodings)`: the encodings are simulcast
+    layers; one without a rid gets a generated one (RFC 9429 section 5.2.1). Encodings without
+    rids given otherwise stay codec alternatives.
+  - `SettingEngineBuilder::with_stopping_transceiver_rejected_in_answer(true)`: an answer rejects
+    the section of a transceiver stopped after the offer arrived (RFC 9429 section 5.3.1), except
+    the offerer's BUNDLE-tagged one; the default is W3C 5.4's `a=inactive`.
 - **jsep**: the violated RFC 9429 / RFC 8839 / RFC 5888 rows.
   - `a=msid` lines carry no appdata by default (`a=msid:<stream id>`, RFC 9429 section
     5.2.1); new `SettingEngineBuilder::with_msid_appdata(true)` writes the track id as

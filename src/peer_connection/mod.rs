@@ -1824,6 +1824,7 @@ impl RTCPeerConnection {
         // put back as it was.
         let snapshot = self.description_snapshot();
         let (sdp_type, prior_state) = (remote_description.sdp_type, self.signaling_state);
+        let msid_sections = self.remote_sections_with_msid();
         let applied = self.apply_remote_description(
             now,
             remote_description,
@@ -1833,7 +1834,7 @@ impl RTCPeerConnection {
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
         } else {
-            self.after_remote_description(sdp_type, prior_state);
+            self.after_remote_description(sdp_type, prior_state, msid_sections);
         }
         applied
     }
@@ -2241,11 +2242,76 @@ impl RTCPeerConnection {
             }
         }
 
-        if extract_ice_details(parsed)?.is_some() {
-            extract_fingerprints(parsed)?;
+        if let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(parsed)? {
+            let fingerprints = extract_fingerprints(parsed)?;
+            self.check_dtls_change_restarts_ice(parsed, answers, &ufrag, &pwd, &fingerprints)?;
         }
         // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
         remote_candidates(parsed)?;
+        Ok(())
+    }
+
+    /// A later description that asks for a new DTLS association is part of an ICE restart:
+    ///
+    /// - RFC 9429 section 5.8.3: "If this is a re-offer or a response to a re-offer and the
+    ///   tls-id value is different from that presently in use, the DTLS connection is not being
+    ///   continued and the remote description MUST be part of an ICE restart, together with
+    ///   new ufrag and password values";
+    /// - section 5.11, for an answer or provisional answer: "If the remote DTLS fingerprint has
+    ///   been changed or the value of the 'a=tls-id' attribute has changed, tear down the DTLS
+    ///   connection. ... If a DTLS connection needs to be torn down but the answer does not
+    ///   indicate an ICE restart or, in the case of 'have-remote-pranswer', new ICE
+    ///   credentials, an error MUST be generated."
+    ///
+    /// RFC 8842 section 6 agrees: a new association over ICE needs "a completely new set of
+    /// ICE candidates". `with_dtls_new_association_without_ice_restart(true)` lets such a
+    /// description through (RFC 8842 section 3.1 alone).
+    fn check_dtls_change_restarts_ice(
+        &self,
+        parsed: &::sdp::description::session::SessionDescription,
+        answers: bool,
+        ufrag: &str,
+        pwd: &str,
+        fingerprints: &[RTCDtlsFingerprint],
+    ) -> Result<()> {
+        if self.setting_engine.dtls_new_association_without_ice_restart
+            || self.transport_closed
+            || self.ice_transport().state() == RTCIceTransportState::New
+            // Only an association in use is "continued" or "torn down": one that is not set up
+            // yet, or that closed or failed, is simply started anew (section 5.11, third item).
+            || !matches!(
+                self.dtls_transport().state(),
+                RTCDtlsTransportState::Connecting | RTCDtlsTransportState::Connected
+            )
+            || self.ice_transport().have_remote_credentials_change(ufrag, pwd)
+        {
+            return Ok(());
+        }
+        let dtls = self.dtls_transport();
+        let remote_tls_id = extract_tls_id(parsed)?;
+        if let (Some(previous), Some(new)) =
+            (dtls.remote_tls_id.as_deref(), remote_tls_id.as_deref())
+            && previous != new
+        {
+            return Err(Error::SdpInvalidValue(format!(
+                "a=tls-id:{new} replaces {previous} without an ICE restart (RFC 9429 section \
+                 5.8.3)"
+            )));
+        }
+        if answers
+            && dtls
+                .remote_dtls_parameters
+                .as_ref()
+                .is_some_and(|previous| {
+                    !transport::dtls::same_fingerprints(&previous.fingerprints, fingerprints)
+                })
+        {
+            return Err(Error::SdpInvalidValue(
+                "the answer changes the DTLS fingerprint without an ICE restart (RFC 9429 \
+                 section 5.11)"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 

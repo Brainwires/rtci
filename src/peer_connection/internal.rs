@@ -840,8 +840,17 @@ impl RTCPeerConnection {
                         // arrived is W3C "stopping", which "will not affect createAnswer" (W3C
                         // webrtc-pc 5.4 `stop()`, "to avoid problems with RFC 8843": the section
                         // may be the BUNDLE-tagged one); it answers inactive, and is rejected by
-                        // the next offer.
-                        if include_unmatched && self.rtp_transceivers[i].stopped() {
+                        // the next offer. With `with_stopping_transceiver_rejected_in_answer`
+                        // the answer rejects it (RFC 9429 section 5.3.1), unless it is the
+                        // offerer's BUNDLE tag, which keeps the W3C form.
+                        let rejected_by_answer = !include_unmatched
+                            && self.setting_engine.stopping_transceiver_rejected_in_answer
+                            && remote_parsed.as_ref().is_some_and(|parsed| {
+                                bundle_group_mids(parsed).first() != Some(&mid_value.as_str())
+                            });
+                        if (include_unmatched || rejected_by_answer)
+                            && self.rtp_transceivers[i].stopped()
+                        {
                             media_sections.push(MediaSection {
                                 mid: mid_value.to_owned(),
                                 rejected: true,

@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -40,8 +41,13 @@ struct Peer {
 
 impl Peer {
     fn new(addr: &str) -> Result<Self> {
+        Self::with_setting_engine(addr, SettingEngine::default())
+    }
+
+    fn with_setting_engine(addr: &str, setting_engine: SettingEngine) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(setting_engine)
             .build(Instant::now())?;
         Ok(Self {
             pc,
@@ -342,6 +348,14 @@ fn a_rolled_back_ice_restart_offer_leaves_the_ice_session_as_it_was() -> Result<
 #[test]
 fn a_rolled_back_offer_for_a_new_dtls_association_keeps_the_association() -> Result<()> {
     let mut world = World::new()?;
+    // The munged offer asks for a new association without an ICE restart, which the answerer
+    // takes only with this setting (RFC 9429 section 5.8.3 refuses it by default).
+    world.peers[1] = Peer::with_setting_engine(
+        "10.0.0.2:5000",
+        SettingEngineBuilder::new()
+            .with_dtls_new_association_without_ice_restart(true)
+            .build(),
+    )?;
     world.connect()?;
     let first_answer = world.peers[1]
         .pc

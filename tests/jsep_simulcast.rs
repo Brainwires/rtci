@@ -590,3 +590,52 @@ fn an_offer_can_ask_to_receive_simulcast() -> TestResult {
     assert_eq!(layers, vec!["f", "h", "q"]);
     Ok(())
 }
+
+/// RFC 9429 section 5.2.1: for a sender with several encodings, "an 'a=rid' line for each
+/// encoding ... If the application has not set an rid ..., an rid-id value MUST be generated".
+/// Encodings stated to be simulcast layers (`with_simulcast_layers`) are offered as layers
+/// with generated rids (no user data, one byte each), rids the application set are kept;
+/// encodings without rids and without that statement stay codec alternatives of one stream
+/// (`codec_negotiation.rs::test_add_track_negotiates_non_first_codec`).
+#[test]
+fn simulcast_layers_without_rids_get_generated_rids() -> TestResult {
+    use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+    use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    for (given, expected) in [
+        (["", "", ""], ["0", "1", "2"]),
+        (["", "1", ""], ["0", "1", "2"]),
+        (["0", "", "hi"], ["0", "1", "hi"]),
+    ] {
+        let mut pc = default_peer()?;
+        let encodings = given
+            .iter()
+            .map(|rid| RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    rid: (*rid).to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(
+                RTCRtpTransceiverInit::with_direction(RTCRtpTransceiverDirection::Sendonly)
+                    .with_simulcast_layers(encodings),
+            ),
+        )?;
+        let offer = pc.create_offer(None)?.sdp;
+        let rid_lines: Vec<String> = expected.iter().map(|r| format!("a=rid:{r} send")).collect();
+        assert_eq!(
+            lines_with(&offer, "a=rid:"),
+            rid_lines,
+            "{given:?}\n{offer}"
+        );
+        assert_eq!(
+            lines_with(&offer, "a=simulcast:"),
+            [format!("a=simulcast:send {}", expected.join(";"))],
+            "{given:?}"
+        );
+    }
+    Ok(())
+}

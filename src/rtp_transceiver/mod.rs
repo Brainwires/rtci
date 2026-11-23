@@ -234,6 +234,54 @@ impl RTCRtpTransceiverInit {
     pub fn recvonly() -> Self {
         Self::with_direction(RTCRtpTransceiverDirection::Recvonly)
     }
+
+    /// Sends `encodings` as simulcast layers: each one an RTP stream of its own, named by
+    /// its rid in the description (`a=rid` and `a=simulcast`, RFC 8853).
+    ///
+    /// In this API several encodings *without* rids are codec alternatives of one stream
+    /// (the first one the negotiation allows is sent), as upstream has them. Encodings given
+    /// here are layers instead: one without a rid gets one generated, as RFC 9429 section
+    /// 5.2.1 asks when the application set none ("an rid-id value MUST be generated ... it
+    /// MUST NOT contain user data, ... SHOULD be no more than 3 bytes"): the smallest
+    /// decimal number (`0`, `1`, ...) no other encoding uses. Rids the application set are
+    /// kept.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+    /// use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+    ///
+    /// let init = RTCRtpTransceiverInit::default()
+    ///     .with_simulcast_layers(vec![RTCRtpEncodingParameters::default(); 3]);
+    /// let rids: Vec<&str> = init
+    ///     .send_encodings
+    ///     .iter()
+    ///     .map(|e| e.rtp_coding_parameters.rid.as_str())
+    ///     .collect();
+    /// assert_eq!(rids, ["0", "1", "2"]);
+    /// ```
+    pub fn with_simulcast_layers(mut self, mut encodings: Vec<RTCRtpEncodingParameters>) -> Self {
+        let mut next = 0usize;
+        for i in 0..encodings.len() {
+            if !encodings[i].rtp_coding_parameters.rid.is_empty() {
+                continue;
+            }
+            let rid = loop {
+                let candidate = next.to_string();
+                next += 1;
+                if !encodings
+                    .iter()
+                    .any(|e| e.rtp_coding_parameters.rid == candidate)
+                {
+                    break candidate;
+                }
+            };
+            encodings[i].rtp_coding_parameters.rid = rid;
+        }
+        self.send_encodings = encodings;
+        self
+    }
 }
 
 /// RTCRtpTransceiver represents a permanent pairing of an RTP sender and RTP receiver that share a common mid.

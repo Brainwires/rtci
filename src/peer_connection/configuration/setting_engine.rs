@@ -401,6 +401,15 @@ pub struct SettingEngine {
     pub(crate) replay_protection: ReplayProtection,
     pub(crate) sdp_media_level_fingerprints: bool,
     pub(crate) disable_sdp_tls_id: bool,
+    /// A remote description may ask for a new DTLS association without an ICE restart (RFC
+    /// 8842 section 3.1 read without its section 6); off by default (RFC 9429 sections 5.8.3
+    /// and 5.11).
+    pub(crate) dtls_new_association_without_ice_restart: bool,
+    /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
+    pub(crate) msid_removal_ends_track: bool,
+    /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
+    /// the offer arrived.
+    pub(crate) stopping_transceiver_rejected_in_answer: bool,
     /// `use_srtp` only on an association that carries SRTP media (RFC 5764 section 4.1);
     /// inverted so that the derived `Default` is the browsers' form, the default.
     pub(crate) dtls_use_srtp_only_with_media: bool,
@@ -1485,6 +1494,84 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_disable_sdp_tls_id(mut self, is_disabled: bool) -> Self {
         self.0.disable_sdp_tls_id = is_disabled;
+        self
+    }
+
+    /// Accepts a remote description that asks for a new DTLS association without an ICE
+    /// restart.
+    ///
+    /// By default (`false`) a peer connection follows RFC 9429: a re-offer, or the answer to
+    /// one, whose `a=tls-id` differs from the one in use "MUST be part of an ICE restart"
+    /// (section 5.8.3), and an answer that changes the remote fingerprint or `tls-id`
+    /// without an ICE restart is an error (section 5.11); `set_remote_description` refuses
+    /// it. RFC 8842 section 6 asks the same over ICE ("at least one of the endpoints MUST
+    /// allocate a completely new set of ICE candidates"). With `true` such a description
+    /// establishes a new association on the ICE session it has (RFC 8842 section 3.1 alone),
+    /// for a peer that replaces its DTLS identity on the same ICE session.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_dtls_new_association_without_ice_restart(true)
+    ///     .build();
+    /// ```
+    pub fn with_dtls_new_association_without_ice_restart(mut self, allowed: bool) -> Self {
+        self.0.dtls_new_association_without_ice_restart = allowed;
+        self
+    }
+
+    /// Ends a remote track when a later remote description lists no `a=msid` on its media
+    /// section any more, while the section still sends.
+    ///
+    /// RFC 8830 section 3: "When a session description is updated to no longer list any
+    /// 'msid' attribute on a specific media description, the recipient can signal to its
+    /// application that the corresponding MediaStreamTrack has ended." In this API the W3C
+    /// webrtc-pc object model governs the track's state (RFC 9429 defers to it), and its
+    /// "process remote tracks" keeps the track, moved to the session's default stream; it is
+    /// muted when the section stops sending. That is the default (`false`). With `true` the
+    /// receiver's track ends ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)).
+    /// A direction change never ends the track (RFC 8830 section 3).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_msid_removal_ends_track(true)
+    ///     .build();
+    /// ```
+    pub fn with_msid_removal_ends_track(mut self, ends: bool) -> Self {
+        self.0.msid_removal_ends_track = ends;
+        self
+    }
+
+    /// Rejects, in an answer, the m= section of a transceiver that was stopped after the
+    /// offer arrived.
+    ///
+    /// RFC 9429 section 5.3.1: an m= section "MUST be rejected ... if the associated
+    /// RtpTransceiver has been stopped". W3C webrtc-pc 5.4 `stop()` puts such a transceiver
+    /// in the "stopping" state, which "will not affect createAnswer" ("to avoid problems with
+    /// RFC 8843"): the section is answered `a=inactive` and rejected by the next offer. That is
+    /// the default (`false`), what browsers do. With `true` the answer rejects it (port 0)
+    /// and the offerer stops its transceiver when it applies the answer; the offerer's
+    /// BUNDLE-tagged section keeps the W3C form, since rejecting it would take the group's
+    /// transport with it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_stopping_transceiver_rejected_in_answer(true)
+    ///     .build();
+    /// ```
+    pub fn with_stopping_transceiver_rejected_in_answer(mut self, rejected: bool) -> Self {
+        self.0.stopping_transceiver_rejected_in_answer = rejected;
         self
     }
 

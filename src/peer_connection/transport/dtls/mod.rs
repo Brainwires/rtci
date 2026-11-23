@@ -51,7 +51,7 @@ pub(crate) fn webrtc_default_cipher_suites() -> Vec<CipherSuiteId> {
 }
 
 /// Whether two remote fingerprint lists name the same certificates (order and hex case aside).
-fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool {
+pub(crate) fn same_fingerprints(a: &[RTCDtlsFingerprint], b: &[RTCDtlsFingerprint]) -> bool {
     let normalize = |list: &[RTCDtlsFingerprint]| {
         let mut v: Vec<(String, String)> = list
             .iter()
