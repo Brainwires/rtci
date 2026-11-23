@@ -3,6 +3,7 @@ members = [
     "rtc-crypto",
     "rtc-datachannel",
     "rtc-dtls",
+    "rtc-ffi",
     "rtc-ice",
     "rtc-interceptor",
     "rtc-interceptor-derive",

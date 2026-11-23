@@ -1,0 +1,37 @@
+[package]
+name = "rtc-ffi"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A C ABI over WebRTC.rs's sans-I/O engine, and an optional driven layer that owns its sockets"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# Not published: crate names on crates.io are the owner's decision (docs/packaging.md), and the
+# driven layer depends on the unpublished reference driver.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["driver"]
+# The driven layer (`rtc_driven_*`, `rtc_mux_*`): a peer connection that owns its sockets and a
+# background thread, on the reference tokio driver (`examples/stream-driver`).
+driver = ["dep:tokio", "dep:stream-driver"]
+
+[dependencies]
+rtc = { path = "..", version = "0.22.0" }
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, optional = true }
+stream-driver = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+# Compiles the C test program (tests/c/loopback.c) against the static library.
+cc = "1.2"
