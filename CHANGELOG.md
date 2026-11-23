@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: a remote answer with a media-level `a=ice-mismatch` is applied, and the stream's
+  ICE agent stops (`ice::Agent::stop_for_ice_mismatch`, RFC 8839 sections 4.2.5, 4.3.3, 5.3):
+  ICE fails and nothing is sent, since without ICE consent there is no RFC 3264 media path
+  (RFC 7675 section 5.1). Such an answer used to be refused. Needs `conf/ice-19-open-musts`.
 - **jsep**: W3C webrtc-pc SDP rows and the RFC 9429 / 3264 / 9143 / 8839 sweep.
   - `RTCRtpTransceiver::mid()` is `None` until a description with the mid is applied
     (W3C 4.4.1.6 `[[Mid]]`); `create_offer` alone no longer makes it visible.

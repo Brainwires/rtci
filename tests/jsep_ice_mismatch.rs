@@ -1,8 +1,8 @@
 //! `a=ice-mismatch` in an answer (RFC 8839 sections 4.2.5, 4.3.3 and 5.3): for that data
 //! stream "ICE procedures MUST NOT be used" and RFC 3264 procedures are used instead. A WebRTC
 //! endpoint has no media path without ICE (RFC 9429 section 5.1.1; consent, RFC 8826 section
-//! 4.2 and RFC 7675), so the answer is refused: the offerer stays in `have-local-offer`, runs
-//! no ICE for the stream, and takes an answer without the attribute.
+//! 4.2 and RFC 7675): the answer is applied and the stream's ICE agent stops (no checks, no
+//! consent, failed), so nothing is sent for it.
 
 mod dtls_sdp_common;
 
@@ -10,10 +10,10 @@ use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCSignalingState;
+use rtc::peer_connection::state::{RTCIceConnectionState, RTCSignalingState};
 
 #[test]
-fn an_answer_with_ice_mismatch_is_refused() -> Result<()> {
+fn an_answer_with_ice_mismatch_ends_ice_and_sends_nothing() -> Result<()> {
     let mut world = World::new(
         Peer::new("10.0.0.1:5000", SettingEngineBuilder::new().build())?,
         Peer::new("10.0.0.2:5000", SettingEngineBuilder::new().build())?,
@@ -32,23 +32,21 @@ fn an_answer_with_ice_mismatch_is_refused() -> Result<()> {
 
     let mismatch = answer.sdp.replace("a=mid:", "a=ice-mismatch\r\na=mid:");
     assert_ne!(mismatch, answer.sdp);
-    let refused = world.peers[0]
+    world.peers[0]
         .pc
-        .set_remote_description(now, RTCSessionDescription::answer(mismatch)?);
-    assert!(
-        refused.is_err(),
-        "an answer with a=ice-mismatch was accepted"
-    );
+        .set_remote_description(now, RTCSessionDescription::answer(mismatch)?)?;
     assert_eq!(
         world.peers[0].pc.signaling_state(),
-        RTCSignalingState::HaveLocalOffer
+        RTCSignalingState::Stable,
+        "the answer is applied"
     );
-    assert!(world.peers[0].pc.remote_description().is_none());
-
-    world.peers[0].pc.set_remote_description(now, answer)?;
     world.trickle()?;
-    world.run("the connection", |peers| {
-        peers.iter().all(|p| p.connected() && p.channel.is_some())
+    world.run("ICE ends for the stream", |peers| {
+        peers[0].pc.ice_connection_state() == RTCIceConnectionState::Failed
     })?;
+    assert!(
+        !world.peers[0].connected() && world.peers[0].channel.is_none(),
+        "no media path without ICE consent"
+    );
     Ok(())
 }

@@ -1886,8 +1886,34 @@ impl RTCPeerConnection {
             self.restore_description_snapshot(snapshot);
         } else {
             self.after_remote_description(sdp_type, prior_state, msid_sections);
+            self.apply_ice_mismatch(now, sdp_type);
         }
         applied
+    }
+
+    /// RFC 8839 sections 4.2.5 (item 3), 4.3.3 and 5.3: an answer with a media-level
+    /// `a=ice-mismatch` for a data stream means "ICE processing MUST be terminated for this
+    /// data stream". The stream's transport (this endpoint runs one, which carries every
+    /// bundled section) stops its ICE agent (`Agent::stop_for_ice_mismatch`): no checks, no
+    /// consent, state failed. The RFC 3264 procedures the RFC then calls for (media to the
+    /// `m=` / `c=` destination without ICE) are not taken: a WebRTC endpoint sends nothing to
+    /// a peer that did not consent by ICE (RFC 7675 section 5.1, RFC 8826 section 4.2), so
+    /// the stream gets no media.
+    fn apply_ice_mismatch(&mut self, now: Instant, sdp_type: RTCSdpType) {
+        if !matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
+            return;
+        }
+        let mismatch = self
+            .remote_description()
+            .and_then(|d| d.parsed.as_ref())
+            .is_some_and(|parsed| {
+                parsed.media_descriptions.iter().any(|media| {
+                    !is_rejected_media(media) && media.has_attribute(ATTR_KEY_ICE_MISMATCH)
+                })
+            });
+        if mismatch {
+            self.ice_transport_mut().agent.stop_for_ice_mismatch(now);
+        }
     }
 
     /// Gives the ICE and DTLS transports the parameters of a remote description: an answer's
@@ -2347,22 +2373,6 @@ impl RTCPeerConnection {
             }
         }
 
-        // RFC 8839 sections 4.2.5, 4.3.3, 5.3: a media-level `a=ice-mismatch` in an answer
-        // means "ICE procedures MUST NOT be used" for that stream and RFC 3264 procedures are
-        // used instead. This endpoint has no media path without ICE: a WebRTC endpoint sends
-        // only to peers that consent by ICE (RFC 8826 section 4.2, RFC 7675; RFC 9429 section
-        // 5.1.1 makes ICE mandatory). So such an answer is refused, and ICE is never run for
-        // the stream.
-        if answers
-            && let Some(index) = parsed.media_descriptions.iter().position(|media| {
-                !is_rejected_media(media) && media.has_attribute(ATTR_KEY_ICE_MISMATCH)
-            })
-        {
-            return Err(Error::SdpInvalidValue(format!(
-                "m= section {index}: a=ice-mismatch; this endpoint has no RFC 3264 media path \
-                 without ICE (RFC 8839 section 5.3, RFC 9429 section 5.1.1)"
-            )));
-        }
         if let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(parsed)? {
             let fingerprints = extract_fingerprints(parsed)?;
             self.check_dtls_change_restarts_ice(parsed, answers, &ufrag, &pwd, &fingerprints)?;
