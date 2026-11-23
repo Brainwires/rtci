@@ -854,25 +854,35 @@ fn sha1_schemes_are_listed_last_if_at_all() -> Result<()> {
 }
 
 /// RFC 8446 section 7.4.2: the ECDHE secret is the x-coordinate in full, leading zero bytes
-/// included: always 32 bytes for P-256 and 48 for P-384. One secret in 256 starts with a zero
-/// byte, so a few thousand exchanges would show one stripped.
+/// included: always 32 bytes for P-256 and 48 for P-384, and both sides compute the same
+/// bytes. Exchanges are drawn until one secret starts with a zero byte (one in 256 does);
+/// that secret has its full length on both sides and is byte for byte the same.
+///
+/// Not by fixed key pairs: the provider boundary (`RTCCrypto::start_key_exchange`) starts
+/// ephemeral exchanges only, and ring cannot import an ECDH private key at all. The bound on
+/// the draws makes a miss a 2^-1000 event, not a 0.3 % one, and the expected cost is about
+/// 256 exchanges per curve.
 #[test]
 fn ecdhe_secrets_keep_their_leading_zeros() -> Result<()> {
     use crate::curve::named_curve::NamedCurve;
+    const MAX_DRAWS: usize = 200_000;
     let provider = provider();
-    for (curve, length, rounds) in [(NamedCurve::P256, 32, 3000), (NamedCurve::P384, 48, 1500)] {
-        let mut leading_zero = 0;
-        for _ in 0..rounds {
+    for (curve, length) in [(NamedCurve::P256, 32), (NamedCurve::P384, 48)] {
+        let mut found = None;
+        for _ in 0..MAX_DRAWS {
             let mut ours = curve.generate_keypair_with_crypto(provider.crypto())?;
-            let theirs = curve.generate_keypair_with_crypto(provider.crypto())?;
-            let secret = ours.complete(&theirs.public_key)?;
-            assert_eq!(secret.len(), length, "{curve:?}");
-            leading_zero += usize::from(secret[0] == 0);
+            let mut theirs = curve.generate_keypair_with_crypto(provider.crypto())?;
+            let our_secret = ours.complete(&theirs.public_key)?;
+            let their_secret = theirs.complete(&ours.public_key)?;
+            assert_eq!(our_secret.len(), length, "{curve:?}");
+            assert_eq!(our_secret, their_secret, "{curve:?}: both sides agree");
+            if our_secret[0] == 0 {
+                found = Some(our_secret);
+                break;
+            }
         }
-        assert!(
-            leading_zero > 0,
-            "{curve:?}: some secret started with a zero byte"
-        );
+        let secret = found.unwrap_or_else(|| panic!("{curve:?}: no secret with a leading zero"));
+        assert_eq!(secret.len(), length, "{curve:?}: the leading zero is kept");
     }
     Ok(())
 }
