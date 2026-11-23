@@ -406,6 +406,10 @@ impl SctpTransport {
         let outcome = if !self.is_started {
             SctpNegotiationOutcome::Started
         } else if self.negotiated_ports == Some((local_port, remote_port)) {
+            // The association goes on; what the peer now accepts is what its latest
+            // description says (W3C webrtc-pc "set a session description": for an answer,
+            // when "an SCTP association already exists, update the data max message size").
+            self.update_max_message_size(remote_max_message_size);
             return Ok(SctpNegotiationOutcome::Unchanged);
         } else {
             // RFC 8841 section 9.3: "The existing SCTP association is closed, and the new
@@ -422,6 +426,32 @@ impl SctpTransport {
             remote_port,
         )?;
         Ok(outcome)
+    }
+
+    /// W3C webrtc-pc 6.1.1.2 "update the data max message size", from the remote
+    /// description's `a=max-message-size` (`remote_max_message_size`; 0 is "any size"):
+    /// `[[MaxMessageSize]]` and `[[MaxBufferSize]]` are set from it and from what this
+    /// endpoint can send, as [`Self::start`] sets them, and a running association sends by
+    /// the new limit. An answer or a provisional answer does this "if description initiates
+    /// the establishment of a new SCTP association ... or an SCTP association already
+    /// exists": before the association is started too (a provisional answer does not start
+    /// it), so that `maxMessageSize` is not null once the description is applied.
+    pub(crate) fn update_max_message_size(&mut self, remote_max_message_size: u32) {
+        let can_send_size = match self.max_message_size.as_usize() as u32 {
+            0 => SctpMaxMessageSize::MAX_MESSAGE_SIZE,
+            configured => configured,
+        };
+        let max_message_size =
+            SctpTransport::calc_message_size(remote_max_message_size, can_send_size);
+        self.negotiated_max_message_size = Some(max_message_size);
+        self.negotiated_max_buffer_size = Some(
+            remote_max_message_size
+                .max(can_send_size)
+                .max(DEFAULT_SEND_BUFFER_SIZE),
+        );
+        for association in self.sctp_associations.values_mut() {
+            association.set_max_message_size(max_message_size);
+        }
     }
 
     /// Whether applying `negotiated` ends the association this transport runs.

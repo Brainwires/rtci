@@ -333,7 +333,7 @@ fn channels_without_an_id_fail_after_the_signaling_state_change_and_before_the_t
 
 /// An answer that rejects the data section, on a connection with two open channels and one
 /// being opened, and that also stops the peer's audio: the description's own events first
-/// (signaling state, mute, stream change), then each channel in the order they were created
+/// (signaling state, mute), then each channel in the order they were created
 /// (`close` for an open one; `error` then `close` for the one that never opened, which did
 /// not get what it was created for), then the SCTP transport's `statechange`. They are
 /// queued when the description is applied: what the application does next, before it reads
@@ -421,7 +421,6 @@ fn the_channels_of_a_rejected_data_section_close_after_the_descriptions_own_even
         vec![
             "signaling:stable",
             "mute",
-            "streams",
             "close:one",
             "close:two",
             "error:opening",

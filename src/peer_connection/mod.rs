@@ -1719,6 +1719,9 @@ impl RTCPeerConnection {
             self.describe_other_transports(parsed);
         }
 
+        if local_description.sdp_type == RTCSdpType::Pranswer {
+            self.update_data_max_message_size();
+        }
         if matches!(
             local_description.sdp_type,
             RTCSdpType::Answer | RTCSdpType::Pranswer
@@ -3168,6 +3171,9 @@ impl RTCPeerConnection {
             }
         }
 
+        if remote_description.sdp_type == RTCSdpType::Pranswer {
+            self.update_data_max_message_size();
+        }
         if answers {
             self.assign_data_channel_ids();
         }
@@ -3802,6 +3808,28 @@ impl RTCPeerConnection {
     /// Running out of ids does not fail the description: the channels left without one keep a
     /// null id, and the SCTP connected procedure tries them again against the association's
     /// negotiated stream count.
+    /// W3C "set a session description", for a provisional answer: "If description initiates
+    /// the establishment of a new SCTP association ... or an SCTP association already exists,
+    /// update the data max message size of connection.[[SctpTransport]]". (A final answer
+    /// does it where it starts, keeps or replaces the association,
+    /// `SctpTransport::negotiate`.) The association itself is started by the final answer.
+    fn update_data_max_message_size(&mut self) {
+        let Some(local) = self.local_description().and_then(|d| d.parsed) else {
+            return;
+        };
+        let Some(remote) = self.remote_description().and_then(|d| d.parsed.clone()) else {
+            return;
+        };
+        if let SctpNegotiation::Association {
+            remote_max_message_size,
+            ..
+        } = negotiated_sctp(&local, &remote)
+        {
+            self.sctp_transport_mut()
+                .update_max_message_size(remote_max_message_size);
+        }
+    }
+
     fn assign_data_channel_ids(&mut self) {
         let dtls_role = self.dtls_transport().role();
         if !matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
