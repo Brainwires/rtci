@@ -506,15 +506,24 @@ fn with_discovery() -> [(&'static str, Settings); 2] {
 /// which start at what a 1200-byte IPv4 packet leaves, grow until their datagrams nearly fill
 /// 1400 bytes, and never pass it. When the path shrinks to 1250 bytes, the data sent at the
 /// larger size is lost, the association falls back to the initial size and every message
-/// arrives; the next search settles under 1250.
+/// arrives (small messages, which retransmissions bundle anew); the next search settles under
+/// 1250.
 #[test]
 fn path_mtu_discovery_grows_the_packets_to_the_path_and_back_when_it_shrinks() -> Result<()> {
     for (dtls, settings) in with_discovery() {
-        let (mut pair, local, remote) = connected_at(OFFERER, settings(), ANSWERER, settings())?;
-        let overhead = negotiated_record_overhead(&mut pair);
+        // The path carries 1400 bytes from the start: a message fragmented for a larger
+        // PLPMTU before the path narrowed would keep its fragments (RFC 9260 6.9).
+        let mut pair = Pair::with_setting_engines(OFFERER, settings(), ANSWERER, settings())?;
         for peer in [&mut pair.offerer, &mut pair.answerer] {
             peer.max_datagram = Some(1400);
         }
+        let local = pair.open_channel("data")?;
+        let remote = *pair
+            .answerer
+            .opened()
+            .last()
+            .expect("the answerer's channel");
+        let overhead = negotiated_record_overhead(&mut pair);
         // The search: confirmations take a round trip, each lost probe a 16-second timer.
         pair.run_for(std::time::Duration::from_secs(200))?;
         let largest = largest_datagram_of_a_large_message(&mut pair, local, remote)?;

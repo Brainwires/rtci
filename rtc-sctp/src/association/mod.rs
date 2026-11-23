@@ -3113,10 +3113,8 @@ impl Association {
             return false;
         }
         let nonce = u64::from_be_bytes(info[12..20].try_into().unwrap_or_default());
-        if let Some(pmtud) = self.pmtud.as_mut() {
-            if let Some(mtu) = pmtud.on_probe_ack(nonce, now) {
-                self.use_path_mtu(mtu, false);
-            }
+        if let Some(mtu) = self.pmtud.as_mut().and_then(|p| p.on_probe_ack(nonce, now)) {
+            self.use_path_mtu(mtu, false);
         }
         self.on_path_success();
         true
