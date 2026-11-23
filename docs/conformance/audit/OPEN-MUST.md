@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 650; rows that
   apply: 5095.
-- RFC behaviour tested (`tested` + `setting`): 4905 of 5095 (96.3 %).
-- Tested as the default (`tested`): 4893 of 5095 (96.0 %); `setting`: 12.
-- Open (not tested in any form): 190: 32 untested, 133 partial, 24 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting`): 4904 of 5095 (96.3 %).
+- Tested as the default (`tested`): 4892 of 5095 (96.0 %); `setting`: 12.
+- Open (not tested in any form): 191: 32 untested, 134 partial, 24 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 20 | 10 |
-| C | partly implemented | 121 | 99 |
+| C | partly implemented | 122 | 100 |
 | D | not implemented | 23 | 19 |
 | E | cannot be met or observed inside this engine | 20 | 14 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 202 | 153 |
+| all | | 203 | 154 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 170 rows, 116 of size S, 44 of size M, 10 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 171 rows, 117 of size S, 44 of size M, 10 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 16 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -44,7 +44,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
 | interceptors | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | jsep (running) | 10 | 82 | 2 | 10 | 0 | 104 | 79 | 23 | 2 |
-| media (running) | 0 | 16 | 16 | 4 | 0 | 36 | 20 | 9 | 7 |
+| media (running) | 0 | 17 | 16 | 4 | 0 | 37 | 21 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
 | sctp | 0 | 0 | 2 | 1 | 1 | 4 | 2 | 1 | 1 |
@@ -183,6 +183,7 @@ Sorted by class, then owner, size and ID.
 | RFC9429-5.2-1 | `rfc9429.md` | createOffer output includes the functionality of RFC 8834 | partial | C | Umbrella of the RFC 8834 audit | L | jsep (running) |
 | GCC-5.4-4 | `draft-ietf-rmcat-gcc.md` | del_var_th(i) = del_var_th(i-1) + (t(i) - t(i-1)) K(i) (abs(m(i)) - ... | partial | C | The draft's threshold time base is a setting (`Gcc::with_threshold_time_base`), not the default: it measured worse on queueing delay, no interop failure. Owner decision on the default | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | partial | C | Congestion feedback leaves at once by default (`with_immediate_congestion_feedback`): a browser sender did not climb past 300 kbit/s with RFC timing; no named failing cell. Owner decision | S | media (running) |
+| RFC4585-3.5.4-2 | `rfc4585.md` | avg_rtcp_size is updated for every RTCP packet sent or received, ... | partial | C | Count the congestion control feedback sent at once in `avg_rtcp_size` as the received is, or decide with RFC4585-3.5.2-5 (owner decision on immediate congestion feedback) | S | media (running) |
 | RFC5109-14.2-2 | `rfc5109.md` | An rtpmap gives the FEC a dynamic payload type listed as a secondary ... | partial | C | Check that the RED fmtp lists the ULPFEC payload type | S | media (running) |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | PDON starts at the DON before the earliest one, not 0 (kept on purpose); owner decision or a test that the RFC start orders a stream numbered from 0 | S | media (running) |
 | RFC6464-4-1 | `rfc6464.md` | Declared in extmap with URI ... | untested | C | Register `ssrc-audio-level` by default so a browser's offer is answered with it | S | media (running) |

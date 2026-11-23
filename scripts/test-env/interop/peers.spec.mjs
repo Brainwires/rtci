@@ -314,7 +314,10 @@ test("RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedbac
       { op: "connected" },
       { op: "await-rtp", kind: "video", packets: 100, ms: 20000 },
       { op: "rtcp", types: ["pli", "fir"] },
-      // RTCP reports go every second or so (RFC 3550 6.2; the stacks' report intervals).
+      // Room for several regular reports from each side. Their spacing is each stack's own:
+      // Rust's default (RFC 4585 4.2: no trr-int, so T_rr_interval 0) is the RFC 3550 6.2
+      // interval for 5% of the session bandwidth, tens of milliseconds at video rates; the
+      // peers report about once a second.
       { op: "wait", ms: 6000 },
       { op: "report" },
     ],
@@ -339,7 +342,14 @@ test("RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedbac
   if (peerBlocks !== null) expect(peerBlocks, `the peer received no reception report block from Rust: ${ctx(r)}`).toBeGreaterThan(0);
   else expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
   const secs = (r.steps || []).reduce((a, s) => a + (s.ms || 0), 0) / 1000;
-  console.log(`[${peerName()}] RTCP cell: ${secs.toFixed(1)} s; Rust sending SSRCs ${(stats.outbound || []).length}; the peer counted ${JSON.stringify(r.rtcp)}, ${peerBlocks} report blocks`);
+  // The media rate of the cell, so the RTCP counts are read against it (the peer's
+  // reflected audio and video run at a few hundred kbit/s at most, not at video call rates).
+  const mediaBytes = Object.values(r.rtp || {}).reduce((a, x) => a + (x.bytes || 0), 0);
+  const kbps = secs > 0 ? (mediaBytes * 8) / secs / 1000 : 0;
+  // Each peer counts every RTCP packet once as it arrives (pion: once per compound datagram,
+  // whichever of its streams the datagram is routed to; aiortc: before routing), not once
+  // per stream it reaches.
+  console.log(`[${peerName()}] RTCP cell: ${secs.toFixed(1)} s, ${kbps.toFixed(0)} kbit/s of media from Rust; Rust sending SSRCs ${(stats.outbound || []).length}; the peer counted ${JSON.stringify(r.rtcp)}, ${peerBlocks} report blocks`);
   expect(srs, `Rust took in no SR from the peer (remote-outbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(blocks, `Rust took in no report block about its streams (remote-inbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(r.rtcpSent?.pli || 0, ctx(r)).toBeGreaterThan(0);
