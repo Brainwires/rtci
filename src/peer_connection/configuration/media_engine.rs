@@ -103,9 +103,18 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
     };
     let asymmetric =
         |line: &str| parameter(line, "level-asymmetry-allowed").as_deref() == Some("1");
+    // RFC 6184 section 8.1: a format without `profile-level-id` is Constrained Baseline... at
+    // Level 1 ("the Baseline profile, without additional constraints at Level 1, MUST be
+    // inferred"); RFC 7742 section 6.2: the parameter is interpreted when received, so an
+    // offer without it is answered at no more than Level 1.
+    let profile_level_id = |line: &str| {
+        parameter(line, "profile-level-id").or_else(|| {
+            Some(crate::rtp_transceiver::fmtp::h264::DEFAULT_PROFILE_LEVEL_ID.to_owned())
+        })
+    };
     let (Some(local_id), Some(offered_id)) = (
-        parameter(local, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
-        parameter(offered, "profile-level-id").filter(|id| id.len() == 6 && id.is_ascii()),
+        profile_level_id(local).filter(|id| id.len() == 6 && id.is_ascii()),
+        profile_level_id(offered).filter(|id| id.len() == 6 && id.is_ascii()),
     ) else {
         return local.to_owned();
     };
@@ -129,6 +138,35 @@ fn h264_answer_fmtp(local: &str, offered: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// The fmtp line this endpoint writes for an H.264 format (RFC 7742 section 6.2):
+/// `profile-level-id` is always there ("Implementations MUST include this parameter within
+/// SDP"; a format registered without one is the RFC 6184 section 8.1 default, `42000a`, stated
+/// explicitly), and `sprop-parameter-sets` never is (parameter sets travel in-band: "WebRTC
+/// implementations MUST NOT include this parameter in the SDP they generate").
+fn h264_generated_fmtp(line: &str) -> String {
+    let mut parameters: Vec<String> = line
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            !p.split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("sprop-parameter-sets"))
+        })
+        .map(str::to_owned)
+        .collect();
+    let has_profile_level_id = parameters.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("profile-level-id"))
+    });
+    if !has_profile_level_id {
+        parameters.push(format!(
+            "profile-level-id={}",
+            crate::rtp_transceiver::fmtp::h264::DEFAULT_PROFILE_LEVEL_ID
+        ));
+    }
+    parameters.join(";")
 }
 
 /// The fmtp line of an H.265 answer: this endpoint's parameters (`local`) with a `level-id`
@@ -2129,6 +2167,24 @@ impl MediaEngine {
         codec: &RTCRtpCodecParameters,
         answering: bool,
     ) -> String {
+        let line = self.local_fmtp_line_of_codec(typ, codec, answering);
+        if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            h264_generated_fmtp(&line)
+        } else {
+            line
+        }
+    }
+
+    fn local_fmtp_line_of_codec(
+        &self,
+        typ: RtpCodecKind,
+        codec: &RTCRtpCodecParameters,
+        answering: bool,
+    ) -> String {
         let registered = match typ {
             RtpCodecKind::Audio => &self.audio_codecs,
             RtpCodecKind::Video => &self.video_codecs,
@@ -2161,7 +2217,14 @@ impl MediaEngine {
         {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }
-        let local_line = local.rtp_codec.sdp_fmtp_line;
+        let mut local_line = local.rtp_codec.sdp_fmtp_line;
+        if local
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+        {
+            local_line = h264_generated_fmtp(&local_line);
+        }
         if !answering {
             return local_line;
         }

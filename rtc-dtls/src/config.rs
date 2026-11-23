@@ -1,16 +1,16 @@
 //! Handshake configuration.
 //!
-//! [`ConfigBuilder`](crate::config::ConfigBuilder) is what a caller supplies: certificates, the client/server role, which cipher
+//! [`ConfigBuilder`] is what a caller supplies: certificates, the client/server role, which cipher
 //! suites and curves to offer, the SRTP protection profiles to negotiate through `use_srtp`,
 //! and how strictly to require the extended master secret
-//! ([`ExtendedMasterSecretType`](crate::config::ExtendedMasterSecretType)).
+//! ([`ExtendedMasterSecretType`]).
 //!
 //! WebRTC authenticates peers by comparing the certificate fingerprint against the one
 //! signalled in SDP, not against a CA chain — so certificates here are normally self-signed
-//! (see [`gen_self_signed_root_cert`](crate::config::gen_self_signed_root_cert)) and the check is implemented by supplying a
-//! [`VerifyPeerCertificateFn`](crate::config::VerifyPeerCertificateFn).
+//! (see [`gen_self_signed_root_cert`]) and the check is implemented by supplying a
+//! [`VerifyPeerCertificateFn`].
 //!
-//! [`HandshakeConfig`](crate::config::HandshakeConfig) is the resolved form the handshake
+//! [`HandshakeConfig`] is the resolved form the handshake
 //! actually runs with, produced by [`ConfigBuilder::build`](crate::config::ConfigBuilder::build).
 
 #[cfg(test)]
@@ -118,6 +118,7 @@ pub struct ConfigBuilder {
     signature_schemes: Vec<SignatureScheme>,
     srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     use_srtp_optional: bool,
+    alpn_protocols: Vec<String>,
     use_srtp_required: bool,
     client_auth: ClientAuthType,
     bad_certificate_for_a_missing_client_certificate: bool,
@@ -167,6 +168,7 @@ impl Default for ConfigBuilder {
             signature_schemes: vec![],
             srtp_protection_profiles: vec![],
             use_srtp_optional: false,
+            alpn_protocols: vec![],
             use_srtp_required: false,
             client_auth: ClientAuthType::default(),
             bad_certificate_for_a_missing_client_certificate: false,
@@ -264,6 +266,19 @@ impl ConfigBuilder {
     /// a fatal alert.
     pub fn with_use_srtp_optional(mut self, use_srtp_optional: bool) -> Self {
         self.use_srtp_optional = use_srtp_optional;
+        self
+    }
+
+    /// The application protocols of Application-Layer Protocol Negotiation (RFC 7301), most
+    /// preferred first; empty (the default) uses no ALPN. A client offers them in its
+    /// ClientHello and takes the one the server selects, which must be one of them; a server
+    /// selects the first of its own that the client offered, refuses a client that offered
+    /// ALPN but none of them (`no_application_protocol`), and answers a client without the
+    /// extension without it. DTLS 1.2 (ServerHello) and DTLS 1.3 (EncryptedExtensions).
+    /// [`State::application_protocol`](crate::state::State::application_protocol) gives the
+    /// result. Each name is 1 to 255 bytes.
+    pub fn with_alpn_protocols(mut self, protocols: Vec<String>) -> Self {
+        self.alpn_protocols = protocols;
         self
     }
 
@@ -923,6 +938,15 @@ impl ConfigBuilder {
         };
 
         let maximum_transmission_unit = if self.mtu == 0 { DEFAULT_MTU } else { self.mtu };
+        if self
+            .alpn_protocols
+            .iter()
+            .any(|protocol| protocol.is_empty() || protocol.len() > 255)
+        {
+            return Err(Error::Other(
+                "an ALPN protocol name is 1 to 255 bytes".to_owned(),
+            ));
+        }
         if self.connection_id.is_some_and(|length| length > 255) {
             return Err(Error::Other(
                 "a connection id is at most 255 bytes".to_owned(),
@@ -1046,6 +1070,7 @@ impl ConfigBuilder {
             extended_master_secret: self.extended_master_secret,
             local_srtp_protection_profiles: self.srtp_protection_profiles,
             use_srtp_optional: self.use_srtp_optional,
+            alpn_protocols: self.alpn_protocols.clone(),
             use_srtp_required: self.use_srtp_required,
             server_name,
             client_auth: self.client_auth,
@@ -1145,6 +1170,8 @@ pub struct HandshakeConfig {
     pub(crate) extended_master_secret: ExtendedMasterSecretType, // Policy for the Extended Master Support extension
     pub(crate) local_srtp_protection_profiles: Vec<SrtpProtectionProfile>, // Available SRTPProtectionProfiles, if empty no SRTP support
     pub(crate) use_srtp_optional: bool, // A client goes on when the server leaves use_srtp out
+    /// The ALPN protocols (RFC 7301), most preferred first; empty without ALPN.
+    pub(crate) alpn_protocols: Vec<String>,
     pub(crate) use_srtp_required: bool, // A server refuses a client it shares no SRTP profile with
     pub(crate) server_name: String,
     pub(crate) client_auth: ClientAuthType, // If we are a client should we request a client certificate
@@ -1251,6 +1278,7 @@ impl HandshakeConfig {
             extended_master_secret: ExtendedMasterSecretType::Disable,
             local_srtp_protection_profiles: vec![],
             use_srtp_optional: false,
+            alpn_protocols: vec![],
             use_srtp_required: false,
             server_name: String::new(),
             client_auth: ClientAuthType::NoClientCert,
@@ -1326,6 +1354,25 @@ impl HandshakeConfig {
     /// Whether DTLS 1.2 is negotiated at all.
     pub(crate) fn supports_dtls12(&self) -> bool {
         self.min_version == DtlsVersion::Dtls1_2
+    }
+
+    /// A server's answer to a ClientHello's ALPN extension offering `offered` (RFC 7301
+    /// section 3.2): `None` when this server uses no ALPN (the extension is ignored), the
+    /// first of its protocols the client offered, or an error when there is none, which is
+    /// a `no_application_protocol` alert.
+    pub(crate) fn select_alpn(&self, offered: &[String]) -> Option<Result<String>> {
+        if self.alpn_protocols.is_empty() {
+            return None;
+        }
+        Some(
+            self.alpn_protocols
+                .iter()
+                .find(|protocol| offered.contains(protocol))
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Other("no application protocol in common (RFC 7301)".to_owned())
+                }),
+        )
     }
 
     /// The connection id a hello of this side carries, if it uses the extension: random

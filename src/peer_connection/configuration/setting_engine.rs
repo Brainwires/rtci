@@ -304,6 +304,9 @@ pub struct IceBehaviour {
     pub send_data_before_nomination: bool,
     /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
     pub pair_before_conveyed: bool,
+    /// See [`SettingEngineBuilder::with_ice_software`]: `None` until it is called (each
+    /// stack's own SOFTWARE), then the value it was given.
+    pub software: Option<Option<String>>,
 }
 
 /// Replay attack protection window sizes.
@@ -506,6 +509,10 @@ pub struct SettingEngine {
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// [`SettingEngineBuilder::with_dtls_connection_id`].
+    pub(crate) dtls_connection_id_length: Option<usize>,
+    /// [`SettingEngineBuilder::with_dtls_alpn`]: `true` when it is turned off.
+    pub(crate) dtls_alpn_off: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
@@ -593,6 +600,26 @@ impl SettingEngine {
     /// the server.
     pub fn turn_allocation_refresh_interval_cap(&self) -> Option<Duration> {
         self.turn_allocation_refresh_interval_cap
+    }
+
+    /// The SOFTWARE of the ICE agent's STUN messages, in the form of
+    /// [`ice::agent::agent_config::AgentConfig::software`] (`None`: its default, empty: none);
+    /// see [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn ice_agent_software(&self) -> Option<String> {
+        self.ice
+            .software
+            .as_ref()
+            .map(|software| software.clone().unwrap_or_default())
+    }
+
+    /// The SOFTWARE of the requests of the TURN clients the engine runs, in the form of
+    /// [`turn::client::ClientConfig::software`] (empty: none); see
+    /// [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn turn_software(&self) -> String {
+        match &self.ice.software {
+            None => turn::client::DEFAULT_SOFTWARE.to_owned(),
+            Some(software) => software.clone().unwrap_or_default(),
+        }
     }
 
     /// Whether an ICE restart discards the local candidates gathered by the previous generation.
@@ -1330,6 +1357,12 @@ impl SettingEngineBuilder {
     /// are then written for a local address with no socket behind it and silently go nowhere, so
     /// the restarted generation exchanges credentials successfully and never leaves `Checking`.
     ///
+    /// Only the previous generation's candidates are discarded. Those added while the restart
+    /// is staged (an answerer's between `set_remote_description` of the restart offer and
+    /// `set_local_description` of its answer, an offerer's between `create_offer` and its
+    /// `set_local_description`) are the new generation's: the restart keeps them and the
+    /// answer lists them (see [`RTCPeerConnection::add_local_candidate`](crate::peer_connection::RTCPeerConnection::add_local_candidate)).
+    ///
     /// # Parameters
     ///
     /// * `discard` - `true` to drop local candidates on restart, `false` (default) to keep them
@@ -1574,6 +1607,38 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The SOFTWARE attribute (RFC 8489 section 14.14) of the STUN messages the peer
+    /// connection sends: the ICE agent's connectivity checks (consent checks and nominations
+    /// included) and its success responses to the peer's, and the requests of the TURN
+    /// clients the engine runs for the configuration's `turn:` / `turns:` servers, over UDP,
+    /// TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind, ConnectionBind).
+    ///
+    /// Without this call the ICE agent sends `rtc-ice` and its version
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
+    /// ([`turn::client::DEFAULT_SOFTWARE`]): RFC 8489 sections 6.1 and 6.3.1.1, requests and
+    /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
+    /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
+    /// an implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD
+    /// make usage of the SOFTWARE attribute a configurable option"). The engine's server-reflexive Binding requests, the agent's error
+    /// responses, the consent checks it keeps up on the previous generation's path during a
+    /// restart, keepalive indications and TURN Send indications carry none in any case.
+    ///
+    /// `text` is fewer than 128 characters and at most 509 bytes (section 14.14); building the
+    /// peer connection with a longer one fails with `ErrAttributeSizeOverflow`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// // No SOFTWARE attribute in any STUN message of the peer connection.
+    /// let _setting_engine = SettingEngineBuilder::new().with_ice_software(None).build();
+    /// ```
+    pub fn with_ice_software(mut self, software: Option<String>) -> Self {
+        self.0.ice.software = Some(software);
+        self
+    }
+
     /// Sets a filter asked about every remote candidate's address (an mDNS candidate's once it
     /// resolves) before the ICE agent holds it; `false` drops the candidate, so no check is ever
     /// sent there. Use it to apply the host's own network policy to peer-chosen destinations.
@@ -1701,7 +1766,7 @@ impl SettingEngineBuilder {
     }
 
     /// RFC 8830 section 3: "if the application ... receives an msid with a new msid-appdata
-    /// value, it SHOULD [learn] that a new MediaStreamTrack has been added" (section 3, the
+    /// value, it SHOULD \[learn\] that a new MediaStreamTrack has been added" (section 3, the
     /// recipient "MUST" learn of a new track for new appdata in the RFC's model). In this API
     /// the W3C webrtc-pc object model governs: a receiver has one track for its lifetime
     /// (webrtc-pc 5.3), with an id the engine generates, and RFC 9429 section 5.2.1 has
@@ -1885,8 +1950,8 @@ impl SettingEngineBuilder {
     /// offer back and is applied, in one `set_remote_description` call. The default is `true`.
     ///
     /// W3C webrtc-pc section 4.4.2, the `setRemoteDescription` steps: a description of type
-    /// "offer" that "is invalid for the current connection.[[SignalingState]] as described in
-    /// [RFC9429]" has the local description set to `{type: "rollback"}` first, and is then
+    /// "offer" that "is invalid for the current connection.\[\[SignalingState\]\] as described in
+    /// \[RFC9429\]" has the local description set to `{type: "rollback"}` first, and is then
     /// set. This engine's
     /// `set_remote_description` is that operation, browsers perform it and "perfect
     /// negotiation" relies on it. RFC 9429 does not forbid it: its state machine (section
@@ -2297,7 +2362,7 @@ impl SettingEngineBuilder {
     /// 3.6), each channel's share of the bytes in proportion to its priority. On by default:
     /// RFC 8831 section 6.4 says the priorities of data channels "MUST be interpreted as
     /// weighted-fair-queuing scheduling priorities per the definition of the corresponding
-    /// stream scheduler supporting interleaving in [RFC8260]". `false` sends the messages in
+    /// stream scheduler supporting interleaving in \[RFC8260\]". `false` sends the messages in
     /// the order they were written, whatever their channel, and the priority of a channel is
     /// then carried to the peer and not otherwise used.
     pub fn with_sctp_weighted_fair_queueing(mut self, enabled: bool) -> Self {
@@ -2394,7 +2459,7 @@ impl SettingEngineBuilder {
 
     /// Whether `send()` accepts data on an in-band data channel that is still "connecting",
     /// waiting for the DATA_CHANNEL_ACK of the DATA_CHANNEL_OPEN this side sent. Off by
-    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.[[ReadyState]] is not "open",
+    /// default: W3C webrtc-pc 6.2 `send()` says "If channel.\[\[ReadyState\]\] is not "open",
     /// throw an InvalidStateError", and refuses with [`Error::ErrDataChannelNotOpen`].
     ///
     /// `true` is RFC 8832 section 6: "the peer that sent the DATA_CHANNEL_OPEN message MAY
@@ -2435,6 +2500,35 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Asks the peer to put a connection id of `length` random bytes in every protected DTLS
+    /// record it sends (RFC 9146 for DTLS 1.2, RFC 9147 section 9 for DTLS 1.3). `None`, the
+    /// default, sends the `connection_id` extension asking for none (RFC 9147 section 5.1).
+    ///
+    /// With connection ids in use the engine follows RFC 9147 sections 9 and 11: when the ICE
+    /// agent's selected pair changes (a new path), a DTLS 1.3 association switches to a fresh
+    /// connection id the peer provided and asks for another, so records on the new path are
+    /// not linked to the old ones by their id.
+    pub fn with_dtls_connection_id(mut self, length: Option<usize>) -> Self {
+        self.0.dtls_connection_id_length = length;
+        self
+    }
+
+    /// Whether the DTLS handshake carries Application-Layer Protocol Negotiation with the
+    /// WebRTC identifiers of RFC 8833 (RFC 8835 section 3.5). The default is `true`: as the
+    /// DTLS client the engine offers `webrtc` and `c-webrtc` (section 2: "A peer in the client
+    /// role MUST offer both identifiers if it is not aware of a need for confidentiality"),
+    /// as the server it selects `webrtc`. A peer that sends or answers no ALPN connects all
+    /// the same, taken as `webrtc` (section 2). The engine never selects `c-webrtc` as the
+    /// server: it cannot promise the media confidentiality that identifier stands for (a
+    /// client that requires it is refused with `no_application_protocol`, and section 2 has
+    /// such a client abort anyway).
+    /// [`RTCPeerConnection::dtls_application_protocol`](crate::peer_connection::RTCPeerConnection::dtls_application_protocol)
+    /// gives what was selected. `false` leaves the extension out.
+    pub fn with_dtls_alpn(mut self, alpn: bool) -> Self {
+        self.0.dtls_alpn_off = !alpn;
+        self
+    }
+
     /// Whether the connection re-keys SRTP by itself before a master key's lifetime ends. The
     /// default is `true`.
     ///
@@ -2464,7 +2558,7 @@ impl SettingEngineBuilder {
     /// and for a stream the offer being answered marks. The default is `false`.
     ///
     /// RFC 8853 section 5.2: "The use of [the pause mark] MUST be accompanied by support
-    /// for RTP stream pause/resume [RFC7728] ... signaled under the same 'm=' line", and
+    /// for RTP stream pause/resume \[RFC7728\] ... signaled under the same 'm=' line", and
     /// section 5.3.2: an answerer "MUST NOT" mark a stream paused when the offer shows no
     /// such support. The engine does not implement RFC 7728 and never signals it, so by
     /// default it writes no `~`: an inactive encoding is listed and not sent, and an offered
@@ -2809,8 +2903,8 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::RTCRtpReceiver::write_rtcp)
-    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::RTCRtpSender::write_rtcp) send
+    /// Lets [`RTCRtpReceiver::write_rtcp`](crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver::write_rtcp)
+    /// and [`RTCRtpSender::write_rtcp`](crate::rtp_transceiver::rtp_sender::RTCRtpSender::write_rtcp) send
     /// feedback the section did not negotiate: a departure from RFC 4585 section 4.2 ("no
     /// feedback messages other than those listed ... MUST be used") and RFC 5104 section 7.2.
     /// Off by default: such a write is refused with `ErrRTCPFeedbackNotNegotiated`.

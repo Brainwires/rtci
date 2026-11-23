@@ -2043,15 +2043,15 @@ impl<'a> InterceptorHandler<'a> {
             String::new()
         };
 
-        // RFC 8852 section 3: an RtpStreamId or RepairedRtpStreamId is 1 to 255 ASCII
-        // letters and digits; an element that is anything else names no stream and is not
-        // used (read through the typed codec, as the SDES items are).
+        // RFC 8852 section 3: an RtpStreamId or RepairedRtpStreamId is 1 to 255 ASCII letters
+        // and digits. The element is read through the typed codec, so one that is anything
+        // else names no stream: it is taken as absent, as an RTCP SDES item of that kind is
+        // (`process_sdes_mids`).
+        use shared::marshal::Unmarshal;
         let rid = if rid_extension_id != 0
-            && let Some(payload) = rtp_header.get_extension(rid_extension_id as u8)
+            && let Some(mut payload) = rtp_header.get_extension(rid_extension_id as u8)
         {
-            String::from_utf8(payload.to_vec())
-                .ok()
-                .and_then(|value| rtp::extension::sdes_extension::RtpStreamId::new(value).ok())
+            rtp::extension::sdes_extension::RtpStreamId::unmarshal(&mut payload)
                 .map(|rid| rid.as_str().to_owned())
                 .unwrap_or_default()
         } else {
@@ -2059,13 +2059,9 @@ impl<'a> InterceptorHandler<'a> {
         };
 
         let rrid = if rrid_extension_id != 0
-            && let Some(payload) = rtp_header.get_extension(rrid_extension_id as u8)
+            && let Some(mut payload) = rtp_header.get_extension(rrid_extension_id as u8)
         {
-            String::from_utf8(payload.to_vec())
-                .ok()
-                .and_then(|value| {
-                    rtp::extension::sdes_extension::RepairedRtpStreamId::new(value).ok()
-                })
+            rtp::extension::sdes_extension::RepairedRtpStreamId::unmarshal(&mut payload)
                 .map(|rrid| rrid.as_str().to_owned())
                 .unwrap_or_default()
         } else {
@@ -3393,6 +3389,14 @@ mod stream_binding_tests {
     /// receiving transceiver (mid "0") with one simulcast layer "h" whose SSRC is not yet known.
     /// Returns the engine, the transceiver and the mid / rid extension ids.
     fn simulcast_receiver(rtx_ssrc: u32) -> (MediaEngine, RTCRtpTransceiverInternal, u8, u8) {
+        simulcast_receiver_of_layer(rtx_ssrc, "h")
+    }
+
+    /// As [`simulcast_receiver`], with the layer's rid `rid`.
+    fn simulcast_receiver_of_layer(
+        rtx_ssrc: u32,
+        rid: &str,
+    ) -> (MediaEngine, RTCRtpTransceiverInternal, u8, u8) {
         let (payload_type, rtx_payload_type) = (96u8, 97u8);
         let mut media_engine = media_engine_with_rtx();
         for uri in [
@@ -3429,7 +3433,7 @@ mod stream_binding_tests {
             });
 
         let layer = RTCRtpCodingParameters {
-            rid: "h".to_owned(),
+            rid: rid.to_owned(),
             ssrc: None,
             rtx: Some(RTCRtpRtxParameters { ssrc: rtx_ssrc }),
             fec: None,
@@ -3578,5 +3582,62 @@ mod stream_binding_tests {
         assert_eq!(ctx.event_outs.len(), 2);
         assert!(ctx.ssrc_owners.len() <= 1);
         assert!(ctx.rid_rebinds.len() <= 1);
+    }
+    /// RFC 8852 section 3: RtpStreamId values are 1 to 255 ASCII letters and digits only. A
+    /// RID element that is anything else names no layer, even one whose rid has the same
+    /// bytes: the packet is not bound by it. The same packet with a rid of letters and digits
+    /// is.
+    #[test]
+    fn a_rid_element_that_is_not_letters_and_digits_binds_no_layer() {
+        for (rid, binds) in [("h_1", false), ("h1", true)] {
+            let rtx_ssrc = 2000u32;
+            let (media_engine, transceiver, mid_id, rid_id) =
+                simulcast_receiver_of_layer(rtx_ssrc, rid);
+            let mut transceivers = vec![transceiver];
+            let recorder = Recorder::default();
+            let mut interceptor = recorder.clone();
+            let mut stats = RTCStatsAccumulator::new();
+            let mut ctx = InterceptorHandlerContext {
+                is_dtls_handshake_complete: true,
+                ..Default::default()
+            };
+            let mut header = rtp::Header {
+                extension: true,
+                extension_profile: 0xBEDE,
+                payload_type: 96,
+                sequence_number: 1,
+                timestamp: 12_345,
+                ssrc: 10_000,
+                ..Default::default()
+            };
+            header
+                .set_extension(mid_id, Bytes::from_static(b"0"))
+                .expect("mid extension");
+            header
+                .set_extension(rid_id, Bytes::copy_from_slice(rid.as_bytes()))
+                .expect("rid extension");
+            let mut handler = InterceptorHandler::new(
+                &mut ctx,
+                &mut transceivers,
+                &media_engine,
+                &mut interceptor,
+                &mut stats,
+                None,
+            );
+            let _ = handler.handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp::Packet {
+                    header,
+                    payload: Bytes::from_static(&[0xDE, 0xAD]),
+                }))),
+            });
+            assert_eq!(
+                binds,
+                recorder.bound_ssrcs().contains(&10_000),
+                "rid {rid:?}: {:?}",
+                recorder.bound_ssrcs()
+            );
+        }
     }
 }

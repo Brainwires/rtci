@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC mDNS in Rust (sans-I/O)"
+description = "Sans-I/O mDNS (RFC 6762) querier and responder, as used for WebRTC mDNS ICE candidates"
 license.workspace = true
-documentation = "https://docs.rs/rtc-mdns"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["mdns", "multicast-dns", "webrtc", "ice", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["ifaces"] }

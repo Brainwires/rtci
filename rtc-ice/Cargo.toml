@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC ICE in Rust"
+description = "Sans-I/O ICE agent (RFC 8445) with trickle ICE, ICE-TCP and consent freshness, for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-ice"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "ice", "nat-traversal", "stun", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
 
 [features]
 default = ["crypto-ring"]

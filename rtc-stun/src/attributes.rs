@@ -1,6 +1,6 @@
 //! STUN attribute types.
 //!
-//! Every attribute is a type code, a length and a value ([`RawAttribute`](crate::attributes::RawAttribute)). This module defines
+//! Every attribute is a type code, a length and a value ([`RawAttribute`]). This module defines
 //! the code points — those from STUN itself ([RFC 8489]) plus the ones TURN, ICE and the NAT
 //! behaviour discovery extensions add — while the typed accessors live in
 //! [`textattrs`](crate::textattrs), [`xoraddr`](crate::xoraddr),
@@ -9,7 +9,7 @@
 //! Codes below `0x8000` are *comprehension-required*: a receiver that does not understand one
 //! must reject the message. Codes at or above `0x8000` are comprehension-optional and may be
 //! ignored, which is how `FINGERPRINT` and the ICE attributes can be added without breaking
-//! older peers. [`STUN_ATTRIBUTES`](crate::attributes::STUN_ATTRIBUTES) is the
+//! older peers. [`STUN_ATTRIBUTES`] is the
 //! comprehension-required set of STUN itself; a usage adds its own and hands the list to
 //! [`Validator::known_attributes`](crate::validated::Validator::known_attributes).
 //!

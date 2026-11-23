@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC RTCP in Rust"
+description = "RTCP packet parsing and serialization (RFC 3550, RFC 4585, RFC 5104, RFC 3611, RFC 8888) for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-rtcp"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "rtcp", "rtp", "feedback", "sans-io"]
+categories = ["network-programming", "multimedia", "parser-implementations"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["marshal"] }

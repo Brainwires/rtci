@@ -92,6 +92,11 @@ impl Harness {
     /// The engine with the TURN-over-TCP server, its offer answered by a second peer
     /// connection (so remote candidates can be added).
     fn new() -> Result<Self> {
+        Self::with(SettingEngineBuilder::new())
+    }
+
+    /// The same, with `settings` (TCP candidates not gathered).
+    fn with(settings: SettingEngineBuilder) -> Result<Self> {
         common::install_crypto_provider();
         let now = Instant::now();
         let mut pc = RTCPeerConnectionBuilder::new()
@@ -104,11 +109,7 @@ impl Harness {
                     }])
                     .build(),
             )
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_tcp_candidate_gathering(false)
-                    .build(),
-            )
+            .with_setting_engine(settings.with_tcp_candidate_gathering(false).build())
             .build(now)?;
         pc.create_data_channel("tcp-relay", None)?;
         let offer = pc.create_offer(None)?;
@@ -507,6 +508,68 @@ fn a_peer_connecting_to_the_relayed_address_reaches_ice_over_a_data_connection()
 /// to a remote passive candidate makes the engine create a permission and send Connect on the
 /// TCP allocation's control connection; the CONNECTION-ID of its success binds a new data
 /// connection, which then carries the check, framed with RFC 4571.
+/// The SOFTWARE of the engine's TURN client over TCP (RFC 8656 section 5, RFC 8489 section
+/// 16.1.2: "Implementers SHOULD make usage of the SOFTWARE attribute a configurable option"),
+/// in the Allocate requests of both control connections, the CreatePermission and the
+/// ConnectionBind of a data connection (RFC 6062 section 4.3): `rtc-turn` and its version by
+/// default, the text `with_ice_software` names, none with `with_ice_software(None)`.
+#[test]
+fn the_engine_tcp_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
+    use rtc::stun::attributes::ATTR_SOFTWARE;
+    use rtc::stun::textattrs::Software;
+    for (setting, expected) in [
+        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (Some(None), None),
+        (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
+    ] {
+        let mut settings = SettingEngineBuilder::new();
+        if let Some(software) = setting.clone() {
+            settings = settings.with_ice_software(software);
+        }
+        let mut h = Harness::with(settings)?;
+        let peer = a("198.51.100.7:45000");
+        h.pc.add_remote_candidate(RTCIceCandidateInit {
+            candidate: format!(
+                "candidate:1 1 tcp 1518280447 {} 9 typ host tcptype active",
+                peer.ip()
+            ),
+            sdp_mid: Some("0".to_owned()),
+            ..Default::default()
+        })?;
+        h.pump()?;
+        let tcp = h.control(true);
+        let mut indication = Message::new();
+        indication.build(&[
+            Box::new(MessageType::new(
+                METHOD_CONNECTION_ATTEMPT,
+                CLASS_INDICATION,
+            )),
+            Box::new(TransactionId::new()),
+            Box::new(ConnectionId(42)),
+            Box::new(PeerAddress {
+                ip: peer.ip(),
+                port: peer.port(),
+            }),
+        ])?;
+        h.pc.handle_stream_read(h.now, tcp, &indication.raw)?;
+        h.pump()?;
+        for method in [
+            METHOD_ALLOCATE,
+            rtc::stun::message::METHOD_CREATE_PERMISSION,
+            METHOD_CONNECTION_BIND,
+        ] {
+            assert!(!h.requests_of(method).is_empty(), "{setting:?}: a {method}");
+        }
+        for (_, m) in &h.requests {
+            let software = Software::get_from_as(m, ATTR_SOFTWARE)
+                .ok()
+                .map(|software| software.text);
+            assert_eq!(software, expected, "{setting:?}: {}", m.typ);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn a_check_from_the_active_relayed_candidate_connects_through_the_server() -> Result<()> {
     let mut h = Harness::new()?;

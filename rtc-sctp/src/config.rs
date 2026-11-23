@@ -115,6 +115,7 @@ pub struct TransportConfig {
     zero_checksum: bool,
     path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
     zero_window_overcommit: bool,
+    strict_zero_window_drop: bool,
 }
 
 impl Default for TransportConfig {
@@ -140,6 +141,7 @@ impl Default for TransportConfig {
             zero_checksum: false,
             path_mtu_discovery: None,
             zero_window_overcommit: false,
+            strict_zero_window_drop: false,
         }
     }
 }
@@ -154,7 +156,10 @@ impl TransportConfig {
     /// messages stays full: what is written must fit the buffer, which it does when the
     /// largest message accepted (`with_max_receive_message_size`) is not larger than the
     /// receive buffer. While the advertised window is open, a full buffer takes that chunk
-    /// either way (the RFC rule binds a closed advertised window only).
+    /// either way (the RFC rule binds a closed advertised window only), and so does an
+    /// association that negotiated user message interleaving (RFC 8260), whatever this
+    /// setting: several part-received I-DATA messages, each smaller than the buffer, can fill
+    /// it together with none of them complete.
     pub fn with_zero_window_overcommit(mut self, value: bool) -> Self {
         self.zero_window_overcommit = value;
         self
@@ -163,6 +168,29 @@ impl TransportConfig {
     /// See [`with_zero_window_overcommit`](Self::with_zero_window_overcommit).
     pub fn zero_window_overcommit(&self) -> bool {
         self.zero_window_overcommit
+    }
+
+    /// RFC 9260 section 6.2 to the letter: once a SACK advertised a_rwnd 0, every new DATA
+    /// chunk above the largest TSN received is dropped, with
+    /// [`with_zero_window_overcommit`](Self::with_zero_window_overcommit) and with user
+    /// message interleaving (RFC 8260) alike. Off by default.
+    ///
+    /// It can deadlock interleaved messages. With I-DATA several part-received messages,
+    /// each smaller than the receive buffer, can fill it together with none of them
+    /// complete: nothing is readable, so the application cannot free any of it; the window
+    /// stays closed; and the chunk that would complete one of them is above the largest TSN,
+    /// so it is dropped on every retransmission. (Six 16 KiB messages on six streams into a
+    /// 16 KiB buffer deliver none.) Without interleaving it can deadlock a message larger than
+    /// the buffer the same way. Use it only where every message fits the buffer and I-DATA is
+    /// not negotiated, or where the RFC form matters more than delivery.
+    pub fn with_strict_zero_window_drop(mut self, value: bool) -> Self {
+        self.strict_zero_window_drop = value;
+        self
+    }
+
+    /// See [`with_strict_zero_window_drop`](Self::with_strict_zero_window_drop).
+    pub fn strict_zero_window_drop(&self) -> bool {
+        self.strict_zero_window_drop
     }
 
     /// Path MTU discovery (DPLPMTUD, RFC 8899 section 6.2, with the PAD chunk of RFC 4820):

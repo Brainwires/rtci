@@ -140,6 +140,14 @@ pub(super) fn ice_agent_config(
         }
     }
 
+    // RFC 8489 section 14.14: fewer than 128 characters, at most 509 bytes.
+    if let Some(software) = setting_engine.ice_agent_software()
+        && (software.len() > stun::textattrs::MAX_TEXT_B
+            || software.chars().count() >= stun::textattrs::MAX_TEXT_CHARS)
+    {
+        return Err(Error::ErrAttributeSizeOverflow);
+    }
+
     let network_types = if setting_engine.candidates.ice_network_types.is_empty() {
         ice::network_type::supported_network_types()
     } else {
@@ -192,6 +200,7 @@ pub(super) fn ice_agent_config(
         data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
         send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
         hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
+        software: setting_engine.ice_agent_software(),
         nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
         nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
             RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,
@@ -228,6 +237,8 @@ pub(super) fn new_dtls_transport(
         crypto_provider,
     })?;
     dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+    dtls_transport.connection_id_length = setting_engine.dtls_connection_id_length;
+    dtls_transport.alpn = !setting_engine.dtls_alpn_off;
     Ok(dtls_transport)
 }
 
@@ -385,6 +396,33 @@ impl RTCPeerConnection {
         // the descriptions say (`a=ssrc:<ssrc> cname:`) and what the parameters report.
         media_engine.rtcp_cname = pipeline_context.interceptor_handler_context.cname.clone();
 
+        // RFC 6679 section 7.1: with ECN signalled in SDP, "the "rtcp-xr" attribute with the
+        // "ecn-sum" parameter MUST also be used", and `nack ecn` "MUST be used whenever the
+        // initialisation method or a congestion control algorithm requires timely sender-side
+        // knowledge of received CE markings" (every initiation method here reads the first
+        // ECT packets back). Both go with every audio and video format; an answer keeps what
+        // the offer had of them, and `ack ccfb` replaces `nack ecn` (RFC 8888 section 7).
+        if setting_engine.ecn && !setting_engine.ecn_without_signalling {
+            for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK.to_owned(),
+                        parameter:
+                            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                                .to_owned(),
+                    },
+                    kind,
+                );
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: interceptor::RTCP_FB_XR.to_owned(),
+                        parameter: interceptor::RTCP_XR_ECN_SUMMARY.to_owned(),
+                    },
+                    kind,
+                );
+            }
+        }
+
         Ok(Self {
             configuration,
             media_engine,
@@ -483,21 +521,27 @@ impl RTCPeerConnection {
         if self.ice_transport().has_pending_restart() {
             // An answer to a restart offer: the restart is applied with the answer
             // (`defer_remote_transport`), and keeps the local candidates unless they are to
-            // be discarded; they are the new generation's, so the answer lists them.
+            // be discarded; they are the new generation's, so the answer lists them. Those
+            // gathered since the offer was applied are the new generation's in any case (the
+            // restart keeps them), and the answer lists them too (RFC 9429 section 5.3.1).
             let answers_restart = !offer
                 && self
                     .pending_remote_transport
                     .as_ref()
                     .is_some_and(|pending| pending.ice_restart);
-            if answers_restart
-                && !self
-                    .setting_engine
-                    .candidates
-                    .discard_local_candidates_during_ice_restart
+            if !answers_restart {
+                return Ok(Vec::new());
+            }
+            if !self
+                .setting_engine
+                .candidates
+                .discard_local_candidates_during_ice_restart
             {
                 return self.ice_transport().get_local_candidates();
             }
-            return Ok(Vec::new());
+            return Ok(self
+                .ice_transport()
+                .get_restart_generation_local_candidates());
         }
         let candidates = self.ice_transport().get_local_candidates()?;
         // Two lite agents (RFC 8445 section 8.2, RFC 8839 sections 4.4.1.3 and 4.4.2.2): the
@@ -3751,6 +3795,9 @@ impl RTCPeerConnection {
         // Start the dtls transport
         self.dtls_transport_mut()
             .start(local_ice_role, remote_dtls_parameters)?;
+        // A ClientHello that arrived before the answer (RFC 8842 section 5.2), now that DTLS
+        // has an endpoint, if ICE has a path already.
+        self.release_early_dtls();
 
         self.update_connection_state(false);
 

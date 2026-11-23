@@ -363,11 +363,10 @@ async fn test_ice_restart_interop() -> Result<()> {
         while let Some(event) = rtc_pc.poll_event() {
             if let RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) =
                 event
+                && let Some(dc) = rtc_pc.data_channel(channel_id)
             {
-                if let Some(dc) = rtc_pc.data_channel(channel_id) {
-                    log::info!("RTC data channel '{}'-'{}' opened", dc.label(), dc.id());
-                    rtc_dc_id = Some(channel_id);
-                }
+                log::info!("RTC data channel '{}'-'{}' opened", dc.label(), dc.id());
+                rtc_dc_id = Some(channel_id);
             }
         }
 
@@ -464,11 +463,11 @@ async fn test_ice_restart_interop() -> Result<()> {
     }
 
     // Send from rtc to webrtc
-    if let Some(channel_id) = rtc_dc_id {
-        if let Some(mut dc) = rtc_pc.data_channel(channel_id) {
-            dc.send_text(Instant::now(), ECHO_MESSAGE_1.to_owned())?;
-            log::info!("RTC sent: {}", ECHO_MESSAGE_1);
-        }
+    if let Some(channel_id) = rtc_dc_id
+        && let Some(mut dc) = rtc_pc.data_channel(channel_id)
+    {
+        dc.send_text(Instant::now(), ECHO_MESSAGE_1.to_owned())?;
+        log::info!("RTC sent: {}", ECHO_MESSAGE_1);
     }
 
     // Process echo
@@ -621,9 +620,7 @@ async fn test_ice_restart_interop() -> Result<()> {
                     log::info!("RTC selected pair after restart: {:?}", pair);
                     rtc_connected = true;
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                    _ => {}
-                },
+                RTCPeerConnectionEvent::OnDataChannel(_dc_event) => {}
                 _ => {}
             }
         }
@@ -759,11 +756,11 @@ async fn test_ice_restart_interop() -> Result<()> {
     }
 
     // Send from rtc to webrtc
-    if let Some(channel_id) = rtc_dc_id {
-        if let Some(mut dc) = rtc_pc.data_channel(channel_id) {
-            dc.send_text(Instant::now(), ECHO_MESSAGE_2.to_owned())?;
-            log::info!("RTC sent after restart: {}", ECHO_MESSAGE_2);
-        }
+    if let Some(channel_id) = rtc_dc_id
+        && let Some(mut dc) = rtc_pc.data_channel(channel_id)
+    {
+        dc.send_text(Instant::now(), ECHO_MESSAGE_2.to_owned())?;
+        log::info!("RTC sent after restart: {}", ECHO_MESSAGE_2);
     }
 
     // Process echo

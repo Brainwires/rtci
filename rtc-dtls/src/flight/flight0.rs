@@ -148,6 +148,7 @@ pub(crate) fn negotiate_client_hello(
     }
     state.cipher_suite = None;
     state.srtp_protection_profile = SrtpProtectionProfile::Unsupported;
+    state.application_protocol = None;
     state.extended_master_secret = false;
     state.secure_renegotiation = false;
     state.remote_offered_point_formats = false;
@@ -204,6 +205,20 @@ pub(crate) fn negotiate_client_hello(
                     _ => {}
                 }
             }
+            // RFC 7301 section 3.2: the first of this server's protocols the client offered;
+            // none in common is a no_application_protocol alert. A server without ALPN
+            // ignores the extension.
+            extension if extension.as_alpn().is_some() => match extension.as_alpn() {
+                Some(Ok(offered)) => match cfg.select_alpn(&offered) {
+                    Some(Ok(protocol)) => state.application_protocol = Some(protocol),
+                    Some(Err(error)) => {
+                        return Err(fatal(AlertDescription::NoApplicationProtocol, error));
+                    }
+                    None => {}
+                },
+                Some(Err(error)) => return Err(fatal(AlertDescription::DecodeError, error)),
+                None => {}
+            },
             Extension::RenegotiationInfo(e) => {
                 // RFC 5746 3.6: this is an initial handshake, so the field is empty.
                 if !e.renegotiated_connection.is_empty() {

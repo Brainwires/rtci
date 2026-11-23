@@ -1362,12 +1362,8 @@ fn two_bundle_groups_run_on_two_transports() -> Result<()> {
     assert_eq!(ufrags(&answer.sdp).len(), 2, "{}", answer.sdp);
     // The two sections of the first group share its credentials, the data section has the
     // second group's.
-    let section_ufrags: Vec<HashSet<String>> = answer
-        .sdp
-        .split("\r\nm=")
-        .skip(1)
-        .map(|section| ufrags(section))
-        .collect();
+    let section_ufrags: Vec<HashSet<String>> =
+        answer.sdp.split("\r\nm=").skip(1).map(ufrags).collect();
     assert_eq!(section_ufrags[0], section_ufrags[1], "{}", answer.sdp);
     assert!(
         section_ufrags[0].is_disjoint(&section_ufrags[2]),

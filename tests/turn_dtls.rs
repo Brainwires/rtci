@@ -186,6 +186,18 @@ impl Harness {
     }
 
     fn with(url: &str, server_cert: Certificate, tls: TurnTlsConfig) -> Result<Self> {
+        Self::with_settings(
+            url,
+            server_cert,
+            SettingEngineBuilder::new().with_turn_tls(tls),
+        )
+    }
+
+    fn with_settings(
+        url: &str,
+        server_cert: Certificate,
+        settings: SettingEngineBuilder,
+    ) -> Result<Self> {
         common::install_crypto_provider();
         let now = Instant::now();
         let mut pc = RTCPeerConnectionBuilder::new()
@@ -198,7 +210,7 @@ impl Harness {
                     }])
                     .build(),
             )
-            .with_setting_engine(SettingEngineBuilder::new().with_turn_tls(tls).build())
+            .with_setting_engine(settings.build())
             .build(now)?;
         pc.create_data_channel("turn-dtls", None)?;
         let offer = pc.create_offer(None)?;
@@ -351,6 +363,50 @@ fn a_turns_udp_server_is_reached_over_dtls_and_its_relayed_candidate_announced()
 /// RFC 7350 section 4 (the TLS certificate rules) and RFC 8656 section 3.1: a server whose
 /// certificate the roots do not vouch for is not used; gathering ends without a relayed
 /// candidate.
+/// The SOFTWARE of the engine's TURN client over DTLS (RFC 8656 section 5, RFC 8489 section
+/// 16.1.2: "Implementers SHOULD make usage of the SOFTWARE attribute a configurable option"):
+/// `rtc-turn` and its version by default, the text `with_ice_software` names, and with
+/// `with_ice_software(None)` none in any request over the association.
+#[test]
+fn the_engine_dtls_turn_client_sends_the_software_with_ice_software_names() -> Result<()> {
+    use rtc::stun::attributes::ATTR_SOFTWARE;
+    use rtc::stun::textattrs::Software;
+    for (setting, expected) in [
+        (None, Some(rtc::turn::client::DEFAULT_SOFTWARE.to_owned())),
+        (Some(None), None),
+        (Some(Some("app 1.0".to_owned())), Some("app 1.0".to_owned())),
+    ] {
+        let (cert, roots) = certificate("192.0.2.20")?;
+        let mut settings = SettingEngineBuilder::new().with_turn_tls(TurnTlsConfig {
+            roots: Some(Arc::new(roots)),
+            ..Default::default()
+        });
+        if let Some(software) = setting.clone() {
+            settings = settings.with_ice_software(software);
+        }
+        let mut h =
+            Harness::with_settings(&format!("turns:{SERVER}?transport=udp"), cert, settings)?;
+        h.add_host()?;
+        h.run(h.now + Duration::from_secs(10))?;
+        assert!(
+            h.server
+                .requests
+                .iter()
+                .filter(|m| m.typ.method == METHOD_ALLOCATE)
+                .count()
+                >= 2,
+            "{setting:?}: the 401 exchange, then the signed Allocate"
+        );
+        for m in &h.server.requests {
+            let software = Software::get_from_as(m, ATTR_SOFTWARE)
+                .ok()
+                .map(|software| software.text);
+            assert_eq!(software, expected, "{setting:?}: {}", m.typ);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn a_dtls_server_the_roots_do_not_vouch_for_is_not_used() -> Result<()> {
     let (cert, _) = certificate("192.0.2.20")?;

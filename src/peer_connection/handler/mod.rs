@@ -607,6 +607,23 @@ impl RTCPeerConnection {
             .rtcp_joined = wanted.into_keys().collect();
     }
 
+    /// Takes the DTLS datagrams the active transport's ICE handler held from before it had a
+    /// path, once it has one (RFC 8842 section 5.2: a ClientHello that overtook the answer),
+    /// up the pipeline.
+    pub(crate) fn release_early_dtls(&mut self) {
+        let held = !self
+            .pipeline_context
+            .transports
+            .active_mut()
+            .ice_handler_context
+            .early_dtls
+            .is_empty();
+        if held {
+            self.get_ice_handler().release_early_dtls();
+            self.pump_reads_on_active(None);
+        }
+    }
+
     /// Runs the pipeline's reads: `msg` up the active transport, or, without one, what every
     /// transport's handlers have queued.
     fn pump_reads(&mut self, msg: Option<TaggedRTCMessageInternal>) {

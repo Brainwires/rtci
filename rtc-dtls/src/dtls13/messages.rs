@@ -24,6 +24,7 @@ pub(crate) const EXT_SUPPORTED_GROUPS: u16 = 10;
 pub(crate) const EXT_EC_POINT_FORMATS: u16 = 11;
 pub(crate) const EXT_SIGNATURE_ALGORITHMS: u16 = 13;
 pub(crate) const EXT_USE_SRTP: u16 = 14;
+pub(crate) const EXT_ALPN: u16 = 16;
 pub(crate) const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
 pub(crate) const EXT_PRE_SHARED_KEY: u16 = 41;
 pub(crate) const EXT_EARLY_DATA: u16 = 42;
@@ -76,6 +77,7 @@ pub(crate) mod alert {
     pub(crate) const USER_CANCELED: u8 = 90;
     pub(crate) const MISSING_EXTENSION: u8 = 109;
     pub(crate) const UNSUPPORTED_EXTENSION: u8 = 110;
+    pub(crate) const NO_APPLICATION_PROTOCOL: u8 = 120;
     pub(crate) const CERTIFICATE_REQUIRED: u8 = 116;
 }
 

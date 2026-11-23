@@ -141,8 +141,7 @@ fn test_multiple_candidates_events() {
         .expect("Failed to create peer connection");
 
     // Add multiple candidates
-    let candidates = vec![
-        RTCIceCandidateInit {
+    let candidates = [RTCIceCandidateInit {
             candidate: "candidate:1 1 udp 2130706431 192.168.1.100 54321 typ host".to_string(),
             sdp_mid: Some("0".to_string()),
             sdp_mline_index: Some(0),
@@ -157,8 +156,7 @@ fn test_multiple_candidates_events() {
             username_fragment: Some("test".to_string()),
             url: Some("stun:stun.example.com:3478".to_string()),
             relay_protocol: None,
-        },
-    ];
+        }];
 
     println!("🔍 Adding {} candidates", candidates.len());
     for (i, candidate) in candidates.iter().enumerate() {

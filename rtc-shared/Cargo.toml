@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC Shared in Rust"
+description = "Shared types of a sans-I/O WebRTC stack: marshalling traits, transport context, replay detection, the stream transport interface"
 license.workspace = true
-documentation = "https://docs.rs/rtc-shared"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "sans-io", "marshal", "networking"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["ifaces", "marshal", "replay"]

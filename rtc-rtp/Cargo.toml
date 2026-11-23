@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC RTP in Rust"
+description = "RTP packets, header extensions (RFC 3550, RFC 8285) and codec payload formats for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-rtp"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "rtp", "packetizer", "media", "sans-io"]
+categories = ["network-programming", "multimedia", "parser-implementations"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["marshal"] }

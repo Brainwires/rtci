@@ -263,12 +263,10 @@ pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
-/// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
 pub mod turn_discovery;
 /// The TURN clients the engine runs itself (RFC 8656, RFC 7350, RFC 6062): who gathers from
 /// `turn:` servers over UDP, [`turn_streams::RelayGathering`].
 pub mod turn_streams;
-/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
@@ -1603,6 +1601,15 @@ impl RTCPeerConnection {
             self.ice_transport_mut().role_determined = true;
         }
 
+        // W3C 4.4.1.4: a provisional answer updates the data max message size of an
+        // association that already exists (a final one does it with the negotiation below).
+        if local_description.sdp_type == RTCSdpType::Pranswer
+            && let Some(parsed) = &local_description.parsed
+            && let Some(remote) = self.remote_description().and_then(|d| d.parsed.clone())
+        {
+            self.update_sctp_max_message_size(parsed, &remote);
+        }
+
         // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"", each transceiver's
         // [[CurrentDirection]] is the direction it states. A final answer does that below with
         // the rest of the negotiation; a provisional one sets the directions alone.
@@ -1719,9 +1726,6 @@ impl RTCPeerConnection {
             self.describe_other_transports(parsed);
         }
 
-        if local_description.sdp_type == RTCSdpType::Pranswer {
-            self.update_data_max_message_size();
-        }
         if matches!(
             local_description.sdp_type,
             RTCSdpType::Answer | RTCSdpType::Pranswer
@@ -1764,7 +1768,7 @@ impl RTCPeerConnection {
     ///
     /// How many RTP packets were discarded because no media section or track could take them
     /// (RFC 8830 section 3.1: the engine buffers no unassociated media, and says so; see
-    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`]). Not a W3C attribute: a fork
+    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`](crate::peer_connection::event::RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded)). Not a W3C attribute: a fork
     /// addition.
     pub fn discarded_rtp_packets(&self) -> u64 {
         self.pipeline_context
@@ -3100,6 +3104,18 @@ impl RTCPeerConnection {
                 self.propose_send_encodings(parsed_remote_description);
             }
 
+            // W3C 4.4.1.4: a provisional answer, too, updates the data max message size of
+            // an association that already exists.
+            if remote_description.sdp_type == RTCSdpType::Pranswer
+                && let Some(parsed_local_description) = self
+                    .local_description()
+                    .and_then(|desc| desc.parsed.clone())
+            {
+                self.update_sctp_max_message_size(
+                    &parsed_local_description,
+                    parsed_remote_description,
+                );
+            }
             if is_final_answer
                 && let Some(parsed_local_description) = self
                     .current_local_description
@@ -3171,9 +3187,6 @@ impl RTCPeerConnection {
             }
         }
 
-        if remote_description.sdp_type == RTCSdpType::Pranswer {
-            self.update_data_max_message_size();
-        }
         if answers {
             self.assign_data_channel_ids();
         }
@@ -3680,6 +3693,21 @@ impl RTCPeerConnection {
     /// # }
     /// ```
     ///
+    /// # During an ICE restart
+    ///
+    /// A candidate added while a restart is staged belongs to the generation the restart
+    /// begins: on the answerer, between `set_remote_description` of the restart offer and
+    /// `set_local_description` of the answer; on the offerer, between the restart offer's
+    /// `create_offer` and its `set_local_description`. It is announced with the new username
+    /// fragment, the restart keeps it even with
+    /// [`with_discard_local_candidates_during_ice_restart`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_discard_local_candidates_during_ice_restart),
+    /// and an answer created after it lists it (RFC 9429 section 5.3.1). It is not paired in
+    /// the session the restart ends once that session has nominated a pair (RFC 8838 section
+    /// 13). So an answerer that gathers for the restart may add its candidates as soon as the
+    /// offer is applied, and need not add them again after `set_local_description`. The
+    /// `username_fragment` of `local_candidate` is not read: the generation is the one staged,
+    /// or the current one when no restart is staged.
+    ///
     /// # Parameters
     ///
     /// - `local_candidate`: The ICE candidate initialization data, or a value whose `candidate`
@@ -3808,28 +3836,6 @@ impl RTCPeerConnection {
     /// Running out of ids does not fail the description: the channels left without one keep a
     /// null id, and the SCTP connected procedure tries them again against the association's
     /// negotiated stream count.
-    /// W3C "set a session description", for a provisional answer: "If description initiates
-    /// the establishment of a new SCTP association ... or an SCTP association already exists,
-    /// update the data max message size of connection.[[SctpTransport]]". (A final answer
-    /// does it where it starts, keeps or replaces the association,
-    /// `SctpTransport::negotiate`.) The association itself is started by the final answer.
-    fn update_data_max_message_size(&mut self) {
-        let Some(local) = self.local_description().and_then(|d| d.parsed) else {
-            return;
-        };
-        let Some(remote) = self.remote_description().and_then(|d| d.parsed.clone()) else {
-            return;
-        };
-        if let SctpNegotiation::Association {
-            remote_max_message_size,
-            ..
-        } = negotiated_sctp(&local, &remote)
-        {
-            self.sctp_transport_mut()
-                .update_max_message_size(remote_max_message_size);
-        }
-    }
-
     fn assign_data_channel_ids(&mut self) {
         let dtls_role = self.dtls_transport().role();
         if !matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
@@ -3966,6 +3972,16 @@ impl RTCPeerConnection {
         self.ice_transport()
             .find_candidate_pair(pair)
             .ok_or(Error::NotFoundError)
+    }
+
+    /// The application protocol the DTLS handshake of the connection's transport selected
+    /// with ALPN (RFC 8835 section 3.5, RFC 8833: `webrtc`, or `c-webrtc` when the remote
+    /// server selected it: a promise to keep the received media confidential that the
+    /// application must keep), once the association is up. `None` before that, or when the
+    /// peer used no ALPN, which RFC 8833 section 2 has the application take as `webrtc`.
+    /// [`SettingEngineBuilder::with_dtls_alpn`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dtls_alpn).
+    pub fn dtls_application_protocol(&self) -> Option<&str> {
+        self.dtls_transport().application_protocol()
     }
 
     /// The RTCP canonical name (CNAME) of this connection: the one name every SSRC it sends
@@ -4674,7 +4690,7 @@ impl RTCPeerConnection {
     ///
     /// The send encodings are otherwise taken as W3C `addTransceiver` takes them: for audio
     /// `scale_resolution_down_by` and `max_framerate` are removed; at most
-    /// [`MAX_SEND_ENCODINGS`] are kept; video encodings without `scale_resolution_down_by`
+    /// [`MAX_SEND_ENCODINGS`](crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS) are kept; video encodings without `scale_resolution_down_by`
     /// get 1.0 when another has one and otherwise halve per layer from the last (4, 2, 1);
     /// a single encoding loses its rid. Without send encodings the sender has one, which the
     /// engine fills in.
@@ -4894,6 +4910,26 @@ impl RTCPeerConnection {
     pub fn reject_data_section(&mut self) {
         self.sctp_transport_mut().staged = Some(SctpRenegotiation::Reject);
         self.trigger_negotiation_needed();
+    }
+
+    /// W3C webrtc 4.4.1.4 for a provisional answer: "If description ... or an SCTP
+    /// association already exists, update the data max message size" from what the
+    /// description pair negotiates for the running association's ports.
+    fn update_sctp_max_message_size(
+        &mut self,
+        local: &::sdp::description::session::SessionDescription,
+        remote: &::sdp::description::session::SessionDescription,
+    ) {
+        if let SctpNegotiation::Association {
+            local_port,
+            remote_port,
+            remote_max_message_size,
+        } = negotiated_sctp(local, remote)
+            && self.sctp_transport().negotiated_ports == Some((local_port, remote_port))
+        {
+            self.sctp_transport_mut()
+                .update_max_message_size(remote_max_message_size);
+        }
     }
 
     /// Brings the SCTP transport in line with what a completed offer/answer exchange
@@ -6306,6 +6342,45 @@ a=rtcp-mux\r\n";
             .unwrap();
         let sdp = &pc.remote_description().unwrap().sdp;
         assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
+    }
+
+    /// RFC 5761 section 5.1.3: with RTP and RTCP multiplexed, "ICE connectivity checks MUST
+    /// only be done for the RTP component". A remote candidate of the RTCP component (2),
+    /// trickled or in the description, is not given to the ICE agent, so no pair and no check
+    /// is made for it; the RTP component's candidates are.
+    #[test]
+    fn remote_rtcp_component_candidates_get_no_checks() {
+        let mut pc = media_pc();
+        // The default candidate (RTP, the m= line's address) and the RTCP one beside it.
+        let sdp = PER_SECTION_UFRAG_OFFER.replacen(
+            "a=rtcp-mux\r\n",
+            "a=rtcp-mux\r\n\
+             a=candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\r\n\
+             a=candidate:1 2 udp 2113929470 203.0.113.100 10101 typ host\r\n",
+            1,
+        );
+        pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &sdp))
+            .unwrap();
+        // The offer's transport parameters, its candidates with them, are applied with the
+        // answer.
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+        let components = |pc: &RTCPeerConnection| {
+            pc.ice_transport()
+                .get_remote_candidates()
+                .iter()
+                .map(|c| (c.port, c.component))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtcp = "candidate:8 2 udp 2113929470 203.0.113.8 10108 typ host";
+        pc.add_remote_candidate(candidate(rtcp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtp = "candidate:9 1 udp 2113929471 203.0.113.9 10109 typ host";
+        pc.add_remote_candidate(candidate(rtp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1), (10109, 1)]);
     }
 
     /// RFC 8838 section 14: a remote candidate that follows the end-of-candidates indication

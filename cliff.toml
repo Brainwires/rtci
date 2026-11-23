@@ -1,26 +1,46 @@
+# git-cliff configuration for the GitHub release body (release.yml runs
+# `git cliff --config cliff.toml --current`). CHANGELOG.md is written by hand and is the full
+# record; the release body is a summary of the release's conventional commits: breaking
+# changes first (at most `max_breaking`), then one section per kind (at most `max` each), with
+# a link to CHANGELOG.md for the rest.
+
 [changelog]
-header = """
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-"""
+# No file header: the body goes into the release page, which has its own title.
+header = ""
 body = """
-{% if version %}\
-    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
-{% else %}\
-    ## [Unreleased]
-{% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
-    ### {{ group | upper_first }}
-    {% for commit in commits %}
-        - {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | upper_first }}\
-          {% if commit.breaking %} [**BREAKING**]{% endif %} \
-          ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/webrtc-rs/rtc/commit/{{ commit.id }}))\
-    {% endfor %}
-{% endfor %}\n
+{%- set max = 15 -%}
+{%- set max_breaking = 30 -%}
+{%- set repo = "https://github.com/Brainwires/webrtc-rs-rtc" -%}
+{%- if version -%}
+    {%- set changelog = repo ~ "/blob/" ~ version ~ "/CHANGELOG.md" -%}
+{%- else -%}
+    {%- set changelog = repo ~ "/blob/master/CHANGELOG.md" -%}
+{%- endif -%}
+{% if version -%}
+## {{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else -%}
+## Unreleased
+{% endif %}
+{%- set breaking = commits | filter(attribute="breaking", value=true) %}
+{%- if breaking | length > 0 %}
+### Breaking changes
+{% for commit in breaking | slice(end=max_breaking) %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first }} ([{{ commit.id | truncate(length=7, end="") }}]({{ repo }}/commit/{{ commit.id }}))
+{%- endfor %}
+{%- if breaking | length > max_breaking %}
+- ... and {{ breaking | length - max_breaking }} more, see [CHANGELOG.md]({{ changelog }})
+{%- endif %}
+{% endif %}
+{%- for group, group_commits in commits | filter(attribute="breaking", value=false) | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in group_commits | slice(end=max) %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first }} ([{{ commit.id | truncate(length=7, end="") }}]({{ repo }}/commit/{{ commit.id }}))
+{%- endfor %}
+{%- if group_commits | length > max %}
+- ... and {{ group_commits | length - max }} more, see [CHANGELOG.md]({{ changelog }})
+{%- endif %}
+{% endfor %}
+The full list of changes is in [CHANGELOG.md]({{ changelog }}).
 """
 footer = ""
 trim = true
@@ -30,20 +50,26 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_preprocessors = []
+# The `<!-- n -->` prefixes order the sections (group_by sorts by name); the template strips
+# them.
 commit_parsers = [
-  { message = "^feat", group = "Features" },
-  { message = "^fix", group = "Bug Fixes" },
-  { message = "^perf", group = "Performance" },
-  { message = "^refactor", group = "Refactoring" },
-  { message = "^doc", group = "Documentation" },
-  { message = "^test", group = "Testing" },
-  { message = "^chore|^ci|^build", group = "Miscellaneous" },
-  { message = "^revert", group = "Reverted Commits" },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^doc", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Testing" },
+  { message = "^chore|^ci|^build|^style", group = "<!-- 6 -->Miscellaneous" },
+  { message = "^revert", group = "<!-- 7 -->Reverted commits" },
+  { message = "^wip", skip = true },
+  # Conventional commits whose type names a component (`ice: ...`, `jsep: ...`).
+  { message = ".*", group = "<!-- 8 -->Other changes" },
 ]
-protect_breaking_commits = false
+# A breaking commit is always listed, whatever the parsers say.
+protect_breaking_commits = true
 filter_commits = false
 tag_pattern = "v[0-9].*"
 skip_tags = ""
 ignore_tags = ""
 topo_order = false
-sort_commits = "oldest"
+sort_commits = "newest"

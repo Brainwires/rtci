@@ -1,30 +1,38 @@
-<h1 align="center">
- <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
- <br>
-</h1>
-<p align="center">
- <a href="https://github.com/webrtc-rs/rtc/actions">
-  <img src="https://github.com/webrtc-rs/rtc/workflows/cargo/badge.svg">
- </a>
- <a href="https://codecov.io/gh/webrtc-rs/rtc">
-  <img src="https://codecov.io/gh/webrtc-rs/rtc/branch/main/graph/badge.svg">
- </a>
- <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
-  <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
- </a>
- <a href="https://crates.io/crates/rtc-dtls">
-  <img src="https://img.shields.io/crates/v/rtc-dtls.svg">
- </a>
- <a href="https://docs.rs/rtc-dtls">
-  <img src="https://docs.rs/rtc-dtls/badge.svg">
- </a>
- <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
- </a>
- <a href="https://discord.gg/4Ju8UHdXMs">
-  <img src="https://img.shields.io/discord/800204819540869120?logo=discord" alt="Discord">
- </a>
-</p>
-<p align="center">
- RTC DTLS Protocol in Rust With Sans-IO
-</p>
+# rtc-dtls
+
+DTLS for WebRTC: DTLS 1.2 and DTLS 1.3, with the extensions WebRTC needs, chiefly the
+`use_srtp` extension and the export of SRTP keying material from the handshake. SCTP data
+channels run over the DTLS association.
+
+## Specifications
+
+- RFC 6347, DTLS 1.2, and RFC 5246, TLS 1.2, as DTLS 1.2 uses it
+- RFC 9147, DTLS 1.3, and RFC 8446, TLS 1.3, as DTLS 1.3 uses it (no 0-RTT, no resumption across processes)
+- RFC 5764, DTLS extension to establish keys for SRTP (`use_srtp`)
+- RFC 7627, extended master secret; RFC 5746, renegotiation indication
+- RFC 9146, connection identifiers for DTLS 1.2; RFC 5077, session tickets
+- RFC 8122 and RFC 8827, certificate fingerprints and the WebRTC security architecture's DTLS rules
+
+Clause-by-clause status, with the test that proves each clause: [rfc6347](../docs/conformance/audit/rfc6347.md), [rfc9147](../docs/conformance/audit/rfc9147.md), [rfc5246](../docs/conformance/audit/rfc5246.md), [rfc8446](../docs/conformance/audit/rfc8446.md), [rfc5764](../docs/conformance/audit/rfc5764.md), [rfc7627](../docs/conformance/audit/rfc7627.md), [rfc5746](../docs/conformance/audit/rfc5746.md), [rfc9146](../docs/conformance/audit/rfc9146.md), [rfc5077](../docs/conformance/audit/rfc5077.md).
+
+## Use
+
+Applications normally get DTLS from the root crate (`rtc`), which configures it from the
+peer connection's certificates and fingerprints. Used on its own, `config::ConfigBuilder`
+sets certificates, cipher suites, curves, the role and the SRTP protection profiles, and
+`endpoint` is the entry point that takes datagrams in and gives datagrams and events out.
+The crate documentation has an example.
+
+## Sans-I/O
+
+The handshake and the record layer are state machines: feed them datagrams and `Instant`s, poll them for the datagrams to send, the next retransmission deadline and the events (handshake complete, exported keys, alerts). The crate does no I/O and reads no clock: every call that depends on time takes an `Instant` from the caller. All cryptography goes through `rtc-crypto`'s provider (`crypto-ring` by default, or `crypto-aws-lc-rs`).
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+This crate is part of the [`rtc`](../README.md) workspace, which descends from
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
+[FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
+notices are retained.
