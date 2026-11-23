@@ -10,8 +10,8 @@
 //! instant the application enqueued.
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, PacerBuilder, Packet, Registry, Slot, StreamInfo,
-    TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerQueueOverflow as QueueOverflow,
+    Packet, Registry, Slot, StreamInfo, TaggedPacket,
 };
 use sansio::Protocol;
 use shared::TransportContext;
@@ -97,6 +97,21 @@ impl Harness {
     }
 
     fn with_burst(burst_bits: f64) -> Self {
+        Self::with(burst_bits, QueueOverflow::default())
+    }
+
+    /// The pacer of [`Harness::with_burst`] with `overflow` for media the target has no room
+    /// for.
+    fn with(burst_bits: f64, overflow: QueueOverflow) -> Self {
+        Self::with_queue(
+            burst_bits,
+            overflow,
+            rtc_interceptor::PACER_DEFAULT_QUEUE_LIMIT,
+        )
+    }
+
+    /// [`Harness::with`] with a queue of `queue_limit` packets.
+    fn with_queue(burst_bits: f64, overflow: QueueOverflow, queue_limit: usize) -> Self {
         let epoch = Instant::now();
         let released = Arc::new(Mutex::new(Vec::new()));
         let marker_released = Arc::clone(&released);
@@ -117,6 +132,8 @@ impl Harness {
                 PacerBuilder::new()
                     .with_target_bitrate(BITRATE)
                     .with_burst_bits(burst_bits)
+                    .with_queue_overflow(overflow)
+                    .with_queue_limit(queue_limit)
                     .build(),
             )
             .build();
@@ -646,12 +663,11 @@ fn a_packet_larger_than_the_burst_is_still_released() {
     );
 }
 
-/// The queue is bounded, and nothing in it is ever thrown away: the packets are numbered, and
-/// one refused (as the pacer once did) is a hole in its stream that no path lost, which the
-/// receiver counts as loss. A packet arriving at a full queue makes the oldest leave at once,
-/// over the budget. Ten packets into a queue of three: all ten leave, in order, with no gap.
+/// With [`QueueOverflow::Drain`] (libwebrtc's pacer) nothing in a full queue is thrown away:
+/// a packet arriving at a full queue makes the oldest leave at once, over the budget. Ten
+/// packets into a queue of three: all ten leave, in order, with no gap.
 #[test]
-fn a_full_queue_releases_its_oldest_and_refuses_nothing() {
+fn with_drain_a_full_queue_releases_its_oldest_and_refuses_nothing() {
     let epoch = Instant::now();
     let released = Arc::new(Mutex::new(Vec::new()));
     let mut chain = Registry::new()
@@ -669,6 +685,7 @@ fn a_full_queue_releases_its_oldest_and_refuses_nothing() {
             PacerBuilder::new()
                 .with_target_bitrate(BITRATE)
                 .with_queue_limit(3)
+                .with_queue_overflow(QueueOverflow::Drain)
                 .build(),
         )
         .build();
@@ -713,14 +730,71 @@ fn a_full_queue_releases_its_oldest_and_refuses_nothing() {
     );
 }
 
+/// By default ([`QueueOverflow::Drop`]) nothing leaves above the target: a source writing
+/// 2.4 Mb/s for ten seconds against a 1.2 Mb/s target has what waited the 2 s bound dropped,
+/// what leaves leaves at the target's spacing (one 12 000-bit packet each 10 ms), and no packet
+/// that leaves has waited longer than the bound. With `Drain` the same source puts all 2.4 Mb/s
+/// on the path (the test below), which on a link that carries the target is the loss that
+/// drives the estimate to its floor (`tests/gcc_rate_limited_link_rtc2rtc.rs`).
+#[test]
+fn by_default_nothing_leaves_above_the_target_and_what_waited_the_bound_is_dropped() {
+    let mut harness = Harness::new();
+    for n in 0..2000u16 {
+        let at = ms(5 * u64::from(n));
+        harness.advance_to(at);
+        harness.send(at, n);
+        harness.drain();
+    }
+    harness.advance_to(ms(20_000));
+    let released = harness.released();
+    // At the target, one packet each 10 ms, from the first write until the queue is empty: the
+    // ten seconds of writes and the last two seconds' packets after them, 1200 in all.
+    assert!(
+        (1190..=1210).contains(&released.len()),
+        "12 s at the target, the rest dropped: {} left",
+        released.len()
+    );
+    for pair in released.windows(2) {
+        assert!(
+            pair[1].at - pair[0].at >= ms(10) - Duration::from_micros(10),
+            "two packets closer than the target allows: {pair:?}"
+        );
+    }
+    let longest = released
+        .iter()
+        .map(|packet| packet.at - ms(5 * u64::from(packet.sequence_number)))
+        .max()
+        .unwrap_or_default();
+    assert!(longest <= ms(2_010), "a packet waited {longest:?}");
+}
+
+/// By default a packet arriving at a full queue drops the oldest (the newest is the one still
+/// worth sending), and nothing leaves over the budget: ten packets into a queue of three leave
+/// the first (inside the budget) and the last three.
+#[test]
+fn by_default_a_full_queue_drops_its_oldest() {
+    let mut harness = Harness::with_queue(PACKET_BITS, QueueOverflow::default(), 3);
+    for n in 0..10u16 {
+        harness.send(ms(0), n);
+        harness.drain();
+    }
+    harness.advance_to(ms(1_000));
+    let order: Vec<u16> = harness
+        .schedule()
+        .iter()
+        .map(|(sequence_number, _)| *sequence_number)
+        .collect();
+    assert_eq!(vec![0, 7, 8, 9], order);
+}
+
 /// The queue time is bounded (libwebrtc's pacer: an expected queue length of 2 s). A source
 /// writing 2.4 Mb/s for ten seconds against a 1.2 Mb/s target fills the queue at 1.2 Mb/s;
 /// the pacing rate rises above the target as far as it takes to drain what is queued before
 /// the oldest packet has waited 2 s, so no packet waits longer than that (and a packet more),
 /// and every packet leaves. Without the bound the last packet waits 10 s.
 #[test]
-fn no_packet_waits_longer_than_the_queue_time_limit() {
-    let mut harness = Harness::new();
+fn with_drain_no_packet_waits_longer_than_the_queue_time_limit() {
+    let mut harness = Harness::with(PACKET_BITS, QueueOverflow::Drain);
     let waits = |harness: &Harness| -> Vec<Duration> {
         harness
             .released()
