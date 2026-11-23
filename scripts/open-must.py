@@ -31,7 +31,7 @@ CLASSES_FILE = os.path.join(AUDIT, "open-must.tsv")
 
 OPEN = ["untested", "partial", "missing", "violated"]
 CLASSES = {
-    "A": "RFC behaviour tested, a setting; the default differs for a named cell or peer",
+    "A": "RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement",
     "B": "implemented, lacking a test that fails without it",
     "C": "partly implemented",
     "D": "not implemented",

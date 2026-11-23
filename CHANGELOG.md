@@ -1992,6 +1992,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sdp** (audit-5, RFC 6679 section 7.1): with ECN signalled (`with_ecn(true)` without
+  `with_ecn_without_signalling`) every audio and video format takes `nack ecn` and the XR ECN
+  summary: an offer's RTP sections carry `a=rtcp-fb:* nack ecn` and `a=rtcp-xr:ecn-sum` beside
+  `a=ecn-capable-rtp`, an answer keeps what the offer had of them (`ack ccfb` replacing
+  `nack ecn`, RFC 8888 section 7). Two such peers without RFC 8888 now mark their media on
+  RFC 6679's own reports (they marked nothing).
+- **sdp** (audit-5, RFC 7742 section 6.2): every H.264 fmtp line this endpoint writes has
+  `profile-level-id` (a format registered without one is written with RFC 6184's default,
+  `42000a`) and none has `sprop-parameter-sets` (it was written as registered). An offer
+  without `profile-level-id` is answered at no more than Level 1, the default it stands for
+  (it was answered at this endpoint's own level).
+- **peer_connection** (audit-5, RFC 8852 section 3): the RID and RRID header extension
+  elements are read through `RtpStreamId` / `RepairedRtpStreamId`; one that is not 1 to 255
+  ASCII letters and digits names no stream (its bytes were taken as the rid).
+- **audit** (audit-5): `setting` takes a second kind of evidence, "measured" (RULES.md):
+  the RFC form has its own mutation-checked test and a named repository test measured it
+  worse; `scripts/audit-count.py --check` requires the measurement test and its numbers.
+  GCC-5.4-4 and RFC4585-3.5.2-5 are such rows, RFC7941-6-1 a `setting` for the recorded
+  Firefox 152 offer; RFC9429-5.3.2-9, FLEXFEC03-5.1-5 and RFC7164-5-1 are `n/a`.
+  `rtc-interceptor` tests `congestion_feedback_rate.rs::rfc_4585_timing_of_congestion_feedback_measured_against_immediate`
+  and `gcc/overuse.rs::the_drafts_threshold_adapts_over_the_uncapped_arrival_gap` added.
+
 - **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
   engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
   answer, while the mapped address may be used (the NAT binding lives as long as the

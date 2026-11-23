@@ -577,3 +577,55 @@ fn a_tstr_and_a_tstn_wait_for_the_regular_packet() {
         assert!(carried, "the regular packet carries it (TSTR: {request})");
     }
 }
+
+fn twcc(media_ssrc: u32, count: u8) -> Vec<Box<dyn rtcp::Packet>> {
+    use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+    vec![Box::new(TransportLayerCc {
+        sender_ssrc: 0,
+        media_ssrc,
+        fb_pkt_count: count,
+        ..Default::default()
+    })]
+}
+
+/// RFC 4585 section 3.5.2, as written, for congestion control feedback too
+/// (`with_immediate_congestion_feedback(false)`): after an Early packet a second transport-wide
+/// feedback message is held for the next regular packet ("allow_early == FALSE"), not sent
+/// at once. With the default (`true`) each leaves as it is built.
+#[test]
+fn with_rfc_4585_timing_a_second_congestion_feedback_waits_for_the_regular_packet() {
+    use rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+    for immediate in [false, true] {
+        let mut chain = chain(
+            builder()
+                .with_bandwidth(RtcpBandwidth {
+                    session: Some(64_000),
+                    ..Default::default()
+                })
+                .with_immediate_congestion_feedback(immediate),
+        );
+        let base = Instant::now();
+        chain.bind_remote_stream(&video(200));
+        control(&mut chain, base, RtcpSessionControl::Start);
+
+        chain
+            .handle_write(rtcp(base + secs(0.01), twcc(200, 1)))
+            .unwrap();
+        assert_eq!(1, written(&mut chain).len(), "immediate {immediate}");
+        chain
+            .handle_write(rtcp(base + secs(0.02), twcc(200, 2)))
+            .unwrap();
+        let second = written(&mut chain);
+        if immediate {
+            assert_eq!(1, second.len(), "leaves as it is built");
+            assert_eq!(1, second[0].get::<TransportLayerCc>().len());
+        } else {
+            assert!(second.is_empty(), "no second Early packet");
+            let sent = run(&mut chain, base + secs(0.9));
+            assert!(!sent.is_empty());
+            assert!(sent[0].at > base + secs(0.02));
+            assert!(sent[0].is_compound(), "with the regular packet");
+            assert_eq!(1, sent[0].get::<TransportLayerCc>().len());
+        }
+    }
+}

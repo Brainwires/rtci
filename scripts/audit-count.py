@@ -26,7 +26,9 @@ and verdict and fails when:
   The setting's last path segment, without its arguments, must be a ``fn`` of a Rust source
   file; the test is found as ``scripts/check-test-inventory.py`` finds the tests the conformance
   tables name (``name``, ``path.rs::name``). Several of each may be given, comma-separated
-  (``docs/conformance/audit/RULES.md`` defines the verdict);
+  (``docs/conformance/audit/RULES.md`` defines the verdict). For the "measured" kind of
+  evidence the reason reads ``Default differs: measured by `<test>`: <numbers> ...``: the
+  measurement test must exist and the numbers be given;
 * a row's level carries no RFC 2119 keyword and is not a procedure step (``proc``, ``DESC``);
 * a ``Totals (N rows)`` heading's N is not the number of table rows;
 * a file's totals line for a level disagrees with its table, a level that has rows has no totals
@@ -125,6 +127,11 @@ SETTING_NOTE = re.compile(
 )
 
 
+MEASURED_NOTE = re.compile(
+    r"measured by (?P<tests>`[^`]+`(?:, `[^`]+`)*): (?P<numbers>\S.{7,})"
+)
+
+
 class Source:
     """The Rust functions and the tests of the tree, read once, for the ``setting`` rows."""
 
@@ -178,6 +185,23 @@ def check_setting(note: str, where: str, source: Source, errors: list[str]) -> N
     for test in re.findall(r"`([^`]+)`", m.group("tests")):
         if not source.has_test(test):
             errors.append(f"{where}: RFC test `{test}` does not exist")
+    # The "measured" kind of evidence (RULES.md): the default differs because the RFC form
+    # measured worse on the repository's own congestion or impairment tests. The note gives
+    # the numbers and names the test that produces them.
+    why = m.group("why")
+    if why.lower().startswith("measured"):
+        measurement = MEASURED_NOTE.match(why)
+        if not measurement:
+            errors.append(
+                f"{where}: a measured `setting` needs 'Default differs: measured by "
+                "`<test>`: <numbers> ...'"
+            )
+            return
+        for test in re.findall(r"`([^`]+)`", measurement.group("tests")):
+            if not source.has_test(test):
+                errors.append(f"{where}: measurement test `{test}` does not exist")
+        if not re.search(r"\d", measurement.group("numbers")):
+            errors.append(f"{where}: a measured `setting` gives the numbers it measured")
 
 
 def scan(

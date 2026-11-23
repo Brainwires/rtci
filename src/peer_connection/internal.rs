@@ -386,6 +386,33 @@ impl RTCPeerConnection {
         // the descriptions say (`a=ssrc:<ssrc> cname:`) and what the parameters report.
         media_engine.rtcp_cname = pipeline_context.interceptor_handler_context.cname.clone();
 
+        // RFC 6679 section 7.1: with ECN signalled in SDP, "the "rtcp-xr" attribute with the
+        // "ecn-sum" parameter MUST also be used", and `nack ecn` "MUST be used whenever the
+        // initialisation method or a congestion control algorithm requires timely sender-side
+        // knowledge of received CE markings" (every initiation method here reads the first
+        // ECT packets back). Both go with every audio and video format; an answer keeps what
+        // the offer had of them, and `ack ccfb` replaces `nack ecn` (RFC 8888 section 7).
+        if setting_engine.ecn && !setting_engine.ecn_without_signalling {
+            for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK.to_owned(),
+                        parameter:
+                            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                                .to_owned(),
+                    },
+                    kind,
+                );
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: interceptor::RTCP_FB_XR.to_owned(),
+                        parameter: interceptor::RTCP_XR_ECN_SUMMARY.to_owned(),
+                    },
+                    kind,
+                );
+            }
+        }
+
         Ok(Self {
             configuration,
             media_engine,

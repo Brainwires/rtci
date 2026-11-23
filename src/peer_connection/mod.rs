@@ -6115,6 +6115,45 @@ a=rtcp-mux\r\n";
         assert_eq!(sdp.matches("a=end-of-candidates\r\n").count(), 2);
     }
 
+    /// RFC 5761 section 5.1.3: with RTP and RTCP multiplexed, "ICE connectivity checks MUST
+    /// only be done for the RTP component". A remote candidate of the RTCP component (2),
+    /// trickled or in the description, is not given to the ICE agent, so no pair and no check
+    /// is made for it; the RTP component's candidates are.
+    #[test]
+    fn remote_rtcp_component_candidates_get_no_checks() {
+        let mut pc = media_pc();
+        // The default candidate (RTP, the m= line's address) and the RTCP one beside it.
+        let sdp = PER_SECTION_UFRAG_OFFER.replacen(
+            "a=rtcp-mux\r\n",
+            "a=rtcp-mux\r\n\
+             a=candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host\r\n\
+             a=candidate:1 2 udp 2113929470 203.0.113.100 10101 typ host\r\n",
+            1,
+        );
+        pc.set_remote_description(Instant::now(), remote(RTCSdpType::Offer, &sdp))
+            .unwrap();
+        // The offer's transport parameters, its candidates with them, are applied with the
+        // answer.
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+        let components = |pc: &RTCPeerConnection| {
+            pc.ice_transport()
+                .get_remote_candidates()
+                .iter()
+                .map(|c| (c.port, c.component))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtcp = "candidate:8 2 udp 2113929470 203.0.113.8 10108 typ host";
+        pc.add_remote_candidate(candidate(rtcp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1)]);
+        let rtp = "candidate:9 1 udp 2113929471 203.0.113.9 10109 typ host";
+        pc.add_remote_candidate(candidate(rtp, Some("a1"), None))
+            .unwrap();
+        assert_eq!(components(&pc), vec![(10100, 1), (10109, 1)]);
+    }
+
     /// RFC 8838 section 14: a remote candidate that follows the end-of-candidates indication
     /// of its generation is ignored: the ICE agent does not take it and the remote
     /// description does not show it after `a=end-of-candidates`.
