@@ -1027,7 +1027,12 @@ impl Association {
     /// - a call was made to `handle_timeout`
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        let pmtud = self.pmtud.as_ref().and_then(|p| p.deadline());
+        // The discovery runs while the association is established only.
+        let pmtud = self
+            .pmtud
+            .as_ref()
+            .filter(|_| self.state() == AssociationState::Established)
+            .and_then(|p| p.deadline());
         match (self.timers.next_timeout(), pmtud) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1108,12 +1113,11 @@ impl Association {
                 self.timers.start(timer, now, self.rto_mgr.get_rto());
             }
         }
-        if self.state() == AssociationState::Established
-            && self
-                .pmtud
-                .as_ref()
-                .and_then(|p| p.deadline())
-                .is_some_and(|at| now >= at)
+        if self
+            .pmtud
+            .as_ref()
+            .and_then(|p| p.deadline())
+            .is_some_and(|at| now >= at)
         {
             self.handle_path_mtu_timeout(now);
         }
