@@ -956,7 +956,7 @@ fn default_candidate(candidates: &[RTCIceCandidate]) -> Option<(std::net::IpAddr
 /// Puts a default destination in a section: the `m=` port and `c=` address, and the `a=rtcp`
 /// line when the section has one (RTCP is multiplexed, so it is the RTP destination too; RFC
 /// 5761 section 5.1.3).
-fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port: u16) {
+pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::IpAddr, port: u16) {
     m.media_name.port = RangedPort {
         value: port as isize,
         range: None,

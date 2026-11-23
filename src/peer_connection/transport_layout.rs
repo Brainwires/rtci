@@ -26,6 +26,7 @@ use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::sdp::{
     ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_group_mids,
     extract_fingerprints, extract_ice_details, get_mid_value, is_rejected_media,
+    set_default_destination,
 };
 use crate::peer_connection::transport::ice::IceTransport;
 use crate::peer_connection::transport::ice::candidate::rtc_ice_candidates_from_ice_candidates;
@@ -486,17 +487,10 @@ impl RTCPeerConnection {
                 }
                 m.attributes
                     .retain(|a| !TRANSPORT_ICE_ATTRIBUTES.contains(&a.key.as_str()));
-                m.media_name.port.value = 9;
-                m.connection_information =
-                    Some(::sdp::description::common::ConnectionInformation {
-                        network_type: "IN".to_owned(),
-                        address_type: "IP4".to_owned(),
-                        address: Some(::sdp::description::common::Address {
-                            address: "0.0.0.0".to_owned(),
-                            ttl: None,
-                            range: None,
-                        }),
-                    });
+                // The dummy destination until the transport has a candidate (RFC 9429 section
+                // 5.2.1: port 9, `c=IN IP4 0.0.0.0` and `a=rtcp:9 IN IP4 0.0.0.0`), not the
+                // default transport's.
+                set_default_destination(m, std::net::Ipv4Addr::UNSPECIFIED.into(), 9);
                 m.attributes.push(Attribute::new(
                     "ice-ufrag".to_owned(),
                     Some(ufrag.to_owned()),
