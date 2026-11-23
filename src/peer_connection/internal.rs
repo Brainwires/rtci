@@ -4467,6 +4467,14 @@ impl RTCPeerConnection {
                 {
                     continue;
                 }
+                // RFC 2198 section 5: a RED format goes with the encodings its fmtp names, as
+                // RTX with its `apt`.
+                if !crate::peer_connection::configuration::media_engine::red_encodings_negotiated(
+                    codec,
+                    &codec_preferences,
+                ) {
+                    continue;
+                }
                 codec_preferences.push(codec.clone());
             }
             // So does telephone-event at a named codec's clock rate (RFC 4733, RFC 7874
