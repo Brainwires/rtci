@@ -20,7 +20,10 @@ pub mod vm;
 
 pub use dlrr::{DLRRReport, DLRRReportBlock};
 pub use prt::PacketReceiptTimesReportBlock;
-pub use rle::{Chunk, ChunkType, DuplicateRLEReportBlock, LossRLEReportBlock, RLEReportBlock};
+pub use rle::{
+    Chunk, ChunkType, DuplicateRLEReportBlock, LossRLEReportBlock, RLEReportBlock,
+    reported_sequence_numbers,
+};
 pub use rrt::ReceiverReferenceTimeReportBlock;
 pub use ssr::{StatisticsSummaryReportBlock, TTLorHopLimitType};
 pub use unknown::UnknownReportBlock;

@@ -24,6 +24,10 @@ pub(crate) struct ReceiverStream {
     ssrc: u32,
     receiver_ssrc: u32,
     clock_rate: f64,
+    /// The clock rate of each other payload type the source may switch to (RFC 7160).
+    payload_clock_rates: Vec<(u8, f64)>,
+    /// The clock rate of the previous packet's payload type.
+    last_clock_rate: f64,
 
     /// Whether a packet has been received (the sequence state below is initialised).
     started: bool,
@@ -56,6 +60,8 @@ impl ReceiverStream {
             ssrc,
             receiver_ssrc: rand::random::<u32>(),
             clock_rate: clock_rate as f64,
+            payload_clock_rates: vec![],
+            last_clock_rate: clock_rate as f64,
 
             started: false,
             max_seq: 0,
@@ -87,6 +93,23 @@ impl ReceiverStream {
     /// The clock rate of the codec the stream is received with.
     pub(crate) fn set_clock_rate(&mut self, clock_rate: u32) {
         self.clock_rate = clock_rate as f64;
+    }
+
+    /// The clock rates of the payload types the source may switch to (RFC 7160): a packet of
+    /// one of them is timed with its own rate.
+    pub(crate) fn set_payload_clock_rates(&mut self, rates: &[(u8, u32)]) {
+        self.payload_clock_rates = rates
+            .iter()
+            .filter(|(_, rate)| *rate > 0)
+            .map(|(pt, rate)| (*pt, f64::from(*rate)))
+            .collect();
+    }
+
+    fn clock_rate_of(&self, payload_type: u8) -> f64 {
+        self.payload_clock_rates
+            .iter()
+            .find(|(pt, _)| *pt == payload_type)
+            .map_or(self.clock_rate, |(_, rate)| *rate)
     }
 
     /// Whether any packet of the stream has been received.
@@ -153,12 +176,16 @@ impl ReceiverStream {
         // RFC 3550 Appendix A.8, for every packet of the sequence, in arrival order:
         // D = (Rj - Ri) - (Sj - Si), J += (|D| - J) / 16. The timestamp difference is taken
         // signed, so a wrap of the 32-bit timestamp is a small step, not a jump of 2^32.
+        // RFC 7160 section 4.3: across a change of clock rate the arrival times are taken in
+        // the clock of the earlier packet, so a path without jitter shows none.
+        let clock_rate = self.clock_rate_of(pkt.header.payload_type);
         if let Some(last_rtp_time_time) = self.last_rtp_time_time {
-            let d = now.duration_since(last_rtp_time_time).as_secs_f64() * self.clock_rate
+            let d = now.duration_since(last_rtp_time_time).as_secs_f64() * self.last_clock_rate
                 - pkt.header.timestamp.wrapping_sub(self.last_rtp_time_rtp) as i32 as f64;
             self.jitter += (d.abs() - self.jitter) / 16.0;
         }
 
+        self.last_clock_rate = clock_rate;
         self.last_rtp_time_rtp = pkt.header.timestamp;
         self.last_rtp_time_time = Some(now);
     }

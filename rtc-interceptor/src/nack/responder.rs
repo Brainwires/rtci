@@ -372,6 +372,7 @@ fn rtx_packet(
     header.payload_type = pt_rtx;
     header.sequence_number = rtx_seq;
     header.padding = false;
+    header.padding_size = 0;
     // RFC 8852 3.2: a repair packet names the stream it repairs with the repaired-RID, not
     // the RID, so a receiver never takes the RTX SSRC for a simulcast layer of its own.
     if let Some(rid_id) = rid_extension_id

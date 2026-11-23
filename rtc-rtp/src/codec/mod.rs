@@ -25,6 +25,8 @@ pub mod smpte336m;
 pub mod svc;
 /// Named telephone events and DTMF ([RFC 4733]).
 pub mod telephone_event;
+/// Telephony tones, `audio/tone` ([RFC 4733] section 4).
+pub mod tone;
 /// VP8 payload format ([RFC 7741]).
 pub mod vp8;
 /// VP9 payload format (draft-ietf-payload-vp9).

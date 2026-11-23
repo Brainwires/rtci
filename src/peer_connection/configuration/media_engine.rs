@@ -472,6 +472,12 @@ pub(crate) fn is_rtcp_conflicting_payload_type(payload_type: PayloadType) -> boo
     (64..=95).contains(&payload_type)
 }
 
+/// The receiver capabilities the default VP9 formats state (RFC 9628 section 6: max-fr in
+/// frames per second, max-fs in macroblocks). The engine does not decode, so these are what a
+/// typical decoder takes, the values Firefox offers: 60 frames a second, 12,288 macroblocks
+/// (up to 4096 x 3072). An application whose decoder takes less registers its own VP9 codecs.
+pub const VP9_RECEIVER_LIMITS: &str = "max-fr=60;max-fs=12288";
+
 impl MediaEngine {
     /// Registers standard WebRTC codecs for audio and video.
     ///
@@ -654,7 +660,10 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_VP9.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=0".to_owned(),
+                    // RFC 9628 section 6: a receiver states max-fr and max-fs ("If the
+                    // implementation is willing to receive media, both parameters MUST be
+                    // provided"); the values Firefox states. See `VP9_RECEIVER_LIMITS`.
+                    sdp_fmtp_line: format!("{VP9_RECEIVER_LIMITS};profile-id=0"),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 98,
@@ -665,7 +674,7 @@ impl MediaEngine {
                     mime_type: MIME_TYPE_VP9.to_owned(),
                     clock_rate: 90000,
                     channels: 0,
-                    sdp_fmtp_line: "profile-id=1".to_owned(),
+                    sdp_fmtp_line: format!("{VP9_RECEIVER_LIMITS};profile-id=1"),
                     rtcp_feedback: video_rtcp_feedback.clone(),
                 },
                 payload_type: 100,
@@ -1603,6 +1612,23 @@ impl MediaEngine {
             RtpCodecKind::Application => &self.application_codecs,
             RtpCodecKind::Unspecified => return codec.rtp_codec.sdp_fmtp_line.clone(),
         };
+        // RFC 8627 section 5.2.1 (and draft-ietf-payload-flexible-fec-scheme-03 5.2.1): "Any
+        // unknown option in the offer must be ignored and deleted from the answer". A FlexFEC
+        // answer states this endpoint's own parameters (its `repair-window`), as a media
+        // codec's does. RTX and RED keep theirs: they name payload types of the description.
+        if answering
+            && crate::rtp_transceiver::rtp_sender::rtp_codec::is_fec_mime_type(
+                &codec.rtp_codec.mime_type,
+            )
+            && let Some(local) = registered.iter().find(|registered| {
+                registered
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+            })
+        {
+            return local.rtp_codec.sdp_fmtp_line.clone();
+        }
         if is_repair_codec(&codec.rtp_codec) {
             return codec.rtp_codec.sdp_fmtp_line.clone();
         }

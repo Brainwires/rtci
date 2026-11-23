@@ -428,6 +428,77 @@ fn a_source_that_fell_silent_times_out_after_five_intervals() {
     assert_eq!(vec![200], sent.last().unwrap().reported());
 }
 
+/// RFC 8834 section 4.1 (RFC 3550 6.2 and 6.3.5): with the reduced minimum interval in use
+/// (half a second at 720 kbit/s), the participant timeout still counts five intervals of the
+/// fixed five-second minimum. A source heard once is reported for 25 seconds, not timed out
+/// after 2.5.
+#[test]
+fn the_participant_timeout_keeps_the_fixed_minimum_under_the_reduced_minimum() {
+    let mut chain = chain(
+        builder()
+            .with_profile(RtcpProfile::Avp)
+            .with_reduced_minimum(true)
+            .with_bandwidth(RtcpBandwidth {
+                session: Some(720_000),
+                ..Default::default()
+            }),
+    );
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_read(rtp(base, 200, 1, 0)).unwrap();
+    read(&mut chain);
+
+    let before = run(&mut chain, base + secs(20.0));
+    assert!(before.len() > 20, "reports come every half second or so");
+    assert!(
+        before.iter().all(|sent| sent.reported() == vec![200]),
+        "still a member after 20 s"
+    );
+    let (_, events) = read(&mut chain);
+    assert!(events.is_empty(), "{events:?}");
+
+    run(&mut chain, base + secs(30.0));
+    let (_, events) = read(&mut chain);
+    assert_eq!(vec![RtcpSessionEvent::SourceTimedOut { ssrc: 200 }], events);
+}
+
+/// RFC 7160 section 4.3: a source that switches payload type, and with it clock rate, on one
+/// SSRC (Opus at 48 kHz to PCMU at 8 kHz) is timed with each packet's own rate: perfectly
+/// paced packets show no jitter in the receiver report.
+#[test]
+fn a_switch_of_clock_rate_on_one_ssrc_shows_no_jitter_on_a_steady_path() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    let mut remote = audio(200);
+    remote.payload_clock_rates = vec![(0, 8_000)];
+    chain.bind_remote_stream(&remote);
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut timestamp = 1_000u32;
+    for seq in 0..50u16 {
+        let at = base + Duration::from_millis(20 * u64::from(seq));
+        let mut packet = rtp(at, 200, seq, timestamp);
+        let pcmu = seq >= 25;
+        if let Packet::Rtp(p) = &mut packet.message.packet {
+            p.header.payload_type = if pcmu { 0 } else { 111 };
+        }
+        chain.handle_read(packet).unwrap();
+        // 20 ms: 960 ticks at 48 kHz, 160 at 8 kHz.
+        timestamp = timestamp.wrapping_add(if pcmu { 160 } else { 960 });
+    }
+    read(&mut chain);
+    let sent = run(&mut chain, base + secs(1.5));
+    let jitter: Vec<u32> = sent
+        .iter()
+        .flat_map(|sent| sent.get::<ReceiverReport>())
+        .flat_map(|rr| rr.reports.iter())
+        .filter(|report| report.ssrc == 200)
+        .map(|report| report.jitter)
+        .collect();
+    assert!(!jitter.is_empty());
+    assert!(jitter.iter().all(|j| *j <= 60), "{jitter:?}");
+}
+
 /// RFC 3550 6.5.1: the CNAME a remote source names is what binds its streams together; the
 /// session reports it.
 #[test]
@@ -782,6 +853,137 @@ fn reference_times_are_sent_and_answered_in_the_regular_report() {
         "{} for {held} s",
         dlrr.reports[0].dlrr
     );
+}
+
+/// RFC 8834 section 8 (RFC 3611 section 3): an XR block of a type this endpoint does not
+/// understand is ignored, and the blocks around it are still acted on. Here an unknown block
+/// type (99) comes before a receiver reference time, which is still answered with a DLRR.
+#[test]
+fn an_unknown_xr_block_is_ignored_and_the_next_block_answered() {
+    let base = Instant::now();
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
+    chain.bind_local_stream(&video(100));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_write(rtp(base, 100, 1, 0)).unwrap();
+    let raw: [u8; 28] = [
+        0x80, 207, 0, 6, // XR, length 6 words
+        0, 0, 1, 44, // sender SSRC 300
+        99, 0, 0, 1, // block type 99, one word
+        0xde, 0xad, 0xbe, 0xef, //
+        4, 0, 0, 2, // receiver reference time, two words
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+    ];
+    let packets = rtcp::packet::unmarshal(&mut &raw[..]).unwrap();
+    let xr = packets[0]
+        .as_any()
+        .downcast_ref::<ExtendedReport>()
+        .expect("an XR");
+    assert_eq!(2, xr.reports.len(), "the unknown block is kept apart");
+    chain.handle_read(rtcp(base + secs(0.1), packets)).unwrap();
+    read(&mut chain);
+
+    let sent = run(&mut chain, base + secs(1.0));
+    let answered = sent
+        .iter()
+        .flat_map(|sent| sent.get::<ExtendedReport>())
+        .next()
+        .expect("an XR with the answer");
+    let dlrr = answered
+        .reports
+        .iter()
+        .find_map(|block| block.as_any().downcast_ref::<DLRRReportBlock>())
+        .expect("a DLRR block");
+    assert_eq!(300, dlrr.reports[0].ssrc);
+    assert_eq!(0x5678_9abc, dlrr.reports[0].last_rr);
+}
+
+fn reference_time(at: Instant, from: u32) -> rtc_interceptor::TaggedPacket {
+    rtcp(
+        at,
+        vec![Box::new(ExtendedReport {
+            sender_ssrc: from,
+            reports: vec![Box::new(ReceiverReferenceTimeReportBlock {
+                ntp_timestamp: u64::from(from) << 32,
+            })],
+        })],
+    )
+}
+
+/// RFC 3611 section 5.1: under `rcvr-rtt=sender` "non RTP senders SHALL NOT send DLRR
+/// blocks". An endpoint that only receives is sent reference times and answers none.
+#[test]
+fn a_receive_only_endpoint_answers_no_reference_time() {
+    let base = Instant::now();
+    let mut chain = chain(builder());
+    let mut remote = video(200);
+    remote
+        .rtcp_feedback
+        .push(feedback("rrtr", "rcvr-rtt=sender"));
+    chain.bind_remote_stream(&remote);
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_read(rtp(base, 200, 1, 0)).unwrap();
+    chain.handle_read(reference_time(base, 200)).unwrap();
+    read(&mut chain);
+
+    let sent = run(&mut chain, base + secs(5.0));
+    assert!(!sent.is_empty());
+    for sent in &sent {
+        for xr in sent.get::<ExtendedReport>() {
+            assert!(
+                !xr.reports
+                    .iter()
+                    .any(|b| b.as_any().is::<DLRRReportBlock>()),
+                "{xr:?}"
+            );
+        }
+    }
+}
+
+/// RFC 3611 section 5.1: "any DLRR Report Blocks that are sent SHALL NOT exceed the specified
+/// size"; what does not fit is reported on in a later interval. `rcvr-rtt=sender:28` holds
+/// two sub-blocks (4 octets of header, 12 each): of three reference times, the two oldest go
+/// first and the third in the next report.
+#[test]
+fn a_dlrr_block_keeps_to_the_signalled_size_and_the_rest_waits() {
+    let base = Instant::now();
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
+    let mut local = video(100);
+    local
+        .rtcp_feedback
+        .push(feedback("rrtr", "rcvr-rtt=sender:28"));
+    chain.bind_local_stream(&local);
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_write(rtp(base, 100, 1, 0)).unwrap();
+    for (i, from) in [300u32, 301, 302].into_iter().enumerate() {
+        chain
+            .handle_read(reference_time(base + secs(0.01 * i as f64), from))
+            .unwrap();
+    }
+    read(&mut chain);
+
+    // Sending all along, so the endpoint stays a sender.
+    let mut sent = vec![];
+    for k in 1..100u16 {
+        let at = base + secs(0.1 * f64::from(k));
+        chain
+            .handle_write(rtp(at, 100, k + 1, u32::from(k) * 9_000))
+            .unwrap();
+        sent.extend(run(&mut chain, at));
+    }
+    let answers: Vec<Vec<u32>> = sent
+        .iter()
+        .flat_map(|sent| sent.get::<ExtendedReport>())
+        .flat_map(|xr| xr.reports.iter())
+        .filter_map(|b| b.as_any().downcast_ref::<DLRRReportBlock>())
+        .map(|dlrr| dlrr.reports.iter().map(|r| r.ssrc).collect())
+        .collect();
+    assert_eq!(vec![vec![300, 301], vec![302]], answers);
 }
 
 /// RFC 3550 6.4.1: the round trip is the time since the sender report less the delay the

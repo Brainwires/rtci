@@ -145,8 +145,8 @@ use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, SSRC};
 use interceptor::{
     BandwidthEstimator, CircuitBreakerBuilder, CircuitBreakerHandle, CongestionControlBuilder,
     CongestionControlHandle, Gcc, KeyFrameRequestInterceptor, NackGeneratorBuilder,
-    NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TwccReceiverBuilder,
-    TwccSenderBuilder,
+    NackResponderBuilder, PacerBuilder, Rfc8888Builder, RtcpSessionBuilder, TstnResponderBuilder,
+    TwccReceiverBuilder, TwccSenderBuilder, XrReportBuilder,
 };
 use std::time::Duration;
 
@@ -377,6 +377,8 @@ pub fn register_default_interceptors_with_options(
         );
 
     let registry = configure_rtcp_reports(registry);
+    let registry = configure_extended_reports(registry);
+    let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
@@ -420,6 +422,8 @@ pub fn register_default_interceptors_without_congestion_control(
     let registry = with_congestion_feedback_recorders(registry, feedback);
 
     let registry = configure_rtcp_reports(registry);
+    let registry = configure_extended_reports(registry);
+    let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
 
     let registry = configure_key_frame_requests(registry);
@@ -780,6 +784,33 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
 /// answer is applied.
 pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuilder) -> Registry {
     registry.with(Slot::RtcpSession, session.build())
+}
+
+/// Adds the RTCP XR report blocks a receiver writes about each source (RFC 3611 section 4:
+/// Loss RLE, Duplicate RLE, Packet Receipt Times, Statistics Summary, VoIP Metrics) for the
+/// remote streams that negotiated them with `a=rtcp-xr` (section 5.1). A stream that did not
+/// gets none. Part of [`register_default_interceptors`].
+///
+/// ```
+/// use rtc::interceptor::Registry;
+/// use rtc::peer_connection::configuration::interceptor_registry::configure_extended_reports;
+///
+/// let registry = configure_extended_reports(Registry::new());
+/// # let _ = registry;
+/// ```
+pub fn configure_extended_reports(registry: Registry) -> Registry {
+    registry.with(Slot::ExtendedReports, XrReportBuilder::new().build())
+}
+
+/// Adds the temporal-spatial trade-off notifications (RFC 5104 section 4.3.3): a local media
+/// sender whose stream negotiated `ccm tstr` answers each request it receives with a TSTN
+/// carrying the index it will use. The request itself still reaches the application, which
+/// owns the encoder. Part of [`register_default_interceptors`].
+pub fn configure_tradeoff_notifications(registry: Registry) -> Registry {
+    registry.with(
+        Slot::TradeoffNotifications,
+        TstnResponderBuilder::new().build(),
+    )
 }
 
 /// Negotiates receiver-side round trip time measurement for video (`a=rtcp-fb:<pt> rrtr`,
@@ -1334,6 +1365,9 @@ pub(crate) fn create_stream_info(
         sdp_fmtp_line_fec: fec_format
             .map(|format| format.sdp_fmtp_line.clone())
             .unwrap_or_default(),
+        // The other payload types of the section and their clock rates (RFC 7160) are not
+        // passed here yet: a stream is timed with its first codec's rate.
+        payload_clock_rates: vec![],
     }
 }
 
@@ -1474,8 +1508,10 @@ mod slot_order_tests {
                 Slot::TwccReceiver,
                 Slot::Rfc8888,
                 Slot::Custom(interceptor::REMB_GENERATOR_SLOT),
+                Slot::ExtendedReports,
                 Slot::NackGenerator,
                 Slot::KeyFrameRequests,
+                Slot::TradeoffNotifications,
             ],
             slots
         );
@@ -1581,8 +1617,10 @@ mod slot_order_tests {
                 Slot::NackResponder,
                 Slot::TwccReceiver,
                 Slot::Rfc8888,
+                Slot::ExtendedReports,
                 Slot::NackGenerator,
                 Slot::KeyFrameRequests,
+                Slot::TradeoffNotifications,
             ],
             slots(&registry)
         );
@@ -1647,10 +1685,15 @@ mod slot_order_tests {
                     Slot::Custom(interceptor::REMB_GENERATOR_SLOT),
                     "RembGeneratorInterceptor".to_owned()
                 ),
+                (Slot::ExtendedReports, "XrReportInterceptor".to_owned()),
                 (Slot::NackGenerator, "NackGeneratorInterceptor".to_owned()),
                 (
                     Slot::KeyFrameRequests,
                     "KeyFrameRequestInterceptor".to_owned()
+                ),
+                (
+                    Slot::TradeoffNotifications,
+                    "TstnResponderInterceptor".to_owned()
                 ),
             ],
             registry.slots()

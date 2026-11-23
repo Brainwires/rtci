@@ -129,6 +129,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in `get_parameters`. `close()` sets every data channel's state to closed without an
     event. `iceCandidatePoolSize` is fixed once `set_local_description` has been called,
     after a rollback too.
+- **media conformance**: FEC and congestion control signalling.
+  - A FlexFEC answer (`video/flexfec`, `video/flexfec-03`) states this endpoint's registered
+    fmtp; it repeated the offer's line, unknown options included (RFC 8627 section 5.2.1).
+  - `StreamInfo` has a new public field `payload_clock_rates` (the clock rate of each payload
+    type a remote source may switch to, RFC 7160 section 4.3); the receiver report jitter uses
+    the earlier packet's rate across a switch. Struct literals without `..Default::default()`
+    need the field. The peer connection leaves it empty for now.
+- **media conformance**: payload formats.
+  - The default VP9 formats state `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6:
+    a receiver "MUST" provide both); new `media_engine::VP9_RECEIVER_LIMITS`. Offers and
+    answers with the default codecs change accordingly.
+  - Two VP8 formats that differ only in `max-fr` / `max-fs` match (RFC 7741 section 6.2.2:
+    receiver capabilities, declarative); they were a mismatch.
+- **media conformance**: RTCP feedback and extended reports.
+  - The TWCC receiver follows draft-holmer-rmcat-transport-wide-cc-extensions-01 section
+    3.1.1 when a late packet moves the base sequence number back: packets an earlier feedback
+    reported as received are "not received" now, with no delta; they were reported received
+    again. `TwccReceiverBuilder::with_rereport_received(true)` is libwebrtc's form (a
+    libwebrtc sender drops a packet from its history once it is reported received, so it
+    ignores the later "not received" either way).
+  - A DLRR block keeps to the size `rcvr-rtt=<mode>:<max>` names (RFC 3611 section 5.1); the
+    reference times that do not fit wait for the next report, oldest first. The RTCP session
+    reads the maximum from an `rrtr` feedback whose parameter is the format as signalled.
+  - The default interceptor set gains `Slot::ExtendedReports` (`XrReportInterceptor`) and
+    `Slot::TradeoffNotifications` (`TstnResponderInterceptor`); both act only for streams
+    that negotiated them.
+- **media conformance**: RTP usage (RFC 8834).
+  - Received RTCP is parsed with `rtcp::packet::unmarshal_lenient`: of a compound packet, a
+    packet of a known type that does not parse is delivered as a `RawPacket` and the others
+    are processed (RFC 8834 section 4.1, RFC 3550 section 6.1); the whole datagram used to be
+    dropped. A datagram whose framing is broken is still dropped.
+  - New `scripts/audit-count.py` (in the Python gates of `cargo.yml`, with `--check`): counts
+    the clause audit's tables by level and verdict, fails on an unknown level or verdict or a
+    totals line that disagrees with its table, and writes `docs/conformance/audit/COUNTS.md`.
 - **jsep**: a rolled-back remote offer leaves the transports as they were (RFC 9429 section
   5.7). The answerer's ICE and DTLS transports take a remote offer's parameters when the local
   answer (or provisional answer) is applied, not when the offer is: the first offer starts
@@ -1610,6 +1644,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: `rtp::codec::tone` (`Tone`, `ToneSender`): the `audio/tone` payload
+  of RFC 4733 section 4 and its sending rule.
+- **media conformance**: RFC 3611 report blocks, RFC 5104 trade-off and back channel,
+  RPSI and LRR helpers.
+  - `XrReportInterceptor` / `XrReportBuilder` (`Slot::ExtendedReports`,
+    `configure_extended_reports`): Loss RLE, Duplicate RLE, Packet Receipt Times, Statistics
+    Summary and VoIP Metrics blocks about each remote stream that negotiated them (an `xr`
+    feedback per `a=rtcp-xr` format, `RTCP_FB_XR`), with the sequence accounting of RFC 3611
+    section 4.1 and Appendix A.1, thinning to a signalled size, the burst and gap metrics of
+    section 4.7.2 and the round trip time the RTCP session measures. `with_formats` sends
+    blocks without negotiation; `with_jitter_buffer` describes the application's jitter
+    buffer (`JitterBufferMetrics`).
+  - `RLEReportBlock::from_flags` / `flags` and `reported_sequence_numbers` (rtc-rtcp): RLE
+    chunks from per-packet flags and back, with the trailing bits of a bit vector zero and
+    ignored.
+  - `TstnResponderInterceptor` (`Slot::TradeoffNotifications`,
+    `configure_tradeoff_notifications`): a TSTN for each TSTR a local media sender that
+    negotiated `ccm tstr` receives (RFC 5104 section 4.3.3). `TstrCommands` and
+    `VbcmCommands` number an application's TSTR and VBCM commands (sections 4.3.2.1,
+    4.3.4.1).
+  - `ReferencePictureSelectionIndication::hevc` / `hevc_picture` (RFC 7798 section 8.3) and
+    `LrrEntry::vp9` / `LrrEntry::av1` / `target_spatial_id` (RFC 9628 section 5.3, AV1 RTP
+    section 8.2).
 - **cc**: the media receiver's side of TMMBR (RFC 5104 section 4.2.1.2). An application asks a
   remote sender to stay under a bit rate with `TmmbrControl::Limit` (and lifts it with
   `TmmbrControl::Clear`) written into the chain; the congestion control interceptor sends the
@@ -2527,6 +2584,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from entering checking) failed the agent with a pair in progress. Tests:
   `agent_checklist_test.rs::test_an_unanswered_nomination_is_sent_again_while_the_peer_is_heard_from`
   and `tests/lossy_link_rtc2rtc.rs::ice_does_not_fail_while_a_nomination_is_in_progress_over_heavy_loss`.
+- **media**: `SampleBuilder` dropped the packets of the first access unit that arrived after
+  a later packet of it (the segment began at the first packet to arrive and the earlier ones
+  were released as consumed); NAL units now come out in sequence-number order from the start
+  (RFC 6184 sections 5.6, 5.8; RFC 7798 section 6).
 - **test**: `tests/lossy_link_rtc2rtc.rs` seeds the engine's provider randomness: each peer's
   `RTCCryptoProvider::random()` (ICE credentials, the tie-breaker, the consent intervals, DTLS
   randoms and cookies) is a generator seeded from the test's seed, so ICE takes the same course
