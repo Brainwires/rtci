@@ -922,17 +922,21 @@ fn two_bundle_groups_run_on_two_transports() -> Result<()> {
     }
     world.peers[0].pc.create_data_channel("data", None)?;
     let now = world.now;
-    let offer = world.peers[0].pc.create_offer(None)?;
-    let offer = RTCSessionDescription::offer(two_bundle_groups(offer.sdp))?;
+    // A JSEP endpoint offers one group (RFC 9429 sections 5.2.1, 5.2.2) and refuses a
+    // changed offer of its own; the answerer is given the offer of an endpoint that offers
+    // two. The offerer's answer check takes each of the answer's groups as a subset of its
+    // one offered group.
+    let local = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, local.clone())?;
+    let offer = RTCSessionDescription::offer(two_bundle_groups(local.sdp))?;
     assert_eq!(
         offer.sdp.matches("a=group:BUNDLE").count(),
         2,
         "{}",
         offer.sdp
     );
-    world.peers[0]
-        .pc
-        .set_local_description(now, offer.clone())?;
     world.peers[1].pc.set_remote_description(now, offer)?;
     let answer = world.peers[1].pc.create_answer(None)?;
     world.peers[1]
@@ -950,10 +954,18 @@ fn two_bundle_groups_run_on_two_transports() -> Result<()> {
         answer.sdp
     );
     assert_eq!(ufrags(&answer.sdp).len(), 2, "{}", answer.sdp);
-    let sections: Vec<&str> = answer.sdp.split("\r\nm=").skip(1).collect();
+    // The two sections of the first group share its credentials, the data section has the
+    // second group's.
+    let section_ufrags: Vec<HashSet<String>> = answer
+        .sdp
+        .split("\r\nm=")
+        .skip(1)
+        .map(|section| ufrags(section))
+        .collect();
+    assert_eq!(section_ufrags[0], section_ufrags[1], "{}", answer.sdp);
     assert!(
-        !sections[1].contains("a=ice-ufrag"),
-        "the second section of the first group has no transport attributes:\n{}",
+        section_ufrags[0].is_disjoint(&section_ufrags[2]),
+        "{}",
         answer.sdp
     );
     world.peers[0].pc.set_remote_description(now, answer)?;
@@ -1017,5 +1029,30 @@ fn two_bundle_groups_run_on_two_transports() -> Result<()> {
         reoffer.sdp
     );
     assert_eq!(ufrags(&reoffer.sdp).len(), 2, "{}", reoffer.sdp);
+    // The other side, given it, answers both groups.
+    let now = world.now;
+    world.peers[1]
+        .pc
+        .set_local_description(now, reoffer.clone())?;
+    world.peers[0].pc.set_remote_description(now, reoffer)?;
+    let answer = world.peers[0].pc.create_answer(None)?;
+    let groups: Vec<&str> = answer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("a=group:BUNDLE"))
+        .collect();
+    assert_eq!(
+        groups,
+        ["a=group:BUNDLE 0 1", "a=group:BUNDLE 2"],
+        "{}",
+        answer.sdp
+    );
+    world.peers[0]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[1].pc.set_remote_description(now, answer)?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.ice_transport_sections().len(), 2);
+    }
     Ok(())
 }
