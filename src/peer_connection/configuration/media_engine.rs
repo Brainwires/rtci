@@ -1642,19 +1642,6 @@ impl MediaEngine {
         );
     }
 
-    /// Whether the negotiated list of `kind` holds formats of the SFrame (`sframe`) or the
-    /// plain numbering yet.
-    fn numbering_negotiated(&self, kind: RtpCodecKind, sframe: bool) -> bool {
-        let negotiated = match kind {
-            RtpCodecKind::Audio => &self.negotiated_audio_codecs,
-            RtpCodecKind::Video => &self.negotiated_video_codecs,
-            _ => return true,
-        };
-        negotiated
-            .iter()
-            .any(|codec| self.sframe_payload_types.contains(&codec.payload_type) == sframe)
-    }
-
     /// Update the MediaEngine from a remote description
     pub(crate) fn update_from_remote_description(
         &mut self,
@@ -1690,15 +1677,7 @@ impl MediaEngine {
                 // then the two media secontions have different rtp header extensions in offer
                 self.update_header_extension_from_media_section(media)?;
 
-                // With one section per kind negotiated, an SFrame section still adds its own
-                // numbering when its kind has none in that numbering yet: its formats are
-                // numbered apart from the plain ones (draft-ietf-avtcore-rtp-sframe-03
-                // section 6), so the first section's list cannot serve it.
-                let own_numbering =
-                    !self.numbering_negotiated(typ, media.has_attribute(ATTR_KEY_SFRAME));
-                if (!self.negotiate_multi_codecs && !own_numbering)
-                    || typ == RtpCodecKind::Unspecified
-                {
+                if !self.negotiate_multi_codecs || typ == RtpCodecKind::Unspecified {
                     continue;
                 }
             }

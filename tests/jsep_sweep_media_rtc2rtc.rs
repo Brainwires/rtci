@@ -86,7 +86,15 @@ fn without_format(sdp: &str, pt: u8) -> String {
     out
 }
 
-fn write(world: &mut World, sender: RTCRtpSenderId, payload_type: u8, packets: u16) -> Result<()> {
+/// Writes `packets` RTP packets with sequence numbers from `first` (SRTP's replay window
+/// drops a number it has seen).
+fn write(
+    world: &mut World,
+    sender: RTCRtpSenderId,
+    payload_type: u8,
+    first: u16,
+    packets: u16,
+) -> Result<()> {
     for n in 0..packets {
         let now = world.now;
         let mut s = world.peers[0].pc.rtp_sender(sender).expect("the sender");
@@ -96,8 +104,8 @@ fn write(world: &mut World, sender: RTCRtpSenderId, payload_type: u8, packets: u
                 header: rtc::rtp::header::Header {
                     version: 2,
                     payload_type,
-                    sequence_number: 4000 + n,
-                    timestamp: u32::from(n) * 3000,
+                    sequence_number: first + n,
+                    timestamp: u32::from(first + n) * 3000,
                     ssrc: SSRC,
                     marker: true,
                     ..Default::default()
@@ -130,8 +138,8 @@ fn the_sender_uses_its_sections_formats_and_follows_a_new_answer() -> Result<()>
     let vp8 = payload_type(&offer, "VP8/90000");
     let opus = payload_type(&offer, "opus/48000/2");
 
-    write(&mut world, sender, vp8, 5)?;
-    write(&mut world, sender, opus, 5)?;
+    write(&mut world, sender, vp8, 100, 5)?;
+    write(&mut world, sender, opus, 200, 5)?;
     let received: Vec<u8> = world.peers[1]
         .rtp
         .iter()
@@ -152,7 +160,7 @@ fn the_sender_uses_its_sections_formats_and_follows_a_new_answer() -> Result<()>
         "the answerer's own still has it"
     );
     world.peers[1].rtp.clear();
-    let _ = write(&mut world, sender, vp8, 5);
+    let _ = write(&mut world, sender, vp8, 300, 5);
     let received: Vec<u8> = world.peers[1]
         .rtp
         .iter()

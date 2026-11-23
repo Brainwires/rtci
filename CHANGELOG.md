@@ -25,9 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     description (RFC 9429 section 5.8.2); its value is still not used.
   - A remote `a=group` line (any semantics) naming a mid that no m= line has is ignored as a
     whole (RFC 5888 section 6); it used to be kept with the unknown tags skipped.
-  - Under `with_disable_media_engine_multiple_codecs(true)` an SFrame section still adds its
-    own numbering to the negotiated list (draft-ietf-avtcore-rtp-sframe-03 section 6): its
-    sender no longer falls back to the plain section's payload types.
+  - A test pins that an SFrame section keeps its own payload-type numbering under
+    `with_disable_media_engine_multiple_codecs(true)` (no failure was found there).
   - New tests pin behaviour the audit had untested: candidates and `a=end-of-candidates` in
     the tagged section only, the relay policy's suppressed related address, a description's
     `a=end-of-candidates` reaching the ICE agent, `a=rtcp` parsed, mandatory values inherited
