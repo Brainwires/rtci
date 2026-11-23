@@ -29,11 +29,10 @@ pub(crate) struct ParkedTransports {
     active: usize,
     /// Every other transport's, by key.
     parked: BTreeMap<usize, TransportStatsAccumulator>,
-    /// The `transport` object name of each m= section assigned to a transport.
-    sections: HashMap<String, String>,
-    /// The name of the transport a section not in `sections` is on (the default transport);
-    /// `None` for transport 0.
-    default: Option<String>,
+    /// The transport key of each m= section assigned to a transport.
+    sections: HashMap<String, usize>,
+    /// The key of the transport a section not in `sections` is on (the default transport).
+    default: usize,
 }
 
 impl RTCStatsAccumulator {
@@ -79,29 +78,69 @@ impl RTCStatsAccumulator {
             .retain(|_, candidate| candidate.transport_id != name);
         self.remote_candidates
             .retain(|_, candidate| candidate.transport_id != name);
-        self.transports.sections.retain(|_, on| *on != name);
+        self.transports.sections.retain(|_, on| *on != key);
     }
 
     /// Records which transport each m= section runs over (`sections` names the sections
     /// assigned to a transport, with its key; any other is on transport `default`), and moves
     /// the RTP streams already counted onto the `transport` object of their section.
     pub(crate) fn set_section_transports(&mut self, sections: &[(String, usize)], default: usize) {
-        self.transports.sections = sections
-            .iter()
-            .map(|(mid, key)| (mid.clone(), transport_stats_name(*key)))
+        self.transports.sections = sections.iter().cloned().collect();
+        self.transports.default = default;
+        let names: HashMap<String, String> = self
+            .inbound_rtp_streams
+            .values()
+            .map(|stream| stream.mid.clone())
+            .chain(self.outbound_rtp_streams.values().map(|s| s.mid.clone()))
+            .map(|mid| {
+                let name = self.section_transport_id(&mid);
+                (mid, name)
+            })
             .collect();
-        self.transports.default = (default != 0).then(|| transport_stats_name(default));
         for stream in self.inbound_rtp_streams.values_mut() {
-            stream.transport_id = self.transports.section_transport(&stream.mid);
+            if let Some(name) = names.get(&stream.mid) {
+                stream.transport_id.clone_from(name);
+            }
         }
         for stream in self.outbound_rtp_streams.values_mut() {
-            stream.transport_id = self.transports.section_transport(&stream.mid);
+            if let Some(name) = names.get(&stream.mid) {
+                stream.transport_id.clone_from(name);
+            }
         }
     }
 
     /// The `transport` object name of the m= section `mid`.
     pub(crate) fn section_transport_id(&self, mid: &str) -> String {
-        self.transports.section_transport(mid)
+        let key = self
+            .transports
+            .sections
+            .get(mid)
+            .copied()
+            .unwrap_or(self.transports.default);
+        self.transport_name(key)
+    }
+
+    /// The name of transport `key`'s `transport` object.
+    fn transport_name(&self, key: usize) -> String {
+        if key == self.transports.active {
+            self.transport.transport_id.clone()
+        } else {
+            self.transports
+                .parked
+                .get(&key)
+                .map_or_else(|| transport_stats_name(key), |t| t.transport_id.clone())
+        }
+    }
+
+    /// Whether an object naming the transport `name` is the active transport's: it names it,
+    /// or names no transport the connection has.
+    pub(crate) fn of_active_transport(&self, name: &str) -> bool {
+        name == self.transport.transport_id
+            || !self
+                .transports
+                .parked
+                .values()
+                .any(|transport| transport.transport_id == name)
     }
 
     /// Every transport's statistics, the active one's included, by key.
@@ -124,16 +163,6 @@ impl RTCStatsAccumulator {
         } else {
             self.transports.parked.get_mut(&key)
         }
-    }
-}
-
-impl ParkedTransports {
-    fn section_transport(&self, mid: &str) -> String {
-        self.sections
-            .get(mid)
-            .or(self.default.as_ref())
-            .cloned()
-            .unwrap_or_else(|| transport_stats_name(0))
     }
 }
 

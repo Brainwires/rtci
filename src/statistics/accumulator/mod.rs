@@ -876,16 +876,22 @@ impl RTCStatsAccumulator {
             remote_paired.insert(pair.remote_candidate_id.clone());
         }
         // The candidates of the active transport's agent; another transport's are its own.
-        let transport = self.transport.transport_id.clone();
-        self.local_candidates.retain(|id, candidate| {
-            candidate.transport_id != transport
-                || local_held.contains(id)
-                || local_paired.contains(id)
+        let theirs = |candidates: &HashMap<String, IceCandidateAccumulator>| -> HashSet<String> {
+            candidates
+                .iter()
+                .filter(|(_, candidate)| !self.of_active_transport(&candidate.transport_id))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let (local_theirs, remote_theirs) = (
+            theirs(&self.local_candidates),
+            theirs(&self.remote_candidates),
+        );
+        self.local_candidates.retain(|id, _| {
+            local_theirs.contains(id) || local_held.contains(id) || local_paired.contains(id)
         });
-        self.remote_candidates.retain(|id, candidate| {
-            candidate.transport_id != transport
-                || remote_held.contains(id)
-                || remote_paired.contains(id)
+        self.remote_candidates.retain(|id, _| {
+            remote_theirs.contains(id) || remote_held.contains(id) || remote_paired.contains(id)
         });
     }
 
@@ -1313,10 +1319,14 @@ impl RTCStatsAccumulator {
             .collect();
         let selected = self.transport.selected_candidate_pair_id.clone();
         // The pairs of the active transport's agent; another transport's are its own.
-        let transport = self.transport.transport_id.clone();
-        self.ice_candidate_pairs.retain(|id, pair| {
-            pair.transport_id != transport || held.contains(id) || *id == selected
-        });
+        let theirs: HashSet<String> = self
+            .ice_candidate_pairs
+            .iter()
+            .filter(|(_, pair)| !self.of_active_transport(&pair.transport_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.ice_candidate_pairs
+            .retain(|id, _| theirs.contains(id) || held.contains(id) || *id == selected);
 
         for cp in pairs {
             let pair =
