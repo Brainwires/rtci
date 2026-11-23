@@ -20,9 +20,17 @@ all-features = true
 # hickory-resolver (MIT OR Apache-2.0). Without it records are answered as none and both
 # families together, through the system resolver.
 dns-records = ["dep:hickory-resolver"]
+# `peer`: a whole `rtc` peer connection driven over sockets the driver owns, UDP included,
+# gathering again by itself when a transport needs new candidates (`OnLocalCandidatesNeeded`).
+# On by default. `rtc` dev-depends on this crate without a version and without this feature,
+# so the two are published in the order rtc, then rtc-stream-driver.
+default = ["peer"]
+peer = ["dep:rtc", "dep:bytes"]
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["ifaces"] }
 tokio.workspace = true
 socket2.workspace = true
 hickory-resolver = { version = "0.25", optional = true, default-features = false, features = ["tokio", "system-config"] }
+rtc = { version = "0.22.0", path = "../..", optional = true }
+bytes = { workspace = true, optional = true }

@@ -28,11 +28,12 @@ manifest, so they must resolve on crates.io too).
 12. `rtc-datachannel`
 13. `rtc-sdp`
 14. `rtc-srtp`
-15. `rtc-stream-driver`
-16. `rtc-stun`
-17. `rtc-ice`
-18. `rtc-turn`
-19. `rtc`
+15. `rtc-stun`
+16. `rtc-ice`
+17. `rtc-turn`
+18. `rtc`
+19. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
+    dev-dependency on it has no version, so `cargo publish` drops it)
 20. `rtc-audio`
 21. `rtc-devices`
 
@@ -145,7 +146,7 @@ From a clean checkout of the release commit:
 # What goes into each package, and nothing large or unintended
 for p in rtc-crypto rtc-interceptor-derive rtc-sframe rtc-shared rtc-dtls rtc-mdns rtc-rtcp \
          rtc-rtp rtc-interceptor rtc-media rtc-sctp rtc-datachannel rtc-sdp rtc-srtp \
-         rtc-stream-driver rtc-stun rtc-ice rtc-turn rtc rtc-audio rtc-devices; do
+         rtc-stun rtc-ice rtc-turn rtc rtc-stream-driver rtc-audio rtc-devices; do
   cargo package --list -p "$p" > "/tmp/$p.files"
 done
 
@@ -180,6 +181,7 @@ cargo publish -p rtc-crypto
 cargo publish -p rtc-interceptor-derive
 # ... every crate of the list, in order ...
 cargo publish -p rtc
+cargo publish -p rtc-stream-driver
 cargo publish -p rtc-audio
 cargo publish -p rtc-devices
 ```

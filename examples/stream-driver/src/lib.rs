@@ -57,8 +57,17 @@
 //! 6887), falling back to NAT-PMP (RFC 6886); the application adds the mapped address as a
 //! server-reflexive candidate ([`nat_mapping::candidate_line`], RFC 6544 section 5.3).
 //!
+//! # A whole peer connection
+//!
+//! [`peer::PeerDriver`] (feature `peer`, on by default) drives an `rtc` peer connection over
+//! sockets it owns, its UDP host sockets included, and gathers for it: at the first local
+//! description, and again on its own when a transport needs a new set of local candidates
+//! (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple, RFC 8842 section
+//! 5.1), closing the previous sockets once a pair on the new ones is selected.
+//!
 //! # Features
 //!
+//! - `peer` (default): [`peer`], with a dependency on `rtc`.
 //! - `dns-records`: SRV and NAPTR lookups (RFC 5928, RFC 8489 section 8) and AAAA / A answered
 //!   apart (RFC 8305 section 3), with hickory-resolver (MIT OR Apache-2.0). Without it, names go
 //!   to the system resolver and record queries are answered with none (the engine then uses
@@ -71,6 +80,8 @@
 #![warn(missing_docs)]
 
 pub mod nat_mapping;
+#[cfg(feature = "peer")]
+pub mod peer;
 pub mod sockets;
 
 use shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId, StreamTransmit};
