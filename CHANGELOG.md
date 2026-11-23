@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: ECN signalling follow-ups. A BUNDLE group negotiates one initiation method (a
+  bundled section takes the tagged section's `a=ecn-capable-rtp`, RFC 6679 section 7.2).
+  Offers and answers state `ect=1`, and a stream marks with the codepoint the peer's `ect=`
+  asks: ECT(0) when it states none (RFC 6679 section 6.1), ECT(1) for `ect=1` (as between two
+  instances of this engine). `with_ecn_without_signalling` keeps ECT(1).
 - **jsep**: an answer lists, after the offered formats, the registered media formats the offer
   lacks (RFC 9429 section 5.3.1: "MUST be added after all existing formats"; RFC 3264 section
   6.1), without feedback lines, when the transceiver has no codec preferences. Answers differ
