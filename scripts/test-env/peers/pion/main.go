@@ -256,6 +256,56 @@ func (h *headerInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer
 	})
 }
 
+// ---- MID and RID on outgoing simulcast packets (an interceptor) ----
+
+// Pion leaves the sdes:mid and sdes:rtp-stream-id header extensions to the application
+// (track_local_static.go: "interceptors may modify the header in place (e.g. add header
+// extensions ...)"); a Pion application that sends simulcast writes them, as this does for
+// the layers a plan's track op names (unless it says "ridExtensions": false).
+type ridTable struct {
+	mu   sync.Mutex
+	rids map[uint32]string // layer SSRC -> RID
+	mids map[uint32]func() string
+}
+
+type ridFactory struct{ t *ridTable }
+
+func (f ridFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &ridInterceptor{t: f.t}, nil
+}
+
+type ridInterceptor struct {
+	interceptor.NoOp
+	t *ridTable
+}
+
+func (r *ridInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
+	midID, ridID := 0, 0
+	for _, e := range info.RTPHeaderExtensions {
+		switch e.URI {
+		case "urn:ietf:params:rtp-hdrext:sdes:mid":
+			midID = e.ID
+		case "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id":
+			ridID = e.ID
+		}
+	}
+	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, a interceptor.Attributes) (int, error) {
+		r.t.mu.Lock()
+		rid, ok := r.t.rids[header.SSRC]
+		midOf := r.t.mids[header.SSRC]
+		r.t.mu.Unlock()
+		if ok {
+			if mid := midOf(); midID != 0 && mid != "" {
+				_ = header.SetExtension(uint8(midID), []byte(mid))
+			}
+			if ridID != 0 {
+				_ = header.SetExtension(uint8(ridID), []byte(rid))
+			}
+		}
+		return writer.Write(header, payload, a)
+	})
+}
+
 // ---- the peer ----
 
 type Peer struct {
@@ -268,6 +318,7 @@ type Peer struct {
 	cands chan *webrtc.ICECandidate
 	stdin *bufio.Reader
 	hdrs  *headerLog
+	rids  *ridTable
 
 	sentScenario  bool
 	lastSentSDP   string
@@ -476,6 +527,8 @@ func (p *Peer) setup() error {
 	// Last in the chain: the headers as they leave for SRTP.
 	p.hdrs = &headerLog{seen: map[uint32]bool{}}
 	ir.Add(headerFactory{log: p.hdrs})
+	p.rids = &ridTable{rids: map[uint32]string{}, mids: map[uint32]func() string{}}
+	ir.Add(ridFactory{t: p.rids})
 	// Sequence numbers for transport-wide congestion control on what this side sends, so Rust
 	// has something to send feedback about.
 	if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, ir); err != nil {
@@ -1072,6 +1125,25 @@ func (p *Peer) addTrack(s Step) error {
 		if err := sender.AddEncoding(t); err != nil {
 			return err
 		}
+	}
+	if len(rids) > 0 && (!s.has("ridExtensions") || s.boolean("ridExtensions")) {
+		var mid string
+		midOf := func() string {
+			if mid == "" {
+				for _, t := range p.pc.GetTransceivers() {
+					if t.Sender() == sender {
+						mid = t.Mid()
+					}
+				}
+			}
+			return mid
+		}
+		p.rids.mu.Lock()
+		for _, e := range sender.GetParameters().Encodings {
+			p.rids.rids[uint32(e.SSRC)] = e.RID
+			p.rids.mids[uint32(e.SSRC)] = midOf
+		}
+		p.rids.mu.Unlock()
 	}
 	if enc := sender.GetParameters().Encodings; len(enc) > 0 {
 		p.localSSRC = uint32(enc[0].SSRC)
