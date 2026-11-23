@@ -1,0 +1,17 @@
+{
+  "name": "pion",
+  "stack": "Pion WebRTC (Go): its own ICE, DTLS, SCTP, SRTP and RTP stacks",
+  "version": "github.com/pion/webrtc/v4 v4.2.29 (pion/ice v4.4.9, pion/dtls v3.1.16, pion/sctp v1.12.1, pion/srtp v3.1.3, pion/interceptor v0.1.51), built with Go 1.27.4",
+  "licence": "MIT",
+  "upstream": "https://github.com/pion/webrtc",
+  "lacks": {
+    "iceTcpActive": {
+      "reason": "Pion's ICE agent gathers TCP candidates only through a TCPMux, as passive ones: it has no active TCP candidate to reach a passive one",
+      "cite": "pion/ice v4.4.9 gather.go gatherCandidatesLocal (case tcp: candidates from the TCPMux, tcpType = TCPTypePassive)"
+    },
+    "dtls13": {
+      "reason": "Pion's DTLS (pion/dtls v3) speaks DTLS 1.2 only",
+      "cite": "pion/webrtc v4.2.29 stats.go TransportStats.TLSVersion: \"Value is always FEFD (DTLS 1.2)\"; dtlstransport.go sets TLSVersion = \"FEFD\""
+    }
+  }
+}

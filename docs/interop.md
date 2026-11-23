@@ -1,0 +1,50 @@
+# Interoperability
+
+What the engine has been run against, how, and what each peer negotiated. The browser cells and
+the non-browser peer cells run in the test environment (`scripts/test-env/run.sh interop`, the
+`test-env` workflow); `interop/gate.mjs` fails the run unless every cell is a pass or a cited
+n/a. The claims these cells prove are rows of [conformance/w6.md](conformance/w6.md).
+
+## The peers
+
+| Peer | Kind | Version | Licence | Upstream | Where it runs |
+|---|---|---|---|---|---|
+| Chromium, Firefox, WebKit | browsers | the Playwright 1.64.1 image's builds | - | [playwright](https://github.com/microsoft/playwright) | `interop/*.spec.mjs`, headless |
+| webrtc-rs `webrtc` | Rust, the pre-sans-I/O line (its own DTLS, SCTP, ICE) | 0.17.3 | MIT OR Apache-2.0 | [webrtc-rs/webrtc](https://github.com/webrtc-rs/webrtc) | `tests/*_interop.rs`, in-process, every platform CI tests |
+| Pion (`pion`) | Go; its own ICE, DTLS, SCTP, SRTP, RTP and interceptors | `github.com/pion/webrtc/v4` v4.2.29 (pion/ice v4.4.9, pion/dtls v3.1.16, pion/sctp v1.12.1, pion/srtp v3.1.3, pion/interceptor v0.1.51; `peers/pion/image/go.sum`), Go 1.27.4 | MIT | [pion/webrtc](https://github.com/pion/webrtc) | `peers/pion`, in the test image, built offline from the image's module cache |
+| str0m (`str0m`) | Rust, sans-I/O; its own ICE agent (`is`), DTLS (`dimpl`, 1.2 and 1.3), SCTP (`sctp-proto`), SRTP | str0m 0.26.0, `rust-crypto` backend (dimpl 0.9.0, str0m-rust-crypto 0.7.0, is 0.12.1, sctp-proto 0.10.9; `peers/str0m/Cargo.lock`) | MIT OR Apache-2.0 | [algesten/str0m](https://github.com/algesten/str0m) | `peers/str0m`, a crate outside the workspace, built `--locked` in the test image |
+| aiortc (`aiortc`) | Python (asyncio); its own SDP, SCTP and RTP; ICE from aioice; DTLS through pyOpenSSL (OpenSSL); SRTP through pylibsrtp (libsrtp); codecs through PyAV (FFmpeg: VP8, H.264, Opus; no VP9) | aiortc 1.16.0, aioice 0.13.0, pyOpenSSL 26.4.0, cryptography 50.0.2, pylibsrtp 1.0.0, av 19.0.2 (`peers/aiortc/image/requirements.txt`, every wheel by SHA-256) | BSD-3-Clause (PyAV's wheel bundles FFmpeg, LGPL; test image only) | [aiortc/aiortc](https://github.com/aiortc/aiortc) | `peers/aiortc`, a venv in the test image |
+| dimpl (layer) | Rust, sans-I/O DTLS 1.2 / 1.3 (str0m's) | 0.9.0, `rust-crypto` | MIT OR Apache-2.0 | [algesten/dimpl](https://github.com/algesten/dimpl) | `peers/layers/tests/dimpl_rtc_dtls.rs`, against rtc-dtls |
+| librice (layer) | Rust, sans-I/O ICE agent `rice-proto` | 0.4.3, `std` only | MIT OR Apache-2.0 | [ystreet/librice](https://github.com/ystreet/librice) | `peers/layers/tests/rice_rtc_ice.rs`, against rtc-ice |
+
+The browsers' media stacks largely descend from libwebrtc. The peers below are independent
+implementations, each pinned to an exact release, run by the same signalling as the browser page.
+
+## How a peer cell runs
+
+A peer is a small program around its stack (`scripts/test-env/peers/<name>/`, contract in
+[its README](../scripts/test-env/peers/README.md)). It connects to `examples/interop-peer` over
+the WebSocket signalling the browser page speaks (offer, answer, candidates, the scenario,
+`request-offer`, `report`), runs one plan (a list of steps: create a channel, add a track, offer,
+ask Rust to offer, echo, wait for RTP, restart ICE, roll back, collide, impair the path with
+netem) and reports what happened: the connection state, the data-channel messages echoed, the
+RTP packets and bytes received per kind, the RTCP received by type, the selected candidate pair,
+the DTLS version, cipher suite and SRTP profile, the SCTP limits, and every description sent and
+received. `interop/peers.spec.mjs` holds the scenarios and the checks, the same for every peer;
+each peer is a Playwright project, so a cell is `<scenario> [<peer>]`. Most scenarios run in both
+directions, "(peer offers)" and "(Rust offers)". The Rust side reports its own view of the same
+session (its RTP and RTCP counts, sequence coverage per stream, W3C stats with the transport's
+`tlsVersion`, `dtlsCipher`, `srtpCipher` and selected pair, SCTP limits), so a cell checks both.
+
+A scenario a peer's stack cannot express is `na-peer`, with the reason and a citation (the stack's
+source or documentation at the pinned version, or what the peer observed at run time), never a
+silent skip. A failure is a finding: [Findings](#findings) records which side is off-spec, by the
+RFC text.
+
+## Matrix
+
+Filled from the train's `test-env` run; rows are the cells of `interop/peers.spec.mjs`.
+
+## What each peer negotiates
+
+## Findings

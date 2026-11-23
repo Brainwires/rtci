@@ -2449,6 +2449,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-5-layers`): layer interop tests against independent
+  implementations, in `scripts/test-env/peers/layers` (a crate outside the workspace, run in
+  the test image's unit stage): rtc-dtls against dimpl 0.9.0 (DTLS 1.2 and 1.3, both roles:
+  handshake, identical DTLS-SRTP exporter output and profile, data, close_notify, the
+  HelloVerifyRequest / HelloRetryRequest cookie exchange, a lost flight, the 1.3-to-1.2
+  fallback) and rtc-ice against librice's sans-I/O agent rice-proto 0.4.3 (full ICE in both
+  roles, trickle, rtc-ice lite, role conflicts).
+
+- **interop** (branch `conf/peers-4-aiortc`): aiortc 1.16.0 (BSD-3-Clause, Python) is a peer of
+  the interop matrix (`scripts/test-env/peers/aiortc`). The test image has a venv with exactly
+  the wheels `peers/aiortc/image/requirements.txt` pins by SHA-256 (aiortc, aioice, pyOpenSSL,
+  cryptography, pylibsrtp, PyAV and their dependencies; `--require-hashes --only-binary :all:`).
+  Media comes from aiortc's own test sources and encoders (VP8, H.264, Opus through PyAV).
+  aiortc exposes no RTCP, so the peer counts it by wrapping the RTP sender's and receiver's
+  RTCP handlers. Its TURN-over-TLS client is held to TLS 1.2, the environment's coturn failing
+  TLS 1.3 handshakes (as for the engine's own client in `tests/testenv`).
+
+- **interop** (branch `conf/peers-3-str0m`): str0m 0.26.0 (MIT OR Apache-2.0, sans-I/O Rust,
+  with its pure-Rust `rust-crypto` backend: dimpl DTLS) is a peer of the interop matrix
+  (`scripts/test-env/peers/str0m`, a crate of its own outside the workspace, built `--locked` in
+  the test image; `cargo deny` with the repository's `deny.toml` passes on it). The program owns
+  the UDP socket, the TCP connections of its active ICE-TCP candidate (RFC 4571 framing) and the
+  clock, and reads the fixtures itself (IVF, H.264 Annex B, Ogg). New cells `DTLS 1.3: *` (plan
+  `config.dtls13`): a peer that prefers DTLS 1.3 negotiates it with the engine either side the
+  client; Pion's `peer.json` records that its DTLS is 1.2 only.
+
+- **interop** (branch `conf/peers-2-pion`): Pion (`github.com/pion/webrtc/v4` v4.2.29, MIT)
+  is a peer of the interop matrix (`scripts/test-env/peers/pion`). The test image carries Go
+  1.27.4 (by SHA-256) and every module `peers/pion/image/go.sum` pins; the peer builds offline
+  at run time. Its media come from the environment's fixtures (IVF, H.264 Annex B, Ogg Opus)
+  through Pion's own packetizers, with Pion's default interceptors (NACK, RTCP reports, TWCC
+  feedback) and its transport-wide sequence numbers on what it sends.
+
+- **interop** (branch `conf/peers-1-harness`): the interop matrix takes non-browser peers.
+  A peer is a program around an independent WebRTC stack (`scripts/test-env/peers/<name>/`:
+  `peer.json` with its pinned version, licence, upstream and the capabilities it lacks, and a
+  `build.sh`) that speaks the browser page's WebSocket signalling with `examples/interop-peer`
+  and runs one plan per cell (steps: channels, tracks, offer, `request-offer`, echo, RTP waits,
+  RTCP feedback, ICE restart, rollback, glare, netem on either direction of the path).
+  `interop/peers.spec.mjs` holds the scenarios and their checks, once for every peer; each peer
+  is a Playwright project, so a cell is `<scenario> [<peer>]`, and `na-peer` (with a reason and
+  citation) joins `na-browser` / `na-env` in `na.mjs`, the matrix and the gate, which also
+  requires every peer to have run. `interop-peer`'s report adds the RTCP it received by type,
+  the transport's `tlsVersion` / `dtlsCipher` / `srtpCipher` / `dtlsRole` and selected
+  candidate pair, the SCTP limits and the full W3C RTP stream stats; `request-offer` takes
+  `"ice_restart": true`. The environment image's tag is `scripts/test-env/image-tag.sh` (it
+  also hashes each peer's `image/` inputs), and `open-b` gets the netem band `open-a` has.
+  Docs: `docs/interop.md`, `docs/conformance/w6.md` ("Independent peers").
+
 - **Licence gate and MSRV** (branch `conf/tcp-7-licence-msrv`). `deny.toml` has a `[licenses]`
   allow-list of permissive licences only (MIT, Apache-2.0 and its LLVM exception, BSD-2/3,
   ISC, Zlib, Unicode, CC0, 0BSD, BSL-1.0, and CDLA-Permissive-2.0 for the optional

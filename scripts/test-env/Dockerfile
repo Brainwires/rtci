@@ -1,6 +1,7 @@
 # The webrtc-rs-rtc test environment: Rust, real network tooling (network namespaces, iptables
-# NAT, ipset, netem), a TURN/STUN server (coturn), synthetic media (GStreamer) and headless
-# Chromium, Firefox and WebKit (Playwright). Built and run by scripts/test-env/run.sh.
+# NAT, ipset, netem), a TURN/STUN server (coturn), synthetic media (GStreamer), headless
+# Chromium, Firefox and WebKit (Playwright), and what the non-browser interop peers
+# (peers/) build from. Built and run by scripts/test-env/run.sh.
 #
 # Playwright's image carries Node and the three browsers with their system libraries; the
 # version is pinned (by digest: the v1.64.1-noble index) and matches interop/package.json.
@@ -45,5 +46,32 @@ RUN set -eu; \
 # interop/package-lock.json resolved it (integrity-checked; no install scripts).
 COPY interop/package.json interop/package-lock.json /opt/interop/
 RUN cd /opt/interop && npm ci --ignore-scripts --no-audit --no-fund && npx playwright --version
+
+# Go for the Pion peer (peers/pion): the toolchain by version and SHA-256 (the checksums
+# go.dev/dl publishes), and every module peers/pion/image/go.sum pins, fetched (and checked
+# against go.sum) into the image's module cache, so the peer builds offline at run time.
+ARG GO_VERSION=1.27.4
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+      arm64) arch=arm64; sum=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+      *) echo "no pinned Go for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz"; \
+    echo "${sum}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH GOMODCACHE=/opt/go/mod GOTOOLCHAIN=local
+COPY peers/pion/image/go.mod peers/pion/image/go.sum /opt/peers/pion/
+RUN cd /opt/peers/pion && go mod download && chmod -R a+rX /opt/go
+
+# Python for the aiortc peer (peers/aiortc): a venv on the image's CPython with exactly the
+# wheels peers/aiortc/image/requirements.txt pins by SHA-256 (no source builds, no resolution).
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY peers/aiortc/image/requirements.txt /opt/peers/aiortc/
+RUN python3 -m venv /opt/peers/aiortc/venv \
+    && /opt/peers/aiortc/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
+       --require-hashes --only-binary :all: --no-deps -r /opt/peers/aiortc/requirements.txt \
+    && chmod -R a+rX /opt/peers/aiortc
 
 WORKDIR /src
