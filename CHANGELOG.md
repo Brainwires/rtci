@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **pacer**: media the congestion controller's target has no room for is dropped by default
+  (`conf/pacer-2-combined`, `QueueOverflow::Drop`). `conf/pacer-1-queue-time` raised the pacing
+  rate above the target to keep the queue under 2 s and released the oldest packet of a full
+  queue over the budget, so a source writing above the target put all of it on the path: in the
+  test environment (`testenv_impairment::gcc_follows_a_rate_limited_link`, netem 600 kbit/s with
+  a 200-packet queue, a 2.4 Mbit/s source) the link's queue overflowed and GCC's target fell to
+  its 100 kbit/s floor and stayed there, against 490 to 570 kbit/s before. Now a packet that has
+  waited the queue time limit, or the oldest one of a full queue, is dropped
+  (`PacerInterceptor::dropped`), and nothing leaves above the target; the receiver counts those
+  packets as lost, which they are. libwebrtc's behaviour is
+  `PacerBuilder::with_queue_overflow(QueueOverflow::Drain)` /
+  `DefaultInterceptorOptions::pacer_queue_overflow` (exported as `PacerQueueOverflow`), for an
+  encoder that follows the target. `tests/gcc_rate_limited_link_rtc2rtc.rs` is the test
+  environment's case on the virtual clock (three seeds, 500 to 590 kbit/s held; 100 kbit/s with
+  `Drain`). `PacerInterceptor::forced` now also counts the overdue packets `Drain` releases.
+
 - **interceptors**: the NACK generator asks for a lost packet while it is missing (a round trip
   between requests) instead of giving it up after ten requests or two seconds
   (`conf/gcc-1-cap-recovery`). The limits came with v0.22.0+brainwires.6 (`ee4217b2`) and froze
