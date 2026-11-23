@@ -282,19 +282,28 @@ test("early media: the browser sends before Rust has its answer, and nothing is 
 
 // ---- transceiver stop() and m-line reuse (RFC 9429 5.2.2, W3C 5.4) ----
 
-test("transceiver stop, then a new transceiver reuses or keeps the m-line", async ({ page }) => {
-  const r = await page.evaluate(async (ws) => {
+// Stop the only transceiver (the answer rejects every m= section and closes the transport),
+// then add one: the next exchange sets up a new transport. Under the default its DTLS
+// association runs on a new 3-tuple (RFC 8842 section 5.1): Rust drops the previous candidates,
+// refuses their addresses, and the interop peer gathers on a new port when the engine says so
+// (`OnLocalCandidatesNeeded`) and trickles the candidate. `?previous_addresses=1` builds the
+// Rust side with `with_dtls_new_association_on_previous_addresses(true)`: it keeps its
+// candidates and their addresses, and its answer lists them again.
+async function stopThenAdd(page, url) {
+  return page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", video: "VP8", audio: true });
     const t1 = s.pc.addTransceiver(Interop.canvasStream().getVideoTracks()[0], { direction: "sendrecv" });
     Interop.prefer(t1, "video", "video/VP8");
     await s.negotiate();
     await s.connected();
+    const firstAnswer = s.pc.remoteDescription.sdp;
     t1.stop();
     await s.negotiate();
     const afterStop = { offer: Interop.mlines(s.pc.localDescription.sdp), answer: Interop.mlines(s.pc.remoteDescription.sdp) };
     s.pc.addTransceiver(Interop.audioStream().getAudioTracks()[0], { direction: "sendrecv" });
     await s.negotiate();
     const afterAdd = { offer: Interop.mlines(s.pc.localDescription.sdp), answer: Interop.mlines(s.pc.remoteDescription.sdp) };
+    const addAnswer = s.pc.remoteDescription.sdp;
     let report;
     await Interop.until(async () => {
       report = await s.report();
@@ -313,9 +322,27 @@ test("transceiver stop, then a new transceiver reuses or keeps the m-line", asyn
       if (x.type === "outbound-rtp") diag.sent.push({ kind: x.kind, ssrc: x.ssrc, mid: x.mid, packetsSent: x.packetsSent });
     });
     s.close();
-    return { afterStop, afterAdd, rtp: report?.rtp, errors: s.errors, diag };
-  }, WS);
+    // The UDP host candidates (address port) an answer of Rust lists.
+    const hosts = (sdp) => sdp.split(/\r?\n/)
+      .filter((l) => l.startsWith("a=candidate:") && / udp /i.test(l) && / typ host/.test(l))
+      .map((l) => l.split(" ").slice(4, 6).join(" "));
+    return {
+      afterStop,
+      afterAdd,
+      firstHosts: hosts(firstAnswer),
+      addHosts: hosts(addAnswer),
+      rtp: report?.rtp,
+      errors: s.errors,
+      rustErrors: report?.errors,
+      diag,
+    };
+  }, url);
+}
+
+function expectStopThenAdd(r) {
   expect(r.errors).toEqual([]);
+  // The interop peer's own gathering on OnLocalCandidatesNeeded did not fail.
+  expect((r.rustErrors || []).filter((e) => e.startsWith("gathering anew")), JSON.stringify(r.rustErrors)).toEqual([]);
   for (const step of [r.afterStop, r.afterAdd]) {
     // An answer has the offer's m-lines, in order and of the same kinds (RFC 9429 5.3.1), and a
     // section the offer rejected (port 0) stays rejected.
@@ -329,6 +356,22 @@ test("transceiver stop, then a new transceiver reuses or keeps the m-line", asyn
     Object.keys(r.rtp || {}).some((k) => k.startsWith("audio:") && r.rtp[k] > 50),
     `${JSON.stringify(r.rtp)} ${JSON.stringify(r.diag)}`,
   ).toBe(true);
+}
+
+test("transceiver stop, then a new transceiver reuses or keeps the m-line", async ({ page }) => {
+  const r = await stopThenAdd(page, WS);
+  expectStopThenAdd(r);
+  // The new transport's answer lists none of the previous candidates: Rust gathered on a new
+  // port and trickled it.
+  for (const host of r.firstHosts) expect(r.addHosts, JSON.stringify(r)).not.toContain(host);
+});
+
+test("transceiver stop, then a new transceiver, Rust on its previous addresses (with_dtls_new_association_on_previous_addresses(true))", async ({ page }) => {
+  const r = await stopThenAdd(page, `${WS}/?previous_addresses=1`);
+  expectStopThenAdd(r);
+  // The new transport kept the candidates: the answer lists them again.
+  expect(r.firstHosts.length, JSON.stringify(r)).toBeGreaterThan(0);
+  for (const host of r.firstHosts) expect(r.addHosts, JSON.stringify(r)).toContain(host);
 });
 
 // ---- direction changes (RFC 9429 5.3.1, RFC 3264 6.1) ----
