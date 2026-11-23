@@ -64,3 +64,40 @@ fn the_session_version_goes_up_by_one_with_each_changed_description() -> TestRes
     assert_eq!(origin(&answer.sdp), (session, version + 2));
     Ok(())
 }
+
+/// RFC 9429 section 5.8: compliant SDP is accepted even where it does not follow the
+/// generation rules; `<sess-id>` and `<sess-version>` are `1*DIGIT` of any length (RFC 8866
+/// section 9), so a remote offer whose values do not fit 64 bits is set and answered, and a
+/// later offer of that session with the version one higher is set too.
+#[test]
+fn a_remote_origin_beyond_64_bits_is_accepted() -> TestResult {
+    let mut a = default_peer()?;
+    let mut b = default_peer()?;
+    a.add_track(video_track("first", 0x0101_0101))?;
+    let offer = a.create_offer(None)?;
+    let line = offer
+        .sdp
+        .lines()
+        .find(|l| l.starts_with("o="))
+        .expect("an o= line")
+        .to_owned();
+    let long = |version: &str| {
+        offer.sdp.replace(
+            &line,
+            &format!("o=- 98765432109876543210987654321 {version} IN IP4 0.0.0.0"),
+        )
+    };
+    b.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551616"))?,
+    )?;
+    let answer = b.create_answer(None)?;
+    b.set_local_description(Instant::now(), answer)?;
+    b.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(long("18446744073709551617"))?,
+    )?;
+    let answer = b.create_answer(None)?;
+    assert!(answer.sdp.contains("m=video"), "{}", answer.sdp);
+    Ok(())
+}

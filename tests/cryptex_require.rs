@@ -132,3 +132,35 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
     }
     Ok(())
 }
+
+/// W3C webrtc-extensions 10.2: `rtpHeaderEncryptionPolicy` defaults to "negotiate": Cryptex
+/// is offered and used when the peer signals it, and a peer that does not is accepted, the
+/// header extensions (MID, RtpStreamId among them) then going in the clear. This is the
+/// default; RFC 7941 section 6's form (SDES header extensions only protected) is the
+/// "require" policy (`require_refuses_an_answer_without_cryptex`,
+/// `require_refuses_an_offer_without_cryptex`).
+#[test]
+fn by_default_cryptex_is_negotiated_and_a_peer_without_it_is_accepted() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_track(video_track("video", 0x0c0c_0020))?;
+    let mut with = default_peer()?;
+    let now = Instant::now();
+    let offer = offerer.create_offer(None)?;
+    assert!(offer.sdp.contains("a=cryptex"), "{}", offer.sdp);
+    jsep_common::exchange(&mut offerer, &mut with)?;
+    assert!(offerer.cryptex_negotiated() && with.cryptex_negotiated());
+
+    let mut offerer = default_peer()?;
+    offerer.add_track(video_track("video", 0x0c0c_0021))?;
+    let mut without = default_peer()?;
+    without.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Disable)?;
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(now, offer.clone())?;
+    without.set_remote_description(now, offer)?;
+    let answer = without.create_answer(None)?;
+    without.set_local_description(now, answer.clone())?;
+    offerer.set_remote_description(now, answer)?;
+    assert!(offerer.remote_description().is_some(), "accepted");
+    assert!(!offerer.cryptex_negotiated());
+    Ok(())
+}

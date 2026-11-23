@@ -46,6 +46,8 @@ struct Peer {
     connected: bool,
     /// The sequence numbers of the RTP packets delivered to the application.
     received: Vec<u16>,
+    /// The RTCP delivered to the application, one entry per datagram and track, in order.
+    rtcp: Vec<Vec<Box<dyn rtc::rtcp::Packet>>>,
 }
 
 impl Peer {
@@ -92,6 +94,7 @@ impl Peer {
             addr: addr.parse()?,
             connected: false,
             received: vec![],
+            rtcp: vec![],
         })
     }
 
@@ -181,8 +184,12 @@ impl World {
                 }
             }
             while let Some(message) = peer.pc.poll_read() {
-                if let RTCMessage::RtpPacket(_, packet) = message.message {
-                    peer.received.push(packet.header.sequence_number);
+                match message.message {
+                    RTCMessage::RtpPacket(_, packet) => {
+                        peer.received.push(packet.header.sequence_number);
+                    }
+                    RTCMessage::RtcpPacket(_, packets) => peer.rtcp.push(packets),
+                    _ => {}
                 }
             }
         }
@@ -628,6 +635,91 @@ fn an_encoding_made_inactive_is_a_local_pause_and_active_again_a_resume() -> Res
     assert_eq!(
         world.handle(1).remote_state(ssrc),
         Some(RemotePauseState::Playing)
+    );
+    Ok(())
+}
+
+/// The PAUSE-RESUME entries of `typ` in `packets`.
+fn pause_resume_entries(
+    packets: &[Box<dyn rtc::rtcp::Packet>],
+    typ: rtc::rtcp::transport_feedbacks::pause_resume::PauseResumeType,
+) -> usize {
+    packets
+        .iter()
+        .filter_map(|packet| {
+            packet
+                .as_any()
+                .downcast_ref::<rtc::rtcp::transport_feedbacks::pause_resume::PauseResume>()
+        })
+        .flat_map(|message| &message.entries)
+        .filter(|entry| entry.typ == typ)
+        .count()
+}
+
+/// Whether `packets` has a sender or receiver report: the compound packet of an RTCP session.
+fn has_report(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
+    packets.iter().any(|packet| {
+        let any = packet.as_any();
+        any.is::<rtc::rtcp::sender_report::SenderReport>()
+            || any.is::<rtc::rtcp::receiver_report::ReceiverReport>()
+    })
+}
+
+/// RFC 7728 section 8.5 ("The messages follow the AVPF timing rules") and sections 6.3 and
+/// 8.2 ("PAUSED MUST also be included in (at least) the next two regular RTCP reports"),
+/// between two peers whose RTCP sessions are the default ones. The receiver's PAUSE is not a
+/// packet of its own: its RTCP session adopted it, and it arrives in a compound packet with
+/// the session's report. The sender's PAUSED arrives in a compound packet, and again in the
+/// next two compound packets of the sender's session, its Regular ones (the sender writes no
+/// other feedback, so every later packet of its session is a Regular one), and in no packet
+/// after them.
+#[test]
+fn pause_resume_messages_ride_the_rtcp_sessions_compound_packets() -> Result<()> {
+    use rtc::rtcp::transport_feedbacks::pause_resume::PauseResumeType;
+    let mut world = World::connected(Pause::NoWait, Pause::NoWait)?;
+    world.send(10)?;
+    let ssrc = world.ssrc;
+    let (to_sender, to_receiver) = (world.peers[0].rtcp.len(), world.peers[1].rtcp.len());
+    world.handle(1).pause(ssrc);
+    world.send(1000)?;
+    assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Paused));
+
+    let pauses: Vec<&Vec<Box<dyn rtc::rtcp::Packet>>> = world.peers[0].rtcp[to_sender..]
+        .iter()
+        .filter(|packets| pause_resume_entries(packets, PauseResumeType::Pause) > 0)
+        .collect();
+    assert_eq!(pauses.len(), 1, "one PAUSE: it was answered");
+    assert!(
+        has_report(pauses[0]),
+        "the PAUSE rides a compound packet of the receiver's session"
+    );
+
+    let later = &world.peers[1].rtcp[to_receiver..];
+    let carrying: Vec<usize> = later
+        .iter()
+        .enumerate()
+        .filter(|(_, packets)| pause_resume_entries(packets, PauseResumeType::Paused) > 0)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!carrying.is_empty(), "PAUSED arrived");
+    let first = carrying[0];
+    assert!(
+        later.len() > first + 4,
+        "regular packets follow: {}",
+        later.len() - first
+    );
+    assert!(
+        later.iter().all(|packets| packets.iter().any(|packet| {
+            packet
+                .as_any()
+                .is::<rtc::rtcp::source_description::SourceDescription>()
+        })),
+        "every one a compound packet, with the CNAME"
+    );
+    assert_eq!(
+        carrying,
+        vec![first, first + 1, first + 2],
+        "PAUSED, then in the next two regular packets, and no more"
     );
     Ok(())
 }

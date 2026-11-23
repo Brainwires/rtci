@@ -6,26 +6,26 @@ Verdicts and classes are defined in `RULES.md`.
 
 ## Arithmetic
 
-- MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
-  apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4990 of 5087 (98.1 %).
-- Tested as the default (`tested`): 4969 of 5087 (97.7 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 6.
-- Open (not tested in any form): 97: 20 untested, 54 partial, 22 missing, 1 violated.
+- MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
+  apply: 5084.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4993 of 5084 (98.2 %).
+- Tested as the default (`tested`): 4971 of 5084 (97.8 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 91: 19 untested, 51 partial, 20 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
-| B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 47 | 26 |
-| D | not implemented | 22 | 18 |
-| E | cannot be met or observed inside this engine | 18 | 12 |
-| F | stale note: already tested on this tree | 6 | 0 |
-| all | | 118 | 70 |
+| B | implemented, lacking a test that fails without it | 9 | 0 |
+| C | partly implemented | 46 | 26 |
+| D | not implemented | 21 | 18 |
+| E | cannot be met or observed inside this engine | 17 | 10 |
+| F | stale note: already tested on this tree | 5 | 0 |
+| all | | 113 | 68 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 85 rows, 50 of size S, 26 of size M, 9 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
+- Work in code and tests (classes B, C, D, F): 81 rows, 48 of size S, 24 of size M, 9 of size L. They are listed below by owner and size.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
@@ -42,13 +42,13 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 13 | 1 | 2 | 0 | 16 | 10 | 5 | 1 |
+| jsep (running) | 0 | 13 | 1 | 0 | 0 | 14 | 8 | 5 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
-| rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
-| sctp | 0 | 0 | 2 | 1 | 1 | 4 | 2 | 1 | 1 |
+| rtp | 1 | 1 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
+| sctp | 0 | 0 | 1 | 1 | 1 | 3 | 2 | 0 | 1 |
 | sdp | 1 | 6 | 1 | 0 | 0 | 8 | 7 | 1 | 0 |
-| security | 4 | 2 | 0 | 1 | 0 | 7 | 6 | 1 | 0 |
+| security | 3 | 1 | 0 | 1 | 0 | 5 | 5 | 0 | 0 |
 | tcp (running) | 0 | 1 | 1 | 0 | 0 | 2 | 0 | 2 | 0 |
 | w3c | 0 | 3 | 0 | 0 | 0 | 3 | 2 | 1 | 0 |
 
@@ -79,7 +79,6 @@ Sorted by class, then owner, size and ID.
 | RFC6544-7-1 | `rfc6544.md` | TCP and UDP pairs share one checklist, checked in priority order | untested | B | A test that TCP and UDP pairs share one checklist in priority order | S | ice |
 | RFC7874-3-12 | `rfc7874.md` | Received tones/events are at least dropped gracefully | untested | B | A test that a received telephone-event packet is delivered as RTP without disturbing the stream | S | rtp |
 | RFC5583-5.2.1-4 | `rfc5583.md` | With several codecs the media streams have the same dependency ... | untested | B | A test that an answer keeps the offer's dependency structure for every payload type | S | sdp |
-| RFC7941-6-2 | `rfc7941.md` | The protection of the header extension is of commensurate strength ... | untested | B | A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload) | S | security |
 | RFC9335-4-5 | `rfc9335.md` | Subsequent offers / answers use the same procedure for including the ... | untested | B | A test that later offers and answers keep `a=cryptex` | S | security |
 | RFC9335-5-2 | `rfc9335.md` | With two-byte extensions, the id carried in "appbits" (value 256) is ... | untested | B | A test that `a=extmap:256` is refused (ids 1..255 only) | S | security |
 | RFC9605-X-4 | `rfc9605.md` | Per-packet SFrame: an application can encrypt each RTP payload and ... | untested | B | A test that an opaque (application-encrypted) payload travels end to end under a codec payload type | S | security |
@@ -125,7 +124,6 @@ Sorted by class, then owner, size and ID.
 | RFC7022-4.2-1 | `rfc7022.md` | A persistent CNAME is either a stored UUID (long-term) or a section 5 ... | partial | C | As RFC7022-4.1-1 | S | sdp |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | partial | C | Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's) | S | sdp |
 | RFC9335-9.1-1 | `rfc9335.md` | a=cryptex: property attribute, no value, mux category TRANSPORT | partial | C | Take `a=cryptex` from the BUNDLE-tagged section (TRANSPORT category) | S | security |
-| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | partial | C | Cryptex or RFC 6904 for MID / RID by default; the default policy is Disable (W3C webrtc-extensions 10.2), no failing cell named | M | security |
 | RFC6544-9.2-1 | `rfc6544.md` | Close the selected pair's connection after an ICE restart | untested | C | After an ICE restart, tell the application to close the old selected TCP connection (driver event) | M | tcp (running) |
 | WEBRTC-4.4.1.4-36 | `w3c-webrtc-pc.md` | Answer or pranswer: update the data max message size of the SCTP ... | partial | C | Update the max message size on a pranswer and on renegotiation | S | w3c |
 | WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
@@ -148,7 +146,6 @@ Sorted by class, then owner, size and ID.
 | RFC7798-7.2.5-1 | `rfc7798.md` | MRST / MRMT dependency signalling (RFC 5583); c= with a single ... | partial | D | H.265 MRST / MRMT transmission (multi-stream), never negotiated now | L | media (running) |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | Per-layer SFrame ciphertext: needs per-layer packetization (W3C SVC) | L | media (running) |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | D | The dependency descriptor header extension | L | media (running) |
-| RFC7496-3.2-2 | `rfc7496.md` | Reliable messages rank above every message sent with the Priority ... | missing | D | The Priority policy (RFC7496-3.2-1, MAY): a bounded send buffer, priority abandonment, reliable messages above it | M | sctp |
 | RFC8835-3.5-3 | `rfc8835.md` | SCTP I-DATA (RFC 8260) | missing | D | SCTP I-DATA (RFC 8260) | L | sctp |
 | RFC9605-X-5 | `rfc9605.md` | Use of SFrame is signalled in SDP so both ends and an SFU agree | missing | D | SFrame signalling in SDP (no attribute is standardised yet) | M | sdp |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first) | M | tcp (running) |
@@ -160,8 +157,6 @@ Sorted by class, then owner, size and ID.
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3.2.5-1 | `rfc8830.md` | On a modified session: added msid values add stream memberships, ... | conflict | E | `conflict`: as RFC8830-3-7 (no msid left); memberships tested | S | jsep (running) |
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
-| RFC8851-6.3-6 | `rfc8851.md` | A recv rid the answerer cannot satisfy is discarded | partial | E | The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes) | S | jsep (running) |
-| RFC9429-3.6.2-2 | `rfc9429.md` | No transmit when no imageattr can be satisfied; SHOULD raise an error | partial | E | Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1 | S | jsep (running) |
 | RFC9429-4.1.9-2 | `rfc9429.md` | Each answer line follows the answer rules of its defining spec | conflict | E | `conflict`: umbrella of 5.3.1-6 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | partial | E | `flexfec` is registered to the RFC 8627 coder (IANA); the draft-03 coder cannot also take the name. Proposed n/a: superseded by RFC 8627 | S | media (running) |
@@ -169,10 +164,10 @@ Sorted by class, then owner, size and ID.
 | RFC4585-4.2-7 | `rfc4585.md` | Receivers do not rely on senders reacting to FB that was not ... | untested | E | Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate | S | media (running) |
 | RFC7164-5-1 | `rfc7164.md` | Participants using a leap-second-bearing reference recognise leap ... | missing | E | The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds | S | media (running) |
 | RFC9653-4-3 | `rfc9653.md` | The parameter MUST NOT appear in any other chunk. | untested | E | Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate | S | sctp |
+| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | security |
 | RFC8826-4.3-3 | `rfc8826.md` | No API extracts long-term keying material or reaches stored traffic ... | partial | E | Binds the script-facing API (RFC 8826 4.3: what JS can extract); the engine has no script API. n/a | S | security |
 | RFC5124-3.1-1 | `rfc5124.md` | The profile is identified as SAVPF in the m= proto field | untested | F | Offers say `UDP/TLS/RTP/SAVPF` (`tests/jsep_answer_sections.rs::an_answer_repeats_the_offered_profile`); mutation-check and cite | S | dtls-srtp |
 | RFC5124-5-2 | `rfc5124.md` | A master key is not reused across sessions/SSRC collisions (two-time ... | untested | F | Keys come from each handshake and SRTCP exhaustion re-keys or fails: rfc3711.md 9.2-4 / 11.3-1 tests; cite them | S | dtls-srtp |
 | RFC7742-5-2 | `rfc7742.md` | Both mandatory codecs are available for negotiation | untested | F | `tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory_audio_and_video_formats` (VP8, H.264 42e0xx); mutation-check and cite | S | payload |
-| RFC7941-4.1-2 | `rfc7941.md` | A sender places the SDES item (MID) in the header extension of its ... | missing | F | `rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite | S | rtp |
 | RFC8852-3.3-1 | `rfc8852.md` | The identifiers are carried in RTP header extensions per RFC 7941, in ... | partial | F | `rtp_sender_test.rs::the_sender_stamps_the_rid_of_each_simulcast_encoding` (send), both header forms tested at the codec; mutation-check and cite | S | rtp |
 | RFC7496-3-1 | `rfc7496.md` | RFC 3758 is REQUIRED to be implemented to implement these policies. | partial | F | RFC 3758's MUST rows are all tested (rfc3758.md: 39 tested, 4 n/a); cite them | S | sctp |
