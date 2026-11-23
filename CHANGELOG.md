@@ -612,6 +612,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **stream-driver**: a port range skips the ports the host refuses (`conf/flake-2-socket-range`).
+  `bind_udp_in_range` and `bind_tcp_listener_in_range` (and the driver's `tcp_port_range`)
+  gave up on the first bind error other than `AddrInUse`. On Windows, a port inside an
+  excluded port range (Hyper-V, WinNAT and other reservations, `netsh interface ipv4 show
+  excludedportrange`) fails with WSAEACCES (`PermissionDenied`), so a configured range that
+  reaches into one failed whenever the rotating start landed on such a port, though other
+  ports of the range were free. Such a port is now skipped like one in use; when every port is
+  refused the error says so (`PermissionDenied`), and `AddrInUse` still means the range is
+  full. Found by `sockets_bind_inside_their_port_range_until_it_is_full`, which failed on
+  GitHub's windows-latest: the test took the ports above an ephemeral port, and Windows
+  hands out ephemeral ports in sequence up to the start of an excluded range (54704 to 54903
+  for UDP on the traced runner). The tests now choose a block of ports they have verified
+  bindable, and `on_windows_a_range_reaching_into_an_excluded_range_uses_its_other_ports`
+  checks the skip against a real excluded range.
 - **rtc**: a stream whose SSRC the remote description declares for an m= section with
   `a=rid` / `a=simulcast` is received when its packets carry no RID
   (`conf/demux-1-declared-ssrc-in-rid-section`). Pion v4.2.29 offers simulcast by RID and also

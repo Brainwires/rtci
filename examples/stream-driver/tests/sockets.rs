@@ -26,14 +26,29 @@ fn binding_request(username: &str) -> Vec<u8> {
     m
 }
 
+/// The first port of `n` consecutive ports on 127.0.0.1 this host lets the test bind (`bind`
+/// succeeds on each, all held at once), released for the test to use. An ephemeral port says
+/// nothing about its neighbours: Windows hands ephemeral ports out in sequence, right up to
+/// the start of an excluded port range (Hyper-V, WinNAT: `netsh interface ipv4 show
+/// excludedportrange`), whose ports then refuse a bind with WSAEACCES. Bounded: 200 tries
+/// spread over 20000..60000.
+fn bindable_block<S>(n: u16, bind: impl Fn(u16) -> std::io::Result<S>) -> u16 {
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let seed = probe.local_addr().unwrap().port();
+    for attempt in 0..200u32 {
+        let base = 20000 + ((u32::from(seed) + attempt * 997) % 40000) as u16;
+        let held: Result<Vec<S>, _> = (base..base + n).map(&bind).collect();
+        if held.is_ok() {
+            return base;
+        }
+    }
+    panic!("no {n} consecutive bindable ports found in 200 tries");
+}
+
 #[test]
 fn sockets_bind_inside_their_port_range_until_it_is_full() {
     let lo: IpAddr = "127.0.0.1".parse().unwrap();
-    // A range nothing else on the host is likely to use, found free first.
-    let base = {
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port().clamp(20000, 60000)
-    };
+    let base = bindable_block(4, |port| std::net::UdpSocket::bind((lo, port)));
     let range = PortRange::new(base, base + 3).unwrap();
     let mut held = vec![];
     while let Ok(socket) = bind_udp_in_range(lo, range) {
@@ -52,10 +67,7 @@ fn sockets_bind_inside_their_port_range_until_it_is_full() {
 
 #[tokio::test]
 async fn listeners_bind_inside_the_range_the_driver_is_given() {
-    let base = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port().clamp(20000, 60000)
-    };
+    let base = bindable_block(21, |port| std::net::TcpListener::bind(("127.0.0.1", port)));
     let range = PortRange::new(base, base + 20).unwrap();
     let listener = bind_tcp_listener_in_range("127.0.0.1".parse().unwrap(), range, false).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -164,4 +176,60 @@ async fn a_shared_passive_port_hands_each_connection_to_the_engine_its_first_che
         "nothing lost in the routing"
     );
     client.await.unwrap();
+}
+
+/// The ranges of `netsh interface ipv4 show excludedportrange protocol=udp`.
+#[cfg(windows)]
+fn excluded_udp_ranges() -> Vec<(u16, u16)> {
+    let out = std::process::Command::new("netsh")
+        .args([
+            "interface",
+            "ipv4",
+            "show",
+            "excludedportrange",
+            "protocol=udp",
+        ])
+        .output()
+        .expect("netsh");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut ports = line.split_whitespace().map(str::parse::<u16>);
+            match (ports.next(), ports.next()) {
+                (Some(Ok(a)), Some(Ok(b))) => Some((a, b)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Windows: a range that reaches into an excluded port range binds its ports outside it,
+/// every time, whatever port the rotation starts at; the excluded ports refuse a bind with
+/// WSAEACCES (10013), which is not "range full". Runs where the host has an excluded UDP range
+/// with a bindable port just below it (GitHub's windows runners do).
+#[cfg(windows)]
+#[test]
+fn on_windows_a_range_reaching_into_an_excluded_range_uses_its_other_ports() {
+    let lo: IpAddr = "127.0.0.1".parse().unwrap();
+    let ranges = excluded_udp_ranges();
+    println!("excluded UDP ranges: {ranges:?}");
+    let Some(&(start, _)) = ranges.iter().find(|(start, end)| {
+        *start > 1025
+            && *end >= start + 2
+            && !ranges.iter().any(|(a, b)| (*a..=*b).contains(&(start - 1)))
+            && std::net::UdpSocket::bind((lo, start - 1)).is_ok()
+    }) else {
+        println!("no excluded UDP range with a free port below it: nothing to check");
+        return;
+    };
+    let refused = std::net::UdpSocket::bind((lo, start)).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(10013), "{refused:?}");
+    // One usable port, then three excluded ones.
+    let range = PortRange::new(start - 1, start + 2).unwrap();
+    for _ in 0..8 {
+        let socket = bind_udp_in_range(lo, range).unwrap();
+        assert_eq!(socket.local_addr().unwrap().port(), start - 1);
+        let full = bind_udp_in_range(lo, range).unwrap_err();
+        assert_eq!(full.kind(), std::io::ErrorKind::AddrInUse, "{full:?}");
+    }
 }
