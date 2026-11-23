@@ -1130,6 +1130,9 @@ fn destinations(
     let mut now = start;
     let mut sent = vec![];
     while now < start + span {
+        // The application reads its events: a local candidate's `icecandidate` is what
+        // conveys it, and the agent pairs it from then on (RFC 8838 section 10).
+        while pc.poll_event().is_some() {}
         while let Some(datagram) = pc.poll_write() {
             sent.push(datagram.transport.peer_addr);
         }
