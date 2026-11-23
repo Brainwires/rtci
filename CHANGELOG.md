@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
+  (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
+  m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT
+  category, whose value is the tagged section's (RFC 8859 section 4.5), the only section an RFC
+  9143 section 7.1.3 answerer writes it in. By default a group has Cryptex when its tagged
+  section (the first identification-tag with a port, RFC 9143 section 7.3.1) carries it, each
+  group by its own; a section outside any group decides by its own attribute; session-level
+  `a=cryptex` counts for every section, as before. An answer with `a=cryptex` on the tagged
+  section only now negotiates Cryptex; the earlier strict reading (every RTP section must carry
+  it) is `SettingEngineBuilder::with_cryptex_required_on_every_bundled_section(true)`, default
+  off. The engine keeps writing `a=cryptex` at the session level in offers and answers, so it is
+  present for every RTP section with `with_bundle_attributes_repeated` either way
+  (`every_written_offer_and_answer_has_cryptex_for_every_bundled_rtp_section`). Rows
+  RFC9335-4-4, RFC9335-9.1-1 and RFC8859-A-30 `tested`.
+  RFC7941-6-1 is `setting` (as on `conf/audit-5-sctp-w3c`, with its Firefox 152 test
+  `require_refuses_the_recorded_firefox_offer`), not `conflict`: W3C webrtc-extensions 10.2
+  fixes only the `negotiate` default; that header extensions then go in the clear is in its
+  non-normative enumeration description, so the texts can both be met and the default is kept
+  by a peer (Firefox 152 signals neither Cryptex nor RFC 6904), not by a W3C requirement.
+
 - **interceptors**: the RTP circuit breaker's packet size follows the sending rate
   (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
   times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech
@@ -524,6 +544,40 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
     from the session level, later offers listing only the endpoint's own feedback, the
     sender following its section's formats and a later answer (RFC 9143 section 9.1, RFC
     3264 sections 8.3.2 and 8.3.4).
+- **peer connection / interceptor**: media-21 (MUST rows, rapid synchronisation).
+  - The default offer has the RFC 6051 64-bit NTP timestamp header extension
+    (`a=extmap:<id> urn:ietf:params:rtp-hdrext:ntp-64`) on audio and video, and the default
+    chain an `NtpTimestampInterceptor` at `Slot::Custom(NTP_TIMESTAMP_SLOT)` (1_850).
+    `DefaultInterceptorOptions` has a new public field, `rapid_synchronisation` (`true`):
+    a struct literal must name it.
+  - `StreamInfo` has a new public field, `section_fmtp_lines`: a struct literal outside the
+    crate must name it (or use `..Default::default()`).
+  - `MediaEngine::register_codec` refuses a ULPFEC format with a payload type of 0 to 34
+    (RFC 5109 sections 14.1, 14.2), and a remote `ulpfec` format at a clock rate no media
+    format of its section has, or of 1000 Hz or less, is not negotiated (section 13).
+  - TSTR and TSTN no longer leave in an Early RTCP packet of their own (RFC 5104 4.3.2.3,
+    4.3.3.3), and an inbound TSTR, VBCM or LRR is delivered to the application.
+  - A VP8 or VP9 sender holds a stream to the receiver's negotiated `max-fr` and `max-fs`
+    (RFC 7741 section 6.1, RFC 9628 section 6): frames above the rate, and the frames from a
+    key picture larger than the size to the next one that fits, are dropped.
+
+- **peer connection**: by default a sender's stream moves to a new SSRC when the application
+  writes a packet with a negotiated codec of another clock rate (RFC 7160 section 4.1): Opus at
+  48 kHz, then PCMU at 8 kHz, on one audio sender is two SSRCs, and the encoding's SSRC
+  (`get_parameters`) is the new one from then on. An application that put the old SSRC in its
+  packets may go on doing so (they go out under the new one).
+  `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` keeps one SSRC as before. A receiver
+  of a single-stream section now follows its source to a new SSRC (the track carries on; it was
+  dropped), and an RTX packet from an SSRC nothing associates is no longer taken for a media
+  stream.
+
+- **peer connection**: `DefaultInterceptorHandles` has a new public field, `transports`
+  (`TransportHandles`): a struct literal must name it. The default chain's circuit breaker is
+  now one per transport (`Slot::CircuitBreaker` holds a `PerRtpSession`).
+
+- **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
+  (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
+  struct literal outside the crate must name it.
 - **ICE-TCP type preferences** (branch `conf/tcp-18-rows`, RFC 6544 section 4.2): a TCP
   candidate's priority now uses its type's preference less one (host 125, peer-reflexive 109,
   server-reflexive 99, relayed 0), as RFC 6544 recommends when UDP is preferred for RTP: a UDP
@@ -2168,6 +2222,46 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
 
 ### Behaviour changes
 
+- **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
+  continues the SCTP association updates `maxMessageSize` and what the association lets this
+  side send from the remote `a=max-message-size` (it kept the first answer's).
+  `rtc_sctp::Association::set_max_message_size` is public (new API).
+
+- **dtls** (audit-5, RFC 8835 section 3.5, RFC 7301): Application-Layer Protocol
+  Negotiation in DTLS 1.2 (ServerHello) and DTLS 1.3 (EncryptedExtensions):
+  `ConfigBuilder::with_alpn_protocols`, `State::application_protocol` (new API). A server
+  without a protocol in common answers `no_application_protocol`.
+- **peer_connection** (audit-5, RFC 8833): the DTLS client offers `webrtc` and `c-webrtc`,
+  the server selects `webrtc`; a peer without ALPN connects as before.
+  `RTCPeerConnection::dtls_application_protocol`, `SettingEngineBuilder::with_dtls_alpn`
+  (new API; `false` leaves the extension out).
+- **peer_connection** (audit-5, RFC 8842 section 5.2, RFC 8122 section 6.2): DTLS datagrams
+  that arrive before ICE has a path (a ClientHello that overtook the answer) are held, at
+  most 8, and taken once the transports start; they were dropped and only the peer's
+  retransmission recovered the handshake.
+
+- **sdp** (audit-5, RFC 6679 section 7.1): with ECN signalled (`with_ecn(true)` without
+  `with_ecn_without_signalling`) every audio and video format takes `nack ecn` and the XR ECN
+  summary: an offer's RTP sections carry `a=rtcp-fb:* nack ecn` and `a=rtcp-xr:ecn-sum` beside
+  `a=ecn-capable-rtp`, an answer keeps what the offer had of them (`ack ccfb` replacing
+  `nack ecn`, RFC 8888 section 7). Two such peers without RFC 8888 now mark their media on
+  RFC 6679's own reports (they marked nothing).
+- **sdp** (audit-5, RFC 7742 section 6.2): every H.264 fmtp line this endpoint writes has
+  `profile-level-id` (a format registered without one is written with RFC 6184's default,
+  `42000a`) and none has `sprop-parameter-sets` (it was written as registered). An offer
+  without `profile-level-id` is answered at no more than Level 1, the default it stands for
+  (it was answered at this endpoint's own level).
+- **peer_connection** (audit-5, RFC 8852 section 3): the RID and RRID header extension
+  elements are read through `RtpStreamId` / `RepairedRtpStreamId`; one that is not 1 to 255
+  ASCII letters and digits names no stream (its bytes were taken as the rid).
+- **audit** (audit-5): `setting` takes a second kind of evidence, "measured" (RULES.md):
+  the RFC form has its own mutation-checked test and a named repository test measured it
+  worse; `scripts/audit-count.py --check` requires the measurement test and its numbers.
+  GCC-5.4-4 and RFC4585-3.5.2-5 are such rows, RFC7941-6-1 a `setting` for the recorded
+  Firefox 152 offer; RFC9429-5.3.2-9, FLEXFEC03-5.1-5 and RFC7164-5-1 are `n/a`.
+  `rtc-interceptor` tests `congestion_feedback_rate.rs::rfc_4585_timing_of_congestion_feedback_measured_against_immediate`
+  and `gcc/overuse.rs::the_drafts_threshold_adapts_over_the_uncapped_arrival_gap` added.
+
 - **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
   engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
   answer, while the mapped address may be used (the NAT binding lives as long as the
@@ -2178,6 +2272,48 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   transport) the new generation asks each server again, over a kept connection when there is
   one, instead of announcing the address the previous generation learned.
 
+- **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always
+  makes progress. With sec-12 every SACK that kept a_rwnd at 0 re-armed the one-RTO wait
+  before the next probe, also when it acknowledged the probe just sent, so a message larger
+  than the receiver's buffer (webrtc-rs/webrtc#822, `tests/sctp_receive_buffer_deadlock.rs`)
+  arrived at one fragment per RTO (64 KiB through 16 KiB: about a minute). A SACK that
+  acknowledges the outstanding zero window probe is now progress and the next probe goes at
+  once; only a probe the receiver drops waits, for T3-rtx and its doubling interval. The
+  receiver acknowledges a chunk it takes through its closed window at once instead of after
+  the SACK delay (the test's message arrives in 1.6 s, 9.4 s on master). With I-DATA the
+  probes finish a part-sent message before another is started, so several interleaved
+  messages that together fill the buffer still complete one at a time; and an association
+  that negotiated I-DATA takes the in-sequence chunk that unblocks reassembly through a closed
+  window whatever `with_zero_window_overcommit` says (RFC 8260 section 6). Without that,
+  interleaved messages that each fit the buffer but fill it together (six 16 KiB messages,
+  16 KiB buffer, weighted fair queueing) deadlocked: the RFC 9260 6.2 drop refused the chunk
+  that would complete one of them, for ever. Toward peers without I-DATA (browsers) the drop
+  is unchanged. The literal drop stays available for I-DATA associations too:
+  `TransportConfig::with_strict_zero_window_drop(true)` (new, off by default; it can deadlock
+  interleaved messages, as its documentation says). Audit: RFC9260-6.2-2 is now the
+  association without I-DATA (`tested`); the I-DATA case is the new row RFC9260-6.2-34,
+  `setting` (measured: 0 of 24 messages with the drop, 24 of 24 by default).
+- **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
+  waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
+  expiry count and the path error count, so probes the receiver keeps answering never end the
+  association.
+- **sctp** (sec-12, RFC 9260 6.2.1 B, C): chunks marked for retransmission (T3-rtx, Fast
+  Retransmit) give their size back to the peer's rwnd, and every retransmission takes it
+  again; T3-rtx retransmissions are limited by cwnd and by rwnd separately.
+- **dtls** (sec-12, RFC 9147 8): after a key update the epoch before stays readable until a
+  record of the next arrives, so a late record of it is processed (it was dropped once a
+  record under the new keys had been read).
+- **dtls** (sec-12, RFC 8446 4.4.2.4): a DTLS 1.3 endpoint that validates the peer's chain
+  refuses a certificate signed with SHA-1 (bad_certificate). Fingerprint authentication
+  (WebRTC) validates no certificate signature and is not affected.
+- **dtls** (sec-12, RFC 8446 C.2): a signature from an RSA key above 8192 bits is refused.
+- **dtls** (sec-12, RFC 8446 7.1): the DTLS 1.3 handshake traffic secrets are erased once
+  both Finished are done; the key schedule keeps no copy of the application traffic secrets.
+- **peer_connection** (sec-12, RFC 9147 9, 11): `SettingEngineBuilder::with_dtls_connection_id`
+  sets the DTLS connection id length; with connection ids in use a spare id is requested once
+  the association is up, and a change of ICE selected pair switches to a fresh one.
+- **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
+  association of every transport of the connection, not only the first.
 - **ice**: through the peer connection a local candidate is paired only once it has been
   conveyed to the peer (RFC 8838 section 10): when the application takes its
   `OnIceCandidateEvent` from `poll_event`, or sets a local description that lists it. An
@@ -3058,6 +3194,56 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   - `rtp::codec::telephone_event::packed_telephone_event_packets` (`PackedEventPacket`):
     consecutive events in one packet, RFC 4733 section 2.5.1.5 (timestamp of the first event,
     M set, each event's own E bit and duration).
+- **The reference driver documented as the crate a first-time user runs** (branch
+  `conf/tcp-15-driver-crate`): `rtc-stream-driver`'s crate documentation states what is the
+  engine's and what is the driver's, with the command table, the loop, the server socket
+  choices and the `dns-records` feature. New example `stream-driver-loopback` (`cargo run
+  --example stream-driver-loopback`): two peer connections over loopback TCP through the driver,
+  UDP blocked, 50 data-channel messages in order; the test environment's env stage runs it. The
+  README's "Driving the Engine" says which parts are engine, driver and application.
+
+- **TURN resolution rules and RFC 8155 discovery** (branch `conf/tcp-14-resolution-rows`; RFC
+  5928 section 3, RFC 8656 section 7.4, RFC 8155). A refused Allocate on an engine TURN link
+  now fails only that server: a 300 (Try Alternate) is followed to its ALTERNATE-SERVER (up to
+  three redirects), a 486 or 508 holds the server address back for a minute and a 437 for two,
+  also against later resolutions, and the next SRV target is tried; a link whose allocations
+  all failed runs its resolution again from the beginning for the next ICE generation (it
+  stayed failed). New `rtc::peer_connection::turn_discovery` (opt-in): `domain_of_identity`,
+  `urls_for_domain` (port-less `turns:` / `turn:` URLs found by S-NAPTR `RELAY` and SRV),
+  `anycast_urls` (`TURN_ANYCAST_IPV4` 192.0.0.10, `TURN_ANYCAST_IPV6` 2001:1::2, followed through
+  the anycast server's 300) and `MDNS_SERVICES` for a driver's mDNS browser.
+
+- **Relayed TCP candidates and TURN connection upkeep in the engine** (branch
+  `conf/tcp-13-relayed-tcp`; RFC 6544 sections 5.5 and 11.2, RFC 6062). A TCP allocation per
+  TCP / TLS server (REQUESTED-TRANSPORT TCP on a control connection of its own); its relayed
+  address becomes a passive TCP candidate and, on port 9, an active one. A peer reaching the
+  passive candidate is announced by ConnectionAttempt; a check from the active one sends
+  Connect (after CreatePermission); either way the engine opens a data connection to the
+  server (`Framing::Raw`, TLS for `turns:`), binds it with ConnectionBind and then carries the
+  peer's RFC 4571 stream to and from ICE. Permissions are created for the remote TCP
+  candidates' addresses as they are learned (the server refuses a peer without one). Once ICE
+  has completed, TURN connections whose relayed candidate the selected pair does not use are
+  closed and the selected one's kept (11.2); a lost TURN connection or DTLS association whose
+  candidate is in use is reconnected, allocated again and ICE restarted (`restart_ice`).
+  `tests/turn_tcp_relay.rs`; env `testenv_turn_streams.rs::the_engine_connects_over_a_relayed_tcp_candidate`.
+
+- **TURN over DTLS in the engine** (branch `conf/tcp-12-turn-dtls`; RFC 7350, RFC 8656 section
+  3.1). A `turns:...?transport=udp` server of the configuration is reached with a client-role
+  `rtc-dtls` association from the first UDP host candidate (of the server's family) of each
+  transport, on the application's socket: its records leave through `poll_write` and are taken
+  out of `handle_read` before ICE sees them. The server's certificate is checked against the
+  URI's host with the roots or verifier of `with_turn_tls` (as for TLS; nothing is contacted
+  without one); only forward-secret AEAD suites are offered (DTLS 1.2 and 1.3, 1.3 alone with
+  `disable_tls12`). The TURN client runs over it with UDP's retransmissions, allocates a UDP
+  relay and announces the relayed candidate with `relayProtocol` `dtls`
+  (`RTCIceServerTransportProtocol::Dtls`, new; libwebrtc's value: W3C names none). A name
+  without a port is found by S-NAPTR (`turn.dtls`) and SRV (`_turns._udp`), else port 5349.
+  The application needs no stream driver for a server given by address. New
+  `rtc_dtls::config::ConfigBuilder::with_server_cert_verifier` (a rustls verifier for the
+  client's server check). The test environment's coturn now listens for DTLS on 5349/udp;
+  `testenv_turn_streams.rs::the_engine_relays_through_turn_over_dtls`.
+
+
 - **Decoding dependencies** (RFC 5583; RFC 7798 section 7.2.5; branch `conf/jsep-47-depend`).
   `sdp::attribute::{Depend, Dependency, DependencyType}` parse and write `a=depend` (one
   dependency per format; `lay`, `mdc` or another token). `RTCPeerConnection::

@@ -439,6 +439,10 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_bundled_fingerprints_agreeing`]: a remote description whose
     /// bundled sections carry fingerprints other than the tagged section's is refused.
     pub(crate) bundled_fingerprints_agree: bool,
+    /// [`SettingEngineBuilder::with_cryptex_required_on_every_bundled_section`]: `a=cryptex`
+    /// counts only at the session level or on every RTP section, the tagged one not standing
+    /// for its group.
+    pub(crate) cryptex_required_on_every_bundled_section: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
@@ -500,6 +504,10 @@ pub struct SettingEngine {
     pub(crate) non_interactive_video: bool,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// [`SettingEngineBuilder::with_dtls_connection_id`].
+    pub(crate) dtls_connection_id_length: Option<usize>,
+    /// [`SettingEngineBuilder::with_dtls_alpn`]: `true` when it is turned off.
+    pub(crate) dtls_alpn_off: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
@@ -1828,6 +1836,28 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether a description has Cryptex for a BUNDLE group only when `a=cryptex` is at the
+    /// session level or on every RTP-based m= section of the group. The default is `false`.
+    ///
+    /// RFC 9335 section 4 binds the writer: "If BUNDLE is in use ... and the 'a=cryptex'
+    /// attribute is present for a media line, it MUST be present for all RTP-based 'm='
+    /// sections belonging to the same bundle group", and this engine writes it so (at the
+    /// session level). The same paragraph assigns the attribute to the TRANSPORT category
+    /// (RFC 8859 section 4.5: "the software MUST pick the one that's associated with the 'm='
+    /// line whose information is used for setting up the underlying transport"), and RFC 9143
+    /// section 7.1.3 has an answerer and a later offerer write such attributes "only in the
+    /// tagged 'm=' section". By default the reader therefore takes the group's Cryptex from
+    /// its BUNDLE-tagged section, so a peer that follows RFC 9143 keeps Cryptex; a section
+    /// outside any group decides by its own attribute.
+    ///
+    /// `true` reads strictly (the JSEP stack's earlier form): `a=cryptex` on some but not all
+    /// RTP-based sections of a group, the tagged one alone included, does not negotiate
+    /// Cryptex, and a `Require` policy refuses such a description.
+    pub fn with_cryptex_required_on_every_bundled_section(mut self, required: bool) -> Self {
+        self.0.cryptex_required_on_every_bundled_section = required;
+        self
+    }
+
     /// Whether answers and subsequent offers repeat the BUNDLE attributes (the IDENTICAL and
     /// TRANSPORT categories of RFC 8859: `a=ice-ufrag`, `a=ice-pwd`, `a=setup`, media-level
     /// `a=fingerprint`, `a=rtcp-mux`, `a=rtcp-mux-only`, `a=rtcp-rsize`, candidates) in every
@@ -2379,6 +2409,35 @@ impl SettingEngineBuilder {
     /// fail.
     pub fn with_srtp_key_lifetime(mut self, lifetime: Option<srtp::keying::KeyLifetime>) -> Self {
         self.0.srtp_key_lifetime = lifetime;
+        self
+    }
+
+    /// Asks the peer to put a connection id of `length` random bytes in every protected DTLS
+    /// record it sends (RFC 9146 for DTLS 1.2, RFC 9147 section 9 for DTLS 1.3). `None`, the
+    /// default, sends the `connection_id` extension asking for none (RFC 9147 section 5.1).
+    ///
+    /// With connection ids in use the engine follows RFC 9147 sections 9 and 11: when the ICE
+    /// agent's selected pair changes (a new path), a DTLS 1.3 association switches to a fresh
+    /// connection id the peer provided and asks for another, so records on the new path are
+    /// not linked to the old ones by their id.
+    pub fn with_dtls_connection_id(mut self, length: Option<usize>) -> Self {
+        self.0.dtls_connection_id_length = length;
+        self
+    }
+
+    /// Whether the DTLS handshake carries Application-Layer Protocol Negotiation with the
+    /// WebRTC identifiers of RFC 8833 (RFC 8835 section 3.5). The default is `true`: as the
+    /// DTLS client the engine offers `webrtc` and `c-webrtc` (section 2: "A peer in the client
+    /// role MUST offer both identifiers if it is not aware of a need for confidentiality"),
+    /// as the server it selects `webrtc`. A peer that sends or answers no ALPN connects all
+    /// the same, taken as `webrtc` (section 2). The engine never selects `c-webrtc` as the
+    /// server: it cannot promise the media confidentiality that identifier stands for (a
+    /// client that requires it is refused with `no_application_protocol`, and section 2 has
+    /// such a client abort anyway).
+    /// [`RTCPeerConnection::dtls_application_protocol`](crate::peer_connection::RTCPeerConnection::dtls_application_protocol)
+    /// gives what was selected. `false` leaves the extension out.
+    pub fn with_dtls_alpn(mut self, alpn: bool) -> Self {
+        self.0.dtls_alpn_off = !alpn;
         self
     }
 

@@ -230,6 +230,8 @@ pub(super) fn new_dtls_transport(
         crypto_provider,
     })?;
     dtls_transport.srtp_key_lifetime = setting_engine.srtp_key_lifetime;
+    dtls_transport.connection_id_length = setting_engine.dtls_connection_id_length;
+    dtls_transport.alpn = !setting_engine.dtls_alpn_off;
     Ok(dtls_transport)
 }
 
@@ -385,6 +387,33 @@ impl RTCPeerConnection {
         // One CNAME for the connection (RFC 7022, RFC 8834 section 4.9): what RTCP says, what
         // the descriptions say (`a=ssrc:<ssrc> cname:`) and what the parameters report.
         media_engine.rtcp_cname = pipeline_context.interceptor_handler_context.cname.clone();
+
+        // RFC 6679 section 7.1: with ECN signalled in SDP, "the "rtcp-xr" attribute with the
+        // "ecn-sum" parameter MUST also be used", and `nack ecn` "MUST be used whenever the
+        // initialisation method or a congestion control algorithm requires timely sender-side
+        // knowledge of received CE markings" (every initiation method here reads the first
+        // ECT packets back). Both go with every audio and video format; an answer keeps what
+        // the offer had of them, and `ack ccfb` replaces `nack ecn` (RFC 8888 section 7).
+        if setting_engine.ecn && !setting_engine.ecn_without_signalling {
+            for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: crate::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_NACK.to_owned(),
+                        parameter:
+                            crate::rtp_transceiver::rtp_sender::rtcp_parameters::RTCP_FB_NACK_ECN
+                                .to_owned(),
+                    },
+                    kind,
+                );
+                media_engine.register_feedback(
+                    crate::rtp_transceiver::rtp_sender::RTCPFeedback {
+                        typ: interceptor::RTCP_FB_XR.to_owned(),
+                        parameter: interceptor::RTCP_XR_ECN_SUMMARY.to_owned(),
+                    },
+                    kind,
+                );
+            }
+        }
 
         Ok(Self {
             configuration,
@@ -3759,6 +3788,9 @@ impl RTCPeerConnection {
         // Start the dtls transport
         self.dtls_transport_mut()
             .start(local_ice_role, remote_dtls_parameters)?;
+        // A ClientHello that arrived before the answer (RFC 8842 section 5.2), now that DTLS
+        // has an endpoint, if ICE has a path already.
+        self.release_early_dtls();
 
         self.update_connection_state(false);
 

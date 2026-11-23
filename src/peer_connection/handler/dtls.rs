@@ -155,6 +155,36 @@ impl<'a> DtlsHandler<'a> {
         "DtlsHandler"
     }
 
+    /// The selected pair changed. When it is a change of path (not the first selection), an
+    /// association that sends connection ids switches to a fresh one (RFC 9147 sections 9
+    /// and 11), so that the records on the new path cannot be linked to the old by it.
+    fn on_new_path(&mut self, now: Instant) {
+        let current = self.stats.transport.selected_candidate_pair_id.clone();
+        let previous = self
+            .ctx
+            .dtls_transport
+            .selected_pair_id
+            .replace(current.clone());
+        if previous.is_none_or(|previous| previous == current) {
+            return;
+        }
+        let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
+            return;
+        };
+        let remote = TransportContext::default().peer_addr;
+        match dtls_endpoint.path_changed(now, remote) {
+            Ok(switched) => debug!("new ICE path: switched to a fresh connection id: {switched}"),
+            Err(err) => debug!("new ICE path: connection ids unchanged: {err}"),
+        }
+        while let Some(transmit) = dtls_endpoint.poll_transmit() {
+            self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                now: transmit.now,
+                transport: transmit.transport,
+                message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+            });
+        }
+    }
+
     /// The round trip time ICE has measured on the selected candidate pair, if it has.
     fn selected_pair_round_trip_time(&self) -> Option<std::time::Duration> {
         let pair = self
@@ -347,6 +377,7 @@ impl<'a>
             let mut peer_certificates_for_stats: Vec<Vec<u8>> = vec![];
             let mut dtls_cipher_for_stats: Option<String> = None;
             let mut dtls_version_for_stats = None;
+            let mut application_protocol = None;
 
             let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
@@ -412,6 +443,8 @@ impl<'a>
                                     dtls_cipher_for_stats =
                                         state.cipher_suite().map(|cs| cs.to_string());
                                     dtls_version_for_stats = state.negotiated_version();
+                                    application_protocol =
+                                        Some(state.application_protocol().map(str::to_owned));
 
                                     handshake_complete = Some(srtp_contexts);
                                 }
@@ -436,6 +469,13 @@ impl<'a>
                     }
                     _ => {}
                 }
+            }
+            // RFC 9147 section 9: "SHOULD request new CIDs for this purpose if path changes
+            // are anticipated", and with ICE they are: a spare id is asked for as soon as a
+            // DTLS 1.3 association that sends connection ids is up (refused, and nothing sent,
+            // when it sends none or is DTLS 1.2).
+            if handshake_complete.is_some() {
+                let _ = dtls_endpoint.request_connection_ids(msg.now, msg.transport.peer_addr, 1);
             }
 
             while let Some(transmit) = dtls_endpoint.poll_transmit() {
@@ -467,6 +507,11 @@ impl<'a>
                 });
             }
 
+            // RFC 8833 section 2: what ALPN selected; a peer that used none is taken as
+            // `webrtc` by the application ("SHOULD assume ... "webrtc"").
+            if let Some(application_protocol) = application_protocol {
+                self.ctx.dtls_transport.application_protocol = application_protocol;
+            }
             // Update stats after dtls_endpoint borrow ends
             if let Some(srtp_profile) = srtp_profile_for_stats {
                 self.update_dtls_stats_from_profile(
@@ -561,6 +606,7 @@ impl<'a>
         let now = evt.now;
         if let RTCEventInternal::ICESelectedCandidatePairChange = evt.event {
             self.connect_client(now, false)?;
+            self.on_new_path(now);
         } else {
             self.ctx.event_outs.push_back(evt);
         }

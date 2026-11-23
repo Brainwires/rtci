@@ -33,7 +33,7 @@ OPEN = ["untested", "partial", "missing", "violated"]
 # Listed with a class, though the RFC behaviour is tested (as a setting).
 SETTLED = ["setting", "conflict"]
 CLASSES = {
-    "A": "RFC behaviour tested, a setting; the default differs for a named cell or peer",
+    "A": "RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement",
     "B": "implemented, lacking a test that fails without it",
     "C": "partly implemented",
     "D": "not implemented",
