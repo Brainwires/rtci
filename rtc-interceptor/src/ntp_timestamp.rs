@@ -106,7 +106,7 @@ struct Stamped {
 }
 
 /// Stamps an RFC 6051 NTP-format timestamp on the packets of local streams that negotiated
-/// `ntp-64` or `ntp-56`; see the [module](self) documentation for which packets.
+/// `ntp-64` or `ntp-56`; see the `ntp_timestamp` module's source documentation for which packets.
 pub struct NtpTimestampInterceptor {
     initial_window: Duration,
     interval: Duration,

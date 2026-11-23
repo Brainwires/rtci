@@ -44,7 +44,6 @@ mod agent_proto;
 pub mod agent_selector;
 /// Snapshot statistics for an agent's candidates and pairs.
 pub mod agent_stats;
-/// Where connectivity checks may be sent (RFC 8445 §5.1.1.1 address rules).
 pub mod remote_policy;
 #[cfg(test)]
 mod remote_policy_test;
@@ -466,6 +465,10 @@ pub struct Agent {
     pub(crate) remote_lite: bool,
     /// The `LiteCandidateUpdate` event of this generation was raised.
     pub(crate) lite_update_raised: bool,
+    /// Two lite agents, controlled: the local transport address an updated candidate
+    /// exchange named in `a=remote-candidates` (RFC 8839 Section 4.4.2.2), which the pair
+    /// takes as its local candidate. See [`Agent::replace_remote_candidates_pinning`].
+    pub(crate) pinned_local_addr: Option<SocketAddr>,
     /// Ta as configured, before the peer's proposal (Section 14.2).
     pub(crate) configured_ta: Option<Duration>,
     /// Which of several nominations the controlled agent uses.
@@ -510,6 +513,32 @@ enum MdnsHostName {
     /// Too many names are published already: the candidate takes this name, which is not
     /// published, and so keeps its address private.
     Unpublished(String),
+}
+
+/// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s and `ice-pwd` 22 to 256, with
+/// "at least 24 bits" and "at least 128 bits of randomness"; an agent "MUST NOT send" a ufrag
+/// longer than 32 characters. Credentials the application supplies are held to that (the
+/// generated ones are 16 and 32 letters): too short is too few bits, other characters or a
+/// longer value are invalid.
+pub(crate) fn check_local_credentials(ufrag: &str, pwd: &str) -> Result<()> {
+    let ice_chars = |value: &str| {
+        value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    };
+    if ufrag.len() < 4 || ufrag.len() * 8 < 24 {
+        return Err(Error::ErrLocalUfragInsufficientBits);
+    }
+    if pwd.len() < 22 || pwd.len() * 8 < 128 {
+        return Err(Error::ErrLocalPwdInsufficientBits);
+    }
+    if ufrag.len() > 32 || !ice_chars(ufrag) {
+        return Err(Error::ErrLocalUfragInvalid);
+    }
+    if pwd.len() > 256 || !ice_chars(pwd) {
+        return Err(Error::ErrLocalPwdInvalid);
+    }
+    Ok(())
 }
 
 impl Agent {
@@ -722,6 +751,7 @@ impl Agent {
 
             remote_lite: false,
             lite_update_raised: false,
+            pinned_local_addr: None,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
             failed_nomination: config.failed_nomination,
@@ -845,7 +875,7 @@ impl Agent {
 
     /// Pairs a conveyed local candidate with every remote candidate it can be paired with.
     fn pair_local_candidate(&mut self, local_index: usize) {
-        if self.local_candidates[local_index].unconveyed {
+        if self.local_candidates[local_index].held_from_pairing() {
             return;
         }
         for remote_index in 0..self.remote_candidates.len() {
@@ -881,6 +911,19 @@ impl Agent {
             return Ok(false);
         }
 
+        // RFC 8839 section 5.1: "rel-addr and rel-port ... MUST be present for server
+        // reflexive, peer-reflexive and relayed candidates". A local one given without its
+        // related address would be signalled as `raddr  rport 0`: it is refused.
+        if matches!(
+            candidate_type,
+            CandidateType::ServerReflexive | CandidateType::Relay | CandidateType::PeerReflexive
+        ) && c
+            .related_address()
+            .is_none_or(|related| related.address.is_empty())
+        {
+            return Err(Error::ErrLocalCandidateWithoutRelatedAddress);
+        }
+
         if c.candidate_type() == CandidateType::Host
             && self.mdns_mode == MulticastDnsMode::QueryAndGather
             && !c.address.ends_with(".local")
@@ -912,9 +955,17 @@ impl Agent {
         // server-reflexive candidate on, the external address of its local one.
         let nat_srflx = self.apply_nat_1to1(&mut c);
 
+        // A candidate gathered while an ICE restart is staged (the remote restart offer is
+        // applied, the answer not yet; or the restart offer is created, not yet applied) is
+        // the new generation's: the peer connection announces it with the new credentials
+        // (W3C webrtc-pc 5.6: a candidate gathered for a generation whose description is not
+        // applied yet waits for it, it is not dropped). The rules below that bind the current
+        // session do not apply to it, and the restart keeps it (`apply_restart`).
+        let staged = self.has_pending_restart();
+
         // RFC 8838 Section 13: no candidate follows the end-of-candidates indication of its
         // generation.
-        if self.local_gathering_complete {
+        if self.local_gathering_complete && !staged {
             warn!(
                 "[{}]: ignoring local candidate {}: gathering was declared complete",
                 self.get_name(),
@@ -924,8 +975,10 @@ impl Agent {
         }
         // RFC 8838 Section 13: "In all cases, an agent MUST NOT trickle any new candidates
         // within an ICE session after nomination of a candidate pair". A candidate gathered
-        // after it is not taken (so not announced either); an ICE restart takes it.
-        if self.selected_pair.is_some() {
+        // after it is not taken (so not announced either); an ICE restart takes it. One
+        // gathered for a staged restart is taken but not paired before the restart.
+        let awaiting_restart = self.selected_pair.is_some();
+        if awaiting_restart && !staged {
             debug!(
                 "[{}]: ignoring local candidate {}: a pair has been nominated",
                 self.get_name(),
@@ -952,30 +1005,37 @@ impl Agent {
             return Ok(false);
         }
 
-        for cand in &self.local_candidates {
-            if cand.equal(&c) {
-                return Ok(false);
-            }
+        for index in 0..self.local_candidates.len() {
+            let cand = &self.local_candidates[index];
+            let equal = cand.equal(&c);
             // RFC 8445 Section 5.1.3: "A candidate is redundant if and only if its transport
             // address and base equal those of another candidate" (a server-reflexive candidate
             // equal to its host candidate, a relayed one identical to a host candidate). An
             // mDNS host candidate hides its address: a reflexive candidate on that address is
             // not redundant with it (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2).
-            if cand.network_type() == c.network_type()
+            let redundant = !equal
+                && cand.network_type() == c.network_type()
                 && cand.tcp_type() == c.tcp_type()
                 && cand.addr() == c.addr()
                 && cand.base_addr() == c.base_addr()
                 && !cand.addr().ip().is_unspecified()
                 && !cand.address().ends_with(".local")
                 && !c.address().ends_with(".local")
-                && cand.address() == c.address()
-            {
-                debug!(
-                    "[{}]: ignoring redundant local candidate {} (same address and base as {})",
-                    self.get_name(),
-                    c,
-                    cand
-                );
+                && cand.address() == c.address();
+            if equal || redundant {
+                if redundant {
+                    debug!(
+                        "[{}]: ignoring redundant local candidate {} (same address and base as {})",
+                        self.get_name(),
+                        c,
+                        cand
+                    );
+                }
+                // Gathered again for a staged restart: the candidate held is the new
+                // generation's too.
+                if staged {
+                    self.local_candidates[index].restart_generation = true;
+                }
                 return Ok(false);
             }
         }
@@ -996,6 +1056,8 @@ impl Agent {
         }
 
         c.unconveyed = unconveyed;
+        c.restart_generation = staged;
+        c.awaiting_restart = staged && awaiting_restart;
         self.local_candidates.push(c);
         let local_index = self.local_candidates.len() - 1;
 
@@ -1012,7 +1074,7 @@ impl Agent {
     /// Adds local candidates gathered together: those without a priority or a rank of their
     /// own are ranked first as RFC 8421 Section 4 recommends for a dual-stack host (an IPv6
     /// head start, then the families alternating; see
-    /// [`rank_local_candidates`](crate::candidate::rank_local_candidates)), around the ranks
+    /// [`rank_local_candidates`]), around the ranks
     /// of the candidates the agent holds, and then each is added as by
     /// [`Agent::add_local_candidate`], whose results are returned in order.
     pub fn add_local_candidates(&mut self, mut candidates: Vec<Candidate>) -> Result<Vec<bool>> {
@@ -1347,7 +1409,7 @@ impl Agent {
                 let remote_index = self.remote_candidates.len() - 1;
 
                 for local_index in 0..self.local_candidates.len() {
-                    if !self.local_candidates[local_index].unconveyed
+                    if !self.local_candidates[local_index].held_from_pairing()
                         && self.local_candidates[local_index]
                             .can_pair_with(&self.remote_candidates[remote_index])
                     {
@@ -1391,7 +1453,7 @@ impl Agent {
             }
         }
         for local_index in 0..self.local_candidates.len() {
-            if !self.local_candidates[local_index].unconveyed
+            if !self.local_candidates[local_index].held_from_pairing()
                 && self.local_candidates[local_index]
                     .can_pair_with(&self.remote_candidates[remote_index])
             {
@@ -1829,9 +1891,25 @@ impl Agent {
     /// is complete after and only after the updated candidate exchange is complete"), and
     /// selects again. Returns `false`, and changes nothing, unless both agents are lite.
     pub fn replace_remote_candidates(&mut self, now: Instant, candidates: Vec<Candidate>) -> bool {
+        self.replace_remote_candidates_pinning(now, candidates, None)
+    }
+
+    /// [`Agent::replace_remote_candidates`], with the local side of the pair given: RFC 8839
+    /// Section 4.4.2.2, a lite answerer offered `a=remote-candidates` forms the pair from the
+    /// offer's default destination and, as its local candidate, the transport address the
+    /// attribute names (the controlling agent's remote candidate is this agent's local one).
+    /// A pair with a local candidate at `local` is chosen over any other; `None` (or an
+    /// address no local candidate has) leaves the choice to the RFC 6724 preference.
+    pub fn replace_remote_candidates_pinning(
+        &mut self,
+        now: Instant,
+        candidates: Vec<Candidate>,
+        local: Option<SocketAddr>,
+    ) -> bool {
         if !(self.lite && self.remote_lite) {
             return false;
         }
+        self.pinned_local_addr = local;
         self.set_selected_pair(Some(now), None);
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
@@ -2136,12 +2214,7 @@ impl Agent {
             pwd = generate_pwd_with_random(self.crypto_provider.random())?;
         }
 
-        if ufrag.len() * 8 < 24 {
-            return Err(Error::ErrLocalUfragInsufficientBits);
-        }
-        if pwd.len() * 8 < 128 {
-            return Err(Error::ErrLocalPwdInsufficientBits);
-        }
+        check_local_credentials(&ufrag, &pwd)?;
 
         self.ufrag_pwd.pending_local_credentials = Some(Credentials { ufrag, pwd });
 
@@ -2158,6 +2231,22 @@ impl Agent {
     /// remote offer, RFC 9429 section 5.7). The live session is untouched.
     pub fn discard_restart_credentials(&mut self) {
         self.ufrag_pwd.pending_local_credentials = None;
+        // What was gathered for it belongs to no generation now; a candidate that could not
+        // join the current session (it had nominated) still does not.
+        for c in &mut self.local_candidates {
+            c.restart_generation = false;
+        }
+    }
+
+    /// The local candidates gathered for the staged ICE restart (see
+    /// [`Agent::generate_restart_credentials`]): added, or added again, since it was staged.
+    /// The restart keeps them whether or not it keeps the others.
+    pub fn get_restart_generation_local_candidates(&self) -> Vec<Candidate> {
+        self.local_candidates
+            .iter()
+            .filter(|c| c.restart_generation)
+            .cloned()
+            .collect()
     }
 
     /// Applies a staged ICE restart, tearing down the old session and starting a new one at `now`.
@@ -2215,6 +2304,7 @@ impl Agent {
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
         self.lite_update_raised = false;
+        self.pinned_local_addr = None;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;
 
@@ -2222,7 +2312,16 @@ impl Agent {
         self.candidate_pairs = Vec::new();
 
         self.set_selected_pair(Some(now), None);
-        self.delete_all_candidates(keep_local_candidates);
+        // The local candidates gathered while the restart was staged are the new
+        // generation's: they stay when the previous generation's are discarded.
+        if !keep_local_candidates {
+            self.local_candidates.retain(|c| c.restart_generation);
+        }
+        self.delete_all_candidates(true);
+        for c in &mut self.local_candidates {
+            c.restart_generation = false;
+            c.awaiting_restart = false;
+        }
         self.previous_media_path = previous_media_path;
         self.previous_generation = previous_media_path.and(previous_generation);
         self.start(now);

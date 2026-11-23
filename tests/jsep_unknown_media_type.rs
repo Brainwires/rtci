@@ -53,3 +53,38 @@ a=rtpmap:96 VP8/90000
     assert_eq!(answerer.get_transceivers().count(), 2);
     Ok(())
 }
+
+/// RFC 8866 section 5.14: "the interpretation of the media format depends on the value of the
+/// <proto> sub-field". An `m=audio` section over a protocol that is not RTP (T.38 over UDPTL,
+/// RFC 4612, whose format is `t38`) is not read as RTP payload types: the description is
+/// applied, the section is answered rejected with its own m= line and gets no transceiver,
+/// and the RTP section next to it is answered as usual.
+#[test]
+fn an_audio_section_over_another_protocol_is_answered_rejected_in_its_place() -> TestResult {
+    let mut answerer = default_peer()?;
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0
+m=audio 9 udptl t38
+{TRANSPORT}a=mid:fax
+a=sendrecv
+a=T38FaxVersion:0
+m=video 9 UDP/TLS/RTP/SAVPF 96
+{TRANSPORT}a=mid:0
+a=sendrecv
+a=rtpmap:96 VP8/90000
+"
+    ));
+    answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    let answer = answerer.create_answer(None)?;
+    let sections = media_sections(&answer.sdp);
+    assert_eq!(sections.len(), 2, "{}", answer.sdp);
+    assert!(
+        sections[0][0].starts_with("m=audio 0 udptl t38"),
+        "the T.38 section is rejected with its own m= line:\n{}",
+        answer.sdp
+    );
+    assert!(sections[1][0].starts_with("m=video "), "{}", answer.sdp);
+    assert_ne!(port_of(&sections[1]), 0, "{}", answer.sdp);
+    assert_eq!(answerer.get_transceivers().count(), 1);
+    Ok(())
+}

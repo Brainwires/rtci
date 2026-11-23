@@ -383,6 +383,11 @@ impl BandwidthEstimator for Gcc {
             self.loss_control.cap(delay_target);
         }
         let loss_target = self.loss_control.target();
+        log::debug!(
+            "gcc: feedback of {} packets, {lost} lost; loss average {:?}, delay target {delay_target:.0}, loss target {loss_target:.0}",
+            reports.len(),
+            self.loss_control.average_loss(),
+        );
 
         // Whichever half is more pessimistic wins, clamped once (D3).
         self.target = delay_target.min(loss_target).clamp(self.min, self.max);

@@ -237,7 +237,7 @@ pub struct GccInterceptor<P> {
 impl<P: Interceptor> GccInterceptor<P> {
     /// Snoop on outgoing RTP: record send_time_ms keyed by TWCC seq.
     ///
-    /// Must be inner to [`TwccSenderInterceptor`] so the sequence number has
+    /// Must be inner to [`TwccSenderInterceptor`](crate::TwccSenderInterceptor) so the sequence number has
     /// already been stamped by the time this method is called.
     #[overrides]
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {

@@ -143,3 +143,56 @@ fn a_provisional_answer_sets_the_current_direction() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 8866 section 5.13: a session-level attribute applies "to all media descriptions
+/// unless overridden"; section 6.7: with no direction attribute at either level, "sendrecv
+/// SHOULD be assumed". A remote offer whose video section states no direction, with
+/// `a=sendonly` at session level, gets a transceiver and is answered `a=recvonly`; without a
+/// direction anywhere it is answered `a=sendrecv` (the answerer has a track to send); a
+/// section's own direction wins over the session's.
+#[test]
+fn a_section_without_a_direction_takes_the_sessions_or_sendrecv() -> TestResult {
+    use jsep_common::{SESSION, TRANSPORT, crlf};
+    use rtc::peer_connection::sdp::RTCSessionDescription;
+    use std::time::Instant;
+    for (session_line, section_line, answered) in [
+        ("a=sendonly\n", "", "a=recvonly"),
+        ("", "", "a=sendrecv"),
+        ("a=sendonly\n", "a=inactive\n", "a=inactive"),
+    ] {
+        let offer = crlf(&format!(
+            "{SESSION}{session_line}m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\n\
+             {section_line}a=rtpmap:96 VP8/90000\n"
+        ));
+        // A sending track, so that the answer shows the offered direction it reverses.
+        let mut pc = default_peer()?;
+        pc.add_track(video_track("local", 0x0909_0909))?;
+        pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+        // A transceiver serves the section (the track's, or a new one for a sendonly offer).
+        let ids: Vec<RTCRtpTransceiverId> = pc.get_transceivers().collect();
+        assert!(
+            ids.into_iter().any(|id| pc
+                .rtp_transceiver(id)
+                .is_some_and(|t| t.mid().as_deref() == Some("0"))),
+            "{session_line:?}"
+        );
+        let answer = pc.create_answer(None)?;
+        assert_eq!(
+            direction_line(&answer.sdp),
+            answered,
+            "{session_line:?} / {section_line:?}:\n{}",
+            answer.sdp
+        );
+    }
+    // A peer with no track of its own: the section without a direction gets a transceiver
+    // (it used to be skipped, and the answer failed for want of one), answered recvonly.
+    let offer = crlf(&format!(
+        "{SESSION}m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=rtpmap:96 VP8/90000\n"
+    ));
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    assert_eq!(pc.get_transceivers().count(), 1);
+    let answer = pc.create_answer(None)?;
+    assert_eq!(direction_line(&answer.sdp), "a=recvonly", "{}", answer.sdp);
+    Ok(())
+}

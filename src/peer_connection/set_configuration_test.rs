@@ -147,7 +147,7 @@ fn ice_server_urls_are_validated_as_the_spec_says() -> Result<()> {
 #[test]
 fn ice_servers_past_the_maximum_are_ignored_and_an_empty_list_clears_them() -> Result<()> {
     use crate::peer_connection::configuration::MAX_ICE_SERVERS;
-    assert!(MAX_ICE_SERVERS >= 32);
+    const { assert!(MAX_ICE_SERVERS >= 32) };
     let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
     let many: Vec<_> = (0..MAX_ICE_SERVERS + 3)
         .map(|n| server(&format!("stun:stun{n}.example.org")))
@@ -182,7 +182,10 @@ fn the_certificates_cannot_change_and_are_reported() -> Result<()> {
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(configuration.clone())
         .build(Instant::now())?;
-    assert_eq!(pc.get_configuration().certificates(), &[original.clone()]);
+    assert_eq!(
+        pc.get_configuration().certificates(),
+        std::slice::from_ref(&original)
+    );
     pc.set_configuration(configuration)?;
 
     let other = RTCConfigurationBuilder::new()

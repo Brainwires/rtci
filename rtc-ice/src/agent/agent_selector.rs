@@ -1855,17 +1855,23 @@ impl Agent {
         }
     }
 
-    /// How a pair ranks among the pairs of two lite agents, larger first: the destination
+    /// How a pair ranks among the pairs of two lite agents, larger first: a pair whose local
+    /// candidate an updated candidate exchange named (`pinned_local_addr`), then the destination
     /// address selection of RFC 6724 Section 6, as far as it applies to two transport
     /// addresses that are given: Rule 2, prefer matching scope (link-local with link-local,
     /// loopback with loopback, global with global); Rule 6, prefer higher precedence (the
     /// default policy table puts IPv6 above IPv4); Rule 9, the longest matching prefix
     /// between source and destination. What is left is decided by the pair priority, which
     /// both agents compute alike.
-    fn lite_pair_preference(&self, index: usize) -> (bool, bool, u32, u64) {
+    fn lite_pair_preference(&self, index: usize) -> (bool, bool, bool, u32, u64) {
         use crate::agent::remote_policy::ip_scope;
 
         let p = &self.candidate_pairs[index];
+        // RFC 8839 Section 4.4.2.2: the local candidate an updated exchange named wins.
+        let pinned = self.pinned_local_addr.is_some_and(|pinned| {
+            let candidate = &self.local_candidates[p.local_index];
+            candidate.addr() == pinned || candidate.base_addr() == pinned
+        });
         let local = self.local_candidates[p.local_index].base_addr().ip();
         let remote = self.remote_candidates[p.remote_index].addr().ip();
         let matching_scope = ip_scope(local) == ip_scope(remote);
@@ -1875,7 +1881,7 @@ impl Agent {
             (IpAddr::V6(a), IpAddr::V6(b)) => (u128::from(a) ^ u128::from(b)).leading_zeros(),
             _ => 0,
         };
-        (matching_scope, is_v6, common_prefix, p.priority())
+        (pinned, matching_scope, is_v6, common_prefix, p.priority())
     }
 
     /// Controlling agent that has concluded: sends the nomination of its selected pair again

@@ -413,3 +413,53 @@ fn near_the_floor_retransmissions_take_the_room_first() {
         }
     }
 }
+
+/// A driver that follows the documented loop (take what is written, then sleep until
+/// `poll_timeout`, then `handle_timeout`) with nothing else waking it: every retransmission the
+/// limit holds back leaves at its own due time, and the driver never spins (each deadline is
+/// later than the instant it was handed last). Under the default rule at 240 kbit/s the 30
+/// originals took the window: the ten requests leave one by one as the originals leave the
+/// window, until the requests run out a second after they were made.
+#[test]
+fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
+    let base = Instant::now();
+    let mut chain = responder(NackResponderBuilder::new());
+    send(&mut chain, base, 30);
+    let lost: Vec<u16> = (0..10).collect();
+    let at = base + Duration::from_millis(300);
+    read_nack(&mut chain, at, &lost, Some(240_000.0), None);
+    assert_eq!(
+        0,
+        drain(&mut chain).retransmitted,
+        "the originals took the target"
+    );
+
+    let mut now = at;
+    let mut wakes = Vec::new();
+    let mut left = Vec::new();
+    while let Some(due) = chain.poll_timeout() {
+        assert!(
+            due > now,
+            "a deadline at {due:?} handed back at {now:?}: a spin"
+        );
+        assert!(wakes.len() < 100, "woken {} times", wakes.len());
+        now = due;
+        chain.handle_timeout(now).unwrap();
+        wakes.push(now - at);
+        let seen = drain(&mut chain);
+        left.extend(std::iter::repeat_n(now - at, seen.retransmitted));
+    }
+    // The first fits when the first two originals (sent at 0 and 10 ms) have left the window,
+    // 710 ms after the NACK; one more as each further original leaves.
+    assert_eq!(Some(&Duration::from_millis(710)), left.first(), "{left:?}");
+    assert!(left.len() >= 2, "{left:?}");
+    for pair in left.windows(2) {
+        assert!(pair[1] > pair[0], "one at a time: {left:?}");
+    }
+    assert!(
+        wakes.len() <= left.len() + 2,
+        "{} wake-ups for {} retransmissions: {wakes:?}",
+        wakes.len(),
+        left.len()
+    );
+}

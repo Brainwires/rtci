@@ -727,11 +727,11 @@ fn padding_after_the_report_blocks_is_cut_off() {
 #[test]
 fn bits_of_a_last_bit_vector_past_the_range_are_zero_and_ignored() {
     let block = RLEReportBlock::from_flags(true, 7, 100, 105, 0, &[true, false, true, true, true]);
-    assert_eq!(vec![Chunk(0b1_10111_0000000000)], block.chunks);
+    assert_eq!(vec![Chunk(0b1101_1100_0000_0000)], block.chunks);
 
     // A sender that left ones past the end: the reader stops at the end of the range.
     let lax = RLEReportBlock {
-        chunks: vec![Chunk(0b1_10111_1111111111)],
+        chunks: vec![Chunk(0b1101_1111_1111_1111)],
         ..block.clone()
     };
     assert_eq!(vec![true, false, true, true, true], lax.flags());

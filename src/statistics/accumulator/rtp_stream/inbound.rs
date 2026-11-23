@@ -182,6 +182,9 @@ pub struct InboundRtpStreamAccumulator {
     /// exactly the same way as if an additional RTCP SR packet had been received". It is not
     /// a report: the remote-outbound members stay those of the SRs.
     pub in_band_ntp: Option<(u64, u32, Instant)>,
+    /// The clock rates the stream's packets have run at, on one SSRC (RFC 7160 section 3.2):
+    /// where the rate changed, and the rate each mapping above was taken at.
+    pub media_clock: MediaClock,
 
     // Round trip time from RTCP XR (RFC 3611 sections 4.4, 4.5)
     /// The SSRC our receiver reports about this stream are sent from, which our XR receiver
@@ -277,6 +280,21 @@ impl InboundRtpStreamAccumulator {
     /// The RTP timestamp of the sender report `on_rtcp_sr_received` took.
     pub fn on_rtcp_sr_rtp_time(&mut self, rtp_time: u32) {
         self.remote_rtp_time = Some(rtp_time);
+        // The sender extrapolated it at the rate of the format it sends now: the rate of the
+        // last packet received.
+        self.media_clock.report = self.media_clock.anchor();
+    }
+
+    /// An original packet of the stream with RTP timestamp `timestamp` arrived, of a format
+    /// whose clock rate is `clock_rate`.
+    pub fn on_media_clock(&mut self, timestamp: u32, clock_rate: u32) {
+        self.media_clock.on_packet(timestamp, clock_rate);
+    }
+
+    /// An in-band NTP timestamp (`in_band_ntp`) was just taken from the packet last given to
+    /// [`Self::on_media_clock`].
+    pub fn on_in_band_ntp_clock(&mut self) {
+        self.media_clock.in_band = self.media_clock.anchor();
     }
 
     /// webrtc-extensions 15 "remote capture timestamp": when a frame of this stream was
@@ -303,6 +321,16 @@ impl InboundRtpStreamAccumulator {
             (None, None) => None,
         };
         let (received_at, report_ntp, report_rtp) = report?;
+        let in_band = match (self.remote_report_received_at, self.in_band_ntp) {
+            (Some(at), Some((_, _, in_band_at))) => in_band_at > at,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let anchor = if in_band {
+            self.media_clock.in_band
+        } else {
+            self.media_clock.report
+        };
         let report_ntp = report_ntp as f64 / 4_294_967_296.0;
         let capture_ntp = match capture_ntp {
             Some(ntp) => ntp,
@@ -311,8 +339,10 @@ impl InboundRtpStreamAccumulator {
                     return None;
                 }
                 let report_rtp = report_rtp?;
-                let elapsed = rtp_timestamp.wrapping_sub(report_rtp) as i32;
-                report_ntp + f64::from(elapsed) / f64::from(clock_rate)
+                report_ntp
+                    + self
+                        .media_clock
+                        .seconds_since(anchor, report_rtp, rtp_timestamp, clock_rate)
             }
         };
         let one_way = self.remote_round_trip_time.unwrap_or(0.0) / 2.0;
@@ -603,9 +633,132 @@ impl InboundRtpStreamAccumulator {
     }
 }
 
+/// How many clock rate changes of a stream are remembered.
+const CLOCK_CHANGES_KEPT: usize = 32;
+
+/// The clock rates one SSRC's packets ran at (RFC 7160 section 3.2: one SSRC, several clock
+/// rates), so an RTP timestamp is placed against a mapping taken at another rate.
+///
+/// RFC 7160 section 4.2: where the rate changes, the new rate's timestamps go on from the
+/// timestamp the old rate had reached at that instant ("start_offset += (capture_time -
+/// capture_start) * previous_clock_rate"). The first packet of a new rate is therefore placed
+/// by the old rate from the mapping before it, and every later one by its own rate from there:
+/// a sender report taken while Opus (48 kHz) was sent places the PCMU (8 kHz) packets after
+/// a switch, and the Opus ones after the switch back, instead of reading 8 kHz ticks as 48 kHz
+/// ones.
+#[derive(Debug, Default, Clone)]
+pub struct MediaClock {
+    /// The clock rate of the last packet.
+    rate: Option<u32>,
+    /// How many changes there have been, and the latest ones: the change's number, the
+    /// timestamp of the first packet at the new rate, the old rate and the new one.
+    changes: u64,
+    recent: std::collections::VecDeque<(u64, u32, u32, u32)>,
+    /// Where the clock stood when the latest sender report and the latest in-band timestamp
+    /// were taken: the rate, and how many changes had happened.
+    report: Option<(u32, u64)>,
+    in_band: Option<(u32, u64)>,
+}
+
+impl MediaClock {
+    fn on_packet(&mut self, timestamp: u32, clock_rate: u32) {
+        if clock_rate == 0 {
+            return;
+        }
+        if let Some(rate) = self.rate
+            && rate != clock_rate
+        {
+            self.changes += 1;
+            self.recent
+                .push_back((self.changes, timestamp, rate, clock_rate));
+            while self.recent.len() > CLOCK_CHANGES_KEPT {
+                self.recent.pop_front();
+            }
+        }
+        self.rate = Some(clock_rate);
+    }
+
+    fn anchor(&self) -> Option<(u32, u64)> {
+        self.rate.map(|rate| (rate, self.changes))
+    }
+
+    /// Seconds from the mapping's RTP timestamp `from` (taken with the clock at `anchor`) to
+    /// `to`, a timestamp of a packet at `clock_rate`: across the changes since the mapping,
+    /// each stretch at its own rate.
+    fn seconds_since(
+        &self,
+        anchor: Option<(u32, u64)>,
+        from: u32,
+        to: u32,
+        clock_rate: u32,
+    ) -> f64 {
+        let ticks = |a: u32, b: u32| f64::from(b.wrapping_sub(a) as i32);
+        let Some((anchor_rate, anchor_changes)) = anchor else {
+            return ticks(from, to) / f64::from(clock_rate);
+        };
+        let after: Vec<&(u64, u32, u32, u32)> = self
+            .recent
+            .iter()
+            .filter(|(number, ..)| *number > anchor_changes)
+            .collect();
+        // The stretch `to` is in: the last change to its rate it does not precede.
+        let stretch = after
+            .iter()
+            .rposition(|(_, start, _, rate)| *rate == clock_rate && ticks(*start, to) >= 0.0);
+        let Some(stretch) = stretch else {
+            // In the mapping's own stretch (or one no longer remembered).
+            let rate = if anchor_rate == clock_rate || after.is_empty() {
+                clock_rate
+            } else {
+                anchor_rate
+            };
+            return ticks(from, to) / f64::from(rate);
+        };
+        if self.changes - anchor_changes > after.len() as u64 {
+            // Changes were forgotten since the mapping: the best left is the packet's rate.
+            return ticks(from, to) / f64::from(clock_rate);
+        }
+        let mut seconds = 0.0;
+        let (mut at, mut rate) = (from, anchor_rate);
+        for (_, start, _, new_rate) in &after[..=stretch] {
+            seconds += ticks(at, *start) / f64::from(rate);
+            at = *start;
+            rate = *new_rate;
+        }
+        seconds + ticks(at, to) / f64::from(clock_rate)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 7160 4.2 timestamps on one SSRC: a sender report at RTP 100000 (Opus, 48 kHz), a
+    /// change to PCMU (8 kHz) 1 s later (timestamp 148000 by the old rate), a change back to
+    /// Opus 2 s after that (148000 + 16000). A PCMU frame 0.5 s into its stretch was captured
+    /// 1.5 s after the report, and an Opus frame 0.25 s into the last stretch 3.25 s after it:
+    /// each stretch at its own rate.
+    #[test]
+    fn a_timestamp_is_placed_across_clock_rate_changes_since_the_report() {
+        let mut stream = InboundRtpStreamAccumulator::default();
+        let at = Instant::now();
+        stream.on_media_clock(99_040, 48_000);
+        let ntp = 1000u64 << 32;
+        stream.on_rtcp_sr_received(1, 1, ntp, at);
+        stream.on_rtcp_sr_rtp_time(100_000);
+        stream.on_media_clock(148_000, 8_000);
+        stream.on_media_clock(152_000, 8_000);
+        stream.on_media_clock(164_000, 48_000);
+        let seconds =
+            |instant: Option<Instant>| instant.expect("placed").duration_since(at).as_secs_f64();
+        let pcmu = seconds(stream.remote_capture_instant(152_000, 8_000, None));
+        assert!((pcmu - 1.5).abs() < 1e-6, "{pcmu}");
+        let opus = seconds(stream.remote_capture_instant(164_000 + 12_000, 48_000, None));
+        assert!((opus - 3.25).abs() < 1e-6, "{opus}");
+        // Before any change the old reading holds.
+        let before = seconds(stream.remote_capture_instant(124_000, 48_000, None));
+        assert!((before - 0.5).abs() < 1e-6, "{before}");
+    }
 
     #[test]
     fn a_dlrr_answering_a_reference_time_gives_a_round_trip_time() {

@@ -265,7 +265,7 @@ impl RembGeneratorBuilder {
 }
 
 /// Generates REMB for the remote streams that negotiated `goog-remb` and no per-packet
-/// congestion feedback (see the [module](self) documentation).
+/// congestion feedback (see the `gcc::remb` module's source documentation).
 pub struct RembGeneratorInterceptor {
     interval: Duration,
     sender_ssrc: u32,
@@ -453,7 +453,7 @@ impl Interceptor for RembGeneratorInterceptor {
 }
 
 /// Stamps the abs-send-time header extension on every packet of a local stream that
-/// negotiated it (see the [module](self) documentation): 6.18 fixed-point seconds of the
+/// negotiated it (see the `gcc::remb` module's source documentation): 6.18 fixed-point seconds of the
 /// instant the packet passes, which is as it leaves the pacer when the interceptor sits below
 /// it (the default set puts it at `Slot::Custom(1_900)`).
 #[derive(Default)]

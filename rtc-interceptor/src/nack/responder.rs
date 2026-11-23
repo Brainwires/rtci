@@ -1123,10 +1123,22 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         Ok(())
     }
 
-    /// When a retransmission the rate limit holds back can leave ([`Self::next_release`]), a
-    /// waiting request runs out, or the reserve falls back to zero.
+    /// Due at once while packets wait in the write queue. A retransmission or a probe cluster's
+    /// padding is made on the read leg (a NACK, a [`ProbeRequest`]), which a driver reaches
+    /// after its `poll_write` (`poll_write`, `poll_event`, `poll_read`, then `poll_timeout`
+    /// and sleep, as the crate's event loop has it): without a deadline the packets would wait
+    /// for whatever wakes the driver next, a timer or an incoming datagram, which can be a
+    /// long time on a connection with little traffic. The deadline is the instant they were
+    /// made, so the driver's `handle_timeout` and the `poll_write` after it take them out at
+    /// once; it is gone when the queue is drained.
+    ///
+    /// A retransmission the rate limit holds back is not in the write queue: its deadline is
+    /// the instant the limit next has room for it ([`Self::next_release`]), never earlier (a
+    /// driver woken at once would spin), and the same for a waiting request running out and
+    /// the reserve falling back to zero.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        self.next_release()
+        let queued = self.write_queue.front().map(|packet| packet.now);
+        queued.into_iter().chain(self.next_release()).min()
     }
 }
 

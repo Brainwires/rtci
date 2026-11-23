@@ -161,3 +161,48 @@ fn a_malformed_imageattr_line_refuses_the_description() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 8859 section 4.7 and appendix A (section 5.17): `a=imageattr` is IDENTICAL-PER-PT, so a
+/// payload type has the same lines in every bundled section. An offer of two bundled video
+/// sections, with limits per codec, gives each payload type the same `a=imageattr` in both,
+/// and its peer applies it.
+#[test]
+fn two_bundled_video_sections_give_a_payload_type_the_same_image_attributes() -> TestResult {
+    let mut offerer = peer(
+        SettingEngineBuilder::new()
+            .with_video_receive_limits(range((48, 48), (1920, 1080)))
+            .with_codec_video_receive_limits("video/VP9", range((48, 48), (640, 360))),
+    )?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let offer = offerer.create_offer(None)?;
+    let sections: Vec<Vec<String>> = media_sections(&offer.sdp)
+        .into_iter()
+        .filter(|s| s[0].starts_with("m=video"))
+        .collect();
+    assert_eq!(sections.len(), 2, "{}", offer.sdp);
+    assert!(
+        offer.sdp.contains("a=group:BUNDLE 0 1"),
+        "the two sections are bundled:\n{}",
+        offer.sdp
+    );
+    // Payload type -> its a=imageattr values, per section.
+    let per_pt = |section: &[String]| {
+        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for line in section
+            .iter()
+            .filter_map(|l| l.strip_prefix("a=imageattr:"))
+        {
+            let (pt, value) = line.split_once(' ').expect("a format and a value");
+            out.entry(pt.to_owned()).or_default().push(value.to_owned());
+        }
+        out
+    };
+    let (first, second) = (per_pt(&sections[0]), per_pt(&sections[1]));
+    assert!(first.len() > 1, "a line per payload type: {first:?}");
+    assert_eq!(first, second, "{}", offer.sdp);
+
+    let mut answerer = peer(SettingEngineBuilder::new())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    Ok(())
+}

@@ -266,17 +266,16 @@ async fn main() -> Result<()> {
             }
 
             // Send periodic messages through data channel
-            if let Some(channel_id) = data_channel_id {
-                if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
-                    if let Some(mut dc) = pc.data_channel(channel_id) {
-                        let message = format!("[Answer] {}", chrono::Local::now());
-                        if let Err(e) = dc.send_text(Instant::now(), message) {
-                            println!("[Answer] DataChannel send error: {}", e);
-                            data_channel_id = None;
-                        }
-                        last_send = Instant::now();
-                    }
+            if let Some(channel_id) = data_channel_id
+                && Instant::now().duration_since(last_send) >= Duration::from_secs(3)
+                && let Some(mut dc) = pc.data_channel(channel_id)
+            {
+                let message = format!("[Answer] {}", chrono::Local::now());
+                if let Err(e) = dc.send_text(Instant::now(), message) {
+                    println!("[Answer] DataChannel send error: {}", e);
+                    data_channel_id = None;
                 }
+                last_send = Instant::now();
             }
 
             // Get next timeout

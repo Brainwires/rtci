@@ -4,13 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC SRTP in Rust"
+description = "Sans-I/O SRTP and SRTCP (RFC 3711, RFC 7714 AES-GCM, RFC 9335 Cryptex) for WebRTC"
 license.workspace = true
-documentation = "https://docs.rs/rtc-srtp"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "srtp", "srtcp", "rtp", "encryption"]
+categories = ["cryptography", "network-programming", "multimedia"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs"]
 
 [features]
 default = ["crypto-ring"]

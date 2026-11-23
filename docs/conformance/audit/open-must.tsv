@@ -1,0 +1,112 @@
+# Classes of the open MUST rows, read by scripts/open-must.py, which writes OPEN-MUST.md.
+# One line per row: ID, class, size, owner, what would close it (tab-separated). Classes:
+#   A  RFC behaviour implemented and tested, a named setting, not the default because a named
+#      browser cell or deployed peer cannot interoperate, or a named repository test measured
+#      it worse (verdict `setting`)
+#   B  implemented, lacking a test that fails without it
+#   C  partly implemented (the close column says what is missing)
+#   D  not implemented
+#   E  cannot be met or observed inside this engine for the stated reason
+#   F  the note is stale: the behaviour is already tested on this tree
+# Owner "(running)" marks a row another agent's branch owns now; it is listed, not worked.
+# A row closed since it was classified (tested / n/a) is reported by --check as stale.
+#
+# ID	class	size	owner	close
+MDNSICE-7.1-1	E	S	ice	Stays partial (audit-5): a process-wide bucket by default is ambient state, which the sans-I/O crates do not keep (`docs/sans-io-deterministic-time.md`), and agents on different clocks cannot share one; one bucket shared by every agent given it is tested. Closes only by an owner decision to share a default bucket
+FLEXFEC03-4.2-17	D	S	media (running)	A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it
+FLEXFEC03-5.1-5	E	S	media (running)	`flexfec` is registered to the RFC 8627 coder (IANA); the draft-03 coder cannot also take the name. Proposed n/a: superseded by RFC 8627
+GCC-5.4-4	A	S	media (running)	`setting` (measured, audit-5): `Gcc::with_threshold_time_base(ThresholdTimeBase::Arrival)`, RFC test mutation-checked; worse queueing delay and fairness on `rfc8836_multi_flow.rs`
+RFC2198-5-4	E	S	media (running)	RED depacketizing for audio is the application's; the engine-side guarantee (bare packets of a RED stream are delivered) can be tested on an audio stream
+RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
+RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity
+RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`
+RFC4585-4.2-7	E	S	media (running)	Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
+RFC5109-7.2-2	D	L	media (running)	A separate FEC RTP session (own m= line and transport) so the FEC stream can use the media SSRC; RFC5109-14.1-5
+RFC5109-14.1-2	D	L	media (running)	As RFC5109-7.2-2
+RFC5109-14.1-5	D	L	media (running)	Separate FEC m= line with `a=group:FEC`, on a transport of its own
+RFC5109-14.3-1	D	L	media (running)	Offering a separate FEC stream (RFC 3388 / 4756 grouping); needs RFC5109-14.1-5
+RFC5124-2-1	B	S	dtls-srtp	A test that the first packet of every RTCP datagram the engine sends is a report (no RFC 3550 encryption prefix)
+RFC5124-3.1-1	F	S	dtls-srtp	Offers say `UDP/TLS/RTP/SAVPF` (`tests/jsep_answer_sections.rs::an_answer_repeats_the_offered_profile`); mutation-check and cite
+RFC5124-3.3.1-6	E	S	dtls-srtp	RFC 9429 5.1.2 requires a JSEP endpoint to accept the eight RTP profiles and to judge DTLS-SRTP by `a=fingerprint`; every other profile is rejected (`an_audio_section_of_another_profile_is_rejected_as_offered`). n/a for a JSEP answerer
+RFC5124-5-2	F	S	dtls-srtp	Keys come from each handshake and SRTCP exhaustion re-keys or fails: rfc3711.md 9.2-4 / 11.3-1 tests; cite them
+RFC5246-4.7-1	E	S	dtls-srtp	Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
+RFC5583-5.2.1-4	B	S	sdp	A test that an answer keeps the offer's dependency structure for every payload type
+RFC5761-5.1.3-4	C	S	ice	Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6
+RFC5764-4.1-1	A	S	dtls-srtp	`setting`: `use_srtp` only for media associations
+RFC6544-4.1-9	B	S	ice	A pacing test with TCP pairs (one scheduler paces both)
+RFC6544-6.1-3	D	M	tcp (running)	Lite-to-lite parallel connection (RFC6544-6.1-1 first)
+RFC6544-7-1	B	S	ice	A test that TCP and UDP pairs share one checklist in priority order
+RFC6544-9.2-1	C	M	tcp (running)	After an ICE restart, tell the application to close the old selected TCP connection (driver event)
+RFC6679-7.1-1	C	S	sdp	Write `nack ecn` / `ecn-sum` / the ECN attribute in offers (SDP half)
+RFC6679-7.1-3	C	S	sdp	Offer `a=rtcp-xr:ecn-sum` with ECN
+RFC6679-7.1-4	C	S	sdp	Offer `nack ecn` where ECN is offered
+RFC7022-4.1-1	C	S	sdp	Write `rtcp_cname()` in `a=ssrc ... cname:` instead of the MediaStream id
+RFC7022-4.2-1	C	S	sdp	As RFC7022-4.1-1
+RFC7164-5-1	E	S	media (running)	The clock is the application's (sans-I/O) and Unix time hides leap seconds; proposed n/a, or a leap-second input the application feeds
+RFC7496-3-1	F	S	sctp	RFC 3758's MUST rows are all tested (rfc3758.md: 39 tested, 4 n/a); cite them
+RFC7714-13.1-3	E	S	dtls-srtp	Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
+RFC7742-5-2	F	S	payload	`tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory_audio_and_video_formats` (VP8, H.264 42e0xx); mutation-check and cite
+RFC7742-6.2-6	C	S	payload	Give an application-registered H.264 format without fmtp a `profile-level-id`
+RFC7742-6.2-7	C	S	sdp	Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's)
+RFC7742-6.2-10	C	S	payload	Stale in part: the H.264 answer fmtp is this endpoint's own (`h264_answer_fmtp`, `tests/jsep_answer_fmtp.rs`), so an offered `sprop-parameter-sets` is not echoed (the audit's Bug 1 is gone; no test pins it). Open: an application-registered H.264 format whose fmtp has it is written as given: strip it from generated SDP, and test both
+RFC7798-7.2.5-1	D	L	media (running)	H.265 MRST / MRMT transmission (multi-stream), never negotiated now
+RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered as RTP without disturbing the stream
+RFC7941-6-1	A	S	security	`setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it
+RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite
+RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
+RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
+RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
+RFC8108-5.1-1	C	M	media (running)	Stays partial (audit-5): report blocks on the co-located SSRCs are not sent even with `with_report_from_every_ssrc(true)`, and the default (blocks once, browser behaviour) has no failing cell or measurement. Add the co-located blocks and make the setting the default, or measure
+RFC8108-6.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
+RFC8122-6.2-5	C	S	dtls-srtp	Missing certificate: bad_certificate (RFC 8122) instead of handshake_failure (RFC 5246 7.4.6) on the peer-connection path
+RFC8122-6.2-6	C	M	dtls-srtp	Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4)
+RFC8826-4.3-3	E	S	security	Binds the script-facing API (RFC 8826 4.3: what JS can extract); the engine has no script API. n/a
+RFC8835-3.5-3	D	L	sctp	SCTP I-DATA (RFC 8260)
+RFC8835-3.5-6	D	M	dtls-srtp	ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833)
+RFC8842-5.1-1	C	M	dtls-srtp	On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5)
+RFC8842-5.1-2	C	M	dtls-srtp	On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5)
+RFC8842-5.1-3	C	M	dtls-srtp	On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5)
+RFC8842-5.2-4	C	M	dtls-srtp	As RFC8122-6.2-6
+RFC8852-3-5	C	S	rtp	Read RID / RRID through the typed `RtpStreamId` codec in the handler, so a value that is not 1..255 alphanumerics is not used
+RFC8852-3.3-1	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_rid_of_each_simulcast_encoding` (send), both header forms tested at the codec; mutation-check and cite
+RFC8852-5-2	B	S	dtls-srtp	A test that a changed RID header extension byte fails SRTP authentication
+RFC9335-4-5	B	S	security	A test that later offers and answers keep `a=cryptex`
+RFC9335-5-2	B	S	security	A test that `a=extmap:256` is refused (ids 1..255 only)
+RFC9335-9.1-1	C	S	security	Take `a=cryptex` from the BUNDLE-tagged section (TRANSPORT category)
+RFC9260-6.2-34	A	S	sctp	`setting` (measured, sctp-14): `TransportConfig::with_strict_zero_window_drop(true)`, RFC test with its mutation; with I-DATA the drop deadlocks interleaved messages that fill the buffer together (0 of 24 against 24 of 24). Closes as tested only with a partial delivery API (RFC9260-6.9-12), under which the drop would not deadlock
+RFC9605-6.1.3-1	D	L	sframe	One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame
+RFC9605-X-4	B	S	sframe	A test that `write_rtp` carries an application-encrypted (per-packet) payload under a codec payload type unchanged, the header to SRTP
+RFC9605-X-5	F	S	sframe	Stale note: `a=sframe` is offered and answered (`tests/encoded_transform_sframe_signalling.rs::an_sframe_transform_offers_and_answers_sframe`); mutation-check and cite
+RFC9605-X-6	C	S	sframe	Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder)
+RFC9628-6-1	A	S	media (running)	`setting`: VP9 receiver limits
+RFC9653-4-3	E	S	sctp	Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
+WEBRTC-4.4.1.4-36	C	S	w3c	Update the max message size on a pranswer and on renegotiation
+WEBRTC-4.4.1.4-82	C	S	w3c	With one transport, a description rejecting every section closes it and fires the closed events
+WEBRTC-4.4.1.4-91	C	M	w3c	Queue the data channel errors of a description in the spec order
+WEBRTC-4.5.1-1	C	S	jsep (running)	Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c)
+RFC3264-5.1-8	C	M	jsep (running)	Follow an answer that renumbers a codec when sending
+RFC8830-3-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC8830-3.2.5-1	E	S	jsep (running)	`conflict`: as RFC8830-3-7 (no msid left); memberships tested
+RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-4.1.8-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of 5.2.2-10, -27)
+RFC9429-4.1.9-2	E	S	jsep (running)	`conflict`: umbrella of 5.3.1-6
+RFC9429-5.1-1	C	L	jsep (running)	Umbrella of the per-spec audits
+RFC9429-5.2.1-13	A	S	jsep (running)	`setting`: unique transport credentials
+RFC9429-5.2.1-23	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-5.2.1-34	A	S	jsep (running)	`setting`: msid without appdata
+RFC9429-5.2.1-40	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-5.2.2-10	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-5.2.2-27	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella; 5.3.2-5, and 5.3.1-6 `conflict`)
+RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
+RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
+RFC9429-5.8-1	A	S	jsep (running)	`setting`: trailing white space in attribute values (webrtc-rs 0.17)
+RFC7160-4.1-1	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
+RFC7160-4.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
+RFC7160-4.1-3	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
+RFC8834-4.3-6	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
+RFC8083-3-3	C	S	media (running)	The RFC form (s over the last 4 * G frames) is a setting (`CircuitBreakerPacketSize::LastFrames`), not the default: s over the CB_INTERVAL window the rate is measured over, because the literal form ceased a talking call at 1 to 5 % loss (measured, cb-2 sweep); no interop failure. Owner decision on the default
+RFC6184-7.2.2-1	C	S	media (media-25)	Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)`

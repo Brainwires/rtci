@@ -330,7 +330,7 @@ impl TransportHandles {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DefaultInterceptorOptions {
     /// Which congestion control feedback is offered and accepted. The default,
@@ -368,6 +368,34 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Where the RTCP sessions draw their random numbers from (the report interval's
+    /// variation, RFC 3550 section 6.3.1; the dither of early feedback, RFC 4585 section
+    /// 3.5.2; their SSRC and CNAME): the provider's `random()` when one is given, as ICE, DTLS
+    /// and SCTP do with the setting engine's provider; `rand` otherwise. Give the same provider
+    /// as [`SettingEngineBuilder::with_crypto_provider`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_crypto_provider)
+    /// for a run that a seeded provider makes the same every time (without it the report
+    /// times, and with them everything the reports drive, differ from run to run).
+    pub rtcp_random: Option<std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+}
+
+impl std::fmt::Debug for DefaultInterceptorOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultInterceptorOptions")
+            .field("congestion_feedback", &self.congestion_feedback)
+            .field("unnegotiated_tmmbr", &self.unnegotiated_tmmbr)
+            .field("pacer_immediate_release", &self.pacer_immediate_release)
+            .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field(
+                "circuit_breaker_packet_size",
+                &self.circuit_breaker_packet_size,
+            )
+            .field(
+                "rtcp_random",
+                &self.rtcp_random.as_ref().map(|provider| provider.name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -379,6 +407,7 @@ impl Default for DefaultInterceptorOptions {
             bandwidth_probing: true,
             rapid_synchronisation: true,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            rtcp_random: None,
         }
     }
 }
@@ -501,7 +530,7 @@ pub fn register_default_interceptors_with_options(
             }),
         );
 
-    let registry = configure_rtcp_reports(registry);
+    let registry = configure_rtcp_reports_from(registry, options.rtcp_random.as_ref());
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
@@ -917,7 +946,7 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 /// CNAME. What a session description negotiates beyond that reaches it as an
 /// [`RtcpSessionControl`](interceptor::RtcpSessionControl) (bandwidth from `b=` lines,
 /// `a=rtcp-rsize`, `trr-int`) or through
-/// [`RtcpSessionBuilder`](interceptor::RtcpSessionBuilder) when the chain is built by hand:
+/// [`RtcpSessionBuilder`] when the chain is built by hand:
 ///
 /// ```
 /// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
@@ -1678,13 +1707,31 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
         section_fmtp_lines: section_codecs
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
             .collect(),
-        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
-        initially_paused: false,
+        section_mime_types: section_codecs
+            .iter()
+            .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
+            .collect(),
     }
+}
+
+/// Adds redundant audio data, RED (RFC 2198), in both directions
+/// ([`RedAudioInterceptor`](interceptor::RedAudioInterceptor), [`Slot::Redundancy`]): a local
+/// audio stream whose section negotiated a RED format with its own encoding as primary and
+/// redundancy (`a=fmtp:63 111/111`, the default codecs' form) is sent as RED with a copy of
+/// the previous packet, and received RED packets are taken apart into their primary encoding,
+/// with lost packets recovered from the next packet's copy. The peer connection installs it in
+/// any chain that does not fill the slot.
+pub fn configure_audio_redundancy(registry: Registry) -> Registry {
+    registry.with(
+        Slot::Redundancy,
+        interceptor::RedAudioBuilder::new().build(),
+    )
 }
 
 /// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198) for video (`a=rtpmap:<red> red/90000`,
@@ -1783,7 +1830,6 @@ mod ulpfec_tests {
                     rtcp_feedback: vec![],
                 },
                 payload_type,
-                ..Default::default()
             }
         };
         let section = [
@@ -2131,8 +2177,10 @@ mod slot_order_tests {
     #[test]
     fn the_twcc_only_setting_neither_offers_nor_records_rfc8888() {
         let mut media_engine = MediaEngine::default();
-        let mut options = DefaultInterceptorOptions::default();
-        options.congestion_feedback = CongestionFeedback::Twcc;
+        let options = DefaultInterceptorOptions {
+            congestion_feedback: CongestionFeedback::Twcc,
+            ..Default::default()
+        };
         let (registry, _handles) = register_default_interceptors_with_options(
             Registry::new(),
             &mut media_engine,

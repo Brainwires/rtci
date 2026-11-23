@@ -352,6 +352,55 @@ fn shaped(csrcs: u8, profile: Option<u16>, seq: u16) -> Vec<u8> {
     packet
 }
 
+/// RFC 7941 section 6: the SDES header extensions (MID, RID) get protection "of commensurate
+/// strength" with RTCP's. Under Cryptex the CSRC list and the extension elements are encrypted
+/// by the SRTP transform of the payload (RFC 9335 section 6) and are under its authentication
+/// tag: they do not leave in the clear, and a changed octet of either fails authentication,
+/// with the HMAC and with the AEAD.
+#[test]
+fn cryptex_extensions_are_encrypted_and_authenticated_like_the_payload() {
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        // 12 octets of fixed header, one CSRC (12..16), the extension header (16..20), its
+        // element (20..24), the payload.
+        let plain = shaped(1, Some(0xBEDE), 1);
+        let protected = context(profile, SEND).encrypt_rtp(&plain).unwrap();
+        assert_eq!(
+            &protected[16..18],
+            &[0xc0, 0xde],
+            "{profile:?}: marked Cryptex"
+        );
+        assert_ne!(
+            &protected[12..16],
+            &plain[12..16],
+            "{profile:?}: CSRC in clear"
+        );
+        assert_ne!(
+            &protected[20..24],
+            &plain[20..24],
+            "{profile:?}: element in clear"
+        );
+        for at in [13, 21] {
+            let mut forged = protected.to_vec();
+            forged[at] ^= 0x01;
+            assert!(
+                context(profile, Cryptex::default())
+                    .decrypt_rtp(&forged)
+                    .is_err(),
+                "{profile:?}: octet {at} changed and still read"
+            );
+        }
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..20],
+            &plain[..20]
+        );
+    }
+}
+
 /// RFC 9335 sections 5 and 5.1: Cryptex applies to RFC 8285 extensions only, and not to
 /// two-byte headers with non-zero "appbits". When Cryptex is mandatory such a packet must not
 /// leave with its CSRCs or extension in the clear (the receiving side of the same policy
@@ -509,5 +558,49 @@ fn cryptex_round_trips_a_padded_packet_with_csrcs() {
                 .unwrap()[..],
             &packet[..]
         );
+    }
+}
+
+/// RFC 7941 section 6: SDES items carried in header extensions (MID, RtpStreamId) are
+/// protected "of commensurate strength" with RTCP's. Under Cryptex they are encrypted with
+/// the payload by the stream's own SRTP transform (the same cipher, key and authentication as
+/// the SRTCP of the session): the extension data on the wire is not the plaintext, and a
+/// packet whose extension block was changed in transit fails authentication, for the counter
+/// mode with HMAC-SHA1 and for AES-GCM.
+#[test]
+fn a_changed_cryptex_extension_block_fails_authentication() {
+    // RFC 9335 A.1.1's packet: a one-byte header extension, element id 5, two octets.
+    let plain = AES_CM_VECTORS[0].1;
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        let protected = context(profile, SEND).encrypt_rtp(plain).unwrap();
+        assert_eq!(
+            &protected[12..14],
+            &[0xC0, 0xDE],
+            "{profile:?}: Cryptex profile"
+        );
+        assert_ne!(
+            &protected[16..20],
+            &plain[16..20],
+            "{profile:?}: the extension element is not in the clear"
+        );
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..],
+            plain
+        );
+        for offset in 16..20 {
+            let mut changed = protected.to_vec();
+            changed[offset] ^= 0x01;
+            assert!(
+                context(profile, Cryptex::default())
+                    .decrypt_rtp(&changed)
+                    .is_err(),
+                "{profile:?}: a change at octet {offset} of the extension block is detected"
+            );
+        }
     }
 }

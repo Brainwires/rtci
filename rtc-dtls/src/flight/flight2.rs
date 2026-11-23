@@ -165,8 +165,10 @@ mod tests {
         curves: Vec<NamedCurve>,
         profiles: Vec<SrtpProtectionProfile>,
     ) {
-        let mut random = HandshakeRandom::default();
-        random.random_bytes = [random_byte; 28];
+        let random = HandshakeRandom {
+            random_bytes: [random_byte; 28],
+            ..Default::default()
+        };
         let mut handshake =
             Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
                 session_id: vec![],

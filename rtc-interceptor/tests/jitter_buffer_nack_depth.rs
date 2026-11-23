@@ -96,6 +96,8 @@ fn ticks(duration: Duration) -> u32 {
 struct Harness {
     chain: Box<dyn Interceptor>,
     released: Arc<Mutex<Vec<u16>>>,
+    /// What the chain wrote and `drain_nacks` has not returned yet.
+    written: Vec<TaggedPacket>,
     epoch: Instant,
 }
 
@@ -141,6 +143,7 @@ impl Harness {
         let mut harness = Self {
             chain: Box::new(chain),
             released,
+            written: Vec::new(),
             epoch,
         };
         harness.bind();
@@ -192,9 +195,14 @@ impl Harness {
         self.drain();
     }
 
-    /// Pull everything the chain is ready to deliver.
+    /// Pull everything the chain is ready to deliver, and what it is ready to send (a driver
+    /// takes both before it sleeps; what is left in `poll_write` is due at once). The NACKs
+    /// are kept for `drain_nacks`.
     fn drain(&mut self) {
         while self.chain.poll_read().is_some() {}
+        while let Some(packet) = self.chain.poll_write() {
+            self.written.push(packet);
+        }
     }
 
     /// Advance the clock to `at` the way the driver does: fire every timeout the chain asks for
@@ -219,6 +227,9 @@ impl Harness {
     fn drain_nacks(&mut self) -> Vec<u16> {
         let mut requested = Vec::new();
         while let Some(packet) = self.chain.poll_write() {
+            self.written.push(packet);
+        }
+        for packet in std::mem::take(&mut self.written) {
             if let Packet::Rtcp(rtcp_packets) = &packet.message.packet {
                 for rtcp_packet in rtcp_packets {
                     if let Some(nack) = rtcp_packet

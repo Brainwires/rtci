@@ -18,7 +18,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
+use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
@@ -28,9 +28,10 @@ use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
-    RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
 use rtc::sansio::Protocol;
+use rtc::shared::marshal::Unmarshal;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -41,6 +42,13 @@ const VP8_PT: u8 = 96;
 const RTX_PT: u8 = 97;
 const FIRST_SEQ: u16 = 4000;
 const RIDS: [&str; 3] = ["q", "h", "f"];
+/// The header extensions that name a stream's m= section and encoding (RFC 9143 section 15,
+/// RFC 8852 sections 3.1 and 3.2).
+const ID_EXTENSIONS: [&str; 3] = [
+    "urn:ietf:params:rtp-hdrext:sdes:mid",
+    "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
+    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id",
+];
 
 fn codec(mime_type: &str, sdp_fmtp_line: &str, rtcp_feedback: Vec<RTCPFeedback>) -> RTCRtpCodec {
     RTCRtpCodec {
@@ -61,6 +69,10 @@ struct Peer {
     read_rtp: HashSet<(u32, u16)>,
     /// The RTCP packets `poll_read` yielded.
     read_rtcp: Vec<Box<dyn rtc::rtcp::Packet>>,
+    /// The SSRC and rid of every stream `OnTrack(OnOpen)` announced.
+    opened: Vec<(u32, Option<String>)>,
+    /// The SSRCs `OnUnassociatedRtpDiscarded` reported.
+    discarded: Vec<u32>,
 }
 
 impl Peer {
@@ -103,6 +115,8 @@ impl Peer {
             states: Vec::new(),
             read_rtp: HashSet::new(),
             read_rtcp: Vec::new(),
+            opened: Vec::new(),
+            discarded: Vec::new(),
         })
     }
 
@@ -122,6 +136,11 @@ impl Peer {
     }
 }
 
+/// Whether a datagram is an SRTCP packet (RFC 5761 section 4: packet types 192 to 223).
+fn wire_rtcp(datagram: &[u8]) -> bool {
+    datagram.len() >= 8 && datagram[0] >> 6 == 2 && (192..=223).contains(&datagram[1])
+}
+
 /// The SSRC and sequence number of an SRTP packet on the wire, or `None` for anything else.
 fn wire_rtp(datagram: &[u8]) -> Option<(u32, u16)> {
     if datagram.len() < 12 || datagram[0] >> 6 != 2 || (192..=223).contains(&datagram[1]) {
@@ -139,6 +158,13 @@ struct World {
     drop_once: HashSet<(u32, u16)>,
     /// The sender's RTP packets put on the wire, per SSRC.
     sent_by_ssrc: HashMap<u32, usize>,
+    /// The sender's RTCP is dropped on the way: its SDES items name each stream's MID and
+    /// RID (RFC 9143 section 15.1, RFC 8852 section 3.1), which a Pion sender does not send.
+    drop_sender_rtcp: bool,
+    /// The header extension ids the answer gives MID, RID and RRID.
+    id_extensions: Vec<u8>,
+    /// The sender's RTP packets that carried one of `id_extensions`.
+    ids_on_wire: usize,
 }
 
 impl World {
@@ -159,10 +185,21 @@ impl World {
                 break;
             }
             for (i, from, to, data) in in_flight {
+                if i == 0 && self.drop_sender_rtcp && wire_rtcp(&data) {
+                    continue;
+                }
                 if i == 0
                     && let Some(rtp) = wire_rtp(&data)
                 {
                     *self.sent_by_ssrc.entry(rtp.0).or_default() += 1;
+                    if let Ok(header) = rtc::rtp::header::Header::unmarshal(&mut &data[..])
+                        && self
+                            .id_extensions
+                            .iter()
+                            .any(|id| header.get_extension(*id).is_some())
+                    {
+                        self.ids_on_wire += 1;
+                    }
                     if self.drop_once.remove(&rtp) {
                         continue;
                     }
@@ -184,12 +221,21 @@ impl World {
         }
         for peer in self.peers.iter_mut() {
             while let Some(event) = peer.pc.poll_event() {
-                if let RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) = event {
-                    if state == RTCPeerConnectionState::Failed {
-                        bail!("a peer's connection failed: {:?}", peer.states);
+                match event {
+                    RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
+                        if state == RTCPeerConnectionState::Failed {
+                            bail!("a peer's connection failed: {:?}", peer.states);
+                        }
+                        peer.connected = state == RTCPeerConnectionState::Connected;
+                        peer.states.push(state);
                     }
-                    peer.connected = state == RTCPeerConnectionState::Connected;
-                    peer.states.push(state);
+                    RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
+                        peer.opened.push((init.ssrc, init.rid));
+                    }
+                    RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc) => {
+                        peer.discarded.push(ssrc);
+                    }
+                    _ => {}
                 }
             }
             while let Some(message) = peer.pc.poll_read() {
@@ -226,19 +272,26 @@ impl World {
 
     /// The offerer sends three simulcast layers; the answerer receives them.
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
-        Self::connected_edited(|offer, _| offer.to_owned())
+        Self::connected_edited(|offer, _| offer.to_owned(), false)
     }
 
     /// [`Self::connected`], the offer passed through `edit` (with each layer's rid, media SSRC
-    /// and RTX SSRC) on its way to the answerer.
+    /// and RTX SSRC) on its way to the answerer. With `without_ids` the sender puts no MID,
+    /// RID or RRID on the wire, as a Pion sender does: the answer it is given leaves out
+    /// those header extensions (so it negotiates none to write), and its RTCP, whose SDES
+    /// would name them, is dropped. The answerer negotiated them and reads them if present.
     fn connected_edited(
         edit: impl Fn(&str, &[(String, u32, Option<u32>)]) -> String,
+        without_ids: bool,
     ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
             drop_once: HashSet::new(),
             sent_by_ssrc: HashMap::new(),
+            drop_sender_rtcp: without_ids,
+            id_extensions: Vec::new(),
+            ids_on_wire: 0,
         };
         let encodings = RIDS
             .iter()
@@ -247,6 +300,10 @@ impl World {
                 rtp_coding_parameters: RTCRtpCodingParameters {
                     rid: (*rid).to_owned(),
                     ssrc: Some(0x0515_0000 + i as u32),
+                    // The RTX SSRC the edit declares in an `a=ssrc-group:FID` line.
+                    rtx: Some(RTCRtpRtxParameters {
+                        ssrc: 0x0515_0100 + i as u32,
+                    }),
                     ..Default::default()
                 },
                 active: true,
@@ -287,6 +344,29 @@ impl World {
         world.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
+        world.id_extensions = answer
+            .sdp
+            .lines()
+            .filter_map(|line| {
+                let (id, uri) = line.strip_prefix("a=extmap:")?.split_once(' ')?;
+                ID_EXTENSIONS
+                    .contains(&uri.trim())
+                    .then(|| id.split('/').next()?.parse().ok())?
+            })
+            .collect();
+        let answer = if without_ids {
+            let sdp: String = answer
+                .sdp
+                .split_inclusive('\n')
+                .filter(|line| {
+                    !(line.starts_with("a=extmap:")
+                        && ID_EXTENSIONS.iter().any(|uri| line.contains(uri)))
+                })
+                .collect();
+            rtc::peer_connection::sdp::RTCSessionDescription::answer(sdp)?
+        } else {
+            answer
+        };
         world.peers[0].pc.set_remote_description(now, answer)?;
         for i in 0..2 {
             let candidate = world.peers[i].candidate()?;
@@ -427,30 +507,34 @@ fn every_simulcast_layer_is_repaired_over_its_rtx_stream() -> Result<()> {
     Ok(())
 }
 
-/// Pion (pion/webrtc v4.2.29, train 10's interop matrix) offers simulcast by RID and declares
-/// every layer's SSRCs too, libwebrtc's older way: per layer an `a=ssrc-group:FID <media>
-/// <rtx>` and `a=ssrc` lines with `cname`, `msid`, `mslabel` and `label`, and an `a=msid` line
-/// per layer, before the `a=rid` / `a=simulcast` lines (RFC 8853 section 5.3 lets SSRCs be
-/// signalled beside RIDs; RFC 5576 section 4.2 the FID group). The answerer still binds each
-/// layer by its RID and receives every layer.
+/// Pion's offer shape (pion/webrtc v4.2.29, train 10's interop matrix): simulcast by RID, and
+/// every layer's SSRCs declared too, libwebrtc's older way: per layer an `a=ssrc-group:FID
+/// <media> <rtx>` and `a=ssrc` lines with `cname`, `msid`, `mslabel` and `label`, and an
+/// `a=msid` line per layer, before the `a=rid` / `a=simulcast` lines (RFC 8853 section 5.3 lets
+/// SSRCs be signalled beside RIDs; RFC 5576 section 4.2 the FID group).
+fn like_pion(offer: &str, layers: &[(String, u32, Option<u32>)]) -> String {
+    let mut pion = String::new();
+    for (_, media, rtx) in layers {
+        let rtx = rtx.expect("each layer has an RTX SSRC");
+        pion += &format!("a=ssrc-group:FID {media} {rtx}\r\n");
+        for ssrc in [*media, rtx] {
+            pion += &format!(
+                "a=ssrc:{ssrc} cname:pion\r\na=ssrc:{ssrc} msid:pion video\r\n\
+                 a=ssrc:{ssrc} mslabel:pion\r\na=ssrc:{ssrc} label:video\r\n"
+            );
+        }
+        pion += "a=msid:pion video\r\n";
+    }
+    let at = offer.find("a=rid:").expect("the offer has rids");
+    format!("{}{pion}{}", &offer[..at], &offer[at..])
+}
+
+/// Pion's offer shape with MID and RID on the wire: the answerer still binds each layer by
+/// the RID its packets carry (each opens with its rid, none as a stream without a rid) and
+/// receives every layer.
 #[test]
 fn a_simulcast_offer_that_also_declares_its_layer_ssrcs_like_pion_is_received() -> Result<()> {
-    let (mut world, sender) = World::connected_edited(|offer, layers| {
-        let mut pion = String::new();
-        for (_, media, rtx) in layers {
-            let rtx = rtx.expect("each layer has an RTX SSRC");
-            pion += &format!("a=ssrc-group:FID {media} {rtx}\r\n");
-            for ssrc in [*media, rtx] {
-                pion += &format!(
-                    "a=ssrc:{ssrc} cname:pion\r\na=ssrc:{ssrc} msid:pion video\r\n\
-                     a=ssrc:{ssrc} mslabel:pion\r\na=ssrc:{ssrc} label:video\r\n"
-                );
-            }
-            pion += "a=msid:pion video\r\n";
-        }
-        let at = offer.find("a=rid:").expect("the offer has rids");
-        format!("{}{pion}{}", &offer[..at], &offer[at..])
-    })?;
+    let (mut world, sender) = World::connected_edited(like_pion, false)?;
     let (layers, _) = world.layers(sender);
     world.send_media(sender, FIRST_SEQ, 30)?;
     for (rid, ssrc, _) in &layers {
@@ -463,6 +547,92 @@ fn a_simulcast_offer_that_also_declares_its_layer_ssrcs_like_pion_is_received() 
                 .map(|(s, _)| *s)
                 .collect::<HashSet<_>>()
         );
+        assert!(
+            world.peers[1].opened.contains(&(*ssrc, Some(rid.clone()))),
+            "layer {rid} (ssrc {ssrc}) is bound by its rid: {:?}",
+            world.peers[1].opened
+        );
     }
+    assert!(
+        world.peers[1].opened.iter().all(|(_, rid)| rid.is_some()),
+        "no stream without a rid: {:?}",
+        world.peers[1].opened
+    );
+    Ok(())
+}
+
+/// RFC 9143 section 9.2: a packet "for each SSRC configured for receiving in that m= section"
+/// belongs to the section. Pion's offer shape, its layers sent as Pion v4.2.29 sends them, with
+/// no MID or RID header extension (nor RTCP SDES items naming them): each declared SSRC is
+/// received as a stream of the section, without a rid (none is guessed), and none is
+/// discarded as unassociated.
+#[test]
+fn declared_layer_ssrcs_sent_without_mid_or_rid_are_received_as_streams_of_their_section()
+-> Result<()> {
+    let (mut world, sender) = World::connected_edited(like_pion, true)?;
+    let (layers, _) = world.layers(sender);
+    world.send_media(sender, FIRST_SEQ, 30)?;
+    assert_eq!(
+        0, world.ids_on_wire,
+        "the sender put no MID, RID or RRID on the wire"
+    );
+    for (rid, ssrc, _) in &layers {
+        assert!(
+            world.peers[1].read_rtp.contains(&(*ssrc, FIRST_SEQ + 20)),
+            "the layer sent as {rid} (ssrc {ssrc}) is received: {:?}",
+            world.peers[1]
+                .read_rtp
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<HashSet<_>>()
+        );
+        assert!(
+            world.peers[1].opened.contains(&(*ssrc, None)),
+            "ssrc {ssrc} opens as a stream without a rid: {:?}",
+            world.peers[1].opened
+        );
+    }
+    assert_eq!(layers.len(), world.peers[1].opened.len());
+    assert_eq!(
+        Vec::<u32>::new(),
+        world.peers[1].discarded,
+        "no declared SSRC is discarded"
+    );
+    Ok(())
+}
+
+/// RFC 4588 with RFC 5576 section 4.2: a packet lost on a declared layer sent without MID or
+/// RID is asked for and retransmitted on the RTX SSRC the `a=ssrc-group:FID` line pairs with
+/// it, and comes back on the layer's own stream.
+#[test]
+fn a_declared_layer_without_rid_is_repaired_over_its_declared_rtx_ssrc() -> Result<()> {
+    let (mut world, sender) = World::connected_edited(like_pion, true)?;
+    let (layers, _) = world.layers(sender);
+    let lost: Vec<(u32, u16)> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ssrc, _))| (*ssrc, FIRST_SEQ + 30 + 7 * i as u16))
+        .collect();
+    world.drop_once = lost.iter().copied().collect();
+
+    world.send_media(sender, FIRST_SEQ, 100)?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+
+    assert!(world.drop_once.is_empty(), "every loss happened");
+    assert_eq!(0, world.ids_on_wire, "no MID, RID or RRID on the wire");
+    for ((rid, ssrc, rtx), (_, seq)) in layers.iter().zip(&lost) {
+        let rtx = rtx.expect("each layer has an RTX SSRC");
+        assert!(
+            world.sent_by_ssrc.get(&rtx).copied().unwrap_or(0) > 0,
+            "the loss of {rid} is retransmitted on its declared RTX ssrc {rtx}: {:?}",
+            world.sent_by_ssrc
+        );
+        assert!(
+            world.peers[1].read_rtp.contains(&(*ssrc, *seq)),
+            "the lost packet {seq} of ssrc {ssrc} comes back on its stream"
+        );
+    }
+    assert_eq!(Vec::<u32>::new(), world.peers[1].discarded);
     Ok(())
 }

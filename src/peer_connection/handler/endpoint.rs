@@ -391,6 +391,12 @@ impl<'a> EndpointHandler<'a> {
                     packet: Packet::Rtp(rtp_packet),
                 })),
             });
+        } else if self.is_early_repair(rtp_packet.header.payload_type) {
+            // A repair packet (RTX, FEC) that arrives while this endpoint's offer is pending,
+            // before the stream it repairs: the answer's `a=ssrc-group` has not arrived and
+            // there is nothing to repair yet. It is not unassociated media: the offer lists
+            // its format (RFC 3264 section 5.1), and nothing of the stream is lost with it.
+            trace!("drop repair packet ssrc = {ssrc} that precedes its stream and the answer");
         } else {
             // RFC 8830 section 3.1: media that cannot be associated is not buffered; the
             // application is told that it was discarded.
@@ -532,7 +538,7 @@ impl<'a> EndpointHandler<'a> {
             let receiver = transceiver.receiver().as_ref()?;
             resolve_rtx_primary(
                 receiver.get_coding_parameters(),
-                receiver.get_codec_preferences(),
+                receiver.receivable_codecs(),
                 rtx_ssrc,
                 rtx_payload_type,
             )
@@ -550,8 +556,8 @@ impl<'a> EndpointHandler<'a> {
     /// types of its receive codecs, the negotiated set of its m= section, and while a local
     /// offer is pending the payload types it lists for the section (RFC 3264 section 5.1: a
     /// remote that adopts a new codec from a renegotiating offer may send it before this
-    /// endpoint has the answer). An SSRC no receiver
-    /// owns, or a receiver with no codecs yet, is left to [`Self::find_track_id`].
+    /// endpoint has the answer; `RTCRtpReceiverInternal::receivable_codecs`). An SSRC no
+    /// receiver owns, or a receiver with no codecs yet, is left to [`Self::find_track_id`].
     fn payload_type_negotiated(&mut self, ssrc: SSRC, payload_type: PayloadType) -> bool {
         let Some(id) =
             self.ctx
@@ -563,12 +569,22 @@ impl<'a> EndpointHandler<'a> {
         let Some(receiver) = self.rtp_transceivers[id].receiver() else {
             return true;
         };
-        let codecs = receiver.get_codec_preferences();
-        codecs.is_empty()
-            || codecs
-                .iter()
-                .any(|codec| codec.payload_type == payload_type)
-            || receiver.offered_payload_types().contains(&payload_type)
+        let mut codecs = receiver.receivable_codecs().peekable();
+        codecs.peek().is_none() || codecs.any(|codec| codec.payload_type == payload_type)
+    }
+
+    /// Whether `payload_type` is a repair format (RTX, FEC) of a section a pending local
+    /// offer lists.
+    fn is_early_repair(&self, payload_type: PayloadType) -> bool {
+        self.rtp_transceivers.iter().any(|transceiver| {
+            transceiver.receiver().as_ref().is_some_and(|receiver| {
+                receiver.has_offered()
+                    && receiver.receivable_codecs().any(|codec| {
+                        codec.payload_type == payload_type
+                            && is_repair_mime_type(&codec.rtp_codec.mime_type)
+                    })
+            })
+        })
     }
 
     fn find_track_id(
@@ -632,9 +648,9 @@ impl<'a> EndpointHandler<'a> {
 /// matching RTX codec's `apt=` parameter (looked up by `rtx_payload_type`).
 /// Returns `None` when the SSRC is not a known RTX SSRC or the `apt` mapping
 /// cannot be resolved.
-pub(crate) fn resolve_rtx_primary(
+pub(crate) fn resolve_rtx_primary<'a>(
     coding_parameters: &[RTCRtpCodingParameters],
-    codec_preferences: &[RTCRtpCodecParameters],
+    codec_preferences: impl IntoIterator<Item = &'a RTCRtpCodecParameters>,
     rtx_ssrc: SSRC,
     rtx_payload_type: PayloadType,
 ) -> Option<(SSRC, PayloadType)> {
@@ -650,7 +666,7 @@ pub(crate) fn resolve_rtx_primary(
 
     // Resolve the original payload type from the negotiated RTX codec's `apt=`
     // parameter.
-    let primary_payload_type = codec_preferences.iter().find_map(|codec| {
+    let primary_payload_type = codec_preferences.into_iter().find_map(|codec| {
         if codec.payload_type == rtx_payload_type
             && codec
                 .rtp_codec
@@ -1038,11 +1054,22 @@ mod rtx_test {
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
 
         let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
-        receiver.set_offered_payload_types(vec![96, 97, 98]);
+        receiver.set_offered(
+            vec![
+                codec(96, "video/VP8", ""),
+                codec(97, "video/rtx", "apt=96"),
+                codec(98, "video/VP9", ""),
+            ],
+            true,
+        );
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_some());
 
         let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
         receiver.set_codec_preferences(vec![codec(96, "video/VP8", "")]);
+        // A provisional answer narrows nothing: the offer's formats stay receivable.
+        assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_some());
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.drop_offered();
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 98, b"vp9").is_none());
         assert!(dispatch(&mut ctx, &mut transceivers, 1000, 96, b"vp8").is_some());
     }
@@ -1134,6 +1161,31 @@ mod rtx_test {
         assert!(dispatch(&mut ctx, &mut transceivers, 3001, 96, &[0xDE]).is_none());
         assert_eq!(ctx.discarded_rtp_packets, 4);
         assert_eq!(discarded_events(&ctx), vec![3000, 3001]);
+    }
+
+    /// The unassociated-media report is for packets that match nothing this endpoint
+    /// described. While its offer is pending, a repair packet in a format the offer lists
+    /// that arrives before its stream (and before the answer's `a=ssrc-group`) is dropped
+    /// without being counted or reported; a media packet no section can take still is.
+    #[test]
+    fn an_early_repair_packet_is_not_reported_as_unassociated_media() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        let mut ctx = EndpointHandlerContext::default();
+        assert!(dispatch(&mut ctx, &mut transceivers, 3000, 97, &[0, 7, 0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 1, "no offer is pending");
+
+        let receiver = transceivers[0].receiver_mut().as_mut().unwrap();
+        receiver.set_offered(
+            vec![codec(96, "video/VP8", ""), codec(97, "video/rtx", "apt=96")],
+            true,
+        );
+        assert!(dispatch(&mut ctx, &mut transceivers, 3001, 97, &[0, 7, 0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 1);
+        assert!(dispatch(&mut ctx, &mut transceivers, 3002, 96, &[0xDE]).is_none());
+        assert_eq!(
+            ctx.discarded_rtp_packets, 2,
+            "media that matches no stream is"
+        );
     }
 
     #[test]

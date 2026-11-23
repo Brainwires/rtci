@@ -43,7 +43,18 @@ pub(crate) struct IceHandlerContext {
     )>,
     /// `lite_candidate_update` was set and the negotiation-needed flag is still to be updated.
     pub(crate) lite_candidate_update_raised: bool,
+
+    /// DTLS datagrams that arrived before ICE had a path to take data from, held so that a
+    /// ClientHello the peer sent before this side could take it (an offerer that has not
+    /// had the answer yet: RFC 8842 section 5.2, RFC 8122 section 6.2) is handled once
+    /// there is one, if it came from a valid pair, instead of waiting for its retransmission.
+    /// At most [`MAX_EARLY_DTLS_DATAGRAMS`], the latest kept.
+    pub(crate) early_dtls: VecDeque<TaggedRTCMessageInternal>,
 }
+
+/// Most DTLS datagrams held before ICE has a path ([`IceHandlerContext::early_dtls`]): a
+/// first flight, fragmented or repeated.
+pub(crate) const MAX_EARLY_DTLS_DATAGRAMS: usize = 8;
 
 impl IceHandlerContext {
     pub(crate) fn new(ice_transport: IceTransport) -> Self {
@@ -58,6 +69,7 @@ impl IceHandlerContext {
             selected_pair_changes: 0,
             lite_candidate_update: None,
             lite_candidate_update_raised: false,
+            early_dtls: VecDeque::new(),
         }
     }
 }
@@ -73,55 +85,9 @@ impl<'a> IceHandler<'a> {
         IceHandler { ctx, stats }
     }
 
-    pub(crate) fn name(&self) -> &'static str {
-        "IceHandler"
-    }
-
-    /// Counts a datagram on the candidate pair it travels on (webrtc-stats
-    /// `RTCIceCandidatePairStats.packetsSent` / `packetsReceived`: the packets "on this candidate
-    /// pair", every one of them).
-    ///
-    /// The pair's statistics are found through the key cached at the last
-    /// `SelectedCandidatePairChange`, so the per-packet path formats nothing. The agent can
-    /// have a selected pair before that event has been polled, though, and a datagram that
-    /// crosses in between travels on that pair all the same: when the cache does not name a
-    /// pair with statistics, it is filled from the agent's selected pair. (During an ICE
-    /// restart the agent has none and the path is the previous pair's, which the cache still
-    /// names.)
-    fn count_on_pair_in_use(&mut self, count: impl FnOnce(&mut IceCandidatePairAccumulator)) {
-        let cached = self
-            .ctx
-            .selected_pair_key
-            .as_ref()
-            .is_some_and(|key| self.stats.ice_candidate_pairs.contains_key(key));
-        if !cached
-            && let Some((local, remote)) =
-                self.ctx.ice_transport.agent.get_selected_candidate_pair()
-        {
-            let (local_id, remote_id) = (local.id().to_owned(), remote.id().to_owned());
-            self.stats
-                .get_or_create_candidate_pair(&local_id, &remote_id);
-            self.ctx.selected_pair_key = Some(candidate_pair_stats_id(&local_id, &remote_id));
-        }
-        if let Some(key) = &self.ctx.selected_pair_key
-            && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
-        {
-            count(pair);
-        }
-    }
-}
-
-impl<'a>
-    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
-    for IceHandler<'a>
-{
-    type Rout = TaggedRTCMessageInternal;
-    type Wout = TaggedRTCMessageInternal;
-    type Eout = TaggedRTCEventInternal;
-    type Error = Error;
-    type Time = Instant;
-
-    fn handle_read(&mut self, mut msg: TaggedRTCMessageInternal) -> Result<()> {
+    /// The read of one message (see `handle_read`).
+    fn read(&mut self, mut msg: TaggedRTCMessageInternal) -> Result<()> {
+        use sansio::Protocol;
         if let RTCMessageInternal::Stun(STUNMessage::Raw(message)) = msg.message {
             self.ctx.ice_transport.agent.handle_read(TransportMessage {
                 now: msg.now,
@@ -199,6 +165,29 @@ impl<'a>
                 ..TransportContext::default()
             };
             self.ctx.read_outs.push_back(msg);
+        } else if matches!(msg.message, RTCMessageInternal::Dtls(_)) {
+            // RFC 8842 section 5.2: "the offerer MUST be prepared to receive a DTLS
+            // ClientHello message ... before it receives the SDP answer"; RFC 8122 section
+            // 6.2. Held until ICE has a path (see `early_dtls`).
+            trace!(
+                "hold a DTLS datagram from {:?} until ICE has a path",
+                msg.transport.peer_addr
+            );
+            // RFC 6544 Section 7.1, as below: on a TCP connection this agent opened, a first
+            // answer that is not STUN fails the pairs of that remote candidate. Such a
+            // datagram is not held.
+            if self
+                .ctx
+                .ice_transport
+                .agent
+                .handle_non_stun_before_validation(msg.now, msg.transport)
+            {
+                return Ok(());
+            }
+            if self.ctx.early_dtls.len() == MAX_EARLY_DTLS_DATAGRAMS {
+                self.ctx.early_dtls.pop_front();
+            }
+            self.ctx.early_dtls.push_back(msg);
         } else {
             trace!(
                 "drop message from {:?} to {:?} before ICE connection is connected",
@@ -212,6 +201,75 @@ impl<'a>
         }
 
         Ok(())
+    }
+
+    /// Hands the held early DTLS datagrams on once ICE has a path, those from a valid pair
+    /// as any data from it (RFC 8445 section 12.2), the others dropped.
+    pub(crate) fn release_early_dtls(&mut self) {
+        if self.ctx.early_dtls.is_empty() || self.ctx.ice_transport.agent.media_path().is_none() {
+            return;
+        }
+        for msg in std::mem::take(&mut self.ctx.early_dtls) {
+            debug!(
+                "a DTLS datagram from {:?} held from before ICE had a path",
+                msg.transport.peer_addr
+            );
+            let _ = self.read(msg);
+        }
+    }
+
+    pub(crate) fn name(&self) -> &'static str {
+        "IceHandler"
+    }
+
+    /// Counts a datagram on the candidate pair it travels on (webrtc-stats
+    /// `RTCIceCandidatePairStats.packetsSent` / `packetsReceived`: the packets "on this candidate
+    /// pair", every one of them).
+    ///
+    /// The pair's statistics are found through the key cached at the last
+    /// `SelectedCandidatePairChange`, so the per-packet path formats nothing. The agent can
+    /// have a selected pair before that event has been polled, though, and a datagram that
+    /// crosses in between travels on that pair all the same: when the cache does not name a
+    /// pair with statistics, it is filled from the agent's selected pair. (During an ICE
+    /// restart the agent has none and the path is the previous pair's, which the cache still
+    /// names.)
+    fn count_on_pair_in_use(&mut self, count: impl FnOnce(&mut IceCandidatePairAccumulator)) {
+        let cached = self
+            .ctx
+            .selected_pair_key
+            .as_ref()
+            .is_some_and(|key| self.stats.ice_candidate_pairs.contains_key(key));
+        if !cached
+            && let Some((local, remote)) =
+                self.ctx.ice_transport.agent.get_selected_candidate_pair()
+        {
+            let (local_id, remote_id) = (local.id().to_owned(), remote.id().to_owned());
+            self.stats
+                .get_or_create_candidate_pair(&local_id, &remote_id);
+            self.ctx.selected_pair_key = Some(candidate_pair_stats_id(&local_id, &remote_id));
+        }
+        if let Some(key) = &self.ctx.selected_pair_key
+            && let Some(pair) = self.stats.ice_candidate_pairs.get_mut(key)
+        {
+            count(pair);
+        }
+    }
+}
+
+impl<'a>
+    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
+    for IceHandler<'a>
+{
+    type Rout = TaggedRTCMessageInternal;
+    type Wout = TaggedRTCMessageInternal;
+    type Eout = TaggedRTCEventInternal;
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
+        let result = self.read(msg);
+        self.release_early_dtls();
+        result
     }
 
     fn poll_read(&mut self) -> Option<Self::Rout> {
@@ -235,8 +293,12 @@ impl<'a>
             msg.transport.peer_addr = path.peer_addr;
             msg.transport.transport_protocol = path.transport_protocol;
             // Only RTP media is ever ECN-marked (the interceptor handler decides which);
-            // DTLS and SCTP go out Not-ECT whatever context their endpoints carried.
-            if !matches!(msg.message, RTCMessageInternal::Rtp(_)) {
+            // DTLS and SCTP go out Not-ECT whatever context their endpoints carried. RFC 6679
+            // is ECN for RTP over UDP: section 6.1.3, "It MUST NOT be used for RTP sessions
+            // using TCP", so nothing is marked on an ICE-TCP pair (RFC 6544).
+            if !matches!(msg.message, RTCMessageInternal::Rtp(_))
+                || path.transport_protocol != shared::TransportProtocol::UDP
+            {
                 msg.transport.ecn = None;
             }
             debug!("Bypass ice write {:?}", msg.transport.peer_addr);

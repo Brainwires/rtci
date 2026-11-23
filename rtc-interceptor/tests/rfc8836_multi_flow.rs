@@ -319,7 +319,7 @@ impl GccFlow {
     }
 
     fn step(&mut self, epoch: Instant, now: Duration, path: &mut Bottleneck) {
-        if now.as_millis() % 100 == 0 {
+        if now.as_millis().is_multiple_of(100) {
             self.targets.push(if now >= self.start {
                 self.gcc.target_bitrate()
             } else {

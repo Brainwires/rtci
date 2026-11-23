@@ -102,6 +102,14 @@ impl IceTransport {
         ))
     }
 
+    /// The local candidates gathered for the staged ICE restart, which it keeps in any case
+    /// ([`ice::Agent::get_restart_generation_local_candidates`]).
+    pub(crate) fn get_restart_generation_local_candidates(&self) -> Vec<RTCIceCandidate> {
+        IceTransport::rtc_ice_candidates_from_ice_candidates(
+            &self.agent.get_restart_generation_local_candidates(),
+        )
+    }
+
     /// Returns the local user credentials.
     pub(crate) fn get_local_user_credentials(&self) -> (&str, &str) {
         (

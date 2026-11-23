@@ -229,6 +229,7 @@ pub(crate) mod pass_through;
 pub(crate) mod registry;
 
 pub(crate) mod adaptive_jitter_buffer;
+pub(crate) mod audio_red;
 pub(crate) mod cc;
 pub(crate) mod circuit_breaker;
 pub(crate) mod flexfec;
@@ -258,6 +259,10 @@ pub(crate) mod xr;
 pub use adaptive_jitter_buffer::{
     JitterBufferBuilder as AdaptiveJitterBufferBuilder, JitterBufferControl,
     JitterBufferInterceptor as AdaptiveJitterBufferInterceptor,
+};
+pub use audio_red::{
+    RED_AUDIO_DEFAULT_MAX_PAYLOAD_SIZE, RED_AUDIO_DEFAULT_REDUNDANCY, RedAudioBuilder,
+    RedAudioInterceptor,
 };
 pub use cc::estimator::{BandwidthEstimator, ConstantBitrate, EstimatorStats};
 pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
@@ -400,8 +405,9 @@ pub use rfc8888::sender::{
 pub use rtcp_session::identity::{RtcpRandom, generate_rtcp_cname};
 pub use rtcp_session::{
     RTCP_SESSION_DEFAULT_MTU, RTCP_SESSION_DEFAULT_T_RR_INTERVAL, RTCP_SESSION_MIN_BANDWIDTH,
-    RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH, RtcpBandwidth,
-    RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
+    RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH,
+    RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl,
+    RtcpSessionEvent, RtcpSessionInterceptor,
 };
 pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};

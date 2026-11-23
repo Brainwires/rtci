@@ -183,6 +183,21 @@ pub(crate) fn signed_with_md5(der: &[u8]) -> bool {
     })
 }
 
+/// Whether the certificate `der` is signed with a SHA-1-based algorithm (RFC 8446 section
+/// 4.4.2.4): sha1WithRSAEncryption (PKCS#1 and OIW), ecdsa-with-SHA1, dsa-with-sha1.
+pub(crate) fn signed_with_sha1(der: &[u8]) -> bool {
+    x509_parser::parse_x509_certificate(der).is_ok_and(|(_, certificate)| {
+        matches!(
+            certificate
+                .signature_algorithm
+                .algorithm
+                .to_id_string()
+                .as_str(),
+            "1.2.840.113549.1.1.5" | "1.3.14.3.2.29" | "1.2.840.10045.4.1" | "1.2.840.10040.4.3"
+        )
+    })
+}
+
 /// Whether a certificate is self-signed: it begins a certification path, so its signature
 /// is not validated and may use an algorithm the peer did not list (RFC 8446 section 4.2.3).
 fn is_self_signed(der: &[u8]) -> bool {

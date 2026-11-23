@@ -1,30 +1,35 @@
-<h1 align="center">
- <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
- <br>
-</h1>
-<p align="center">
- <a href="https://github.com/webrtc-rs/rtc/actions">
-  <img src="https://github.com/webrtc-rs/rtc/workflows/cargo/badge.svg">
- </a>
- <a href="https://codecov.io/gh/webrtc-rs/rtc">
-  <img src="https://codecov.io/gh/webrtc-rs/rtc/branch/main/graph/badge.svg">
- </a>
- <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
-  <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
- </a>
- <a href="https://crates.io/crates/rtc-sctp">
-  <img src="https://img.shields.io/crates/v/rtc-sctp.svg">
- </a>
- <a href="https://docs.rs/rtc-sctp">
-  <img src="https://docs.rs/rtc-sctp/badge.svg">
- </a>
- <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
- </a>
- <a href="https://discord.gg/4Ju8UHdXMs">
-  <img src="https://img.shields.io/discord/800204819540869120?logo=discord" alt="Discord">
- </a>
-</p>
-<p align="center">
- RTC SCTP Protocol in Rust With Sans-IO
-</p>
+# rtc-sctp
+
+SCTP as WebRTC data channels use it: associations over DTLS, ordered and unordered
+streams, partial reliability, stream reconfiguration, stream schedulers, congestion and flow
+control, path MTU handling and the association lifecycle.
+
+## Specifications
+
+- RFC 9260, Stream Control Transmission Protocol
+- RFC 3758 and RFC 7496, partial reliability and its policies
+- RFC 6525, stream reconfiguration
+- RFC 8260, stream schedulers (user message interleaving, I-DATA, is not implemented)
+- RFC 8261, SCTP over DTLS
+
+Clause-by-clause status, with the test that proves each clause: [rfc9260](../docs/conformance/audit/rfc9260.md), [rfc3758](../docs/conformance/audit/rfc3758.md), [rfc7496](../docs/conformance/audit/rfc7496.md), [rfc6525](../docs/conformance/audit/rfc6525.md), [rfc8260](../docs/conformance/audit/rfc8260.md), [rfc8261](../docs/conformance/audit/rfc8261.md).
+
+## Use
+
+`Endpoint` accepts and opens associations; an `Association` carries the streams. The
+root crate (`rtc`) runs one association per peer connection under its data channels
+(`rtc-datachannel`).
+
+## Sans-I/O
+
+A deterministic state machine: feed it datagrams and time, poll it for datagrams, timeouts and events. The crate does no I/O and reads no clock: every call that depends on time takes an `Instant` from the caller.
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+This crate is part of the [`rtc`](../README.md) workspace, which descends from
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
+[FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
+notices are retained.

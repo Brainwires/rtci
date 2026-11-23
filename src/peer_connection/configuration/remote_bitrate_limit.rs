@@ -247,7 +247,12 @@ mod tests {
                 )
                 .with(
                     Slot::Pacer,
-                    PacerBuilder::new().with_target_bitrate(8_000_000.0).build(),
+                    // Without the queue time limit, which would drain the two seconds offered
+                    // below within two seconds whatever the bound.
+                    PacerBuilder::new()
+                        .with_target_bitrate(8_000_000.0)
+                        .with_queue_time_limit(None)
+                        .build(),
                 )
                 .build();
             chain

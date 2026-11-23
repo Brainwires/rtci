@@ -331,6 +331,33 @@ fn a_client_hello_without_a_common_group_is_a_handshake_failure() -> Result<()> 
     Ok(())
 }
 
+/// RFC 8446 section 4.2.8: the client_shares vector "MAY be empty if the client is
+/// requesting a HelloRetryRequest". A ClientHello with an empty key_share is answered with a
+/// HelloRetryRequest naming a group the client listed, not refused.
+#[test]
+fn an_empty_key_share_is_answered_with_a_hello_retry_request() -> Result<()> {
+    let answer = server_answers(no_cookies(), |hello| {
+        hello.set(
+            messages::EXT_SUPPORTED_GROUPS,
+            u16_list(&[X25519, SECP256R1]),
+        );
+        hello.set(messages::EXT_KEY_SHARE, client_key_shares(&[]));
+    })?;
+    assert!(plaintext_alerts(&answer).is_empty(), "no alert");
+    let (handshake_type, _, body, _) = first_message(&answer[0]);
+    assert_eq!(handshake_type, messages::SERVER_HELLO);
+    let retry = Answer::parse(&body);
+    assert_eq!(retry.random, messages::HELLO_RETRY_REQUEST_RANDOM.to_vec());
+    let group = retry
+        .extensions
+        .iter()
+        .find(|(t, _)| *t == messages::EXT_KEY_SHARE)
+        .map(|(_, data)| u16::from_be_bytes([data[0], data[1]]))
+        .expect("the group asked for");
+    assert!([X25519, SECP256R1].contains(&group), "{group:#06x}");
+    Ok(())
+}
+
 /// RFC 8446 section 4.1.2: the compression methods of a TLS 1.3 ClientHello are exactly
 /// one zero byte; anything else is an illegal_parameter.
 #[test]
@@ -940,6 +967,40 @@ fn a_failed_handshake_forgets_its_secrets() -> Result<()> {
     Ok(())
 }
 
+/// RFC 8446 section 7.1: "Once all the values which are to be derived from a given secret
+/// have been computed, that secret SHOULD be erased." After a handshake, on both sides: the
+/// handshake traffic secrets are gone (both Finished are done, the epoch's record keys
+/// derived), the Main Secret too (the resumption master secret is derived), and the key
+/// schedule keeps no copy of the application traffic secrets the association took for its
+/// key updates. Data still flows both ways, and a key update still works.
+#[test]
+fn a_completed_handshake_keeps_only_the_secrets_still_needed() -> Result<()> {
+    let mut pair = Pair::new(client_builder(), no_cookies())?.complete();
+    for client in [true, false] {
+        let conn = if client {
+            pair.client_conn()
+        } else {
+            pair.server_conn()
+        };
+        let schedule = conn.schedule.as_ref().expect("a key schedule");
+        assert!(
+            schedule.handshake_secrets_forgotten(),
+            "handshake traffic secrets"
+        );
+        assert!(
+            schedule.application_secrets_handed_over(),
+            "application secret copies"
+        );
+        assert!(conn.local_application_secret().is_some());
+    }
+    assert_eq!(pair.client_sends(b"after"), vec![b"after".to_vec()]);
+    assert_eq!(pair.server_sends(b"back"), vec![b"back".to_vec()]);
+    pair.client.update_keys(pair.now, server_addr(), true)?;
+    pair.run();
+    assert_eq!(pair.client_sends(b"updated"), vec![b"updated".to_vec()]);
+    Ok(())
+}
+
 // ----------------------------------------------------------------------------------------
 // Certificates.
 // ----------------------------------------------------------------------------------------
@@ -1191,6 +1252,164 @@ fn a_certificate_signed_with_md5_is_a_bad_certificate() -> Result<()> {
     assert_eq!(
         pair.client.connection_fatal_alerts(&server_addr()),
         Some((Some(alert::BAD_CERTIFICATE), None))
+    );
+    Ok(())
+}
+
+/// RFC 8446 section 4.4.2.4: "it is RECOMMENDED that any endpoint receiving any certificate
+/// which it would need to validate using any signature algorithm using a SHA-1 hash abort the
+/// handshake with a bad_certificate alert". A server certificate whose signature algorithm is
+/// sha1WithRSAEncryption is refused by a client that validates the chain (with that error,
+/// before the chain verifier sees it), and taken by one that authenticates by fingerprint and
+/// so validates no certificate signature (WebRTC's self-signed certificates).
+#[test]
+fn a_certificate_signed_with_sha1_is_refused_where_the_chain_is_validated() -> Result<()> {
+    let key_pair = rcgen::KeyPair::from_pem(include_str!("testdata/rsa-2048.pkcs8.pem"))
+        .expect("an RSA key pair");
+    let sha256 = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .self_signed(&key_pair)
+        .unwrap();
+    // sha256WithRSAEncryption, 1.2.840.113549.1.1.11, becomes sha1WithRSAEncryption,
+    // 1.2.840.113549.1.1.5, in the TBSCertificate and the outer signature algorithm.
+    let sha256_oid = [
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+    ];
+    let mut der = sha256.der().to_vec();
+    let mut replaced = 0;
+    let mut at = 0;
+    while let Some(found) = der[at..]
+        .windows(sha256_oid.len())
+        .position(|window| window == sha256_oid)
+    {
+        let position = at + found;
+        der[position + sha256_oid.len() - 1] = 0x05;
+        replaced += 1;
+        at = position + sha256_oid.len();
+    }
+    assert_eq!(replaced, 2);
+    assert!(super::certificate_checks::signed_with_sha1(&der));
+    let sha1 = rustls::pki_types::CertificateDer::from(der);
+    let server = || -> Result<ConfigBuilder> {
+        Ok(ConfigBuilder::default()
+            .with_crypto_provider(provider())
+            .with_cookie_exchange(false)
+            .with_certificates(vec![Certificate {
+                certificate: vec![sha1.clone()],
+                private_key: CryptoPrivateKey::from_key_pair(&key_pair, provider().crypto())?,
+            }]))
+    };
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(sha1.clone()).expect("a root");
+    let validating = ConfigBuilder::default()
+        .with_crypto_provider(provider())
+        .with_post_quantum_key_share(false)
+        .with_server_name("localhost".to_owned())
+        .with_roots_cas(roots);
+    let mut pair = Pair::new(validating, server()?)?;
+    pair.run();
+    assert!(!pair.client_complete);
+    assert_eq!(
+        pair.client.connection_fatal_alerts(&server_addr()),
+        Some((Some(alert::BAD_CERTIFICATE), None))
+    );
+    assert!(
+        format!("{:?}", pair.client_error).contains("SHA-1"),
+        "{:?}",
+        pair.client_error
+    );
+
+    // Fingerprint authentication validates no certificate signature.
+    let mut pair = Pair::new(client_builder(), server()?)?;
+    pair.run();
+    assert!(
+        pair.client_complete && pair.server_complete,
+        "{:?}",
+        pair.client_error
+    );
+    Ok(())
+}
+
+/// An RSA public key of `bits` bits (an odd modulus with its top bit set, e = 65537), for a
+/// certificate an issuer signs: nobody holds its private key.
+struct BareRsaKey(Vec<u8>);
+
+impl BareRsaKey {
+    fn new(bits: usize) -> Self {
+        let mut modulus = vec![0xa5u8; bits / 8];
+        modulus[0] = 0xc3;
+        *modulus.last_mut().unwrap() |= 1;
+        let integer = |bytes: &[u8]| {
+            let mut value = vec![0u8];
+            value.extend_from_slice(bytes);
+            der(0x02, &value)
+        };
+        let mut body = integer(&modulus);
+        body.extend(der(0x02, &[0x01, 0x00, 0x01]));
+        Self(der(0x30, &body))
+    }
+}
+
+/// A DER element: tag, definite length, value.
+fn der(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    match value.len() {
+        n if n < 0x80 => out.push(n as u8),
+        n if n < 0x100 => out.extend([0x81, n as u8]),
+        n => out.extend([0x82, (n >> 8) as u8, n as u8]),
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+impl rcgen::PublicKeyData for BareRsaKey {
+    fn der_bytes(&self) -> &[u8] {
+        &self.0
+    }
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &rcgen::PKCS_RSA_SHA256
+    }
+}
+
+/// RFC 8446 appendix C.2: "Applications SHOULD also enforce minimum and maximum key sizes."
+/// A signature from a certificate whose RSA key has 9216 bits is refused for its size, before
+/// any RSA operation; one of 8192 bits is not refused for its size (it fails as the forged
+/// signature it is).
+#[test]
+fn rsa_keys_above_8192_bits_are_refused() -> Result<()> {
+    let issuer_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let issuer = rcgen::Issuer::new(
+        rcgen::CertificateParams::new(vec!["issuer".to_owned()]).unwrap(),
+        issuer_key,
+    );
+    let verify = |bits: usize| {
+        let certificate = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .signed_by(&BareRsaKey::new(bits), &issuer)
+            .unwrap();
+        crate::crypto::verify_key_signature(
+            provider().crypto(),
+            b"signed",
+            &crate::signature_hash_algorithm::SignatureHashAlgorithm {
+                hash: crate::signature_hash_algorithm::HashAlgorithm::Sha256,
+                signature: crate::signature_hash_algorithm::SignatureAlgorithm::Rsa,
+            },
+            &vec![0x42; bits / 8],
+            &[certificate.der().to_vec()],
+            false,
+        )
+    };
+    let large = verify(9216);
+    assert!(
+        format!("{large:?}").contains("RFC 8446 appendix C.2"),
+        "{large:?}"
+    );
+    let largest = verify(8192);
+    assert!(largest.is_err(), "a forged signature");
+    assert!(
+        !format!("{largest:?}").contains("appendix C.2"),
+        "{largest:?}"
     );
     Ok(())
 }

@@ -289,7 +289,7 @@ fn remove_candidate_pair_drops_the_pair_and_both_calls_refuse_what_the_spec_refu
     let before = world.peers[0].events.len();
     world.peers[0].pc.remove_candidate_pair(now, &other)?;
     world.step()?;
-    assert_eq!(pairs(&world.peers[0].pc), [current.clone()]);
+    assert_eq!(pairs(&world.peers[0].pc), std::slice::from_ref(&current));
     assert!(
         world.peers[0].events[before..].iter().any(
             |e| matches!(e, RTCPeerConnectionEvent::OnIceCandidatePairRemove(p) if *p == other)

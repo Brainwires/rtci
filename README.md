@@ -1,71 +1,19 @@
-<h1 align="center">
- <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
- <br>
-</h1>
-<p align="center">
- <a href="https://github.com/webrtc-rs/rtc/actions">
-  <img src="https://github.com/webrtc-rs/rtc/workflows/cargo/badge.svg">
- </a>
- <a href="https://codecov.io/gh/webrtc-rs/rtc">
-  <img src="https://codecov.io/gh/webrtc-rs/rtc/branch/master/graph/badge.svg">
- </a>
- <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
-  <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
- </a>
- <a href="https://crates.io/crates/rtc">
-  <img src="https://img.shields.io/crates/v/rtc.svg">
- </a>
- <a href="https://docs.rs/rtc">
-  <img src="https://docs.rs/rtc/badge.svg">
- </a>
- <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
- </a>
- <a href="https://discord.gg/4Ju8UHdXMs">
-  <img src="https://img.shields.io/discord/800204819540869120?logo=discord" alt="Discord">
- </a>
- <a href="https://twitter.com/WebRTCrs">
-  <img src="https://img.shields.io/twitter/url/https/twitter.com/webrtcrs.svg?style=social&label=%40WebRTCrs" alt="Twitter">
- </a>
-</p>
+# `rtc`
+
 <p align="center">
  <strong>Sans-I/O WebRTC implementation in Rust</strong>
 </p>
 
-<p align="center">
-<strong>Sponsored with 💖 by</strong><br>
-</p>
-<p align="center">
-<strong>Gold Sponsors:</strong><br>
-<a href="https://www.recall.ai" target="_blank">
-<img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/recall_md.svg"
-alt="Recall.ai">
-</a><br>
-<p align="center">
-<strong>Silver Sponsors:</strong><br>
-<a href="https://getstream.io/video/voice-calling/?utm_source=https://github.com/webrtc-rs/webrtc&utm_medium=sponsorship&utm_content=&utm_campaign=webrtcRepo_July2023_video_klmh22" target="_blank">
-<img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/stream-logo.png" height="50" alt="Stream Chat">
-</a><br>
-<a href="https://channel.io/" target="_blank">
-<img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/ChannelTalk_logo_md.png" alt="ChannelTalk">
-</a><br>
-<strong>Bronze Sponsors:</strong><br>
-<a href="https://github.com/AdrianEddy" target="_blank">AdrianEddy</a><br>
-</p>
-
-
-<details>
-<summary><b>Table of Content</b></summary>
-
 - [Overview](#overview)
+- [Status](#status)
 - [Installation](#installation)
 - [Sans-I/O Event Loop Pattern](#sans-io-event-loop-pattern)
+- [Driving the Engine](#driving-the-engine)
 - [Feeding ICE Candidates](#feeding-ice-candidates)
 - [Back-Pressure](#back-pressure)
 - [Features](#features)
-- [What's New in 0.21](#whats-new-in-021)
 - [Examples](#examples)
-- [Architecture](#architecture)
+- [Crates](#crates)
 - [Common Use Cases](#common-use-cases)
 - [Specification Compliance](#specification-compliance)
 - [Documentation](#documentation)
@@ -74,13 +22,10 @@ alt="Recall.ai">
 - [Contributing](#contributing)
 - [License](#license)
 
-</details>
-
 ## Overview
 
-**RTC** is a pure Rust implementation of [WebRTC](https://www.w3.org/TR/webrtc/) using a **sans-I/O architecture**.
-Unlike traditional WebRTC libraries, RTC separates protocol logic from I/O operations, giving you complete control over
-networking, threading, and async runtime integration.
+`rtc` is a Rust implementation of [WebRTC](https://www.w3.org/TR/webrtc/) with a **sans-I/O architecture**: the
+protocol logic is separate from all I/O, so the application controls networking, threading and the async runtime.
 
 ### What is Sans-I/O?
 
@@ -90,47 +35,69 @@ you what to send.
 
 **Benefits:**
 
-- 🚀 **Runtime Independent** - Works with tokio, async-std, smol, or blocking I/O
-- 🎯 **Full Control** - You control threading, scheduling, and I/O multiplexing
-- 🧪 **Testable** - Protocol logic can be tested without real network I/O
-- 🔌 **Flexible** - Easy integration with existing networking code
+- **Runtime independent**: works with tokio, async-std, smol or blocking I/O
+- **Control**: the application decides threading, scheduling and I/O multiplexing
+- **Testable**: the protocol logic runs in tests without a network
+- **Embeddable**: it fits into existing networking code
 
 There is no ambient clock, either: every method that needs the time takes an `Instant` from you. That is what makes a
 whole session reproducible in a test without a socket or a sleep.
+
+## Status
+
+As of 2026-11-23 the workspace is audited clause by clause against 110 specifications (the W3C WebRTC
+API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
+WebRTC uses); every row names the code and the test that proves it. From
+[docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
+
+| Level | Rows that apply | RFC behaviour tested | Tested as the default |
+| --- | ---: | ---: | ---: |
+| MUST | 5082 | 5015 (98.7 %) | 4992 (98.2 %) |
+| SHOULD | 968 | 836 (86.4 %) | 836 (86.4 %) |
+| MAY | 605 | 442 (73.1 %) | 442 (73.1 %) |
+
+"RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
+browser or a deployed peer cannot interoperate with it by default. The open MUST rows, each with its
+class and reason, are in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
+in the repository's [issues](https://github.com/Brainwires/webrtc-rs-rtc/issues), security problems as
+[SECURITY.md](SECURITY.md) describes.
 
 ## Installation
 
 ```toml
 [dependencies]
-rtc = "0.21"
+rtc = "0.22"
 ```
 
-RTC requires Rust edition 2024.
+The crates use Rust edition 2024; the minimum supported Rust version is 1.89 (`rust-version` in the manifests,
+checked by CI's MSRV job).
 
 ### Crypto Providers
 
 All cryptography goes through a pluggable [`RTCCryptoProvider`]. Two built-in providers ship with the crate and the
-Cargo features are **additive** — enabling both builds successfully, and `ring` is preferred when both are on:
+Cargo features are **additive**: enabling both builds, and `ring` is preferred when both are on:
 
 ```toml
 # Default: the ring provider, no C toolchain required.
-rtc = "0.21"
+rtc = "0.22"
 
 # aws-lc-rs instead (pulls in the aws-lc-sys C toolchain).
-rtc = { version = "0.21", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc = { version = "0.22", default-features = false, features = ["crypto-aws-lc-rs"] }
 ```
 
 There is **no process-global provider to install**. The provider is selected per peer connection through
 `SettingEngine::set_crypto_provider`, so two peer connections in one process may use different ones. Applications
 needing OpenSSL, a FIPS-validated module, an HSM, or a platform backend can implement the public traits themselves and
 validate the result against the bundled conformance suite (`rtc_crypto::conformance::assert_provider`, behind the
-`test-support` feature).
+`test-support` feature). The other features: `pem` (PEM certificate import in DTLS), `turn-tls-webpki-roots` (the Mozilla
+roots for TURN over TLS) and `openssl` / `vendored-openssl` (an OpenSSL AES-CTR cipher for SRTP).
 
-[`RTCCryptoProvider`]: https://docs.rs/rtc-crypto
+[`RTCCryptoProvider`]: rtc-crypto/README.md
 
 ## Sans-I/O Event Loop Pattern
 
-The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnection` — **bring the trait into scope with
+The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnection`: **bring the trait into scope with
 `use rtc::sansio::Protocol;` or none of these methods will resolve.**
 
 | Method | Direction | What it does |
@@ -148,7 +115,7 @@ The event loop is the [`sansio::Protocol`] trait implemented by `RTCPeerConnecti
 so there is nothing to call it with. It exists so the signature is already right when the first inbound event variant
 is added.
 
-Order matters only in that `poll_write` should be drained after anything that could have produced output —
+Order matters only in that `poll_write` should be drained after anything that could have produced output:
 `handle_read`, `handle_timeout`, `handle_write`, and the negotiation calls all queue packets rather than sending them.
 
 [`sansio::Protocol`]: https://docs.rs/sansio/latest/sansio/trait.Protocol.html
@@ -330,8 +297,8 @@ driver owns the sockets and nothing else: it binds, connects, accepts, reads, wr
 and resolves names when the engine says so, and reports what happened. The application owns
 its UDP sockets, signalling and the loop.
 
-**The reference driver** (`examples/stream-driver`, crate `rtc-stream-driver`, not published)
-implements the stream half on tokio; its crate documentation has the command table and the
+**The reference driver** (crate `rtc-stream-driver`, in `examples/stream-driver`, published beside the
+engine) implements the stream half on tokio; its crate documentation has the command table and the
 loop. `cargo run --example stream-driver-loopback` runs two peer connections over loopback TCP
 through it with a data channel, the smallest complete program (the test environment runs it).
 The driver also has the socket choices a server makes:
@@ -392,108 +359,76 @@ STUN/TURN server the candidate was gathered from so it is attributed correctly i
 
 `poll_read` is the throttle. Undrained data-channel messages leave bytes in SCTP's reassembly queue, which lowers the
 receiver-window credit advertised in every SACK, which tells the peer to slow down. **Declining to call `poll_read` is
-how you apply back-pressure**; resume when the application catches up. Media is never throttled this way — RTP arrives
+how you apply back-pressure**; resume when the application catches up. Media is never throttled this way: RTP arrives
 over SRTP and is subject to none of SCTP's flow control.
 
 ## Features
 
-- ✅ **ICE** (Interactive Connectivity Establishment) - NAT traversal with STUN/TURN, plus mDNS candidates
-- ✅ **DTLS** (Datagram Transport Layer Security) - Encryption for media and data
-- ✅ **SCTP** (Stream Control Transmission Protocol) - Reliable data channels
-- ✅ **RTP/RTCP** - Real-time media transport and control
-- ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
-- ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
-- ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
-- ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
-- ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
+- **ICE** (Interactive Connectivity Establishment) - NAT traversal with STUN/TURN, plus mDNS candidates
+- **DTLS** (Datagram Transport Layer Security) - Encryption for media and data
+- **SCTP** (Stream Control Transmission Protocol) - Reliable data channels
+- **RTP/RTCP** - Real-time media transport and control
+- **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
+- **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
+- **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
+- **Trickle ICE** - Progressive candidate gathering, and ICE restart
+- **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
-- ✅ **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
+- **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
   back-pressure; `examples/stream-driver` is a tokio driver for it
-- ✅ **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
+- **TURN over TCP and TLS built in** - the engine runs `turn:?transport=tcp` and `turns:` servers through its stream
   interface: resolution by the driver, Happy Eyeballs (RFC 8305), TLS with rustls sans-I/O (ALPN `stun.turn`; roots or a
   verifier from the application, Mozilla roots with feature `turn-tls-webpki-roots`), relayed candidates with
   `relayProtocol`; TURN over DTLS (RFC 7350) and over plain UDP on the application's socket as well (who gathers
   from `turn:` servers over UDP: `with_relay_gathering`)
-- ✅ **NAT-assisted candidates in the reference driver** - `rtc_stream_driver::nat_mapping` (opt-in, no dependency): a
+- **NAT-assisted candidates in the reference driver** - `rtc_stream_driver::nat_mapping` (opt-in, no dependency): a
   PCP (RFC 6887) MAP request with a NAT-PMP (RFC 6886) fallback to the gateway the application names; the mapping is
   added as a server-reflexive candidate with type preference 105 (RFC 6544 section 5.3)
-- ✅ **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
+- **Server-side sockets in the reference driver** - `rtc_stream_driver::sockets`: port ranges for UDP sockets and
   ICE-TCP listeners, the local address list (bind addresses, interface and IP filters, loopback and link-local opt-in),
   one UDP port and one passive ICE-TCP port shared by many peer connections (routed by the ICE ufrag of the first
   check, `UfragMux`, `accept_by_ufrag`, `RTCPeerConnection::ice_username_fragment`); 1:1 NAT addresses
   (`with_nat_1to1_ips`) apply to every host candidate, the engine's TCP ones included
-- ✅ **Simulcast** - RID-based simulcast, sending and receiving
-- ✅ **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding is not there yet)
-- ✅ **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
+- **Simulcast** - RID-based simulcast, sending and receiving
+- **SVC signalling in `rtc-rtp`** - the W3C scalability modes and their layer structures, VP8 / VP9 layer descriptors, the AV1 Dependency Descriptor, and forwarder-side layer selectors (`scalabilityMode` on an encoding, `RTCRtpSender::set_configured_scalability_mode`)
+- **RTX & FEC** - RFC 4588 retransmission; FlexFEC through opt-in interceptors, both as browsers send it
   (draft-ietf-payload-flexible-fec-scheme-03, `video/flexfec-03`) and as published (RFC 8627, `video/flexfec`: masks,
   row / column / 2-D protection, retransmission); ULPFEC (RFC 5109) in RED, as browsers send it for video, through
   `configure_ulpfec` (opt-in, not in the default codecs)
-- ✅ **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
+- **Statistics** - `getStats` per the W3C WebRTC Statistics API, for what a transport measures (members that need an
   encoder, decoder or playout are left out, not reported as 0)
-- ✅ **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
+- **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
   bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
-- ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
+- **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
 [docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
 I-DATA, a TURN server and others).
 
-## What's New in 0.21
-
-**A provider-neutral cryptographic API.** Every cryptographic operation in the stack now goes through the new
-`rtc-crypto` crate rather than a hard-wired backend:
-
-- `RTCCryptoProvider` bundles an `RTCCrypto` operations trait and an `RTCRandom` CSPRNG. `RingProvider` and
-  `AwsLcRsProvider` ship built in, and an application can supply its own — OpenSSL, a FIPS-validated module, an HSM, a
-  platform backend — by implementing the public traits.
-- **No library code resolves a default provider.** `crypto::default_provider()` is called in exactly one place, at
-  peer-connection construction, where the application either supplied one via `SettingEngine::set_crypto_provider` or
-  gets the feature-selected built-in. A `--no-default-features` build now fails at configuration time instead of deep
-  inside a handshake.
-- **`crypto-ring` and `crypto-aws-lc-rs` are additive.** Enabling both builds and is covered in CI; previously the
-  combination was a `compile_error!`, which broke otherwise valid builds whenever Cargo feature unification pulled in
-  both.
-- A reusable conformance suite (`rtc_crypto::conformance::assert_provider`) validates any implementation against the
-  same RFC vectors the built-ins pass.
-- Certificates are provider-neutral: `RTCCertificate::generate`, `generate_from_signing_key` and `from_pkcs8`.
-  Non-exportable HSM/KMS keys are supported.
-
-**Performance.** Key schedules moved off the per-packet path: SRTP keys its MACs once per context (~40% faster per
-RTCP packet), DTLS CBC keys its record MACs at epoch setup (~4-7% faster), AES-CTR is batched (~9-10% faster on a
-1200-byte payload), and the built-in `RTCRandom` no longer reads the OS per record (DTLS GCM record encryption went
-from 1.015 µs to 262 ns). Every per-packet benchmark is at parity with or faster than the pre-migration baseline.
-
-**Behaviour change.** `MediaEngine::register_default_codecs` no longer registers `video/ulpfec`, because the receive
-path does not recover media from ULPFEC packets. **This changes the default offer's SDP**: payload type 116 is gone.
-Register it explicitly with `MIME_TYPE_ULP_FEC` if you need it.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full list, and
-[docs/crypto-provider-migration.md](docs/crypto-provider-migration.md) for before/after migration examples.
-
 ## Examples
 
-The repository includes examples demonstrating various use cases:
+The repository has examples for the common cases (they are not part of the published crate):
 
-- [data-channels-offer-answer](https://github.com/webrtc-rs/rtc/tree/master/examples/data-channels-offer-answer/) -
+- [data-channels-offer-answer](examples/data-channels-offer-answer/) -
   Complete data channel setup with signaling
-- [data-channels-flow-control](https://github.com/webrtc-rs/rtc/tree/master/examples/data-channels-flow-control/) -
+- [data-channels-flow-control](examples/data-channels-flow-control/) -
   Applying back-pressure to a fast sender
-- [trickle-ice](https://github.com/webrtc-rs/rtc/tree/master/examples/trickle-ice/) - Progressive candidate exchange
-- [ice-restart](https://github.com/webrtc-rs/rtc/tree/master/examples/ice-restart/) - Recovering a connection after a
+- [trickle-ice](examples/trickle-ice/) - Progressive candidate exchange
+- [ice-restart](examples/ice-restart/) - Recovering a connection after a
   network change
-- [perfect-negotiation](https://github.com/webrtc-rs/rtc/tree/master/examples/perfect-negotiation/) - Glare-free
+- [perfect-negotiation](examples/perfect-negotiation/) - Glare-free
   renegotiation with rollback
-- [reflect](https://github.com/webrtc-rs/rtc/tree/master/examples/reflect/) - Echo server that reflects media back to
+- [reflect](examples/reflect/) - Echo server that reflects media back to
   the sender
-- [save-to-disk-vpx](https://github.com/webrtc-rs/rtc/tree/master/examples/save-to-disk-vpx/) - Receive and save VP8/VP9
+- [save-to-disk-vpx](examples/save-to-disk-vpx/) - Receive and save VP8/VP9
   video
-- [play-from-disk-vpx](https://github.com/webrtc-rs/rtc/tree/master/examples/play-from-disk-vpx/) - Send VP8/VP9 video
+- [play-from-disk-vpx](examples/play-from-disk-vpx/) - Send VP8/VP9 video
   from disk
-- [simulcast](https://github.com/webrtc-rs/rtc/tree/master/examples/simulcast) - Receive 3 simulcast encodings in one
+- [simulcast](examples/simulcast) - Receive 3 simulcast encodings in one
   track
-- [broadcast](https://github.com/webrtc-rs/rtc/tree/master/examples/broadcast) - Broadcast a video to multiple peers
-- [stats](https://github.com/webrtc-rs/rtc/tree/master/examples/stats) - Statistical information about a
+- [broadcast](examples/broadcast) - Broadcast a video to multiple peers
+- [stats](examples/stats) - Statistical information about a
   PeerConnection
 
 Run one with its registered example name:
@@ -503,48 +438,32 @@ cargo run --example data-channels-offer
 cargo run --example data-channels-answer
 ```
 
-## Architecture
+## Crates
 
-RTC is built from composable crates, each implementing a specific protocol:
+The engine is the root crate, `rtc`; each protocol is a crate of its own, usable alone and re-exported by
+`rtc` (`rtc::ice`, `rtc::dtls`, ...). Each crate's README lists the specifications it implements.
 
-## RTC Crates
-
-<p align="center">
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DataChannel<a href="https://crates.io/crates/rtc-datachannel"><img src="https://img.shields.io/crates/v/rtc-datachannel.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTP<a href="https://crates.io/crates/rtc-rtp"><img src="https://img.shields.io/crates/v/rtc-rtp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTCP<a href="https://crates.io/crates/rtc-rtcp"><img src="https://img.shields.io/crates/v/rtc-rtcp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SRTP<a href="https://crates.io/crates/rtc-srtp"><img src="https://img.shields.io/crates/v/rtc-srtp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SCTP<a href="https://crates.io/crates/rtc-sctp"><img src="https://img.shields.io/crates/v/rtc-sctp.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DTLS<a href="https://crates.io/crates/rtc-dtls"><img src="https://img.shields.io/crates/v/rtc-dtls.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Crypto<a href="https://crates.io/crates/rtc-crypto"><img src="https://img.shields.io/crates/v/rtc-crypto.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">mDNS<a href="https://crates.io/crates/rtc-mdns"><img src="https://img.shields.io/crates/v/rtc-mdns.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">STUN<a href="https://crates.io/crates/rtc-stun"><img src="https://img.shields.io/crates/v/rtc-stun.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">TURN<a href="https://crates.io/crates/rtc-turn"><img src="https://img.shields.io/crates/v/rtc-turn.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">ICE<a href="https://crates.io/crates/rtc-ice"><img src="https://img.shields.io/crates/v/rtc-ice.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SDP<a href="https://crates.io/crates/rtc-sdp"><img src="https://img.shields.io/crates/v/rtc-sdp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Shared<a href="https://crates.io/crates/rtc-shared"><img src="https://img.shields.io/crates/v/rtc-shared.svg"></a>
-</p>
-
-### Dependency Graph
-
-<p align="center">
- <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_crates_dep_graph.png" alt="RTC Crates Dependency Graph">
-</p>
-
-### Protocol Stack
-
-<p align="center">
- <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_stack.png" alt="RTC Protocols Stack">
-</p>
-
+| Crate | What it is |
+| --- | --- |
+| `rtc` | The peer connection: JSEP negotiation, transports, media and data channels, statistics |
+| [`rtc-crypto`](rtc-crypto/README.md) | The provider-neutral cryptography interface, with the ring and aws-lc-rs providers |
+| [`rtc-shared`](rtc-shared/README.md) | Marshalling traits, transport context, replay detection, the stream transport interface |
+| [`rtc-ice`](rtc-ice/README.md) | The ICE agent (RFC 8445), trickle ICE, ICE-TCP, consent freshness |
+| [`rtc-stun`](rtc-stun/README.md) | STUN messages, integrity and a client (RFC 8489) |
+| [`rtc-turn`](rtc-turn/README.md) | The TURN client (RFC 8656, RFC 6062) |
+| [`rtc-mdns`](rtc-mdns/README.md) | mDNS querier and responder (RFC 6762) |
+| [`rtc-dtls`](rtc-dtls/README.md) | DTLS 1.2 and 1.3, DTLS-SRTP key export |
+| [`rtc-srtp`](rtc-srtp/README.md) | SRTP and SRTCP, AES-GCM, Cryptex |
+| [`rtc-sctp`](rtc-sctp/README.md) | SCTP (RFC 9260) for data channels |
+| [`rtc-datachannel`](rtc-datachannel/README.md) | Data channels and DCEP (RFC 8831, RFC 8832) |
+| [`rtc-rtp`](rtc-rtp/README.md) | RTP, header extensions, payload formats, SVC structures |
+| [`rtc-rtcp`](rtc-rtcp/README.md) | RTCP packets and feedback messages |
+| [`rtc-interceptor`](rtc-interceptor/README.md) | The RTP / RTCP pipeline: RTCP session, NACK, TWCC, GCC, pacing, FEC |
+| [`rtc-interceptor-derive`](rtc-interceptor-derive/README.md) | Macros for writing interceptors |
+| [`rtc-sdp`](rtc-sdp/README.md) | SDP parsing and serialization |
+| [`rtc-media`](rtc-media/README.md) | Media samples and container readers and writers |
+| [`rtc-sframe`](rtc-sframe/README.md) | SFrame end-to-end media encryption (RFC 9605) |
+| [`rtc-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
 
 ## Common Use Cases
 
@@ -685,13 +604,15 @@ Which sections of each are implemented, and which are not, is in [docs/conforman
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/rtc) - Complete API reference
+- API documentation: the crate documentation (`cargo doc --open`; docs.rs once published)
 - [Conformance](docs/conformance.md) - Every claim with its spec section and test, and what is not implemented
 - [Test exclusions](docs/test-exclusions.md) and [upstream test parity](docs/upstream-test-parity.md) - Every test runs,
   and every upstream test is accounted for
-- [Examples](https://github.com/webrtc-rs/rtc/tree/master/examples) - Working code examples
-- [Sans-I/O Pattern](https://sans-io.readthedocs.io/) - Detailed explanation of the sans-I/O design
-- [WebRTC for the Curious](https://webrtcforthecurious.com/) - Comprehensive WebRTC guide
+- [Examples](examples/) - Working code examples
+- [Sans-I/O Pattern](https://sans-io.readthedocs.io/) - The sans-I/O design
+- [FORK.md](FORK.md) - What this code base carries over upstream, and why
+- [CHANGELOG.md](CHANGELOG.md) - Every change, by release
+- [docs/releasing.md](docs/releasing.md) - How a release is published
 
 ## Building and Testing
 
@@ -714,7 +635,7 @@ cargo run --example data-channels-answer
 # The repository's own checks (no build needed)
 python3 scripts/check-test-inventory.py   # no ignored, commented-out, orphaned or platform-gated test
 python3 scripts/check-test-parity.py      # every upstream test has a fork test, a mapping or a reason
-python3 scripts/check-fuzz-registry.py    # every fuzz target is built by OSS-Fuzz and run by CI
+python3 scripts/check-fuzz-registry.py    # every fuzz target is listed for OSS-Fuzz and run by CI
 python3 scripts/check-workflow-pins.py    # actions pinned by SHA, no self-hosted runner for a fork PR
 
 # Fuzz one target (nightly toolchain and cargo-fuzz; each crate's fuzz/ directory, ./fuzz for `rtc`)
@@ -729,7 +650,7 @@ This project follows [Semantic Versioning](https://semver.org/):
 - **Minor** (`0.X.0`): Backwards-compatible additions or deprecations to the public API.
 - **Major** (`X.0.0`): Breaking changes to the public API.
 
-While the version is `0.x`, the minor version acts as the major — i.e., a minor bump may include breaking changes. Once
+While the version is `0.x`, the minor version acts as the major: a minor bump may include breaking changes. Once
 `1.0.0` is released, full semver stability guarantees apply.
 
 Pre-release versions are published with the following suffixes, in order of increasing stability:
@@ -738,11 +659,12 @@ Pre-release versions are published with the following suffixes, in order of incr
 - **`-beta.N`**: Feature-complete for the release. API may still have minor changes.
 - **`-rc.N`**: Release candidate. No further API changes are expected unless critical issues are found.
 
-For example: `1.0.0-alpha.1` → `1.0.0-beta.1` → `1.0.0-rc.1` → `1.0.0`.
+For example: `1.0.0-alpha.1`, then `1.0.0-beta.1`, `1.0.0-rc.1` and `1.0.0`.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Issues and pull requests go to the repository. Report security problems privately, as [SECURITY.md](SECURITY.md)
+describes.
 
 ## License
 
@@ -752,7 +674,3 @@ This project is licensed under either of:
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 
 at your option.
-
-## Acknowledgments
-
-Special thanks to all contributors and the WebRTC-rs community for making this project possible.
