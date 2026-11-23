@@ -382,13 +382,14 @@ fn up_to_the_target_the_original_media_is_not_lowered() {
 /// first, whatever the originals took. At 100 kbit/s the 30 originals (30 360 octets) took more
 /// than the window's 12 500 octets; the reserve is half the target, 50 kbit/s. With a minimum
 /// of 100 kbit/s, 100 − 50 is under it: twelve retransmissions of 1014 octets fill the 12 500.
-/// With a minimum of 40 kbit/s, or none announced, the originals' share holds: none.
+/// With a minimum of 40 kbit/s, or none announced, the originals' share holds: none. The
+/// original media is told the target less the reserve, never less than the minimum.
 #[test]
 fn near_the_floor_retransmissions_take_the_room_first() {
-    for (minimum, expected) in [
-        (None, 0),
-        (Some(40_000.0), 0),
-        (Some(100_000.0), 12_500 / RETRANSMISSION),
+    for (minimum, expected, media_target) in [
+        (None, 0, 50_000.0),
+        (Some(40_000.0), 0, 50_000.0),
+        (Some(100_000.0), 12_500 / RETRANSMISSION, 100_000.0),
     ] {
         let base = Instant::now();
         let mut chain = responder(NackResponderBuilder::new());
@@ -396,7 +397,9 @@ fn near_the_floor_retransmissions_take_the_room_first() {
         let lost: Vec<u16> = (0..20).collect();
         let at = base + Duration::from_millis(300);
         read_nack(&mut chain, at, &lost, Some(100_000.0), minimum);
-        let mut retransmitted = drain(&mut chain).retransmitted;
+        let seen = drain(&mut chain);
+        assert_eq!(vec![media_target], seen.targets, "minimum {minimum:?}");
+        let mut retransmitted = seen.retransmitted;
         chain.handle_timeout(at).unwrap();
         retransmitted += drain(&mut chain).retransmitted;
         assert_eq!(expected, retransmitted, "minimum {minimum:?}");

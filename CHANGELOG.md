@@ -40,10 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retransmissions alone at the target, not lowering the original media) and `Unlimited` (the
   earlier behaviour) are settings. Without a congestion controller nothing is held back.
   Measured by `tests/capacity_cap_video_rtc2rtc.rs` (300 kbit/s cap, six seeds), longest
-  freeze: the default 1.33 to 1.44 s with 65 to 70 retransmissions of which 11 to 13 dropped at
+  freeze: the default 1.33 to 1.44 s with 65 to 70 retransmissions of which 11 to 14 dropped at
   the link; `UpToTarget` 1.31 to 1.43 s (61 to 65, 11 to 12 dropped); unlimited 1.04 to 1.58 s
-  (274 to 370, three in four dropped); the RFC sharing without the lowered target 2.7 to 3.1 s,
-  and with the floor rule only at the exact minimum 3.7 to 4.8 s. API: `GccShared` gained
+  (257 to 367, three in four dropped); the RFC sharing without the lowered target 2.46 to 2.47 s,
+  without the floor rule 2.46 to 2.47 s, with it only at the exact minimum 3.7 to 4.8 s. The test
+  now also bounds the retransmissions (at most 100 through the cap). API: `GccShared` gained
   `estimate_bps` and `retransmission_reserve_bps` (its `target_bitrate_bps` is now the lowered
   target); new `RetransmissionReserve`, `MinimumTarget`, `NackResponderInterceptor::next_release`.
   A request the per-stream budget (one retransmission per original sent) refuses is still not

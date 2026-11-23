@@ -88,8 +88,9 @@ pub enum RetransmissionRateLimit {
     ///
     /// **At the congestion controller's floor.** The controller's minimum bit rate is this
     /// engine's setting, not the RFC's, and the controller announces it with its target
-    /// ([`MinimumTarget`]). When lowering the original media by the reserve would take it
-    /// under that floor (target − reserve < minimum), the original media cannot make the room:
+    /// ([`MinimumTarget`]). The original media is never told less than that minimum (the least
+    /// the application set its media to need). When lowering the original media by the reserve
+    /// would take it under that floor (target − reserve < minimum), it cannot make the room:
     /// an encoder at its own minimum already fills the floor (in the capacity-cap test, 30
     /// kbit/s of video and 80 kbit/s of audio against a 100 kbit/s target), and the rule above
     /// would leave the repairs nothing for as long as the estimate stays near the floor. There
@@ -161,6 +162,13 @@ pub struct RetransmissionReserve {
 pub struct MinimumTarget {
     /// The minimum, bits per second.
     pub bits_per_second: f64,
+}
+
+/// The target for the original media: the controller's `target` less the `reserve`, never
+/// under the controller's `minimum` (the least the application set its media to need; near it
+/// the retransmissions take the room first instead, see [`RetransmissionRateLimit::WithinTarget`]).
+fn media_target(target: f64, reserve: f64, minimum: f64) -> f64 {
+    (target - reserve).max(minimum.min(target)).max(0.0)
 }
 
 /// How much the reported reserve may move before a new one is announced: 5 % of the target,
@@ -732,7 +740,11 @@ impl NackResponderInterceptor {
                 transport: TransportContext::default(),
                 message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
                     Attribute::TargetBitrateChanged {
-                        bits_per_second: (target_bps - reserve).max(0.0),
+                        bits_per_second: media_target(
+                            target_bps,
+                            reserve,
+                            self.minimum_bps.unwrap_or(0.0),
+                        ),
                     },
                 ),
             });
@@ -1022,10 +1034,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         // only the reserve moved.
         self.announce_reserve(now, !carries_target);
         if carries_target && self.announced_reserve > 0.0 {
-            let reserve = self.announced_reserve;
+            let (reserve, minimum) = (self.announced_reserve, self.minimum_bps.unwrap_or(0.0));
             for attribute in &mut msg.message.attributes {
                 if let Attribute::TargetBitrateChanged { bits_per_second } = attribute {
-                    *bits_per_second = (*bits_per_second - reserve).max(0.0);
+                    *bits_per_second = media_target(*bits_per_second, reserve, minimum);
                 }
             }
         }

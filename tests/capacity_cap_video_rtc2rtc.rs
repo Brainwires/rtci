@@ -984,8 +984,8 @@ fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, Outcom
 
 /// Never more than 2 s without a usable frame on the receiving side, and the retransmissions
 /// congestion controlled (RFC 4588 section 7): at most 100 sent through the cap, on every seed
-/// (the rules held to the target sent 61 to 70, 11 to 13 of them dropped at the link's queue;
-/// without a limit 274 to 370 were sent and three in four dropped).
+/// (the rules held to the target sent 61 to 70, 11 to 14 of them dropped at the link's queue;
+/// without a limit 257 to 367 were sent and three in four dropped).
 fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
     for (seed, outcome) in outcomes {
         assert!(
@@ -1006,8 +1006,8 @@ fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
 /// share the target, and the target the encoder follows is lowered while repairs are
 /// pending): never more than 2 s without a usable frame on the receiving side (engine
 /// v0.22.0+brainwires.5 gave at most 0.85 s in ParolNet's simulation of the same call;
-/// v0.22.0+brainwires.6 froze for 5.9 to 6.8 s here on every seed; the RFC's sharing
-/// without the lowered target froze for 2.7 to 3.1 s).
+/// v0.22.0+brainwires.6 froze for 5.9 to 6.8 s here on every seed; now 1.33 to 1.44 s, and
+/// 2.46 to 2.47 s with the RFC's sharing but without the lowered target).
 ///
 /// When the cap comes, the sender is still at 1.4 Mbit/s for half a second and some fifty
 /// video packets are dropped at the link's queue. With the release's NACK request policy (ten

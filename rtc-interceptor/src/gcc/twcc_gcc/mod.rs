@@ -89,9 +89,12 @@ pub struct GccShared {
 }
 
 impl GccShared {
-    fn update_target(&mut self) {
+    /// The target for the original media: the estimate less the reserve, never under the
+    /// controller's `minimum` (what the application set to carry its media at the least).
+    fn update_target(&mut self, minimum: u32) {
         self.target_bitrate_bps = self.estimate_bps.map(|estimate| {
-            (f64::from(estimate) - self.retransmission_reserve_bps).max(0.0) as u32
+            let lowered = (f64::from(estimate) - self.retransmission_reserve_bps).max(0.0) as u32;
+            lowered.max(minimum.min(estimate))
         });
     }
 }
@@ -115,8 +118,9 @@ impl GccHandle {
     /// The target an encoder follows, in bps: the estimate less the retransmission reserve
     /// the NACK responder holds while it repairs (RFC 4588 section 7: "the sender SHOULD NOT
     /// send retransmission packets without reducing the packet rate and bitrate of the
-    /// original stream"). The estimate itself while nothing is being repaired, and in a
-    /// chain without a NACK responder. `None` if no TWCC feedback has been processed yet.
+    /// original stream"), never under the minimum bit rate
+    /// ([`GccInterceptorBuilder::with_min_bitrate`]). The estimate itself while nothing is
+    /// being repaired, and in a chain without a NACK responder. `None` if no TWCC feedback has been processed yet.
     pub fn target_bitrate_bps(&self) -> Option<u32> {
         self.shared().target_bitrate_bps
     }
@@ -244,7 +248,7 @@ impl<P: Interceptor> GccInterceptor<P> {
         {
             let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             shared.retransmission_reserve_bps = reserve.bits_per_second.max(0.0);
-            shared.update_target();
+            shared.update_target(self.min_bitrate_bps);
         }
         if let Packet::Rtp(ref rtp) = msg.message.packet
             && let Some(&ext_id) = self.local_streams.get(&rtp.header.ssrc)
@@ -352,7 +356,7 @@ impl<P: Interceptor> GccInterceptor<P> {
             e.into_inner()
         });
         shared.estimate_bps = Some(estimate as u32);
-        shared.update_target();
+        shared.update_target(self.min_bitrate_bps);
     }
 
     /// Reconstruct `(send_time_ms, recv_time_ms)` pairs from a TWCC feedback packet.
@@ -849,7 +853,7 @@ mod tests {
         assert!(handle2.target_bitrate_bps().is_none());
         // Write through the shared mutex.
         handle.inner.lock().unwrap().estimate_bps = Some(500_000);
-        handle.inner.lock().unwrap().update_target();
+        handle.inner.lock().unwrap().update_target(0);
         assert_eq!(handle2.target_bitrate_bps(), Some(500_000));
     }
 
