@@ -332,7 +332,14 @@ test("RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedbac
   const blocks = (stats.remoteInbound || []).length;
   const out = (stats.outbound || []).find((o) => o.kind === "video")?.w3c || {};
   expect(r.rtcp?.sr || 0, `the peer received no SR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
-  expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  // A sender puts its reception report blocks in its SRs and sends a bare RR only for the
+  // SSRCs that send nothing (RFC 3550 6.4): Rust sends media in this cell, so what the peer must
+  // get is report blocks about its streams, in SRs or RRs.
+  const peerBlocks = r.reportBlocks ?? null;
+  if (peerBlocks !== null) expect(peerBlocks, `the peer received no reception report block from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  else expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
+  const secs = (r.steps || []).reduce((a, s) => a + (s.ms || 0), 0) / 1000;
+  console.log(`[${peerName()}] RTCP cell: ${secs.toFixed(1)} s; Rust sending SSRCs ${(stats.outbound || []).length}; the peer counted ${JSON.stringify(r.rtcp)}, ${peerBlocks} report blocks`);
   expect(srs, `Rust took in no SR from the peer (remote-outbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(blocks, `Rust took in no report block about its streams (remote-inbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(r.rtcpSent?.pli || 0, ctx(r)).toBeGreaterThan(0);
