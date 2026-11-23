@@ -179,26 +179,43 @@ impl RTCPeerConnection {
     /// The set always holds a transport, the one a later description sets up. So the last
     /// one is not taken out but replaced, in its place, by a new one: a new ICE agent with
     /// credentials of its own (a new generation; a closed agent cannot restart), a new DTLS
-    /// transport and new SRTP contexts, in the state "new" with nothing announced. The local
-    /// candidates the application gathered are the new agent's too, as an ICE restart keeps
-    /// them (unless `with_discard_local_candidates_during_ice_restart`): the application's
-    /// sockets are what they were, and its gathering for the new generation announces them.
+    /// transport and new SRTP contexts, in the state "new" with nothing announced. The DTLS
+    /// association the next description sets up on it runs on a new 3-tuple (RFC 8842
+    /// section 5.1): the closed transport's local candidates are not kept and their UDP
+    /// addresses are refused, so the application gathers on new ports. With
+    /// `with_dtls_new_association_on_previous_addresses(true)` they are the new agent's too,
+    /// as an ICE restart keeps them (unless `with_discard_local_candidates_during_ice_restart`).
     fn close_transport(&mut self, id: TransportId) -> Result<()> {
         log::debug!("transport {id:?} carries no m= section any more: closed");
         self.with_transport(id, |pc| pc.announce_transport_closed());
         let closed = if self.pipeline_context.transports.len() > 1 {
             self.pipeline_context.remove_transport(id)
         } else {
-            let kept: Vec<ice::candidate::Candidate> = if self
+            // The next description sets up a new DTLS association on the new transport, on a
+            // new 3-tuple (RFC 8842 section 5.1, `restart_needs_new_local_addresses`): the
+            // closed transport's candidates are not kept, their UDP addresses are refused
+            // until an ICE restart that is not for a new association, and the engine's TURN
+            // links allocate again. `with_dtls_new_association_on_previous_addresses(true)`
+            // keeps them, as an ICE restart keeps them.
+            let on_new_addresses = !self
                 .setting_engine
-                .candidates
-                .discard_local_candidates_during_ice_restart
+                .dtls_new_association_on_previous_addresses;
+            let kept: Vec<ice::candidate::Candidate> = if on_new_addresses
+                || self
+                    .setting_engine
+                    .candidates
+                    .discard_local_candidates_during_ice_restart
             {
                 vec![]
             } else {
                 self.ice_transport_of(id)
                     .agent
                     .get_local_candidates_to_signal()
+            };
+            let retired = if on_new_addresses {
+                self.ice_transport_of(id).current_generation_udp_addresses()
+            } else {
+                vec![]
             };
             // Its own credentials: there is no other transport to share them with, and the
             // closed one's belong to its generation.
@@ -208,8 +225,13 @@ impl RTCPeerConnection {
                     log::debug!("a local candidate is not kept for the new transport: {err}");
                 }
             }
+            ice.ice_transport.previous_association_addresses = retired;
             let closed = self.pipeline_context.transports.renew(id, ice, dtls, srtp);
             self.pipeline_context.sync_transport_stats();
+            if on_new_addresses {
+                let now = self.pipeline_context.now;
+                self.with_transport(id, |pc| pc.reallocate_turn_links_of_active_transport(now));
+            }
             closed
         };
         if let Some(mut bundle) = closed {
@@ -710,7 +732,17 @@ impl RTCPeerConnection {
     /// its credentials, its candidates (in its first such section, RFC 9429 section 5.2.1)
     /// and its default destination in `m=` / `c=`. The default transport's sections keep what
     /// `populate_sdp` wrote.
-    pub(crate) fn write_transport_attributes(&self, d: &mut SessionDescription) {
+    ///
+    /// `offer` is `Some` while an offer (`true`) or an answer (`false`) is being made: a
+    /// transport with an ICE restart staged lists the candidates
+    /// [`Self::restart_offered_local_candidates`] gives, as the default transport does
+    /// (`offered_local_candidates`). `None` when a description already set is read back
+    /// (`populate_local_candidates`): the candidates the transport holds.
+    pub(crate) fn write_transport_attributes(
+        &self,
+        d: &mut SessionDescription,
+        offer: Option<bool>,
+    ) {
         let transports = &self.pipeline_context.transports;
         if transports.len() == 1 {
             return;
@@ -754,8 +786,15 @@ impl RTCPeerConnection {
                 .unwrap_or_else(|| dtls.local_tls_id.clone());
             let ice = &bundle.ice_handler_context.ice_transport;
             let (ufrag, pwd) = ice.get_local_user_credentials();
-            let candidates =
-                rtc_ice_candidates_from_ice_candidates(&ice.agent.get_local_candidates_to_signal());
+            let staged = match offer {
+                Some(offer) => self
+                    .restart_offered_local_candidates(id, offer)
+                    .unwrap_or_default(),
+                None => None,
+            };
+            let candidates = staged.unwrap_or_else(|| {
+                rtc_ice_candidates_from_ice_candidates(&ice.agent.get_local_candidates_to_signal())
+            });
             let mut first = true;
             for m in &mut d.media_descriptions {
                 if is_rejected_media(m)
@@ -858,7 +897,7 @@ impl RTCPeerConnection {
     /// The local candidates of every transport other than the default one, in the local
     /// description as it is read (`populate_local_candidates`).
     pub(crate) fn populate_other_transports_candidates(&self, d: &mut SessionDescription) {
-        self.write_transport_attributes(d);
+        self.write_transport_attributes(d, None);
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,

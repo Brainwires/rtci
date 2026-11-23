@@ -77,6 +77,7 @@ hmac = "0.12.1"
 sha1 = "0.10.6"
 sha2 = "0.10.9"
 subtle = "2.6.1"
+num-bigint = "0.4.6"
 x509-parser = "0.16.0"
 der-parser = "9.0.0"
 rustls = { version = "0.23.27", default-features = false, features = ["std"] }

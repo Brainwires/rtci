@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **dtls, ice**: a new DTLS association runs on a new 3-tuple (RFC 8842 section 5.1: "a new
+  3-tuple ... MUST be allocated by at least one of the endpoints"; section 6: "a completely new
+  set of ICE candidates that were not recently used for any other DTLS association"). The ICE
+  restart that comes with a new association (`renew_dtls_association` and the automatic
+  re-keying that calls it, a data-only association replaced for SRTP, and the answer to an
+  offer that asks for one) now drops the local candidates, and so does the new transport that
+  replaces one an answer closed (every m= section rejected): it keeps none of the closed
+  one's candidates, even without `with_discard_local_candidates_during_ice_restart`, and
+  `add_local_candidate` refuses a UDP candidate on one of their transport addresses with the new
+  `Error::ErrICECandidateAddressOfPreviousDtlsAssociation` until the next ICE restart that is not
+  for a new association. The answer to such an offer lists only the candidates given for the
+  restart, and engine-run TURN links delete their allocation and allocate again. An application
+  gathers on new ports for the new generation. New
+  `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)` keeps the
+  candidates and the addresses, for an application with one fixed socket. Rows RFC8842-5.1-1,
+  -2, -3 `tested` (`tests/dtls_association_new_three_tuple.rs`). The tests that set up a new
+  association gather on new ports (`World::regather`, `Pair::regather`), with several
+  transports too (`renewing_the_dtls_association_renews_every_transport`).
+
 - **pacer**: media the congestion controller's target has no room for is dropped by default
   (`conf/pacer-2-combined`, `QueueOverflow::Drop`). `conf/pacer-1-queue-time` raised the pacing
   rate above the target to keep the queue under 2 s and released the oldest packet of a full
@@ -434,6 +453,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     5.3), and a repair packet that precedes its stream is dropped without being reported as
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
+
+### Features
+
+- **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
+  (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
+  RFC6544-9.2-1 `tested`.
+
+- **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
+  DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
+  both without parameters and with NULL parameters"); only the NULL form was before. The
+  providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
+  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
+  `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
+  comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
+  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
+  Row RFC5246-4.7-1 `tested`
+  (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
+
 - **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
   ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
   1.3 (it was `handshake_failure` / `certificate_required`). New
@@ -655,10 +692,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
   nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
   characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
+  server-reflexive Binding requests of the engine's gatherer carry the ICE agent's SOFTWARE
+  too (RFC 8489 sections 6.1 and 14.14: requests SHOULD; they carried none before), under the
+  same setting. New public field
+
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
 ### Bug Fixes
+
+- **rtc** (multi-transport ICE restart, `conf/mt-9-restart-drops-candidates`): with several
+  transports (sections outside a BUNDLE group, several BUNDLE groups), a transport other than
+  the default one wrote every local candidate its agent held into an offer or answer that
+  restarts ICE on it, where the default transport lists none in the offer and, in the answer,
+  only those of the new generation. After a restart that drops the local candidates
+  (`with_discard_local_candidates_during_ice_restart`, or a new DTLS association: RFC 8842
+  section 6, "a completely new set of ICE candidates that were not recently used for any other
+  DTLS association") the peer's agent of that transport took the dead candidate into the new
+  generation, checked it first and kept the pair of the new candidates, of the same
+  foundation, frozen behind it: the transport selected no pair within 10 s. Each transport now
+  lists the candidates the restart rule gives it (`restart_offered_local_candidates`, used by
+  `offered_local_candidates` and `write_transport_attributes`). Tests:
+  `tests/multi_transport_rtc2rtc.rs::a_restart_that_drops_the_local_candidates_reconnects_every_transport`
+  (two and three transports, shared and unique credentials),
+  `a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbundled_sections`,
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`, and
+  `renewing_the_dtls_association_renews_every_transport`, which now gathers on new ports.
+
+- **rtc** (multi-transport routing during an ICE restart): a datagram is routed to the
+  transport that gathered on its local address; one on an address no transport holds a
+  candidate on went to the default transport. After a restart that dropped the local
+  candidates the previous selected pair still carries the data until the new generation
+  selects a pair (RFC 8445 section 9; RFC 8839 section 4.4.3.1.1: "The agent will continue to
+  send media using this pair"), so the data of another transport's previous path went to the
+  default transport and was lost: two RTP packets per renewal in
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`. The local address of a
+  transport's media path now counts as one it is on (`transport_set.rs`, `on_address`).
+
+- **rtc** (engine-run TURN, RFC 8842 section 5.1): after a new DTLS association deleted the
+  engine's allocation, the TURN link allocated again from the transport's first UDP base, the
+  host candidate of the association it replaced, whose address the new association refuses.
+  It now starts only from a base the new association may use, the one the application gathers
+  for it. Test: `tests/turn_udp.rs::a_new_dtls_association_deletes_the_engine_allocation_and_allocates_again`.
 
 - **rtc**: a stream whose SSRC the remote description declares for an m= section with
   `a=rid` / `a=simulcast` is received when its packets carry no RID
