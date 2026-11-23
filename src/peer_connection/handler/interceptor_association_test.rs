@@ -388,6 +388,126 @@ fn a_later_mid_moves_an_ssrc_to_its_section() {
     assert_eq!(ssrcs(&transceivers[1]), vec![Some(0xbbbb)]);
 }
 
+/// RFC 9143 section 9.2 and RFC 7941 section 4.2.6: a stream the remote description
+/// declares for section 1 moves to section 2 when its packets name mid 2; a reordered packet
+/// still naming mid 1, older than the one that moved it, does not move it back; a newer one
+/// naming mid 1 again does.
+#[test]
+fn a_declared_ssrc_follows_its_newest_mid() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    transceivers[0]
+        .receiver_mut()
+        .as_mut()
+        .unwrap()
+        .set_coding_parameters(vec![RTCRtpCodingParameters {
+            ssrc: Some(0xcccc),
+            ..Default::default()
+        }]);
+    let arrival = |mid: &'static str| Arrival {
+        ssrc: 0xcccc,
+        payload_type: VP8,
+        mid: Some(mid),
+    };
+    let holder = |transceivers: &[RTCRtpTransceiverInternal]| -> Vec<usize> {
+        (0..transceivers.len())
+            .filter(|&i| receive_codings(transceivers, i).contains(&(Some(0xcccc), None)))
+            .collect()
+    };
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[(arrival("1"), 10), (arrival("2"), 12), (arrival("1"), 11)],
+    );
+    assert_eq!(
+        holder(&after),
+        vec![1],
+        "moved to mid 2; the older packet did not move it back"
+    );
+
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    transceivers[0]
+        .receiver_mut()
+        .as_mut()
+        .unwrap()
+        .set_coding_parameters(vec![RTCRtpCodingParameters {
+            ssrc: Some(0xcccc),
+            ..Default::default()
+        }]);
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[(arrival("1"), 10), (arrival("2"), 12), (arrival("1"), 13)],
+    );
+    assert_eq!(
+        holder(&after),
+        vec![0],
+        "a newer packet naming mid 1 moves it back"
+    );
+}
+
+/// [`opened`] with the sequence number of each arrival given.
+fn opened_in_order(
+    mut transceivers: Vec<RTCRtpTransceiverInternal>,
+    arrivals: &[(Arrival, u16)],
+) -> (Vec<(usize, u32)>, Vec<RTCRtpTransceiverInternal>) {
+    let media_engine = media_engine();
+    let mut stats = RTCStatsAccumulator::new();
+    let mut ctx = InterceptorHandlerContext {
+        is_dtls_handshake_complete: true,
+        ..Default::default()
+    };
+    let mut chain = Registry::new().build();
+    let mut handler = InterceptorHandler::new(
+        &mut ctx,
+        &mut transceivers,
+        &media_engine,
+        &mut chain,
+        &mut stats,
+        None,
+    );
+    let now = Instant::now();
+    for (arrival, sequence_number) in arrivals {
+        let mut header = rtp::Header {
+            version: 2,
+            payload_type: arrival.payload_type,
+            sequence_number: *sequence_number,
+            timestamp: 1000,
+            ssrc: arrival.ssrc,
+            ..Default::default()
+        };
+        if let Some(mid) = arrival.mid {
+            header
+                .set_extension(MID_ID, Bytes::from_static(mid.as_bytes()))
+                .expect("extension");
+        }
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp::Packet {
+                    header,
+                    payload: Bytes::from_static(&[1, 2, 3]),
+                }))),
+            })
+            .expect("handle_read");
+        while handler.poll_read().is_some() {}
+    }
+    let mut opened = vec![];
+    while let Some(event) = handler.poll_event() {
+        if let RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+            RTCTrackEvent::OnOpen(init),
+        )) = event.event
+        {
+            opened.push((init.receiver_id.0, init.ssrc));
+        }
+    }
+    (opened, transceivers)
+}
+
 /// RFC 9143 section 9.2: an RTCP SDES packet with a MID item maps the chunk's SSRC to the m=
 /// section the MID names. A stream of that SSRC whose packets carry no MID, and whose payload
 /// type two sections receive, then has its section. A MID that names no section maps nothing.

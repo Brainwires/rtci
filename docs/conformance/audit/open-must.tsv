@@ -67,7 +67,6 @@ RFC7874-3-11	D	M	media (running)	As RFC7874-3-10: the 30 ms minimum gap
 RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered as RTP without disturbing the stream
 RFC7874-3-13	D	M	media (running)	As RFC7874-3-10: events 0 to 15
 RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite
-RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
 RFC7941-6-1	C	M	security	Cryptex or RFC 6904 for MID / RID by default; the default policy is Disable (W3C webrtc-extensions 10.2), no failing cell named
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
@@ -115,7 +114,7 @@ RFC8839-4.4.1.2.2-2	E	S	jsep (running)	`conflict`: both forms tested, the govern
 RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remote-candidates` (rtc-ice call)
 RFC8851-6.3-6	E	S	jsep (running)	The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes)
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9143-9.2-5	C	S	jsep (running)	Move a declared SSRC or a layer on a later MID
+RFC9143-9.2-5	C	S	jsep (running)	Move one simulcast layer of a several-stream receiver to the section its MID names
 RFC9429-3.6.2-2	E	S	jsep (running)	Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1
 RFC9429-4.1.8-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only (umbrella of 5.2.2-10, -27)
 RFC9429-4.1.9-2	E	S	jsep (running)	`conflict`: umbrella of 5.3.1-6
@@ -131,4 +130,4 @@ RFC9429-5.3-1	A	S	jsep (running)	`setting`: bundle attributes in the tagged sect
 RFC9429-5.3.1-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.8-1	C	S	jsep (running)	The remaining grammar exceptions
-RFC9429-6-1	C	S	jsep (running)	The payload-type step of RFC 9143 9.2
+RFC9429-6-1	C	S	jsep (running)	As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested

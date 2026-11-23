@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4985 of 5087 (98.0 %).
-- Tested as the default (`tested`): 4966 of 5087 (97.6 %); `setting`: 14; `conflict` (two specifications conflict, the governing one's form is the default): 5.
-- Open (not tested in any form): 102: 20 untested, 59 partial, 22 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4986 of 5087 (98.0 %).
+- Tested as the default (`tested`): 4967 of 5087 (97.6 %); `setting`: 14; `conflict` (two specifications conflict, the governing one's form is the default): 5.
+- Open (not tested in any form): 101: 20 untested, 58 partial, 22 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 14 | 13 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 52 | 31 |
+| C | partly implemented | 51 | 30 |
 | D | not implemented | 22 | 18 |
 | E | cannot be met or observed inside this engine | 17 | 11 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 121 | 73 |
+| all | | 120 | 72 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 90 rows, 52 of size S, 29 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 89 rows, 51 of size S, 29 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 18 | 1 | 2 | 0 | 21 | 12 | 8 | 1 |
+| jsep (running) | 0 | 17 | 1 | 2 | 0 | 20 | 11 | 8 | 1 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -92,12 +92,11 @@ Sorted by class, then owner, size and ID.
 | RFC5576-4.2-2 | `rfc5576.md` | A group lists at least one ssrc-id; MAY list more | partial | C | Use groups of three or more ids and `SIM` | S | jsep (running) |
 | RFC7728-6.2-2 | `rfc7728.md` | The hold-off period is 2 * RTT + T_dither_max, RTT the longest known | partial | C | Use the measured round trip | S | jsep (running) |
 | RFC7728-6.4-2 | `rfc7728.md` | The local-pause PAUSED is repeated a sufficient number of times | partial | C | Tune the repetitions to the observed loss | S | jsep (running) |
-| RFC7941-4.2.6-1 | `rfc7941.md` | An item from an RTP packet with the same or a lower extended sequence ... | partial | C | Apply a later MID item by extended sequence number (RFC9143-9.2-5) | S | jsep (running) |
 | RFC8839-4.4.2.2-1 | `rfc8839.md` | Lite: remote-candidates in the offer forms the pair and completes the ... | partial | C | Pin the local side of the pair from `a=remote-candidates` (rtc-ice call) | S | jsep (running) |
-| RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move a declared SSRC or a layer on a later MID | S | jsep (running) |
+| RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move one simulcast layer of a several-stream receiver to the section its MID names | S | jsep (running) |
 | RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
 | RFC9429-5.8-1 | `rfc9429.md` | Any line that is not well formed rejects the description, even when ... | partial | C | The remaining grammar exceptions | S | jsep (running) |
-| RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | The payload-type step of RFC 9143 9.2 | S | jsep (running) |
+| RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | As RFC9143-9.2-5 (a simulcast layer moved by MID); every other step of RFC 9143 9.2 is tested | S | jsep (running) |
 | WEBRTC-4.5.1-1 | `w3c-webrtc-pc.md` | Failures are reported as rejections or exceptions with the specified ... | partial | C | Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c) | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
 | RFC7728-6.3-3 | `rfc7728.md` | PAUSED is repeated in the next two regular RTCP reports while paused | partial | C | Carry PAUSED inside the regular compound packets | M | jsep (running) |

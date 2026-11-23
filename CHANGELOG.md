@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tested end to end: an offerer answers the answerer's connectivity checks before the
     answer arrives (RFC 8839 section 4.2.4; the ICE agent already verified them with its own
     credentials).
+  - A stream the remote description declares for one m= section moves to the section a
+    later packet's MID names (when that section's receiver has no stream), as one the engine
+    placed already did (RFC 9143 section 9.2); a MID from a packet older than the one that
+    moved the stream is not applied (RFC 7941 section 4.2.6).
 
 - **audit**: JSEP umbrella rows closed by their children (`conf/jsep-60-umbrellas`, jsep16).
   No engine change. RFC8859-4.8-1, A-7, A-29, A-33, RFC9429-5.2.1-57, 5.3.1-11, 5.5-5, 5.2-1
