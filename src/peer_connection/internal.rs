@@ -535,6 +535,8 @@ impl RTCPeerConnection {
         );
         let pair_changes = self
             .pipeline_context
+            .transports
+            .default()
             .ice_handler_context
             .selected_pair_changes;
         let aligning = pair_changes != self.seen_selected_pair_changes && {

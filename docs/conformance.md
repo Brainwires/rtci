@@ -214,7 +214,9 @@ What it does not close: a separate RTCP component (item 7).
 ### Execution order (one branch per step)
 
 The two pieces above as a sequence of branches, each of which leaves master correct (one
-transport still works at every step) and closes rows of its own. Run every step through the
+transport still works at every step) and closes rows of its own. Owner: the multi-transport
+work (`conf/mt-*`); T1 is done by `conf/mt-1-transport-set` (`TransportSet` in
+`src/peer_connection/handler/transport_set.rs`), and that work may reorder the rest. Run every step through the
 train's browser matrix before the next; steps 4 to 9 change what is on the wire.
 
 | Step | Branch content | Files touched | Rows it closes |
