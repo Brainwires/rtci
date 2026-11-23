@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: partly implemented JSEP rows (`conf/jsep-56-partial-rows`, jsep15).
+  - Remote descriptions: a section without `c=` when the session has none is refused (RFC
+    8866 section 5.7); bundled sections that give one payload type two `a=imageattr` sets
+    are refused (RFC 8859 section 4.7); two `ccm pause` lines for one
+    payload type are refused (RFC 7728 section 9); an `a=msid` id or appdata longer than 64
+    characters is ignored like any malformed `a=msid` (RFC 8830 section 2); an audio or video
+    section whose protocol is not RTP (`m=audio 9 udptl t38`) is answered rejected in its
+    place instead of having its formats read as payload types (RFC 8866 section 5.14);
+    domain names in `o=` / `c=` / candidates follow the RFC 1035 label rules (rtc-sdp); with
+    BUNDLE the DTLS role is the tagged section's `a=setup` (RFC 8859 section 4.5; Firefox's
+    later answers say `active` in the other sections).
+  - A trickled candidate (`add_remote_candidate`) is checked against the RFC 8839 grammar,
+    as the candidate lines of a description are.
+  - ICE (rtc-ice): application credentials are held to RFC 8839 section 5.4 (ufrag 4 to 32
+    ice-chars, password 22 to 256): new errors `ErrLocalUfragInvalid`, `ErrLocalPwdInvalid`;
+    a local srflx / prflx / relay candidate without a related address is refused
+    (`ErrLocalCandidateWithoutRelatedAddress`, RFC 8839 section 5.1).
+  - Local descriptions: `create_offer` fails when a `SettingEngineBuilder::with_mid_generator`
+    generator returns a mid the session has or one that is not a token (RFC 5888 section 4),
+    and when a stream or track id cannot be written in `a=msid` (1 to 64 token characters,
+    RFC 8830 section 2); offered media sections say `TCP/DTLS/RTP/SAVPF` when the default or
+    selected candidate is a TCP one (RFC 9429 section 5.1.2), as the data section already said
+    `TCP/DTLS/SCTP`.
+  - SSRCs: a new local SSRC is drawn outside every SSRC a local description of the
+    connection described before (RFC 5576 sections 5 and 8; bounded history of 4096).
+  - Remote tracks: a remote source that times out (RFC 3550 6.3.5, the RTCP session's
+    `SourceTimedOut`) mutes its track as a BYE does (W3C webrtc 9.3).
+  - Browser descriptions recorded by the interop harness (train 9 round 3: Chromium,
+    Firefox, WebKit, 42 files) are fixtures of `browser_sdp_test.rs`; all 183 recorded
+    (bar the two munged-fingerprint cells) pass every check, none needs a new tolerance.
+  - Breaking: the new refusals and errors above; `RTCPeerConnection::add_sender_sdp`-side
+    errors surface from `create_offer` / `create_answer`.
+
 - **audit**: the open MUST rows, classified (`conf/audit-2-classify`). No engine change.
   - New verdict `setting` (`docs/conformance/audit/RULES.md`): the clause's behaviour is
     implemented and tested, selected by a named setting, and the default differs because a

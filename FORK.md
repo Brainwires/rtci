@@ -435,6 +435,14 @@ versions that support it. Raising it is a deliberate change of the manifest.
 
 ### Defaults the fork narrows on purpose
 
+- SDP (jsep15): remote descriptions without `c=` for a section, with an `a=imageattr` set
+  that differs for one payload type across one BUNDLE group, or with two `ccm pause` lines for
+  one payload type, are refused (RFC 8866 5.7, RFC 8859 4.7, RFC 7728 9); trickled candidates are grammar-checked (RFC 8839 5.1);
+  application ICE credentials outside RFC 8839 5.4 and local reflexive candidates without
+  `raddr` are refused; `create_offer` refuses a duplicate generated mid and ids that cannot be
+  an msid. With BUNDLE the DTLS role is read from the tagged section. The browser fixtures
+  (`tests/fixtures/browser-sdp/`, Chromium, Firefox, WebKit) pass all of it.
+
 - SDP (jsep13): a remote description with an attribute that does not follow its grammar is
   refused, also when the value would be ignored (RFC 9429 section 5.8; upstream skipped such
   lines, or used them), except `a=msid` and `a=rid` lines, which RFC 8830 and RFC 8851 have

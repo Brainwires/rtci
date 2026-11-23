@@ -94,7 +94,7 @@ RFC9605-X-5	D	M	sdp	SFrame signalling in SDP (no attribute is standardised yet)
 RFC9605-X-6	D	L	media (running)	The dependency descriptor header extension
 RFC9628-6-1	A	S	media (running)	`setting`: VP9 receiver limits
 RFC9653-4-3	E	S	sctp	Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
-WEBRTC-4.4.1.4-11	C	S	jsep (running)	The rtcp-mux, rid and tls-id checks of RFC 9429 5.8.3
+WEBRTC-4.4.1.4-11	C	S	jsep (running)	W3C error names (InvalidAccessError) for the 5.8.3 refusals (4.5.1-1); the checks themselves exist and are tested
 WEBRTC-4.4.1.4-36	C	S	w3c	Update the max message size on a pranswer and on renegotiation
 WEBRTC-4.4.1.4-82	C	S	w3c	With one transport, a description rejecting every section closes it and fires the closed events
 WEBRTC-4.4.1.4-91	C	M	w3c	Queue the data channel errors of a description in the spec order
@@ -102,109 +102,59 @@ WEBRTC-4.4.2-43	C	M	jsep (running)	As RFC9429-4.1.11-1
 WEBRTC-4.5.1-1	C	M	jsep (running)	Umbrella of the open 4.4.1.4 / 4.4.2 rows
 WEBRTC-5.4-31	C	S	jsep (running)	Strict codec dictionary match in the media engine
 WEBRTC-5.4-32	C	S	jsep (running)	Symmetric / asymmetric fmtp parameter rules beyond H.264
-RFC3264-4-4	E	S	jsep (running)	What was sent is the application's signalling; the engine cannot see it
 RFC3264-5.1-8	C	M	jsep (running)	Follow an answer that renumbers a codec when sending
 RFC3264-5.1-16	C	M	jsep (running)	Start receivers when the offer is applied (RFC9429-4.1.11-1)
 RFC3264-5.1-17	C	M	jsep (running)	As RFC3264-5.1-16
 RFC5576-4.2-2	C	S	jsep (running)	Use groups of three or more ids and `SIM`
-RFC5576-5-2	B	S	jsep (running)	A test that bindings are rebuilt on each remote description
-RFC5576-5-3	C	S	jsep (running)	Check application-named SSRCs; detect a remote description that mentions a local SSRC
-RFC5576-5-9	C	S	jsep (running)	Keep a history of SSRCs used
-RFC5576-8-1	C	S	jsep (running)	Check SSRCs minted before the offer was applied
-RFC5576-8-2	C	S	jsep (running)	As RFC5576-5-9
-RFC5888-4-1	C	S	jsep (running)	Catch a duplicate mid from a custom `mid_generator`
-RFC5888-7-1	E	S	jsep (running)	Playout is the application's; the engine generates, answers and exposes LS groups (tested)
 RFC7728-6.2-2	C	S	jsep (running)	Use the measured round trip
 RFC7728-6.2-4	D	M	jsep (running)	Detect several receivers (RFC7728-6.2-5)
 RFC7728-6.3-3	C	M	jsep (running)	Carry PAUSED inside the regular compound packets
 RFC7728-6.4-2	C	S	jsep (running)	Tune the repetitions to the observed loss
 RFC7728-8.2-4	C	M	jsep (running)	As RFC7728-6.3-3
 RFC7728-8.5-1	C	M	jsep (running)	Schedule the messages in the RTCP session's Early / Regular slots
-RFC7728-9-7	C	S	jsep (running)	Refuse two explicit `pause` lines for one payload type
-RFC8830-2-1	C	S	jsep (running)	Check msid length and token characters (gen and parse)
 RFC8830-2-4	C	S	jsep (running)	Check msid-id / appdata uniqueness
 RFC8830-3-6	C	M	jsep (running)	A MediaStream object and stream-added notice
 RFC8830-3-7	E	S	jsep (running)	W3C webrtc-pc governs track state (RFC 9429 defers to it); the RFC form is `with_msid_removal_ends_track(true)`, tested. Spec conflict, not interop
-RFC8830-3-8	C	S	jsep (running)	End a track on RTP timeout
+RFC8830-3-8	E	S	jsep (running)	W3C webrtc 9.3 governs track state (as 3-7): BYE and the RTP timeout (now handled) mute the track; an ended form would be a setting. Spec conflict, not interop
 RFC8830-3.2.2-1	C	M	jsep (running)	Apply msid when the offer is set; several streams per track
 RFC8830-3.2.5-1	C	M	jsep (running)	Move a track between streams; act on removal
-RFC8839-4.2.1.2-1	C	S	jsep (running)	Candidates in every m= section that has a transport
 RFC8839-4.2.4-1	C	M	jsep (running)	Answer checks with the local credentials before the answer arrives
-RFC8839-4.3.1-1	C	S	jsep (running)	As RFC8839-4.2.1.2-1
-RFC8839-4.3.2-1	C	S	jsep (running)	As RFC8839-4.2.1.2-1
-RFC8839-4.3.4-4	B	S	jsep (running)	A test that the controlling side nominates once until a restart
-RFC8839-4.4.1.1.1-3	C	S	jsep (running)	New credentials on a restart also with fixed `SettingEngine` credentials (bug B5)
 RFC8839-4.4.1.2.2-2	E	S	jsep (running)	RFC 9429 5.2.2 requires the opposite of a JSEP endpoint; the RFC 8839 form is `with_nominated_candidates_only(true)`, tested. Spec conflict, not interop
-RFC8839-4.4.1.3-1	B	S	jsep (running)	A lite renegotiation test
-RFC8839-4.4.2.1-2	C	S	jsep (running)	As RFC8839-4.4.1.1.1-3
 RFC8839-4.4.2.2-1	C	S	jsep (running)	Pin the local side of the pair from `a=remote-candidates` (rtc-ice call)
-RFC8839-4.4.3.1-4	B	S	jsep (running)	A test that pairs that stay keep their state
-RFC8839-4.4.3.1-5	B	S	jsep (running)	A test that Completed stays Completed
-RFC8839-4.4.3.2-1	B	S	jsep (running)	A lite restart test
-RFC8839-5.1-3	C	S	jsep (running)	The grammar check for trickled candidates (`add_remote_candidate`)
-RFC8839-5.1-6	C	S	jsep (running)	Write component 1 only; read the component of remote candidates (bugs B3, B4)
-RFC8839-5.1-8	C	S	jsep (running)	Refuse a srflx / relay candidate without `raddr` / `rport`
-RFC8839-5.1-11	C	S	jsep (running)	Read `tcptype` wherever it stands among the extensions
-RFC8839-5.4-5	C	S	jsep (running)	Check supplied credentials' length and characters
-RFC8839-5.4-6	C	S	jsep (running)	Bound supplied ufrags
-RFC8851-4-3	C	S	jsep (running)	RepairedRtpStreamId on retransmissions (NACK responder)
 RFC8851-6.2.2-6	C	M	jsep (running)	Check restriction values against the codec (section 8)
 RFC8851-6.3-6	C	S	jsep (running)	Ask the encoder whether it can meet the restrictions
 RFC8851-6.4-1	C	M	jsep (running)	Codec compatibility of answered values (section 8)
-RFC8858-5.2-2	C	S	jsep (running)	Re-offer with the stream at port zero instead of refusing the answer
-RFC8859-4.3-1	C	S	jsep (running)	Check IDENTICAL attributes for equality on receive
-RFC8859-4.5-1	C	S	jsep (running)	Take fingerprint and setup from the tagged section
-RFC8859-4.7-1	C	S	jsep (running)	Compare `a=imageattr` per payload type on receive
+RFC8859-4.3-1	C	S	jsep (running)	Refuse differing IDENTICAL values: reverses the ECN tagged-section rule (RFC 6679 7.2), owner decision; presence is decided by the fixtures (tagged speaks for the group)
+RFC8859-4.5-1	C	S	jsep (running)	Fingerprints: as RFC8859-A-19 (owner decision); setup now from the tagged section
 RFC8859-4.8-1	C	S	jsep (running)	Umbrella of A-13, A-22, A-23
 RFC8859-A-7	C	S	jsep (running)	Other group semantics (see rfc5888.md)
-RFC8859-A-13	C	S	jsep (running)	Refuse conflicting extmap ids across bundled sections
-RFC8859-A-17	C	S	jsep (running)	Read rtcp-mux of every bundled section
-RFC8859-A-18	C	S	jsep (running)	As RFC8859-A-17 for rtcp-rsize
-RFC8859-A-19	C	S	jsep (running)	Take the tagged section's fingerprint
-RFC8859-A-20	C	S	jsep (running)	Take the tagged section's setup; read session level
+RFC8859-A-19	C	S	jsep (running)	Owner decision: read the tagged section's fingerprint and ignore the others, instead of refusing a disagreement (no browser writes one)
 RFC8859-A-29	C	S	jsep (running)	See rfc9143.md 6-1
-RFC8859-A-30	B	S	jsep (running)	A test of which section's `a=cryptex` decides
-RFC8859-A-32	B	S	jsep (running)	A test with two bundled video sections
 RFC8859-A-33	C	S	jsep (running)	c= of a bundled section per RFC 9143 7.1.1
-RFC8866-5-7	C	S	jsep (running)	RFC 1035 label rules
-RFC8866-5.7-1	C	S	jsep (running)	Call `validate` in `set_remote_description`
-RFC8866-5.13-5	C	S	jsep (running)	Inherit the other session-level attributes
-RFC8866-5.14-13	C	S	jsep (running)	Read the proto before reading fmt as payload types
 RFC8866-6.10-1	D	S	jsep (running)	`a=charset`
 RFC9143-7.1.3-3	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9143-9.2-1	C	S	jsep (running)	Send the RTCP SDES MID item
 RFC9143-9.2-5	C	S	jsep (running)	Move a declared SSRC or a layer on a later MID
-RFC9143-9.2-14	C	S	jsep (running)	Discard an unrecognised APP packet instead of passing it up
-RFC9429-3.6.2-1	E	S	jsep (running)	The encoder is the application's; `send_resolution` gives the bound (tested)
 RFC9429-3.6.2-2	E	S	jsep (running)	As RFC9429-3.6.2-1: the engine does not hold back the application's packets
 RFC9429-4.1.8-1	C	M	jsep (running)	Umbrella of the 5.2.2 rows
 RFC9429-4.1.9-2	C	M	jsep (running)	Umbrella of the 5.3.1 rows
 RFC9429-4.1.11-1	C	M	jsep (running)	Receive the formats and sections of a pending local offer
 RFC9429-5.1-1	C	L	jsep (running)	Umbrella of the per-spec audits
-RFC9429-5.1.1-3	B	S	jsep (running)	A test against an RFC 5245 ICE peer
-RFC9429-5.1.2-1	C	S	jsep (running)	TCP/DTLS/RTP/SAVPF when the selected candidate is TCP
 RFC9429-5.2-1	C	L	jsep (running)	Umbrella of the RFC 8834 audit
 RFC9429-5.2.1-13	A	S	jsep (running)	`setting`: unique transport credentials
 RFC9429-5.2.1-23	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.1-28	C	M	jsep (running)	Offer RED / ULPFEC by default (they exist now; the note's D1 is stale)
-RFC9429-5.2.1-29	E	S	jsep (running)	The engine packetizes nothing; `a=maxptime` is written from the application's packet times (tested)
 RFC9429-5.2.1-34	A	S	jsep (running)	`setting`: msid without appdata
 RFC9429-5.2.1-40	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9429-5.2.1-56	B	S	jsep (running)	A test that a default offer has no `a=crypto`, `a=key-mgmt`, `a=ice-lite`
 RFC9429-5.2.1-57	C	S	jsep (running)	Umbrella of rfc8859.md
 RFC9429-5.2.1-58	C	S	jsep (running)	Relative `u=`, 64-bit o= ids and times, non-UTF-8 text
 RFC9429-5.2.2-10	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
 RFC9429-5.2.2-27	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9429-5.2.3.2-4	E	S	jsep (running)	Silence suppression is the encoder's (the application's); the offer is tested
 RFC9429-5.3-1	C	M	jsep (running)	Umbrella
-RFC9429-5.3.1-2	C	S	jsep (running)	`ice2`; `a=msid-semantic` in offers too
 RFC9429-5.3.1-6	E	S	jsep (running)	W3C webrtc-pc 5.4 ("stopping" does not affect createAnswer) governs; the RFC form is a setting, tested. Spec conflict, not interop
 RFC9429-5.3.1-11	C	S	jsep (running)	Umbrella of rfc3264.md
 RFC9429-5.3.2-5	A	S	jsep (running)	`setting`: bundle attributes in the tagged section only
-RFC9429-5.3.2-9	E	S	jsep (running)	rtcp-mux is required (rtcpMuxPolicy require; an answer without it is refused), so a section without it never runs. Proposed n/a
 RFC9429-5.5-5	C	S	jsep (running)	Umbrella of the 5.9 rows
 RFC9429-5.8-1	C	S	jsep (running)	The remaining grammar exceptions
 RFC9429-5.9-4	C	M	jsep (running)	As RFC9429-4.1.11-1
-RFC9429-5.10-13	C	M	jsep (running)	Apply an answer that drops or pauses layers to the sender
 RFC9429-5.11-5	C	M	jsep (running)	Prepare reception of every payload type before the first packet
 RFC9429-6-1	C	S	jsep (running)	The payload-type step of RFC 9143 9.2
