@@ -6,7 +6,7 @@
 use super::*;
 use crate::association::Event;
 use crate::association::stream::{StreamEvent, StreamId};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 /// xorshift64*: a reproducible loss pattern without a dependency.
@@ -44,6 +44,13 @@ pub(crate) struct Peer {
     pub(crate) received: Vec<(StreamId, Bytes)>,
     /// When false, readable streams are left alone (an application that stopped reading).
     pub(crate) auto_read: bool,
+    /// How messages are read: in parts with `Stream::read_part`, put together here as the
+    /// data channel layer does (the default), or whole with `Stream::read_sctp`.
+    pub(crate) read_parts: bool,
+    /// The parts read of each stream's message that is not complete yet.
+    partial: HashMap<StreamId, Vec<u8>>,
+    /// How many parts were read that did not end their message.
+    pub(crate) parts_before_end: usize,
     /// When true, what the endpoint itself has to send (`Endpoint::poll_transmit`: the INIT
     /// ACK of a stateless handshake, answers to out-of-the-blue packets) goes on the link.
     pub(crate) endpoint_answers: bool,
@@ -64,6 +71,9 @@ impl Peer {
             events: vec![],
             received: vec![],
             auto_read: true,
+            read_parts: true,
+            partial: HashMap::new(),
+            parts_before_end: 0,
             endpoint_answers: false,
         }
     }
@@ -127,13 +137,32 @@ impl Peer {
             match event {
                 Event::Stream(StreamEvent::Readable { id }) if self.auto_read => {
                     if let Ok(mut stream) = conn.stream(id) {
-                        while let Ok(Some(chunks)) = stream.read_sctp() {
-                            let mut buf = vec![0u8; chunks.len()];
-                            let n = chunks.read(&mut buf).unwrap_or(0);
-                            buf.truncate(n);
-                            self.received.push((id, Bytes::from(buf)));
+                        if self.read_parts {
+                            while let Ok(Some(part)) = stream.read_part() {
+                                let buf = self.partial.entry(id).or_default();
+                                for c in &part.chunks.chunks {
+                                    buf.extend_from_slice(&c.user_data);
+                                }
+                                if part.end_of_record {
+                                    let whole = self.partial.remove(&id).unwrap_or_default();
+                                    self.received.push((id, Bytes::from(whole)));
+                                } else {
+                                    self.parts_before_end += 1;
+                                }
+                            }
+                        } else {
+                            while let Ok(Some(chunks)) = stream.read_sctp() {
+                                let mut buf = vec![0u8; chunks.len()];
+                                let n = chunks.read(&mut buf).unwrap_or(0);
+                                buf.truncate(n);
+                                self.received.push((id, Bytes::from(buf)));
+                            }
                         }
                     }
+                }
+                Event::Stream(StreamEvent::PartialDeliveryAborted { id, .. }) => {
+                    self.partial.remove(&id);
+                    self.events.push(event);
                 }
                 other => self.events.push(other),
             }

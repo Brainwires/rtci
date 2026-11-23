@@ -166,6 +166,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numbers, which stays the default). Not covered: `configure_ulpfec` takes one RED and one
   ULPFEC payload type for both directions, and an `a=rid` `pt=` list is compared by number with
   this endpoint's formats. Row RFC3264-5.1-8 `tested`; RFC3264-6.1-23 now has a test that sends.
+- **sctp** (sctp-15): `TransportConfig::with_strict_zero_window_drop` and
+  `strict_zero_window_drop` are removed. The RFC 9260 6.2 drop they selected is the default
+  for every association; `with_zero_window_overcommit(true)` is the escape for applications
+  that read whole messages only. `Stream::read_part` (partial delivery) is how a buffer full
+  of incomplete messages empties under it.
 
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
@@ -595,6 +600,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the association is up, and a change of ICE selected pair switches to a fresh one.
 - **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
   association of every transport of the connection, not only the first.
+- **sctp** (sctp-15, RFC 9260 6.9, 6.2, 11.1.7; RFC 6458 3.1.4, 6.1.7, 8.1.21; RFC 8260):
+  partial delivery. New `Stream::read_part` returns a `MessagePart` (`chunks`, `unordered`,
+  `first`, `end_of_record`): a complete message whole, as one part with the end of record;
+  the in-order leading fragments of a message that has not all arrived once they reach the
+  partial delivery point (new `TransportConfig::with_partial_delivery_point`, default half
+  the receive buffer, at most the buffer), or whatever their size when the receive buffer is
+  out of space with nothing readable whole (RFC 9260 6.9: "it SHOULD dispatch part of its
+  inbound message through a partial delivery API"). One message per stream at a time, an
+  ordered one only when it is due, nothing else of the stream read until its last part;
+  several streams at once with I-DATA (RFC 8260 4.3.1). What is read leaves the receive
+  window at once. New `Stream::in_partial_delivery`. A FORWARD TSN or I-FORWARD-TSN that
+  skips the rest of a message in partial delivery raises the new
+  `StreamEvent::PartialDeliveryAborted { id, unordered, sequence }` (`StreamEvent` is
+  `#[non_exhaustive]`). `read_sctp` is unchanged: whole messages only.
+  - The RFC 9260 6.2 drop (once a_rwnd 0 is advertised, new DATA above the largest TSN is
+    dropped) is the default for every association again: an I-DATA association no longer
+    takes the chunk that unblocks reassembly through a closed window. With partial delivery
+    the drop deadlocks nothing (sctp-14's measurements, now read in parts: six interleaved
+    16 KiB messages into a 16 KiB buffer, 24 of 24 in 2.1 s, 0 of 24 for a reader of whole
+    messages; one 64 KiB message through a 16 KiB buffer, 230 ms; the zero window sweep, 672
+    runs, 0 stalls). `with_zero_window_overcommit` stays, for applications that read whole
+    messages only.
+  - A window the sender sees as too small for a full chunk (the last a_rwnd less what it
+    sent since) is announced by a SACK as soon as a read opens it (RFC 9260 6.2, "When the
+    window opens up, an SCTP receiver SHOULD send additional SACK chunks"); it was only for
+    a window advertised as 0. On the wire: extra window-update SACKs toward a sender that a
+    small receive buffer blocks; none while the sender still sees room for a chunk.
+- **peer_connection** (sctp-15, RFC 9260 6.9, RFC 8841 6.1, RFC 8831 6.6): data channels read
+  SCTP in parts and put messages together above the association, so the SCTP window reopens
+  while a message is still incomplete; the application still gets whole messages (W3C). The
+  zero window overcommit is no longer set when the advertised `max-message-size` is larger
+  than the receive buffer. A message larger than the advertised maximum is dropped as
+  before. A conforming peer has at most one message in progress per stream (RFC 8260
+  2.2.2), each at most that maximum, and the handler holds at most one per stream; over
+  that product the bytes of incomplete messages held for an association have a ceiling,
+  new `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` (64 MiB by default, never
+  below the advertised `max-message-size`; worst case per association: the receive buffer
+  plus the ceiling, 65 MiB with the defaults). A part that would go over fails only its
+  data channel (`OnError`, `data-channel-failure`, the message naming the limit) and resets
+  its stream once the rest of the message has been read and dropped. 16 and 64 concurrent
+  64 KiB messages over I-DATA all arrive under the default. The receive window a peer sees is the same as before
+  for messages that fit half the buffer; a message larger, or interleaved messages that fill
+  it, keep it open instead of closing it.
 
 ### Features
 

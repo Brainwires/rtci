@@ -9,18 +9,18 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5080.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5060 of 5080 (99.6 %).
-- Tested as the default (`tested`): 5028 of 5080 (99.0 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Tested as the default (`tested`): 5029 of 5080 (99.0 %); `setting`: 24; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 20: 2 untested, 13 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 25 | 17 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 24 | 17 |
 | B | implemented, lacking a test that fails without it | 0 | 0 |
 | C | partly implemented | 9 | 4 |
 | D | not implemented | 7 | 6 |
 | E | cannot be met or observed inside this engine | 11 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 52 | 35 |
+| all | | 51 | 35 |
 
 ## What 100 % takes
 
@@ -75,7 +75,6 @@ Sorted by class, then owner, size and ID.
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | setting | A | `setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
-| RFC9260-6.2-34 | `rfc9260.md` | With a_rwnd 0, new DATA above the highest TSN received is dropped ... | setting | A | `setting` (measured, sctp-14): `TransportConfig::with_strict_zero_window_drop(true)`, RFC test with its mutation; with I-DATA the drop deadlocks interleaved messages that fill the buffer together (0 of 24 against 24 of 24). Closes as tested only with a partial delivery API (RFC9260-6.9-12), under which the drop would not deadlock | S | sctp |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
 | RFC8842-5.1-2 | `rfc8842.md` | Offerer needing a new association allocates a new 3-tuple for the ... | partial | C | On a new association drop the local candidates and refuse the transport addresses the previous one used (the engine restarts ICE already); move the rtc tests that re-add the same candidates (`dtls_association_new.rs`) to new ports (audit-5) | M | dtls-srtp |
@@ -107,7 +106,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-36 rows: 10 of class B, 10 of class C, 3 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
+37 rows: 10 of class B, 11 of class C, 3 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -127,6 +126,7 @@ Sorted by class, then owner, size and ID.
 | RFC7742-6.2-10 | `rfc7742.md` | Parameter sets are signalled in-band; sprop-parameter-sets MUST NOT ... | C | tested |
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | C | tested |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | C | tested |
+| RFC7941-4.2.6-1 | `rfc7941.md` | An item from an RTP packet with the same or a lower extended sequence ... | C | tested |
 | RFC8122-6.2-5 | `rfc8122.md` | Server ends with bad_certificate when the client sends none or a ... | C | tested |
 | RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | C | tested |
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | C | tested |

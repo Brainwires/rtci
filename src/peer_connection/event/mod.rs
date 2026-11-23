@@ -786,6 +786,22 @@ pub(crate) enum RTCEventInternal {
     /// - Stream ID
     SCTPStreamFailed(usize /*AssociationHandle*/, u16 /*StreamID*/),
 
+    /// A message read in parts (RFC 9260 6.9) would have taken the incomplete messages held
+    /// for the association past the inbound reassembly limit
+    /// (`SettingEngineBuilder::with_sctp_inbound_reassembly_limit`): the data channel on the
+    /// stream fails, with an error naming the limit (RFC 8831 6.6). Its stream is reset by
+    /// the SCTP handler once the rest of the message has been read and dropped.
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    /// - The limit, in bytes
+    SCTPInboundReassemblyLimit(
+        usize, /*AssociationHandle*/
+        u16,   /*StreamID*/
+        usize,
+    ),
+
     /// The SCTP cause code of the failure the next `SCTPStreamFailed` / `SCTPAssociationFailed`
     /// report (W3C `RTCError.sctpCauseCode`), when the association was aborted with one.
     SCTPFailureCause(u16),
