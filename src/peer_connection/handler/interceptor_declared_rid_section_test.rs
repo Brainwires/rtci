@@ -30,6 +30,11 @@ const VP8_RTX: u8 = 124;
 
 /// An engine that answered Firefox's offer: `start_rtp` has set up the video receiver.
 fn answered_firefox() -> RTCPeerConnection {
+    answered(FIREFOX_OFFER)
+}
+
+/// An engine that answered `offer`.
+fn answered(offer: &str) -> RTCPeerConnection {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().expect("codecs");
     for uri in [
@@ -52,7 +57,7 @@ fn answered_firefox() -> RTCPeerConnection {
         .with_media_engine(media_engine)
         .build(now)
         .expect("peer connection");
-    let offer = FIREFOX_OFFER.replace("\r\n", "\n").replace('\n', "\r\n");
+    let offer = offer.replace("\r\n", "\n").replace('\n', "\r\n");
     pc.set_remote_description(now, RTCSessionDescription::offer(offer).expect("offer"))
         .expect("set_remote_description");
     let answer = pc.create_answer(None).expect("answer");
@@ -147,6 +152,21 @@ fn video_codings(pc: &RTCPeerConnection) -> Vec<(String, Option<u32>, Option<u32
         .get_coding_parameters()
         .iter()
         .map(|c| (c.rid.clone(), c.ssrc, c.rtx.as_ref().map(|r| r.ssrc)))
+        .collect()
+}
+
+/// The video receiver's declared streams: (SSRC, RTX SSRC).
+fn declared(pc: &RTCPeerConnection) -> Vec<(Option<u32>, Option<u32>)> {
+    pc.rtp_transceivers
+        .iter()
+        .find(|t| t.kind() == RtpCodecKind::Video)
+        .expect("video transceiver")
+        .receiver()
+        .as_ref()
+        .expect("receiver")
+        .declared_codings()
+        .iter()
+        .map(|c| (c.ssrc, c.rtx.as_ref().map(|r| r.ssrc)))
         .collect()
 }
 
@@ -270,6 +290,54 @@ fn a_declared_rtx_ssrc_without_a_rid_resolves_to_its_primary() {
         }],
     );
     assert_eq!(vec![(FID[1].0, None)], opened);
+    assert!(
+        video_codings(&pc).contains(&(String::new(), Some(FID[1].0), Some(FID[1].1))),
+        "{:?}",
+        video_codings(&pc)
+    );
+}
+
+/// Firefox's offer with its three layers also grouped as `a=ssrc-group:SIM` (libwebrtc's
+/// simulcast by SSRC): the group folds them into one track, and each member is still a declared
+/// primary of the rid section with its own FID RTX. A RID-less packet of the second member is
+/// a stream of the section without a rid; one with a RID binds by rid.
+#[test]
+fn every_member_of_a_sim_group_in_a_rid_section_is_a_declared_ssrc() {
+    let sim = format!(
+        "a=ssrc-group:FID {} {}\r\na=ssrc-group:SIM {} {} {}\r\n",
+        FID[2].0, FID[2].1, FID[0].0, FID[1].0, FID[2].0
+    );
+    let last_fid = format!("a=ssrc-group:FID {} {}\r\n", FID[2].0, FID[2].1);
+    let offer = FIREFOX_OFFER.replace("\r\n", "\n").replace('\n', "\r\n");
+    assert!(offer.contains(&last_fid));
+    let mut pc = answered(&offer.replacen(&last_fid, &sim, 1));
+    assert_eq!(
+        FID.iter()
+            .map(|(media, rtx)| (Some(*media), Some(*rtx)))
+            .collect::<Vec<_>>(),
+        declared(&pc)
+    );
+    let opened = opened(
+        &mut pc,
+        &[
+            Arrival {
+                ssrc: FID[1].0,
+                payload_type: VP8,
+                mid: None,
+                rid: None,
+            },
+            Arrival {
+                ssrc: FID[0].0,
+                payload_type: VP8,
+                mid: Some("0"),
+                rid: Some("h"),
+            },
+        ],
+    );
+    assert_eq!(
+        vec![(FID[1].0, None), (FID[0].0, Some("h".to_owned()))],
+        opened
+    );
     assert!(
         video_codings(&pc).contains(&(String::new(), Some(FID[1].0), Some(FID[1].1))),
         "{:?}",
