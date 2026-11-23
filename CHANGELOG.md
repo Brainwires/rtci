@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- **interceptors**: the NACK generator asks for a lost packet while it is missing (a round trip
+  between requests) instead of giving it up after ten requests or two seconds
+  (`conf/gcc-1-cap-recovery`). The limits came with v0.22.0+brainwires.6 (`ee4217b2`) and froze
+  calls: when a path drops to 300 kbit/s the sender loses some fifty video packets before its
+  estimate falls, their retransmissions crowd the same full queue, and packets given up while
+  the receiver's sample builder still waited for them left the picture frozen for 5.9 to 6.8 s
+  until a key frame (ParolNet's `m1::the_estimate_follows_a_cap_that_comes_and_goes`, and
+  `tests/capacity_cap_video_rtc2rtc.rs` on six of six seeds). The limits stay available:
+  `with_max_nacks_per_packet(NACK_SUGGESTED_MAX_NACKS_PER_PACKET)`,
+  `with_max_packet_age(Some(NACK_SUGGESTED_MAX_PACKET_AGE))`; a signalled `rtx-time` still ends
+  the requests. `NACK_DEFAULT_MAX_NACKS_PER_PACKET` and `NACK_DEFAULT_MAX_PACKET_AGE` are renamed
+  `NACK_SUGGESTED_*` (they are not the defaults).
+- **interceptors**: the NACK responder holds its retransmissions to the congestion controller's
+  target (RFC 4588 section 7), read from `Attribute::TargetBitrateChanged` on the read leg:
+  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default, `UpToTarget`
+  (libwebrtc's rule), keeps the retransmissions alone under the target over the last second;
+  `WithinTarget` is the RFC's form (they take what the original packets leave of it);
+  `Unlimited` is the earlier behaviour. Without a congestion controller nothing is held back.
+  Measured by `tests/capacity_cap_video_rtc2rtc.rs`: unlimited, about 300 retransmissions (five
+  times the link) of which three in four were dropped at the bottleneck; `UpToTarget`, 66 of which
+  12; the RFC form, too few to repair with while the encoder sat at the controller's floor (a
+  2.7 to 3.1 s freeze).
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC
