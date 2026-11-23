@@ -3797,6 +3797,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
+  HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are
+  incremented only for missing TSNs prior to the HTNA") was applied only outside Fast
+  Recovery; in Fast Recovery only a SACK that advanced the Cumulative TSN Ack Point counted
+  any, so a chunk lost inside the recovery window after it began waited for T3-rtx: one packet
+  in flight at an RTO doubling to 60 s. At 10 % loss a few lost SACKs after that held a
+  reliable channel's messages back for more than 90 s (124 of 300 delivered; the shape of the
+  train 8 CI failure, 205 of 300). Every SACK now counts below its HTNA; a chunk that reaches
+  three reports during a Fast Recovery that began earlier is retransmitted as soon as cwnd
+  allows and is not fast retransmitted again (steps 5 and 6). The test that asserted the old
+  rule, `reliable_loss_in_fast_recovery_keeps_htna_miss_indications`, is now
+  `reliable_loss_in_fast_recovery_is_retransmitted_by_gap_reports`, and
+  `fast_recovery_retransmits_only_the_reported_loss` counts its three reports instead of
+  setting them by hand; also
+  `tests/lossy_link_rtc2rtc.rs::a_loss_during_fast_recovery_is_retransmitted_on_gap_reports`.
 - **ice**: over a lossy link the data channel could take more than 30 seconds to open because
   the controlling agent dropped the peer's DTLS handshake while the responses to its
   nomination were lost. The controlled agent selects the pair when the first USE-CANDIDATE

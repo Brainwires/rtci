@@ -58,7 +58,10 @@ fn fast_recovery_counts_only_tsns_the_sack_reports_missing() -> Result<()> {
     Ok(())
 }
 
-/// Three such SACKs fast-retransmit the TSN they report missing, and nothing sent after it.
+/// Three SACKs that report a TSN missing retransmit it during Fast Recovery, and nothing sent
+/// after it. The two that do not advance the Cumulative TSN Ack count a miss indication too:
+/// 101 is below the highest TSN each newly acknowledges (RFC 9260 7.2.4, the HTNA rule holds
+/// for every SACK).
 #[test]
 fn fast_recovery_retransmits_only_the_reported_loss() -> Result<()> {
     let now = Instant::now();
@@ -67,13 +70,16 @@ fn fast_recovery_retransmits_only_the_reported_loss() -> Result<()> {
     a.fast_recover_exit_point = 109;
 
     a.handle_sack(&sack(100, vec![(2, 2)]), now)?; // 101 missing, 102 acked
-    a.handle_sack(&sack(100, vec![(2, 3)]), now)?; // no advance: rule (b) does not apply
-    a.handle_sack(&sack(100, vec![(2, 4)]), now)?;
-    assert_eq!(1, a.inflight_queue.get(101).unwrap().miss_indicator);
-    // Two more advances of the Cumulative TSN Ack are impossible without 101, so feed the
-    // indications the way two more advancing SACKs from other losses would.
-    a.inflight_queue.get_mut(101).unwrap().miss_indicator = 3;
-    a.will_retransmit_fast = true;
+    a.handle_sack(&sack(100, vec![(2, 3)]), now)?; // no advance; 103 newly acked
+    a.handle_sack(&sack(100, vec![(2, 4)]), now)?; // 104 newly acked
+    assert_eq!(3, a.inflight_queue.get(101).unwrap().miss_indicator);
+    for tsn in 105..=109 {
+        assert_eq!(
+            0,
+            a.inflight_queue.get(tsn).unwrap().miss_indicator,
+            "TSN {tsn}"
+        );
+    }
 
     let retransmitted = transmitted_data(&a.gather_outbound(now).0);
     assert_eq!(
