@@ -12,10 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dtls, ice**: a new DTLS association runs on a new 3-tuple (RFC 8842 section 5.1: "a new
   3-tuple ... MUST be allocated by at least one of the endpoints"; section 6: "a completely new
   set of ICE candidates that were not recently used for any other DTLS association"). The ICE
-  restart that comes with a new association (an offer that sets a closed transport up again,
-  `renew_dtls_association` and the automatic re-keying that calls it, a data-only association
-  replaced for SRTP, and the answer to an offer that asks for one) now drops the local
-  candidates, even without `with_discard_local_candidates_during_ice_restart`, and
+  restart that comes with a new association (`renew_dtls_association` and the automatic
+  re-keying that calls it, a data-only association replaced for SRTP, and the answer to an
+  offer that asks for one) now drops the local candidates, and so does the new transport that
+  replaces one an answer closed (every m= section rejected): it keeps none of the closed
+  one's candidates, even without `with_discard_local_candidates_during_ice_restart`, and
   `add_local_candidate` refuses a UDP candidate on one of their transport addresses with the new
   `Error::ErrICECandidateAddressOfPreviousDtlsAssociation` until the next ICE restart that is not
   for a new association. The answer to such an offer lists only the candidates given for the
