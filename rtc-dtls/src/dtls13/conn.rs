@@ -260,6 +260,8 @@ pub(crate) struct Conn13 {
     pub(crate) schedule: Option<KeySchedule>,
     pub(crate) transcript: Transcript,
     pub(crate) srtp_profile: SrtpProtectionProfile,
+    /// The application protocol ALPN selected (RFC 7301), if either side used it.
+    pub(crate) application_protocol: Option<String>,
     pub(crate) peer_certificates: Vec<Vec<u8>>,
     pub(crate) server_name: String,
     pub(crate) client_random: Vec<u8>,
@@ -428,6 +430,7 @@ impl Conn13 {
             schedule: None,
             transcript: Transcript::default(),
             srtp_profile: SrtpProtectionProfile::Unsupported,
+            application_protocol: None,
             peer_certificates: vec![],
             server_name: String::new(),
             client_random: vec![],
@@ -1554,10 +1557,15 @@ impl Conn13 {
             self.drop_read_epoch(EPOCH_EARLY);
         }
         if epoch > EPOCH_APPLICATION {
-            // RFC 9147 section 8: the keys before an update are kept until a record under
-            // the new ones has been read.
-            self.read
-                .retain(|read| read.epoch < EPOCH_APPLICATION || read.epoch >= epoch);
+            // RFC 9147 section 8: the keys before an update "MUST" be kept until a record
+            // under the new ones has been read, and records of an older epoch, late through
+            // loss or reordering, "SHOULD" be processed with it. The epoch before this one
+            // stays readable until a record of the next arrives; anything older goes (the
+            // peer cannot send in two epochs past it before an update is acknowledged, so
+            // the epoch bits of section 4.2.2 still tell them apart).
+            self.read.retain(|read| {
+                read.epoch < EPOCH_APPLICATION || read.epoch.saturating_add(1) >= epoch
+            });
         }
 
         let number = RecordNumber { epoch, sequence };

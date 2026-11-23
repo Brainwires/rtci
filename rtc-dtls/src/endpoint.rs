@@ -711,6 +711,40 @@ impl Endpoint {
         self.with_dtls13(now, remote, |conn| conn.request_connection_ids(count))
     }
 
+    /// The association with `remote` now sends on a new path (the transport under it changed
+    /// its local or remote address, an ICE pair switch for one). RFC 9147 section 9:
+    /// "Implementations SHOULD use a new CID whenever sending on a new path and SHOULD request
+    /// new CIDs for this purpose if path changes are anticipated"; section 11: "implementations
+    /// SHOULD attempt to use fresh CIDs whenever they change local addresses or ports". When
+    /// the established DTLS 1.3 association sends a connection id, it switches to the next
+    /// spare one the peer provided and asks for one more, for the next change. Returns whether
+    /// it switched: `false` without connection ids, before the handshake completed, or with no
+    /// spare id (one is requested then).
+    ///
+    /// # Errors
+    ///
+    /// When `remote` names no association, or the request cannot be written.
+    pub fn path_changed(&mut self, now: Instant, remote: SocketAddr) -> Result<bool> {
+        let Some(conn) = self.connections.get(&remote) else {
+            return Err(Error::InvalidRemoteAddress(remote));
+        };
+        let sends_one = conn
+            .connection_ids()
+            .is_some_and(|(_, sent)| !sent.is_empty());
+        if !sends_one || !conn.is_handshake_completed() {
+            return Ok(false);
+        }
+        let mut switched = false;
+        self.with_dtls13(now, remote, |conn| {
+            switched = conn.use_next_connection_id();
+            // One more for the next change; refused while an earlier request is unanswered,
+            // which then brings it.
+            let _ = conn.request_connection_ids(1);
+            Ok(())
+        })?;
+        Ok(switched)
+    }
+
     /// Runs `action` on the association with `remote`, sets its timers and queues what it
     /// wants sent.
     fn with_dtls13(

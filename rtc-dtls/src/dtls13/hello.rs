@@ -266,6 +266,9 @@ pub(crate) struct Negotiated {
     /// The connection id the client asks for in records sent to it, if it offered the
     /// extension.
     pub(crate) client_connection_id: Option<Vec<u8>>,
+    /// The application protocol selected from the client's ALPN extension (RFC 7301
+    /// section 3.2), when both sides use ALPN.
+    pub(crate) application_protocol: Option<String>,
     /// The extension types the ClientHello carried: what EncryptedExtensions may answer.
     pub(crate) offered_extensions: Vec<u16>,
 }
@@ -468,6 +471,20 @@ pub(crate) fn negotiate(
         }
     }
 
+    // RFC 7301 section 3.2: the first of this server's protocols the client offered; none in
+    // common is a no_application_protocol alert. A server without ALPN ignores the extension.
+    let application_protocol = match hello.extension(EXT_ALPN) {
+        Some(data) => {
+            let offered = crate::extension::parse_alpn(data).map_err(decode_error)?;
+            match cfg.select_alpn(&offered) {
+                Some(Ok(protocol)) => Some(protocol),
+                Some(Err(error)) => return Err(refuse(alert::NO_APPLICATION_PROTOCOL, error)),
+                None => None,
+            }
+        }
+        None => None,
+    };
+
     let client_connection_id = match hello.extension(EXT_CONNECTION_ID) {
         Some(data) => Some(parse_connection_id(data).map_err(decode_error)?.to_vec()),
         None => None,
@@ -482,6 +499,7 @@ pub(crate) fn negotiate(
         srtp_profile,
         server_name,
         client_connection_id,
+        application_protocol,
         offered_extensions: hello.extensions.iter().map(|(t, _)| *t).collect(),
     })
 }

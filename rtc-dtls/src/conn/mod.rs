@@ -370,6 +370,9 @@ impl DTLSConn {
                 .peer_certificates
                 .clone_from(&v13.peer_certificates);
             self.state.srtp_protection_profile = v13.srtp_profile;
+            self.state
+                .application_protocol
+                .clone_from(&v13.application_protocol);
             if !self.is_client {
                 self.state.server_name.clone_from(&v13.server_name);
             }
