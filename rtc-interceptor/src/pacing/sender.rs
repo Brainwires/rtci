@@ -148,6 +148,39 @@ impl PacerBuilder {
 /// - **The deadline is when the head can afford to go**, not `now + interval`, so it always
 ///   advances — a deadline at or before the `now` just handed to `handle_timeout` is the
 ///   webrtc#862 busy-loop.
+///
+/// # Order of service
+///
+/// 1. **Audio** (the packets of a stream bound with an `audio/` codec, and its repair flows)
+///    leaves the moment it is written, charged to the budget, which the packets behind it then
+///    wait out. A voice that waits behind a video backlog is the call breaking up.
+/// 2. **Other media** (video, retransmissions, FEC) waits in one queue, in the order it was
+///    written, and leaves as the budget allows. The **queue time bound** (2 s by default,
+///    [`PacerBuilder::with_queue_time_limit`]) is this queue's: its bits and the age of its
+///    oldest packet raise the pacing rate above the target (libwebrtc's
+///    `MaybeUpdateMediaRateDueToLongQueue`), its head leaves whatever the budget says once it
+///    has waited the bound, and a packet arriving at a full queue makes its oldest packet leave
+///    over the budget rather than being refused.
+/// 3. **Padding** (padding-only packets, RFC 3550 section 5.1: the padding bit and no payload,
+///    which the NACK responder fills a probe cluster with) waits in a queue of its own and leaves
+///    only when no media waits. A probe cluster is written as a burst of padding the moment it is
+///    asked for; queued in line with the media it would hold every packet the application writes
+///    during the cluster behind all of it (140 to 180 ms for a 6000-octet cluster at 200 kbit/s
+///    in `early_media_rtc2rtc`). Media written during a cluster leaves first, at the cluster's
+///    rate and with its mark, so it fills the cluster in place of padding, as in libwebrtc's
+///    pacer (padding has the lowest priority of its packet queue).
+///
+/// Padding is outside the queue time bound: it never counts toward raising the pacing rate,
+/// is never released over the budget (neither as overdue nor to make room), and so never goes
+/// ahead of media or past the rate the congestion controller set. Padding older than the bound
+/// is **sent late, not dropped**. Each padding packet already holds the next sequence number
+/// of its RTX stream (the responder numbers it when it fills the cluster), so dropping it
+/// would leave a hole in that stream which a receiver counts as lost (RFC 3550 appendix A.3,
+/// expected minus received) and the RTCP reports carry back as loss nobody had on the path.
+/// Sent late it costs nothing: it leaves only from budget no media wants. A padding queue
+/// that reaches the queue limit (4096 packets, far beyond what probing writes while media
+/// waits) discards the padding that arrives, counted by [`PacerInterceptor::padding_discarded`]:
+/// the one place padding can leave a hole, preferred to letting it go over the budget.
 pub struct PacerInterceptor {
     pacer: LeakyBucket,
     /// The rate the bucket was set to before the queue time limit raised it, while it is
@@ -155,7 +188,11 @@ pub struct PacerInterceptor {
     /// [`Self::pacer_mut`]).
     raised_from: Option<f64>,
     queue: VecDeque<TaggedPacket>,
-    /// The bits waiting in `queue`.
+    /// Padding-only packets, released only while `queue` is empty (see the order of service).
+    padding: VecDeque<TaggedPacket>,
+    /// Padding refused because the padding queue was full.
+    padding_discarded: u64,
+    /// The bits waiting in `queue` (padding not counted).
     queued_bits: f64,
     queue_limit: usize,
     queue_time_limit: Option<Duration>,
@@ -185,6 +222,8 @@ impl PacerInterceptor {
             raised_from: None,
             pacer,
             queue: VecDeque::new(),
+            padding: VecDeque::new(),
+            padding_discarded: 0,
             queued_bits: 0.0,
             queue_limit: queue_limit.max(1),
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
@@ -205,9 +244,14 @@ impl PacerInterceptor {
         &mut self.pacer
     }
 
-    /// How many packets are waiting to be released.
+    /// How many packets are waiting to be released, padding included.
     pub fn queued(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + self.padding.len()
+    }
+
+    /// How many padding-only packets were discarded because the padding queue was full.
+    pub fn padding_discarded(&self) -> u64 {
+        self.padding_discarded
     }
 
     /// How many packets left over the budget because the queue was full (none is ever
@@ -216,7 +260,8 @@ impl PacerInterceptor {
         self.forced
     }
 
-    /// How long the oldest queued packet has waited at `now`, zero with nothing queued.
+    /// How long the oldest queued media packet has waited at `now`, zero with none queued
+    /// (padding is not counted: the queue time bound is the media's).
     pub fn queue_time(&self, now: Instant) -> Duration {
         self.queue.front().map_or(Duration::ZERO, |head| {
             now.saturating_duration_since(head.now)
@@ -266,6 +311,11 @@ impl PacerInterceptor {
         }
     }
 
+    /// Whether `packet` is padding only: an RTP packet with the padding bit and no payload.
+    fn is_padding(packet: &TaggedPacket) -> bool {
+        matches!(&packet.message.packet, Packet::Rtp(rtp) if rtp.header.padding && rtp.payload.is_empty())
+    }
+
     fn is_audio(&self, packet: &TaggedPacket) -> bool {
         matches!(&packet.message.packet, Packet::Rtp(rtp) if self.audio.contains(&rtp.header.ssrc))
     }
@@ -286,9 +336,13 @@ impl PacerInterceptor {
             .map_or(&self.pacer, |probe| &probe.bucket)
     }
 
-    /// The instant the head of the queue can next be released.
+    /// The instant the next packet can be released: the head of the media queue, or of the
+    /// padding while no media waits (padding has no queue time bound to wake for).
     fn next_release(&self) -> Option<Instant> {
-        let head = self.queue.front()?;
+        let Some(head) = self.queue.front() else {
+            let head = self.padding.front()?;
+            return self.bucket().releasable_at(Self::bits_of(head));
+        };
         let by_budget = self.bucket().releasable_at(Self::bits_of(head)).map(|at| {
             // While the rate is raised it moves with every call, and the instant computed at
             // one rate can come out a hair short of the budget at the next: a microsecond
@@ -449,14 +503,30 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             return Ok(());
         }
 
+        // Padding waits behind every other packet, and nothing waits behind it.
+        let padding = Self::is_padding(&msg);
+
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
-        if self.immediate_release && self.queue.is_empty() {
+        // Queued padding is not in line ahead of media.
+        if self.immediate_release && self.queue.is_empty() && (!padding || self.padding.is_empty())
+        {
             let bits = Self::bits_of(&msg);
             if self.try_spend(bits) {
                 self.release(msg, bits);
                 return Ok(());
             }
+        }
+
+        if padding {
+            // Never over the budget and never counted toward the queue time bound (see the
+            // order of service); at the limit the arrival is discarded.
+            if self.padding.len() >= self.queue_limit {
+                self.padding_discarded += 1;
+            } else {
+                self.padding.push_back(msg);
+            }
+            return Ok(());
         }
 
         if self.queue.len() >= self.queue_limit {
@@ -518,6 +588,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         }
         if self.queue.is_empty() {
             self.queued_bits = 0.0;
+            // No media waits: padding leaves from what the budget has left, never over it.
+            while let Some(head) = self.padding.front() {
+                let bits = Self::bits_of(head);
+                if !self.try_spend(bits) {
+                    break;
+                }
+                let mut packet = self.padding.pop_front().expect("front just checked");
+                packet.now = now;
+                self.release(packet, bits);
+            }
         }
         self.follow_queue(now);
         Ok(())

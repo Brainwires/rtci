@@ -112,5 +112,5 @@ pub(crate) mod lexer;
 
 pub use description::{
     media::MediaDescription,
-    session::{ParseOptions, SessionDescription},
+    session::{ParseOptions, SdpDecimal, SessionDescription},
 };

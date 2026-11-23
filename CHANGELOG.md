@@ -5,6 +5,244 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- **jsep**: `SettingEngineBuilder::with_msid_appdata_change_renews_track`
+  (`conf/jsep-69-msid-appdata`, jsep17). RFC 8830 section 3's form: a remote description that
+  names a new msid-appdata ends the receiver's track and gives it a new one with a `track`
+  event. Off by default (W3C webrtc-pc 5.3: one track per receiver). RFC8830-3-6 is
+  `conflict`.
+- **jsep**: a packet's MID moves one simulcast layer (`conf/jsep-68-mid-layer`, jsep17).
+  RFC 9143 section 9.2: one layer of a several-stream receiver moves to the section the MID
+  of a later packet names, the other layers stay. RFC9143-9.2-5 and RFC9429-6-1 are
+  `tested`.
+- **jsep**: `a=ssrc-group` of any size and `SIM` (`conf/jsep-67-ssrc-groups`, jsep17). A
+  FID or FEC-FR group of three or more ids and an `a=ssrc-group:SIM` (one track whose further
+  streams are codings of its receiver) are read (RFC 5576 section 4.2, RFC 5956 section 4.1);
+  they were ignored. RFC5576-4.2-2 is `tested`.
+- **interceptor**: RFC 7728 rows (`conf/jsep-66-pause-resume`, jsep17).
+  - New `RepeatInRegularReports` attribute and `RtcpSessionControl::StopRepeating`: the RTCP
+    session carries a written packet again in the next N Regular compound packets. PAUSED uses
+    it: "the next two regular RTCP reports" (sections 6.3, 8.2);
+    `PauseResumeBuilder::with_repeats_in_regular_reports(false)` keeps the report-interval
+    timer for a chain without the session.
+  - The hold-off takes the longest round trip the RTCP session measured (6.2), applies again
+    with `nowait` once the received SSRCs show two CNAMEs (6.2), and a local-pause PAUSED is
+    repeated as often as the reported loss needs (6.4: 3 to 10).
+  - RFC7728-6.2-2, 6.2-4, 6.2-5, 6.3-3, 6.4-2, 8.2-4, 8.5-1 are `tested`.
+- **rtc-sdp**: `o=` session ids and versions of any length (`conf/jsep-65-origin`, jsep17).
+  `Origin::session_id` and `Origin::session_version` are now `SdpDecimal` (was `u64`): the
+  `1*DIGIT` of RFC 8866 section 9 has no upper bound, and RFC 9429 section 5.8 has a JSEP
+  endpoint accept compliant SDP beyond the 64 bits it generates. `SdpDecimal` keeps the digits
+  as written, compares as a number, has `From<u64>`, `PartialEq<u64>`, `to_u64()` and
+  `incremented()`. RFC9429-5.2.1-58 is `tested`.
+- **audit**: small JSEP rows (`conf/jsep-64-small-rows`, jsep17). No engine change.
+  - RFC8851-6.3-6 and RFC9429-3.6.2-2 are `n/a` (coordinator decision): they bind the encoder,
+    which is the application's; the engine's part of each stays tested. RFC7496-3.2-2 is
+    `n/a`: it binds only an endpoint that offers the optional SCTP Priority policy, which
+    neither the engine nor the W3C API offers.
+  - RFC7941-4.1-2 is `tested` (the sender stamps MID and RtpStreamId; the note was stale),
+    RFC7941-6-2 `tested` (a changed Cryptex extension block fails authentication, both AES-CM
+    and AES-GCM), RFC7941-6-1 `conflict`: the `require` header encryption policy is RFC 7941
+    section 6's form, `negotiate` stays the default as W3C webrtc-extensions 10.2 requires.
+- **jsep**: audio RED by default (`conf/jsep-63-red-default`, jsep17).
+  - `register_default_codecs` adds `audio/red` 48000/2 (payload type 63, `a=fmtp:63 111/111`,
+    after Opus), as Chromium and WebKit offer it (RFC 2198, RFC 8854 section 4.2). Default
+    offers and answers to them now list it.
+  - New `RedAudioInterceptor` / `RedAudioBuilder` (`rtc-interceptor`), `Slot::Redundancy`
+    (10_450) and `configure_audio_redundancy`; the peer connection installs it in any chain
+    that does not fill the slot. A local Opus stream whose section negotiated RED is sent as
+    RED with a copy of the previous packet; received RED is taken apart into Opus packets, a
+    lost one recovered from the next packet's copy. A RED stream is bound with its primary
+    codec.
+  - `StreamInfo` has a new field, `section_mime_types` (struct literals need it or
+    `..Default::default()`).
+  - Video `red` + `ulpfec` stay out of the defaults (FORK.md: the opt-in ULPFEC interceptors
+    take fixed payload types, and no browser cell exercises ULPFEC in RED).
+- **jsep**: receive-side JSEP rows (`conf/jsep-61-receive-rows`, jsep16).
+  - An `a=rid` line whose `max-width`, `max-height` or `max-fs` no `a=imageattr` set of its
+    formats admits is discarded, in an offer and in an answer (RFC 8851 sections 6.2.2, 6.4
+    and 8).
+  - Tested end to end: an offerer answers the answerer's connectivity checks before the
+    answer arrives (RFC 8839 section 4.2.4; the ICE agent already verified them with its own
+    credentials).
+  - A stream the remote description declares for one m= section moves to the section a
+    later packet's MID names (when that section's receiver has no stream), as one the engine
+    placed already did (RFC 9143 section 9.2); a MID from a packet older than the one that
+    moved the stream is not applied (RFC 7941 section 4.2.6).
+  - rtc-ice: new `Agent::replace_remote_candidates_pinning(now, candidates, local)`: two lite
+    agents, the controlled one takes the local candidate an updated exchange names in
+    `a=remote-candidates` (RFC 8839 section 4.4.2.2); the peer connection passes it.
+  - Audit only: RFC8830-3.2.2-1 tested (stale note), 3.2.5-1 `conflict` (as 3-7),
+    RFC9429-5.8-1 `setting` (trailing white space, for webrtc-rs 0.17), RFC9429-5.2.1-28
+    tested by the MUST of RFC 8854 section 7 (Opus `useinbandfec=1`).
+- **audit**: JSEP umbrella rows closed by their children (`conf/jsep-60-umbrellas`, jsep16).
+  No engine change. RFC8859-4.8-1, A-7, A-29, A-33, RFC9429-5.2.1-57, 5.3.1-11, 5.5-5, 5.2-1
+  and WEBRTC-4.4.2-43 are `tested` (every child row is); RFC9429-4.1.8-1 and 5.3-1 are
+  `setting` and 4.1.9-2 `conflict`, as their open children are.
+- **jsep / sdp**: small JSEP rows (`conf/jsep-59-small-rows`, jsep16).
+  - W3C error names: `Error::dom_exception_name` (`InvalidAccessError` for the RFC 9429
+    section 5.8.3 refusals, `OperationError` for a description that does not parse,
+    `InvalidStateError`, ...) and `Error::rtc_error_detail` (`sdp-syntax-error`), so an API
+    over the engine raises what webrtc-pc 4.4.1.5 names.
+  - The W3C codec dictionary match (webrtc-pc 5.4) is strict everywhere the W3C algorithms
+    use it: an encoding's codec matches a negotiated one with `ignoreAsymmetricalParameters`
+    (no mime-type-only fallback any more), setCodecPreferences and setParameters compare
+    every parameter of the media format (defaults inferred: H.264 `packetization-mode=0`,
+    ...). Breaking: an encoding whose codec names only a MIME type that the negotiated codec
+    has with an fmtp line no longer matches it, and loses its codec after negotiation.
+  - `a=msid`: a section that would repeat an earlier section's msid-id and appdata (one
+    track sent by two transceivers, which W3C allows) gets its appdata suffixed `-<n>`
+    (RFC 8830 section 2).
+  - rtc-sdp: `a=charset` is read by `SessionDescription::unmarshal` (ISO-8859-1, US-ASCII,
+    UTF-8; an unsupported set's text kept as octets) and `SessionDescription::charset`
+    names it (RFC 8866 section 6.10). A relative `u=` reference is accepted (RFC 8866
+    section 9). Breaking: `SessionDescription::uri` is an `Option<String>` (was
+    `Option<url::Url>`).
+- **audit / jsep**: specification conflicts get a verdict of their own
+  (`conf/jsep-58-spec-conflicts`, jsep16).
+  - New verdict `conflict` (`docs/conformance/audit/RULES.md`): two specifications conflict
+    for this endpoint; the clause's form is implemented and tested as a named setting, the
+    form of the specification that governs (W3C webrtc-pc, or RFC 9429 for a JSEP endpoint) is
+    the default and tested too. `scripts/audit-count.py` checks that the note names the
+    setting (a `fn` of the source), an RFC-form test and a default-form test that exist, and
+    the governing text; COUNTS.md has a `conflict` column and counts it in "RFC behaviour
+    tested", never in "tested as the default"; `scripts/open-must.py` lists such rows with
+    class E. RFC8830-3-7, 3-8, RFC8839-4.4.1.2.2-2 and RFC9429-5.3.1-6 are `conflict`.
+  - New `SettingEngineBuilder::with_source_departure_ends_track(bool)` (default `false`):
+    with `true` a remote track whose SSRCs have all said BYE or timed out ends
+    (`RTCTrackEvent::OnClose`), RFC 8830 section 3; by default W3C webrtc-pc 9.3 mutes it.
+  - Breaking for other branches: COUNTS.md and the totals-line grammar gained `conflict`;
+    regenerate with `python3 scripts/audit-count.py`.
+- **jsep**: coordinator decisions on BUNDLE attributes (`conf/jsep-57-decisions`, jsep16).
+  - Remote fingerprints with BUNDLE (RFC 8859 sections 4.5 and appendix A, TRANSPORT
+    category): the tagged section's are the group's, and what the other bundled sections
+    carry is neither compared nor used. A description whose bundled sections disagree is no
+    longer refused; `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` is the
+    old refusal (`Error::ErrSessionDescriptionConflictingFingerprints`) as a hardening.
+  - IDENTICAL attributes (RFC 8859 section 4.3): a remote description is refused when two
+    bundled sections carry one with different values (an absence is not: the tagged section
+    speaks for the group, and RFC 9429 itself writes `a=rtcp-mux-only` in a section a later
+    offer adds and not in the tagged one). Checked against the 183 recorded browser descriptions first: none
+    breaks it (Firefox's tagged-only `a=rtcp-rsize` and `a=extmap-allow-mixed` are absences,
+    which stay accepted). Breaking: an offer with different `a=ecn-capable-rtp` methods in
+    two bundled sections is refused; it was answered with the tagged section's.
+  - Merged `conf/early-1-receive-at-offer`, `conf/loss-3-followups` and
+    `conf/media-22-train-fixes`.
+- **jsep**: partly implemented JSEP rows (`conf/jsep-56-partial-rows`, jsep15).
+  - Remote descriptions: a section without `c=` when the session has none is refused (RFC
+    8866 section 5.7); bundled sections that give one payload type two `a=imageattr` sets
+    are refused (RFC 8859 section 4.7); two `ccm pause` lines for one
+    payload type are refused (RFC 7728 section 9); an `a=msid` id or appdata longer than 64
+    characters is ignored like any malformed `a=msid` (RFC 8830 section 2); an audio or video
+    section whose protocol is not RTP (`m=audio 9 udptl t38`) is answered rejected in its
+    place instead of having its formats read as payload types (RFC 8866 section 5.14);
+    domain names in `o=` / `c=` / candidates follow the RFC 1035 label rules (rtc-sdp); with
+    BUNDLE the DTLS role is the tagged section's `a=setup` (RFC 8859 section 4.5; Firefox's
+    later answers say `active` in the other sections).
+  - A trickled candidate (`add_remote_candidate`) is checked against the RFC 8839 grammar,
+    as the candidate lines of a description are.
+  - ICE (rtc-ice): application credentials are held to RFC 8839 section 5.4 (ufrag 4 to 32
+    ice-chars, password 22 to 256): new errors `ErrLocalUfragInvalid`, `ErrLocalPwdInvalid`;
+    a local srflx / prflx / relay candidate without a related address is refused
+    (`ErrLocalCandidateWithoutRelatedAddress`, RFC 8839 section 5.1).
+  - Local descriptions: `create_offer` fails when a `SettingEngineBuilder::with_mid_generator`
+    generator returns a mid the session has or one that is not a token (RFC 5888 section 4),
+    and when a stream or track id cannot be written in `a=msid` (1 to 64 token characters,
+    RFC 8830 section 2); offered media sections say `TCP/DTLS/RTP/SAVPF` when the default or
+    selected candidate is a TCP one (RFC 9429 section 5.1.2), as the data section already said
+    `TCP/DTLS/SCTP`.
+  - SSRCs: a new local SSRC is drawn outside every SSRC a local description of the
+    connection described before (RFC 5576 sections 5 and 8; bounded history of 4096).
+  - Remote tracks: a remote source that times out (RFC 3550 6.3.5, the RTCP session's
+    `SourceTimedOut`) mutes its track as a BYE does (W3C webrtc 9.3).
+  - Browser descriptions recorded by the interop harness (train 9 round 3: Chromium,
+    Firefox, WebKit, 42 files) are fixtures of `browser_sdp_test.rs`; all 183 recorded
+    (bar the two munged-fingerprint cells) pass every check, none needs a new tolerance.
+  - Breaking: the new refusals and errors above; `RTCPeerConnection::add_sender_sdp`-side
+    errors surface from `create_offer` / `create_answer`.
+- **audit**: the open MUST rows, classified (`conf/audit-2-classify`). No engine change.
+  - New verdict `setting` (`docs/conformance/audit/RULES.md`): the clause's behaviour is
+    implemented and tested, selected by a named setting, and the default differs because a
+    named browser cell or deployed peer cannot interoperate with it. `scripts/audit-count.py`
+    checks every `setting` row's note names a setting that is a `fn` of the source, a test of
+    the RFC form that exists, and the cell or peer; a totals line carries `setting N /` where
+    a file has such rows. `COUNTS.md` has a `setting` column and reports "RFC behaviour
+    tested" (`tested` + `setting`) beside "tested as the default". Twelve MUST rows became
+    `setting` (bundle attributes in the tagged section only, unique transport credentials,
+    `a=msid` without appdata, strict RTCP validity, `use_srtp` for media associations only,
+    VP9 receiver limits).
+  - New `scripts/open-must.py` (a Python gate of `cargo.yml`, with `--check`) writes
+    `docs/conformance/audit/OPEN-MUST.md` from the tables and `open-must.tsv`: every open MUST
+    row with its class (A to F), what would close it, its size and owner, and the arithmetic
+    to 100 %. It fails on an open row without a class.
+  - Breaking for other branches: a totals line or a COUNTS.md made by the old script is
+    regenerated by `python3 scripts/audit-count.py`.
+- **jsep**: an offerer receives as its offer describes before the answer arrives
+  (`conf/early-1-receive-at-offer`, early1; RFC 3264 section 5.1, RFC 9429 sections 4.1.11,
+  5.9 and 5.11). No signature changes; the behaviour an application sees changes:
+  - From `set_local_description(offer)` on, each receiver whose m= section the offer lists
+    `sendrecv` or `recvonly` takes that section's formats beside the ones negotiated before,
+    and the offer's header extension ids are read where none is negotiated yet. Media that
+    overtakes the answer (a later offer on a transport that is up; an offer followed by a
+    provisional answer) is delivered at once, as `RTCMessage::RtpPacket` for the track of the
+    receiver the application has from `add_transceiver_*` / `add_track`, where it used to be
+    discarded (`discarded_rtp_packets`) or let through without its stream being established.
+    `RTCTrackEvent::OnOpen` and `OnUnmute` therefore fire before the answer; the W3C `track`
+    event (`OnRemoteTrack`) still fires when the remote description is applied. Nothing is
+    buffered.
+  - A provisional answer no longer narrows what is received: every format of the offer
+    stays receivable until the final answer or a rollback (RFC 9429 section 4.1.11).
+  - The final answer keeps a stream that arrived early (its SSRC, track and statistics) and
+    binds it to the interceptors again only when it changes what the stream was bound with.
+    A format that was offered and never negotiated before is bound without RTCP feedback
+    until the answer has it (RFC 4585 section 4.2), so for a new section NACK, PLI and
+    congestion feedback start with the answer; receiver reports of an RTP session that
+    already exists cover the early stream. A format the answer leaves out stops being
+    received with the answer.
+  - A rollback of the offer (explicit, or the implicit one of a glare) takes back what the
+    offer prepared: the early streams are unbound, their inbound-rtp statistics are retired,
+    a track their media unmuted is muted again (`RTCTrackEvent::OnMute`), and what the peer
+    still sends for them is unassociated media (`OnUnassociatedRtpDiscarded`).
+  - With several transports, a section a pending local offer lists in a BUNDLE group is
+    accepted on that group's transport as well as on the transport the offer stages for it
+    (RFC 9143 section 7.2), until the answer says where it is.
+  - While a local offer is pending, an RTX or FEC packet on an SSRC no description names yet
+    is taken as the repair flow of the one stream its section receives (RFC 4588 section
+    5.3), and a repair packet that precedes its stream is dropped without being reported as
+    unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
+    of codec `video/rtx` (at any time).
+
+### Bug fixes
+
+- **pacer**: media is no longer held behind a probe cluster's padding
+  (`conf/early-2-late-last-packet`). The NACK responder writes a cluster as a burst of
+  padding-only packets when the congestion controller asks for it, and the pacer queued them
+  in line with the media, so every packet the application wrote during the cluster waited for
+  all of it: about 180 ms for a 6000-octet cluster at 200 kbit/s. Padding-only packets (RFC
+  3550 section 5.1) now wait in a queue of their own and leave only when no other packet waits;
+  media written during a cluster leaves first, at the cluster's rate and with its mark, as in
+  libwebrtc's pacer. This was the intermittent failure of
+  `early_media_rtc2rtc::simulcast_streams_an_offer_asks_for_are_received_before_the_answer`
+  (about 1 run in 25): the five-second application-limited probe fell on the last writes of the
+  low layer, whose last one or two packets left 140 to 180 ms after they were written, past the
+  test's 100 ms settle (`media_leaves_ahead_of_queued_padding`). With the queue time bound of
+  `conf/pacer-1-queue-time` (`conf/pacer-2-combined`): the order of service is audio, then other
+  media, then padding; padding never counts toward raising the pacing rate and is never released
+  over the budget, and padding older than the bound is sent late rather than dropped (each
+  holds an RTX sequence number, so a dropped one would read as loss at the receiver). A padding
+  queue at the queue limit discards the arrival (`PacerInterceptor::padding_discarded`)
+  (`padding_never_raises_the_pacing_rate`, `padding_older_than_the_queue_time_limit_waits_for_spare_budget`).
+- **nack**: what the NACK responder makes on the read leg (a retransmission a NACK asks for, a
+  probe cluster's padding) is due at once: `poll_timeout` returns the instant it was made while
+  it waits. A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+  `poll_timeout` and sleep), so these packets waited for whatever woke the driver next; in the
+  failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
+  write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
+  `the_padding_of_a_probe_cluster_is_due_at_once`).
+
 ## [0.22.0+brainwires.6] - 2026-11-23
 
 The conformance release: trains 1 to 10 of the clause-by-clause work across the WebRTC

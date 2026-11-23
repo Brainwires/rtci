@@ -151,6 +151,29 @@ impl Harness {
             .expect("handle_write");
     }
 
+    /// A padding-only packet (RFC 3550 section 5.1), as the NACK responder fills a probe
+    /// cluster with: no payload and 255 octets of padding, 2136 bits on the wire.
+    fn send_padding(&mut self, at: Duration, sequence_number: u16) {
+        self.chain
+            .handle_write(TaggedPacket {
+                now: self.epoch + at,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        padding: true,
+                        payload_type: 97,
+                        sequence_number,
+                        ssrc: 2,
+                        padding_size: 255,
+                        ..Default::default()
+                    },
+                    payload: bytes::Bytes::new(),
+                })),
+            })
+            .expect("handle_write");
+    }
+
     /// Fire a timeout and then drain, which is what a driver does.
     ///
     /// The draining is load-bearing on the belt and was not under nesting: a released packet is
@@ -338,6 +361,35 @@ fn packets_arriving_mid_drain_keep_their_order() {
             .iter()
             .map(|(sequence_number, _)| *sequence_number)
             .collect::<Vec<_>>()
+    );
+}
+
+/// A probe cluster is written as a burst of padding the moment it is asked for. Media written
+/// while that padding waits goes ahead of it, as soon as the budget allows, instead of waiting
+/// out the whole cluster; the padding keeps its order and leaves once nothing else waits.
+#[test]
+fn media_leaves_ahead_of_queued_padding() {
+    let mut harness = Harness::new();
+    // 20 padding packets of 2136 bits: the 12 000-bit burst lets 5 out at once, and the other
+    // 15 would take about 27 ms at 1.2 Mb/s.
+    for sequence_number in 100..120 {
+        harness.send_padding(ms(0), sequence_number);
+    }
+    harness.send(ms(1), 1);
+    harness.advance_to(ms(100));
+
+    let schedule = harness.schedule();
+    let order: Vec<u16> = schedule.iter().map(|(seq, _)| *seq).collect();
+    let mut expected: Vec<u16> = (100..105).collect();
+    expected.push(1);
+    expected.extend(105..120);
+    assert_eq!(expected, order, "{schedule:?}");
+    // The media packet waits only for the budget its own 12 000 bits need: 1320 bits were
+    // left after the padding that went at once, and 10 680 more take 8.9 ms.
+    let (_, media_at) = schedule[5];
+    assert!(
+        media_at < ms(10),
+        "the media packet left at {media_at:?}, behind the padding"
     );
 }
 
@@ -691,6 +743,83 @@ fn no_packet_waits_longer_than_the_queue_time_limit() {
         "the longest wait was {longest:?}, over the 2 s limit"
     );
     assert!(longest >= ms(1_500), "the queue did grow: {longest:?}");
+}
+
+/// The queue time bound is the media's: padding never counts toward raising the pacing rate.
+/// 2000 padding packets (4.27 Mbit) at a 1.2 Mb/s target take 3.55 s; were they counted, the
+/// rate would rise to send them all within 2 s, on top of a target that has no room for them.
+#[test]
+fn padding_never_raises_the_pacing_rate() {
+    let mut harness = Harness::new();
+    for n in 0..2000u16 {
+        harness.send_padding(ms(0), 60_000 + n);
+    }
+    harness.drain();
+    harness.advance_to(ms(2_500));
+    // 12 000 bits of burst and 2.5 s at 1.2 Mb/s: 1410 packets of 2136 bits.
+    let by_then = harness.released().len();
+    assert!(
+        (1_400..=1_410).contains(&by_then),
+        "{by_then} padding packets left in 2.5 s: not at the target rate"
+    );
+    harness.advance_to(ms(4_000));
+    assert_eq!(
+        2000,
+        harness.released().len(),
+        "and then all of it, none dropped"
+    );
+}
+
+/// Padding that has waited longer than the queue time bound is sent late, not dropped and not
+/// forced out ahead of media: with a source above the target behind it for four seconds, the
+/// queued padding leaves only once the media queue is empty, every packet of it, and the media
+/// still waits no longer than the bound.
+#[test]
+fn padding_older_than_the_queue_time_limit_waits_for_spare_budget() {
+    let mut harness = Harness::new();
+    for n in 0..10u16 {
+        harness.send_padding(ms(0), 60_000 + n);
+    }
+    harness.drain();
+    // 2.4 Mb/s of media against the 1.2 Mb/s target for 4 s.
+    for n in 0..800u16 {
+        let at = ms(5 * u64::from(n));
+        harness.advance_to(at);
+        harness.send(at, n);
+        harness.drain();
+    }
+    harness.advance_to(ms(20_000));
+    let released = harness.released();
+    let padding: Vec<&Released> = released
+        .iter()
+        .filter(|packet| packet.sequence_number >= 60_000)
+        .collect();
+    assert_eq!(10, padding.len(), "no padding is dropped");
+    let last_media = released
+        .iter()
+        .filter(|packet| packet.sequence_number < 60_000)
+        .map(|packet| packet.at)
+        .max()
+        .expect("media left");
+    // The burst let the first five go at once; the other five waited out the media.
+    assert_eq!(
+        5,
+        padding.iter().filter(|packet| packet.at == ms(0)).count()
+    );
+    assert!(
+        padding
+            .iter()
+            .filter(|packet| packet.at > ms(0))
+            .all(|packet| packet.at >= last_media),
+        "padding went ahead of media: {padding:?}, last media at {last_media:?}"
+    );
+    let longest = released
+        .iter()
+        .filter(|packet| packet.sequence_number < 60_000)
+        .map(|packet| packet.at - ms(5 * u64::from(packet.sequence_number)))
+        .max()
+        .unwrap_or_default();
+    assert!(longest <= ms(2_010), "media waited {longest:?}");
 }
 
 /// Audio is not queued behind video (libwebrtc paces audio first): with a second of video

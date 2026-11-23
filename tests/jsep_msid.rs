@@ -333,3 +333,212 @@ fn a_sender_in_no_stream_is_written_with_a_dash() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 8830 section 2: `msid-id = 1*64token-char` and `msid-appdata = 1*64token-char`. A
+/// received line whose id or appdata is longer than 64 characters is not well formed and is
+/// ignored (section 2: such a line "SHOULD be ignored"; the track then takes the next line's
+/// stream). An id or track id of this side's that cannot be written (a space, more than 64
+/// characters) makes `create_offer` fail instead of writing a line that does not parse; 64
+/// characters are written.
+#[test]
+fn msid_ids_and_appdata_are_one_to_sixty_four_token_characters() -> TestResult {
+    let long = "s".repeat(65);
+    let mut pc = default_peer()?;
+    let (streams, _, _) = remote_track(
+        &mut pc,
+        offer(
+            &format!("a=msid:{long} track\na=msid:short {long}\na=msid:good track\n"),
+            "",
+        ),
+    )?;
+    assert_eq!(streams, vec!["good"]);
+
+    let offered = |stream: &str, track: &str| {
+        let mut pc = default_peer()?;
+        pc.add_track(rtc::media_stream::MediaStreamTrack::new(
+            stream.to_owned(),
+            track.to_owned(),
+            "label".to_owned(),
+            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            vec![rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+                rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                    ssrc: Some(0x0808_0808),
+                    ..Default::default()
+                },
+                codec: jsep_common::vp8(),
+                ..Default::default()
+            }],
+        ))?;
+        pc.create_offer(None)
+            .map(|offer| offer.sdp)
+            .map_err(Box::<dyn std::error::Error>::from)
+    };
+    for (stream, track) in [
+        ("my stream", "track"),
+        ("stream", "my track"),
+        (long.as_str(), "track"),
+        ("stream", long.as_str()),
+    ] {
+        assert!(offered(stream, track).is_err(), "{stream:?} / {track:?}");
+    }
+    let sixty_four = "s".repeat(64);
+    let sdp = offered(&sixty_four, &sixty_four)?;
+    assert!(
+        sdp.contains(&format!("a=msid:{sixty_four} {sixty_four}\r\n")),
+        "{sdp}"
+    );
+    Ok(())
+}
+
+/// RFC 8830 section 2: "Multiple media descriptions with the same value for 'msid-id' and
+/// 'msid-appdata' are not permitted". W3C webrtc-pc lets one track be sent by two
+/// transceivers in one stream (`addTransceiver(track)` twice); the second section's appdata
+/// is made unique (`<track id>-1`, its source-level msid too), and a later offer keeps the
+/// lines. Without appdata (`with_msid_appdata(false)`, the RFC 9429 form) the two sections
+/// carry the stream alone, as RFC 9429's examples do.
+#[test]
+fn two_sections_never_carry_the_same_msid_pair() -> TestResult {
+    use jsep_common::{media_sections, video_track};
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    let init = || RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Sendonly,
+        streams: vec!["shared".to_owned()],
+        send_encodings: vec![],
+    };
+    let msid_lines = |sdp: &str| -> Vec<Vec<String>> {
+        media_sections(sdp)
+            .iter()
+            .map(|section| {
+                section
+                    .iter()
+                    .filter(|l| l.starts_with("a=msid:") || l.contains(" msid:"))
+                    .cloned()
+                    .collect()
+            })
+            .collect()
+    };
+    let mut pc = jsep_common::default_peer()?;
+    pc.add_transceiver_from_track(video_track("same", 0x0101_0101), Some(init()))?;
+    pc.add_transceiver_from_track(video_track("same", 0x0202_0202), Some(init()))?;
+    let offer = pc.create_offer(None)?;
+    let lines = msid_lines(&offer.sdp);
+    assert_eq!(lines.len(), 2, "{}", offer.sdp);
+    assert!(
+        lines[0].contains(&"a=msid:shared same".to_owned()),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        lines[1].contains(&"a=msid:shared same-1".to_owned()),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        lines[1]
+            .iter()
+            .filter(|l| l.contains(" msid:"))
+            .all(|l| l.ends_with("msid:shared same-1")),
+        "{}",
+        offer.sdp
+    );
+    pc.set_local_description(Instant::now(), offer.clone())?;
+    let later = pc.create_offer(None)?;
+    assert_eq!(
+        msid_lines(&later.sdp),
+        lines,
+        "a later offer keeps the lines"
+    );
+
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine({
+            let mut media_engine = MediaEngine::default();
+            media_engine.register_default_codecs()?;
+            media_engine
+        })
+        .with_setting_engine(SettingEngineBuilder::new().with_msid_appdata(false).build())
+        .build(Instant::now())?;
+    pc.add_transceiver_from_track(video_track("same", 0x0101_0101), Some(init()))?;
+    pc.add_transceiver_from_track(video_track("same", 0x0202_0202), Some(init()))?;
+    let offer = pc.create_offer(None)?;
+    for section in msid_lines(&offer.sdp) {
+        assert!(
+            section.contains(&"a=msid:shared".to_owned()),
+            "{}",
+            offer.sdp
+        );
+    }
+    Ok(())
+}
+
+/// RFC 8830 section 3: a new msid-appdata in a section names a new track: "the recipient
+/// ... MUST" learn that a new track was added. By default the W3C object model governs (a
+/// receiver has one track for its lifetime, webrtc-pc 5.3, with an id the engine generates;
+/// RFC 9429 section 5.2.1 has senders leave the appdata out): a changed appdata changes no
+/// track and fires no event. With `with_msid_appdata_change_renews_track(true)` the
+/// receiver's track ends (`OnClose`) and a new track with a new id takes its place,
+/// announced with the `track` event; the same appdata again changes nothing.
+#[test]
+fn a_new_msid_appdata_is_a_new_track_only_when_asked() -> TestResult {
+    use rtc::media_stream::MediaStreamTrackState::Live;
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+    use rtc::sansio::Protocol;
+    let peer = |renews: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        Ok(RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_msid_appdata_change_renews_track(renews)
+                    .build(),
+            )
+            .build(Instant::now())?)
+    };
+    // (tracks closed, tracks announced by the `track` event) since the last call.
+    let events = |pc: &mut RTCPeerConnection| {
+        let (mut closed, mut announced) = (vec![], vec![]);
+        while let Some(event) = pc.poll_event() {
+            match event {
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnClose(id)) => closed.push(id),
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnRemoteTrack(init)) => {
+                    announced.push(init.track_id)
+                }
+                _ => {}
+            }
+        }
+        (closed, announced)
+    };
+    for renews in [false, true] {
+        let mut pc = peer(renews)?;
+        let (_, _, first) = remote_track(&mut pc, offer("a=msid:stream one\n", ""))?;
+        assert_eq!(events(&mut pc).1, vec![first.clone()], "renews {renews}");
+
+        let (_, _, second) = remote_track(&mut pc, offer("a=msid:stream two\n", ""))?;
+        let (closed, announced) = events(&mut pc);
+        if renews {
+            assert_ne!(second, first, "a new track");
+            assert_eq!(closed, vec![first.clone()], "the old one ended");
+            assert_eq!(announced, vec![second.clone()], "the new one announced");
+            assert_eq!(
+                track_state(&mut pc, offer("a=msid:stream two\n", ""))?,
+                Live
+            );
+        } else {
+            assert_eq!(second, first, "the receiver's one track");
+            assert!(
+                closed.is_empty() && announced.is_empty(),
+                "{closed:?} {announced:?}"
+            );
+        }
+        let (_, _, third) = remote_track(&mut pc, offer("a=msid:stream two\n", ""))?;
+        assert_eq!(third, second, "renews {renews}: the same appdata again");
+        assert_eq!(events(&mut pc), (vec![], vec![]), "renews {renews}");
+    }
+    Ok(())
+}

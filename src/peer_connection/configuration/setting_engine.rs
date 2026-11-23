@@ -424,6 +424,11 @@ pub struct SettingEngine {
     pub(crate) dtls_new_association_without_ice_restart: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
+    /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
+    /// track ends and a new one takes its place.
+    pub(crate) msid_appdata_change_renews_track: bool,
+    /// RFC 8830 section 3: a remote track whose SSRCs have all left (BYE, timeout) ends.
+    pub(crate) source_departure_ends_track: bool,
     /// RFC 9429 section 5.3.1: an answer rejects the section of a transceiver stopped after
     /// the offer arrived.
     pub(crate) stopping_transceiver_rejected_in_answer: bool,
@@ -431,6 +436,9 @@ pub struct SettingEngine {
     /// inverted so that the derived `Default` is the browsers' form, the default.
     pub(crate) dtls_use_srtp_only_with_media: bool,
     pub(crate) accept_lowercase_fingerprints: bool,
+    /// [`SettingEngineBuilder::with_bundled_fingerprints_agreeing`]: a remote description whose
+    /// bundled sections carry fingerprints other than the tagged section's is refused.
+    pub(crate) bundled_fingerprints_agree: bool,
     /// Answers and subsequent offers repeat the BUNDLE attributes in every bundled m=
     /// section instead of carrying them in the tagged one only (RFC 9143 section 7.1.3); see
     /// [`SettingEngineBuilder::with_bundle_attributes_repeated`].
@@ -1686,6 +1694,47 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// RFC 8830 section 3: "if the application ... receives an msid with a new msid-appdata
+    /// value, it SHOULD [learn] that a new MediaStreamTrack has been added" (section 3, the
+    /// recipient "MUST" learn of a new track for new appdata in the RFC's model). In this API
+    /// the W3C webrtc-pc object model governs: a receiver has one track for its lifetime
+    /// (webrtc-pc 5.3), with an id the engine generates, and RFC 9429 section 5.2.1 has
+    /// senders leave the appdata out. That is the default (`false`): a changed appdata changes
+    /// nothing the application sees. With `true`, a remote description whose section names
+    /// another appdata than the one before ends the receiver's track
+    /// ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose)) and
+    /// gives the receiver a new track, announced with a track event
+    /// ([`RTCTrackEvent::OnRemoteTrack`](crate::peer_connection::event::RTCTrackEvent::OnRemoteTrack)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_msid_appdata_change_renews_track(true)
+    ///     .build();
+    /// ```
+    pub fn with_msid_appdata_change_renews_track(mut self, renews: bool) -> Self {
+        self.0.msid_appdata_change_renews_track = renews;
+        self
+    }
+
+    /// Ends a remote track when all of its SSRCs have left: an RTCP BYE for each, or each
+    /// timed out (RFC 3550 section 6.3.5, the RTCP session's `SourceTimedOut`).
+    ///
+    /// RFC 8830 section 3: "a MediaStreamTrack ... has ended when all of its SSRCs have ended
+    /// (BYE, timeout)". In this API W3C webrtc section 9.3 governs the track's state: the
+    /// track is muted when its source leaves and unmuted when media arrives again, and it ends
+    /// only when its transceiver stops (a port of zero included). That is the default
+    /// (`false`). With `true` the receiver's track ends
+    /// ([`RTCTrackEvent::OnClose`](crate::peer_connection::event::RTCTrackEvent::OnClose))
+    /// once every SSRC it receives has left; one that is heard again before then has not.
+    pub fn with_source_departure_ends_track(mut self, ends: bool) -> Self {
+        self.0.source_departure_ends_track = ends;
+        self
+    }
+
     /// Rejects, in an answer, the m= section of a transceiver that was stopped after the
     /// offer arrived.
     ///
@@ -1758,6 +1807,24 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_lowercase_fingerprints_accepted(mut self, is_accepted: bool) -> Self {
         self.0.accept_lowercase_fingerprints = is_accepted;
+        self
+    }
+
+    /// Whether a remote description is refused when a bundled m= section carries
+    /// `a=fingerprint` values other than its BUNDLE group's tagged section. The default is
+    /// `false`.
+    ///
+    /// `a=fingerprint` is of the TRANSPORT multiplexing category (RFC 8859 section 4.5 and
+    /// appendix A): "the attribute value MUST be taken from the m= line whose information is
+    /// used to set up the underlying transport", the tagged section's (RFC 9143 section
+    /// 7.1.3). By default the tagged section's fingerprints are the group's and the other
+    /// bundled sections' are not used, whatever they say. `true` is a hardening beyond the
+    /// RFC: every bundled section must agree with the tagged one (in the sha-256 values when
+    /// there are any), as the sections outside a BUNDLE group, which share the transport,
+    /// always must; otherwise the description is
+    /// [`Error::ErrSessionDescriptionConflictingFingerprints`](shared::error::Error::ErrSessionDescriptionConflictingFingerprints).
+    pub fn with_bundled_fingerprints_agreeing(mut self, agreeing: bool) -> Self {
+        self.0.bundled_fingerprints_agree = agreeing;
         self
     }
 

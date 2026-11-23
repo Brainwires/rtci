@@ -315,13 +315,26 @@ pub(crate) fn codec_parameters_fuzzy_search(
     (RTCRtpCodecParameters::default(), CodecMatch::None)
 }
 
+/// W3C webrtc 5.4 "codec dictionary match" with `ignoreAsymmetricalParameters` false (its
+/// default): see [`codec_dictionary_match_with`].
+pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+    codec_dictionary_match_with(first, second, false)
+}
+
 /// W3C webrtc 5.4 "codec dictionary match": whether two codec dictionaries name the same
 /// codec. The MIME types are equal without regard to case, the clock rates equal, the
 /// channels both absent (0) or equal, and the `sdpFmtpLine`s both absent (empty) or
-/// matching: compared by the format's own rules where it has key-value parameters
-/// (`fmtp::match_fmtp`: H.264 profile and packetization mode, and so on) and as strings
-/// otherwise.
-pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) -> bool {
+/// matching. Lines that are not in key-value format are compared as strings. Key-value
+/// lines must agree on the format's symmetrical parameters (`fmtp::match_fmtp`: H.264
+/// profile and packetization mode, H.265 profile, VP9 profile, AV1 nothing, and so on); with
+/// `ignore_asymmetrical_parameters` false every parameter must be equal too, a parameter
+/// left out counting as its default where the format infers one ("In some cases a parameter
+/// can be omitted and still be inferred").
+pub(crate) fn codec_dictionary_match_with(
+    first: &RTCRtpCodec,
+    second: &RTCRtpCodec,
+    ignore_asymmetrical_parameters: bool,
+) -> bool {
     if !first.mime_type.eq_ignore_ascii_case(&second.mime_type)
         || first.clock_rate != second.clock_rate
         || first.channels != second.channels
@@ -338,8 +351,46 @@ pub(crate) fn codec_dictionary_match(first: &RTCRtpCodec, second: &RTCRtpCodec) 
     if !first_fmtp.contains('=') || !second_fmtp.contains('=') {
         return first_fmtp == second_fmtp;
     }
-    fmtp::parse(&first.mime_type, first_fmtp)
+    if !fmtp::parse(&first.mime_type, first_fmtp)
         .match_fmtp(&*fmtp::parse(&second.mime_type, second_fmtp))
+    {
+        return false;
+    }
+    ignore_asymmetrical_parameters
+        || media_format(&first.mime_type, first_fmtp)
+            == media_format(&second.mime_type, second_fmtp)
+}
+
+/// The media format of a key-value `sdpFmtpLine` (W3C webrtc 5.4): each parameter by its
+/// lower-case name, with the defaults the format infers for one left out.
+fn media_format(mime_type: &str, fmtp: &str) -> std::collections::BTreeMap<String, String> {
+    let mut parameters: std::collections::BTreeMap<String, String> = fmtp
+        .split(';')
+        .filter_map(|p| {
+            let (key, value) = p.split_once('=')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect();
+    let defaults: &[(&str, &str)] = match mime_type.to_ascii_lowercase().as_str() {
+        // RFC 6184 section 8.1.
+        "video/h264" => &[
+            ("packetization-mode", "0"),
+            ("level-asymmetry-allowed", "0"),
+        ],
+        // RFC 7798 section 7.1.
+        "video/h265" => &[("profile-id", "1"), ("tier-flag", "0"), ("level-id", "93")],
+        // RTP payload format for VP9, section 6.
+        "video/vp9" => &[("profile-id", "0")],
+        // AV1 RTP payload format, section 7.2.
+        "video/av1" => &[("profile", "0"), ("level-idx", "5"), ("tier", "0")],
+        _ => &[],
+    };
+    for (key, value) in defaults {
+        parameters
+            .entry((*key).to_owned())
+            .or_insert_with(|| (*value).to_owned());
+    }
+    parameters
 }
 
 /// The negotiated codec an encoding is sent with.
@@ -365,10 +416,12 @@ pub(crate) fn encoding_send_codec(
             .find(|c| !c.rtp_codec.mime_type.is_empty() && !is_repair_codec(&c.rtp_codec))
             .cloned();
     }
-    match codec_parameters_fuzzy_search(codec, negotiated) {
-        (_, CodecMatch::None) => None,
-        (matched, _) => Some(matched),
-    }
+    // W3C webrtc 4.4.1.6: an encoding's codec is the negotiated one it matches by the codec
+    // dictionary match with `ignoreAsymmetricalParameters` true (no mime-type-only match).
+    negotiated
+        .iter()
+        .find(|c| codec_dictionary_match_with(codec, &c.rtp_codec, true))
+        .cloned()
 }
 
 /// Searches for a matching encoding in available codecs.
@@ -1044,5 +1097,123 @@ mod rtx_apt_test {
             super::rtcp_feedback_intersection(&rrtr("rcvr-rtt=all"), &rrtr("rcvr-rtt=sender:64")),
             rrtr("rcvr-rtt=sender:64")
         );
+    }
+}
+
+#[cfg(test)]
+mod codec_dictionary_match_test {
+    use super::{
+        RTCRtpCodec, RTCRtpCodecParameters, codec_dictionary_match_with, encoding_send_codec,
+    };
+
+    fn h264(fmtp: &str) -> RTCRtpCodec {
+        RTCRtpCodec {
+            mime_type: "video/H264".to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        }
+    }
+
+    /// W3C webrtc 5.4 "codec dictionary match": an `sdpFmtpLine` on one side only is no
+    /// match; lines that are not key-value are compared as strings; symmetrical parameters
+    /// (H.264 profile, packetization mode) must be equal; the asymmetrical ones (the H.264
+    /// level) too unless `ignoreAsymmetricalParameters`; a parameter left out is its
+    /// inferred default.
+    #[test]
+    fn the_codec_dictionary_match_follows_the_w3c_algorithm() {
+        let base = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+        let cases = [
+            (base, base, true, true),
+            // Order and case of the parameter names do not matter.
+            (
+                base,
+                "PROFILE-LEVEL-ID=42e01f;packetization-mode=1;level-asymmetry-allowed=1",
+                true,
+                true,
+            ),
+            // Another level: asymmetrical.
+            (
+                base,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034",
+                false,
+                true,
+            ),
+            // Another packetization mode: symmetrical.
+            (
+                base,
+                "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f",
+                false,
+                false,
+            ),
+            // Another profile: symmetrical.
+            (
+                base,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f",
+                false,
+                false,
+            ),
+            // An inferred default: packetization-mode=0 left out.
+            (
+                "packetization-mode=0;profile-level-id=42e01f",
+                "profile-level-id=42e01f",
+                true,
+                true,
+            ),
+            // On one side only.
+            (base, "", false, false),
+        ];
+        for (first, second, strict, ignoring) in cases {
+            assert_eq!(
+                codec_dictionary_match_with(&h264(first), &h264(second), false),
+                strict,
+                "{first} / {second}"
+            );
+            assert_eq!(
+                codec_dictionary_match_with(&h264(first), &h264(second), true),
+                ignoring,
+                "{first} / {second}, ignoring asymmetrical parameters"
+            );
+        }
+        let red = |fmtp: &str| RTCRtpCodec {
+            mime_type: "audio/red".to_owned(),
+            clock_rate: 48000,
+            channels: 2,
+            sdp_fmtp_line: fmtp.to_owned(),
+            rtcp_feedback: vec![],
+        };
+        assert!(codec_dictionary_match_with(
+            &red("111/111"),
+            &red("111/111"),
+            false
+        ));
+        assert!(!codec_dictionary_match_with(
+            &red("111/111"),
+            &red("111/111/111"),
+            true
+        ));
+    }
+
+    /// W3C webrtc 4.4.1.6: an encoding's codec is the negotiated codec it matches with
+    /// `ignoreAsymmetricalParameters` true. A codec of the same MIME type with another
+    /// profile is no match (the mime-type-only fallback is gone); another level is.
+    #[test]
+    fn an_encoding_codec_matches_a_negotiated_one_by_the_dictionary_match() {
+        let negotiated = vec![RTCRtpCodecParameters {
+            rtp_codec: h264(
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+            ),
+            payload_type: 102,
+        }];
+        let other_level =
+            h264("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034");
+        assert_eq!(
+            encoding_send_codec(&other_level, &negotiated).map(|c| c.payload_type),
+            Some(102)
+        );
+        let other_profile =
+            h264("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f");
+        assert_eq!(encoding_send_codec(&other_profile, &negotiated), None);
     }
 }
