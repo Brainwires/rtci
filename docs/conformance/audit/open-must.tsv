@@ -66,7 +66,6 @@ RFC7874-3-11	D	M	media (running)	As RFC7874-3-10: the 30 ms minimum gap
 RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered as RTP without disturbing the stream
 RFC7874-3-13	D	M	media (running)	As RFC7874-3-10: events 0 to 15
 RFC7941-6-1	E	S	security	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
-RFC8083-3-3	C	S	interceptors (cb-2)	The RFC form is the setting `CircuitBreakerPacketSize::LastFrames` with its own test; the default (s over the rate window) was chosen on measured evidence recorded in the row's note; convert to `setting` (class A) when RULES.md has a verdict for a measured default on this base
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
 RFC8108-5.1-1	C	S	media (running)	Report blocks from every SSRC is a setting (`with_report_from_every_ssrc`), not the default (browser behaviour, no failing cell). Owner decision
 RFC8108-6.1-2	C	S	media (running)	A new SSRC on a clock-rate change
