@@ -3898,6 +3898,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
   and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
   that had none.
+- **sctp**: a lost COOKIE ACK held DATA back until T3-rtx. The side that sent the COOKIE ECHO
+  stays in COOKIE-ECHOED and discards the DATA its ESTABLISHED peer sends (RFC 9260 5.1, as it
+  SHOULD), and each discard backs the peer's RTO off: after crossed INITs at 10 % loss a data
+  channel's DATA_CHANNEL_OPEN waited 16 s and more and the channel did not open within 30 s.
+  The COOKIE ACK that answers a duplicate COOKIE ECHO in ESTABLISHED (5.2.4 D) now carries the
+  outstanding DATA that fits after it (5.1 D: a COOKIE ACK "MAY be bundled with any pending
+  DATA chunks"), counted as a retransmission (no RTT sample, 6.3.1 C5); the peer takes the
+  COOKIE ACK first and accepts the DATA in ESTABLISHED. Test:
+  `cookie_ack_loss_test.rs::outstanding_data_follows_the_cookie_ack_that_answers_a_repeated_cookie_echo`
+  (fails before); `data_written_when_the_cookie_ack_arrives_leaves_at_once` and
+  `handshake_timers_back_off_on_their_own_and_leave_the_rto_alone` pin that DATA written as
+  the COOKIE ACK arrives leaves at that instant and that T1-init / T1-cookie back off on their
+  own without touching the RTO.
 
 - **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
   HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are
