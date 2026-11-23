@@ -2433,6 +2433,9 @@ fn a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section() -> Res
             .iter()
             .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
     })?;
+    Ok(())
+}
+
 /// The RTP session number of `sender`'s transport.
 fn session_of(world: &mut World, sender: RTCRtpSenderId) -> usize {
     world.peers[0]
