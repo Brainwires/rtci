@@ -7,6 +7,7 @@ use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
 use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
 use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
+use crate::peer_connection::handler::transport_set::{TransportId, TransportSet};
 use crate::peer_connection::sdp::answered_extension_directions;
 use crate::peer_connection::sdp::has_bundle_attribute;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
@@ -296,14 +297,16 @@ impl RTCPeerConnection {
                     == ice::mdns::MulticastDnsMode::QueryAndGather,
                 ..Default::default()
             },
-            ice_handler_context,
-            dtls_handler_context,
+            transports: TransportSet::new(
+                ice_handler_context,
+                dtls_handler_context,
+                SrtpHandlerContext {
+                    rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
+                    ..Default::default()
+                },
+            ),
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            srtp_handler_context: SrtpHandlerContext {
-                rtp_header_encryption_policy: configuration.rtp_header_encryption_policy,
-                ..Default::default()
-            },
             interceptor_handler_context: InterceptorHandlerContext::default(),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
@@ -436,6 +439,8 @@ impl RTCPeerConnection {
         // and the answer to it the local candidate its `a=remote-candidates` names.
         let only = if offer {
             self.pipeline_context
+                .transports
+                .default()
                 .ice_handler_context
                 .lite_candidate_update
                 .as_ref()
@@ -508,6 +513,8 @@ impl RTCPeerConnection {
         let lite = std::mem::take(
             &mut self
                 .pipeline_context
+                .transports
+                .default_mut()
                 .ice_handler_context
                 .lite_candidate_update_raised,
         );
@@ -1365,19 +1372,61 @@ impl RTCPeerConnection {
     }
 
     pub(crate) fn ice_transport(&self) -> &IceTransport {
-        &self.pipeline_context.ice_handler_context.ice_transport
+        &self
+            .pipeline_context
+            .transports
+            .default()
+            .ice_handler_context
+            .ice_transport
     }
 
     pub(crate) fn ice_transport_mut(&mut self) -> &mut IceTransport {
-        &mut self.pipeline_context.ice_handler_context.ice_transport
+        &mut self
+            .pipeline_context
+            .transports
+            .default_mut()
+            .ice_handler_context
+            .ice_transport
     }
 
     pub(crate) fn dtls_transport(&self) -> &DtlsTransport {
-        &self.pipeline_context.dtls_handler_context.dtls_transport
+        &self
+            .pipeline_context
+            .transports
+            .default()
+            .dtls_handler_context
+            .dtls_transport
     }
 
     pub(crate) fn dtls_transport_mut(&mut self) -> &mut DtlsTransport {
-        &mut self.pipeline_context.dtls_handler_context.dtls_transport
+        &mut self
+            .pipeline_context
+            .transports
+            .default_mut()
+            .dtls_handler_context
+            .dtls_transport
+    }
+
+    /// The ICE transport of the connection's transport `id`; the default one when `id` names
+    /// none.
+    pub(crate) fn ice_transport_of(&self, id: TransportId) -> &IceTransport {
+        let transports = &self.pipeline_context.transports;
+        &transports
+            .transport(id)
+            .unwrap_or_else(|| transports.default())
+            .ice_handler_context
+            .ice_transport
+    }
+
+    /// The DTLS transport of the connection's transport `id`; the default one when `id` names
+    /// none.
+    pub(crate) fn dtls_transport_of(&self, id: TransportId) -> &DtlsTransport {
+        let transports = &self.pipeline_context.transports;
+        &transports
+            .transport(id)
+            .unwrap_or_else(|| transports.default())
+            .dtls_handler_context
+            .dtls_transport
     }
 
     pub(crate) fn sctp_transport(&self) -> &SctpTransport {
@@ -2368,6 +2417,8 @@ impl RTCPeerConnection {
         // candidate exchange of RFC 8445 section 8.2 is an offer.
         if self
             .pipeline_context
+            .transports
+            .default()
             .ice_handler_context
             .lite_candidate_update
             .is_some()
@@ -2942,6 +2993,8 @@ impl RTCPeerConnection {
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
         let agent = &self
             .pipeline_context
+            .transports
+            .default()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3055,6 +3108,8 @@ impl RTCPeerConnection {
         // pair that is still reported names them.
         let agent = &self
             .pipeline_context
+            .transports
+            .default()
             .ice_handler_context
             .ice_transport
             .agent;
