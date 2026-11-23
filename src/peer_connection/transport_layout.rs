@@ -24,8 +24,8 @@ use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::sdp::{
-    add_candidates_to_media_descriptions, bundle_group_mids, extract_fingerprints,
-    extract_ice_details, get_mid_value, is_rejected_media,
+    ATTR_KEY_BUNDLE_ONLY, add_candidates_to_media_descriptions, bundle_group_mids,
+    extract_fingerprints, extract_ice_details, get_mid_value, is_rejected_media,
 };
 use crate::peer_connection::transport::ice::IceTransport;
 use crate::peer_connection::transport::ice::candidate::rtc_ice_candidates_from_ice_candidates;
@@ -387,16 +387,27 @@ impl RTCPeerConnection {
         Ok(())
     }
 
-    /// An offer under the `max-compat` bundle policy (RFC 9429 section 4.1.1: "gather ICE
-    /// candidates for each media track"; one transport per m= section): each section that has
-    /// no transport yet gets one of its own. The first section of an initial offer keeps the
+    /// The transports of an offer this side makes (RFC 9429 sections 4.1.1 and 5.2.1: "each
+    /// m= section that is not bundle-only has its own ICE credentials and candidates").
+    ///
+    /// - `max-compat` gathers "for each media track": each section that has no transport yet
+    ///   gets one of its own, in every offer.
+    /// - `balanced` (the default) gathers "for each media type in use": in an initial offer the
+    ///   first section of each type has a transport of its own and the later ones are
+    ///   bundle-only, on the BUNDLE transport. A later offer gives a new section the BUNDLE
+    ///   transport.
+    /// - `must-bundle` gathers for one track: every section but the first is bundle-only.
+    ///
+    /// A section keeps the transport it has. The first section of an initial offer keeps the
     /// connection's first transport.
     pub(crate) fn plan_offer_transports(&mut self, d: &SessionDescription) -> Result<()> {
-        if self.effective_bundle_policy() != RTCBundlePolicy::MaxCompat {
-            return Ok(());
-        }
+        let own_transports = self.effective_bundle_policy() == RTCBundlePolicy::MaxCompat;
+        // An initial BUNDLE offer (RFC 9143 section 2): no offer/answer exchange completed.
+        let initial = self.is_initial_exchange();
         let transports = &self.pipeline_context.transports;
         let mut groups: Vec<(Option<TransportId>, Vec<String>)> = vec![];
+        // The group a section without a transport of its own joins: the BUNDLE transport's.
+        let mut bundle_group: Option<usize> = None;
         for m in &d.media_descriptions {
             if is_rejected_media(m) {
                 continue;
@@ -404,13 +415,28 @@ impl RTCPeerConnection {
             let Some(mid) = get_mid_value(m) else {
                 continue;
             };
-            match transports.assignment(mid) {
-                Some(id) => match groups.iter_mut().find(|(on, _)| *on == Some(id)) {
-                    Some((_, group)) => group.push(mid.clone()),
-                    None => groups.push((Some(id), vec![mid.clone()])),
-                },
-                None => groups.push((None, vec![mid.clone()])),
-            }
+            let bundle_only = m.attribute(ATTR_KEY_BUNDLE_ONLY).is_some();
+            let index = match transports.assignment(mid) {
+                Some(id) => groups
+                    .iter()
+                    .position(|(on, _)| *on == Some(id))
+                    .or_else(|| {
+                        groups.push((Some(id), vec![]));
+                        Some(groups.len() - 1)
+                    }),
+                // A bundle-only section has no transport of its own (RFC 9143 section 6).
+                None if bundle_only => bundle_group,
+                // A section of an initial offer that is not bundle-only has one; in a later
+                // offer, only under `max-compat`.
+                None if own_transports || initial => None,
+                None => bundle_group,
+            };
+            let index = index.unwrap_or_else(|| {
+                groups.push((None, vec![]));
+                groups.len() - 1
+            });
+            groups[index].1.push(mid.clone());
+            bundle_group.get_or_insert(index);
         }
         // The default transport's group first: it is the one the first section had.
         let default = transports.default_id();
@@ -418,7 +444,15 @@ impl RTCPeerConnection {
             let group = groups.remove(index);
             groups.insert(0, group);
         }
-        let groups: Vec<Vec<String>> = groups.into_iter().map(|(_, group)| group).collect();
+        let groups: Vec<Vec<String>> = groups
+            .into_iter()
+            .map(|(_, group)| group)
+            .filter(|group| !group.is_empty())
+            .collect();
+        if groups.len() <= 1 && self.pipeline_context.transports.len() == 1 {
+            // One transport for everything, as the connection has.
+            return Ok(());
+        }
         self.apply_transport_layout(&groups)
     }
 

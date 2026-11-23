@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection** (mt-5): `bundlePolicy: balanced`, the default, follows RFC 9429
+  section 4.1.1 / 5.2.1 in an initial offer: the first m= section of each media type (audio,
+  video, data) has a transport of its own, with its own ICE credentials, candidates and
+  default destination; the later sections of a type stay bundle-only. Until the answer the
+  offerer has up to three transports (`ice_transport_sections()` lists each); an answer that
+  bundles, as every browser's does, closes all but the tagged section's. An application that
+  gathers only for the first transport still connects with a bundling peer.
+
 - **peer connection** (mt-4): transport identity in the API, for connections with several
   transports.
   - `RTCPeerConnectionIceEvent` and `RTCPeerConnectionIceErrorEvent` have an
@@ -1678,6 +1686,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **`bundlePolicy: balanced`** (mt-5; RFC 9429 4.1.1, 5.2.1; RFC 9143 7.2; W3C webrtc-pc
+  4.2.4): an initial offer gathers for each media type in use; a peer that does not bundle
+  answers one audio and one video section (and data) on separate transports, the bundle-only
+  sections rejected. A later offer puts a new section on the BUNDLE transport. Browser
+  scenario: "balanced: Rust's offer has a transport per media type, answered without
+  BUNDLE"; `examples/interop-peer` gathers for its own offer's transports.
 - **Transport identity in the API** (mt-4; W3C webrtc-pc 4.3.2, 5.5, 5.6, webrtc-stats 7.1).
   - `RTCPeerConnectionEvent::OnTransportEvent(RTCTransportEvent)`: every transport's ICE
     `statechange`, `gatheringstatechange`, `selectedcandidatepairchange`, candidate pair

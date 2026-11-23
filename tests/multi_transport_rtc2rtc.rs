@@ -227,8 +227,17 @@ impl World {
         &mut self,
         edit: impl Fn(String) -> String,
     ) -> Result<(Vec<RTCRtpSenderId>, String)> {
+        self.negotiate_kinds(&[RtpCodecKind::Audio, RtpCodecKind::Video], edit)
+    }
+
+    /// `negotiate` with a sender of each of `kinds`.
+    fn negotiate_kinds(
+        &mut self,
+        kinds: &[RtpCodecKind],
+        edit: impl Fn(String) -> String,
+    ) -> Result<(Vec<RTCRtpSenderId>, String)> {
         let mut senders = vec![];
-        for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        for kind in kinds.iter().copied() {
             let transceiver = self.peers[0].pc.add_transceiver_from_kind(
                 kind,
                 Some(RTCRtpTransceiverInit {
@@ -430,9 +439,16 @@ fn unbundled_sections_run_on_transports_of_their_own() -> Result<()> {
 /// both media and data run over the one that is left.
 #[test]
 fn a_bundling_answer_leaves_the_tagged_sections_transport_only() -> Result<()> {
-    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    for policy in [RTCBundlePolicy::MaxCompat, RTCBundlePolicy::Balanced] {
+        a_bundling_answer_leaves_one_transport(policy)?;
+    }
+    Ok(())
+}
+
+fn a_bundling_answer_leaves_one_transport(policy: RTCBundlePolicy) -> Result<()> {
+    let mut world = World::new(policy)?;
     let (senders, offer) = world.negotiate(|sdp| sdp)?;
-    assert_eq!(ufrags(&offer).len(), 3, "{offer}");
+    assert_eq!(ufrags(&offer).len(), 3, "{policy:?}: {offer}");
     assert_eq!(
         world.peers[0].pc.ice_transport_sections().len(),
         1,
@@ -761,5 +777,107 @@ fn statistics_have_a_transport_object_per_transport() -> Result<()> {
     assert_eq!(streams.len(), 2);
     assert_ne!(streams[0], streams[1], "audio and video on two transports");
     assert!(streams.iter().all(|id| ids.contains(id)));
+    Ok(())
+}
+
+/// RFC 9429 section 4.1.1, `balanced`: "gather ICE candidates for each media type in use
+/// (audio, video, and data). If the remote endpoint is not BUNDLE-aware, negotiate only one
+/// audio and video track on separate transports." Section 5.2.1: the first section of each
+/// type has its own ICE credentials and candidates, the later ones are bundle-only. Answered
+/// by a peer that does not bundle, the bundle-only video section is rejected and audio, video
+/// and data each run on their own transport.
+#[test]
+fn balanced_gives_each_media_type_a_transport_of_its_own() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::Balanced)?;
+    let kinds = [
+        RtpCodecKind::Audio,
+        RtpCodecKind::Video,
+        RtpCodecKind::Video,
+    ];
+    let (senders, offer) = world.negotiate_kinds(&kinds, without_bundle_group)?;
+    assert_eq!(
+        ufrags(&offer).len(),
+        3,
+        "audio, the first video and data have their own credentials:\n{offer}"
+    );
+    let sections: Vec<&str> = offer.split("\r\nm=").skip(1).collect();
+    assert_eq!(sections.len(), 4, "{offer}");
+    assert!(
+        sections[2].contains("a=bundle-only") && !sections[2].contains("a=ice-ufrag"),
+        "the second video section is bundle-only, without credentials:\n{offer}"
+    );
+    for section in [sections[0], sections[1], sections[3]] {
+        assert!(!section.contains("a=bundle-only"), "{section}");
+    }
+    let answer = world.peers[1]
+        .pc
+        .local_description()
+        .expect("an answer")
+        .sdp;
+    let answered: Vec<&str> = answer.split("\r\nm=").skip(1).collect();
+    assert!(
+        answered[2].starts_with("video 0 "),
+        "the bundle-only section is rejected:\n{answer}"
+    );
+    assert_eq!(ufrags(&answer).len(), 3, "{answer}");
+    for peer in &world.peers {
+        assert_eq!(peer.pc.ice_transport_sections().len(), 3);
+    }
+    world.gather()?;
+    // RFC 9143 section 7.2: each section that is not bundle-only has an address:port of its
+    // own, its transport's default candidate; the bundle-only one has port zero.
+    let local = world.peers[0]
+        .pc
+        .local_description()
+        .expect("the offer")
+        .sdp;
+    let ports: Vec<u16> = local
+        .split("\r\nm=")
+        .skip(1)
+        .map(|m| {
+            m.split(' ')
+                .nth(1)
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+        })
+        .collect();
+    assert_eq!(ports[2], 0, "{local}");
+    let own: HashSet<u16> = [ports[0], ports[1], ports[3]].into_iter().collect();
+    assert_eq!(own.len(), 3, "three unique ports: {local}");
+    assert!(!own.contains(&9) && !own.contains(&0), "{local}");
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    assert_eq!(world.paths.len(), 6, "{:?}", world.paths);
+    let live = &senders[..2];
+    let mut transports = HashSet::new();
+    for sender in live {
+        transports.insert(
+            world.peers[0]
+                .pc
+                .rtp_sender(*sender)
+                .expect("sender")
+                .transport()
+                .expect("a transport")
+                .id(),
+        );
+    }
+    transports.insert(world.peers[0].pc.sctp().expect("SCTP").transport().id());
+    assert_eq!(
+        transports.len(),
+        3,
+        "audio, video and data on three transports"
+    );
+    let ssrcs: Vec<u32> = live.iter().map(|s| world.ssrc(*s)).collect();
+    for seq in 1..=5 {
+        for sender in live {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("RTP of the audio and the first video delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
     Ok(())
 }

@@ -10,13 +10,13 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 780 / untested 17 / partial 53 / missing 19 / violated 0 / n-a 60
+- MUST: tested 781 / untested 17 / partial 53 / missing 18 / violated 0 / n-a 60
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 301 / untested 8 / partial 21 / missing 18 / violated 0 / n-a 34
+- sections 1 to 4: rows 399; MUST: tested 302 / untested 8 / partial 21 / missing 17 / violated 0 / n-a 34
 - section 5: rows 258; MUST: tested 221 / untested 3 / partial 12 / missing 1 / violated 0 / n-a 13
 - sections 6 to 12: rows 300; MUST: tested 258 / untested 6 / partial 20 / missing 0 / violated 0 / n-a 13
 
@@ -41,7 +41,7 @@ By pass:
 | WEBRTC-4.2.3-1 | 4.2.3 | MUST | "relay": the ICE agent uses only relay candidates | tested | src/peer_connection/internal.rs:77 | a_relay_policy_set_later_reaches_the_agent | |
 | WEBRTC-4.2.3-2 | 4.2.3 | MUST | "all": the ICE agent may use any candidate type | tested | src/peer_connection/mod.rs:2258 | an_all_policy_set_later_lifts_relay | |
 | WEBRTC-4.2.3-3 | 4.2.3 | MUST | Only candidates the policy permits are surfaced and used for connectivity checks | tested | `src/peer_connection/internal.rs` (`add_ice_local_candidate`) | `tests/ice_candidate_relay_protocol.rs::under_the_relay_policy_only_relay_candidates_are_surfaced`, `a_relay_policy_set_later_reaches_the_agent` | A host or srflx candidate the relay policy filters raises no icecandidate event; a relay one does. `conf/ice-16-webrtc-pc-ice-rows` |
-| WEBRTC-4.2.4-1 | 4.2.4 | MUST | "balanced": one transport per media type when the remote is not bundle-aware | missing | src/peer_connection/configuration/mod.rs:270 | | D2: one transport only; behaves as max-bundle |
+| WEBRTC-4.2.4-1 | 4.2.4 | MUST | "balanced": one transport per media type when the remote is not bundle-aware | tested | src/peer_connection/transport_layout.rs (plan_offer_transports) | balanced_gives_each_media_type_a_transport_of_its_own, an_offer_without_a_group_is_answered_by_the_policy | mt-5: an initial offer gives each media type a transport; an unbundled answer keeps one audio and one video section, each on its own transport |
 | WEBRTC-4.2.4-2 | 4.2.4 | MUST | "max-compat": one transport per track when the remote is not bundle-aware | tested | src/peer_connection/transport_layout.rs (plan_offer_transports) | tests/multi_transport_rtc2rtc.rs::unbundled_sections_run_on_transports_of_their_own | mt-2: a transport per section; a bundling answer leaves one |
 | WEBRTC-4.2.4-3 | 4.2.4 | MUST | "max-bundle": gather for one track; negotiate one media track if the remote is not bundle-aware | untested | src/peer_connection/internal.rs:531 | | D2 promises a defined error for a remote offer without BUNDLE; no test or error variant found |
 | WEBRTC-4.2.4-4 | 4.2.4 | MUST | A bundle-aware remote gets all media and data on one transport | tested | src/peer_connection/sdp/mod.rs:1461 | test_offer_answer_rtc_to_rtc | |

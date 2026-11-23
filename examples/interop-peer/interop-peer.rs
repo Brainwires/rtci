@@ -571,8 +571,16 @@ impl Session {
         let offer = self.pc.create_offer(None)?;
         self.pc
             .set_local_description(Instant::now(), offer.clone())?;
+        // The offer's other transports (RFC 9429 section 5.2.1: under `balanced` the first
+        // section of each media type has one) get their candidates, which the local
+        // description then lists.
+        self.add_transport_candidates()?;
+        let sdp = self
+            .pc
+            .local_description()
+            .map_or(offer.sdp, |description| description.sdp);
         self.have_local_offer = true;
-        self.out.push(json!({"type": "offer", "sdp": offer.sdp}));
+        self.out.push(json!({"type": "offer", "sdp": sdp}));
         Ok(())
     }
 
