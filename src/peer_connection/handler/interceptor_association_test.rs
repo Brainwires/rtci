@@ -778,3 +778,99 @@ fn a_retransmission_stream_is_associated_again_after_the_original_moved() {
         "the new RTX stream repairs the new original"
     );
 }
+
+/// The receiver of a track whose remote description declared the simulcast streams `ssrcs`
+/// (RFC 5576 `a=ssrc-group:SIM`): one coding per stream.
+fn declare_layers(transceiver: &mut RTCRtpTransceiverInternal, ssrcs: &[u32]) {
+    let codings: Vec<RTCRtpCodingParameters> = ssrcs
+        .iter()
+        .map(|ssrc| RTCRtpCodingParameters {
+            ssrc: Some(*ssrc),
+            ..Default::default()
+        })
+        .collect();
+    let receiver = transceiver.receiver_mut().as_mut().unwrap();
+    receiver.set_coding_parameters(codings.clone());
+    receiver.set_track(MediaStreamTrack::new(
+        "stream".to_string(),
+        "declared".to_string(),
+        "label".to_string(),
+        RtpCodecKind::Video,
+        codings
+            .into_iter()
+            .map(|rtp_coding_parameters| RTCRtpEncodingParameters {
+                rtp_coding_parameters,
+                active: true,
+                ..Default::default()
+            })
+            .collect(),
+    ));
+}
+
+/// RFC 5576 section 4.2 (`a=ssrc-group:SIM`): the declared simulcast streams of a track are
+/// received as its layers. Each stream's packets, without a MID, stay with the track's
+/// receiver, and none takes over another's coding (RFC 7160 4.1's single-stream rule is for a
+/// receiver of one stream).
+#[test]
+fn the_declared_streams_of_a_sim_group_are_layers_of_one_receiver() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare_layers(&mut transceivers[0], &[0x5101, 0x5102, 0x5103]);
+    let arrival = |ssrc: u32| Arrival {
+        ssrc,
+        payload_type: VP8,
+        mid: None,
+    };
+    let (_, after) = opened(
+        transceivers,
+        &[
+            arrival(0x5101),
+            arrival(0x5102),
+            arrival(0x5103),
+            arrival(0x5102),
+        ],
+    );
+    assert_eq!(
+        receive_codings(&after, 0),
+        vec![
+            (Some(0x5101), None),
+            (Some(0x5102), None),
+            (Some(0x5103), None)
+        ]
+    );
+    assert_eq!(receive_codings(&after, 1), vec![]);
+}
+
+/// RFC 9143 section 9.2: a packet's MID re-associates its SSRC with the m= section it names,
+/// for one simulcast layer of a receiver too: the layer whose later packet names mid 2 moves
+/// to that section's free receiver, and the other layers stay where they were.
+#[test]
+fn a_later_mid_moves_one_simulcast_layer_to_its_section() {
+    let mut transceivers = vec![
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+        transceiver(RtpCodecKind::Video, "2", vec![codec("video/VP8", VP8)]),
+    ];
+    declare_layers(&mut transceivers[0], &[0x6101, 0x6102, 0x6103]);
+    let arrival = |ssrc: u32, mid: &'static str| Arrival {
+        ssrc,
+        payload_type: VP8,
+        mid: Some(mid),
+    };
+    let (_, after) = opened_in_order(
+        transceivers,
+        &[
+            (arrival(0x6101, "1"), 10),
+            (arrival(0x6102, "1"), 10),
+            (arrival(0x6103, "1"), 10),
+            (arrival(0x6102, "2"), 11),
+        ],
+    );
+    assert_eq!(
+        receive_codings(&after, 0),
+        vec![(Some(0x6101), None), (Some(0x6103), None)],
+        "the other layers stay"
+    );
+    assert_eq!(receive_codings(&after, 1), vec![(Some(0x6102), None)]);
+}

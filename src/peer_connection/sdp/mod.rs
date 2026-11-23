@@ -646,6 +646,108 @@ pub(crate) struct TrackDetails {
     pub(crate) rids: Vec<String>,
     /// What each rid's `a=rid` line restricts the stream to (RFC 8851 section 5).
     pub(crate) rid_restrictions: HashMap<String, RTCRtpRidRestrictions>,
+    /// The further simulcast streams of the track an `a=ssrc-group:SIM` names, after the
+    /// first one (`ssrc`).
+    pub(crate) ssrc_layers: Vec<SsrcLayer>,
+}
+
+/// The `ssrc-group` semantics of simulcast streams sent as SSRCs of one track, without
+/// RFC 8853 rids (registered in RFC 5576's registry by libwebrtc's use; "SIM").
+const SEMANTIC_TOKEN_SIMULCAST: &str = "SIM";
+
+/// One simulcast stream of an `a=ssrc-group:SIM` track with its repair flows.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SsrcLayer {
+    pub(crate) ssrc: SSRC,
+    pub(crate) rtx_ssrc: Option<SSRC>,
+    pub(crate) fec_ssrc: Option<SSRC>,
+}
+
+/// What the `a=ssrc-group` lines of a media section say (RFC 5576 section 4.2): a group
+/// lists one or more ssrc-ids, and any number of them.
+#[derive(Default, Debug)]
+struct SsrcGroups {
+    /// The RTX flow of each primary: the second id of its `FID` group (RFC 4588 section 8.6).
+    rtx: HashMap<SSRC, SSRC>,
+    /// The FEC repair flow of each source of a `FEC-FR` group (RFC 5956 section 4.3).
+    fec: HashMap<SSRC, SSRC>,
+    /// Every SSRC that is a repair flow of another, not a track of its own.
+    repair_flows: HashSet<SSRC>,
+    /// The members of each `SIM` group, in order.
+    simulcast: Vec<Vec<SSRC>>,
+}
+
+impl SsrcGroups {
+    fn of(media: &MediaDescription) -> Self {
+        let mut lists: Vec<(&str, Vec<SSRC>)> = vec![];
+        for value in media
+            .attributes
+            .iter()
+            .filter(|a| a.key == ATTR_KEY_SSRC_GROUP)
+            .filter_map(|a| a.value.as_deref())
+        {
+            let mut tokens = value.split(' ');
+            let semantics = tokens.next().unwrap_or_default();
+            let Ok(ids) = tokens
+                .map(str::parse::<SSRC>)
+                .collect::<std::result::Result<Vec<_>, _>>()
+            else {
+                log::warn!("a=ssrc-group:{value}: an ssrc-id is not a number");
+                continue;
+            };
+            if !ids.is_empty() {
+                lists.push((semantics, ids));
+            }
+        }
+
+        let mut groups = SsrcGroups::default();
+        // `FID` (RFC 5888 section 8.4, RFC 4588 section 8.6): the first id is the source,
+        // every further one a flow of the same source, the first of them its RTX flow.
+        let mut primaries: HashSet<SSRC> = HashSet::new();
+        for (semantics, ids) in &lists {
+            if *semantics == SEMANTIC_TOKEN_FLOW_IDENTIFICATION && ids.len() >= 2 {
+                groups.rtx.entry(ids[0]).or_insert(ids[1]);
+                groups.repair_flows.extend(&ids[1..]);
+                primaries.insert(ids[0]);
+            } else if *semantics == SEMANTIC_TOKEN_SIMULCAST {
+                primaries.extend(ids);
+            }
+        }
+        // `FEC-FR` (RFC 5956 sections 4.1, 4.3): one or more source flows and the additive
+        // repair flows that protect them. The first id is a source (as WebRTC writes it,
+        // `FEC-FR <source> <repair>`, RFC 8627 section 6); a further id is a source too when
+        // it is a primary of its own (an `FID` source or a `SIM` stream, as `S1 S2 R2` in
+        // section 4.2), a repair flow otherwise.
+        for (semantics, ids) in &lists {
+            if *semantics != SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK || ids.len() < 2 {
+                continue;
+            }
+            let (mut sources, mut repairs): (Vec<SSRC>, Vec<SSRC>) = (vec![], vec![]);
+            for (i, ssrc) in ids.iter().enumerate() {
+                if i == 0 || primaries.contains(ssrc) {
+                    sources.push(*ssrc);
+                } else {
+                    repairs.push(*ssrc);
+                }
+            }
+            let Some(&repair) = repairs.first() else {
+                continue;
+            };
+            for source in sources {
+                groups.fec.entry(source).or_insert(repair);
+            }
+            groups.repair_flows.extend(repairs);
+        }
+        groups.simulcast = lists
+            .into_iter()
+            .filter(|(semantics, ids)| *semantics == SEMANTIC_TOKEN_SIMULCAST && ids.len() >= 2)
+            .map(|(_, ids)| ids)
+            .collect();
+        for members in &mut groups.simulcast {
+            members.retain(|ssrc| !groups.repair_flows.contains(ssrc));
+        }
+        groups
+    }
 }
 
 pub(crate) fn track_details_for_ssrc(
@@ -675,8 +777,6 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         // `slot_by_ssrc` finds a track by SSRC (unique within the section) without a scan.
         let mut track_slots: Vec<Option<TrackDetails>> = vec![];
         let mut slot_by_ssrc: HashMap<SSRC, usize> = HashMap::new();
-        let mut rtx_repair_flows = HashMap::new();
-        let mut fec_repair_flows = HashMap::new();
 
         // The section's `a=msid` lines (RFC 8830 section 2), read before anything else: they
         // name the track's streams whatever a legacy `a=ssrc:<n> msid:` attribute says.
@@ -711,79 +811,13 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
             continue;
         }
 
+        // RFC 5576 section 4.2: a group "MUST list at least one <ssrc-id> for a group and MAY
+        // list any number of additional ones". Read before the `a=ssrc` lines, wherever the
+        // groups stand in the section.
+        let groups = SsrcGroups::of(media);
+
         for attr in &media.attributes {
             match attr.key.as_str() {
-                ATTR_KEY_SSRC_GROUP => {
-                    if let Some(value) = &attr.value {
-                        let split: Vec<&str> = value.split(' ').collect();
-                        if split[0] == SEMANTIC_TOKEN_FLOW_IDENTIFICATION {
-                            // Add rtx ssrcs to blacklist, to avoid adding them as tracks
-                            // Essentially lines like `a=ssrc-group:FID 2231627014 632943048` are processed by this section
-                            // as this declares that the second SSRC (632943048) is a rtx repair flow (RFC4588) for the first
-                            // (2231627014) as specified in RFC5576
-                            if split.len() == 3 {
-                                let base_ssrc = match split[1].parse::<u32>() {
-                                    Ok(ssrc) => ssrc,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                let rtx_repair_flow = match split[2].parse::<u32>() {
-                                    Ok(n) => n,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                rtx_repair_flows.insert(rtx_repair_flow, base_ssrc);
-                                // Remove if rtx was added as track before
-                                if let Some(slot) = slot_by_ssrc.remove(&rtx_repair_flow) {
-                                    track_slots[slot] = None;
-                                }
-
-                                if let Some(track) = slot_by_ssrc
-                                    .get(&base_ssrc)
-                                    .and_then(|&slot| track_slots[slot].as_mut())
-                                {
-                                    track.rtx_ssrc = Some(rtx_repair_flow);
-                                }
-                            }
-                        } else if split[0] == SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK {
-                            // Similar to above, lines like `a=ssrc-group:FEC-FR aaaaa bbbbb`
-                            // means for video ssrc aaaaa, there's a FEC track bbbbb
-                            if split.len() == 3 {
-                                let base_ssrc = match split[1].parse::<u32>() {
-                                    Ok(ssrc) => ssrc,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                let fec_repair_flow = match split[2].parse::<u32>() {
-                                    Ok(n) => n,
-                                    Err(err) => {
-                                        log::warn!("Failed to parse SSRC: {err}");
-                                        continue;
-                                    }
-                                };
-                                fec_repair_flows.insert(fec_repair_flow, base_ssrc);
-                                // Remove if fec was added as track before
-                                if let Some(slot) = slot_by_ssrc.remove(&fec_repair_flow) {
-                                    track_slots[slot] = None;
-                                }
-
-                                if let Some(track) = slot_by_ssrc
-                                    .get(&base_ssrc)
-                                    .and_then(|&slot| track_slots[slot].as_mut())
-                                {
-                                    track.fec_ssrc = Some(fec_repair_flow);
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Handle `a=msid:<stream_id> <track_label>` The first value is the same as MediaStream.id
                 // in the browser and can be used to figure out which tracks belong to the same stream. The browser should
                 // figure this out automatically when an ontrack event is emitted on RTCPeerConnection.
@@ -801,11 +835,8 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                             }
                         };
 
-                        if rtx_repair_flows.contains_key(&ssrc) {
-                            continue; // This ssrc is a RTX repair flow, ignore
-                        }
-                        if fec_repair_flows.contains_key(&ssrc) {
-                            continue; // This ssrc is a FEC repair flow, ignore
+                        if groups.repair_flows.contains(&ssrc) {
+                            continue; // A repair flow (RTX, FEC) of a primary, not a track.
                         }
 
                         // The source-level msid of a description without `a=msid` lines
@@ -842,21 +873,35 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
             };
         }
 
-        for (repair_ssrc, base_ssrc) in rtx_repair_flows {
-            if let Some(track) = slot_by_ssrc
-                .get(&base_ssrc)
-                .and_then(|&slot| track_slots[slot].as_mut())
-            {
-                track.rtx_ssrc = Some(repair_ssrc);
+        for track in track_slots.iter_mut().flatten() {
+            if let Some(ssrc) = track.ssrc {
+                track.rtx_ssrc = groups.rtx.get(&ssrc).copied();
+                track.fec_ssrc = groups.fec.get(&ssrc).copied();
             }
         }
 
-        for (repair_ssrc, base_ssrc) in fec_repair_flows {
-            if let Some(track) = slot_by_ssrc
-                .get(&base_ssrc)
-                .and_then(|&slot| track_slots[slot].as_mut())
-            {
-                track.fec_ssrc = Some(repair_ssrc);
+        // RFC 5576 section 4.2 with the `SIM` semantics: the sources of a group are the
+        // simulcast streams of one track, the first one's track; the others are its further
+        // layers, each with its repair flows.
+        for members in &groups.simulcast {
+            let mut present = members
+                .iter()
+                .filter_map(|ssrc| slot_by_ssrc.get(ssrc).map(|&slot| (*ssrc, slot)));
+            let Some((_, keeper)) = present.next() else {
+                continue;
+            };
+            let layers: Vec<(SSRC, usize)> = present.collect();
+            for (ssrc, slot) in layers {
+                if slot == keeper || track_slots[slot].take().is_none() {
+                    continue;
+                }
+                if let Some(track) = track_slots[keeper].as_mut() {
+                    track.ssrc_layers.push(SsrcLayer {
+                        ssrc,
+                        rtx_ssrc: groups.rtx.get(&ssrc).copied(),
+                        fec_ssrc: groups.fec.get(&ssrc).copied(),
+                    });
+                }
             }
         }
 
@@ -1020,6 +1065,32 @@ fn track_details_from_sdp_pairs_repair_flows_by_lookup() {
         assert_eq!(track.track_id, format!("track{i}"));
         assert_eq!(track.mid, "0");
     }
+}
+
+/// RFC 5576 section 4.2: a group "MAY list any number of additional" ids. A `FID` group of
+/// three is a source and two further flows of it, the first of them its RTX flow; a `FEC-FR`
+/// group of three is one source and two additive repair flows (RFC 5956 section 4.1). No flow
+/// a group names as a repair flow is a track.
+#[test]
+fn groups_of_three_ids_name_one_source_and_its_flows() {
+    let mut media = MediaDescription::default()
+        .with_value_attribute(ATTR_KEY_MID.to_owned(), "0".to_owned())
+        .with_property_attribute(ATTR_KEY_SEND_RECV.to_owned())
+        .with_value_attribute(ATTR_KEY_SSRC_GROUP.to_owned(), "FID 4 14 24".to_owned())
+        .with_value_attribute(ATTR_KEY_SSRC_GROUP.to_owned(), "FEC-FR 4 34 44".to_owned());
+    media.media_name.media = "video".to_owned();
+    for ssrc in [4, 14, 24, 34, 44] {
+        media = media.with_value_attribute(
+            ATTR_KEY_SSRC.to_owned(),
+            format!("{ssrc} msid:stream track"),
+        );
+    }
+    let tracks = track_details_from_sdp(&SessionDescription::default().with_media(media));
+    assert_eq!(tracks.len(), 1, "{tracks:?}");
+    assert_eq!(tracks[0].ssrc, Some(4));
+    assert_eq!(tracks[0].rtx_ssrc, Some(14));
+    assert_eq!(tracks[0].fec_ssrc, Some(34));
+    assert!(tracks[0].ssrc_layers.is_empty());
 }
 
 #[test]
@@ -5617,8 +5688,8 @@ pub(crate) fn update_sdp_origin(
         if d.marshal() == *last_generated {
             return;
         }
-        origin.session_version = origin.session_version.wrapping_add(1);
-        d.origin.session_version = origin.session_version;
+        origin.session_version = origin.session_version.incremented();
+        d.origin.session_version = origin.session_version.clone();
     }
     *last_generated = d.marshal();
 }

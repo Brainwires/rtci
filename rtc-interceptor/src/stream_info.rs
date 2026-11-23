@@ -193,6 +193,11 @@ pub struct StreamInfo {
     /// `onelevelonly` (RFC 5109 section 13) of their `ulpfec` format here. Empty when the
     /// binder did not say.
     pub section_fmtp_lines: Vec<(u8, String)>,
+    /// The MIME type of every format of the stream's m= section by payload type, repair and
+    /// redundancy formats included, for an interceptor that acts on a format the stream does
+    /// not name itself: the RED interceptor finds the section's `red` format here (RFC 2198
+    /// section 5). Empty when the binder did not say.
+    pub section_mime_types: Vec<(u8, String)>,
 }
 
 impl StreamInfo {

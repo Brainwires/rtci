@@ -372,6 +372,8 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
             "o=mozilla...THIS_IS_SDPARTA-99.0 8847547619928269125 0 IN IP4 0.0.0.0\r\n",
             "o=- 0 0 IN IP6 2001:db8::1\r\n",
             "o=- 18446744073709551615 18446744073709551615 IN IP4 host.example.com\r\n",
+            // `1*DIGIT` has no upper bound (RFC 8866 section 9).
+            "o=- 18446744073709551616 1 IN IP4 0.0.0.0\r\n",
             "o=\u{e9}t\u{e9} 1 1 IN IP4 127.0.0.1\r\n",
             // RFC 8866 section 5.2: other network and address types may be registered.
             "o=- 1 1 ATM NSAP 47.0091.8100.0000.0060.3e64.fd01.0060.3e64.fd01.fe\r\n",
@@ -393,7 +395,6 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
             "o=- 1 x IN IP4 0.0.0.0\r\n",
             "o=- -1 1 IN IP4 0.0.0.0\r\n",
             "o=- 1.5 1 IN IP4 0.0.0.0\r\n",
-            "o=- 18446744073709551616 1 IN IP4 0.0.0.0\r\n",
             "o=- 1 1 I/N IP4 0.0.0.0\r\n",
             "o=- 1 1 IN IP/4 0.0.0.0\r\n",
             "o=- 1 1 IN IP4 ::1\r\n",
@@ -410,6 +411,32 @@ fn origin_has_six_fields_with_the_grammar_of_each() {
     assert_eq!(parsed.origin.session_id, 3724394400);
     assert_eq!(parsed.origin.session_version, 3724394405);
     assert_eq!(parsed.origin.unicast_address, "198.51.100.1");
+}
+
+/// RFC 8866 section 9: `<sess-id>` and `<sess-version>` are `1*DIGIT`, with no upper bound. A
+/// description whose values do not fit 64 bits is compliant (RFC 9429 section 5.8 accepts
+/// compliant SDP that does not follow the generation rules of section 5.2.1), is read, and is
+/// written back as it was; the version increments past any width.
+#[test]
+fn an_origin_beyond_64_bits_is_read_and_written_back() {
+    let line = "o=- 340282366920938463463374607431768211456 000018446744073709551615 IN IP4 \
+                127.0.0.1\r\n";
+    let parsed = strict(&format!("{V}{line}{S}{T}")).unwrap();
+    assert_eq!(
+        parsed.origin.session_id.as_str(),
+        "340282366920938463463374607431768211456"
+    );
+    assert_eq!(parsed.origin.session_id.to_u64(), None);
+    assert_eq!(parsed.origin.session_version, u64::MAX);
+    assert!(parsed.marshal().contains(line), "{}", parsed.marshal());
+    let next = parsed.origin.session_version.incremented();
+    assert_eq!(next.as_str(), "18446744073709551616");
+    assert!(next > parsed.origin.session_version);
+    assert_eq!(
+        "999".parse::<SdpDecimal>().unwrap().incremented().as_str(),
+        "1000"
+    );
+    assert!("12a".parse::<SdpDecimal>().is_err());
 }
 
 // --- s=, i= -----------------------------------------------------------------------------------
@@ -459,8 +486,8 @@ fn an_empty_session_name_is_never_written() {
     let built = SessionDescription {
         origin: Origin {
             username: "-".to_owned(),
-            session_id: 1,
-            session_version: 1,
+            session_id: 1.into(),
+            session_version: 1.into(),
             network_type: "IN".to_owned(),
             address_type: "IP4".to_owned(),
             unicast_address: "0.0.0.0".to_owned(),
@@ -1328,8 +1355,8 @@ fn the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives() {
 fn a_description_is_written_in_the_order_of_the_grammar_whatever_was_set() {
     // Every optional part set: the lines come out as v o s i u e p c b t r z a, m i c b a.
     let mut session = SessionDescription::new_jsep_session_description(false);
-    session.origin.session_id = 1;
-    session.origin.session_version = 2;
+    session.origin.session_id = 1.into();
+    session.origin.session_version = 2.into();
     session
         .attributes
         .push(Attribute::new("x".to_owned(), None));
