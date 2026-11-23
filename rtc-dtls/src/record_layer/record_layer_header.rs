@@ -5,7 +5,7 @@
 //! ChangeCipherSpec, so records protected with the old and new keys can be told apart while a
 //! rekey is in flight.
 //!
-//! The sequence number is 48 bits on the wire but held as a `u64`; [`MAX_SEQUENCE_NUMBER`](crate::record_layer::record_layer_header::MAX_SEQUENCE_NUMBER) is the
+//! The sequence number is 48 bits on the wire but held as a `u64`; [`MAX_SEQUENCE_NUMBER`] is the
 //! largest value that fits.
 use crate::content::*;
 

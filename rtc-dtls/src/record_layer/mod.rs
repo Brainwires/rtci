@@ -1,4 +1,3 @@
-/// The record header: content type, version, epoch and sequence number.
 pub mod record_layer_header;
 
 #[cfg(test)]

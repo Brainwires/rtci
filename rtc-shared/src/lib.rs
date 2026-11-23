@@ -79,14 +79,11 @@ pub mod replay_detector;
 pub mod error;
 /// `serde` helpers for types that have no natural serialized form, such as [`std::time::Instant`].
 pub mod serde;
-/// Stream transports (TCP, TLS over TCP) for a sans-I/O engine: ids, commands, events,
-/// framing and back-pressure.
 pub mod stream;
 pub mod tcp_framing;
 /// Conversions between monotonic, Unix and NTP time.
 pub mod time;
 pub(crate) mod transport;
-/// Splitting a TURN-over-TCP byte stream into STUN and ChannelData messages.
 pub mod turn_framing;
 /// Small shared helpers: packet demultiplexing predicates and random-string generation.
 pub mod util;

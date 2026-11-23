@@ -360,7 +360,7 @@ pub struct AgentConfig {
     /// Lets connectivity checks go to a loopback remote address (`127.0.0.0/8`, `::1`) from a
     /// local candidate that is not itself on loopback. Off by default: a loopback remote
     /// candidate is then paired only with a loopback local candidate, so a peer cannot make
-    /// this host send checks to its own services. See the [`remote_policy`](super::remote_policy) module.
+    /// this host send checks to its own services. See the [`remote_policy`] module.
     pub allow_loopback_remote_candidates: bool,
 
     /// Lets connectivity checks go to a link-local remote address (`169.254.0.0/16`,

@@ -917,7 +917,7 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 /// CNAME. What a session description negotiates beyond that reaches it as an
 /// [`RtcpSessionControl`](interceptor::RtcpSessionControl) (bandwidth from `b=` lines,
 /// `a=rtcp-rsize`, `trr-int`) or through
-/// [`RtcpSessionBuilder`](interceptor::RtcpSessionBuilder) when the chain is built by hand:
+/// [`RtcpSessionBuilder`] when the chain is built by hand:
 ///
 /// ```
 /// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
