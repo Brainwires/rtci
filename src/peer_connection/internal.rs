@@ -2433,37 +2433,11 @@ impl RTCPeerConnection {
                 continue;
             }
             for encoding in sender.send_encodings() {
-                let coding = &encoding.rtp_coding_parameters;
-                let Some(ssrc) = coding.ssrc else {
-                    continue;
-                };
-                let rid = (!coding.rid.is_empty()).then(|| coding.rid.clone());
-                let repair = coding
-                    .rtx
-                    .as_ref()
-                    .map(|rtx| rtx.ssrc)
-                    .into_iter()
-                    .chain(coding.fec.as_ref().map(|fec| fec.ssrc));
-                controls.push(
-                    RtcpSessionControl::StreamIdentifiers {
-                        ssrc,
-                        mid: Some(mid.clone()),
-                        rid: rid.clone(),
-                        repaired_rid: None,
-                    }
-                    .into_packet(now),
+                controls.extend(
+                    stream_identifiers(mid, &encoding.rtp_coding_parameters)
+                        .into_iter()
+                        .map(|control| control.into_packet(now)),
                 );
-                for repair_ssrc in repair {
-                    controls.push(
-                        RtcpSessionControl::StreamIdentifiers {
-                            ssrc: repair_ssrc,
-                            mid: Some(mid.clone()),
-                            rid: None,
-                            repaired_rid: rid.clone(),
-                        }
-                        .into_packet(now),
-                    );
-                }
             }
         }
         for control in controls {
@@ -3313,6 +3287,97 @@ impl RTCPeerConnection {
         }
     }
 
+    /// RFC 7160 section 4.1: the stream `old` of transceiver `index`'s sender is written with
+    /// `codec`, of another clock rate, from `now` on, so it moves to a new SSRC (its RTX stream
+    /// too). The stream it leaves stays in its RTCP session; a return to a rate used before
+    /// sends a BYE for the SSRC that used it. The RTCP session is told the new SSRC's RTP
+    /// session, its SDES identifiers, and the switch (the next compound packet leads with the
+    /// new SSRC's sender report, the other rates' behind it). The outbound statistics carry on
+    /// under the new SSRC. Returns the new SSRC.
+    pub(crate) fn move_sender_to_clock_rate(
+        &mut self,
+        index: usize,
+        old: SSRC,
+        codec: &RTCRtpCodecParameters,
+        now: Instant,
+    ) -> Option<SSRC> {
+        let mut minted = vec![];
+        let new = self.unused_ssrc(&mut minted);
+        let (has_rtx, rid) = {
+            let sender = self.rtp_transceivers.get(index)?.sender().as_ref()?;
+            let coding = sender
+                .send_encodings()
+                .iter()
+                .map(|encoding| &encoding.rtp_coding_parameters)
+                .find(|coding| coding.ssrc == Some(old))?;
+            (coding.rtx.is_some(), coding.rid.clone())
+        };
+        let new_rtx = has_rtx.then(|| self.unused_ssrc(&mut minted));
+        let mid = self.rtp_transceivers[index].mid().clone();
+        let sender = self.rtp_transceivers[index].sender_mut().as_mut()?;
+        let (info, previous) = sender.move_to_clock_rate(
+            old,
+            new,
+            new_rtx,
+            codec,
+            &self.media_engine,
+            self.interceptor.as_mut(),
+        );
+        log::debug!(
+            "rtp sender of transceiver {index}: ssrc {old} moves to {new} for clock rate {} (RFC 7160 4.1)",
+            codec.rtp_codec.clock_rate
+        );
+        self.stats_mut().replace_outbound_rtp_stream(old, new);
+        let repair = info.as_ref().and_then(|info| info.ssrc_rtx);
+        let mut controls = vec![];
+        if self.pipeline_context.transports.len() > 1
+            && let Some(mid) = mid.as_deref()
+        {
+            let session = self.pipeline_context.transports.transport_id_for(mid).0;
+            controls.push(
+                interceptor::RtpSessionAssignment {
+                    session,
+                    ssrcs: std::iter::once(new).chain(repair).collect(),
+                }
+                .into_packet(now),
+            );
+        }
+        let rid = (!rid.is_empty()).then_some(rid);
+        controls.push(
+            interceptor::RtcpSessionControl::StreamIdentifiers {
+                ssrc: new,
+                mid: mid.clone(),
+                rid: rid.clone(),
+                repaired_rid: None,
+            }
+            .into_packet(now),
+        );
+        if let Some(repair) = repair {
+            controls.push(
+                interceptor::RtcpSessionControl::StreamIdentifiers {
+                    ssrc: repair,
+                    mid,
+                    rid: None,
+                    repaired_rid: rid,
+                }
+                .into_packet(now),
+            );
+        }
+        controls.push(
+            interceptor::RtcpSessionControl::ClockRateSwitch {
+                current: new,
+                previous,
+            }
+            .into_packet(now),
+        );
+        for control in controls {
+            if let Err(err) = self.interceptor.handle_write(control) {
+                log::warn!("rtcp session control after a clock rate switch: {err}");
+            }
+        }
+        Some(new)
+    }
+
     pub(super) fn unused_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
         self.unused_ssrc_drawn(minted, &mut rand::random::<u32>)
     }
@@ -3328,6 +3393,8 @@ impl RTCPeerConnection {
                     taken.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
                     taken.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
                 }
+                // The streams of other clock rates are still in the session (RFC 7160 4.1).
+                taken.extend(sender.parked_ssrcs());
             }
         }
         for description in [
@@ -4067,6 +4134,7 @@ impl RTCPeerConnection {
         for id in self.pipeline_context.transports.ids() {
             self.with_transport(id, |pc| pc.update_transport_stats_on_active());
         }
+        self.pipeline_context.stats.sync_outgoing_estimates();
     }
 
     /// `update_transport_stats` for the active transport.
@@ -5123,4 +5191,82 @@ fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
         .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
     let closed = section.media_name.port.value == 0 || zero_port;
     (!closed, closed)
+}
+
+/// The SDES identifiers of an encoding's SSRCs (RFC 9143 section 15.1, RFC 8852 sections 3.1
+/// and 3.2): the media SSRC's MID and RtpStreamId, its RTX SSRC's MID and RepairedRtpStreamId.
+/// A FlexFEC SSRC has the MID only: RFC 8627 section 7.2, the RtpStreamId and
+/// RepairedRtpStreamId items "SHOULD NOT be used" for FlexFEC streams (one FEC stream may
+/// protect several).
+pub(crate) fn stream_identifiers(
+    mid: &str,
+    coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters,
+) -> Vec<interceptor::RtcpSessionControl> {
+    let Some(ssrc) = coding.ssrc else {
+        return vec![];
+    };
+    let rid = (!coding.rid.is_empty()).then(|| coding.rid.clone());
+    let mut identifiers = vec![interceptor::RtcpSessionControl::StreamIdentifiers {
+        ssrc,
+        mid: Some(mid.to_owned()),
+        rid: rid.clone(),
+        repaired_rid: None,
+    }];
+    if let Some(rtx) = &coding.rtx {
+        identifiers.push(interceptor::RtcpSessionControl::StreamIdentifiers {
+            ssrc: rtx.ssrc,
+            mid: Some(mid.to_owned()),
+            rid: None,
+            repaired_rid: rid,
+        });
+    }
+    if let Some(fec) = &coding.fec {
+        identifiers.push(interceptor::RtcpSessionControl::StreamIdentifiers {
+            ssrc: fec.ssrc,
+            mid: Some(mid.to_owned()),
+            rid: None,
+            repaired_rid: None,
+        });
+    }
+    identifiers
+}
+
+#[cfg(test)]
+mod stream_identifiers_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::{
+        RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
+    };
+    use interceptor::RtcpSessionControl;
+
+    /// RFC 8852 sections 3.1 and 3.2 and RFC 9143 section 15.1: a simulcast layer's media SSRC
+    /// carries its MID and RtpStreamId, its RTX SSRC the MID and the layer's RID as
+    /// RepairedRtpStreamId. RFC 8627 section 7.2: "the RtpStreamId and RepairedRtpStreamId
+    /// SDES items SHOULD NOT be used" for a FlexFEC stream: its SSRC carries the MID only.
+    #[test]
+    fn a_flexfec_ssrc_is_identified_by_its_mid_only() {
+        let coding = RTCRtpCodingParameters {
+            rid: "h".to_owned(),
+            ssrc: Some(1),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 2 }),
+            fec: Some(RTCRtpFecParameters { ssrc: 3 }),
+            ..Default::default()
+        };
+        let items = |rid: Option<&str>, repaired: Option<&str>, ssrc: u32| {
+            RtcpSessionControl::StreamIdentifiers {
+                ssrc,
+                mid: Some("1".to_owned()),
+                rid: rid.map(str::to_owned),
+                repaired_rid: repaired.map(str::to_owned),
+            }
+        };
+        assert_eq!(
+            stream_identifiers("1", &coding),
+            vec![
+                items(Some("h"), None, 1),
+                items(None, Some("h"), 2),
+                items(None, None, 3)
+            ]
+        );
+    }
 }

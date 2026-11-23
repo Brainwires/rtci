@@ -89,9 +89,13 @@ pub(crate) struct InterceptorHandlerContext {
     /// the payload type and MID tables an unknown SSRC is looked up in are that transport's
     /// (RFC 9143 section 9.2: the tables are prepared per BUNDLE group). `None` with one.
     pub(crate) arrival_mids: Option<Vec<String>>,
-    /// The congestion controller's last target, in bits per second: what
-    /// `allocate_target_bitrate` divides again when the encodings change.
+    /// The congestion controllers' last targets summed over the transports, in bits per
+    /// second: the connection's figure.
     pub(crate) target_bitrate: Option<f64>,
+    /// Each transport's congestion controller's last target, by transport key: what
+    /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
+    /// encodings change.
+    pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -122,6 +126,7 @@ impl Default for InterceptorHandlerContext {
             wall_clock: None,
             arrival_mids: None,
             target_bitrate: None,
+            transport_targets: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -813,12 +818,47 @@ impl<'a> InterceptorHandler<'a> {
             }
         };
 
+        // A retransmission stream of a single-stream receiver, named by its payload type.
+        if let Some(bound) = self.associate_rtx_by_apt(index, ssrc, payload_type) {
+            return bound;
+        }
+
+        // A receiver that already has a stream: a simulcast one (its codings have rids) is the
+        // rid path's. One of a single stream takes the new SSRC over when the packet is media
+        // of its section: the remote source moved to another SSRC (RFC 7160 section 4.1: an
+        // SSRC per clock rate; RFC 3550 section 8.2: a collision), and RFC 8834 section 4.3
+        // wants every negotiated format accepted at any time. The track carries on under the
+        // new SSRC; the old stream is unbound.
+        let mut takeover = false;
         if let Some(transceiver) = self.rtp_transceivers.get(index)
             && let Some(receiver) = transceiver.receiver()
             && !receiver.track().codings().is_empty()
         {
-            // it is rid-based (or already bound), let's use the rid path
-            return false;
+            let codings = receiver.track().codings();
+            let single = codings.len() == 1
+                && codings[0].rtp_coding_parameters.rid.is_empty()
+                && codings[0].rtp_coding_parameters.ssrc != Some(ssrc);
+            let media = receiver.get_codec_preferences().iter().any(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+            });
+            if !(single && media) {
+                // it is rid-based (or already bound), let's use the rid path
+                return false;
+            }
+            let old = codings[0].rtp_coding_parameters.ssrc;
+            debug!("ssrc {ssrc} takes over the stream of ssrc {old:?} in transceiver {index}");
+            if let Some(receiver) = self.rtp_transceivers[index].receiver_mut() {
+                receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+                receiver.set_coding_parameters(vec![]);
+                receiver.track_mut().set_codings(vec![]);
+            }
+            if let Some(old) = old {
+                self.ctx.ssrc_owners.remove(old);
+                self.ctx.placed_ssrcs.remove(&old);
+            }
+            takeover = true;
         }
 
         let Some(transceiver) = self.rtp_transceivers.get_mut(index) else {
@@ -895,8 +935,134 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
-        self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        // The track the new SSRC took over is open already.
+        if !takeover {
+            self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        }
         true
+    }
+
+    /// RFC 6051 section 3.3: the `ntp-64` or `ntp-56` timestamp `packet` carries, if its
+    /// stream negotiated either, as the stream's newest RTP-to-NTP mapping.
+    fn record_in_band_ntp(&mut self, packet: &rtp::Packet, now: Instant) {
+        use shared::marshal::Unmarshal;
+        let id = |uri: &str| {
+            let (id, audio, video) =
+                self.media_engine
+                    .get_header_extension_id(RTCRtpHeaderExtensionCapability {
+                        uri: uri.to_owned(),
+                    });
+            ((audio || video) && id != 0).then_some(id as u8)
+        };
+        let Some(stream) = self.stats.inbound_rtp_streams.get_mut(&packet.header.ssrc) else {
+            return;
+        };
+        let ntp = if let Some(value) =
+            id(rtp::extension::NTP_64_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            rtp::extension::ntp_timestamp_extension::Ntp64Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .map(|extension| extension.ntp_time)
+        } else if let Some(value) =
+            id(rtp::extension::NTP_56_URI).and_then(|id| packet.header.get_extension(id))
+        {
+            let report = stream.remote_ntp_time;
+            rtp::extension::ntp_timestamp_extension::Ntp56Extension::unmarshal(&mut value.as_ref())
+                .ok()
+                .zip(report)
+                .map(|(extension, report)| extension.ntp_time(report))
+        } else {
+            None
+        };
+        if let Some(ntp) = ntp.filter(|ntp| *ntp != 0) {
+            stream.in_band_ntp = Some((ntp, packet.header.timestamp, now));
+        }
+    }
+
+    /// RFC 4588 section 5.3: "Upon reception of original RTP packets with a new SSRC, the
+    /// receiver MUST perform the SSRC association again". An RTX packet from an SSRC no
+    /// description or header extension associates, whose payload type is an RTX format of
+    /// transceiver `index`'s section (its `apt` a media format there), belongs to the one
+    /// original stream of that section's single-stream receiver (the MID, or the section's
+    /// payload types, named the section; SSRC multiplexing, one original per section, so the
+    /// association is not ambiguous): it becomes that stream's RTX SSRC, in place of the one
+    /// before (the sender moved both, RFC 7160 section 4.1, or restarted its RTX stream).
+    ///
+    /// `None` when the packet is not RTX of such a receiver; `Some(false)` when it is RTX but
+    /// there is no original stream to associate it with yet (it is dropped).
+    fn associate_rtx_by_apt(
+        &mut self,
+        index: usize,
+        ssrc: SSRC,
+        payload_type: PayloadType,
+    ) -> Option<bool> {
+        let receiver = self
+            .rtp_transceivers
+            .get_mut(index)?
+            .receiver_mut()
+            .as_mut()?;
+        let codec = receiver
+            .get_codec_preferences()
+            .iter()
+            .find(|codec| {
+                codec.payload_type == payload_type
+                    && codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                        crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                    )
+            })
+            .cloned()?;
+        let apt = crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt(
+            &codec.rtp_codec.sdp_fmtp_line,
+        )?;
+        if !receiver
+            .get_codec_preferences()
+            .iter()
+            .any(|media| media.payload_type == apt)
+        {
+            return None;
+        }
+        // Before its original stream there is nothing to associate it with: a retransmission
+        // is never a stream of its own.
+        if receiver.get_coding_parameters().is_empty() {
+            return Some(false);
+        }
+        let single = receiver.get_coding_parameters().len() == 1
+            && receiver.get_coding_parameters()[0].rid.is_empty();
+        if !single {
+            return None;
+        }
+        let coding = receiver.get_coding_parameter_mut_by_rid("")?;
+        let Some(primary) = coding.ssrc.filter(|primary| *primary != ssrc) else {
+            return Some(false);
+        };
+        let replaced = coding.rtx.as_ref().map(|rtx| rtx.ssrc);
+        coding.rtx = Some(RTCRtpRtxParameters { ssrc });
+        debug!("rtx ssrc {ssrc} associated with ssrc {primary} by its payload type (RFC 4588 5.3)");
+        let parameters = receiver.get_parameters(self.media_engine);
+        let flow = repair_flow_codec(&codec.rtp_codec);
+        for (bind, repair) in [(false, replaced.filter(|r| *r != 0)), (true, Some(ssrc))] {
+            let Some(repair) = repair else {
+                continue;
+            };
+            RTCRtpReceiverInternal::interceptor_remote_stream_op(
+                self.interceptor,
+                bind,
+                repair,
+                None,
+                None,
+                codec.payload_type,
+                None,
+                None,
+                &flow,
+                &parameters.rtp_parameters.header_extensions,
+                &[],
+            );
+        }
+        if let Some(replaced) = replaced {
+            self.ctx.ssrc_owners.remove(replaced);
+        }
+        self.stats.update_inbound_rtx_ssrc(primary, ssrc);
+        Some(true)
     }
 
     /// A repair (RTX) stream announced only by the `repaired-rtp-stream-id` header extension
@@ -1578,6 +1744,14 @@ impl<'a>
                         }
                     }
 
+                    // RFC 6051 section 3.3: an in-band NTP-format timestamp is taken "in exactly
+                    // the same way as if an additional RTCP SR packet had been received". The
+                    // 56-bit variant's upper eight bits of seconds come from the stream's SRs,
+                    // so it counts only after one.
+                    if rtp_packet.header.extension && retransmitted.is_none() {
+                        self.record_in_band_ntp(rtp_packet, msg.now);
+                    }
+
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
                     // included.
@@ -1628,15 +1802,26 @@ impl<'a>
                 for attribute in &packet.message.attributes {
                     match attribute {
                         Attribute::TargetBitrateChanged { bits_per_second } => {
-                            // The selected pair's `availableOutgoingBitrate`, and each
-                            // outbound stream's `targetBitrate`: its share by priority and
-                            // maxBitrate (`allocate_target_bitrate`).
-                            self.ctx.target_bitrate = Some(*bits_per_second);
-                            let shares = crate::peer_connection::priority::allocate_target_bitrate(
-                                self.rtp_transceivers,
-                                *bits_per_second,
-                            );
-                            self.stats.on_target_bitrate(*bits_per_second, &shares);
+                            // One controller per transport (`PerRtpSession`): the estimate is
+                            // that transport's, named by the session tag. Its selected pair's
+                            // `availableOutgoingBitrate`, and the `targetBitrate` of each
+                            // outbound stream on it: its share by priority and maxBitrate
+                            // (`allocate_target_bitrate_on`). The connection's figure is the
+                            // sum over the transports.
+                            let key = interceptor::RtpSession::of(&packet.message)
+                                .unwrap_or_else(|| self.stats.active_transport());
+                            self.ctx.transport_targets.insert(key, *bits_per_second);
+                            self.ctx.target_bitrate =
+                                Some(self.ctx.transport_targets.values().sum());
+                            let stats = &*self.stats;
+                            let on_transport = |mid: &str| stats.section_transport_key(mid) == key;
+                            let shares =
+                                crate::peer_connection::priority::allocate_target_bitrate_on(
+                                    self.rtp_transceivers,
+                                    *bits_per_second,
+                                    on_transport,
+                                );
+                            self.stats.on_target_bitrate(key, *bits_per_second, &shares);
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {

@@ -478,3 +478,102 @@ fn media_and_inbound_rtcp_pass_through() {
         "the key-frame request reaches the application"
     );
 }
+
+fn sender_report_request(media_ssrc: u32) -> Vec<Box<dyn rtcp::Packet>> {
+    vec![Box::new(
+        rtcp::transport_feedbacks::rapid_resynchronization_request::RapidResynchronizationRequest {
+            sender_ssrc: 200,
+            media_ssrc,
+        },
+    )]
+}
+
+/// RFC 6051 section 3.2: "a media source that understands the RTCP-SR-REQ packet SHOULD
+/// generate an RTCP SR packet as soon as possible while complying with the RTCP early feedback
+/// rules". Between two parties (no dither) the SR of the SSRC the request names leaves at
+/// once, in an Early compound packet, long before the first regular one; a request for an
+/// SSRC this side does not send gets nothing early.
+#[test]
+fn an_rtcp_sr_req_is_answered_with_a_sender_report_at_once() {
+    let mut chain = chain(builder().with_bandwidth(RtcpBandwidth {
+        session: Some(64_000),
+        ..Default::default()
+    }));
+    let base = Instant::now();
+    chain.bind_local_stream(&video(100));
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_write(rtp(base, 100, 1, 3000)).unwrap();
+    assert!(
+        written(&mut chain)
+            .iter()
+            .all(|sent| !sent.has::<SenderReport>())
+    );
+
+    let other = base + secs(0.02);
+    chain
+        .handle_read(rtcp(other, sender_report_request(4242)))
+        .unwrap();
+    read(&mut chain);
+    assert!(written(&mut chain).is_empty(), "not an SSRC of ours");
+
+    let now = base + secs(0.05);
+    chain
+        .handle_read(rtcp(now, sender_report_request(100)))
+        .unwrap();
+    read(&mut chain);
+    let sent = written(&mut chain);
+    assert_eq!(1, sent.len(), "an Early packet");
+    assert_eq!(now, sent[0].at);
+    let reports = sent[0].get::<SenderReport>();
+    assert_eq!(1, reports.len());
+    assert_eq!(100, reports[0].ssrc);
+}
+
+/// RFC 5104 sections 4.3.2.3 and 4.3.3.3: a TSTR "is not time critical and SHOULD be sent
+/// using regular RTCP timing", and so does the TSTN that acknowledges it. Written where a PLI
+/// would leave at once in an Early packet, each waits for the next regular compound packet.
+#[test]
+fn a_tstr_and_a_tstn_wait_for_the_regular_packet() {
+    use rtcp::payload_feedbacks::temporal_spatial_tradeoff::{
+        TemporalSpatialTradeoffNotification, TemporalSpatialTradeoffRequest, TstEntry,
+    };
+    for request in [true, false] {
+        let mut chain = chain(builder());
+        let base = Instant::now();
+        chain.bind_remote_stream(&video(200));
+        control(&mut chain, base, RtcpSessionControl::Start);
+        let entries = vec![TstEntry {
+            ssrc: 200,
+            sequence_number: 0,
+            index: 7,
+        }];
+        let packet: Box<dyn rtcp::Packet> = if request {
+            Box::new(TemporalSpatialTradeoffRequest {
+                sender_ssrc: 0,
+                entries,
+            })
+        } else {
+            Box::new(TemporalSpatialTradeoffNotification {
+                sender_ssrc: 0,
+                entries,
+            })
+        };
+        let now = base + secs(0.01);
+        chain.handle_write(rtcp(now, vec![packet])).unwrap();
+        assert!(
+            written(&mut chain).is_empty(),
+            "no Early packet (TSTR: {request})"
+        );
+
+        let sent = run(&mut chain, base + secs(10.0));
+        let first = sent.first().expect("a regular packet");
+        assert!(first.is_compound());
+        let carried = if request {
+            first.has::<TemporalSpatialTradeoffRequest>()
+        } else {
+            first.has::<TemporalSpatialTradeoffNotification>()
+        };
+        assert!(carried, "the regular packet carries it (TSTR: {request})");
+    }
+}

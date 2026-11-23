@@ -370,3 +370,27 @@ fn sender_id_is_reachable_after_add_track() {
         .expect("add track");
     assert!(peer_connection.rtp_sender(sender_id).is_some());
 }
+
+/// FlexFEC draft-03 section 4.2 and RFC 8627 section 4.2.1: the repair stream's SSRC "SHALL be
+/// randomly assigned" (RFC 3550 section 8). Where the track names none, the engine mints it:
+/// across peer connections made one after another the minted FEC SSRCs never repeat and vary
+/// in every bit, like the media SSRCs (`sender_ssrcs_are_random_across_peer_connections`).
+#[test]
+fn minted_fec_ssrcs_are_random_across_peer_connections() {
+    let vp8 = video_codec(MIME_TYPE_VP8, VP8_PT, "");
+    let flexfec = video_codec(MIME_TYPE_FLEX_FEC03, FLEX_FEC_PT, "repair-window=10000000");
+    let ssrcs: Vec<SSRC> = (0..64)
+        .map(|_| {
+            offer_for(video_media_engine(&[vp8.clone(), flexfec.clone()]), &vp8)
+                .fec_ssrc
+                .expect("a minted FEC SSRC")
+        })
+        .collect();
+    let distinct: std::collections::HashSet<SSRC> = ssrcs.iter().copied().collect();
+    assert_eq!(distinct.len(), ssrcs.len(), "no repeats: {ssrcs:?}");
+    let (any, all) = ssrcs
+        .iter()
+        .fold((0u32, u32::MAX), |(any, all), s| (any | s, all & s));
+    assert_eq!((any, all), (u32::MAX, 0), "every bit varies: {ssrcs:?}");
+    assert!(!ssrcs.contains(&MEDIA_SSRC), "not the media SSRC");
+}

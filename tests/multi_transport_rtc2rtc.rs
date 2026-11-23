@@ -14,7 +14,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors,
+    CongestionFeedback, DefaultInterceptorHandles, DefaultInterceptorOptions,
     register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -59,6 +59,8 @@ struct Peer {
     rtp: Vec<Header>,
     /// Every event the peer raised, in order.
     events: Vec<RTCPeerConnectionEvent>,
+    /// The handles of the default interceptors.
+    handles: DefaultInterceptorHandles,
 }
 
 impl Peer {
@@ -72,17 +74,11 @@ impl Peer {
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let registry = match options {
-            None => register_default_interceptors(Registry::new(), &mut media_engine)?,
-            Some(options) => {
-                register_default_interceptors_with_options(
-                    Registry::new(),
-                    &mut media_engine,
-                    options,
-                )?
-                .0
-            }
-        };
+        let (registry, handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            options.unwrap_or(&DefaultInterceptorOptions::default()),
+        )?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
                 RTCConfigurationBuilder::new()
@@ -107,6 +103,7 @@ impl Peer {
             received: vec![],
             rtp: vec![],
             events: vec![],
+            handles,
         })
     }
 
@@ -2436,5 +2433,164 @@ fn a_rollback_takes_back_the_transport_an_offer_gave_a_new_data_section() -> Res
             .iter()
             .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
     })?;
+/// The RTP session number of `sender`'s transport.
+fn session_of(world: &mut World, sender: RTCRtpSenderId) -> usize {
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .transport()
+        .expect("a transport")
+        .rtp_session()
+}
+
+/// Sends `packets` RTP packets on each sender, stepping the world after each round.
+fn send_for_a_while(world: &mut World, senders: &[RTCRtpSenderId], packets: u16) -> Result<()> {
+    for seq in 1..=packets {
+        for sender in senders {
+            world.send_rtp(*sender, seq)?;
+        }
+        for _ in 0..5 {
+            world.step()?;
+        }
+    }
+    Ok(())
+}
+
+/// RFC 8083: the circuit breakers judge a flow by the RTCP of its RTP session. With two
+/// transports each has its own breaker, which knows the flows on that transport only.
+#[test]
+fn each_transport_has_a_circuit_breaker_of_its_own() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    send_for_a_while(&mut world, &senders, 20)?;
+    let sessions: Vec<usize> = senders.iter().map(|s| session_of(&mut world, *s)).collect();
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    let handles = world.peers[0].handles.transports.clone();
+    for (index, (ssrc, session)) in ssrcs.iter().zip(&sessions).enumerate() {
+        let own = handles
+            .circuit_breaker(*session)
+            .expect("a breaker per transport");
+        assert!(
+            own.state(*ssrc).is_some(),
+            "its own transport's breaker watches {ssrc:#x}"
+        );
+        let other = handles
+            .circuit_breaker(sessions[1 - index])
+            .expect("a breaker per transport");
+        assert!(
+            other.state(*ssrc).is_none(),
+            "the other transport's breaker does not watch {ssrc:#x}"
+        );
+    }
+    Ok(())
+}
+
+/// Sends a packet on each sender every 20 ms for `duration` of virtual time, delivering what
+/// is in flight and running both peers' timers (RTCP reports, congestion feedback) as it goes.
+fn send_media_for(world: &mut World, senders: &[RTCRtpSenderId], duration: Duration) -> Result<()> {
+    let end = world.now + duration;
+    let mut next_send = world.now;
+    let mut seq = 1u16;
+    while world.now < end {
+        if world.now >= next_send {
+            for sender in senders {
+                world.send_rtp(*sender, seq)?;
+            }
+            seq = seq.wrapping_add(1);
+            next_send += Duration::from_millis(20);
+        }
+        while world.step()? {}
+        let next = world
+            .peers
+            .iter_mut()
+            .filter_map(|p| p.pc.poll_timeout())
+            .min()
+            .map_or(next_send, |at| at.min(next_send));
+        world.now = next.max(world.now + Duration::from_millis(1));
+        let now = world.now;
+        for peer in world.peers.iter_mut() {
+            peer.pc.handle_timeout(now)?;
+        }
+    }
+    Ok(())
+}
+
+/// webrtc-stats 8.20 `availableOutgoingBitrate`: the bitrate the congestion control estimates
+/// for the outgoing RTP streams on the pair. With audio and video on transports of their own,
+/// each transport has a congestion controller of its own (RFC 8836 section 2: each path has
+/// its own capacity), and each transport's selected pair reports that transport's estimate,
+/// not another's and not the sum.
+#[test]
+fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    let sessions: Vec<usize> = senders.iter().map(|s| session_of(&mut world, *s)).collect();
+    assert_ne!(
+        sessions[0], sessions[1],
+        "audio and video in two RTP sessions"
+    );
+    // Each transport's controller held at a limit of its own, so the two estimates differ
+    // and one transport's estimate on the other's pair shows.
+    let handles = world.peers[0].handles.transports.clone();
+    for (session, limit) in sessions.iter().zip([150_000.0, 90_000.0]) {
+        handles
+            .congestion_control(*session)
+            .expect("a congestion controller per transport")
+            .set_session_bitrate_limit(Some(limit));
+    }
+    // Long enough for the receiver's congestion feedback to reach the sender on each
+    // transport, and for the controllers' timers to run.
+    send_media_for(&mut world, &senders, Duration::from_secs(3))?;
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    let now = world.now;
+    let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
+    let mut pairs = HashSet::new();
+    let mut reported_estimates = vec![];
+    for (ssrc, session) in ssrcs.iter().zip(&sessions) {
+        let transport_id = report
+            .outbound_rtp_streams()
+            .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == *ssrc)
+            .map(|s| {
+                s.sent_rtp_stream_stats
+                    .rtp_stream_stats
+                    .transport_id
+                    .clone()
+            })
+            .expect("an outbound stream per sender");
+        let transport = report
+            .iter()
+            .find_map(|e| match e {
+                RTCStatsReportEntry::Transport(t) if t.stats.id == transport_id => Some(t),
+                _ => None,
+            })
+            .expect("the stream's transport is in the report");
+        let pair = report
+            .candidate_pairs()
+            .find(|p| p.stats.id == transport.selected_candidate_pair_id)
+            .expect("the transport's selected pair is in the report");
+        let own = handles
+            .congestion_control(*session)
+            .expect("a congestion controller per transport")
+            .target_bitrate();
+        let reported = pair
+            .available_outgoing_bitrate
+            .unwrap_or_else(|| panic!("transport {transport_id} has no estimate: {pair:?}"));
+        assert_eq!(
+            reported, own,
+            "the pair of {ssrc:#x}'s transport reports its own controller's estimate"
+        );
+        pairs.insert(pair.stats.id.clone());
+        reported_estimates.push(reported);
+    }
+    assert_eq!(pairs.len(), 2, "two transports, two selected pairs");
+    assert_ne!(
+        reported_estimates[0], reported_estimates[1],
+        "each transport at a limit of its own: {reported_estimates:?}"
+    );
     Ok(())
 }

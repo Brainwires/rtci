@@ -509,3 +509,144 @@ fn a_dtmf_packet_that_comes_first_does_not_set_the_tracks_codec() {
         Some("audio/opus")
     );
 }
+
+/// The receive codings (SSRC, RTX SSRC) of transceiver `index`'s receiver.
+fn receive_codings(
+    transceivers: &[RTCRtpTransceiverInternal],
+    index: usize,
+) -> Vec<(Option<u32>, Option<u32>)> {
+    transceivers[index]
+        .receiver()
+        .as_ref()
+        .map(|receiver| {
+            receiver
+                .get_coding_parameters()
+                .iter()
+                .map(|coding| (coding.ssrc, coding.rtx.as_ref().map(|rtx| rtx.ssrc)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// RFC 7160 section 4.1 (an SSRC per clock rate) and RFC 8834 section 4.3 (every negotiated
+/// format accepted at any time): the source of a single-stream section moves to a new SSRC,
+/// and the receiver's track follows it there. It is the same track: no second announcement.
+#[test]
+fn a_new_ssrc_takes_over_the_stream_of_a_single_stream_receiver() {
+    let transceivers = vec![
+        transceiver(RtpCodecKind::Audio, "0", vec![codec("audio/opus", OPUS)]),
+        transceiver(RtpCodecKind::Video, "1", vec![codec("video/VP8", VP8)]),
+    ];
+    let (opened, transceivers) = opened(
+        transceivers,
+        &[
+            Arrival {
+                ssrc: 0xaaaa,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xbbbb,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+        ],
+    );
+    assert_eq!(opened, vec![(1, 0xaaaa)], "one track, announced once");
+    assert_eq!(
+        receive_codings(&transceivers, 1),
+        vec![(Some(0xbbbb), None)]
+    );
+}
+
+/// RFC 4588 section 5.3: "Upon reception of original RTP packets with a new SSRC, the
+/// receiver MUST perform the SSRC association again". An RTX stream from an SSRC nothing
+/// declared is associated, by its payload type (its `apt`) and its section, with the one
+/// original stream of the section; after the original moved to a new SSRC, the RTX stream
+/// from another new SSRC is associated with the new original. An RTX packet before any
+/// original is not a stream of its own.
+#[test]
+fn a_retransmission_stream_is_associated_again_after_the_original_moved() {
+    let rtx = RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: "video/rtx".to_owned(),
+            clock_rate: 90_000,
+            channels: 0,
+            sdp_fmtp_line: format!("apt={VP8}"),
+            rtcp_feedback: vec![],
+        },
+        payload_type: 97,
+    };
+    let video = || {
+        vec![
+            transceiver(RtpCodecKind::Audio, "0", vec![codec("audio/opus", OPUS)]),
+            transceiver(
+                RtpCodecKind::Video,
+                "1",
+                vec![codec("video/VP8", VP8), rtx.clone()],
+            ),
+        ]
+    };
+    let (announced, transceivers) = opened(
+        video(),
+        &[Arrival {
+            ssrc: 0xcccc,
+            payload_type: 97,
+            mid: Some("1"),
+        }],
+    );
+    assert!(announced.is_empty(), "{announced:?}");
+    assert_eq!(receive_codings(&transceivers, 1), vec![]);
+
+    let (announced, transceivers) = opened(
+        video(),
+        &[
+            Arrival {
+                ssrc: 0xaaaa,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xa0a0,
+                payload_type: 97,
+                mid: Some("1"),
+            },
+        ],
+    );
+    assert_eq!(announced, vec![(1, 0xaaaa)]);
+    assert_eq!(
+        receive_codings(&transceivers, 1),
+        vec![(Some(0xaaaa), Some(0xa0a0))]
+    );
+
+    let (_, transceivers) = opened(
+        video(),
+        &[
+            Arrival {
+                ssrc: 0xaaaa,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xa0a0,
+                payload_type: 97,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xbbbb,
+                payload_type: VP8,
+                mid: Some("1"),
+            },
+            Arrival {
+                ssrc: 0xb0b0,
+                payload_type: 97,
+                mid: Some("1"),
+            },
+        ],
+    );
+    assert_eq!(
+        receive_codings(&transceivers, 1),
+        vec![(Some(0xbbbb), Some(0xb0b0))],
+        "the new RTX stream repairs the new original"
+    );
+}

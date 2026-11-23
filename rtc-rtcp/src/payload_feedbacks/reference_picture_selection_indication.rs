@@ -89,6 +89,48 @@ impl ReferencePictureSelectionIndication {
         (layer <= 0x3f).then_some((layer, poc))
     }
 
+    /// An RPSI for a VP8 stream (RFC 7741 section 5.1) or a VP9 stream (RFC 9628 section
+    /// 5.1): the native bit string "is simply the (7- or 15-bit) Picture ID of the received
+    /// frame", as its payload descriptor carried it: 7 bits for a Picture ID below 128 unless
+    /// `extended`, 15 bits otherwise (the descriptor's M bit). The bits are left-aligned in the
+    /// octets, the low bit of the last octet unused. A Picture ID above 15 bits is refused.
+    pub fn picture_id(
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        payload_type: u8,
+        picture_id: u16,
+        extended: bool,
+    ) -> Result<Self> {
+        if picture_id > 0x7fff {
+            return Err(Error::InvalidHeader);
+        }
+        if payload_type > RPSI_PAYLOAD_TYPE_MAX {
+            return Err(Error::WrongPayloadType);
+        }
+        let native_rpsi = if extended || picture_id > 0x7f {
+            Bytes::copy_from_slice(&(picture_id << 1).to_be_bytes())
+        } else {
+            Bytes::copy_from_slice(&[(picture_id as u8) << 1])
+        };
+        Ok(Self {
+            sender_ssrc,
+            media_ssrc,
+            payload_type,
+            native_rpsi,
+            unused_bits: 1,
+        })
+    }
+
+    /// The Picture ID of a VP8 or VP9 RPSI ([`Self::picture_id`]): a native bit string of 7 or
+    /// 15 bits, `None` for any other length.
+    pub fn vp8_vp9_picture_id(&self) -> Option<u16> {
+        match (self.native_rpsi.len(), self.native_rpsi_bits()) {
+            (1, 7) => Some(u16::from(self.native_rpsi[0] >> 1)),
+            (2, 15) => Some(u16::from_be_bytes([self.native_rpsi[0], self.native_rpsi[1]]) >> 1),
+            _ => None,
+        }
+    }
+
     /// The length of the native bit string in bits.
     pub fn native_rpsi_bits(&self) -> usize {
         (self.native_rpsi.len() * 8).saturating_sub(self.unused_bits as usize)
@@ -245,6 +287,33 @@ mod hevc_test {
             ..rpsi
         };
         assert_eq!(None, not_hevc.hevc_picture());
+    }
+}
+
+#[cfg(test)]
+mod picture_id_test {
+    use super::*;
+
+    /// RFC 7741 section 5.1 and RFC 9628 section 5.1: the VP8 and VP9 native RPSI bit string
+    /// is the 7- or 15-bit Picture ID of the frame, left-aligned, one bit of padding in the
+    /// last octet; it reads back after the wire.
+    #[test]
+    fn a_vp8_or_vp9_rpsi_carries_the_7_or_15_bit_picture_id() {
+        let short = ReferencePictureSelectionIndication::picture_id(1, 2, 96, 0x55, false).unwrap();
+        assert_eq!(&[0xAA][..], &short.native_rpsi[..]);
+        assert_eq!(7, short.native_rpsi_bits());
+        let long = ReferencePictureSelectionIndication::picture_id(1, 2, 96, 0x1234, true).unwrap();
+        assert_eq!(&[0x24, 0x68][..], &long.native_rpsi[..]);
+        assert_eq!(15, long.native_rpsi_bits());
+        // A Picture ID that needs 15 bits takes them whatever `extended` says.
+        let wide = ReferencePictureSelectionIndication::picture_id(1, 2, 96, 0x80, false).unwrap();
+        assert_eq!(15, wide.native_rpsi_bits());
+        for (rpsi, id) in [(short, 0x55), (long, 0x1234), (wide, 0x80)] {
+            let raw = rpsi.marshal().unwrap();
+            let read = ReferencePictureSelectionIndication::unmarshal(&mut raw.freeze()).unwrap();
+            assert_eq!(Some(id), read.vp8_vp9_picture_id());
+        }
+        assert!(ReferencePictureSelectionIndication::picture_id(1, 2, 96, 0x8000, true).is_err());
     }
 }
 

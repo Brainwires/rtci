@@ -324,6 +324,25 @@ mod test {
         assert!(LrrEntry::vp9(1, 0, 98, (0, 8), None).is_err());
     }
 
+    /// RFC 9628 section 5.3: for VP9 the layer ID of an LRR is the spatial layer (SID, three
+    /// bits) and the temporal layer ID the TID: a request for spatial layer 5, temporal layer
+    /// 2, from layer 3 / 1, reads back as such; a SID or TID over 7 is refused.
+    #[test]
+    fn a_vp9_layer_refresh_request_names_the_spatial_and_temporal_layers() {
+        let entry = LrrEntry::vp9(0x0a0b0c0d, 1, 98, (2, 5), Some((1, 3))).unwrap();
+        let lrr = LayerRefreshRequest {
+            sender_ssrc: 1,
+            entries: vec![entry],
+        };
+        let raw = lrr.marshal().unwrap();
+        assert_eq!(&[0x02, 0x05, 0x01, 0x03][..], &raw[20..24]);
+        let read = LayerRefreshRequest::unmarshal(&mut raw.freeze()).unwrap();
+        assert_eq!(5, read.entries[0].target_spatial_id());
+        assert_eq!(2, read.entries[0].target_temporal_layer_id);
+        assert!(LrrEntry::vp9(1, 1, 98, (2, 8), None).is_err());
+        assert!(LrrEntry::vp9(1, 1, 98, (8, 0), None).is_err());
+    }
+
     #[test]
     fn lrr_round_trips_with_and_without_the_current_layer() {
         let lrr = LayerRefreshRequest {

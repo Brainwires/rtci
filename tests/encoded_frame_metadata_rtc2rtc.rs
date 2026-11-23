@@ -1065,3 +1065,267 @@ fn the_corruption_detection_extension_makes_the_corruption_measurements_present(
     );
     Ok(())
 }
+
+/// The answer with `params` on the fmtp line of every format of `codec` (`"vp8"`), one added
+/// where a format has none.
+fn with_codec_fmtp(sdp: String, codec: &str, params: &str) -> String {
+    let pts: Vec<String> = sdp
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("a=rtpmap:")
+                .and_then(|r| r.split_once(' '))
+                .filter(|(_, enc)| enc.to_ascii_lowercase().starts_with(&format!("{codec}/")))
+                .map(|(pt, _)| pt.to_owned())
+        })
+        .collect();
+    assert!(!pts.is_empty(), "a {codec} format");
+    let mut out = String::new();
+    for line in sdp.split_inclusive("\r\n") {
+        let pt = pts.iter().find(|pt| {
+            line.starts_with(&format!("a=fmtp:{pt} "))
+                || line
+                    .to_ascii_lowercase()
+                    .starts_with(&format!("a=rtpmap:{pt} {codec}/"))
+        });
+        match pt {
+            Some(pt) if line.starts_with("a=fmtp:") => {
+                out.push_str(&line.replacen(
+                    &format!("a=fmtp:{pt} "),
+                    &format!("a=fmtp:{pt} {params};"),
+                    1,
+                ));
+            }
+            Some(pt) => {
+                out.push_str(line);
+                if !sdp.contains(&format!("a=fmtp:{pt} ")) {
+                    out.push_str(&format!("a=fmtp:{pt} {params}\r\n"));
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+fn with_vp8_fmtp(sdp: String, params: &str) -> String {
+    with_codec_fmtp(sdp, "vp8", params)
+}
+
+/// Writes one VP8 frame of two packets at `timestamp` (a key frame of `key` size, or a delta
+/// frame) on the sender's stream, sequence numbers from `seq`.
+fn send_vp8_frame(
+    world: &mut World,
+    sender: RTCRtpSenderId,
+    seq: u16,
+    timestamp: u32,
+    key: Option<(u16, u16)>,
+) -> Result<()> {
+    let (ssrc, pt, _) = sender_stream(world, sender, DEPENDENCY_DESCRIPTOR_URI);
+    let now = world.now;
+    for (i, payload) in [vp8_payload(true, key), vp8_payload(false, None)]
+        .into_iter()
+        .enumerate()
+    {
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: seq + i as u16,
+                        timestamp,
+                        ssrc,
+                        marker: i == 1,
+                        ..Default::default()
+                    },
+                    payload: payload.clone(),
+                },
+            )?;
+    }
+    world.media_ssrc = Some(ssrc);
+    world.pump()?;
+    Ok(())
+}
+
+/// RFC 7741 section 6.1: `max-fs` is the largest frame (in 16 by 16 macroblocks) the receiver
+/// can decode, and "a sender MUST NOT send ... frames of a larger size". With `max-fs=300` in
+/// the answer, a 640x480 key frame (1200 macroblocks) and the delta frame after it stay off
+/// the wire; the 320x180 key frame (240) that follows, and its delta frame, go.
+#[test]
+fn frames_larger_than_the_receivers_max_fs_are_not_sent() -> Result<()> {
+    let (mut world, sender) =
+        World::connected(RtpCodecKind::Video, |sdp| with_vp8_fmtp(sdp, "max-fs=300"))?;
+    send_vp8_frame(&mut world, sender, 1, 3000, Some((640, 480)))?;
+    send_vp8_frame(&mut world, sender, 3, 6000, None)?;
+    send_vp8_frame(&mut world, sender, 5, 9000, Some((320, 180)))?;
+    send_vp8_frame(&mut world, sender, 7, 12000, None)?;
+    world.run_until(world.now + Duration::from_millis(200))?;
+    let timestamps: Vec<u32> = world.media_wire().iter().map(|h| h.timestamp).collect();
+    assert_eq!(timestamps, vec![9000, 9000, 12000, 12000], "{timestamps:?}");
+    Ok(())
+}
+
+/// RFC 7741 section 6.1: `max-fr` is the highest frame rate the receiver can decode, and "a
+/// sender MUST NOT send frames at a higher rate". Thirty frames a second written for one
+/// second against `max-fr=10`: ten frames go, a third of the frames written.
+#[test]
+fn frames_above_the_receivers_max_fr_are_not_sent() -> Result<()> {
+    let (mut world, sender) =
+        World::connected(RtpCodecKind::Video, |sdp| with_vp8_fmtp(sdp, "max-fr=10"))?;
+    for frame in 0..30u32 {
+        let key = (frame == 0).then_some((320, 180));
+        send_vp8_frame(
+            &mut world,
+            sender,
+            1 + 2 * frame as u16,
+            3000 * (frame + 1),
+            key,
+        )?;
+        world.run_until(world.now + Duration::from_millis(33))?;
+    }
+    world.run_until(world.now + Duration::from_millis(200))?;
+    let mut frames: Vec<u32> = world.media_wire().iter().map(|h| h.timestamp).collect();
+    frames.dedup();
+    assert_eq!(frames.len(), 10, "{frames:?}");
+    Ok(())
+}
+
+/// The capture time a receiver gives the first frame of a stream, written as soon as the
+/// connection is up: (`Some` and its error against the instant it was written) or `None`.
+fn first_frame_capture_time(edit: impl Fn(String) -> String) -> Result<Option<Duration>> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, edit)?;
+    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtc::rtp::extension::SDES_MID_URI);
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .write_rtp(
+            now,
+            rtc::rtp::Packet {
+                header: Header {
+                    version: 2,
+                    payload_type: pt,
+                    sequence_number: 1,
+                    timestamp: 90_000,
+                    ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: vp8_payload(true, Some((320, 180))),
+            },
+        )?;
+    world.pump()?;
+    let packets = read_frame(&world, 90_000);
+    assert!(!packets.is_empty(), "the frame arrived");
+    let RTCEncodedFrameMetadataKind::Video(video) = receiver_metadata(&mut world, &packets)? else {
+        panic!("a video frame");
+    };
+    Ok(video.frame.remote_capture_time.map(|remote| {
+        if remote > now {
+            remote - now
+        } else {
+            now - remote
+        }
+    }))
+}
+
+/// RFC 6051 section 3.3 (RFC 8834 section 5.2.1 recommends it): with `ntp-64` negotiated, the
+/// default, the first packets of a stream carry the sender's NTP timestamp, and the receiver
+/// takes it "in exactly the same way as if an additional RTCP SR packet had been received":
+/// the very first frame, which no sender report can have described yet, has its capture time
+/// on the receiver's clock. With the extension left out of the answer it has none.
+#[test]
+fn the_first_frame_is_placed_by_its_in_band_ntp_timestamp_before_any_sender_report() -> Result<()> {
+    let error = first_frame_capture_time(|sdp| sdp)?.expect("placed by ntp-64");
+    assert!(error < Duration::from_millis(5), "{error:?} off");
+    let without = first_frame_capture_time(|sdp| {
+        sdp.lines()
+            .filter(|line| !line.contains(rtc::rtp::extension::NTP_64_URI))
+            .map(|line| format!("{line}\r\n"))
+            .collect()
+    })?;
+    assert_eq!(None, without, "nothing places it without the extension");
+    Ok(())
+}
+
+/// A VP9 packet that is a whole frame: the descriptor (B, E; P on a delta frame), and on a
+/// key picture the scalability structure with one spatial layer of `key` size (RFC 9628
+/// sections 4.2, 4.2.1).
+fn vp9_payload(key: Option<(u16, u16)>) -> Bytes {
+    let mut payload = match key {
+        Some((width, height)) => {
+            let mut p = vec![0x0E, 0x10];
+            p.extend(width.to_be_bytes());
+            p.extend(height.to_be_bytes());
+            p
+        }
+        None => vec![0x4C],
+    };
+    payload.extend([0x55u8; 60]);
+    Bytes::from(payload)
+}
+
+/// RFC 9628 section 6: a sender "SHOULD NOT" send VP9 frames larger than the receiver's
+/// `max-fs`. With `max-fs=300` in the answer, a key picture whose scalability structure says
+/// 640x480 (1200 macroblocks) and the delta frame after it stay off the wire; the 320x180 key
+/// picture (240) and its delta frame go.
+#[test]
+fn vp9_frames_larger_than_the_receivers_max_fs_are_not_sent() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| {
+        with_codec_fmtp(sdp, "vp9", "max-fs=300")
+    })?;
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        let pt = parameters
+            .rtp_parameters
+            .codecs
+            .iter()
+            .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("video/VP9"))
+            .map(|c| c.payload_type)
+            .expect("VP9 negotiated");
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            pt,
+        )
+    };
+    world.media_ssrc = Some(ssrc);
+    for (i, key) in [Some((640, 480)), None, Some((320, 180)), None]
+        .into_iter()
+        .enumerate()
+    {
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: 1 + i as u16,
+                        timestamp: 3000 * (i as u32 + 1),
+                        ssrc,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: vp9_payload(key),
+                },
+            )?;
+        world.pump()?;
+    }
+    world.run_until(world.now + Duration::from_millis(200))?;
+    let timestamps: Vec<u32> = world.media_wire().iter().map(|h| h.timestamp).collect();
+    assert_eq!(timestamps, vec![9000, 12000], "{timestamps:?}");
+    Ok(())
+}

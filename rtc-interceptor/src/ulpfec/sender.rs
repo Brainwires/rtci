@@ -235,6 +235,9 @@ struct ProtectedStream {
     in_flight: VecDeque<InFlight>,
     /// With a wire tap: media packets that passed this slot since the last block was closed.
     passing: usize,
+    /// One protection level only for this stream (RFC 5109 section 13: `onelevelonly=1` on
+    /// the negotiated `ulpfec` format, or the builder's setting).
+    one_level_only: bool,
 }
 
 /// The most media packets remembered between this slot and the wire tap. The pacer between the
@@ -310,7 +313,7 @@ impl UlpfecSendInterceptor {
     }
 
     /// The FEC payloads for a full block, each protecting every `count`-th packet.
-    fn encode_block(&self, block: &[(u16, Bytes)]) -> Vec<Bytes> {
+    fn encode_block(&self, block: &[(u16, Bytes)], one_level_only: bool) -> Vec<Bytes> {
         let count = self.num_fec_packets.min(block.len());
         if count == 0 {
             return Vec::new();
@@ -333,7 +336,12 @@ impl UlpfecSendInterceptor {
                     .unwrap_or(0);
                 vec![ProtectionLevel::new(longest as u16, sequences)]
             } else {
-                self.level_lengths
+                let levels = if one_level_only {
+                    &self.level_lengths[..1]
+                } else {
+                    &self.level_lengths[..]
+                };
+                levels
                     .iter()
                     .map(|length| ProtectionLevel::new(*length, sequences.clone()))
                     .collect()
@@ -546,7 +554,11 @@ impl UlpfecSendInterceptor {
         end: BlockEnd,
         block: &[(u16, Bytes)],
     ) {
-        let mut fec_payloads: VecDeque<Bytes> = self.encode_block(block).into();
+        let one_level_only = self
+            .streams
+            .get(&ssrc)
+            .is_some_and(|stream| stream.one_level_only);
+        let mut fec_payloads: VecDeque<Bytes> = self.encode_block(block, one_level_only).into();
         for fec in &fec_payloads {
             self.rate.on_repair_sent(now, fec.len());
         }
@@ -729,7 +741,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             return Ok(());
         }
 
-        let fec_payloads = self.encode_block(&block);
+        let one_level_only = self
+            .streams
+            .get(&ssrc)
+            .is_some_and(|stream| stream.one_level_only);
+        let fec_payloads = self.encode_block(&block, one_level_only);
         for fec in &fec_payloads {
             self.rate.on_repair_sent(now, fec.len());
         }
@@ -808,6 +824,19 @@ impl Interceptor for UlpfecSendInterceptor {
         if !(self.filter)(info) {
             return;
         }
+        // RFC 5109 section 13: "If 1 is signaled, only one level of FEC protection SHALL be
+        // used in the stream": `onelevelonly=1` on the negotiated `ulpfec` format.
+        let fec_format = match self.carriage {
+            Carriage::Red {
+                fec_payload_type, ..
+            } => Some(fec_payload_type),
+            Carriage::Stream => info.payload_type_fec,
+        };
+        let one_level_only = fec_format.is_some_and(|payload_type| {
+            info.section_fmtp_lines
+                .iter()
+                .any(|(pt, fmtp)| *pt == payload_type && super::one_level_only_from_fmtp(fmtp))
+        });
         let packetizer = match self.carriage {
             Carriage::Red { .. } => None,
             Carriage::Stream => {
@@ -836,6 +865,7 @@ impl Interceptor for UlpfecSendInterceptor {
                 last_wire_sequence: 0,
                 in_flight: VecDeque::new(),
                 passing: 0,
+                one_level_only,
             },
         );
         if let Some(images) = &self.wire {

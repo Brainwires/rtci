@@ -187,6 +187,12 @@ pub struct StreamInfo {
     /// marked `~`, "an unsolicited locally paused stream"). The RFC 7728 interceptor starts
     /// it paused when pause and resume were negotiated for it; other interceptors ignore it.
     pub initially_paused: bool,
+    /// The `a=fmtp` parameters of every format of the stream's m= section by payload type,
+    /// repair and redundancy formats included (RTX, RED, ULPFEC, FlexFEC), for an interceptor
+    /// that acts on a format the stream does not name itself: the ULPFEC interceptors read
+    /// `onelevelonly` (RFC 5109 section 13) of their `ulpfec` format here. Empty when the
+    /// binder did not say.
+    pub section_fmtp_lines: Vec<(u8, String)>,
 }
 
 impl StreamInfo {
