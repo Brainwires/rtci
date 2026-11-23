@@ -92,6 +92,11 @@ pub(super) struct PendingRemoteTransport {
     pub(super) new_dtls_role: Option<RTCDtlsRole>,
     /// This offer staged the answer's new `tls-id`.
     pub(super) staged_tls_id: bool,
+    /// The transports other than the default one the offer restarts ICE on or asks a new DTLS
+    /// association of, each on its own (RFC 9429 section 5.3.1, RFC 8842 section 5.3, per
+    /// transport): the gathering state it had before the restart credentials of the answer
+    /// were staged on it (`None`: no restart), and whether the answer's `tls-id` was staged.
+    pub(super) other_restarts: Vec<(TransportId, Option<RTCIceGatheringState>, bool)>,
 }
 
 /// See [`RTCPeerConnection::description_snapshot`].
@@ -367,7 +372,8 @@ impl RTCPeerConnection {
                 setting_engine.ecn,
                 setting_engine.ecn_initiation,
                 rand::rng().random(),
-            ),
+            )
+            .with_ecn_marking(setting_engine.ecn_marking),
             announced_ice_connection_state: RTCIceConnectionState::New,
             now,
         };
@@ -1994,10 +2000,107 @@ impl RTCPeerConnection {
             bundle.srtp_handler_context.rtcp_reduced_size =
                 per_transport.get(&bundle.id).copied().unwrap_or(false);
         }
-        let mut controls = vec![
-            RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
-            RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
-        ];
+        let mut controls = vec![];
+        // The SSRCs of each transport's sections: the RTP session each stream runs in
+        // (RFC 8834 section 4.4: a transport per unbundled section, an RTCP session, a
+        // congestion controller and a pacer each), told before what is per session.
+        let mut assignments: std::collections::BTreeMap<usize, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for id in self.pipeline_context.transports.ids() {
+            assignments.entry(id.0).or_default();
+        }
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid).0;
+            let ssrcs = assignments.entry(id).or_default();
+            let mut add = |coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters| {
+                ssrcs.extend(coding.ssrc);
+                ssrcs.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                ssrcs.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+            };
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    add(&encoding.rtp_coding_parameters);
+                }
+            }
+            if let Some(receiver) = transceiver.receiver() {
+                for coding in receiver.get_coding_parameters() {
+                    add(coding);
+                }
+            }
+        }
+        for (session, ssrcs) in &assignments {
+            controls.push(
+                interceptor::RtpSessionAssignment {
+                    session: *session,
+                    ssrcs: ssrcs.clone(),
+                }
+                .into_packet(now),
+            );
+        }
+        // Reduced-size RTCP and the bandwidth are each RTCP session's: those of the sections
+        // on its transport. With one transport that is every section.
+        let single = self.pipeline_context.transports.len() == 1;
+        let per_session: Vec<(usize, bool, RtcpBandwidth)> = if single {
+            vec![(
+                self.pipeline_context.transports.default_id().0,
+                reduced_size,
+                bandwidth,
+            )]
+        } else {
+            self.pipeline_context
+                .transports
+                .ids()
+                .into_iter()
+                .map(|id| {
+                    let on = |t: &&RTCRtpTransceiverInternal| {
+                        live(t)
+                            && t.mid().as_ref().is_some_and(|mid| {
+                                self.pipeline_context.transports.transport_id_for(mid) == id
+                            })
+                    };
+                    let of = |value: fn(&RTCRemoteBandwidth) -> Option<u64>| {
+                        sum(self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .map(|t| value(&t.remote_bandwidth()))
+                            .collect())
+                    };
+                    let reduced = self.rtp_transceivers.iter().any(|t| on(&t))
+                        && self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .all(|t| t.rtcp_reduced_size());
+                    (
+                        id.0,
+                        reduced,
+                        RtcpBandwidth {
+                            session: of(|b| b.session_bitrate),
+                            rs: of(|b| b.rtcp_senders_bitrate),
+                            rr: of(|b| b.rtcp_receivers_bitrate),
+                        },
+                    )
+                })
+                .collect()
+        };
+        for (session, reduced_size, bandwidth) in per_session {
+            let tag = |mut packet: interceptor::TaggedPacket| {
+                packet
+                    .message
+                    .add(interceptor::RtpSession(session).attribute());
+                packet
+            };
+            controls.push(tag(
+                RtcpSessionControl::ReducedSize(reduced_size).into_packet(now)
+            ));
+            controls.push(tag(
+                RtcpSessionControl::Bandwidth(bandwidth).into_packet(now)
+            ));
+        }
         // A `trr-int` an earlier negotiation set and this one does not have is undone.
         controls.push(
             match trr_int {
@@ -2272,6 +2375,9 @@ impl RTCPeerConnection {
                 self.pipeline_context
                     .stats
                     .set_outbound_rfc6679(info.ssrc, rfc6679);
+                self.pipeline_context
+                    .stats
+                    .set_outbound_ect_preference(info.ssrc, transceiver.remote_ect_preference());
                 self.pipeline_context
                     .stats
                     .set_outbound_ccfb(info.ssrc, ccfb);
@@ -2905,15 +3011,75 @@ impl RTCPeerConnection {
     /// The gathering state does move here, because SDP generation reads it and a restart offer
     /// must not claim end-of-candidates.
     pub(super) fn stage_ice_restart(&mut self) -> Result<()> {
-        let (local_ufrag, local_pwd) = (
-            self.setting_engine.candidates.username_fragment.clone(),
-            self.setting_engine.candidates.password.clone(),
-        );
+        // Fixed credentials from the settings are the default transport's.
+        let (local_ufrag, local_pwd) = if self.pipeline_context.transports.active_id()
+            == self.pipeline_context.transports.default_id()
+        {
+            (
+                self.setting_engine.candidates.username_fragment.clone(),
+                self.setting_engine.candidates.password.clone(),
+            )
+        } else {
+            self.restart_credentials_for_other_transport()
+        };
         self.ice_transport_mut()
             .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
         Ok(())
+    }
+
+    /// The credentials a transport other than the default one restarts with: the ones the
+    /// default transport has staged when the transports share theirs and it restarts too
+    /// (`with_unique_transport_credentials` off), else new ones (empty: generated).
+    fn restart_credentials_for_other_transport(&self) -> (String, String) {
+        if self.setting_engine.unique_transport_credentials {
+            return (String::new(), String::new());
+        }
+        let default = self.ice_transport_of(self.pipeline_context.transports.default_id());
+        if !default.has_pending_restart() {
+            return (String::new(), String::new());
+        }
+        let staged = default.agent.get_local_credentials();
+        (staged.ufrag.clone(), staged.pwd.clone())
+    }
+
+    /// `restartIce` and an offer of this side that restarts ICE: every transport stages new
+    /// credentials (W3C restartIce: "all ICE transports"), the default one first so that the
+    /// others can take its credentials when they share them.
+    pub(super) fn stage_ice_restart_on_every_transport(&mut self) -> Result<()> {
+        let default = self.pipeline_context.transports.default_id();
+        self.with_transport(default, |pc| pc.stage_ice_restart())?;
+        for id in self.pipeline_context.transports.ids() {
+            if id != default {
+                self.with_transport(id, |pc| pc.stage_ice_restart())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the ICE restart every transport has staged (`set_local_description`); a
+    /// transport with none staged is left alone.
+    pub(super) fn apply_staged_ice_restarts(&mut self, now: Instant) -> Result<()> {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| {
+                if pc.ice_transport().has_pending_restart() {
+                    pc.apply_ice_restart(now)
+                } else {
+                    Ok(())
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether any transport has an ICE restart staged.
+    pub(super) fn any_ice_restart_staged(&self) -> bool {
+        self.pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .any(|id| self.ice_transport_of(id).has_pending_restart())
     }
 
     /// Drops the transport part of the pending remote offer
@@ -2929,6 +3095,20 @@ impl RTCPeerConnection {
         }
         if pending.staged_tls_id {
             self.dtls_transport_mut().staged_local_tls_id = None;
+        }
+        for (id, gathering, staged_tls_id) in pending.other_restarts {
+            if self.pipeline_context.transports.transport(id).is_none() {
+                continue;
+            }
+            self.with_transport(id, |pc| {
+                if let Some(gathering) = gathering {
+                    pc.ice_transport_mut().discard_restart_credentials();
+                    pc.ice_transport_mut().ice_gathering_state = gathering;
+                }
+                if staged_tls_id {
+                    pc.dtls_transport_mut().staged_local_tls_id = None;
+                }
+            });
         }
     }
 

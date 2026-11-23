@@ -10,7 +10,7 @@ use crate::report::receiver_stream::ReceiverStream;
 use crate::report::sender_stream::SenderStream;
 use crate::stream_info::StreamInfo;
 use crate::{Attribute, AttributedPacket, Interceptor, Packet, TaggedPacket};
-use identity::{RtcpRandom, ThreadRandom, choose_ssrc, generate_cname};
+use identity::{RtcpRandom, SharedRandom, ThreadRandom, choose_ssrc, generate_cname};
 use rtcp::extended_report::{
     DLRRReport, DLRRReportBlock, EcnSummaryReport, EcnSummaryReportBlock, ExtendedReport,
     ReceiverReferenceTimeReportBlock,
@@ -381,6 +381,42 @@ impl RtcpSessionBuilder {
     pub fn with_random(mut self, random: impl RtcpRandom + 'static) -> Self {
         self.random = Box::new(random);
         self
+    }
+
+    /// Builds an RTCP session per RTP session ([`crate::PerRtpSession`]): a peer connection
+    /// with sections on several transports runs an RTCP session on each (RFC 3550 section 6,
+    /// RFC 8834 section 4.4), every one with these settings, the same CNAME (RFC 7022
+    /// section 4.2: one per endpoint) and its own members, bandwidth and timers.
+    pub fn build_per_rtp_session(mut self) -> crate::PerRtpSession<RtcpSessionInterceptor> {
+        let cname = self
+            .cname
+            .take()
+            .unwrap_or_else(|| generate_cname(self.random.as_mut()));
+        let random = SharedRandom(Arc::new(std::sync::Mutex::new(std::mem::replace(
+            &mut self.random,
+            Box::new(ThreadRandom),
+        ))));
+        let template = RtcpSessionBuilder {
+            cname: Some(cname),
+            random: Box::new(random.clone()),
+            ..self
+        };
+        let make = move |template: &RtcpSessionBuilder| RtcpSessionBuilder {
+            profile: template.profile,
+            t_rr_interval: template.t_rr_interval,
+            bandwidth: template.bandwidth,
+            rtcp_fraction: template.rtcp_fraction,
+            reduced_minimum: template.reduced_minimum,
+            reduced_size: template.reduced_size,
+            mtu: template.mtu,
+            cname: template.cname.clone(),
+            point_to_point: template.point_to_point,
+            report_from_every_ssrc: template.report_from_every_ssrc,
+            immediate_congestion_feedback: template.immediate_congestion_feedback,
+            random: Box::new(random.clone()),
+        };
+        let first = make(&template).build();
+        crate::PerRtpSession::with_first(first, move || make(&template).build())
     }
 
     /// Builds the interceptor.

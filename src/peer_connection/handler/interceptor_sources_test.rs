@@ -149,6 +149,7 @@ fn receiver_after_goodbye(arrivals: Vec<Arrival>, goodbye: Vec<u32>) -> RTCRtpTr
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
 
     let base = Instant::now();

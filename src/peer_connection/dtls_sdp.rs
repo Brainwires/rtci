@@ -129,7 +129,12 @@ impl RTCPeerConnection {
             let offered = self
                 .remote_description()
                 .and_then(|remote| remote.parsed.as_ref())
-                .and_then(|parsed| extract_tls_id(parsed).ok().flatten());
+                // The default transport's: each transport of the offer has its own.
+                .and_then(|parsed| {
+                    extract_tls_id(&self.default_transport_view(parsed))
+                        .ok()
+                        .flatten()
+                });
             if offered.is_none() {
                 return Ok(d);
             }
@@ -156,6 +161,9 @@ impl RTCPeerConnection {
                 .attributes
                 .push(Attribute::new(ATTR_KEY_TLS_ID.to_owned(), Some(tls_id)));
         }
+        // The other transports' sections, each with its association's `tls-id` (RFC 8842
+        // section 5: one per transport).
+        self.write_transport_attributes(&mut d);
         Ok(d)
     }
 }
