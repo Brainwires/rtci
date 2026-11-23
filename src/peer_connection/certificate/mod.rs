@@ -981,29 +981,59 @@ mod test {
 
     #[test]
     fn test_generate_certificate_rsa() -> Result<()> {
+        // W3C webrtc-pc 4.9: generateCertificate supports RSASSA-PKCS1-v1_5 with a 2048-bit
+        // modulus, public exponent 65537 and SHA-256. The aws-lc-rs provider generates the
+        // key; ring has no RSA key generation, and refuses with an explicit
+        // unsupported-algorithm error (`tests/dtls_rsa_certificate.rs` covers RSA end to end
+        // with an imported key there).
+        use x509_parser::prelude::FromDer;
         let provider = default_test_provider()?;
-
-        // Neither built-in provider generates RSA keys, mirroring rcgen's
-        // `KeyGenerationUnavailable` under `ring`. The certificate path must still work for any
-        // provider that does support it, so this asserts success or an explicit
-        // unsupported-algorithm error, never a silent failure. `tests/dtls_rsa_certificate.rs`
-        // covers RSA end to end using an imported fixture key.
+        let params = || {
+            CertificateParams::new(vec!["webrtc.rs".to_owned()])
+                .map_err(|e| Error::Other(e.to_string()))
+        };
         if !provider
             .crypto()
             .supports(crypto::CryptoAlgorithm::SigningKeyGeneration(
                 SignatureScheme::RsaPkcs1Sha256,
             ))
         {
+            assert!(
+                RTCCertificate::generate(
+                    provider.crypto(),
+                    SignatureScheme::RsaPkcs1Sha256,
+                    params()?
+                )
+                .is_err(),
+                "a provider without RSA key generation says so"
+            );
             return Ok(());
         }
 
-        let _certificate = RTCCertificate::generate(
+        let certificate = RTCCertificate::generate(
             provider.crypto(),
             SignatureScheme::RsaPkcs1Sha256,
-            CertificateParams::new(vec!["webrtc.rs".to_owned()])
-                .map_err(|e| Error::Other(e.to_string()))?,
+            params()?,
         )?;
-
+        let der = certificate
+            .dtls_certificate
+            .certificate
+            .first()
+            .expect("a certificate")
+            .clone();
+        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(der.as_ref())
+            .map_err(|e| Error::Other(e.to_string()))?;
+        assert_eq!(
+            parsed.signature_algorithm.algorithm,
+            x509_parser::oid_registry::OID_PKCS1_SHA256WITHRSA
+        );
+        match parsed.public_key().parsed() {
+            Ok(x509_parser::public_key::PublicKey::RSA(rsa)) => {
+                assert_eq!(rsa.key_size(), 2048);
+                assert_eq!(rsa.try_exponent().ok(), Some(65537));
+            }
+            other => panic!("an RSA public key: {other:?}"),
+        }
         Ok(())
     }
 

@@ -1203,6 +1203,28 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Unspecified) => return Err(Error::ErrPeerConnSDPTypeInvalidValue),
         }
 
+        // W3C 4.4.1.6 [[SctpTransport]]: an offer that describes an SCTP association creates
+        // the transport ("connecting") when there is none; an answer that closes the
+        // association (a rejected data section, `a=sctp-port:0`) makes it null; a rollback
+        // brings back [[LastStableStateSctpTransport]], which every stable state records.
+        let (describes, closes) = describes_sctp_association(sd);
+        match sd.sdp_type {
+            RTCSdpType::Offer if describes => self.sctp_transport_mut().described = true,
+            RTCSdpType::Answer if closes => self.sctp_transport_mut().described = false,
+            RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
+                self.sctp_transport_mut().described = true;
+            }
+            RTCSdpType::Rollback => {
+                let last = self.sctp_transport().last_stable_described;
+                self.sctp_transport_mut().described = last;
+            }
+            _ => {}
+        }
+        if next_state == RTCSignalingState::Stable {
+            let described = self.sctp_transport().described;
+            self.sctp_transport_mut().last_stable_described = described;
+        }
+
         if matches!(sd.sdp_type, RTCSdpType::Answer) {
             // W3C "set a session description": an answer resets [[LastCreatedOffer]] and
             // [[LastCreatedAnswer]], so a description created for an exchange that is over
@@ -3929,4 +3951,19 @@ mod unused_ssrc_test {
         assert_eq!(11, unused_ssrc_from([7, 0, 9, 11, 13], &taken));
         assert_eq!(7, unused_ssrc_from([7], &HashSet::new()));
     }
+}
+
+/// Whether `sd` describes an SCTP association (RFC 8841 section 10.2: a data section that is
+/// not rejected, with a non-zero `a=sctp-port`), and whether it closes one (sections 10.3,
+/// 10.4: its data section is rejected or has `a=sctp-port:0`).
+fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
+    let Some(section) = have_data_channel(sd) else {
+        return (false, false);
+    };
+    let zero_port = section
+        .attributes
+        .iter()
+        .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
+    let closed = section.media_name.port.value == 0 || zero_port;
+    (!closed, closed)
 }

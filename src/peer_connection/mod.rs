@@ -3003,6 +3003,38 @@ impl RTCPeerConnection {
             .assign_stream_ids(dtls_role, max_channels)
         {
             log::debug!("data channel ids not assigned: {err}");
+            // W3C 4.4.1.6: "If no available ID could be generated, set channel's
+            // [[ReadyState]] to "closed", and add channel to errorList"; each channel of
+            // errorList then gets an `error` event (`data-channel-failure`, 4.4.1.6 step
+            // "fire an event named error") and is closed.
+            let mut error_list: Vec<RTCDataChannelId> = self
+                .data_channels
+                .values()
+                .filter(|dc| dc.stream_id.is_none() && !dc.negotiated)
+                .map(|dc| dc.id)
+                .collect();
+            error_list.sort_unstable();
+            for id in error_list {
+                if self.data_channels.remove(&id).is_none() {
+                    continue;
+                }
+                self.data_channels.record_error(
+                    id,
+                    crate::peer_connection::rtc_error::RTCError::new(
+                        crate::peer_connection::rtc_error::RTCErrorDetailType::DataChannelFailure,
+                        "no data channel id is available",
+                    ),
+                );
+                self.pipeline_context.stats.on_data_channel_gone(id);
+                for event in [
+                    crate::peer_connection::event::RTCDataChannelEvent::OnError(id),
+                    crate::peer_connection::event::RTCDataChannelEvent::OnClose(id),
+                ] {
+                    self.pipeline_context.event_outs.push_back(
+                        crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(event),
+                    );
+                }
+            }
         }
     }
 
@@ -3877,7 +3909,7 @@ impl RTCPeerConnection {
     ///
     /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-sctp)
     pub fn sctp(&self) -> Option<RTCSctpTransport<'_>> {
-        if self.sctp_transport().is_started {
+        if self.sctp_transport().described {
             Some(RTCSctpTransport {
                 peer_connection: self,
             })

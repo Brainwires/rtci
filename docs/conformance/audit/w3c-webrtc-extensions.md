@@ -8,7 +8,7 @@ The draft's section numbers are generated when it is rendered; this file numbers
 
 Totals:
 
-- MUST: tested 57 / untested 1 / partial 1 / missing 0 / violated 0 / n-a 14
+- MUST: tested 58 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 14
 - SHOULD: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
 
@@ -85,7 +85,7 @@ Totals:
 | WEBRTC-EXT-13.3-3 | 13.3 | MUST | The always-negotiated data section is the offerer-tagged m= section of the BUNDLE group | tested | `src/peer_connection/internal.rs` | `always_negotiated_data_channels_need_no_negotiation_for_the_first_channel` | reads a=group |
 | WEBRTC-EXT-15-1 | 15 | MUST | A received frame's capture timestamp is the remote capture time translated to the receiver clock, when computable | partial | `src/peer_connection/message/mod.rs:420` | - | The application sees every RTCP SR and RTP timestamp and can compute it; the engine offers no helper and no abs-capture-time |
 | WEBRTC-EXT-15-2 | 15 | MUST | A received video frame's RTP timestamp is that of its packets | tested | `src/peer_connection/handler/endpoint.rs:264` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | Packets are delivered with their headers intact; frames are the application's |
-| WEBRTC-EXT-15-3 | 15 | MUST | A received frame's receive timestamp is when its last packet arrived | untested | `src/peer_connection/message/mod.rs:420` | - | `poll_read` hands out the packet; whether the arrival instant travels with it was not confirmed by a test |
+| WEBRTC-EXT-15-3 | 15 | MUST | A received frame's receive timestamp is when its last packet arrived | tested | `src/rtp_transceiver/rtp_receiver/frame_metadata.rs` (FrameRecords::record), `src/rtp_transceiver/rtp_receiver/mod.rs` (encoded_frame_metadata) | `a_frames_receive_time_is_its_last_packets_arrival`, `received_video_frames_carry_their_metadata` | `receive_time`: the instant the datagram carrying the frame's last packet was given to the engine |
 | WEBRTC-EXT-16-1 | 16 | MUST | RTCConfiguration.targetLatency ("lowest" default, "none") | n/a | - | - | Network link setup is the application's |
 | WEBRTC-EXT-16-2 | 16 | SHOULD | "lowest": use techniques such as network slicing when available | n/a | - | - | Network link setup is the application's |
 | WEBRTC-EXT-17-1 | 17 | MUST | startDiagnosticLogging / stopDiagnosticLogging / cancelDiagnosticLogging with their state and metadata checks | n/a | - | - | User-agent logging session, user consent |

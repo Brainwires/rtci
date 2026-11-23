@@ -1173,6 +1173,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **sctp / data channels** (pc-22, W3C webrtc-pc 4.4.1.6): `RTCPeerConnection::sctp()` is the
+  transport from the first applied offer (local or remote) that describes an SCTP association,
+  in state "connecting" until the association is up; it was `None` until the association
+  started. An answer that closes the association (rejected data section, `a=sctp-port:0`)
+  makes it `None`, and a rollback brings back the last stable state's
+  (`[[LastStableStateSctpTransport]]`). An in-band data channel that gets no id when an
+  answer settles the DTLS role is closed: `OnError` (`data_channel_error`:
+  data-channel-failure), then `OnClose`; it used to stay connecting without an id.
+- **crypto** (pc-22): the aws-lc-rs provider generates RSA keys (`SignatureScheme::RsaPkcs1Sha256`:
+  2048 bits, exponent 65537), so `RTCCertificate::generate` makes RSA certificates with
+  `crypto-aws-lc-rs` (W3C webrtc-pc 4.9). ring still cannot (no RSA key generation in ring).
 - **bandwidth** (pc-21): `maxBitrate` is enforced and the congestion controller's target is
   divided among the senders (W3C webrtc 5.2.5, webrtc-priority 3.2, RFC 8835 section 4.1).
   Every active encoding of a sending transceiver gets a share by `priority` (very-low : low :

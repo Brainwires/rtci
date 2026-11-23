@@ -132,6 +132,14 @@ pub(crate) struct SctpTransport {
     // so we need a dedicated field
     pub(crate) is_started: bool,
 
+    /// W3C `[[SctpTransport]]` is not null: an applied offer described an SCTP association
+    /// (RFC 8841 section 10.2), and no answer has closed it since (sections 10.3, 10.4). The
+    /// transport is exposed ("connecting" until its association is up) from then on.
+    pub(crate) described: bool,
+    /// W3C `[[LastStableStateSctpTransport]]`: `described` in the last stable state, what a
+    /// rollback brings back.
+    pub(crate) last_stable_described: bool,
+
     // The *configured* ceiling from SettingEngine — an input to the negotiation below, not the
     // value W3C `maxMessageSize` reports. See `negotiated_max_message_size`.
     pub(crate) max_message_size: SctpMaxMessageSize,
@@ -234,6 +242,8 @@ impl SctpTransport {
             sctp_associations: HashMap::new(),
 
             is_started: false,
+            described: false,
+            last_stable_described: false,
             max_message_size,
             negotiated_max_message_size: None,
             negotiated_max_buffer_size: None,
@@ -601,6 +611,8 @@ impl SctpTransport {
             return Ok(());
         }
         self.is_started = true;
+        // A started association is a transport that exists (`described`).
+        self.described = true;
         self.local_port = local_port;
         self.negotiated_ports = Some((local_port, remote_port));
         self.lost = false;
