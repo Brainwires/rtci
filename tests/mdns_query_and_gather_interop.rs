@@ -117,9 +117,10 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
     // runners have docker0) the rtc peer then resolves both candidates to the same address,
     // one of them wrongly; the two share a foundation, so the right one stays Frozen (RFC 8445
     // section 6.1.2.6) until the wrong one's check has failed, about 40 s later, past the
-    // test's timeout. The mDNS draft gives each IP address a name of its own (section 3.1.1,
-    // steps 2 to 5); upstream does not, so the upstream peer gathers on the mDNS egress
-    // interface only.
+    // test's timeout. One name per IP address is
+    // draft-ietf-mmusic-mdns-ice-candidates-03 section 3.1.1, steps 2 to 5 (an expired draft
+    // that browsers follow; RFC 8445 has no such rule); upstream does not follow it, so the upstream peer gathers on the mDNS
+    // egress interface only.
     if let Some(egress) = mdns_egress_ip() {
         log::info!("webrtc peer gathers on the mDNS egress interface address {egress} only");
         setting_engine.set_ip_filter(Box::new(move |ip| ip == egress));

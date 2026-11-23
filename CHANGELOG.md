@@ -957,6 +957,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
   `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
   ICE, DTLS and SCTP handlers left nothing waiting.
+### Test environment and documentation
+
+- **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
+  `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
+  `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base
+  image's 4.6.1 package, whose TLS listener picks its SSL context by the ClientHello's
+  `legacy_version`: a client offering TLS 1.3 alone got `handshake_failure`, one offering 1.3
+  and 1.2 got 1.2 (fixed in coturn 4.6.2, coturn/coturn#989). The TLS 1.2 clamps of the
+  environment's own TURN-over-TLS client (`tests/testenv/mod.rs`) and of the aiortc peer are
+  gone: they negotiate TLS 1.3. Both versions are covered on purpose:
+  `testenv_turn_streams::the_engine_relays_through_turn_over_tls_1_3` (the engine offering TLS
+  1.3 alone) and `the_engine_relays_through_turn_over_tls_1_2_to_a_server_without_tls_1_3`
+  (the default offer to a fourth coturn, port 5350, whose libssl stops at TLS 1.2), each
+  checking first what its server settles on. TURN over DTLS stays DTLS 1.2 (coturn's OpenSSL
+  DTLS). The engine keeps TLS 1.2 for TURN over TLS (`rustls` feature `tls12`, on by default
+  in `TurnTlsConfig`): deployed servers need it, coturn 4.6.1 being what Ubuntu 24.04 and
+  Debian 13 ship; the comments now say so.
+- **test-env**: the aiortc peer runs aiortc built from upstream main at commit 0ee2bd29
+  (source archive by SHA-256 `9f2a6308e53813eb62fb604e38619178df72f5cfd4ccdc3dbca5b7f0b2c86ca7`,
+  built offline with setuptools 84.2.1 pinned by hash) instead of `sdp.py` and `rtp.py` from the
+  fork `Brainwires/aiortc` over the 1.16.0 wheel: upstream fixed both bugs, 6a76d5e0 (`a=extmap`
+  extension attributes, aiortc/aiortc#1492) and 0ee2bd29 (RTCP SDES chunk alignment,
+  aiortc/aiortc#1496), in no release yet. The whole package comes from the commit (the extmap
+  fix also changes `rtcpeerconnection.py`); to be dropped for the first release with both. The
+  overlay files and `LICENSE.aiortc` are removed.
+- **docs**: the trailing space webrtc-rs 0.17.x writes in `a=rtcp-fb` without parameters breaks
+  RFC 4585 section 4.2's `rtcp-fb-param` (cited now); Pion fixed it in v4.1.5 (pion/webrtc#3207,
+  PR #3218) and webrtc-rs on its default branch (`rtc` 718d405), so the notes name 0.17.x
+  alone. RFC9429-5.8-1 keeps its verdict (`setting`); its note cites the grammar. The mDNS
+  one-name-per-address rule is cited as draft-ietf-mmusic-mdns-ice-candidates-03 section 3.1.1
+  (expired). `docs/conformance/w6.md` and `docs/interop.md` link the upstream reports:
+  algesten/str0m#1184 (TCP pairing by tcptype), webrtc-rs/rtc#339 (`a=msid` without appdata),
+  aiortc #1492 and #1496 (closed as fixed), coturn #989.
 
 ### Publishing readiness (crates.io)
 

@@ -12,6 +12,12 @@
 //! adds its host candidate (which the relay policy keeps from the peer): the engine runs its
 //! DTLS association to coturn from that socket, and every datagram on it is to or from coturn.
 //! Over plain UDP (`turn:...?transport=udp`) the same, without DTLS.
+//!
+//! TLS 1.3 and TLS 1.2 each have a case of their own: the engine offering TLS 1.3 alone to the
+//! environment's main coturn (which speaks both), and the engine's default offer (1.3 and 1.2)
+//! to a second coturn that stops at TLS 1.2 (`coturn/turnserver-tls12.conf`), as servers
+//! without TLS 1.3 do. Each first checks, with a plain rustls client, that the server
+//! negotiates exactly what the case says.
 
 mod common;
 mod testenv;
@@ -47,6 +53,8 @@ enum Signal {
 enum PeerKind {
     /// The relay policy, the engine's TURN client.
     Relay,
+    /// As `Relay`, TURN over TLS offering TLS 1.3 alone (`TurnTlsConfig::disable_tls12`).
+    RelayTls13Only,
     /// As `Relay`, TCP candidates only: the relayed TCP candidates of the TCP allocation.
     RelayTcpOnly,
     /// No TURN server: the engine's own ICE-TCP candidates (the application adds the host
@@ -112,6 +120,7 @@ fn peer(
         };
         let mut settings = SettingEngineBuilder::new().with_turn_tls(TurnTlsConfig {
             roots: Some(roots(&env)),
+            disable_tls12: kind == PeerKind::RelayTls13Only,
             ..Default::default()
         });
         if kind == PeerKind::RelayTcpOnly {
@@ -289,7 +298,47 @@ fn peer(
     })
 }
 
+/// The TLS version `server` settles on with a client (plain rustls, the environment's CA, the
+/// server named by its address as the engine names it) that offers `versions`, from `open-a`;
+/// the handshake's error when it refuses them all.
+fn negotiated_tls_version(
+    env: &Env,
+    server: std::net::SocketAddr,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> io::Result<rustls::ProtocolVersion> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .expect("install_crypto_provider() first");
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(versions)
+        .map_err(io::Error::other)?
+        .with_root_certificates(roots(env))
+        .with_no_client_auth();
+    let mut conn = rustls::ClientConnection::new(
+        Arc::new(config),
+        rustls::pki_types::ServerName::from(server.ip()),
+    )
+    .map_err(io::Error::other)?;
+    let mut stream = in_netns("open-a", move || {
+        std::net::TcpStream::connect_timeout(&server, Duration::from_secs(5))
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    while conn.is_handshaking() {
+        conn.complete_io(&mut stream)?;
+    }
+    conn.protocol_version()
+        .ok_or_else(|| io::Error::other("no protocol version after the handshake"))
+}
+
 fn relay_through_engine_turn(url: &str, expected: RTCIceServerTransportProtocol) {
+    relay_through_engine_turn_as(url, expected, PeerKind::Relay);
+}
+
+fn relay_through_engine_turn_as(
+    url: &str,
+    expected: RTCIceServerTransportProtocol,
+    kind: PeerKind,
+) {
     common::install_crypto_provider();
     let env = Env::get();
     // Over DTLS and over plain UDP the engine runs on the application's UDP socket.
@@ -313,13 +362,13 @@ fn relay_through_engine_turn(url: &str, expected: RTCIceServerTransportProtocol)
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let offerer = std::thread::spawn(move || {
         in_netns("h-symmetric-a", move || {
-            peer(true, u, e, a_tx, a_rx, m, ip_a, PeerKind::Relay)
+            peer(true, u, e, a_tx, a_rx, m, ip_a, kind)
         })
     });
     let (u, e, m) = (url.to_owned(), env.clone(), messages.clone());
     let answerer = std::thread::spawn(move || {
         in_netns("h-symmetric-b", move || {
-            peer(false, u, e, b_tx, b_rx, m, ip_b, PeerKind::Relay)
+            peer(false, u, e, b_tx, b_rx, m, ip_b, kind)
         })
     });
     let b = answerer.join().unwrap().unwrap();
@@ -364,6 +413,53 @@ fn the_engine_relays_through_turn_over_tls() {
     // The server certificate names 203.0.113.10 as well as turn.rtc.test.
     relay_through_engine_turn(
         &format!("turns:{}?transport=tcp", env.turn_tls),
+        RTCIceServerTransportProtocol::Tls,
+    );
+}
+
+/// RFC 8656 section 3.1 over TLS 1.3 (RFC 8446): the engine offers TLS 1.3 alone
+/// (`TurnTlsConfig::disable_tls12`) to coturn, which speaks TLS 1.3 and 1.2 and settles on 1.3.
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn the_engine_relays_through_turn_over_tls_1_3() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    use rustls::version::{TLS12, TLS13};
+    assert_eq!(
+        negotiated_tls_version(&env, env.turn_tls, &[&TLS13, &TLS12]).unwrap(),
+        rustls::ProtocolVersion::TLSv1_3,
+        "the environment's coturn must take TLS 1.3 when it is offered"
+    );
+    relay_through_engine_turn_as(
+        &format!("turns:{}?transport=tcp", env.turn_tls),
+        RTCIceServerTransportProtocol::Tls,
+        PeerKind::RelayTls13Only,
+    );
+}
+
+/// RFC 8656 section 3.1 over TLS 1.2 (RFC 5246): the engine's default offer (TLS 1.3 and 1.2)
+/// to a coturn that stops at TLS 1.2 settles on 1.2, as with the servers deployed without TLS
+/// 1.3. The server is checked first: a client offering TLS 1.3 alone is refused, one offering
+/// both gets 1.2.
+#[test]
+#[ignore = "needs the real-network test environment (coturn, NAT namespaces): scripts/test-env/run.sh"]
+fn the_engine_relays_through_turn_over_tls_1_2_to_a_server_without_tls_1_3() {
+    common::install_crypto_provider();
+    let env = Env::get();
+    let server = env.turn_tls12.expect(
+        "RTC_TESTENV_TURN_TLS12 is not set: scripts/test-env/coturn/start.sh starts that server",
+    );
+    use rustls::version::{TLS12, TLS13};
+    assert!(
+        negotiated_tls_version(&env, server, &[&TLS13]).is_err(),
+        "the TLS 1.2 server took a TLS 1.3-only ClientHello"
+    );
+    assert_eq!(
+        negotiated_tls_version(&env, server, &[&TLS13, &TLS12]).unwrap(),
+        rustls::ProtocolVersion::TLSv1_2
+    );
+    relay_through_engine_turn(
+        &format!("turns:{server}?transport=tcp"),
         RTCIceServerTransportProtocol::Tls,
     );
 }
