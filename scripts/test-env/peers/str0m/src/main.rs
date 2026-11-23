@@ -194,6 +194,9 @@ struct Peer {
     open: HashSet<ChannelId>,
     local_labels: HashSet<String>,
     connected: bool,
+    /// The transport protocol and peer of the last datagram str0m took (what the session
+    /// runs on when its stats name no selected pair).
+    last_path: Option<(Protocol, SocketAddr)>,
     ice_state: String,
     answers_got: u32,
     answers_sent: u32,
@@ -384,6 +387,7 @@ impl Peer {
             open: HashSet::new(),
             local_labels: HashSet::new(),
             connected: false,
+            last_path: None,
             ice_state: "new".into(),
             answers_got: 0,
             answers_sent: 0,
@@ -443,6 +447,9 @@ impl Peer {
             },
         );
         if self.rtc.accepts(&input) {
+            if self.connected {
+                self.last_path = Some((proto, source));
+            }
             let _ = self.rtc.handle_input(input);
             let _ = self.drain();
         }
@@ -1276,13 +1283,15 @@ impl Peer {
                 if mids.is_empty() {
                     return Err("no video from Rust to send feedback about".into());
                 }
-                for _ in 0..3 {
-                    for mid in &mids {
-                        for t in st["types"].as_array().cloned().unwrap_or_default() {
-                            let (name, kind) = match t.as_str() {
-                                Some("fir") => ("fir", KeyframeRequestKind::Fir),
-                                _ => ("pli", KeyframeRequestKind::Pli),
-                            };
+                // One kind at a time: str0m keeps one pending keyframe request per stream, and
+                // a FIR asked for in the same turn as a PLI replaces it.
+                for t in st["types"].as_array().cloned().unwrap_or_default() {
+                    let (name, kind) = match t.as_str() {
+                        Some("fir") => ("fir", KeyframeRequestKind::Fir),
+                        _ => ("pli", KeyframeRequestKind::Pli),
+                    };
+                    for _ in 0..3 {
+                        for mid in &mids {
                             let ok = self
                                 .rtc
                                 .writer(*mid)
@@ -1292,8 +1301,8 @@ impl Peer {
                                 *self.rtcp_sent.entry(name.into()).or_default() += 1;
                             }
                         }
+                        self.wait(300)?;
                     }
-                    self.wait(200)?;
                 }
             }
             "impair" => {
@@ -1391,6 +1400,18 @@ impl Peer {
             .and_then(|d| d[2].as_str())
             .unwrap_or_default()
             .to_owned();
+        // str0m's stats name the selected pair every stats interval; a session shorter than
+        // that has none, and then the path its last datagrams came over is the one in use.
+        let selected = match (&self.selected, self.last_path) {
+            (Value::Null, Some((proto, from))) => {
+                let proto = if proto == Protocol::Udp { "udp" } else { "tcp" };
+                json!({
+                    "local": {"candidateType": "host", "protocol": proto, "relayProtocol": null},
+                    "remote": {"candidateType": null, "protocol": proto, "address": from.ip().to_string(), "port": from.port()},
+                })
+            }
+            (s, _) => s.clone(),
+        };
         json!({
             "ok": r.is_ok(),
             "error": r.err(),
@@ -1406,7 +1427,7 @@ impl Peer {
             "rtcp": self.rtcp,
             "rtcpSent": self.rtcp_sent,
             "twccSent": answer.contains("transport-wide-cc"),
-            "selectedPair": self.selected,
+            "selectedPair": selected,
             "dtls": version.map(|v| json!({"version": format!("{:04X}", v.as_u16()), "cipher": null, "srtpProfile": null, "role": null})),
             "sctp": {"maxMessageSize": 262144},
             "localCandidates": self.candidate_lines,

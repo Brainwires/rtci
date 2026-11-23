@@ -321,14 +321,25 @@ test("RTCP: SR and RR both ways, PLI and FIR from the peer, transport-cc feedbac
   }, ["rtcpFeedback"]);
   expectOk(r);
   logNegotiated(r);
+  // SR and RR are the engine's own: its RTCP session takes them in and they never reach the
+  // application (tests/idle_endpoints.rs), so what Rust received shows in its stats: a sender
+  // report makes a remote-outbound-rtp (reportsSent counts them), a report block about one of
+  // Rust's streams a remote-inbound-rtp (W3C webrtc-stats 7.5, 7.6). Feedback (PLI, FIR) does
+  // reach the application, and the sender's stats count it (pliCount, firCount).
   const rust = r.rust?.rtcp || {};
+  const stats = r.rust?.stats || {};
+  const srs = (stats.remoteOutbound || []).reduce((a, x) => a + (x.reportsSent || 0), 0);
+  const blocks = (stats.remoteInbound || []).length;
+  const out = (stats.outbound || []).find((o) => o.kind === "video")?.w3c || {};
   expect(r.rtcp?.sr || 0, `the peer received no SR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
   expect(r.rtcp?.rr || 0, `the peer received no RR from Rust: ${ctx(r)}`).toBeGreaterThan(0);
-  expect(rust.sr || 0, `Rust received no SR from the peer: ${ctx(r)}`).toBeGreaterThan(0);
-  expect(rust.rr || 0, `Rust received no RR from the peer: ${ctx(r)}`).toBeGreaterThan(0);
+  expect(srs, `Rust took in no SR from the peer (remote-outbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
+  expect(blocks, `Rust took in no report block about its streams (remote-inbound-rtp): ${ctx(r, { stats })}`).toBeGreaterThan(0);
   expect(r.rtcpSent?.pli || 0, ctx(r)).toBeGreaterThan(0);
-  expect(rust.pli || 0, `Rust received none of the peer's PLIs: ${ctx(r)}`).toBeGreaterThan(0);
-  if ((r.rtcpSent?.fir || 0) > 0) expect(rust.fir || 0, `Rust received none of the peer's FIRs: ${ctx(r)}`).toBeGreaterThan(0);
+  expect(Math.max(rust.pli || 0, out.pliCount || 0), `Rust received none of the peer's PLIs: ${ctx(r)}`).toBeGreaterThan(0);
+  if ((r.rtcpSent?.fir || 0) > 0) {
+    expect(Math.max(rust.fir || 0, out.firCount || 0), `Rust received none of the peer's FIRs: ${ctx(r)}`).toBeGreaterThan(0);
+  }
   // Rust sends transport-cc feedback when both the feedback and the header extension are
   // negotiated and the peer's packets carry the extension.
   const answer = lastDescription(r, "received", "answer");

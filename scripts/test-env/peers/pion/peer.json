@@ -12,6 +12,14 @@
     "dtls13": {
       "reason": "Pion's DTLS (pion/dtls v3) speaks DTLS 1.2 only",
       "cite": "pion/webrtc v4.2.29 stats.go TransportStats.TLSVersion: \"Value is always FEFD (DTLS 1.2)\"; dtlstransport.go sets TLSVersion = \"FEFD\""
+    },
+    "unbundled": {
+      "reason": "Pion runs one ICE and one DTLS transport per PeerConnection: in an answer it rejects (port 0) every section outside the offer's BUNDLE group, and with bundlePolicy max-compat it still runs every section over its one transport",
+      "cite": "pion/webrtc v4.2.29 sdp.go populateSDP (a section that does not bundleMatch gets MediaName.Port 0); peerconnection.go (one iceTransport / dtlsTransport per PeerConnection). Observed in train 10 round 1: Pion answered Rust's offer without a group with port 0 on both sections, and offered max-compat sections that it served on one transport"
+    },
+    "rollback": {
+      "reason": "Pion does not take a rollback description",
+      "cite": "pion/webrtc v4.2.29 SetLocalDescription: \"InvalidModificationError: invalid SDP type supplied to SetLocalDescription(): rollback\" (train 10 round 1)"
     }
   }
 }

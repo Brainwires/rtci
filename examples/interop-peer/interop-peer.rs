@@ -12,8 +12,9 @@
 //!   so the browser answers for media.
 //!   `"ice_restart":true` restarts ICE in that offer (W3C restartIce).
 //! - `{"type":"report"}`: replies `{"type":"report", ...}` with what it received, its
-//!   connection state, its W3C stats counters and per-stream sequence coverage, the RTCP it
-//!   received by type, what DTLS and SRTP negotiated, the selected candidate pair and the SCTP
+//!   connection state, its W3C stats counters (with the remote-inbound / remote-outbound
+//!   stats the peer's RTCP reports made) and per-stream sequence coverage, the RTCP that
+//!   reached the application by type (feedback; SR and RR are the engine's own), what DTLS and SRTP negotiated, the selected candidate pair and the SCTP
 //!   transport's limits (what the non-browser peers' cells compare with their own view).
 //! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
 //!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
@@ -934,6 +935,25 @@ impl Session {
                 })
             })
             .collect();
+        // What the peer's RTCP reports said, as the engine took them in: a sender report makes
+        // a remote-outbound-rtp (its `reportsSent` counts them), a report block about one of
+        // this side's streams a remote-inbound-rtp (W3C webrtc-stats 7.5, 7.6). The engine's
+        // RTCP session consumes SR and RR itself (they never reach `poll_read`), so these are
+        // where a peer's reports show.
+        let remote_inbound: Vec<Value> = report
+            .iter()
+            .filter_map(|e| match e {
+                RTCStatsReportEntry::RemoteInboundRtp(r) => serde_json::to_value(r).ok(),
+                _ => None,
+            })
+            .collect();
+        let remote_outbound: Vec<Value> = report
+            .iter()
+            .filter_map(|e| match e {
+                RTCStatsReportEntry::RemoteOutboundRtp(r) => serde_json::to_value(r).ok(),
+                _ => None,
+            })
+            .collect();
         let outbound: Vec<Value> = report
             .outbound_rtp_streams()
             .map(|o| {
@@ -1019,6 +1039,8 @@ impl Session {
             "transports": transports,
             "inbound": inbound,
             "outbound": outbound,
+            "remoteInbound": remote_inbound,
+            "remoteOutbound": remote_outbound,
             "remoteCandidates": remote_candidates,
             "candidatePairs": candidate_pairs,
         })
