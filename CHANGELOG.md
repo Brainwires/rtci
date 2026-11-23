@@ -1514,6 +1514,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ufrag, which answered it on another transport's path. Tested through the reference driver's shared-port `UfragMux`
   with the remote's candidates arriving late
   (`three_transports_share_one_port_with_shared_credentials_through_the_drivers_mux`).
+- **peer connection** (mt-9): an ICE-TCP connection accepted on a passive port several
+  transports share is tied to a transport by its first check's full USERNAME, or by a
+  tie-breaker one transport alone was reached with (`route_named`); with shared credentials on
+  both sides and no tie-breaker seen yet, nothing names one and such a port needs
+  `with_unique_transport_credentials(true)` on one side. The shared-port tests of the
+  stream-transport stack take unique credentials (as on `conf/tcp-10-srv-naptr`).
 - **peer connection** (mt-9): `RTCRtpTransceiver::set_bundle_request(Some(false))` moves the
   transceiver's section out of its BUNDLE group at the next offer (RFC 9143 7.5.2: the tag out
   of the group, no `a=bundle-only`, a transport of its own with its own candidates and DTLS
