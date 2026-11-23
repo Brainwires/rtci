@@ -7,10 +7,9 @@ rust-version.workspace = true
 description = "Sans-I/O audio pipeline for RTC: Opus, G.711, G.722, an adaptive jitter buffer with concealment and time-stretching, and audio processing"
 license.workspace = true
 documentation = "https://docs.rs/rtc-audio"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "audio", "opus", "jitter-buffer", "sans-io"]
+categories = ["multimedia::audio", "network-programming"]
 readme = "README.md"
 
 # The default features are pure Rust and need no system library: the workspace's CI installs

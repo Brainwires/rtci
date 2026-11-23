@@ -6,10 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 description = "A C ABI over WebRTC.rs's sans-I/O engine, and an optional driven layer that owns its sockets"
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "ffi", "sans-io"]
+categories = ["network-programming", "api-bindings"]
 # Not published: crate names on crates.io are the owner's decision (docs/packaging.md), and the
 # driven layer depends on the unpublished reference driver.
 publish = false
