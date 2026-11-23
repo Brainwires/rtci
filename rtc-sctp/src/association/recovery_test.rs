@@ -93,6 +93,106 @@ fn fast_recovery_retransmits_only_the_reported_loss() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9260 7.2.4: "For each incoming SACK chunk, miss indications are incremented only for
+/// missing TSNs prior to the HTNA", outside Fast Recovery too: TSNs the SACK reports missing
+/// above the highest TSN it newly acknowledges count nothing. "A newly acknowledged DATA
+/// chunk is one not previously acknowledged in a SACK chunk": a SACK that repeats what an
+/// earlier one acknowledged has no HTNA, and counts nothing.
+#[test]
+fn miss_indications_count_below_the_highest_tsn_newly_acknowledged_only() -> Result<()> {
+    let now = Instant::now();
+    let mut a = ten_in_flight(now)?;
+    assert!(!a.in_fast_recovery);
+
+    // 105 acknowledged: 100..=104 below it, one indication each.
+    a.handle_sack(&sack(99, vec![(6, 6)]), now)?;
+    // 102 newly acknowledged, 105 again: the HTNA is 102. 103 and 104 are reported missing
+    // but lie above it.
+    a.handle_sack(&sack(99, vec![(3, 3), (6, 6)]), now)?;
+    let misses = |a: &Association| -> Vec<u32> {
+        (100..=109)
+            .map(|tsn| a.inflight_queue.get(tsn).unwrap().miss_indicator)
+            .collect()
+    };
+    assert_eq!(vec![2, 2, 1, 1, 1, 0, 0, 0, 0, 0], misses(&a));
+    // The same SACK again acknowledges nothing new.
+    a.handle_sack(&sack(99, vec![(3, 3), (6, 6)]), now)?;
+    assert_eq!(vec![2, 2, 1, 1, 1, 0, 0, 0, 0, 0], misses(&a));
+    assert!(!a.in_fast_recovery);
+    assert!(transmitted_data(&a.gather_outbound(now).0).is_empty());
+    Ok(())
+}
+
+/// RFC 9260 7.2.4 steps 1, 3 and 5 in Fast Recovery: a chunk that reaches its third miss
+/// indication through a SACK that advances the Cumulative TSN Ack Point is marked for
+/// retransmission and is no Fast Retransmit candidate any more, but it is not sent in a
+/// packet that ignores cwnd: step 3 is "If not in Fast Recovery". It goes out "as soon as
+/// cwnd allows". (It was sent at once, past cwnd.)
+#[test]
+fn a_third_miss_in_fast_recovery_waits_for_the_window_also_when_the_cumulative_ack_advances()
+-> Result<()> {
+    let now = Instant::now();
+    let mut a = ten_in_flight(now)?;
+    a.in_fast_recovery = true;
+    a.fast_recover_exit_point = 109;
+    let ssthresh = a.ssthresh;
+
+    // 100 and 102 are lost. Three SACKs that do not advance the Cumulative TSN Ack: 100
+    // reaches three indications and goes out with the window.
+    a.handle_sack(&sack(99, vec![(2, 2)]), now)?;
+    a.handle_sack(&sack(99, vec![(2, 2), (4, 4)]), now)?;
+    a.handle_sack(&sack(99, vec![(2, 2), (4, 5)]), now)?;
+    let resent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(vec![100], resent.iter().map(|c| c.tsn).collect::<Vec<_>>());
+    assert_eq!(2, a.inflight_queue.get(102).unwrap().miss_indicator);
+
+    // The window is in full use when the retransmission of 100 is acknowledged: the SACK
+    // advances the Cumulative TSN Ack to 101 and reports 102 missing a third time.
+    a.cwnd = 200;
+    a.handle_sack(&sack(101, vec![(2, 4)]), now)?;
+    assert!(a.in_fast_recovery);
+    assert_eq!(ssthresh, a.ssthresh, "no second reduction");
+    let lost = a.inflight_queue.get(102).unwrap();
+    assert_eq!(3, lost.miss_indicator);
+    assert!(lost.retransmit, "marked for retransmission");
+    assert!(!lost.is_fast_retransmit_candidate());
+    assert!(
+        transmitted_data(&a.gather_outbound(now).0).is_empty(),
+        "not sent past cwnd"
+    );
+
+    a.cwnd = 64 * a.mtu;
+    let resent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(vec![102], resent.iter().map(|c| c.tsn).collect::<Vec<_>>());
+    Ok(())
+}
+
+/// RFC 9260 7.2.4 step 5: a fast-retransmitted chunk is "ineligible for a subsequent Fast
+/// Retransmit". The retransmission is lost too: however many SACKs report the chunk missing
+/// after it, it is not fast retransmitted again (T3-rtx is what sends it next).
+#[test]
+fn a_fast_retransmitted_chunk_is_not_fast_retransmitted_again() -> Result<()> {
+    let now = Instant::now();
+    let mut a = ten_in_flight(now)?;
+    for gap_end in 2..=4u16 {
+        a.handle_sack(&sack(99, vec![(2, gap_end)]), now)?;
+    }
+    assert!(a.in_fast_recovery);
+    let resent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(vec![100], resent.iter().map(|c| c.tsn).collect::<Vec<_>>());
+
+    for gap_end in 5..=10u16 {
+        a.handle_sack(&sack(99, vec![(2, gap_end)]), now)?;
+        assert!(
+            transmitted_data(&a.gather_outbound(now).0).is_empty(),
+            "after the SACK acknowledging up to {}",
+            99 + u32::from(gap_end)
+        );
+    }
+    assert_eq!(2, a.inflight_queue.get(100).unwrap().nsent);
+    Ok(())
+}
+
 /// cwnd grows without another bound in slow start (ssthresh is the peer's window, up to
 /// u32::MAX), so its additions saturate instead of wrapping to a tiny window after about
 /// 2 GiB acknowledged (or panicking with overflow checks on).

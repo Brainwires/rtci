@@ -3001,6 +3001,20 @@ impl Association {
             }
             // RFC 9260 5.2.4 D, and case E of 5.2: the cookie of the association that exists
             // (the COOKIE ACK was lost) is acknowledged again, whatever its age.
+            AssociationState::Established => {
+                let mut chunks: Vec<Box<dyn Chunk>> = vec![Box::new(ChunkCookieAck {})];
+                for data in self.outstanding_data_after_a_cookie_ack(now)? {
+                    chunks.push(Box::new(data));
+                }
+                return Ok(vec![Packet {
+                    common_header: CommonHeader {
+                        verification_tag: self.peer_verification_tag,
+                        source_port: self.source_port,
+                        destination_port: self.destination_port,
+                    },
+                    chunks,
+                }]);
+            }
             _ => {}
         };
 
@@ -3012,6 +3026,62 @@ impl Association {
             },
             chunks: vec![Box::new(ChunkCookieAck {})],
         }])
+    }
+
+    /// The DATA that goes after the COOKIE ACK answering a duplicate COOKIE ECHO in
+    /// ESTABLISHED: the earliest outstanding chunks that fit the packet with it, sent again.
+    ///
+    /// The duplicate says the peer is still in COOKIE-ECHOED: it did not receive the COOKIE
+    /// ACK, and it discarded what DATA reached it (RFC 9260 5.1, "SHOULD discard" in
+    /// COOKIE-ECHOED), so what is outstanding is waiting for T3-rtx, whose RTO those discards
+    /// have backed off. RFC 9260 5.1 D lets DATA come with the COOKIE ACK, and the peer takes
+    /// the packet's COOKIE ACK first (5.1 E), so this DATA arrives in ESTABLISHED. It counts as
+    /// a retransmission: no round trip is measured with it (6.3.1 C5), and partially reliable
+    /// DATA whose retransmissions are spent is abandoned instead (RFC 3758 3.5 A3).
+    fn outstanding_data_after_a_cookie_ack(
+        &mut self,
+        now: Instant,
+    ) -> Result<Vec<ChunkPayloadData>> {
+        // The common header and the COOKIE ACK chunk (a 4-byte chunk header).
+        let mut size = COMMON_HEADER_SIZE as usize + 4;
+        let mut chosen = vec![];
+        let mut tsn = self.cumulative_tsn_ack_point.wrapping_add(1);
+        while sna32lt(tsn, self.my_next_tsn) {
+            let outstanding = self
+                .inflight_queue
+                .get(tsn)
+                .is_some_and(|c| c.is_outstanding() && c.nsent > 0);
+            if outstanding && !self.abandon_retransmit_candidate(tsn, now)? {
+                let Some(c) = self.inflight_queue.get(tsn) else {
+                    break;
+                };
+                if size + c.wire_size() > self.mtu as usize {
+                    break;
+                }
+                size += c.wire_size();
+                chosen.push(tsn);
+            }
+            tsn = tsn.wrapping_add(1);
+        }
+        let mut chunks = vec![];
+        for tsn in chosen {
+            if let Some(c) = self.inflight_queue.get_mut(tsn)
+                && c.is_outstanding()
+            {
+                c.retransmit = false;
+                c.nsent += 1;
+                chunks.push(c.clone());
+            }
+        }
+        if !chunks.is_empty() {
+            debug!(
+                "[{}] COOKIE ACK again, with {} outstanding DATA chunk(s)",
+                self.side,
+                chunks.len()
+            );
+            self.min_tsn2measure_rtt = self.my_next_tsn;
+        }
+        Ok(chunks)
     }
 
     fn handle_cookie_ack(&mut self, now: Instant) -> Result<Vec<Packet>> {
@@ -4236,13 +4306,14 @@ impl Association {
             htna
         };
         // A chunk that reaches three miss indications during a Fast Recovery that began
-        // before this SACK is not sent at once, ignoring cwnd (step 3 is for the SACK that
-        // starts Fast Recovery): it is marked for retransmission, goes out "as soon as cwnd
-        // allows" and is not fast retransmitted again (steps 5 and 6). A partially reliable
+        // before this SACK, whether or not the SACK advances the Cumulative TSN Ack Point, is
+        // not sent at once, ignoring cwnd: step 3 is "If not in Fast Recovery", for the SACK
+        // that starts it. The chunk is marked for retransmission (step 1), goes out "as soon as
+        // cwnd allows" and is not fast retransmitted again (step 5). A partially reliable
         // chunk whose retransmission budget is spent (RFC 3758 3.5 A3, RFC 7496 3.1) is never
         // sent again: it takes the fast retransmit path, which abandons it and sends FORWARD
         // TSN (RFC 3758 3.5 C1-C3) without waiting for the timer.
-        let recovering = self.in_fast_recovery && !cum_tsn_ack_point_advanced;
+        let recovering = self.in_fast_recovery;
 
         let mut tsn = cum_tsn_ack_point.wrapping_add(1);
         while sna32lt(tsn, max_tsn) {
@@ -4300,10 +4371,6 @@ impl Association {
             }
 
             tsn = tsn.wrapping_add(1);
-        }
-
-        if self.in_fast_recovery && cum_tsn_ack_point_advanced {
-            self.will_retransmit_fast = true;
         }
 
         Ok(())
