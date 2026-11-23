@@ -123,6 +123,7 @@ impl RTCPeerConnection {
         interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+        let streams_settings = setting_engine.streams;
 
         // Each media section negotiates its own codecs unless the application asked for one
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
@@ -361,6 +362,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
+            streams: super::streams::EngineStreams::new(streams_settings),
         })
     }
 

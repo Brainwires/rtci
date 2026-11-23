@@ -30,11 +30,11 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | RFC 8839 SDP for ICE | `rfc8839.md` | MUST | 33 | 17 | 13 | 17 | 3 | 14 |
 | | | SHOULD | 1 | 0 | 1 | 4 | 0 | 2 |
 | | | MAY | 6 | 1 | 0 | 2 | 0 | 3 |
-| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 22 | 4 | 2 | 1 | 0 | 10 |
-| | | SHOULD | 9 | 1 | 2 | 0 | 0 | 21 |
+| RFC 6544 ICE-TCP | `rfc6544.md` | MUST | 25 | 3 | 1 | 1 | 0 | 9 |
+| | | SHOULD | 14 | 1 | 2 | 0 | 0 | 16 |
 | | | MAY | 3 | 1 | 0 | 4 | 0 | 1 |
 | RFC 4571 framing over TCP | `rfc4571.md` | MUST | 2 | 2 | 0 | 0 | 0 | 9 |
-| | | SHOULD | 0 | 0 | 1 | 0 | 0 | 1 |
+| | | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 |
 | | | MAY | 1 | 0 | 0 | 0 | 0 | 1 |
 | RFC 7675 consent | `rfc7675.md` | MUST | 12 | 1 | 0 | 0 | 0 | 0 |
 | | | SHOULD | 2 | 0 | 0 | 0 | 0 | 2 |

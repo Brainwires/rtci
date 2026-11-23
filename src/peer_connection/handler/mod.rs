@@ -140,7 +140,7 @@ pub(crate) struct PipelineContext {
 }
 
 impl PipelineContext {
-    fn observe(&mut self, now: Instant) {
+    pub(crate) fn observe(&mut self, now: Instant) {
         self.now = self.now.max(now);
     }
 }
@@ -324,7 +324,7 @@ impl RTCPeerConnection {
         })
     }
 
-    fn flush_writes(&mut self) {
+    pub(crate) fn flush_writes(&mut self) {
         use sansio::Protocol;
 
         let mut intermediate_wouts = VecDeque::new();
@@ -559,7 +559,14 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
         self.flush_writes();
-        self.pipeline_context.write_outs.pop_front()
+        // A datagram for one of the engine's own TCP candidates goes on its connection
+        // (`poll_stream_transmit`), not to the application.
+        while let Some(msg) = self.pipeline_context.write_outs.pop_front() {
+            if let Some(msg) = self.route_stream_write(msg) {
+                return Some(msg);
+            }
+        }
+        None
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEvent) -> Result<(), Self::Error> {
@@ -642,6 +649,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         self.get_sctp_handler().request_abort();
         self.get_dtls_handler().request_close(now);
         self.flush_writes();
+        // The engine's TCP connections carry what was just queued, then close.
+        self.close_streams();
 
         // Close handlers in reverse order (Endpoint→Interceptor→SRTP→DataChannel→SCTP→
         // DTLS→ICE→Demuxer) so that higher-level protocols (DataChannels, SCTP) shut down

@@ -473,6 +473,9 @@ pub struct SettingEngine {
     pub(crate) ecn: bool,
     /// How a stream starts marking ([`SettingEngineBuilder::with_ecn_initiation`]).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
+    /// and the methods after it).
+    pub(crate) streams: crate::peer_connection::streams::StreamSettings,
 }
 
 impl SettingEngine {
@@ -2136,6 +2139,42 @@ impl SettingEngineBuilder {
     /// detection applies to both.
     pub fn with_ecn_initiation(mut self, initiation: interceptor::EcnInitiation) -> Self {
         self.0.ecn_initiation = initiation;
+        self
+    }
+
+    /// Whether the engine gathers TCP host candidates itself (RFC 6544 section 4.1 says it
+    /// should be configurable; browsers gather them by default). On by default: for the
+    /// address of each UDP host candidate the application adds, the engine asks its driver
+    /// for listeners (`RTCPeerConnection::poll_stream_command`) and adds a passive and a
+    /// simultaneous-open candidate on them and an active one (port 9), whose connections it
+    /// opens itself. A driver that never serves the stream interface gets no TCP candidate.
+    /// `false`: no TCP candidate but those the application adds.
+    pub fn with_tcp_candidate_gathering(mut self, gather: bool) -> Self {
+        self.0.streams.tcp_candidates = gather;
+        self
+    }
+
+    /// Whether the gathered TCP candidates include a simultaneous-open one (RFC 6544 section
+    /// 5.1: one passive and one S-O host candidate per interface). On by default; its
+    /// listener and its connections bind with `reuse_address`. Browsers neither gather nor
+    /// pair them (they connect to one as to a passive candidate, which works).
+    pub fn with_tcp_simultaneous_open(mut self, simultaneous_open: bool) -> Self {
+        self.0.streams.simultaneous_open = simultaneous_open;
+        self
+    }
+
+    /// Whether the engine closes its ICE-TCP connections that carry no selected pair once ICE
+    /// has completed (RFC 6544 section 8, SHOULD). On by default.
+    pub fn with_tcp_close_unused_connections(mut self, close: bool) -> Self {
+        self.0.streams.close_unused_connections = close;
+        self
+    }
+
+    /// The limits of the engine's stream transports: the bytes of a connection the driver may
+    /// hold unwritten, the bytes queued beyond which a packet is dropped whole, and the number
+    /// of connections. See [`StreamConfig`](shared::stream::StreamConfig).
+    pub fn with_stream_limits(mut self, limits: shared::stream::StreamConfig) -> Self {
+        self.0.streams.limits = limits;
         self
     }
 

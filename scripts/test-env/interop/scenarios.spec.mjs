@@ -154,6 +154,38 @@ test("ICE-TCP: the browser's active candidate reaches Rust's passive one", async
   expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
 });
 
+test("ICE-TCP: built into the engine with UDP blocked, the browser reaches an engine-gathered TCP candidate", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    // The Rust side adds only a UDP host candidate and drops all ICE UDP; its engine gathers
+    // passive, simultaneous-open and active TCP candidates, trickles them, and drives the
+    // connections through the stream interface and the tokio reference driver.
+    const s = await Interop.open(ws, { engine_tcp: true, udp_blocked: true });
+    const dc = s.pc.createDataChannel("engine-tcp");
+    await s.negotiate();
+    const tcpCandidates = () => s.localCandidates.filter((c) => / tcp /i.test(c));
+    await Interop.until(() => tcpCandidates().length > 0 || s.pc.iceGatheringState === "complete", 10000, "gathering")
+      .catch(() => {});
+    if (tcpCandidates().length === 0) {
+      s.close();
+      return { noTcp: true, candidates: s.localCandidates };
+    }
+    await s.connected();
+    const e = await Interop.echo(dc, 30, 32768);
+    await e.wait(30, 20000);
+    const sel = await Interop.selectedPair(s.pc);
+    s.close();
+    return { echoed: e.got.length, local: sel?.local, remote: sel?.remote };
+  }, WS);
+  naBrowser(
+    r.noTcp,
+    "this browser gathered no TCP candidate",
+    `its icecandidate events: ${JSON.stringify(r.candidates)}`,
+  );
+  expect(r.echoed).toBe(30);
+  expect((r.local?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+  expect((r.remote?.protocol || "").toLowerCase(), JSON.stringify(r)).toBe("tcp");
+});
+
 // ---- the browser as the answerer for media ----
 
 test("Rust offers media, the browser answers and decodes it", async ({ page }) => {

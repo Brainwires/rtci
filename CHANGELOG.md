@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ICE-TCP built into the engine** (branch `conf/tcp-2-ice-tcp`): TCP candidates are
+  gathered by default (RFC 6544 section 4.1; browsers do), by the engine itself, for a driver
+  that serves the new stream interface. An application that adds a UDP host candidate and
+  polls `poll_stream_command` now gets `StreamCommand::Listen` commands, and the passive,
+  simultaneous-open and active TCP candidates appear as `OnIceCandidateEvent`s; its end of
+  gathering (the empty candidate) is held until those listeners are answered. An
+  application that never touches the stream interface sees no change.
+  `SettingEngineBuilder::with_tcp_candidate_gathering(false)` turns it off. `RTCPeerConnection`
+  has a new field, so nothing outside changes, but `SettingEngine` has one too.
+
 - **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
   draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
   - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
@@ -1609,6 +1619,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **ICE-TCP in the engine** (RFC 6544, RFC 4571; branch `conf/tcp-2-ice-tcp`). The
+  application owns the sockets only: `RTCPeerConnection::poll_stream_command` (listen, stop,
+  connect from a local address, close, reset), `poll_stream_transmit` (bytes for a connection),
+  `handle_stream_event` (listening, connected, failed, written, closed, reset),
+  `handle_stream_accepted` (a connection on one of its listeners gets an id) and
+  `handle_stream_read` (bytes in any segmentation). For each address of a UDP host candidate
+  the engine gathers a passive and a simultaneous-open TCP candidate (a listener each) and an
+  active one (port 9); it opens an active candidate's connection from an ephemeral port when
+  its first check goes out and a simultaneous-open one from its own port, reuses an open
+  connection for every later packet of the pair, frames STUN, DTLS, SRTP and SCTP with RFC
+  4571, fails a pair at once when its connection cannot be made (section 7.1), resets a
+  connection whose first answer is not STUN or whose frames stop being STUN / DTLS / RTP
+  (RFC 4571 section 2), reopens a broken selected connection on the next write from the
+  active side (section 11.1), closes the connections that carry no selected pair once ICE
+  has completed (section 8; `with_tcp_close_unused_connections(false)` keeps them) and closes
+  everything on `close()`. Settings: `with_tcp_candidate_gathering`,
+  `with_tcp_simultaneous_open`, `with_tcp_close_unused_connections`, `with_stream_limits`. A
+  TCP candidate the application adds itself stays the application's, as before.
+  `tests/ice_tcp_streams_rtc2rtc.rs` (an in-memory stream network that cuts, delays, refuses
+  and breaks), `tests/testenv_ice_tcp.rs` (through a NAT with the tokio driver, UDP
+  blocked) and the browser cell "ICE-TCP: built into the engine with UDP blocked, ...".
 
 - **shared**: stream transports for the sans-I/O engine (`rtc_shared::stream`, branch
   `conf/tcp-1-framing`). An engine names its TCP connections and listeners by id

@@ -255,6 +255,7 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
+pub(crate) mod streams;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
@@ -842,6 +843,8 @@ pub struct RTCPeerConnection {
     /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
     /// congestion control; `priority.rs`).
     pub(crate) last_data_dscp: Option<u8>,
+    /// The engine's stream transports: its ICE-TCP candidates and their connections.
+    pub(crate) streams: streams::EngineStreams,
 }
 
 impl RTCPeerConnection {
@@ -2983,8 +2986,10 @@ impl RTCPeerConnection {
                 local_candidate.url.as_deref(),
                 local_candidate.relay_protocol,
             )?;
+            // RFC 6544 section 4.1: the TCP candidates of the same address, the engine's own.
+            self.gather_tcp_candidates(candidate_value);
         } else {
-            self.finish_local_gathering();
+            self.finish_local_gathering_after_streams();
         }
 
         Ok(())
