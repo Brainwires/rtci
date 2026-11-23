@@ -984,17 +984,43 @@ impl RTCRtpTransceiverInternal {
 
     /// The remote codecs that match one of `left_codecs`, exact matches first, and the RTX
     /// codecs that go with them, twice: with this endpoint's payload types (the matching local
-    /// codecs'; an RTX format is the local one of its primary), and, entry for entry, with the
-    /// remote description's own (what is sent to the remote side carries). The local list
-    /// is a preference list: the formats it names are read from the media engine, which has
-    /// them in this endpoint's numbering (`RTCRtpReceiverInternal::get_codecs`).
+    /// codecs'; an RTX format's `apt` and a RED format's encodings follow), and, entry for
+    /// entry, with the remote description's own (what is sent to the remote side carries).
     fn match_remote_codecs(
         mut remote_codecs: Vec<RTCRtpCodecParameters>,
         mut left_codecs: Vec<RTCRtpCodecParameters>,
     ) -> (Vec<RTCRtpCodecParameters>, Vec<RTCRtpCodecParameters>) {
+        use crate::peer_connection::configuration::media_engine::red_block_payload_types;
         use crate::rtp_transceiver::rtp_sender::rtp_codec::repair_family;
         // The remote section as it is, for the list in its own numbering.
         let given = remote_codecs.clone();
+        // A RED format names its encodings by payload type (RFC 2198 section 5): it is
+        // matched, and kept in the local list, with the local numbers of those encodings
+        // (the receive path finds a RED packet's primary encoding by that list).
+        let local_number = |remote: PayloadType| -> Option<PayloadType> {
+            let named = given.iter().find(|codec| codec.payload_type == remote)?;
+            match codec_parameters_fuzzy_search(&named.rtp_codec, &left_codecs) {
+                (_, CodecMatch::None) => None,
+                (local, _) => Some(local.payload_type),
+            }
+        };
+        for codec in &mut remote_codecs {
+            if repair_family(&codec.rtp_codec) == "red"
+                && let Some(local) = red_block_payload_types(&codec.rtp_codec.sdp_fmtp_line)
+                    .and_then(|blocks| {
+                        blocks
+                            .into_iter()
+                            .map(local_number)
+                            .collect::<Option<Vec<_>>>()
+                    })
+            {
+                codec.rtp_codec.sdp_fmtp_line = local
+                    .iter()
+                    .map(|block| block.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+            }
+        }
         // find codec matches between what is in remote description and
         // the transceivers codecs and use payload type registered to
         // media engine.
