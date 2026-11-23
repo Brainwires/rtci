@@ -1,16 +1,18 @@
 name: Release binaries (rtc-ffi)
 
 # The prebuilt C library of rtc-ffi (cdylib, staticlib, header) for five platforms, with SHA-256
-# sums and a manifest. Runs only on a version tag or by hand: a dispatch uploads the archives
-# as workflow artifacts; a tag also attaches them to the GitHub release of that tag. Tagging and
-# publishing are the owner's decision (docs/packaging.md). No secret but GITHUB_TOKEN.
+# sums and a manifest. Runs only by hand, and only on the owner's word: a dispatch uploads the
+# archives as workflow artifacts; a dispatch on a tag ref also attaches them to the GitHub
+# release of that tag. Tagging and publishing are the owner's decision (docs/packaging.md). No
+# secret but GITHUB_TOKEN.
 #
 # GitHub-hosted runners on purpose (marked `runners-first:` below): choosing one of our pools
 # takes the pick-runners action, which needs RUNNER_STATUS_TOKEN, and a release build takes no
-# secret but GITHUB_TOKEN and comes from a clean image. It runs only on a tag or by hand.
+# secret but GITHUB_TOKEN and comes from a clean image.
 on:
-  push:
-    tags: ['v*']
+  # No tag trigger: how and where release binaries are built (runners, artefacts, signing) is
+  # not decided yet, so a version tag must not start this workflow. Restore
+  # `push: tags: ['v*']` here once the owner has decided (docs/releasing.md).
   workflow_dispatch:
 
 permissions:
