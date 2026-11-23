@@ -21,12 +21,19 @@ a=ice-ufrag:Ab1c
 a=ice-pwd:9/9muCWoOi3uLifh0NuRHlkwz
 ";
 
+/// A video section of `formats`: VP8 at 96, VP9 profile 0 at 98, VP9 profile 1 at 100 (the
+/// numbers the default codecs use, so that an answer keeps them).
 fn section(mid: &str, formats: &str, extra: &str) -> String {
     let mut s = format!(
         "m=video 9 UDP/TLS/RTP/SAVPF {formats}\nc=IN IP4 0.0.0.0\na=setup:actpass\na=mid:{mid}\na=sendrecv\na=rtcp-mux\n"
     );
     for pt in formats.split_whitespace() {
-        s.push_str(&format!("a=rtpmap:{pt} VP8/90000\n"));
+        s.push_str(&match pt {
+            "96" => "a=rtpmap:96 VP8/90000\n".to_owned(),
+            "98" => "a=rtpmap:98 VP9/90000\na=fmtp:98 profile-id=0\n".to_owned(),
+            "100" => "a=rtpmap:100 VP9/90000\na=fmtp:100 profile-id=1\n".to_owned(),
+            other => panic!("no format {other}"),
+        });
     }
     s.push_str(extra);
     s
@@ -36,7 +43,7 @@ fn offer(group: &str, l2_depend: &str) -> String {
     crlf(&format!(
         "{SESSION}{group}{}{}",
         section("L1", "96", ""),
-        section("L2", "97", l2_depend)
+        section("L2", "98", l2_depend)
     ))
 }
 
@@ -45,7 +52,7 @@ fn offer(group: &str, l2_depend: &str) -> String {
 #[test]
 fn an_answer_keeps_the_offered_layered_dependency() -> TestResult {
     let mut pc = default_peer()?;
-    let sdp = offer("a=group:DDP L1 L2\n", "a=depend:97 lay L1:96\n");
+    let sdp = offer("a=group:DDP L1 L2\n", "a=depend:98 lay L1:96\n");
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp)?)?;
     let dependencies = pc.remote_decoding_dependencies();
     assert_eq!(dependencies.len(), 1, "{dependencies:?}");
@@ -53,7 +60,7 @@ fn an_answer_keeps_the_offered_layered_dependency() -> TestResult {
     assert_eq!(
         dependencies[0].1.dependencies,
         vec![Dependency {
-            fmt: "97".to_owned(),
+            fmt: "98".to_owned(),
             typ: DependencyType::Lay,
             on: Some(("L1".to_owned(), vec!["96".to_owned()])),
         }]
@@ -66,7 +73,7 @@ fn an_answer_keeps_the_offered_layered_dependency() -> TestResult {
     );
     let sections = media_sections(&answer.sdp);
     assert!(
-        sections[1].iter().any(|l| l == "a=depend:97 lay L1:96"),
+        sections[1].iter().any(|l| l == "a=depend:98 lay L1:96"),
         "{}",
         answer.sdp
     );
@@ -82,8 +89,8 @@ fn an_answer_keeps_the_offered_layered_dependency() -> TestResult {
 #[test]
 fn dependencies_outside_a_valid_ddp_group_are_not_taken() -> TestResult {
     for (group, depend) in [
-        ("", "a=depend:97 lay L1:96\n"),
-        ("a=group:DDP L1 L2\n", "a=depend:97 lay L1:96\n"),
+        ("", "a=depend:98 lay L1:96\n"),
+        ("a=group:DDP L1 L2\n", "a=depend:98 lay L1:96\n"),
     ] {
         let mut pc = default_peer()?;
         let l1 = if group.is_empty() {
@@ -94,7 +101,7 @@ fn dependencies_outside_a_valid_ddp_group_are_not_taken() -> TestResult {
         let sdp = crlf(&format!(
             "{SESSION}{group}{}{}",
             section("L1", "96", l1),
-            section("L2", "97", depend)
+            section("L2", "98", depend)
         ));
         pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp)?)?;
         assert!(pc.remote_decoding_dependencies().is_empty());
@@ -114,7 +121,7 @@ fn a_dependency_on_a_format_the_answer_drops_is_removed() -> TestResult {
     let l1 = "m=video 9 UDP/TLS/RTP/SAVPF 96 120\nc=IN IP4 0.0.0.0\na=setup:actpass\na=mid:L1\na=sendrecv\na=rtcp-mux\na=rtpmap:96 VP8/90000\na=rtpmap:120 X-UNKNOWN/90000\n";
     let sdp = crlf(&format!(
         "{SESSION}a=group:DDP L1 L2\n{l1}{}",
-        section("L2", "97 98", "a=depend:97 lay L1:96; 98 lay L1:120\n")
+        section("L2", "98 100", "a=depend:98 lay L1:96; 100 lay L1:120\n")
     ));
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp)?)?;
     let answer = pc.create_answer(None)?;
@@ -124,7 +131,7 @@ fn a_dependency_on_a_format_the_answer_drops_is_removed() -> TestResult {
         .filter(|l| l.starts_with("a=depend"))
         .map(String::as_str)
         .collect();
-    assert_eq!(depend, vec!["a=depend:97 lay L1:96"], "{}", answer.sdp);
+    assert_eq!(depend, vec!["a=depend:98 lay L1:96"], "{}", answer.sdp);
     assert!(answer.sdp.lines().any(|l| l == "a=group:DDP L1 L2"));
     Ok(())
 }

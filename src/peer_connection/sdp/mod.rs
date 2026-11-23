@@ -3599,14 +3599,16 @@ pub(crate) fn answer_decoding_dependencies(
         .filter_map(|a| a.value.as_deref())
         .filter_map(|value| {
             let mut tokens = value.split_whitespace();
-            (tokens.next() == Some("DDP")).then(|| {
-                tokens
-                    .filter(|mid| {
-                        formats.contains_key(*mid) && offered.iter().any(|(m, _)| m == mid)
-                    })
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
+            (tokens.next() == Some("DDP")).then(|| tokens.map(str::to_owned).collect::<Vec<_>>())
+        })
+        // A group `decoding_dependencies` took (its dependent sections are listed); the
+        // sections without `a=depend` (a base layer) are members too.
+        .filter(|group| offered.iter().any(|(mid, _)| group.contains(mid)))
+        .map(|group| {
+            group
+                .into_iter()
+                .filter(|mid| formats.contains_key(mid))
+                .collect::<Vec<_>>()
         })
         .filter(|group| group.len() >= 2)
         .collect();
