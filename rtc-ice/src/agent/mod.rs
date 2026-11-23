@@ -29,7 +29,11 @@ mod agent_rfc7675_test;
 #[cfg(test)]
 mod agent_rfc8445_test;
 #[cfg(test)]
+mod agent_stun_rows_test;
+#[cfg(test)]
 mod agent_test;
+#[cfg(test)]
+mod agent_trickle_test;
 
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
 pub mod agent_config;
@@ -112,6 +116,10 @@ pub(crate) struct BindingRequest {
     /// The PRIORITY the request carried: the priority of a local peer-reflexive candidate its
     /// response may reveal (RFC 8445 Section 7.2.5.3.1).
     pub(crate) priority: u32,
+    /// A response to it arrived and was discarded because its integrity check failed: if
+    /// the transaction ends without one that passes, that is an integrity violation, not a
+    /// timeout (RFC 8489 Section 9.1.4).
+    pub(crate) unauthentic_response: bool,
 }
 
 impl BindingRequest {
@@ -140,6 +148,7 @@ impl BindingRequest {
             cancelled: false,
             consent: true,
             priority: 0,
+            unauthentic_response: false,
         }
     }
 }
@@ -264,6 +273,10 @@ fn assert_inbound_message_integrity(
     MessageIntegrity::check(m, key, crypto)
 }
 
+/// The SOFTWARE attribute the agent sends unless configured otherwise
+/// ([`AgentConfig::software`]).
+pub const DEFAULT_SOFTWARE: &str = concat!("rtc-ice ", env!("CARGO_PKG_VERSION"));
+
 /// What the agent reports to its caller.
 #[non_exhaustive]
 pub enum Event {
@@ -297,6 +310,11 @@ pub enum Event {
     /// (local, remote) to nominate and waits for [`Agent::resolve_nomination_proposal`]
     /// (webrtc-extensions 7, `icecandidatepairnominate`).
     CandidatePairNominationProposed(Box<Candidate>, Box<Candidate>),
+    /// A check (or consent request) on this pair (local, remote) ended without a response
+    /// that passed its integrity check, and at least one response arrived that failed it:
+    /// RFC 8489 Section 9.1.4 has the transaction signal "an integrity protection violation"
+    /// instead of a timeout. The pair fails as it would on a timeout; the event says why.
+    IntegrityViolation(Box<Candidate>, Box<Candidate>),
 }
 
 /// An [`Event`] together with the instant its condition was observed at.
@@ -463,6 +481,12 @@ pub struct Agent {
     pub(crate) data_from_selected_pair_only: bool,
     /// Data on the best valid pair before a pair is selected (RFC 8445 Section 12.1).
     pub(crate) send_data_before_nomination: bool,
+    /// [`AgentConfig::hold_local_candidates_until_conveyed`].
+    pub(crate) hold_local_candidates_until_conveyed: bool,
+    /// [`AgentConfig::path_mtu`].
+    pub(crate) path_mtu: Option<usize>,
+    /// [`AgentConfig::software`], resolved: `None` sends no SOFTWARE attribute.
+    pub(crate) software: Option<String>,
 
     /// The 1:1 NAT mapping applied to the host candidates the application adds.
     pub(crate) ext_ip_mapper: Option<ExternalIpMapper>,
@@ -519,6 +543,7 @@ impl Agent {
             &config.multicast_dns_query_timeout,
             MdnsOptions {
                 first_query_delay: config.multicast_dns_first_query_delay.unwrap_or(true),
+                multi_question_delay: config.multicast_dns_multi_question_delay.unwrap_or(true),
                 destination_reported: config.multicast_dns_destination_reported,
                 unicast_response: config.multicast_dns_unicast_response,
                 rate_limit: config.multicast_dns_rate_limit.clone(),
@@ -700,6 +725,13 @@ impl Agent {
             answer_integrity: IntegrityAlgorithm::Sha1,
             data_from_selected_pair_only: config.data_from_selected_pair_only,
             send_data_before_nomination: config.send_data_before_nomination,
+            hold_local_candidates_until_conveyed: config.hold_local_candidates_until_conveyed,
+            path_mtu: config.path_mtu,
+            software: match &config.software {
+                None => Some(DEFAULT_SOFTWARE.to_owned()),
+                Some(s) if s.is_empty() => None,
+                Some(s) => Some(s.clone()),
+            },
 
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
@@ -719,8 +751,83 @@ impl Agent {
         Ok(agent)
     }
 
-    /// Adds a new local candidate.
-    pub fn add_local_candidate(&mut self, mut c: Candidate) -> Result<bool> {
+    /// Adds a new local candidate that the caller conveys to the peer with this call (trickles
+    /// it, or writes it into the description it sends): the agent pairs it at once.
+    ///
+    /// RFC 8838 Section 10: "A Trickle ICE agent MUST NOT pair a local candidate until it has
+    /// been trickled to the remote party." A caller that gathers a candidate before it can
+    /// convey it adds it with [`Agent::add_unconveyed_local_candidate`] and tells the agent
+    /// with [`Agent::local_candidate_conveyed`] when it has.
+    ///
+    /// With [`AgentConfig::hold_local_candidates_until_conveyed`] this is
+    /// [`Agent::add_unconveyed_local_candidate`].
+    pub fn add_local_candidate(&mut self, c: Candidate) -> Result<bool> {
+        let hold = self.hold_local_candidates_until_conveyed;
+        self.add_gathered_local_candidate(c, hold)
+    }
+
+    /// Adds a new local candidate that is not conveyed to the peer yet: the agent holds it,
+    /// answers checks that reach it, and pairs it once [`Agent::local_candidate_conveyed`]
+    /// (or [`Agent::all_local_candidates_conveyed`]) says it has been trickled (RFC 8838
+    /// Section 10). Otherwise as [`Agent::add_local_candidate`]; a server-reflexive candidate
+    /// the agent adds next to it for a 1:1 NAT mapping is held too.
+    pub fn add_unconveyed_local_candidate(&mut self, c: Candidate) -> Result<bool> {
+        self.add_gathered_local_candidate(c, true)
+    }
+
+    /// The local candidate `id` has been conveyed to the peer: it is paired now with the
+    /// remote candidates known (RFC 8838 Section 10, steps 2 and 3). Returns whether the
+    /// agent held such a candidate unconveyed.
+    pub fn local_candidate_conveyed(&mut self, id: &str) -> bool {
+        let Some(local_index) = self
+            .local_candidates
+            .iter()
+            .position(|c| c.unconveyed && c.id() == id)
+        else {
+            return false;
+        };
+        self.convey_local_candidate(local_index);
+        true
+    }
+
+    /// Every local candidate the agent holds has been conveyed to the peer (a description
+    /// listing them was applied, say): each one held unconveyed is paired now.
+    pub fn all_local_candidates_conveyed(&mut self) {
+        for local_index in 0..self.local_candidates.len() {
+            if self.local_candidates[local_index].unconveyed {
+                self.convey_local_candidate(local_index);
+            }
+        }
+    }
+
+    /// Whether the local candidate `id` is held unconveyed (and so unpaired).
+    pub fn is_local_candidate_unconveyed(&self, id: &str) -> bool {
+        self.local_candidates
+            .iter()
+            .any(|c| c.unconveyed && c.id() == id)
+    }
+
+    fn convey_local_candidate(&mut self, local_index: usize) {
+        self.local_candidates[local_index].unconveyed = false;
+        self.pair_local_candidate(local_index);
+    }
+
+    /// Pairs a conveyed local candidate with every remote candidate it can be paired with.
+    fn pair_local_candidate(&mut self, local_index: usize) {
+        if self.local_candidates[local_index].unconveyed {
+            return;
+        }
+        for remote_index in 0..self.remote_candidates.len() {
+            if self.local_candidates[local_index]
+                .can_pair_with(&self.remote_candidates[remote_index])
+            {
+                self.add_pair(local_index, remote_index);
+            }
+        }
+        self.request_connectivity_check();
+    }
+
+    fn add_gathered_local_candidate(&mut self, mut c: Candidate, unconveyed: bool) -> Result<bool> {
         // Filter by network type if network_types is configured
         if !self.network_types.is_empty() {
             let candidate_network_type = c.network_type();
@@ -848,21 +955,15 @@ impl Agent {
             c.hide_related_address = true;
         }
 
+        c.unconveyed = unconveyed;
         self.local_candidates.push(c);
         let local_index = self.local_candidates.len() - 1;
 
-        for remote_index in 0..self.remote_candidates.len() {
-            if self.local_candidates[local_index]
-                .can_pair_with(&self.remote_candidates[remote_index])
-            {
-                self.add_pair(local_index, remote_index);
-            }
-        }
-
-        self.request_connectivity_check();
+        // RFC 8838 Section 10: a candidate not yet conveyed to the peer is not paired.
+        self.pair_local_candidate(local_index);
 
         if let Some(srflx) = nat_srflx {
-            self.add_local_candidate(srflx)?;
+            self.add_gathered_local_candidate(srflx, unconveyed)?;
         }
 
         Ok(true)
@@ -906,7 +1007,8 @@ impl Agent {
                 && other.component() == c.component()
                 && other.network_type().is_tcp() == c.network_type().is_tcp()
                 && other.tcp_type() == c.tcp_type()
-                && other.priority_override == 0
+                // (A lite agent's ranked candidates carry their priority as an override.)
+                && (other.priority_override == 0 || other.local_preference_rank.is_some())
         };
         let ranked: Vec<&Candidate> = self.local_candidates.iter().filter(same_group).collect();
         let is_v6 = |x: &Candidate| x.network_type().is_ipv6();
@@ -925,6 +1027,31 @@ impl Agent {
             }
         }
         c.local_preference_rank = Some(rank);
+
+        // RFC 8445 Section 5.2: "If an ICE lite agent is dual-stack or IPv6-only, the local
+        // preference SHOULD be set to the precedence value for IP addresses described in [RFC
+        // 6724]" (an IPv4-only lite agent keeps 65535). The precedence takes the high byte, so
+        // it orders the candidates, and the rank the low one, so that two candidates of one
+        // precedence still have unique priorities (Section 5.2: "each candidate MUST have a
+        // unique priority").
+        if self.lite && self.is_dual_stack_or_ipv6(c) {
+            let precedence = rfc6724_precedence(c.addr().ip());
+            let local_preference = (u16::from(precedence) << 8) | (255 - rank.min(255));
+            c.priority_override = (u32::from(c.candidate_type().preference()) << 24)
+                + (u32::from(local_preference) << 8)
+                + 256u32.saturating_sub(u32::from(c.component()));
+        }
+    }
+
+    /// Whether the agent is dual-stack or IPv6-only: its network types include an IPv6 one,
+    /// or it holds (or is given) an IPv6 candidate.
+    fn is_dual_stack_or_ipv6(&self, c: &Candidate) -> bool {
+        self.network_types.iter().any(|t| t.is_ipv6())
+            || c.network_type().is_ipv6()
+            || self
+                .local_candidates
+                .iter()
+                .any(|other| other.network_type().is_ipv6())
     }
 
     /// Applies the 1:1 NAT mapping to a host candidate the application adds. With a `Host`
@@ -1180,8 +1307,9 @@ impl Agent {
                 let remote_index = self.remote_candidates.len() - 1;
 
                 for local_index in 0..self.local_candidates.len() {
-                    if self.local_candidates[local_index]
-                        .can_pair_with(&self.remote_candidates[remote_index])
+                    if !self.local_candidates[local_index].unconveyed
+                        && self.local_candidates[local_index]
+                            .can_pair_with(&self.remote_candidates[remote_index])
                     {
                         self.add_pair(local_index, remote_index);
                     }
@@ -1223,8 +1351,9 @@ impl Agent {
             }
         }
         for local_index in 0..self.local_candidates.len() {
-            if self.local_candidates[local_index]
-                .can_pair_with(&self.remote_candidates[remote_index])
+            if !self.local_candidates[local_index].unconveyed
+                && self.local_candidates[local_index]
+                    .can_pair_with(&self.remote_candidates[remote_index])
             {
                 self.add_pair(local_index, remote_index);
             }
@@ -2750,13 +2879,18 @@ impl Agent {
         let (out, result) = {
             let mut out = Message::new();
             let result = self.answer_integrity_setter().and_then(|integrity| {
-                out.build(&[
+                let mut setters: Vec<Box<dyn Setter + '_>> = vec![
                     Box::new(m.clone()),
                     Box::new(BINDING_SUCCESS),
                     Box::new(XorMappedAddress { ip, port }),
-                    integrity,
-                    Box::new(FINGERPRINT),
-                ])
+                ];
+                // RFC 8489 Section 6.3.1.1: a success response SHOULD carry SOFTWARE.
+                if let Some(software) = &self.software {
+                    setters.push(Box::new(Software::new(ATTR_SOFTWARE, software.clone())));
+                }
+                setters.push(integrity);
+                setters.push(Box::new(FINGERPRINT));
+                out.build(&setters)
             });
             (out, result)
         };
@@ -3001,11 +3135,17 @@ impl Agent {
             // A response: FINGERPRINT when present, MESSAGE-INTEGRITY with the peer's
             // password, no unknown comprehension-required attribute, or it is discarded (RFC
             // 8489 Sections 6.3.3 and 9.1.4). Only what the integrity covers is read.
+            //
+            // The agent's requests carry MESSAGE-INTEGRITY only, so a response is checked by
+            // that attribute only (RFC 8489 Section 9.1.4: "the algorithm in the response has
+            // to match; otherwise, the response MUST be discarded"), and so is every later
+            // transaction with the peer (Section 9.1.5).
             let known = ice_known_attributes();
             match stun::validated::Validator::new()
                 .known_attributes(&known)
-                .authenticate(
+                .authenticate_with(
                     m,
+                    IntegrityAlgorithm::Sha1,
                     remote_credentials.pwd.as_bytes(),
                     self.crypto_provider.crypto(),
                 ) {
@@ -3017,6 +3157,9 @@ impl Agent {
                         remote_addr,
                         rejection
                     );
+                    if !matches!(rejection, stun::validated::Rejection::UnknownAttributes(_)) {
+                        self.note_unauthentic_response(m.transaction_id);
+                    }
                     // RFC 8489 Section 6.3.4: an (authenticated) error response with unknown
                     // comprehension-required attributes means the transaction failed. (A
                     // success response with them is discarded, Section 6.3.3, and the
@@ -3510,6 +3653,19 @@ impl Agent {
         } else {
             TransportProtocol::UDP
         };
+        // RFC 8489 Section 6.1: "the STUN usage MUST follow the MTU constraint" outside MTU
+        // probing. Nothing over UDP leaves larger than the path MTU allows.
+        if transport_protocol == TransportProtocol::UDP
+            && message.len() > self.max_udp_stun_size(peer_addr)
+        {
+            warn!(
+                "[{}]: not sending a STUN message of {} bytes to {}: larger than the path MTU allows",
+                self.get_name(),
+                message.len(),
+                peer_addr
+            );
+            return;
+        }
 
         self.write_outs.push_back(TaggedBytesMut {
             now,
@@ -3523,6 +3679,18 @@ impl Agent {
         });
 
         self.local_candidates[local_index].seen(now, true);
+    }
+
+    /// The largest STUN message sent over UDP to `peer`: the path MTU
+    /// ([`AgentConfig::path_mtu`]), else the RFC 8489 Section 6.1 assumption (576 bytes for
+    /// IPv4, 1280 for IPv6), less the IP and UDP headers.
+    pub(crate) fn max_udp_stun_size(&self, peer: SocketAddr) -> usize {
+        let (assumed, overhead) = if peer.is_ipv4() {
+            (576, 20 + 8)
+        } else {
+            (1280, 40 + 8)
+        };
+        self.path_mtu.unwrap_or(assumed).saturating_sub(overhead)
     }
 
     fn handle_inbound_candidate_msg(
@@ -3618,5 +3786,31 @@ impl Agent {
         }
 
         best_pair_index
+    }
+}
+
+/// The precedence of RFC 6724 Section 2.1's default policy table for `ip` (an IPv4 address
+/// as its IPv4-mapped form, `::ffff:0:0/96`).
+pub(crate) fn rfc6724_precedence(ip: IpAddr) -> u8 {
+    let v6 = match ip {
+        IpAddr::V4(_) => return 35,
+        IpAddr::V6(v6) => v6,
+    };
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return rfc6724_precedence(IpAddr::V4(v4));
+    }
+    let s = v6.segments();
+    if v6.is_loopback() {
+        50
+    } else if s[0] == 0x2002 {
+        30
+    } else if s[0] == 0x2001 && s[1] == 0 {
+        5
+    } else if s[0] & 0xfe00 == 0xfc00 {
+        3
+    } else if s[..6] == [0; 6] || s[0] & 0xffc0 == 0xfec0 || s[0] == 0x3ffe {
+        1
+    } else {
+        40
     }
 }

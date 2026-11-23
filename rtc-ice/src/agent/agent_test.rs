@@ -2606,8 +2606,13 @@ fn test_published_mdns_host_candidates_resolve_at_the_peer() -> Result<()> {
 
     b.handle_timeout(now)?;
     assert_eq!(carry_mdns(&mut b, "192.168.1.4", &mut a, now)?, 2);
-    assert_eq!(carry_mdns(&mut a, "192.168.1.3", &mut b, now)?, 2);
-    b.handle_timeout(now)?;
+    // Each query asks two questions (A and AAAA): the answers wait 20 to 120 ms (RFC 6762
+    // section 6.3).
+    assert_eq!(carry_mdns(&mut a, "192.168.1.3", &mut b, now)?, 0);
+    let later = now + Duration::from_millis(120);
+    a.handle_timeout(later)?;
+    assert_eq!(carry_mdns(&mut a, "192.168.1.3", &mut b, later)?, 2);
+    b.handle_timeout(later)?;
 
     let mut resolved: Vec<SocketAddr> = b.remote_candidates.iter().map(|c| c.addr()).collect();
     resolved.sort();

@@ -1235,6 +1235,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **ice**: through the peer connection a local candidate is paired only once it has been
+  conveyed to the peer (RFC 8838 section 10): when the application takes its
+  `OnIceCandidateEvent` from `poll_event`, or sets a local description that lists it. An
+  application that adds a candidate and never takes the event (nor sets a description after
+  it) now sends no check from it. `SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed(true)`
+  pairs at once, as before. In `rtc-ice`, `Agent::add_local_candidate` still pairs at once (the
+  caller conveys the candidate with that call); new `Agent::add_unconveyed_local_candidate`,
+  `local_candidate_conveyed`, `all_local_candidates_conveyed`, `is_local_candidate_unconveyed`
+  and `AgentConfig::hold_local_candidates_until_conveyed` (`ice_local_candidate_conveyed.rs`,
+  `agent_trickle_test.rs`).
+- **ice**: a STUN response to a check is authenticated by MESSAGE-INTEGRITY only, the attribute
+  every check carries; one with MESSAGE-INTEGRITY-SHA256 instead is discarded (RFC 8489
+  sections 9.1.4, 9.1.5). A check, or any other STUN message, larger than the path MTU allows
+  over UDP is not sent (section 6.1: `AgentConfig::path_mtu`, else 576 / 1280 bytes), and the
+  check's pair fails; so does a check that cannot be built (a USERNAME of 509 bytes or more).
+  A check whose responses all failed their integrity check ends with the new
+  `Event::IntegrityViolation` for its pair (section 9.1.4) (`agent_stun_rows_test.rs`).
+- **ice**: connectivity checks and success responses carry SOFTWARE, `rtc-ice <version>` by
+  default (RFC 8489 sections 6.1, 6.3.1.1); `AgentConfig::software` sets another text, or none
+  with an empty one (section 16.1.2). A lite agent that is dual-stack or IPv6-only takes its
+  local preference from the RFC 6724 precedence of the address (RFC 8445 section 5.2), its
+  rank breaking ties; an IPv4-only one keeps 65535.
+- **mdns**: through `rtc-ice` and the peer connection, the answers to a query of more than one
+  question wait 20 to 120 ms even when every question is about the agent's own name (RFC 6762
+  section 6.3); `MdnsConfig::with_multi_question_delay`,
+  `AgentConfig::multicast_dns_multi_question_delay`,
+  `SettingEngineBuilder::with_multicast_dns_multi_question_delay(false)` answers at once as
+  before. `rtc-mdns` alone keeps answering such a query at once unless asked.
+- **mdns**: cached addresses found stale before their TTL ends are flushed (RFC 6762 sections
+  10.4, 10.5): `Mdns::reconfirm(now, name)` (a client's hint) sends two queries and flushes an
+  address no response brought within ten seconds; an address other hosts' queries ask for in
+  vain (two or more in ten seconds) is flushed without a query of our own. New
+  `Mdns::is_reconfirming` (`mdns_stale_test.rs`).
 - **fec**: an encoding the application gives without a FEC SSRC gets one when a FEC format
   (flexfec-03, RFC 8627 FlexFEC) is registered, as it gets an RTX SSRC: the offer carries the
   `a=ssrc-group:FEC-FR` and the repair flow is bound

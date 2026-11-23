@@ -191,6 +191,7 @@ impl RTCPeerConnection {
             multicast_dns_local_ip: setting_engine.multicast_dns.local_ip,
             multicast_dns_query_timeout: setting_engine.multicast_dns.timeout,
             multicast_dns_first_query_delay: setting_engine.multicast_dns.first_query_delay,
+            multicast_dns_multi_question_delay: setting_engine.multicast_dns.multi_question_delay,
             multicast_dns_destination_reported: setting_engine.multicast_dns.destination_reported,
             multicast_dns_unicast_response: setting_engine.multicast_dns.unicast_response,
             multicast_dns_rate_limit: setting_engine.multicast_dns.rate_limit.clone(),
@@ -212,6 +213,7 @@ impl RTCPeerConnection {
             unauthenticated_requests: setting_engine.ice.unauthenticated_requests,
             data_from_selected_pair_only: setting_engine.ice.data_from_selected_pair_only,
             send_data_before_nomination: setting_engine.ice.send_data_before_nomination,
+            hold_local_candidates_until_conveyed: !setting_engine.ice.pair_before_conveyed,
             nat_1to1_ips: setting_engine.candidates.nat_1to1_ips.clone(),
             nat_1to1_ip_candidate_type: match setting_engine.candidates.nat_1to1_ip_candidate_type {
                 RTCIceCandidateType::Srflx => ice::candidate::CandidateType::ServerReflexive,

@@ -681,6 +681,10 @@ impl Agent {
                 setters.push(Box::new(AttrControlled(self.tie_breaker)));
             }
             setters.push(Box::new(PriorityAttr(priority)));
+            // RFC 8489 Section 6.1: a request SHOULD carry SOFTWARE.
+            if let Some(software) = &self.software {
+                setters.push(Box::new(Software::new(ATTR_SOFTWARE, software.clone())));
+            }
             setters.push(Box::new(
                 MessageIntegrity::new_short_term_integrity_with_provider(
                     remote_credentials.pwd.clone(),
@@ -692,8 +696,26 @@ impl Agent {
             msg.build(&setters)
         };
         if let Err(err) = built {
+            // (A USERNAME of 509 bytes or more, say: the check can never be sent.)
             error!("{}", err);
+            self.fail_pair(pair_index);
             return;
+        }
+        // RFC 8489 Section 6.1: over UDP a STUN message fits the path MTU (assumed 576 / 1280
+        // bytes when not known): long ufrags can make a check that does not. It is not sent,
+        // and the pair fails at once.
+        if !is_tcp {
+            let destination = self.remote_candidates[pair.remote_index].addr();
+            if msg.raw.len() > self.max_udp_stun_size(destination) {
+                warn!(
+                    "[{}]: a check of {} bytes on {} exceeds the path MTU: the pair failed",
+                    self.get_name(),
+                    msg.raw.len(),
+                    pair
+                );
+                self.fail_pair(pair_index);
+                return;
+            }
         }
 
         let rto = self.check_rto();
@@ -730,6 +752,7 @@ impl Agent {
             cancelled: false,
             consent,
             priority,
+            unauthentic_response: false,
         });
 
         // Track request sent on the candidate pair
@@ -832,6 +855,9 @@ impl Agent {
 
         let mut failed = false;
         for r in timed_out {
+            if r.unauthentic_response && !r.cancelled {
+                self.signal_integrity_violation(&r);
+            }
             if r.cancelled || r.consent {
                 continue;
             }
@@ -883,6 +909,40 @@ impl Agent {
         if failed {
             self.maybe_nominate(now);
         }
+    }
+
+    /// A response with the transaction id `id` failed its integrity check and was discarded.
+    pub(crate) fn note_unauthentic_response(&mut self, id: TransactionId) {
+        if let Some(r) = self
+            .pending_binding_requests
+            .iter_mut()
+            .find(|r| r.transaction_id == id)
+        {
+            r.unauthentic_response = true;
+        }
+    }
+
+    /// RFC 8489 Section 9.1.4: "If all responses received are discarded, then instead of
+    /// signaling a timeout after ending the transaction, the layer MUST signal an integrity
+    /// protection violation."
+    fn signal_integrity_violation(&mut self, r: &BindingRequest) {
+        let (Some(local), Some(remote)) = (
+            self.local_candidates.get(r.local_index),
+            self.remote_candidates.get(r.remote_index),
+        ) else {
+            return;
+        };
+        warn!(
+            "[{}]: every response to the request on {} -> {} failed its integrity check: integrity violation",
+            self.get_name(),
+            local,
+            remote
+        );
+        let event = Event::IntegrityViolation(Box::new(local.clone()), Box::new(remote.clone()));
+        self.event_outs.push_back(TaggedEvent {
+            now: self.clock,
+            event,
+        });
     }
 
     /// The pair is Failed: out of the valid list, not nominated, not awaited. The selected

@@ -197,6 +197,8 @@ pub struct MulticastDNS {
     pub local_ip: Option<IpAddr>,
     /// See [`SettingEngineBuilder::with_multicast_dns_first_query_delay`]. `None`: on.
     pub first_query_delay: Option<bool>,
+    /// See [`SettingEngineBuilder::with_multicast_dns_multi_question_delay`]. `None`: on.
+    pub multi_question_delay: Option<bool>,
     /// See [`SettingEngineBuilder::with_multicast_dns_destination_reported`].
     pub destination_reported: bool,
     /// See [`SettingEngineBuilder::with_multicast_dns_unicast_response`].
@@ -219,6 +221,7 @@ impl Default for MulticastDNS {
             local_name: "".to_string(),
             local_ip: None,
             first_query_delay: None,
+            multi_question_delay: None,
             destination_reported: false,
             unicast_response: false,
             rate_limit: None,
@@ -299,6 +302,8 @@ pub struct IceBehaviour {
     pub data_from_selected_pair_only: bool,
     /// See [`SettingEngineBuilder::with_ice_data_before_nomination`].
     pub send_data_before_nomination: bool,
+    /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
+    pub pair_before_conveyed: bool,
 }
 
 /// Replay attack protection window sizes.
@@ -1308,6 +1313,15 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether the mDNS answers to a query of more than one question (an A and an AAAA
+    /// question for a published name, as browsers ask) wait a random 20 to 120 ms (RFC 6762
+    /// section 6.3). On by default; `false` answers a query about the engine's own names only
+    /// at once.
+    pub fn with_multicast_dns_multi_question_delay(mut self, delay: bool) -> Self {
+        self.0.multicast_dns.multi_question_delay = Some(delay);
+        self
+    }
+
     /// Declares that the application hands every datagram of its mDNS socket to `handle_read`
     /// with the datagram's destination address in `local_addr` (`IP_PKTINFO` /
     /// `IPV6_PKTINFO`): the mDNS group's (`224.0.0.251:5353`, `[ff02::fb]:5353`) for one that
@@ -1462,6 +1476,19 @@ impl SettingEngineBuilder {
     /// arrives before the nomination does.
     pub fn with_ice_data_before_nomination(mut self, enabled: bool) -> Self {
         self.0.ice.send_data_before_nomination = enabled;
+        self
+    }
+
+    /// Pairs a local candidate as soon as it is added, before the application has it to
+    /// trickle. Off by default: RFC 8838 section 10 ("A Trickle ICE agent MUST NOT pair a local
+    /// candidate until it has been trickled to the remote party"), so a local candidate is
+    /// paired once the application has taken its `OnIceCandidateEvent` from
+    /// [`poll_event`](crate::sansio::Protocol::poll_event), or once a local description is
+    /// set (it lists the candidates gathered so far), whichever comes first. Turning this on
+    /// restores the earlier behaviour: checks may leave on a candidate the peer has not
+    /// heard of yet, which it then learns as peer-reflexive.
+    pub fn with_ice_pairing_before_candidates_are_conveyed(mut self, enabled: bool) -> Self {
+        self.0.ice.pair_before_conveyed = enabled;
         self
     }
 
