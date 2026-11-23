@@ -405,9 +405,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     that negotiated them.
   fails the handshake).
 
-
-
-
   fails the handshake).
 - **media conformance**: RTP usage (RFC 8834).
   - Received RTCP is parsed with `rtcp::packet::unmarshal_lenient`: of a compound packet, a
@@ -2518,8 +2515,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `TransportConfig::{with_rto_config, rto_config}`; the timers' backoff stops at the
   configured RTO.Max.
 
-
-
 - **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
   webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
   packets of one frame as `poll_read` delivered them and returns
@@ -2680,7 +2675,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stats object with a selected pair.
   configured RTO.Max.
 
-
 - **media conformance**: receiver and sender rows (media phase five).
   - `rtp::codec::h265::H265MultiStreamDepacketizer`: the receiver of an HEVC bitstream carried
     in several RTP streams, on one transport (MRST) or several (MRMT), RFC 7798 section 4.3
@@ -2719,7 +2713,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `payload_types_reused_across_sections` (crate-internal, for the SDP layer): the payload
     types two sections of one BUNDLE group use for different formats (RFC 8834 section 4.3).
 
-
 - **media conformance**: an RTCP session, transport-wide numbering, congestion controller and
   pacer per transport. With m= sections on several transports (mt-2) each transport is an RTP
   session of its own (RFC 8834 section 4.4, RFC 3550 section 6): its RTCP reports name only
@@ -2739,7 +2732,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     application's estimator keeps one controller and one numbering for the connection.
   - `RtcpSessionControl::{ReducedSize, Bandwidth}` are written per transport, tagged with
     its session.
-
 
 - **peer_connection**: `RTCPeerConnection::renew_dtls_association()` asks for a new DTLS
   association in the next offer (a new `a=tls-id`, RFC 8842 section 5.5): its handshake exports
