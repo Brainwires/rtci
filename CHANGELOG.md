@@ -16,10 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `_without_congestion_control`, `configure_congestion_control`) take the options of the media
     engine's profile, and the RTCP session a peer connection installs follows the setting engine's.
     `Rfc` is the defaults unchanged. `docs/behaviour-profiles.md` (rendered by
-    `scripts/behaviour-profiles.py`, a Python gate with `--check`) lists 33 governed behaviours with
-    their clause, each profile's value and the source of each Chrome value (7 observed in the recorded
+    `scripts/behaviour-profiles.py`, a Python gate with `--check`) lists 35 governed behaviours with
+    their clause, each profile's value and the source of each Chrome value (9 observed in the recorded
     Chromium descriptions or the browser matrix, 26 unverified), the settings left alone with their
-    class, and 8 Chrome behaviours the engine cannot express.
+    class, and 10 Chrome behaviours the engine cannot express.
   - Cargo feature `chrome-defaults`: `BehaviourProfile::default()`, and with it every
     `SettingEngine::default()`, `SettingEngineBuilder::new()`, `MediaEngine::default()` and
     `DefaultInterceptorOptions::default()`, is `Chrome`. Cargo unifies features: one crate of a build
@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New settings: `SettingEngineBuilder::with_ice_software` (the SOFTWARE attribute of ICE checks,
     RFC 8489 16.1.2), `without_sctp_rto`; `DefaultInterceptorOptions` fields `rtcp_t_rr_interval`,
     `rtcp_immediate_congestion_feedback`, `rtcp_report_from_every_ssrc`, `twcc_rereport_received`,
-    `gcc_threshold_time_base`, `gcc_one_decrease_per_round_trip` (the struct is `#[non_exhaustive]`).
+    `gcc_threshold_time_base`, `gcc_one_decrease_per_round_trip`, `abs_send_time_on_audio`,
+    `receiver_reference_time_on_audio` (the struct is `#[non_exhaustive]`; the last two put Chromium's
+    audio abs-send-time and `a=rtcp-xr:rcvr-rtt=all` in the `Chrome` profile's offers).
     `SettingEngine::behaviour_profile`, `MediaEngine::behaviour_profile`.
   - Breaking: `SettingEngine`, `MediaEngine` and `DefaultInterceptorOptions` implement `Default` by
     hand (the build's default profile) instead of deriving it; `SctpMaxMessageSize` derives `Debug`,

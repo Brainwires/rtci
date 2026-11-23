@@ -48,6 +48,14 @@ failing cell or peer is named.
 `COUNTS.md` reports two figures per level, over the rows that apply (all but `n/a`): "RFC
 behaviour tested" (`tested` + `setting`) and "tested as the default" (`tested`).
 
+A `setting` row's setting is governed by the behaviour profiles (`docs/behaviour-profiles.md`):
+`BehaviourProfile::StrictRfc` turns every such setting to the RFC form at once (with the RFC
+SHOULDs the default departs from for the same reason), while `Rfc`, the default, keeps the
+interoperable form. A new `setting` row's setting needs a `StrictRfc` value in
+`src/peer_connection/configuration/behaviour_profile.rs`: the profile's completeness test fails a
+setting that has no entry there. `StrictRfc` does not interoperate with browsers; it exists to run
+the RFC forms together.
+
 ## Classes of the open MUST rows
 
 Every MUST row that is `untested`, `partial`, `missing`, `violated` or `setting` has exactly one

@@ -419,7 +419,7 @@ governed_behaviours! {
         rfc: true => "true",
         chrome: true => "true",
         strict_rfc: false => "false",
-        chrome_source: "Chromium writes a=msid:<stream id> <track id> (fixture chromium--reflect-video-vp8--1-offer.sdp)",
+        chrome_source: "Chromium writes a=msid with the stream id and the track id (fixture chromium--reflect-video-vp8--1-offer.sdp)",
         evidence: Observed,
         apply_setting: |b: SettingEngineBuilder, v| b.with_msid_appdata(v),
         read: |s: &SettingEngine| !s.msid_appdata_omitted,
@@ -848,7 +848,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_pacing",
         class: NotGovernedClass::Same,
-        note: "Ta 50 ms; libwebrtc's weak ping interval is 48 ms. Not changed: a value other than the default is written as a=ice-pacing, which Chromium never writes",
+        note: "Ta 50 ms, stated as a=ice-pacing:50 in every description (RFC 8839 5.5; Chromium writes none and ignores it, so it is part of the Chrome profile's superset); libwebrtc's weak ping interval is 48 ms, close enough not to change the proposal",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_ice_pacing_group",

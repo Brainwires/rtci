@@ -278,6 +278,8 @@ fn documented_superset(item: &str) -> bool {
         "a=tls-id",
         // RFC 8839 5.4 options beyond trickle, and the end of candidates.
         "a=ice-options",
+        // RFC 8839 5.5: the engine states its Ta (50 ms) in every description.
+        "a=ice-pacing",
         // RFC 8843 / RFC 8853: rid and simulcast receive support.
         "a=rid",
         "a=simulcast",
