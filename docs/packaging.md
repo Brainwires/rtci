@@ -167,7 +167,7 @@ of that tag. The workflow takes no secret but `GITHUB_TOKEN` and has not been ru
    by hand, and how and where release binaries are built (runners, artefacts, signing) is not
    decided yet. Whether and when to tag is the owner's call, as is publishing a Deno or
    other binding anywhere.
-2. **Crate names.** On crates.io, upstream's `rtc` and `rtc-*` names belong to webrtc-rs; the
-   release renames the crates to `rtci`, `rtci-*` (`scripts/rename-to-rtci.py`, run as the
-   release's last content commit). `rtc-ffi` stays `publish = false`: it is delivered as built
+2. **Crate names.** On crates.io, the names of upstream's crates belong to webrtc-rs; the
+   release renames this project's crates to their `rtci` names (`scripts/rename-to-rtci.py`,
+   run as the release's last content commit, `docs/rename.md`). `rtc-ffi` stays `publish = false`: it is delivered as built
    libraries and a header, not as a Rust dependency.

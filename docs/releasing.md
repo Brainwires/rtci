@@ -36,8 +36,8 @@ manifest, so they must resolve on crates.io too).
 20. `rtc-audio`
 21. `rtc-devices`
 
-The rename commit turns every name into its `rtci` form (`rtc` -> `rtci`, `rtc-<x>` ->
-`rtci-<x>`) in the same order: `rtci-crypto` first, then `rtci`, `rtci-audio`, `rtci-devices` last.
+The rename commit gives every crate its `rtci` name (`docs/rename.md`) and keeps this order.
+`scripts/rename-to-rtci.py` prints it and writes it into release.yml.
 
 Not published (`publish = false`): `rtc-ffi` (the C interface: delivered as built libraries and
 a header, not as a Rust dependency; see `docs/packaging.md`), `rtc-signal` (the examples'
@@ -56,9 +56,9 @@ regenerate the list and update this file and release.yml.
 
 ## 0.1.0: order of operations
 
-The first crates.io release is also the rename from `rtc` / `rtc-*` to `rtci` / `rtci-*` and
-the reset of the version line to `0.1.0` (`docs/rename.md`, which arrives with the rename
-script). In this order:
+The first crates.io release is also the rename of every crate to its `rtci` name and the reset
+of the version line to `0.1.0` (`docs/rename.md`, which arrives with the rename script). In
+this order:
 
 1. **Every release-gating branch is merged into `master`, and `master`'s CI is green** (cargo,
    fuzz, test environment, audit).
@@ -74,8 +74,8 @@ script). In this order:
 6. **Publish** in the order above, from a machine with a crates.io login (`cargo login` with a
    token that has `publish-new` and `publish-update`). Never from CI until publishing moves
    there; never with a token in the repository.
-7. **The repository rename** `Brainwires/webrtc-rs-rtc` -> `Brainwires/rtci` on GitHub (GitHub
-   redirects the old URLs; the manifests' `repository` already names the new one).
+7. **The repository rename** to `Brainwires/rtci` on GitHub (GitHub redirects the old URLs; the
+   manifests' `repository` already names the new one).
 8. **Detach from the fork network** (GitHub support request "detach fork"), so the repository
    stands on its own and its default pull request base is no longer upstream's.
 
@@ -215,12 +215,11 @@ Nothing is rolled back: the crates already published stay published.
 - **Yanking**: a version published broken is yanked, `cargo yank --version <v> -p <name>`
   (undo: `--undo`), and replaced by a patch release; see "When a publish fails midway". A
   yank never deletes: existing lock files keep resolving it. Record it in `CHANGELOG.md`.
-- **The rename, for dependents**: announce `rtci` with the migration table of `docs/rename.md`
-  ("For dependents": `rtc = "0.22"` -> `rtci = "0.1"`, `use rtc::` -> `use rtci::`, C
-  `librtc_ffi` / `rtc.h` / `rtc_*` -> `librtci_ffi` / `rtci.h` / `rtci_*`, or the one-line
-  `rtc = { package = "rtci", version = "0.1" }`) in the GitHub release text and to the known
-  dependents (ParolNet, the Denext binding), whose git dependencies on
-  `Brainwires/webrtc-rs-rtc` keep working through GitHub's redirect but should move to the
-  crates.io release.
-- **The repository**: the rename and the detach of step 7 and 8 above are done; the README's
-  links, badges and `SECURITY.md` point at the new name.
+- **The rename, for dependents**: announce the `rtci` crates with the migration table of
+  `docs/rename.md` ("For dependents": crate names and versions, `use` paths, feature
+  references, the C library, header and symbol prefixes, `RUST_LOG` targets, or a `package =`
+  rename on the dependent's side) in the GitHub release text and to the known dependents
+  (ParolNet, the Denext binding). Their git dependencies on the old repository URL keep working
+  through GitHub's redirect, but should move to the crates.io release.
+- **The repository**: the rename and the detach of steps 7 and 8 are done; check that the
+  README's links and `SECURITY.md` name the new repository.
