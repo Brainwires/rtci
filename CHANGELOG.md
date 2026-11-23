@@ -32,8 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     longer refused; `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` is the
     old refusal (`Error::ErrSessionDescriptionConflictingFingerprints`) as a hardening.
   - IDENTICAL attributes (RFC 8859 section 4.3): a remote description is refused when two
-    bundled sections carry one with different values, or an RTP section carries one its RTP
-    tagged section lacks. Checked against the 183 recorded browser descriptions first: none
+    bundled sections carry one with different values (an absence is not: the tagged section
+    speaks for the group, and RFC 9429 itself writes `a=rtcp-mux-only` in a section a later
+    offer adds and not in the tagged one). Checked against the 183 recorded browser descriptions first: none
     breaks it (Firefox's tagged-only `a=rtcp-rsize` and `a=extmap-allow-mixed` are absences,
     which stay accepted). Breaking: an offer with different `a=ecn-capable-rtp` methods in
     two bundled sections is refused; it was answered with the tagged section's.

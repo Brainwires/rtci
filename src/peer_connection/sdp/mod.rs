@@ -523,13 +523,13 @@ pub(crate) fn check_bundled_packet_times(desc: &SessionDescription) -> Result<()
 /// an answer or a subsequent offer carry it in the tagged section only, from where it applies
 /// to every bundled section (the note of section 4.3: such attributes "might not always be
 /// explicitly encoded across all media descriptions"), so an absence is not a disagreement.
-/// Two bundled sections that both carry one with different values are, and so is an RTP
-/// section stating one that an RTP tagged section does not (it would be in force for one
-/// section of the RTP session and not for another). The category is rtc-sdp's table
-/// (`sdp::attribute::mux`). The browser descriptions recorded by the interop harness never
-/// disagree (Firefox carries `a=rtcp-rsize` and `a=extmap-allow-mixed` in the tagged section
-/// only, and a tagged data section carries none of the RTP session's attributes: both are
-/// absences).
+/// Two bundled sections that both carry one with different values are. A section that
+/// carries one its tagged section lacks is not refused: RFC 9429 section 5.2.2 itself writes
+/// `a=rtcp-mux-only` in a section a later offer adds and not in the tagged one, and a tagged
+/// data section carries none of the RTP session's attributes. The category is rtc-sdp's
+/// table (`sdp::attribute::mux`). The browser descriptions recorded by the interop harness
+/// never disagree (Firefox carries `a=rtcp-rsize` and `a=extmap-allow-mixed` in the tagged
+/// section only: absences).
 pub(crate) fn check_bundled_identical_attributes(desc: &SessionDescription) -> Result<()> {
     use ::sdp::attribute::mux::{MuxCategory, category};
     let values = |media: &MediaDescription, key: &str| -> Option<Vec<String>> {
@@ -559,7 +559,6 @@ pub(crate) fn check_bundled_identical_attributes(desc: &SessionDescription) -> R
         if std::ptr::eq(tagged, media) {
             continue;
         }
-        let rtp = |m: &MediaDescription| m.media_name.media != MEDIA_SECTION_APPLICATION;
         let mut keys: Vec<&str> = media.attributes.iter().map(|a| a.key.as_str()).collect();
         keys.dedup();
         for key in keys {
@@ -573,20 +572,13 @@ pub(crate) fn check_bundled_identical_attributes(desc: &SessionDescription) -> R
             let tag = get_mid_value(tagged)
                 .map(String::as_str)
                 .unwrap_or_default();
-            match values(tagged, key) {
-                Some(theirs) if theirs != own => {
-                    return Err(Error::SdpInvalidValue(format!(
-                        "a={key} differs between the bundled sections {mid} and {tag} (RFC 8859 \
-                         section 4.3: IDENTICAL category)"
-                    )));
-                }
-                None if rtp(media) && rtp(tagged) => {
-                    return Err(Error::SdpInvalidValue(format!(
-                        "a={key} is in the bundled section {mid} and not in its tagged section \
-                         {tag} (RFC 8859 section 4.3: IDENTICAL category)"
-                    )));
-                }
-                _ => {}
+            if let Some(theirs) = values(tagged, key)
+                && theirs != own
+            {
+                return Err(Error::SdpInvalidValue(format!(
+                    "a={key} differs between the bundled sections {mid} and {tag} (RFC 8859 \
+                     section 4.3: IDENTICAL category)"
+                )));
             }
         }
     }
