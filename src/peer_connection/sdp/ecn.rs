@@ -47,6 +47,32 @@ pub(crate) struct EcnCapability {
     /// `mode=`; "An offer that does not include a "mode=" parameter MUST be treated as if a
     /// "mode=setread" parameter had been included".
     pub(crate) mode: EcnMode,
+    /// `ect=`: the marking the endpoint prefers to receive, "with "0" being implied if not
+    /// specified".
+    pub(crate) ect: EcnEct,
+}
+
+/// The `ect=` parameter (RFC 6679 section 6.1): "This is either "random", "0", or "1", with
+/// "0" being implied if not specified".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EcnEct {
+    /// ECT(0), the default.
+    #[default]
+    Zero,
+    /// ECT(1).
+    One,
+    /// Either, chosen by the sender.
+    Random,
+}
+
+/// What a negotiated section's streams do: how they initiate ECN and the codepoint they mark
+/// with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NegotiatedEcn {
+    pub(crate) initiation: interceptor::EcnInitiation,
+    /// ECT(1) when the peer asked for it (`ect=1`), else ECT(0) (RFC 6679 section 6.1: "It is
+    /// RECOMMENDED that ECT(0) marking be used"; for `random` this sender takes ECT(0)).
+    pub(crate) codepoint: shared::EcnCodepoint,
 }
 
 impl EcnCapability {
@@ -69,19 +95,29 @@ impl EcnCapability {
             return None;
         }
         let mut mode = EcnMode::SetRead;
+        let mut ect = EcnEct::Zero;
         for parm in parm_list.split(';') {
-            if let Some((name, val)) = parm.trim().split_once('=')
-                && name.trim().eq_ignore_ascii_case("mode")
-            {
-                match val.trim().to_ascii_lowercase().as_str() {
+            let Some((name, val)) = parm.trim().split_once('=') else {
+                continue;
+            };
+            let val = val.trim().to_ascii_lowercase();
+            if name.trim().eq_ignore_ascii_case("mode") {
+                match val.as_str() {
                     "setonly" => mode = EcnMode::SetOnly,
                     "readonly" => mode = EcnMode::ReadOnly,
                     "setread" => mode = EcnMode::SetRead,
                     _ => {}
                 }
+            } else if name.trim().eq_ignore_ascii_case("ect") {
+                match val.as_str() {
+                    "0" => ect = EcnEct::Zero,
+                    "1" => ect = EcnEct::One,
+                    "random" => ect = EcnEct::Random,
+                    _ => {}
+                }
             }
         }
-        Some(Self { methods, mode })
+        Some(Self { methods, mode, ect })
     }
 
     /// The first method of the list this endpoint implements.
@@ -116,26 +152,32 @@ pub(crate) fn media_ecn_capability(media: &MediaDescription) -> Option<EcnCapabi
 /// The `a=ecn-capable-rtp` that applies to `media` of `desc`: its own, or the tagged
 /// section's of its BUNDLE group, where RFC 9143 section 7.1.3 puts the IDENTICAL attributes
 /// (RFC 8859 section 7.4 places this one there) of an answer or a subsequent offer.
+///
+/// A bundled section takes the tagged section's when that has one, so one BUNDLE group (one
+/// transport, one RTP session) has one initiation method and one marking (RFC 6679 section
+/// 7.2: the initiation is chosen for the RTP session).
 pub(crate) fn section_ecn_capability(
     desc: &SessionDescription,
     media: &MediaDescription,
 ) -> Option<EcnCapability> {
-    media_ecn_capability(media)
-        .or_else(|| super::tagged_section(desc, media).and_then(media_ecn_capability))
+    super::tagged_section(desc, media)
+        .and_then(media_ecn_capability)
+        .or_else(|| media_ecn_capability(media))
 }
 
 /// The value of an offer's `a=ecn-capable-rtp` (RFC 6679 section 6.1.1: "one or more ECN
 /// initiation methods in a comma-separated list in decreasing order of preference"): the
 /// configured initiation first, then the other method this endpoint implements. No `mode=`
-/// (this endpoint sets and reads the field: `with_ecn` says the socket layer does both) and no
-/// `ect=` (ECT(0) implied: this endpoint takes either marking).
+/// (this endpoint sets and reads the field: `with_ecn` says the socket layer does both), and
+/// `ect=1`: this endpoint's receiver reports the marks in RFC 8888 feedback for an L4S (RFC
+/// 9331) congestion controller, whose identifier is ECT(1).
 pub(crate) fn offer_value(preferred: interceptor::EcnInitiation) -> String {
     let other = match preferred {
         interceptor::EcnInitiation::RtpAndRtcp => interceptor::EcnInitiation::LeapOfFaith,
         interceptor::EcnInitiation::LeapOfFaith => interceptor::EcnInitiation::RtpAndRtcp,
     };
     format!(
-        " {},{}",
+        " {},{} ect=1",
         initiation_method(preferred),
         initiation_method(other)
     )
@@ -148,7 +190,7 @@ pub(crate) fn offer_value(preferred: interceptor::EcnInitiation) -> String {
 pub(crate) fn answer_value(offered: &EcnCapability) -> Option<String> {
     offered
         .first_known()
-        .map(|initiation| format!(" {}", initiation_method(initiation)))
+        .map(|initiation| format!(" {} ect=1", initiation_method(initiation)))
 }
 
 /// Whether ECN was negotiated for a section, and how its streams initiate it: both the
@@ -159,7 +201,7 @@ pub(crate) fn negotiated_initiation(
     local: (&SessionDescription, &MediaDescription),
     remote: (&SessionDescription, &MediaDescription),
     local_is_answer: bool,
-) -> Option<interceptor::EcnInitiation> {
+) -> Option<NegotiatedEcn> {
     let local_capability = section_ecn_capability(local.0, local.1)?;
     let remote_capability = section_ecn_capability(remote.0, remote.1)?;
     if remote_capability.mode == EcnMode::SetOnly {
@@ -170,7 +212,15 @@ pub(crate) fn negotiated_initiation(
     } else {
         &remote_capability
     };
-    answered.first_known()
+    let initiation = answered.first_known()?;
+    Some(NegotiatedEcn {
+        initiation,
+        codepoint: if remote_capability.ect == EcnEct::One {
+            shared::EcnCodepoint::Ect1
+        } else {
+            shared::EcnCodepoint::Ect0
+        },
+    })
 }
 
 #[cfg(test)]
@@ -185,7 +235,13 @@ mod tests {
             Some(EcnCapability {
                 methods: vec!["leap".to_owned(), "rtp".to_owned()],
                 mode: EcnMode::ReadOnly,
+                ect: EcnEct::One,
             })
+        );
+        assert_eq!(
+            EcnCapability::parse(" rtp").map(|c| c.ect),
+            Some(EcnEct::Zero),
+            "ECT(0) is implied"
         );
         assert_eq!(
             EcnCapability::parse(" rtp").map(|c| c.mode),
@@ -197,7 +253,7 @@ mod tests {
     #[test]
     fn an_answer_takes_the_first_offered_method_it_implements() {
         let offered = EcnCapability::parse(" ice,leap,rtp").expect("parses");
-        assert_eq!(answer_value(&offered).as_deref(), Some(" leap"));
+        assert_eq!(answer_value(&offered).as_deref(), Some(" leap ect=1"));
         let only_ice = EcnCapability::parse(" ice,future").expect("parses");
         assert_eq!(answer_value(&only_ice), None);
     }

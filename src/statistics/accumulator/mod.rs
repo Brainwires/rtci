@@ -975,8 +975,13 @@ impl RTCStatsAccumulator {
         if !marked {
             return None;
         }
-        stream.on_ect1_sent();
-        Some(shared::EcnCodepoint::Ect1)
+        // The codepoint the peer asked for (`a=ecn-capable-rtp ... ect=`, RFC 6679 section
+        // 6.1), ECT(1) unless negotiated otherwise.
+        let codepoint = stream.ect_codepoint.unwrap_or(shared::EcnCodepoint::Ect1);
+        if codepoint == shared::EcnCodepoint::Ect1 {
+            stream.on_ect1_sent();
+        }
+        Some(codepoint)
     }
 
     /// Counts the ECN codepoint an RTP packet of the inbound stream `ssrc` arrived with.
@@ -1002,11 +1007,12 @@ impl RTCStatsAccumulator {
         &mut self,
         ssrc: SSRC,
         negotiated: bool,
-        ecn_negotiated: Option<interceptor::EcnInitiation>,
+        ecn_negotiated: Option<crate::peer_connection::sdp::ecn::NegotiatedEcn>,
     ) {
         let ecn = self.ecn && ecn_negotiated.is_some();
-        let initiation = ecn_negotiated.unwrap_or(self.ecn_initiation);
+        let initiation = ecn_negotiated.map_or(self.ecn_initiation, |n| n.initiation);
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.ect_codepoint = ecn_negotiated.map(|n| n.codepoint);
             stream.ccfb_negotiated = negotiated;
             stream.ect1_marking = ecn && negotiated;
             // A renegotiation that keeps `ack ccfb` keeps where the stream is in the

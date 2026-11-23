@@ -134,6 +134,9 @@ pub struct OutboundRtpStreamAccumulator {
     /// RFC 6679 sections 7.2-7.4 for the stream, fed from the RFC 8888 reports (RFC 8888
     /// section 7); `Some` while `ect1_marking`.
     pub ecn_validation: Option<Box<interceptor::EcnValidation>>,
+    /// The codepoint the stream marks with, as the peer's `a=ecn-capable-rtp` `ect=` asked
+    /// (ECT(0) unless it asked for ECT(1)); `None` (ECT(1)) when not negotiated by SDP.
+    pub ect_codepoint: Option<shared::EcnCodepoint>,
     /// RTP packets sent with ECT(1).
     pub packets_sent_with_ect1: u64,
     /// What the RFC 8888 reports received from the remote say about the stream.

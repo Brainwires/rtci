@@ -14,6 +14,8 @@
 //! Two `rtc` peers on a simulated network that can mark CE, bleach ECT(1), delay and drop
 //! packets; virtual time, no sockets.
 
+mod jsep_common;
+
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use rtc::interceptor::{EcnInitiation, Registry};
@@ -326,6 +328,16 @@ impl World {
     /// The offerer (`sender`) sends video to the answerer (`receiver`), connected over host
     /// candidates. Returns the world, the sender and the offer's SDP.
     fn connected(sender: Setup, receiver: Setup) -> Result<(Self, RTCRtpSenderId, String)> {
+        Self::connected_with(sender, receiver, |answer| answer)
+    }
+
+    /// [`connected`](Self::connected), the answer's SDP passed through `edit` before the
+    /// offerer applies it.
+    fn connected_with(
+        sender: Setup,
+        receiver: Setup,
+        edit: fn(String) -> String,
+    ) -> Result<(Self, RTCRtpSenderId, String)> {
         let mut world = World {
             peers: [
                 Peer::new("10.0.0.1:5000", sender)?,
@@ -367,6 +379,7 @@ impl World {
         world.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
+        let answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(edit(answer.sdp))?;
         world.peers[0].pc.set_remote_description(now, answer)?;
         for i in 0..2 {
             let candidate = world.peers[i].candidate()?;
@@ -822,11 +835,11 @@ fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
     let (world, _, offer) = World::connected(ECN_CCFB, ECN_CCFB)?;
     assert!(offer.contains("a=rtcp-fb:* ack ccfb"), "{offer}");
     assert!(
-        offer.contains("a=ecn-capable-rtp: rtp,leap\r\n"),
+        offer.contains("a=ecn-capable-rtp: rtp,leap ect=1\r\n"),
         "the offer states its methods, the configured one first:\n{offer}"
     );
     assert!(
-        world.answer.contains("a=ecn-capable-rtp: rtp\r\n"),
+        world.answer.contains("a=ecn-capable-rtp: rtp ect=1\r\n"),
         "the answer picks one:\n{}",
         world.answer
     );
@@ -836,9 +849,12 @@ fn ecn_is_negotiated_with_ecn_capable_rtp_beside_ccfb() -> Result<()> {
         ..ECN_CCFB
     };
     let (mut world, sender, offer) = World::connected(leap, ECN_CCFB)?;
-    assert!(offer.contains("a=ecn-capable-rtp: leap,rtp\r\n"), "{offer}");
     assert!(
-        world.answer.contains("a=ecn-capable-rtp: leap\r\n"),
+        offer.contains("a=ecn-capable-rtp: leap,rtp ect=1\r\n"),
+        "{offer}"
+    );
+    assert!(
+        world.answer.contains("a=ecn-capable-rtp: leap ect=1\r\n"),
         "the answerer takes the offer's first method it implements:\n{}",
         world.answer
     );
@@ -890,5 +906,64 @@ fn without_signalling_ecn_is_used_on_ccfb_alone() -> Result<()> {
     let media = media_on_the_wire(&world, ssrc);
     let from = marked_from(&media).expect("media is sent ECT(1)");
     assert!(from.wrapping_sub(FIRST_SEQ) < 50);
+    Ok(())
+}
+
+/// RFC 6679 section 6.1: `ect=` is the receiver's preference, "with "0" being implied if not
+/// specified", and "It is RECOMMENDED that ECT(0) marking be used": a peer whose answer states
+/// no `ect=` gets ECT(0) on the wire; this endpoint's own descriptions ask for ECT(1), the L4S
+/// identifier its RFC 8888 receiver reports for (above).
+#[test]
+fn a_peer_that_states_no_ect_value_gets_ect0() -> Result<()> {
+    let (mut world, sender, _) = World::connected_with(ECN_CCFB, ECN_CCFB, |answer| {
+        answer.replace(" ect=1\r\n", "\r\n")
+    })?;
+    let (ssrc, _) = world.sender_stream(sender);
+    world.send_media(sender, Duration::from_millis(500))?;
+    let marks: Vec<_> = world
+        .sent
+        .iter()
+        .filter(|(from_sender, rtp, ecn)| {
+            *from_sender && rtp.is_some_and(|(s, _)| s == ssrc) && ecn.is_some()
+        })
+        .map(|(_, _, ecn)| *ecn)
+        .collect();
+    assert!(!marks.is_empty(), "media is marked");
+    assert!(
+        marks.iter().all(|e| *e == Some(EcnCodepoint::Ect0)),
+        "{marks:?}"
+    );
+    Ok(())
+}
+
+/// RFC 6679 section 7.2: one RTP session initiates ECN one way. A BUNDLE group is one session:
+/// an offer whose bundled sections list different initiation methods is answered with the
+/// tagged section's method in every section.
+#[test]
+fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
+    let section = |mid: &str, methods: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\n{}a=mid:{mid}\na=sendrecv\n\
+             a=rtpmap:96 VP8/90000\na=rtcp-fb:* ack ccfb\na=ecn-capable-rtp: {methods}\n",
+            jsep_common::TRANSPORT
+        )
+    };
+    let offer = jsep_common::crlf(&format!(
+        "{}a=group:BUNDLE 0 1\n{}{}",
+        jsep_common::SESSION,
+        section("0", "leap,rtp"),
+        section("1", "rtp")
+    ));
+    let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
+    pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+    )?;
+    let answer = pc.create_answer(None)?.sdp;
+    let methods: Vec<&str> = answer
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=ecn-capable-rtp:"))
+        .collect();
+    assert_eq!(methods, vec![" leap ect=1", " leap ect=1"], "{answer}");
     Ok(())
 }

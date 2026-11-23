@@ -2454,12 +2454,16 @@ impl RTCPeerConnection {
     /// `a=ecn-capable-rtp` with a method this endpoint implements, and the peer reads the
     /// marks. With `with_ecn_without_signalling` the configured initiation, whatever the
     /// descriptions say. `None` without ECN; the statistics also need `ack ccfb` to mark.
-    pub(super) fn negotiated_ecn(&self, mid: Option<&str>) -> Option<interceptor::EcnInitiation> {
+    pub(super) fn negotiated_ecn(&self, mid: Option<&str>) -> Option<ecn::NegotiatedEcn> {
         if !self.setting_engine.ecn {
             return None;
         }
         if self.setting_engine.ecn_without_signalling {
-            return Some(self.setting_engine.ecn_initiation);
+            // What browsers that send L4S do: ECT(1) on `ack ccfb` alone.
+            return Some(ecn::NegotiatedEcn {
+                initiation: self.setting_engine.ecn_initiation,
+                codepoint: shared::EcnCodepoint::Ect1,
+            });
         }
         let mid = mid?;
         let local = self.current_local_description.as_ref()?;

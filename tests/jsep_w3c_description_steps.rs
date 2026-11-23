@@ -264,3 +264,48 @@ fn codec_preferences_match_capabilities_by_their_format_parameters() -> TestResu
     )?;
     Ok(())
 }
+
+/// W3C webrtc-pc 4.4.1.1: the constructor sets [[Configuration]] through "set the
+/// configuration", so it validates the ICE servers as `setConfiguration` does: a STUN URL
+/// with a query is refused by both, and both keep at most the first 32 servers.
+#[test]
+fn the_constructor_and_set_configuration_validate_servers_alike() -> TestResult {
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    use rtc::peer_connection::transport::RTCIceServer;
+    let with_servers = |urls: Vec<&str>| {
+        RTCConfigurationBuilder::new()
+            .with_ice_servers(
+                urls.into_iter()
+                    .map(|url| RTCIceServer {
+                        urls: vec![url.to_owned()],
+                        ..Default::default()
+                    })
+                    .collect(),
+            )
+            .build()
+    };
+    let bad = || with_servers(vec!["stun:stun.example.org:3478?transport=udp"]);
+    let built = RTCPeerConnectionBuilder::new()
+        .with_configuration(bad())
+        .build(Instant::now());
+    assert!(built.is_err(), "the constructor refuses it");
+    let mut pc = default_peer()?;
+    assert!(
+        pc.set_configuration(bad()).is_err(),
+        "setConfiguration refuses it"
+    );
+
+    let many: Vec<String> = (0..40)
+        .map(|i| format!("stun:stun{i}.example.org:3478"))
+        .collect();
+    let many = || with_servers(many.iter().map(String::as_str).collect());
+    let pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(many())
+        .build(Instant::now())?;
+    assert_eq!(pc.get_configuration().ice_servers().len(), 32);
+    let mut pc = default_peer()?;
+    pc.set_configuration(many())?;
+    assert_eq!(pc.get_configuration().ice_servers().len(), 32);
+    Ok(())
+}
