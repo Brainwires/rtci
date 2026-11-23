@@ -253,6 +253,15 @@ pub enum Slot {
     /// application, so that what it holds back while a stream is paused, and the sequence
     /// numbers it closes up afterwards, are all any other interceptor sees.
     PauseResume = 14_200,
+    /// [`RedAudioInterceptor`](crate::RedAudioInterceptor) (RFC 2198): wraps a local audio
+    /// stream's packets in RED and takes received RED packets apart.
+    ///
+    /// **Both legs.** *Write:* application-ward of the NACK responder and the FEC encoder, so
+    /// the RED packet is what they buffer and protect. *Read:* after the receiver report and
+    /// the FEC decoder, which count and repair the RED packets that arrived, and before the
+    /// NACK generator, which then does not ask for a packet RED recovered. (Declared after
+    /// [`Slot::Custom`] so that variant keeps its discriminant.)
+    Redundancy = 10_450,
 }
 
 impl Slot {
@@ -281,6 +290,7 @@ impl Slot {
             Self::ExtendedReports => 10_100,
             Self::TradeoffNotifications => 14_100,
             Self::PauseResume => 14_200,
+            Self::Redundancy => 10_450,
             Self::Custom(position) => position,
         }
     }
