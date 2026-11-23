@@ -13,16 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5029 | 24 | 7 | 2 | 13 | 5 | 0 | 666 | 5746 |
+| MUST | 5034 | 24 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
 | SHOULD | 851 | 0 | 0 | 14 | 57 | 42 | 4 | 326 | 1294 |
 | MAY | 445 | 0 | 0 | 20 | 34 | 108 | 0 | 171 | 778 |
 | PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
-| all | 6393 | 24 | 7 | 38 | 109 | 156 | 4 | 1164 | 7895 |
-| MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
-| SHOULD | 850 | 0 | 0 | 14 | 57 | 43 | 4 | 326 | 1294 |
-| MAY | 443 | 0 | 0 | 20 | 33 | 109 | 0 | 171 | 776 |
-| PROC | 61 | 0 | 0 | 2 | 3 | 1 | 0 | 0 | 67 |
-| all | 6387 | 25 | 7 | 37 | 102 | 158 | 4 | 1163 | 7883 |
+| all | 6398 | 24 | 7 | 37 | 105 | 156 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -31,14 +26,10 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5080 | 5060 | 99.6 | 5029 | 99.0 |
+| MUST | 5080 | 5065 | 99.7 | 5034 | 99.1 |
 | SHOULD | 968 | 851 | 87.9 | 851 | 87.9 |
 | MAY | 607 | 445 | 73.3 | 445 | 73.3 |
 | PROC | 76 | 68 | 89.5 | 68 | 89.5 |
-| MUST | 5080 | 5065 | 99.7 | 5033 | 99.1 |
-| SHOULD | 968 | 850 | 87.8 | 850 | 87.8 |
-| MAY | 605 | 443 | 73.2 | 443 | 73.2 |
-| PROC | 67 | 61 | 91.0 | 61 | 91.0 |
 
 ## Per file
 

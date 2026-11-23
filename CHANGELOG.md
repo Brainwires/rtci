@@ -454,81 +454,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
 
-### Features
-
-- **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
-  (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
-  RFC6544-9.2-1 `tested`.
-
-- **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
-  DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
-  both without parameters and with NULL parameters"); only the NULL form was before. The
-  providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
-  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
-  `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
-  comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
-  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
-  Row RFC5246-4.7-1 `tested`
-  (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
-
-- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
-  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
-  1.3 (it was `handshake_failure` / `certificate_required`). New
-  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
-  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
-  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
-- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
-  engine change; new tests, each checked by mutation in the container.
-  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
-    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
-    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
-    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
-    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
-    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
-    dependency structure (RFC 5583 section 5.2.1).
-  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
-    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
-    received gracefully, SRTP re-keying, PR-SCTP).
-  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
-    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
-    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
-    `n/a`: it binds the script-facing API.
-  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
-
-- **interceptors**: a packet only overtaken is not a loss for congestion control
-  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
-  received" as lost at once and forgot it, so the later feedback reporting it received matched
-  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
-  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
-  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
-  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
-  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
-  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
-
-- **interceptors**: the pacer bounds its queue time and never refuses a packet
-  (`conf/pacer-1-queue-time`).
-  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
-    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
-    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
-    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
-    replaced by `forced`.
-  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
-    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
-    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
-    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
-    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
-    25 s; now 2 s. The application sees that its source is above the target in the target
-    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
-  - Audio streams are not queued behind video: their packets leave when written and are
-    charged to the budget.
-  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
-    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
-    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
-  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
-    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
-    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
-    every time. Without it they come from `rand`, as before.
-
 ### Behaviour changes
 
 - **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
@@ -682,6 +607,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, keep it open instead of closing it.
 
 ### Features
+
+- **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
+  (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
+  RFC6544-9.2-1 `tested`.
+
+- **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
+  DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
+  both without parameters and with NULL parameters"); only the NULL form was before. The
+  providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
+  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
+  `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
+  comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
+  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
+  Row RFC5246-4.7-1 `tested`
+  (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
+
+- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
+  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
+  1.3 (it was `handshake_failure` / `certificate_required`). New
+  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
+  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
+  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
+- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
+  engine change; new tests, each checked by mutation in the container.
+  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
+    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
+    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
+    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
+    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
+    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
+    dependency structure (RFC 5583 section 5.2.1).
+  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
+    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
+    received gracefully, SRTP re-keying, PR-SCTP).
+  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
+    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
+    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
+    `n/a`: it binds the script-facing API.
+  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
+
+- **interceptors**: a packet only overtaken is not a loss for congestion control
+  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
+  received" as lost at once and forgot it, so the later feedback reporting it received matched
+  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
+  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
+  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
+  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
+  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
+  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
+
+- **interceptors**: the pacer bounds its queue time and never refuses a packet
+  (`conf/pacer-1-queue-time`).
+  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
+    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
+    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
+    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
+    replaced by `forced`.
+  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
+    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
+    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
+    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
+    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
+    25 s; now 2 s. The application sees that its source is above the target in the target
+    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
+  - Audio streams are not queued behind video: their packets leave when written and are
+    charged to the budget.
+  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
+    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
+    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
+  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
+    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
+    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
+    every time. Without it they come from `rand`, as before.
 
 - **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
   SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:

@@ -8,11 +8,8 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5080.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5060 of 5080 (99.6 %).
-- Tested as the default (`tested`): 5029 of 5080 (99.0 %); `setting`: 24; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 20: 2 untested, 13 partial, 5 missing, 0 violated.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5065 of 5080 (99.7 %).
-- Tested as the default (`tested`): 5033 of 5080 (99.1 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Tested as the default (`tested`): 5034 of 5080 (99.1 %); `setting`: 24; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 15: 1 untested, 9 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
@@ -23,8 +20,7 @@ Verdicts and classes are defined in `RULES.md`.
 | D | not implemented | 7 | 5 |
 | E | cannot be met or observed inside this engine | 10 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 51 | 35 |
-| all | | 47 | 33 |
+| all | | 46 | 33 |
 
 ## What 100 % takes
 
@@ -103,8 +99,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-37 rows: 10 of class B, 11 of class C, 3 of class D, 6 of class E, 7 of class F. The note of each row says how it was closed.
-41 rows: 10 of class B, 14 of class C, 3 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+42 rows: 10 of class B, 15 of class C, 3 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
