@@ -188,6 +188,12 @@ for (const codec of ["VP8", "VP9", "H264", "H265", "AV1"]) {
   });
 }
 
+// The wire payload types both ways (interop-peer's `wireRtp`, counted from the SRTP header
+// before the engine takes RED apart) are recorded as the `wire-payload-types` annotation of
+// the result. Chromium and WebKit offer RED (RFC 2198) after Opus and the engine's answer keeps
+// that order; RFC 3264 6.1 has each side send its peer's preferred format and libwebrtc sends
+// RED only when it precedes the codec it protects, so Opus, not RED, crosses the wire both
+// ways.
 test("reflect audio Opus", async ({ page }) => {
   const r = await page.evaluate(async (ws) => {
     const s = await Interop.open(ws, { media: "reflect", audio: true });
@@ -199,11 +205,29 @@ test("reflect audio Opus", async ({ page }) => {
       const r = await Interop.inbound(s.pc, "audio");
       return r && r.packetsReceived > 100 && r;
     }, 20000, "100 audio packets").catch(async (e) => ({ error: String(e), last: await Interop.inbound(s.pc, "audio") }));
+    const report = await s.report().catch((e) => ({ error: String(e) }));
+    const payloadTypes = (sdp) => {
+      const section = sdp.split(/\r?\nm=/).find((m) => /^(m=)?audio /.test(m)) || "";
+      const pt = (name) => (section.match(new RegExp(`a=rtpmap:(\\d+) ${name}/`, "i")) || [])[1];
+      return { opus: pt("opus"), red: pt("red"), order: (section.match(/^(?:m=)?audio \S+ \S+ (.*)/) || [])[1] };
+    };
+    const offer = payloadTypes(s.pc.localDescription.sdp);
+    const answer = payloadTypes(s.pc.remoteDescription.sdp);
     s.close();
-    return rtp;
+    return { ...rtp, wire: report.wireRtp, offer, answer };
   }, WS);
+  test.info().annotations.push({
+    type: "wire-payload-types",
+    description: JSON.stringify({ wire: r.wire, offer: r.offer, answer: r.answer }),
+  });
   expect(r.error, JSON.stringify(r)).toBeUndefined();
   expect(r.mimeType.toLowerCase()).toBe("audio/opus");
+  expect(r.wire, JSON.stringify(r)).toBeTruthy();
+  // The browser sends with the answer's numbering (RFC 3264 5.1), the engine with the offer's.
+  const opusIn = Number(r.answer.opus);
+  const opusOut = Number(r.offer.opus);
+  expect(Object.keys(r.wire.received).map(Number), JSON.stringify(r)).toEqual([opusIn]);
+  expect(Object.keys(r.wire.sent).map(Number), JSON.stringify(r)).toEqual([opusOut]);
 });
 
 // The engine sends transport-wide congestion control feedback only for a stream whose section

@@ -595,6 +595,86 @@ fn an_sdes_rtp_stream_id_item_places_a_layer_whose_packets_carry_no_rid() {
     assert!(opened.is_empty(), "{opened:?}");
 }
 
+/// The transceivers a single video packet with the MID `mid` and the RtpStreamId header
+/// extension element `rid` opened a track on.
+fn opened_by_rid(
+    mut transceivers: Vec<RTCRtpTransceiverInternal>,
+    mid: &'static str,
+    rid: &'static str,
+) -> Vec<(usize, u32)> {
+    const RID_ID: u8 = 10;
+    let mut media_engine = media_engine();
+    media_engine
+        .update_header_extension(
+            u16::from(RID_ID),
+            ::sdp::extmap::SDES_RTP_STREAM_ID_URI,
+            RtpCodecKind::Video,
+        )
+        .expect("negotiate the RtpStreamId extension");
+    let mut stats = RTCStatsAccumulator::new();
+    let mut ctx = InterceptorHandlerContext {
+        is_dtls_handshake_complete: true,
+        ..Default::default()
+    };
+    let mut chain = Registry::new().build();
+    let mut handler = InterceptorHandler::new(
+        &mut ctx,
+        &mut transceivers,
+        &media_engine,
+        &mut chain,
+        &mut stats,
+        None,
+    );
+    let mut header = rtp::Header {
+        version: 2,
+        payload_type: VP8,
+        sequence_number: 1,
+        timestamp: 1000,
+        ssrc: 7000,
+        ..Default::default()
+    };
+    header
+        .set_extension(MID_ID, Bytes::from_static(mid.as_bytes()))
+        .expect("extension");
+    header
+        .set_extension(RID_ID, Bytes::from_static(rid.as_bytes()))
+        .expect("extension");
+    handler
+        .handle_read(TaggedRTCMessageInternal {
+            now: Instant::now(),
+            transport: TransportContext::default(),
+            message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp::Packet {
+                header,
+                payload: Bytes::from_static(&[1, 2, 3]),
+            }))),
+        })
+        .expect("handle_read");
+    while handler.poll_read().is_some() {}
+    let mut opened = vec![];
+    while let Some(event) = handler.poll_event() {
+        if let RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnTrack(
+            RTCTrackEvent::OnOpen(init),
+        )) = event.event
+        {
+            opened.push((init.receiver_id.0, init.ssrc));
+        }
+    }
+    opened
+}
+
+/// RFC 8852 section 3: RtpStreamId values "MUST be restricted to" ASCII letters and digits.
+/// A header extension element that is one names the layer; an element that is not (here
+/// with a hyphen) is not used, even where a layer was given that very name.
+#[test]
+fn an_rtp_stream_id_element_that_is_not_alphanumeric_names_no_layer() {
+    assert_eq!(
+        opened_by_rid(vec![simulcast_layer("1", "h")], "1", "h"),
+        vec![(0, 7000)]
+    );
+    let opened = opened_by_rid(vec![simulcast_layer("1", "h-1")], "1", "h-1");
+    assert!(opened.is_empty(), "{opened:?}");
+}
+
 /// A DTMF event (RFC 4733 section 2.1: on the audio stream's SSRC) that arrives before any
 /// audio does not make `telephone-event` the stream's codec: the track opens on the first
 /// audio packet, with the audio codec.

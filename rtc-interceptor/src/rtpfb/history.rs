@@ -27,6 +27,11 @@ pub struct History {
     lost_feedback: u64,
     /// Sent packets no feedback ever described, released without a verdict.
     unreported: u64,
+    /// Packets a feedback reported as not received, held back for one more feedback: a
+    /// packet only overtaken on the path arrives after the report that named it missing.
+    pending_losses: Vec<u64>,
+    /// Packets reported as not received and then as received by a later feedback.
+    recovered: u64,
 }
 
 /// A sent packet and whether any feedback has described it yet.
@@ -118,7 +123,26 @@ impl History {
         received_at: Instant,
         acknowledgement: Acknowledgement,
     ) -> Option<Duration> {
-        let id = *self.twcc_index.get(&acknowledgement.sequence_number)?;
+        let Some(&id) = self.twcc_index.get(&acknowledgement.sequence_number) else {
+            if acknowledgement.arrived {
+                log::debug!(
+                    "rtpfb: transport-wide {} reported received matches no packet held (released, or never sent)",
+                    acknowledgement.sequence_number
+                );
+            }
+            return None;
+        };
+        if acknowledgement.arrived
+            && self
+                .packets
+                .get(&id)
+                .is_some_and(|sent| sent.covered && !sent.report.arrived)
+        {
+            log::debug!(
+                "rtpfb: transport-wide {} reported received after a feedback reported it lost",
+                acknowledgement.sequence_number
+            );
+        }
         self.apply(received_at, id, acknowledgement)
     }
 
@@ -129,9 +153,29 @@ impl History {
         ssrc: u32,
         acknowledgement: Acknowledgement,
     ) -> Option<Duration> {
-        let id = *self
+        let Some(&id) = self
             .ssrc_sequence_index
-            .get(&(ssrc, acknowledgement.sequence_number))?;
+            .get(&(ssrc, acknowledgement.sequence_number))
+        else {
+            if acknowledgement.arrived {
+                log::debug!(
+                    "rtpfb: {ssrc:#x} {} reported received matches no packet held (released, or never sent)",
+                    acknowledgement.sequence_number
+                );
+            }
+            return None;
+        };
+        if acknowledgement.arrived
+            && self
+                .packets
+                .get(&id)
+                .is_some_and(|sent| sent.covered && !sent.report.arrived)
+        {
+            log::debug!(
+                "rtpfb: {ssrc:#x} {} reported received after a feedback reported it lost",
+                acknowledgement.sequence_number
+            );
+        }
         self.apply(received_at, id, acknowledgement)
     }
 
@@ -207,24 +251,51 @@ impl History {
     /// Loss feedback alone does not advance the reporting window; losses are emitted when a later
     /// packet is reported as arrived.
     pub fn take_reports(&mut self) -> Vec<PacketReport> {
+        let mut reports = Vec::new();
+        // The losses the previous call held back: lost after all, or received meanwhile. A
+        // packet received late is reported as received but without its arrival time: it
+        // counts for the loss fraction, while the delay model, which reads reports in send
+        // order, does not see an old packet among new ones.
+        for id in std::mem::take(&mut self.pending_losses) {
+            if let Some(sent) = self.release(id) {
+                let mut packet = sent.report;
+                if packet.arrived {
+                    self.recovered += 1;
+                    packet.arrival = None;
+                }
+                reports.push(packet);
+            }
+        }
         let Some(highest) = self.highest_acknowledged else {
-            return Vec::new();
+            return reports;
         };
         if self.next_to_report > highest {
-            return Vec::new();
+            return reports;
         }
-
-        let mut reports = Vec::new();
         for id in self.next_to_report..=highest {
-            if let Some(sent) = self.packets.remove(&id) {
-                let packet = sent.report;
-                if packet.is_twcc {
-                    self.twcc_index.remove(&packet.twcc_sequence_number);
-                }
-                self.ssrc_sequence_index
-                    .remove(&(packet.ssrc, packet.rtp_sequence_number));
+            // Held only while a later feedback can still name it: a transmission superseded
+            // under the same number never will.
+            let held = self.packets.get(&id).is_some_and(|sent| {
+                let packet = &sent.report;
+                let reachable = if packet.is_twcc {
+                    self.twcc_index.get(&packet.twcc_sequence_number) == Some(&id)
+                } else {
+                    self.ssrc_sequence_index
+                        .get(&(packet.ssrc, packet.rtp_sequence_number))
+                        == Some(&id)
+                };
+                sent.covered && !packet.arrived && reachable
+            });
+            if held {
+                // A loss is final only when the next feedback has not reported it received
+                // either (libwebrtc's TransportFeedbackAdapter keeps a lost packet "because
+                // it might be reported as received by a later feedback").
+                self.pending_losses.push(id);
+                continue;
+            }
+            if let Some(sent) = self.release(id) {
                 if sent.covered {
-                    reports.push(packet);
+                    reports.push(sent.report);
                 } else {
                     self.unreported += 1;
                 }
@@ -233,6 +304,29 @@ impl History {
         self.next_to_report = highest + 1;
 
         reports
+    }
+
+    /// Take a packet out of the history and its indexes.
+    fn release(&mut self, id: u64) -> Option<Sent> {
+        let sent = self.packets.remove(&id)?;
+        let packet = &sent.report;
+        if packet.is_twcc && self.twcc_index.get(&packet.twcc_sequence_number) == Some(&id) {
+            self.twcc_index.remove(&packet.twcc_sequence_number);
+        }
+        if self
+            .ssrc_sequence_index
+            .get(&(packet.ssrc, packet.rtp_sequence_number))
+            == Some(&id)
+        {
+            self.ssrc_sequence_index
+                .remove(&(packet.ssrc, packet.rtp_sequence_number));
+        }
+        Some(sent)
+    }
+
+    /// Packets reported as not received that a later feedback reported as received.
+    pub fn recovered(&self) -> u64 {
+        self.recovered
     }
 
     /// Drop records of packets sent before `cutoff` that were never acknowledged.
@@ -363,7 +457,8 @@ mod tests {
         assert_eq!(0, history.unreported());
     }
 
-    /// A packet the receiver itself reports as not received is still a loss.
+    /// A packet the receiver itself reports as not received is still a loss, once the next
+    /// feedback has not reported it received either.
     #[test]
     fn a_packet_reported_not_received_is_a_loss() {
         let now = Instant::now();
@@ -373,15 +468,43 @@ mod tests {
         history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
         history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
 
-        let reports = history.take_reports();
+        let arrived = |reports: Vec<PacketReport>| -> Vec<bool> {
+            reports.iter().map(|report| report.arrived).collect()
+        };
+        assert_eq!(vec![true, true], arrived(history.take_reports()));
         assert_eq!(
-            vec![false, true, true],
-            reports
-                .iter()
-                .map(|report| report.arrived)
-                .collect::<Vec<_>>()
+            vec![false],
+            arrived(history.take_reports()),
+            "the next feedback's turn"
         );
         assert_eq!(0, history.unreported());
+        assert_eq!(0, history.recovered());
+    }
+
+    /// A packet only overtaken on the path is reported as not received by the feedback that
+    /// covered the packets after it, and as received by the next. It is not a loss
+    /// (libwebrtc's `TransportFeedbackAdapter` keeps a lost packet "because it might be
+    /// reported as received by a later feedback"): the history holds a reported loss for one
+    /// more feedback, and reports the packet as received, without an arrival time for the
+    /// delay model, which reads reports in send order.
+    #[test]
+    fn a_packet_reported_lost_and_then_received_is_not_a_loss() {
+        let now = Instant::now();
+        let mut history = history_with_three_packets(now);
+
+        history.on_twcc_feedback(now, Acknowledgement::lost(0));
+        history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
+        assert_eq!(1, history.take_reports().len(), "1, and 0 held back");
+        history.on_twcc_feedback(
+            now,
+            Acknowledgement::received(0, Some(Duration::from_millis(50)), Ecn::NotEct),
+        );
+        history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
+        let reports = history.take_reports();
+        assert_eq!(2, reports.len());
+        assert!(reports.iter().all(|report| report.arrived), "{reports:?}");
+        assert_eq!(None, reports[0].arrival, "0 is out of send order now");
+        assert_eq!(1, history.recovered());
     }
 
     /// The feedback packet count is how a lost feedback packet is told from a quiet receiver
@@ -480,7 +603,9 @@ mod tests {
         history.on_twcc_feedback(now, Acknowledgement::lost(0));
         history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
         history.on_twcc_feedback(now, Acknowledgement::received(2, None, Ecn::NotEct));
-        assert_eq!(3, history.take_reports().len());
+        // 1 and 2, then the loss of 0 a feedback later.
+        assert_eq!(2, history.take_reports().len());
+        assert_eq!(1, history.take_reports().len());
         assert!(history.take_reports().is_empty());
         assert!(history.is_empty(), "and released");
     }

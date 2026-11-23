@@ -757,6 +757,19 @@ impl RTCPeerConnection {
         transports.active_id() == transports.data_transport_id()
     }
 
+    /// Has the handlers work off what applying a description left them, so that the events it
+    /// causes are queued now, behind the description's own, and not at some later poll
+    /// behind whatever the application did in between (W3C webrtc-pc: closing a channel's
+    /// underlying data transport and closing a transport each "queue a task", in that order
+    /// after the task that set the description). What `poll_event` does once its backlog is
+    /// empty.
+    pub(crate) fn settle_description_events(&mut self) {
+        if self.pump_events() {
+            self.pump_reads(None);
+            self.pump_events();
+        }
+    }
+
     /// Returns whether any handler raised an event during the sweep, of any transport.
     fn pump_events(&mut self) -> bool {
         let mut raised = false;

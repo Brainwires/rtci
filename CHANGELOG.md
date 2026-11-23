@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **pacer**: media the congestion controller's target has no room for is dropped by default
+  (`conf/pacer-2-combined`, `QueueOverflow::Drop`). `conf/pacer-1-queue-time` raised the pacing
+  rate above the target to keep the queue under 2 s and released the oldest packet of a full
+  queue over the budget, so a source writing above the target put all of it on the path: in the
+  test environment (`testenv_impairment::gcc_follows_a_rate_limited_link`, netem 600 kbit/s with
+  a 200-packet queue, a 2.4 Mbit/s source) the link's queue overflowed and GCC's target fell to
+  its 100 kbit/s floor and stayed there, against 490 to 570 kbit/s before. Now a packet that has
+  waited the queue time limit, or the oldest one of a full queue, is dropped
+  (`PacerInterceptor::dropped`), and nothing leaves above the target; the receiver counts those
+  packets as lost, which they are. libwebrtc's behaviour is
+  `PacerBuilder::with_queue_overflow(QueueOverflow::Drain)` /
+  `DefaultInterceptorOptions::pacer_queue_overflow` (exported as `PacerQueueOverflow`), for an
+  encoder that follows the target. `tests/gcc_rate_limited_link_rtc2rtc.rs` is the test
+  environment's case on the virtual clock (three seeds, 500 to 590 kbit/s held; 100 kbit/s with
+  `Drain`). `PacerInterceptor::forced` now also counts the overdue packets `Drain` releases.
+
+- **interceptors**: the NACK generator asks for a lost packet while it is missing (a round trip
+  between requests) instead of giving it up after ten requests or two seconds
+  (`conf/gcc-1-cap-recovery`). The limits came with v0.22.0+brainwires.6 (`ee4217b2`) and froze
+  calls: when a path drops to 300 kbit/s the sender loses some fifty video packets before its
+  estimate falls, their retransmissions crowd the same full queue, and packets given up while
+  the receiver's sample builder still waited for them left the picture frozen for 5.9 to 6.8 s
+  until a key frame (ParolNet's `m1::the_estimate_follows_a_cap_that_comes_and_goes`, and
+  `tests/capacity_cap_video_rtc2rtc.rs` on six of six seeds). The limits stay available:
+  `with_max_nacks_per_packet(NACK_SUGGESTED_MAX_NACKS_PER_PACKET)`,
+  `with_max_packet_age(Some(NACK_SUGGESTED_MAX_PACKET_AGE))`; a signalled `rtx-time` still ends
+  the requests. `NACK_DEFAULT_MAX_NACKS_PER_PACKET` and `NACK_DEFAULT_MAX_PACKET_AGE` are renamed
+  `NACK_SUGGESTED_*` (they are not the defaults).
+- **interceptors**: the NACK responder holds its retransmissions to the congestion controller's
+  target (RFC 4588 section 7), read from `Attribute::TargetBitrateChanged` on the read leg:
+  `NackResponderBuilder::with_rate_limit(RetransmissionRateLimit)`. The default, `UpToTarget`
+  (libwebrtc's rule), keeps the retransmissions alone under the target over the last second;
+  `WithinTarget` is the RFC's form (they take what the original packets leave of it);
+  `Unlimited` is the earlier behaviour. Without a congestion controller nothing is held back.
+  Measured by `tests/capacity_cap_video_rtc2rtc.rs`: unlimited, about 300 retransmissions (five
+  times the link) of which three in four were dropped at the bottleneck; `UpToTarget`, 66 of which
+  12; the RFC form, too few to repair with while the encoder sat at the controller's floor (a
+  2.7 to 3.1 s freeze).
+
 - **media**: open media MUST rows (`conf/media-25-payload-rows`).
   - One SSRC across clock rates (the default since `conf/media-23-clock-rate-default`):
     sender reports extrapolate their RTP timestamp at the clock rate of the payload type sent
@@ -45,6 +84,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RFC6184-7.2.2-1 stays `partial`, owner decision).
   - FLEXFEC03-4.2-17 and FLEXFEC03-5.1-5 are `n/a`: superseded by RFC 8627. Open MUST rows
     67 to 45.
+- **jsep**: follow-ups to the payload type stack (`conf/jsep-74-followups`). The `a=extmap`
+  lines of negotiated header extensions are written in id order; they were written in the
+  order of a hash map, different from one run to the next (the ids and URIs are unchanged).
+  The engine's answer to every recorded offer
+  (`tests/fixtures/browser-sdp/`: Chromium, Firefox, WebKit, webrtc-rs 0.17; 38 offers) is
+  pinned line by line in `tests/fixtures/browser-sdp-answers/`
+  (`tests/browser_offer_answers_pinned.rs`; `RTC_UPDATE_ANSWER_FIXTURES=1` rewrites them):
+  compared with the train head before the payload type stack (`conf/train-11` daf14463), the
+  38 answers are the same line for line, the payload type numbers included, once the `a=extmap`
+  lines are in id order. The umbrella RFC9429-5.1-1 is `setting` (every child is `tested`,
+  `setting` or `conflict`).
+
+- **jsep**: the events a description causes are queued when it is applied, in the W3C order,
+  data channels included (`conf/jsep-73-dc-error-order`). W3C webrtc-pc 4.4.1.4 fires
+  `signalingstatechange`, then `error` at each channel of errorList (a channel that got no id),
+  then the mutes, the stream changes and the track events; what the description closes is
+  announced in tasks queued after that ("When an RTCDataChannel object's underlying data
+  transport has been closed, the user agent MUST queue a task": `error` if it closed with an
+  error, then `close`). Changed: (1) `OnSctpTransportStateChange(Closed)` for an answer that
+  closes the SCTP association (a rejected data section, `a=sctp-port:0`) was queued before
+  `OnSignalingStateChangeEvent`; it now follows the description's events and the `OnClose` of
+  the association's channels. (2) Those channel events (`OnClose`; `OnError` then `OnClose`
+  for a channel that never opened) were produced by a later `poll_event`, behind whatever was
+  queued in between (the next description's `signalingstatechange`, say); they are now queued
+  with the description, channel by channel in the order the channels were created. An
+  application that relied on the SCTP event arriving first has to wait for it after the
+  channels'. Row WEBRTC-4.4.1.4-91 `tested`.
+- **sctp**: assigning data channel ids with every id of this side's parity taken no longer
+  overflows (a panic in debug builds for the DTLS client). The update of the data max message
+  size on answers and provisional answers is `conf/audit-5-sctp-w3c`'s
+  (`SctpTransport::update_max_message_size`, `update_sctp_max_message_size`); this branch
+  extends it to a provisional answer that initiates the association (W3C: "If description
+  initiates the establishment of a new SCTP association ... or an SCTP association already
+  exists"): `RTCSctpTransport::max_message_size` was null until the final answer then. Test:
+  `tests/sctp_transport_by_description.rs::the_max_message_size_follows_every_answer_and_provisional_answer`. The umbrella WEBRTC-4.5.1-1 is `tested`.
+
+- **jsep**: an answer that rejects every m= section closes the transports
+  (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state
+  stable: the transports "no longer referenced by a non-stopped transceiver" are closed, "the
+  RTCDtlsTransports and their associated RTCIceTransports. This results in events firing on
+  these objects in a queued task"; RFC 9429 section 5.11: the ICE components of a rejected
+  section are discarded "unless a non-rejected "m=" section is bundled with" it. With one
+  transport this was only remembered (the next offer restarted ICE on the same agent and asked
+  for a new DTLS association), with no close and no event; with several, the layout of such an
+  answer was not applied at all. Now each transport is closed when the answer is applied, local
+  or remote: its DTLS `statechange` to "closed", then its ICE one (the legacy variants for the
+  default transport and `OnTransportEvent` with the transport's ids), after the description's
+  own events; the connection's states follow (`iceGatheringState`, `iceConnectionState` and
+  `connectionState` "new"), the ICE agent is closed and nothing more is sent. The last
+  transport is replaced in its place by a new one, not started: a new ICE agent with
+  credentials of its own, a new DTLS transport (a new `a=tls-id`, the same certificate), new
+  transport ids, the ICE role undetermined. The next description that sets a section up
+  starts it as the first was (no ICE restart: `a=ice-ufrag` / `a=ice-pwd` are a new
+  generation's). The local candidates the application added are the new agent's too, unless
+  `with_discard_local_candidates_during_ice_restart(true)`; they are announced again when the
+  application adds them for the new generation. Applications that waited for the state events
+  of an ICE restart after such an exchange now see a closed transport and then a new one
+  connecting. Row WEBRTC-4.4.1.4-82 `tested`.
+
+- **jsep**: payload types are kept per direction of each m= section
+  (`conf/jsep-71-pt-numbering`). RFC 3264 section 5.1: "the answer might indicate different
+  payload type numbers for the same codecs, in which case, the offerer MUST send with the
+  payload type numbers from the answer"; section 6.1: the answerer "MUST use the payload type
+  numbers from the offer, even if they differ from those in the answer"; RFC 9429 sections 5.10
+  and 5.11: "The payload type mapping from the remote description is used to determine payload
+  types for the outgoing RTP streams". A sender's codecs (`RTCRtpSender::get_parameters`, what
+  `write_rtp` accepts and the streams the interceptors are bound with) are now the remote
+  section's, with its numbers, RTX `apt` and RED's encodings in that numbering; the receiver's
+  (`RTCRtpReceiver::get_parameters`, demultiplexing, RTX and RED association, statistics) and
+  the formats of this endpoint's own descriptions keep the numbers its descriptions gave them:
+  a remote answer's formats are entered under the payload types of the local offer, not the
+  answer's, and later offers keep them (RFC 3264 section 8.3.2). Behaviour changes only towards
+  a peer that numbers a format otherwise than this endpoint: before, the first remote
+  description's numbers were used for both directions and for every later description, so an
+  answer that renumbered a format was sent to correctly, and what the peer then sent (with the
+  offer's numbers) was read under the wrong ones; a later offer of the peer's with new numbers
+  was answered and sent to with the old ones. New:
+  `SettingEngineBuilder::with_own_payload_types_in_answers(true)` has an answer number the
+  formats as this endpoint registered them (RFC 3264 section 6.1 has "SHOULD" for the offer's
+  numbers, which stays the default). Not covered: `configure_ulpfec` takes one RED and one
+  ULPFEC payload type for both directions, and an `a=rid` `pt=` list is compared by number with
+  this endpoint's formats. Row RFC3264-5.1-8 `tested`; RFC3264-6.1-23 now has a test that sends.
+
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
   m= sections" binds the writer; the same paragraph assigns the attribute to the TRANSPORT
@@ -331,7 +453,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `n/a`: it binds the script-facing API.
   - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
 
+- **interceptors**: a packet only overtaken is not a loss for congestion control
+  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
+  received" as lost at once and forgot it, so the later feedback reporting it received matched
+  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
+  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
+  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
+  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
+  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
+  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
+
+- **interceptors**: the pacer bounds its queue time and never refuses a packet
+  (`conf/pacer-1-queue-time`).
+  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
+    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
+    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
+    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
+    replaced by `forced`.
+  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
+    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
+    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
+    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
+    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
+    25 s; now 2 s. The application sees that its source is above the target in the target
+    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
+  - Audio streams are not queued behind video: their packets leave when written and are
+    charged to the budget.
+  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
+    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
+    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
+  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
+    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
+    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
+    every time. Without it they come from `rand`, as before.
+
 ### Behaviour changes
+
+- **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
+  (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
+  before, whenever RED was negotiated: a 24 kbit/s audio-only call went from 38.5 to 64.5
+  kbit/s on the wire (hosted run 45240105038), against every browser that negotiates RED.
+  RFC 3264 sections 5.1 and 6.1 list an m= line's formats "in order of preference" and have
+  the sender "use the format with the highest preference"; RFC 2198 section 5 reads a
+  section that leads with `red` as the sender sending "redundancy by default"; RFC 8854
+  recommends Opus's in-band FEC for Opus (section 4.1) and FEC only for the loss observed or
+  on the application's request (section 8); libwebrtc sends RED only when it is "negotiated
+  before the actual codec" (`webrtc_voice_engine.cc`, `SetSendCodecs`). Chromium and WebKit
+  list RED after Opus in their offers and in their answers to this engine, so neither side
+  sends RED in a call between them by default.
+  - New `AudioRedundancy { WhenPreferred, Always, Never }` (`rtc-interceptor`, default
+    `WhenPreferred`), `RedAudioBuilder::with_audio_redundancy`,
+    `SettingEngineBuilder::with_audio_redundancy` and
+    `configure_audio_redundancy_with(registry, AudioRedundancy)` (new API).
+    `WhenPreferred`: RED when the remote description lists it ahead of the stream's codec;
+    `Always`: RED whenever negotiated (the jsep17 behaviour); `Never`: the codec only.
+    Received RED is taken apart in every mode. RED stays offered and answered as before.
+  - A sender's streams are bound to the interceptors with their section's formats in the
+    remote m= line's order (`StreamInfo::section_mime_types`); the sender's negotiated codec
+    list itself is unchanged.
+  - The interop peer reports the RTP payload types and octets on the wire in each direction
+    (`wireRtp`), and the "reflect audio Opus" cell records them and asserts Opus both ways.
+    The Chromium and WebKit answer fixtures of "Rust offers media" are refreshed from train
+    11's matrix (they now answer the engine's RED, after Opus).
 
 - **peer_connection** (audit-5, W3C webrtc 4.4.1.4): an answer or a provisional answer that
   continues the SCTP association updates `maxMessageSize` and what the association lets this
@@ -464,6 +647,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ice::Agent::get_restart_generation_local_candidates`. Tests:
   `tests/ice_restart_answerer_candidates.rs`,
   `agent_open_rows_test.rs::test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it`.
+
+- **pacer**: media is no longer held behind a probe cluster's padding
+  (`conf/early-2-late-last-packet`). The NACK responder writes a cluster as a burst of
+  padding-only packets when the congestion controller asks for it, and the pacer queued them
+  in line with the media, so every packet the application wrote during the cluster waited for
+  all of it: about 180 ms for a 6000-octet cluster at 200 kbit/s. Padding-only packets (RFC
+  3550 section 5.1) now wait in a queue of their own and leave only when no other packet waits;
+  media written during a cluster leaves first, at the cluster's rate and with its mark, as in
+  libwebrtc's pacer. This was the intermittent failure of
+  `early_media_rtc2rtc::simulcast_streams_an_offer_asks_for_are_received_before_the_answer`
+  (about 1 run in 25): the five-second application-limited probe fell on the last writes of the
+  low layer, whose last one or two packets left 140 to 180 ms after they were written, past the
+  test's 100 ms settle (`media_leaves_ahead_of_queued_padding`). With the queue time bound of
+  `conf/pacer-1-queue-time` (`conf/pacer-2-combined`): the order of service is audio, then other
+  media, then padding; padding never counts toward raising the pacing rate and is never released
+  over the budget, and padding older than the bound is sent late rather than dropped (each
+  holds an RTX sequence number, so a dropped one would read as loss at the receiver). A padding
+  queue at the queue limit discards the arrival (`PacerInterceptor::padding_discarded`)
+  (`padding_never_raises_the_pacing_rate`, `padding_older_than_the_queue_time_limit_waits_for_spare_budget`).
+- **nack**: what the NACK responder makes on the read leg (a retransmission a NACK asks for, a
+  probe cluster's padding) is due at once: `poll_timeout` returns the instant it was made while
+  it waits. A driver reads after it writes (`poll_write`, `poll_event`, `poll_read`, then
+  `poll_timeout` and sleep), so these packets waited for whatever woke the driver next; in the
+  failing run above a cluster asked for at 6053 ms left at 6096 ms, with the application's next
+  write (`a_retransmission_a_nack_asks_for_is_due_at_once`,
+  `the_padding_of_a_probe_cluster_is_due_at_once`).
+- **interceptors**: what any interceptor makes on the read leg for the write leg is due at once
+  (`conf/pacer-2-combined`). An audit of every interceptor that writes while reading found four
+  that left the packet for whatever woke the driver next: the NACK responder (a retransmission,
+  a probe cluster's padding), the RTCP session (the Early SR answering an RTCP-SR-REQ, RFC 6051
+  section 3.2) and the pause/resume interceptor (PAUSED or REFUSED answering a PAUSE, RFC 7728).
+  The chain now takes what its read leg made down the write leg after each read and reports it
+  from `poll_timeout` until `poll_write` takes it (`rtc-interceptor/tests/read_work_is_due.rs`,
+  over the reusable `tests/wakeup_common` helper). At the peer connection,
+  `tests/driver_wakeup_rtc2rtc.rs` runs a call (ICE, DTLS, SCTP, a data channel, video with
+  RTX, RTCP, probes) under a driver that checks at every sleep that nothing waits in
+  `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
+  ICE, DTLS and SCTP handlers left nothing waiting.
 
 ### Publishing readiness (crates.io)
 

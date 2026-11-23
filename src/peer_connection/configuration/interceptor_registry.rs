@@ -330,7 +330,7 @@ impl TransportHandles {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DefaultInterceptorOptions {
     /// Which congestion control feedback is offered and accepted. The default,
@@ -346,6 +346,13 @@ pub struct DefaultInterceptorOptions {
     /// default) or holds every packet for its next timeout. See
     /// [`PacerBuilder::with_immediate_release`](interceptor::PacerBuilder::with_immediate_release).
     pub pacer_immediate_release: bool,
+    /// What the pacer does with media the congestion controller's target has no room for
+    /// (the application writing above the target for longer than the pacer's 2 s queue time
+    /// limit): dropped by default, so nothing leaves above the target;
+    /// [`PacerQueueOverflow::Drain`](interceptor::PacerQueueOverflow::Drain) sends it above
+    /// the target as libwebrtc's pacer does. See
+    /// [`PacerBuilder::with_queue_overflow`](interceptor::PacerBuilder::with_queue_overflow).
+    pub pacer_queue_overflow: interceptor::PacerQueueOverflow,
     /// Whether the path is probed for capacity above the target with short clusters of
     /// packets, as libwebrtc does. `true` by default: RFC 8836 section 2 asks that a
     /// congestion controller "adapt as quickly as possible to initial network conditions"
@@ -368,6 +375,35 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Where the RTCP sessions draw their random numbers from (the report interval's
+    /// variation, RFC 3550 section 6.3.1; the dither of early feedback, RFC 4585 section
+    /// 3.5.2; their SSRC and CNAME): the provider's `random()` when one is given, as ICE, DTLS
+    /// and SCTP do with the setting engine's provider; `rand` otherwise. Give the same provider
+    /// as [`SettingEngineBuilder::with_crypto_provider`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_crypto_provider)
+    /// for a run that a seeded provider makes the same every time (without it the report
+    /// times, and with them everything the reports drive, differ from run to run).
+    pub rtcp_random: Option<std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+}
+
+impl std::fmt::Debug for DefaultInterceptorOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultInterceptorOptions")
+            .field("congestion_feedback", &self.congestion_feedback)
+            .field("unnegotiated_tmmbr", &self.unnegotiated_tmmbr)
+            .field("pacer_immediate_release", &self.pacer_immediate_release)
+            .field("pacer_queue_overflow", &self.pacer_queue_overflow)
+            .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field(
+                "circuit_breaker_packet_size",
+                &self.circuit_breaker_packet_size,
+            )
+            .field(
+                "rtcp_random",
+                &self.rtcp_random.as_ref().map(|provider| provider.name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -376,9 +412,11 @@ impl Default for DefaultInterceptorOptions {
             congestion_feedback: CongestionFeedback::default(),
             unnegotiated_tmmbr: false,
             pacer_immediate_release: true,
+            pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             bandwidth_probing: true,
             rapid_synchronisation: true,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            rtcp_random: None,
         }
     }
 }
@@ -471,6 +509,7 @@ pub fn register_default_interceptors_with_options(
     let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();
     transports.insert_congestion_control(0, handle.clone());
     let pacer_immediate_release = options.pacer_immediate_release;
+    let pacer_queue_overflow = options.pacer_queue_overflow;
     let registry = registry
         .with_per_rtp_session(
             Slot::CongestionControl,
@@ -497,11 +536,12 @@ pub fn register_default_interceptors_with_options(
                 PacerBuilder::new()
                     .with_target_bitrate(initial_target)
                     .with_immediate_release(pacer_immediate_release)
+                    .with_queue_overflow(pacer_queue_overflow)
                     .build()
             }),
         );
 
-    let registry = configure_rtcp_reports(registry);
+    let registry = configure_rtcp_reports_from(registry, options.rtcp_random.as_ref());
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
@@ -1695,13 +1735,27 @@ pub(crate) fn create_stream_info(
 /// ([`RedAudioInterceptor`](interceptor::RedAudioInterceptor), [`Slot::Redundancy`]): a local
 /// audio stream whose section negotiated a RED format with its own encoding as primary and
 /// redundancy (`a=fmtp:63 111/111`, the default codecs' form) is sent as RED with a copy of
-/// the previous packet, and received RED packets are taken apart into their primary encoding,
-/// with lost packets recovered from the next packet's copy. The peer connection installs it in
-/// any chain that does not fill the slot.
+/// the previous packet when the remote description lists RED ahead of the stream's codec
+/// ([`AudioRedundancy::WhenPreferred`](interceptor::AudioRedundancy::WhenPreferred), RFC 3264
+/// sections 5.1 and 6.1), and received RED packets are taken apart into their primary
+/// encoding, with lost packets recovered from the next packet's copy.
 pub fn configure_audio_redundancy(registry: Registry) -> Registry {
+    configure_audio_redundancy_with(registry, interceptor::AudioRedundancy::default())
+}
+
+/// [`configure_audio_redundancy`], with `audio_redundancy` deciding when a local stream is
+/// sent in RED. The peer connection installs it, with
+/// [`SettingEngineBuilder::with_audio_redundancy`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_audio_redundancy),
+/// in any chain that does not fill the slot.
+pub fn configure_audio_redundancy_with(
+    registry: Registry,
+    audio_redundancy: interceptor::AudioRedundancy,
+) -> Registry {
     registry.with(
         Slot::Redundancy,
-        interceptor::RedAudioBuilder::new().build(),
+        interceptor::RedAudioBuilder::new()
+            .with_audio_redundancy(audio_redundancy)
+            .build(),
     )
 }
 

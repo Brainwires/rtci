@@ -3,7 +3,9 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
+use rtc::interceptor::{
+    AudioRedundancy, Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket,
+};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -115,6 +117,14 @@ struct Peer {
 
 impl Peer {
     fn new(addr: &str, ssrc_per_clock_rate: bool) -> Result<Self> {
+        Self::with_audio_redundancy(addr, ssrc_per_clock_rate, AudioRedundancy::default())
+    }
+
+    fn with_audio_redundancy(
+        addr: &str,
+        ssrc_per_clock_rate: bool,
+        audio_redundancy: AudioRedundancy,
+    ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let tap = Tap::default();
@@ -132,6 +142,7 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_ssrc_per_clock_rate(ssrc_per_clock_rate)
+                    .with_audio_redundancy(audio_redundancy)
                     .build(),
             )
             .with_interceptor_registry(registry)
@@ -176,6 +187,8 @@ struct World {
     now: Instant,
     /// The headers of the RTP packets the first peer put on the wire.
     wire: Vec<Header>,
+    /// The size of each of those packets on the wire (the SRTP datagram), in step with `wire`.
+    wire_sizes: Vec<usize>,
     /// Sequence numbers of the first peer's RTP packets the network loses.
     lose: Vec<u16>,
 }
@@ -203,6 +216,7 @@ impl World {
                 {
                     let lost = self.lose.contains(&header.sequence_number);
                     self.wire.push(header);
+                    self.wire_sizes.push(data.len());
                     if lost {
                         continue;
                     }
@@ -281,13 +295,37 @@ impl World {
         edit: impl Fn(String) -> String,
         ssrc_per_clock_rate: bool,
     ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with_redundancy(
+            kind,
+            edit,
+            ssrc_per_clock_rate,
+            [AudioRedundancy::default(); 2],
+        )
+    }
+
+    /// [`Self::connected`], each peer built with `with_audio_redundancy` of `redundancy`
+    /// (the sender's first).
+    fn connected_with_audio_redundancy(
+        edit: impl Fn(String) -> String,
+        redundancy: [AudioRedundancy; 2],
+    ) -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_with_redundancy(RtpCodecKind::Audio, edit, false, redundancy)
+    }
+
+    fn connected_with_redundancy(
+        kind: RtpCodecKind,
+        edit: impl Fn(String) -> String,
+        ssrc_per_clock_rate: bool,
+        redundancy: [AudioRedundancy; 2],
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [
-                Peer::new("10.0.0.1:5000", ssrc_per_clock_rate)?,
-                Peer::new("10.0.0.2:5000", ssrc_per_clock_rate)?,
+                Peer::with_audio_redundancy("10.0.0.1:5000", ssrc_per_clock_rate, redundancy[0])?,
+                Peer::with_audio_redundancy("10.0.0.2:5000", ssrc_per_clock_rate, redundancy[1])?,
             ],
             now: Instant::now(),
             wire: Vec::new(),
+            wire_sizes: Vec::new(),
             lose: Vec::new(),
         };
         let transceiver = world.peers[0].pc.add_transceiver_from_kind(
@@ -342,6 +380,12 @@ impl World {
 
     /// Writes a packet with payload type `pt` on the sender's stream.
     fn send(&mut self, sender: RTCRtpSenderId, seq: u16, pt: u8) -> Result<()> {
+        self.send_sized(sender, seq, pt, 100)
+    }
+
+    /// Writes a packet with payload type `pt` and a payload of `size` octets on the sender's
+    /// stream, then lets 20 ms pass.
+    fn send_sized(&mut self, sender: RTCRtpSenderId, seq: u16, pt: u8, size: usize) -> Result<()> {
         let now = self.now;
         let ssrc = self.peers[0]
             .pc
@@ -369,7 +413,7 @@ impl World {
                 now,
                 rtc::rtp::Packet {
                     header,
-                    payload: Bytes::from(vec![0x10u8; 100]),
+                    payload: Bytes::from(vec![0x10u8; size]),
                 },
             )?;
         self.pump()?;
@@ -631,49 +675,207 @@ fn without_red(sdp: String) -> String {
     lines.join("\r\n") + "\r\n"
 }
 
-/// RFC 2198 with the default audio formats (RFC 8854 section 4.2): both peers offer and
-/// answer `red/48000/2` with Opus as primary and redundancy, so the sender's Opus packets go
-/// on the wire as RED packets (payload type 63) that also carry the packet before; the network
-/// loses one, and the receiving application still gets every Opus packet, the lost one
-/// recovered from the next packet's copy, with its sequence number and timestamp. A peer that
-/// does not answer RED gets plain Opus, and the loss stays a loss.
+/// The answer with its `red` format moved ahead of every other format on `m=audio`: a peer
+/// that prefers redundancy (RFC 3264 section 6.1, the answerer's order of preference).
+fn red_first(sdp: String) -> String {
+    let red = sdp.lines().find_map(|l| {
+        l.strip_prefix("a=rtpmap:")
+            .filter(|rest| rest.contains(" red/"))
+            .and_then(|rest| rest.split(' ').next())
+            .map(str::to_owned)
+    });
+    let Some(red) = red else {
+        return sdp;
+    };
+    let lines: Vec<String> = sdp
+        .lines()
+        .map(|l| {
+            if l.starts_with("m=audio ") {
+                let parts: Vec<&str> = l.split(' ').collect();
+                let mut out: Vec<&str> = parts[..3].to_vec();
+                out.push(&red);
+                out.extend(parts[3..].iter().filter(|part| **part != red));
+                out.join(" ")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    lines.join("\r\n") + "\r\n"
+}
+
+/// The first `m=audio` line's formats.
+fn audio_formats(sdp: &str) -> Vec<String> {
+    sdp.lines()
+        .find(|l| l.starts_with("m=audio "))
+        .map(|l| l.split(' ').skip(3).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// 24 kbit/s Opus in 20 ms packets: 60 octets of payload, 50 packets a second.
+const OPUS_24K_PAYLOAD: usize = 60;
+
+/// What a one-second, 24 kbit/s Opus call put on the wire with the sender's answer edited by
+/// `edit` and each peer's `with_audio_redundancy`, the packet with sequence number 4 lost:
+/// (the wire payload types, the media octets on the wire, what the receiving application got
+/// as (sequence number, timestamp, payload type)).
+type Call = (Vec<u8>, usize, Vec<(u16, u32, u8)>);
+
+fn opus_call(edit: impl Fn(String) -> String, redundancy: [AudioRedundancy; 2]) -> Result<Call> {
+    let (mut world, sender) = World::connected_with_audio_redundancy(edit, redundancy)?;
+    let local = world.peers[0].pc.local_description().expect("offer").sdp;
+    assert!(local.contains("a=rtpmap:63 red/48000/2\r\n"), "{local}");
+    assert!(local.contains("a=fmtp:63 111/111\r\n"), "{local}");
+    world.lose = vec![4];
+    for seq in 1..=50u16 {
+        world.send_sized(sender, seq, 111, OPUS_24K_PAYLOAD)?;
+    }
+    let on_wire: Vec<u8> = world.wire.iter().map(|h| h.payload_type).collect();
+    let octets: usize = world
+        .wire
+        .iter()
+        .zip(&world.wire_sizes)
+        .filter(|(h, _)| matches!(h.payload_type, 111 | 63))
+        .map(|(_, size)| size)
+        .sum();
+    let received = world.peers[1]
+        .read_rtp
+        .iter()
+        .map(|h| (h.sequence_number, h.timestamp, h.payload_type))
+        .collect();
+    Ok((on_wire, octets, received))
+}
+
+/// The answer the sender applied, edited by `edit`.
+fn answer_applied(edit: impl Fn(String) -> String) -> Result<String> {
+    let (world, _) = World::connected(RtpCodecKind::Audio, edit)?;
+    Ok(world.peers[0]
+        .pc
+        .remote_description()
+        .expect("answer")
+        .sdp
+        .clone())
+}
+
+/// The Opus packets 1 to 50 as the receiving application gets them, without `missing`.
+fn opus_packets_without(missing: &[u16]) -> Vec<(u16, u32, u8)> {
+    (1..=50u16)
+        .filter(|seq| !missing.contains(seq))
+        .map(|seq| (seq, u32::from(seq) * 960, 111))
+        .collect()
+}
+
+/// RFC 3264 sections 5.1 and 6.1: the formats of an m= line are "listed in order of
+/// preference", and the sender "SHOULD use the format with the highest preference". Both
+/// peers offer and answer RED after Opus (the default formats, Chromium's and WebKit's order),
+/// so the sender sends Opus: payload type 111 on the wire, the same octets as a call whose
+/// answer has no RED, and a loss stays a loss (Opus's in-band FEC is the codec's, RFC 8854
+/// section 4.1).
 #[test]
-fn opus_is_sent_in_red_and_a_lost_packet_is_recovered() -> Result<()> {
-    for red in [true, false] {
-        let (mut world, sender) = World::connected(
-            RtpCodecKind::Audio,
-            if red { |sdp| sdp } else { without_red },
-        )?;
-        let local = world.peers[0].pc.local_description().expect("offer").sdp;
-        assert!(local.contains("a=rtpmap:63 red/48000/2\r\n"), "{local}");
-        assert!(local.contains("a=fmtp:63 111/111\r\n"), "{local}");
-        world.lose = vec![4];
-        for seq in 1..=6u16 {
-            world.send(sender, seq, 111)?;
-        }
-        let on_wire: Vec<u8> = world.wire.iter().map(|h| h.payload_type).collect();
-        let received: Vec<(u16, u32, u8)> = world.peers[1]
-            .read_rtp
-            .iter()
-            .map(|h| (h.sequence_number, h.timestamp, h.payload_type))
-            .collect();
-        let expected: Vec<u16> = if red {
-            vec![1, 2, 3, 4, 5, 6]
+fn red_negotiated_after_opus_sends_opus_at_the_bitrate_of_a_call_without_red() -> Result<()> {
+    let answer = answer_applied(|sdp| sdp)?;
+    assert_eq!(audio_formats(&answer)[..2], ["111", "63"], "{answer}");
+    let default = [AudioRedundancy::default(); 2];
+    let (red_wire, red_octets, red_received) = opus_call(|sdp| sdp, default)?;
+    let (plain_wire, plain_octets, plain_received) = opus_call(without_red, default)?;
+    println!(
+        "24 kbit/s Opus, RED negotiated after Opus: {} octets/s on the wire ({:.1} kbit/s); \
+         without RED: {} octets/s ({:.1} kbit/s); ratio {:.3}",
+        red_octets,
+        red_octets as f64 * 8.0 / 1000.0,
+        plain_octets,
+        plain_octets as f64 * 8.0 / 1000.0,
+        red_octets as f64 / plain_octets as f64
+    );
+    assert_eq!(red_wire, vec![111; 50], "RED after Opus: Opus on the wire");
+    assert_eq!(plain_wire, vec![111; 50]);
+    assert_eq!(
+        red_octets, plain_octets,
+        "the same octets on the wire as a call without RED (ratio 1)"
+    );
+    assert_eq!(red_received, opus_packets_without(&[4]));
+    assert_eq!(plain_received, opus_packets_without(&[4]));
+    Ok(())
+}
+
+/// RFC 3264 section 6.1, RFC 2198 section 5: an answer that lists RED first prefers it, and
+/// the sender sends RED (payload type 63) carrying a copy of the packet before; the network
+/// loses one, and the receiving application still gets every Opus packet, the lost one
+/// recovered from the next packet's copy, with its sequence number and timestamp. The wire
+/// carries about twice the octets of the Opus call.
+#[test]
+fn red_first_in_the_answer_sends_red_and_recovers_a_lost_packet() -> Result<()> {
+    let default = [AudioRedundancy::default(); 2];
+    let (wire, octets, received) = opus_call(red_first, default)?;
+    let (_, plain_octets, _) = opus_call(without_red, default)?;
+    println!(
+        "24 kbit/s Opus, RED first in the answer: {} octets/s on the wire ({:.1} kbit/s); \
+         without RED: {} octets/s; ratio {:.3}",
+        octets,
+        octets as f64 * 8.0 / 1000.0,
+        plain_octets,
+        octets as f64 / plain_octets as f64
+    );
+    assert_eq!(wire, vec![63; 50], "RED first: RED on the wire");
+    assert_eq!(received, opus_packets_without(&[]), "the loss recovered");
+    assert!(
+        octets as f64 > 1.5 * plain_octets as f64,
+        "a copy of the packet before in each: {octets} vs {plain_octets}"
+    );
+    Ok(())
+}
+
+/// `with_audio_redundancy(Always)`, the application's request (RFC 8854 section 8): RED on
+/// the wire whatever the answer's order, and the loss recovered. `Never`: Opus even when the
+/// answer prefers RED.
+#[test]
+fn audio_redundancy_always_sends_red_in_any_order_and_never_sends_none() -> Result<()> {
+    for (policy, red_is_first, expected) in [
+        (AudioRedundancy::Always, false, 63u8),
+        (AudioRedundancy::Always, true, 63),
+        (AudioRedundancy::Never, true, 111),
+    ] {
+        let (wire, octets, received) = if red_is_first {
+            opus_call(red_first, [policy, AudioRedundancy::default()])?
         } else {
-            vec![1, 2, 3, 5, 6]
+            opus_call(|sdp| sdp, [policy, AudioRedundancy::default()])?
         };
-        assert_eq!(
-            on_wire,
-            vec![if red { 63 } else { 111 }; 6],
-            "red {red}: what the sender put on the wire"
+        println!(
+            "24 kbit/s Opus, {policy:?}, RED first: {red_is_first}: {} octets/s ({:.1} kbit/s)",
+            octets,
+            octets as f64 * 8.0 / 1000.0
         );
         assert_eq!(
+            wire,
+            vec![expected; 50],
+            "{policy:?}, RED first: {red_is_first}"
+        );
+        let missing: &[u16] = if expected == 63 { &[] } else { &[4] };
+        assert_eq!(
             received,
-            expected
-                .iter()
-                .map(|seq| (*seq, u32::from(*seq) * 960, 111))
-                .collect::<Vec<_>>(),
-            "red {red}: what the receiving application got"
+            opus_packets_without(missing),
+            "{policy:?}, RED first: {red_is_first}"
+        );
+    }
+    Ok(())
+}
+
+/// The setting is about sending: a receiver takes RED apart and recovers a loss whatever its
+/// own `with_audio_redundancy` (RFC 8854 section 7: an endpoint "MUST be able to receive and
+/// make use of" the FEC formats it indicated).
+#[test]
+fn received_red_is_decoded_in_every_mode() -> Result<()> {
+    for receiver in [
+        AudioRedundancy::WhenPreferred,
+        AudioRedundancy::Always,
+        AudioRedundancy::Never,
+    ] {
+        let (wire, _, received) = opus_call(|sdp| sdp, [AudioRedundancy::Always, receiver])?;
+        assert_eq!(wire, vec![63; 50], "receiver {receiver:?}");
+        assert_eq!(
+            received,
+            opus_packets_without(&[]),
+            "receiver {receiver:?}: every packet, the lost one recovered"
         );
     }
     Ok(())

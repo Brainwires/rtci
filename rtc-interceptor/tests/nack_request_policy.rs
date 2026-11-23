@@ -3,7 +3,8 @@
 //! with (`rtx-time`, RFC 4588 8.1).
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, NackGeneratorBuilder, NackResponderBuilder, Packet,
+    Attribute, AttributedPacket, Interceptor, NACK_SUGGESTED_MAX_NACKS_PER_PACKET,
+    NACK_SUGGESTED_MAX_PACKET_AGE, NackGeneratorBuilder, NackResponderBuilder, Packet,
     RTCPFeedback, Registry, RtcpSessionEvent, Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::transport_feedbacks::transport_layer_nack::{NackPair, TransportLayerNack};
@@ -91,18 +92,20 @@ fn count(asked: &[bool]) -> usize {
     asked.iter().filter(|asked| **asked).count()
 }
 
-/// RFC 4588 Appendix A: a receiver limits how often it asks for one packet. By default ten
-/// requests, then it gives the packet up.
+/// RFC 4588 Appendix A: a receiver may limit how often it asks for one packet. With a limit
+/// of ten requests (libwebrtc's), it gives the packet up after the tenth.
 #[test]
 fn a_lost_packet_is_asked_for_ten_times_then_given_up() {
-    let mut chain = generator(NackGeneratorBuilder::new().with_max_packet_age(None));
+    let mut chain = generator(
+        NackGeneratorBuilder::new().with_max_nacks_per_packet(NACK_SUGGESTED_MAX_NACKS_PER_PACKET),
+    );
     let asked = requests(&mut chain, Instant::now(), 50);
     assert_eq!(10, count(&asked));
     assert!(asked[..10].iter().all(|asked| *asked));
 }
 
-/// RFC 4588 6.3: a retransmission is asked for only while it can be of use. By default for
-/// two seconds; here half a second.
+/// RFC 4588 6.3: a retransmission is asked for only while it can be of use, as long as the
+/// application says: here half a second, then two seconds.
 #[test]
 fn a_lost_packet_is_not_asked_for_past_its_age() {
     let mut chain = generator(
@@ -115,9 +118,22 @@ fn a_lost_packet_is_not_asked_for_past_its_age() {
     assert_eq!(6, count(&asked));
     assert!(asked[..6].iter().all(|asked| *asked));
 
-    let mut chain = generator(NackGeneratorBuilder::new().with_max_nacks_per_packet(0));
+    let mut chain = generator(
+        NackGeneratorBuilder::new().with_max_packet_age(Some(NACK_SUGGESTED_MAX_PACKET_AGE)),
+    );
     let asked = requests(&mut chain, Instant::now(), 50);
-    assert_eq!(21, count(&asked), "the default: two seconds");
+    assert_eq!(21, count(&asked), "two seconds");
+}
+
+/// By default a lost packet is asked for, a round trip after each request, for as long as it
+/// is missing: the interceptor does not know how long the application waits for it (RFC 4588
+/// 6.3), and a packet given up while the application still waits leaves its picture frozen
+/// (`tests/capacity_cap_video_rtc2rtc.rs`).
+#[test]
+fn by_default_a_lost_packet_is_asked_for_while_it_is_missing() {
+    let mut chain = generator(NackGeneratorBuilder::new());
+    let asked = requests(&mut chain, Instant::now(), 50);
+    assert_eq!(50, count(&asked));
 }
 
 /// The limits can be lifted: the request repeats for as long as the packet is missing.

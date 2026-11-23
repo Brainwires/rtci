@@ -1,4 +1,4 @@
-# ICE and SCTP randomness audit
+# ICE, SCTP and RTCP randomness audit
 
 ## Scope
 
@@ -31,6 +31,15 @@
 | Retransmission counters, sequence arithmetic, and timers | Derived protocol state | Deterministic values derived from negotiated state and elapsed time; no random source is appropriate. |
 | `ParamRandom` | Peer-provided extension negotiation input | Parsed from the peer rather than generated locally. It is not an application randomness boundary. |
 | Unit-test packets and fixtures | Reproducible protocol inputs | Fixed constants remain intentional. Tests for generated values check invariants rather than depending on exact output. |
+
+## RTCP and the interceptors
+
+| Value | Security role | Source and decision |
+| --- | --- | --- |
+| RTCP report interval variation, early-feedback dither (RFC 3550 6.3.1, RFC 4585 3.5.2) | None; it desynchronises reporters | The RTCP session's `RtcpRandom`. The peer connection's fallback session (`configure_rtcp_reports_from`, installed when the registry has none) and the default set with `DefaultInterceptorOptions::rtcp_random` draw from the crypto provider's `random()`; the default set without it, and `configure_rtcp_reports`, from `rand`. A seeded provider in both the setting engine and `rtcp_random` makes a session's report times, and everything they drive, the same every run (`the_same_seed_gives_the_same_run`). |
+| RTCP session SSRC and CNAME (RFC 3550 8.1, RFC 7022) | Unique per session; the CNAME is not to be traceable | The same `RtcpRandom`. |
+| Report and feedback sender SSRCs of the interceptors (NACK generator, RFC 8888 sender, TWCC recorder, receiver report stream, REMB) | Identifiers, nothing secret | `rand`. They name packets and do not decide when anything is sent, so they do not change a run's course. |
+| XR receipt-time origin, FlexFEC / ULPFEC initial sequence number and timestamp, pause/resume fallback SSRC, NACK responder's RTX sequence start | Starting values (RFC 3550 5.1 asks for random initial values) | `rand`, unless configured. Values only. |
 
 ## Provider boundary decision
 
