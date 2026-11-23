@@ -16,6 +16,8 @@ use std::cell::Cell;
 thread_local! {
     /// Whether the next `World`'s peers run without the pacer.
     static WITHOUT_PACER: Cell<bool> = const { Cell::new(false) };
+    /// Whether the next `World`'s pacer drains above the target (`PacerQueueOverflow::Drain`).
+    static DRAIN: Cell<bool> = const { Cell::new(false) };
 }
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::Registry;
@@ -144,6 +146,9 @@ impl Peer {
         // The sweep's `RTC_CB_PACKET_SIZE=last-frames` runs RFC 8083 section 3's s.
         let mut options = DefaultInterceptorOptions::default();
         options.rtcp_random = Some(provider.clone());
+        if DRAIN.with(|d| d.get()) {
+            options.pacer_queue_overflow = rtc::interceptor::PacerQueueOverflow::Drain;
+        }
         if std::env::var("RTC_CB_PACKET_SIZE").as_deref() == Ok("last-frames") {
             options.circuit_breaker_packet_size = CircuitBreakerPacketSize::LastFrames;
         }
@@ -651,22 +656,26 @@ fn a_flow_far_above_the_tcp_rate_over_a_lossy_link_is_ceased() -> Result<()> {
     Ok(())
 }
 
-/// The pacer's queue time is bounded at 2 s (libwebrtc's expected queue length). A 2 Mbit/s
-/// source that ignores the target over a link that holds every datagram back by up to 40 ms,
-/// where the congestion
-/// controller settles under 1 Mbit/s: every packet leaves, the last one within about 2 s of its
-/// write, and none is refused (the pacer once refused packets at a full queue of 4096, and the
-/// receiver counted the holes as 4419 lost on a path that lost nothing).
+/// With `PacerQueueOverflow::Drain` (libwebrtc's pacer) the queue time is bounded at 2 s by
+/// pacing above the target. A 2 Mbit/s source that ignores the target over a link that holds
+/// every datagram back by up to 40 ms and has no capacity limit: every packet leaves, the last
+/// one within about 2 s of its write, and none is refused (the pacer once refused packets at a
+/// full queue of 4096, and the receiver counted the holes as 4419 lost). The default drops what
+/// the target has no room for instead; `tests/gcc_rate_limited_link_rtc2rtc.rs` is why.
 #[test]
-fn a_source_above_the_target_is_queued_two_seconds_at_most_and_loses_nothing() -> Result<()> {
+fn with_drain_a_source_above_the_target_is_queued_two_seconds_at_most_and_loses_nothing()
+-> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
+    DRAIN.with(|d| d.set(true));
     let outcome = run(
         RtpCodecKind::Video,
         Shape::Constant(2000),
         Link::jittered(40, 0.0),
         60,
         7,
-    )?;
+    );
+    DRAIN.with(|d| d.set(false));
+    let outcome = outcome?;
     println!("{outcome:?}");
     assert!(outcome.ceased.is_empty(), "{outcome:?}");
     assert_eq!(outcome.left, outcome.written, "{outcome:?}");

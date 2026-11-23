@@ -747,9 +747,11 @@ fn by_default_nothing_leaves_above_the_target_and_what_waited_the_bound_is_dropp
     }
     harness.advance_to(ms(20_000));
     let released = harness.released();
+    // At the target, one packet each 10 ms, from the first write until the queue is empty: the
+    // ten seconds of writes and the last two seconds' packets after them, 1200 in all.
     assert!(
-        (1000..=1010).contains(&released.len()),
-        "about half left (10 s at the target, the rest dropped): {}",
+        (1190..=1210).contains(&released.len()),
+        "12 s at the target, the rest dropped: {} left",
         released.len()
     );
     for pair in released.windows(2) {

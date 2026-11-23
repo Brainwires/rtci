@@ -264,12 +264,12 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
     let answer = world.pcs[1].create_answer(None)?;
     world.pcs[1].set_local_description(start, answer.clone())?;
     world.pcs[0].set_remote_description(start, answer)?;
-    for i in 0..2 {
+    for (i, addr) in addrs.iter().enumerate() {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "udp".to_owned(),
-                address: addrs[i].ip().to_string(),
-                port: addrs[i].port(),
+                address: addr.ip().to_string(),
+                port: addr.port(),
                 component: 1,
                 ..Default::default()
             },
