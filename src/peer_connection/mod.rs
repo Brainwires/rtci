@@ -2847,7 +2847,10 @@ impl RTCPeerConnection {
     /// peer-reflexive candidate the ICE agent learned from a connectivity check is not in the
     /// description and is not listed (webrtc-pc 5.6: "will not expose peer reflexive
     /// candidates since they are not in the remote description").
-    pub(crate) fn remote_description_candidates(&self) -> Vec<transport::RTCIceCandidate> {
+    pub(crate) fn remote_description_candidates(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Vec<transport::RTCIceCandidate> {
         let Some(parsed) = self
             .pending_remote_description
             .as_ref()
@@ -2858,7 +2861,13 @@ impl RTCPeerConnection {
         };
         let mut seen: Vec<&str> = vec![];
         let mut candidates = vec![];
+        let transports = &self.pipeline_context.transports;
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            // The sections of the transport `on` (each transport has candidates of its own,
+            // RFC 9429 section 5.2.1).
+            if get_mid_value(media).is_some_and(|mid| transports.transport_id_for(mid) != on) {
+                continue;
+            }
             for value in media
                 .attributes
                 .iter()
@@ -2885,17 +2894,24 @@ impl RTCPeerConnection {
 
     /// W3C `RTCIceTransport.getLocalParameters()`: the ICE parameters of the local description
     /// (pending, else current), `None` while there is none. Read from the description's first
-    /// media section, the section of the one (BUNDLE) transport.
-    pub(crate) fn local_description_ice_parameters(&self) -> Option<transport::RTCIceParameters> {
+    /// media section on the transport `on`.
+    pub(crate) fn local_description_ice_parameters(
+        &self,
+        on: handler::transport_set::TransportId,
+    ) -> Option<transport::RTCIceParameters> {
         let parsed = self
             .pending_local_description
             .as_ref()
             .or(self.current_local_description.as_ref())?
             .parsed
             .as_ref()?;
+        let transports = &self.pipeline_context.transports;
         let (ufrag, pwd) = parsed
             .media_descriptions
-            .first()
+            .iter()
+            .find(|media| {
+                get_mid_value(media).is_none_or(|mid| transports.transport_id_for(mid) == on)
+            })
             .map(|media| media_ice_credentials(parsed, media))?;
         Some(transport::RTCIceParameters {
             username_fragment: ufrag?.to_owned(),
@@ -3018,12 +3034,15 @@ impl RTCPeerConnection {
                 local.as_ref(),
             );
             if id != self.pipeline_context.transports.default_id() {
-                return self.with_transport(id, |pc| pc.add_other_local_candidate(local_candidate));
+                return self
+                    .with_transport(id, |pc| pc.add_local_candidate_on_default(local_candidate));
             }
         }
         self.add_local_candidate_on_default(local_candidate)
     }
 
+    /// `add_local_candidate` on the active transport (the default one, unless the candidate
+    /// is for another).
     fn add_local_candidate_on_default(
         &mut self,
         local_candidate: RTCIceCandidateInit,

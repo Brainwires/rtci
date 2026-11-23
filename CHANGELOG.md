@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection** (mt-4): transport identity in the API, for connections with several
+  transports.
+  - `RTCPeerConnectionIceEvent` and `RTCPeerConnectionIceErrorEvent` have an
+    `ice_transport: Option<RTCTransportId>` field: a struct literal needs it (or
+    `..Default::default()`).
+  - The variants that name no transport (`OnIceTransportStateChange`,
+    `OnIceGathererStateChange`, `OnSelectedCandidatePairChange`, `OnIceCandidatePair{Add,
+    Nominate,Remove}`, `OnDtlsTransportStateChange`, `OnDtlsTransportError`) are fired for
+    the default transport only; with several transports the other transports' candidate pair
+    events and DTLS states used to come through them unnamed.
+  - `iceGatheringState` and `OnIceGatheringStateChangeEvent` are the aggregate of every
+    transport's gathering state (W3C 4.3.2), and the null `icecandidate` comes once every
+    transport has finished; they were the first transport's.
+  - The statistics report has a `transport` object per transport (transport 0 keeps its
+    name); RTP stream and codec objects name the transport of their section.
+
 - **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
   draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
   - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
@@ -1662,6 +1678,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **Transport identity in the API** (mt-4; W3C webrtc-pc 4.3.2, 5.5, 5.6, webrtc-stats 7.1).
+  - `RTCPeerConnectionEvent::OnTransportEvent(RTCTransportEvent)`: every transport's ICE
+    `statechange`, `gatheringstatechange`, `selectedcandidatepairchange`, candidate pair
+    events and DTLS `statechange` / `error`, with the ids of its ICE and DTLS transports.
+  - `RTCPeerConnection::dtls_transports()` and `dtls_transport_by_id(id)` give the handles;
+    each `RTCIceTransport` reports its own remote candidates and local parameters.
+  - Local candidates and end-of-candidates indications name their transport
+    (`ice_transport`); a transport other than the default one gathers through the same path
+    as the default (its candidates' statistics, generations and server URLs included).
+  - The connection's gathering state aggregates the transports (W3C 4.3.2).
+  - `getStats`: a `transport` object per transport with its own candidate pairs and
+    candidates, each RTP stream's `transportId` the transport of its section.
+  - The browser scenario "unbundled: max-compat without a BUNDLE group" checks both of
+    Rust's transports report DTLS "connected" by `OnTransportEvent` and have a `transport`
+    stats object with a selected pair.
 - **Several transports in one peer connection** (mt-2; RFC 9429 sections 4.1.1, 5.2.1, 5.3.1,
   RFC 9143 section 7, RFC 8835 section 4.2, RFC 8834 section 4.4). An m= section outside a
   BUNDLE group runs on a transport of its own: its own ICE agent and credentials, candidates,

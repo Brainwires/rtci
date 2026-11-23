@@ -22,8 +22,11 @@ use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::state::ice_connection_state::RTCIceConnectionState;
+use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::ice::candidate_pair::RTCIceCandidatePair;
+use crate::peer_connection::transport::ice::state::RTCIceTransportState;
 use shared::TransportContext;
 use std::collections::HashMap;
 
@@ -41,6 +44,40 @@ pub(crate) struct TransportBundle {
     pub(crate) ice_handler_context: IceHandlerContext,
     pub(crate) dtls_handler_context: DtlsHandlerContext,
     pub(crate) srtp_handler_context: SrtpHandlerContext,
+    /// What the application has been told about this transport.
+    pub(crate) announced: TransportAnnounced,
+}
+
+/// What the application has been told about one transport's states (W3C webrtc-pc 5.5, 5.6:
+/// each `RTCIceTransport` and `RTCDtlsTransport` fires its own events).
+#[derive(Debug)]
+pub(crate) struct TransportAnnounced {
+    pub(crate) ice: RTCIceTransportState,
+    pub(crate) selected_pair: Option<RTCIceCandidatePair>,
+    pub(crate) dtls: RTCDtlsTransportState,
+    /// The gatherer state last announced. The field on the ICE transport can run ahead of it:
+    /// `create_offer` with an ICE restart moves it to "gathering" for the description it
+    /// generates, before the restart is applied.
+    pub(crate) gathering: RTCIceGatheringState,
+    /// The username fragment of the ICE generation whose gathering was started last.
+    pub(crate) gathering_ufrag: Option<String>,
+    /// The local candidates announced in an `icecandidate` event, with the username fragment
+    /// of the generation they were announced for (W3C 5.6: candidates are surfaced per
+    /// generation; RFC 8838 section 9 ties a trickled candidate to its generation).
+    pub(crate) announced_candidates: Vec<(String, String)>,
+}
+
+impl Default for TransportAnnounced {
+    fn default() -> Self {
+        Self {
+            ice: RTCIceTransportState::New,
+            selected_pair: None,
+            dtls: RTCDtlsTransportState::New,
+            gathering: RTCIceGatheringState::New,
+            gathering_ufrag: None,
+            announced_candidates: vec![],
+        }
+    }
 }
 
 /// The transports of a peer connection; never empty.
@@ -75,6 +112,7 @@ impl TransportSet {
                 ice_handler_context,
                 dtls_handler_context,
                 srtp_handler_context,
+                announced: TransportAnnounced::default(),
             }],
             next: 1,
             by_mid: HashMap::new(),
@@ -241,6 +279,7 @@ impl TransportSet {
             ice_handler_context,
             dtls_handler_context,
             srtp_handler_context,
+            announced: TransportAnnounced::default(),
         });
         id
     }
@@ -328,6 +367,42 @@ impl TransportSet {
     }
 }
 
+impl super::PipelineContext {
+    /// Has the pipeline's handlers act on transport `id` (the default one when `id` is not in
+    /// the set), its statistics included.
+    pub(crate) fn activate_transport(&mut self, id: TransportId) {
+        self.transports.set_active(id);
+        self.sync_transport_stats();
+    }
+
+    /// Has the statistics the handlers update be the active transport's.
+    pub(crate) fn sync_transport_stats(&mut self) {
+        let active = self.transports.active_id();
+        self.stats.activate_transport(active.0);
+    }
+
+    /// Takes transport `id` out of the set, with its statistics, and returns it.
+    pub(crate) fn remove_transport(&mut self, id: TransportId) -> Option<TransportBundle> {
+        let bundle = self.transports.remove(id)?;
+        self.sync_transport_stats();
+        self.stats.retire_transport(id.0);
+        Some(bundle)
+    }
+
+    /// Tells the statistics which transport each m= section is on.
+    pub(crate) fn describe_section_transports(&mut self) {
+        let sections: Vec<(String, usize)> = self
+            .transports
+            .by_mid
+            .iter()
+            .filter(|(_, id)| self.transports.index(**id).is_some())
+            .map(|(mid, id)| (mid.clone(), id.0))
+            .collect();
+        let default = self.transports.default_id().0;
+        self.stats.set_section_transports(&sections, default);
+    }
+}
+
 /// W3C webrtc-pc 4.3.4 `RTCIceConnectionState`: the aggregate of the ICE transports' states,
 /// for a connection that is not closed.
 pub(crate) fn aggregate_ice_connection_state(
@@ -357,6 +432,32 @@ pub(crate) fn aggregate_ice_connection_state(
     } else {
         // An `Unspecified` state, which no transport reports.
         states.into_iter().next().unwrap_or(New)
+    }
+}
+
+/// W3C webrtc-pc 4.3.2 `RTCIceGatheringState`: the aggregate of the ICE transports' gatherer
+/// states.
+pub(crate) fn aggregate_gathering_state(
+    states: impl IntoIterator<Item = RTCIceGatheringState>,
+) -> RTCIceGatheringState {
+    use RTCIceGatheringState::*;
+    let mut states = states.into_iter().peekable();
+    if states.peek().is_none() {
+        // "... or there are no transports."
+        return New;
+    }
+    let states: Vec<RTCIceGatheringState> = states.collect();
+    if states.contains(&Gathering) {
+        // "Any of the RTCIceTransports are in the gathering state."
+        Gathering
+    } else if states.iter().all(|s| *s == Complete) {
+        // "At least one RTCIceTransport exists, and all RTCIceTransports are in the complete
+        // gathering state."
+        Complete
+    } else {
+        // "Any of the RTCIceTransports are in the new gathering state and none of the
+        // transports are in the gathering state."
+        New
     }
 }
 
@@ -413,6 +514,14 @@ impl TransportSet {
                     .ice_transport
                     .ice_connection_state
             })
+            .collect()
+    }
+
+    /// Every transport's gatherer state, as announced.
+    pub(crate) fn gathering_states(&self) -> Vec<RTCIceGatheringState> {
+        self.bundles
+            .iter()
+            .map(|bundle| bundle.announced.gathering)
             .collect()
     }
 
@@ -494,6 +603,20 @@ mod tests {
         assert_eq!(aggregate(&[New, Closed]), New);
         assert_eq!(aggregate(&[Connected, New]), Checking);
         assert_eq!(aggregate(&[]), New);
+    }
+
+    /// W3C 4.3.2: the connection's gathering state is the aggregate of every transport's.
+    #[test]
+    fn the_gathering_state_aggregates_every_transport() {
+        use RTCIceGatheringState::*;
+        let aggregate =
+            |states: &[RTCIceGatheringState]| aggregate_gathering_state(states.iter().copied());
+        assert_eq!(aggregate(&[]), New);
+        assert_eq!(aggregate(&[Complete, Gathering]), Gathering);
+        assert_eq!(aggregate(&[New, Gathering]), Gathering);
+        assert_eq!(aggregate(&[Complete, Complete]), Complete);
+        assert_eq!(aggregate(&[Complete, New]), New);
+        assert_eq!(aggregate(&[New]), New);
     }
 
     /// W3C 4.3.3: the connection state is the aggregate of every ICE and DTLS transport's.

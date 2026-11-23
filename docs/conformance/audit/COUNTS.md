@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4307 | 238 | 280 | 132 | 22 | 611 | 5590 |
+| MUST | 4308 | 238 | 280 | 131 | 22 | 611 | 5590 |
 | SHOULD | 668 | 82 | 78 | 76 | 6 | 327 | 1237 |
 | MAY | 391 | 33 | 36 | 128 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5424 | 356 | 397 | 339 | 28 | 1106 | 7650 |
+| all | 5425 | 356 | 397 | 338 | 28 | 1106 | 7650 |
 
 ## Per file
 
@@ -306,7 +306,7 @@ is a procedure step without a keyword.
 | `w3c-webrtc-extensions.md` | MUST | 57 | 1 | 1 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
 | `w3c-webrtc-extensions.md` | MAY | 0 | 0 | 0 | 1 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 779 | 17 | 53 | 20 | 0 | 60 | 929 |
+| `w3c-webrtc-pc.md` | MUST | 780 | 17 | 53 | 19 | 0 | 60 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 1 | 0 | 0 | 5 | 10 |
 | `w3c-webrtc-pc.md` | MAY | 3 | 2 | 0 | 0 | 0 | 13 | 18 |
 | `w3c-webrtc-priority.md` | MUST | 13 | 0 | 0 | 1 | 0 | 0 | 14 |

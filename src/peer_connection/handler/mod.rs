@@ -9,8 +9,8 @@ pub(crate) mod srtp;
 pub(crate) mod transport_set;
 
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent};
+use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCTransportEventKind};
 use crate::peer_connection::handler::datachannel::{DataChannelHandler, DataChannelHandlerContext};
 use crate::peer_connection::handler::demuxer::{DemuxerHandler, DemuxerHandlerContext};
 use crate::peer_connection::handler::dtls::DtlsHandler;
@@ -362,7 +362,7 @@ impl RTCPeerConnection {
 
         for (id, mut wouts) in ids.into_iter().zip(per_transport) {
             let previous = self.pipeline_context.transports.active_id();
-            self.pipeline_context.transports.set_active(id);
+            self.pipeline_context.activate_transport(id);
             process_handler_list!(call_macro: process_handler!(self, handler, {
                 while let Some(msg) = wouts.pop_front() {
                     if let Err(err) = handler.handle_write(msg) {
@@ -395,7 +395,7 @@ impl RTCPeerConnection {
                     wouts.push_back(msg);
                 }
             }), [get_dtls_handler, get_ice_handler, get_demuxer_handler]);
-            self.pipeline_context.transports.set_active(previous);
+            self.pipeline_context.activate_transport(previous);
 
             // Final poll write out to pipeline's write out
             while let Some(msg) = wouts.pop_front() {
@@ -635,13 +635,10 @@ impl RTCPeerConnection {
                     if self.is_closed() {
                         continue;
                     }
-                    // The transport's own event is the default transport's (the events
-                    // name no transport); the connection's is the aggregate of every
-                    // transport's state (W3C 4.3.4).
-                    let transports = &self.pipeline_context.transports;
-                    if transports.active_id() == transports.default_id() {
-                        self.announce_ice_transport_state(state);
-                    }
+                    // The transport's own event (`OnTransportEvent`, and the variant naming
+                    // no transport for the default one); the connection's is the aggregate
+                    // of every transport's state (W3C 4.3.4).
+                    self.announce_ice_transport_state(state);
                     let aggregate = self.ice_connection_state();
                     if aggregate != self.pipeline_context.announced_ice_connection_state {
                         self.pipeline_context.announced_ice_connection_state = aggregate;
@@ -670,6 +667,25 @@ impl RTCPeerConnection {
                     );
                     self.announce_transport_states();
                 }
+                // webrtc-extensions 7: the candidate pair events are the active transport's.
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnIceCandidatePairAdd(pair),
+                ) => self.fire_transport_event(
+                    RTCPeerConnectionEvent::OnIceCandidatePairAdd(pair.clone()),
+                    RTCTransportEventKind::CandidatePairAdd(pair),
+                ),
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnIceCandidatePairNominate(pair),
+                ) => self.fire_transport_event(
+                    RTCPeerConnectionEvent::OnIceCandidatePairNominate(pair.clone()),
+                    RTCTransportEventKind::CandidatePairNominate(pair),
+                ),
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnIceCandidatePairRemove(pair),
+                ) => self.fire_transport_event(
+                    RTCPeerConnectionEvent::OnIceCandidatePairRemove(pair.clone()),
+                    RTCTransportEventKind::CandidatePairRemove(pair),
+                ),
                 RTCEventInternal::RTCPeerConnectionEvent(evt) => {
                     self.pipeline_context.event_outs.push_back(evt);
                 }

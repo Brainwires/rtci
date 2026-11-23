@@ -1459,9 +1459,9 @@ impl RTCPeerConnection {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous = self.pipeline_context.transports.active_id();
-        self.pipeline_context.transports.set_active(id);
+        self.pipeline_context.activate_transport(id);
         let result = f(self);
-        self.pipeline_context.transports.set_active(previous);
+        self.pipeline_context.activate_transport(previous);
         result
     }
 
@@ -2967,7 +2967,7 @@ impl RTCPeerConnection {
             // They belong to the new generation too (W3C 5.6, RFC 8838 section 9: the peer
             // discards the candidates of the old one), so one not yet announced for it is
             // announced now, once. Anything else the agent refused stays silent.
-            let gathering = self.ice_gathering_state();
+            let gathering = self.active_announced().gathering;
             let kept = self
                 .ice_transport()
                 .agent
@@ -2978,7 +2978,7 @@ impl RTCPeerConnection {
             match kept {
                 Some(kept)
                     if gathering == RTCIceGatheringState::Gathering
-                        && !self.announced.announced_candidates.iter().any(
+                        && !self.active_announced().announced_candidates.iter().any(
                             |(generation, announced)| {
                                 *generation == ufrag && *announced == kept.to_string()
                             },
@@ -2991,10 +2991,11 @@ impl RTCPeerConnection {
         };
 
         for mut rtc_candidate in added {
-            self.announced
+            let announced = self.active_announced_mut();
+            announced
                 .announced_candidates
                 .retain(|(generation, _)| *generation == ufrag);
-            self.announced
+            announced
                 .announced_candidates
                 .push((ufrag.clone(), rtc_candidate.to_string()));
             // Register local candidate with stats accumulator
@@ -3035,6 +3036,7 @@ impl RTCPeerConnection {
                 RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
                     candidate: Some(rtc_candidate),
                     url: url.map(str::to_owned),
+                    ice_transport: Some(self.ice_transport().id),
                 }),
             );
         }
@@ -3051,10 +3053,17 @@ impl RTCPeerConnection {
     /// stats object names resolves in the same report). Pairs the agent no longer holds (an ICE
     /// restart drops them) are dropped from the stats too.
     pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_ice_agent_stats_on_active(now));
+        }
+    }
+
+    /// `update_ice_agent_stats` for the active transport's agent.
+    fn update_ice_agent_stats_on_active(&mut self, now: Instant) {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3169,7 +3178,7 @@ impl RTCPeerConnection {
         let agent = &self
             .pipeline_context
             .transports
-            .default()
+            .active()
             .ice_handler_context
             .ice_transport
             .agent;
@@ -3257,6 +3266,13 @@ impl RTCPeerConnection {
     ///
     /// This is called automatically by `get_stats()`.
     pub(super) fn update_transport_stats(&mut self) {
+        for id in self.pipeline_context.transports.ids() {
+            self.with_transport(id, |pc| pc.update_transport_stats_on_active());
+        }
+    }
+
+    /// `update_transport_stats` for the active transport.
+    fn update_transport_stats_on_active(&mut self) {
         let dtls_state = self.dtls_transport().state();
         // webrtc-stats `iceLocalUsernameFragment`: the local username fragment in use for
         // message validation, which is the ICE agent's current one: the first description's,

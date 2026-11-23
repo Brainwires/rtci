@@ -407,6 +407,7 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
       sameTransport,
       echoed: e.got.length,
       rtp,
+      rust: { transportsConnected: report.transportsConnected, stats: report.stats },
       errors: report.errors,
     };
   }, WS);
@@ -416,6 +417,12 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
   // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
   // transport objects only.
   if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  // Rust's side: each transport fired its own DTLS "connected" (OnTransportEvent) and has a
+  // transport stats object of its own with a selected candidate pair.
+  expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
+  const rustTransports = r.rust.stats.transports.filter((t) => t.dtlsState === "connected");
+  expect(rustTransports.length, JSON.stringify(r.rust.stats.transports)).toBe(2);
+  expect(rustTransports.every((t) => t.selectedCandidatePairId !== ""), JSON.stringify(rustTransports)).toBe(true);
   expect(r.echoed, JSON.stringify(r)).toBe(1);
   expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
   expect(r.errors).toEqual([]);

@@ -15,12 +15,17 @@ use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtc::peer_connection::event::{
+    RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTransportEventKind,
+};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtc::peer_connection::state::{
+    RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState,
+};
 use rtc::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
+    CandidateConfig, CandidateHostConfig, RTCDtlsTransportState, RTCIceCandidate,
+    RTCIceCandidateInit, RTCIceTransportState, RTCTransportId,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::header::Header;
@@ -28,6 +33,9 @@ use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtc::statistics::StatsSelector;
+use rtc::statistics::report::RTCStatsReportEntry;
+use rtc::statistics::stats::transport::RTCTransportStats;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -44,6 +52,8 @@ struct Peer {
     channel: Option<RTCDataChannelId>,
     received: Vec<Vec<u8>>,
     rtp: Vec<Header>,
+    /// Every event the peer raised, in order.
+    events: Vec<RTCPeerConnectionEvent>,
 }
 
 impl Peer {
@@ -69,6 +79,7 @@ impl Peer {
             channel: None,
             received: vec![],
             rtp: vec![],
+            events: vec![],
         })
     }
 
@@ -156,6 +167,7 @@ impl World {
         }
         for peer in self.peers.iter_mut() {
             while let Some(event) = peer.pc.poll_event() {
+                peer.events.push(event.clone());
                 match event {
                     RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
                         if state == RTCPeerConnectionState::Failed {
@@ -453,5 +465,301 @@ fn a_bundling_answer_leaves_the_tagged_sections_transport_only() -> Result<()> {
             .iter()
             .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
     })?;
+    Ok(())
+}
+
+/// The ICE and DTLS transport ids the `OnTransportEvent`s of `peer` name, with the kinds of
+/// event fired at each.
+fn transport_events(peer: &Peer) -> Vec<(RTCTransportId, RTCTransportId, RTCTransportEventKind)> {
+    peer.events
+        .iter()
+        .filter_map(|event| match event {
+            RTCPeerConnectionEvent::OnTransportEvent(event) => Some((
+                event.ice_transport,
+                event.dtls_transport,
+                event.event.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// W3C webrtc-pc 5.5, 5.6: each `RTCIceTransport` and `RTCDtlsTransport` fires its own
+/// `statechange`, `gatheringstatechange` and `selectedcandidatepairchange`. With three
+/// transports each one's events name it, every one of them reaches "connected", and the
+/// variants that name no transport report the default transport only.
+#[test]
+fn every_transport_fires_its_own_state_events() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    for peer in &world.peers {
+        let events = transport_events(peer);
+        let ice_ids: HashSet<RTCTransportId> = events.iter().map(|(ice, _, _)| *ice).collect();
+        assert_eq!(ice_ids.len(), 3, "events of three transports: {events:?}");
+        for ice in &ice_ids {
+            let of = |f: &dyn Fn(&RTCTransportEventKind) -> bool| {
+                events.iter().any(|(on, _, kind)| on == ice && f(kind))
+            };
+            assert!(of(&|k| matches!(
+                k,
+                RTCTransportEventKind::IceStateChange(RTCIceTransportState::Connected)
+            )));
+            assert!(of(&|k| matches!(
+                k,
+                RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Connected)
+            )));
+            assert!(of(&|k| matches!(
+                k,
+                RTCTransportEventKind::SelectedCandidatePairChange(_)
+            )));
+            assert!(of(&|k| matches!(
+                k,
+                RTCTransportEventKind::GatheringStateChange(RTCIceGatheringState::Gathering)
+            )));
+            assert!(of(&|k| matches!(
+                k,
+                RTCTransportEventKind::CandidatePairAdd(_)
+            )));
+            // The ids lead back to the transport's handle, whose ICE transport is the one
+            // the events name.
+            let dtls = peer
+                .pc
+                .dtls_transport_by_id(*ice)
+                .expect("the event names a transport of the connection");
+            assert_eq!(dtls.ice_transport().id(), *ice);
+            assert_eq!(dtls.state(), RTCDtlsTransportState::Connected);
+            assert!(dtls.ice_transport().get_selected_candidate_pair().is_some());
+        }
+        // Each event's DTLS id is the DTLS transport over that ICE transport.
+        for (ice, dtls, _) in &events {
+            assert_eq!(
+                peer.pc
+                    .dtls_transport_by_id(*dtls)
+                    .expect("a DTLS transport of the connection")
+                    .ice_transport()
+                    .id(),
+                *ice
+            );
+        }
+        // The variants naming no transport are the default transport's: one transport's
+        // states, each reached once.
+        let legacy_connected = peer
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    RTCPeerConnectionEvent::OnDtlsTransportStateChange(
+                        RTCDtlsTransportState::Connected
+                    )
+                )
+            })
+            .count();
+        assert_eq!(legacy_connected, 1, "{:?}", peer.events);
+        let handles = peer.pc.dtls_transports();
+        assert_eq!(handles.len(), 3);
+        assert_eq!(
+            handles.iter().map(|t| t.id()).collect::<HashSet<_>>().len(),
+            3
+        );
+    }
+    // The senders' transports are among them, each a distinct one.
+    let ids: HashSet<RTCTransportId> = senders
+        .iter()
+        .map(|sender| {
+            world.peers[0]
+                .pc
+                .rtp_sender(*sender)
+                .expect("sender")
+                .transport()
+                .expect("a transport")
+                .ice_transport()
+                .id()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let fired: HashSet<RTCTransportId> = transport_events(&world.peers[0])
+        .iter()
+        .map(|(ice, _, _)| *ice)
+        .collect();
+    assert!(ids.is_subset(&fired));
+    Ok(())
+}
+
+/// W3C 4.3.2: the connection's `iceGatheringState` is "gathering" while any transport gathers
+/// and "complete" only once all have finished; the null `icecandidate` comes once, then. Each
+/// transport's end-of-candidates indication names its transport.
+#[test]
+fn the_gathering_state_is_complete_when_every_transport_is() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("candidates announced", |_| true)?;
+    let sections = world.peers[0].pc.ice_transport_sections();
+    assert_eq!(sections.len(), 3);
+    assert_eq!(
+        world.peers[0].pc.ice_gathering_state(),
+        RTCIceGatheringState::Gathering
+    );
+    let mut ends = vec![];
+    for (k, (mid, index)) in sections.iter().enumerate() {
+        world.peers[0].events.clear();
+        world.peers[0].pc.add_local_candidate(RTCIceCandidateInit {
+            sdp_mid: Some(mid.clone()),
+            sdp_mline_index: Some(*index),
+            ..Default::default()
+        })?;
+        world.run("events read", |_| true)?;
+        let events = &world.peers[0].events;
+        let end = events.iter().find_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(ice) => ice
+                .candidate
+                .as_ref()
+                .filter(|c| c.end_of_candidates)
+                .map(|c| (c.sdp_mid.clone(), ice.ice_transport)),
+            _ => None,
+        });
+        let (end_mid, end_transport) = end.expect("the transport's end-of-candidates");
+        assert_eq!(end_mid.as_deref(), Some(mid.as_str()));
+        ends.push(end_transport.expect("it names its transport"));
+        let null = events.iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ice) if ice.candidate.is_none()
+            )
+        });
+        let complete = events.iter().any(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(
+                    RTCIceGatheringState::Complete
+                )
+            )
+        });
+        if k + 1 < sections.len() {
+            assert_eq!(
+                world.peers[0].pc.ice_gathering_state(),
+                RTCIceGatheringState::Gathering,
+                "a transport is still gathering"
+            );
+            assert!(!null && !complete, "{events:?}");
+        } else {
+            assert_eq!(
+                world.peers[0].pc.ice_gathering_state(),
+                RTCIceGatheringState::Complete
+            );
+            assert!(null && complete, "{events:?}");
+        }
+    }
+    assert_eq!(ends.iter().collect::<HashSet<_>>().len(), 3);
+    Ok(())
+}
+
+/// The candidates each transport announces name it: the `ice_transport` of an `icecandidate`
+/// is the ICE transport that holds the candidate.
+#[test]
+fn local_candidate_events_name_their_transport() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("candidates announced", |_| true)?;
+    let peer = &world.peers[0];
+    let held: Vec<(RTCTransportId, Vec<(String, u16)>)> = peer
+        .pc
+        .dtls_transports()
+        .iter()
+        .map(|t| {
+            let ice = t.ice_transport();
+            let candidates = ice
+                .get_local_candidates()
+                .iter()
+                .map(|c| (c.address.clone(), c.port))
+                .collect();
+            (ice.id(), candidates)
+        })
+        .collect();
+    let mut named = HashSet::new();
+    for event in &peer.events {
+        let RTCPeerConnectionEvent::OnIceCandidateEvent(ice) = event else {
+            continue;
+        };
+        let Some(candidate) = ice.candidate.as_ref().filter(|c| !c.end_of_candidates) else {
+            continue;
+        };
+        let holder = held
+            .iter()
+            .find(|(_, candidates)| {
+                candidates.contains(&(candidate.address.clone(), candidate.port))
+            })
+            .map(|(id, _)| *id)
+            .expect("a transport holds the candidate");
+        assert_eq!(ice.ice_transport, Some(holder), "{candidate:?}");
+        named.insert(holder);
+    }
+    assert_eq!(named.len(), 3, "each transport announced its candidate");
+    Ok(())
+}
+
+/// webrtc-stats 7.1: a `transport` object per transport, each with its selected candidate
+/// pair, whose `candidate-pair` names it; the RTP streams' `transportId` is the transport of
+/// their section.
+#[test]
+fn statistics_have_a_transport_object_per_transport() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    for seq in 1..=5 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("RTP delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
+    let now = world.now;
+    let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
+    let transports: Vec<&RTCTransportStats> = report
+        .iter()
+        .filter_map(|e| match e {
+            RTCStatsReportEntry::Transport(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transports.len(), 3, "{transports:?}");
+    let ids: HashSet<&str> = transports.iter().map(|t| t.stats.id.as_str()).collect();
+    assert_eq!(ids.len(), 3);
+    for transport in &transports {
+        let pair = report
+            .candidate_pairs()
+            .find(|p| p.stats.id == transport.selected_candidate_pair_id)
+            .expect("the selected pair is in the report");
+        assert_eq!(pair.transport_id, transport.stats.id);
+        assert!(pair.packets_sent > 0, "{pair:?}");
+    }
+    for pair in report.candidate_pairs() {
+        assert!(ids.contains(pair.transport_id.as_str()));
+    }
+    let streams: Vec<&str> = report
+        .outbound_rtp_streams()
+        .map(|s| {
+            s.sent_rtp_stream_stats
+                .rtp_stream_stats
+                .transport_id
+                .as_str()
+        })
+        .collect();
+    assert_eq!(streams.len(), 2);
+    assert_ne!(streams[0], streams[1], "audio and video on two transports");
+    assert!(streams.iter().all(|id| ids.contains(id)));
     Ok(())
 }

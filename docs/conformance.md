@@ -158,10 +158,15 @@ application learns what to gather for from `ice_transport_sections()`. Tests:
 `tests/multi_transport_rtc2rtc.rs` (audio, video and data on three transports; a bundling
 answer leaving one), `set_description_atomic_test.rs`, the aggregation tests in
 `transport_set.rs`, and the browser scenario "unbundled: max-compat without a BUNDLE group".
-Left: the transport-level events and statistics of the other transports (the events name no
-transport: an API change), the gathering state aggregate (W3C 4.3.2), `balanced` offers, an
-ICE restart or a new DTLS association of the other transports, a section moved out of a group
-in a later answer (RFC 9143 7.3.2), and several BUNDLE groups.
+Done (mt-4): transport identity. Every transport fires its own events
+(`RTCPeerConnectionEvent::OnTransportEvent`, naming its ICE and DTLS transports; the variants
+that name no transport are the default transport's), local candidates name their transport and
+go through one path whatever the transport, the gathering state aggregates every transport (W3C
+4.3.2), `dtls_transports()` / `dtls_transport_by_id` give the handles, and the statistics have
+a `transport` object per transport (`src/statistics/accumulator/transports.rs`: the handlers
+update the active transport's, the others are parked).
+Left: `balanced` offers, an ICE restart or a new DTLS association of the other transports, a
+section moved out of a group in a later answer (RFC 9143 7.3.2), and several BUNDLE groups.
 
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts

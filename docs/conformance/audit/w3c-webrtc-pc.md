@@ -10,13 +10,13 @@ Totals (rows 957):
 
 The section 8 rows (statistics) carry the verdicts of branch `conf/stats-conformance`; the totals include them.
 
-- MUST: tested 779 / untested 17 / partial 53 / missing 20 / violated 0 / n-a 60
+- MUST: tested 780 / untested 17 / partial 53 / missing 19 / violated 0 / n-a 60
 - SHOULD: tested 4 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 5
 - MAY: tested 3 / untested 2 / partial 0 / missing 0 / violated 0 / n-a 13
 
 By pass:
 
-- sections 1 to 4: rows 399; MUST: tested 300 / untested 8 / partial 21 / missing 19 / violated 0 / n-a 34
+- sections 1 to 4: rows 399; MUST: tested 301 / untested 8 / partial 21 / missing 18 / violated 0 / n-a 34
 - section 5: rows 258; MUST: tested 221 / untested 3 / partial 12 / missing 1 / violated 0 / n-a 13
 - sections 6 to 12: rows 300; MUST: tested 258 / untested 6 / partial 20 / missing 0 / violated 0 / n-a 13
 
@@ -61,7 +61,7 @@ By pass:
 | WEBRTC-4.3.2-1 | 4.3.2 | MUST | iceGatheringState "new": no transport gathering, or no transports | tested | src/peer_connection/transport/ice/mod.rs:108 | gathering_state_reports_the_tracked_field | accessor test only; the initial value is the field default |
 | WEBRTC-4.3.2-2 | 4.3.2 | MUST | "gathering": any transport is gathering | tested | src/peer_connection/states_events.rs (begin_local_gathering) | gathering_is_announced_once_per_ice_generation | set when a local description starts a generation (first, or after an ICE restart), with gatheringstatechange and icegatheringstatechange; a later description of the same generation keeps "complete" |
 | WEBRTC-4.3.2-3 | 4.3.2 | MUST | "complete": a transport exists and all have finished gathering | tested | src/peer_connection/states_events.rs (finish_local_gathering) | gathering_is_announced_once_per_ice_generation |  |
-| WEBRTC-4.3.2-4 | 4.3.2 | MUST | The state aggregates the transports the transceivers and SCTP transport reference | missing | src/peer_connection/states_events.rs |  | mt-2: there can be several transports; the gathering state and its events are the first transport's only |
+| WEBRTC-4.3.2-4 | 4.3.2 | MUST | The state aggregates the transports the transceivers and SCTP transport reference | tested | src/peer_connection/states_events.rs (update_gathering_state), src/peer_connection/handler/transport_set.rs (aggregate_gathering_state) | the_gathering_state_is_complete_when_every_transport_is, the_gathering_state_aggregates_every_transport | mt-4: each transport has its own gatherer state and events (OnTransportEvent); the connection's is gathering while any gathers, complete once all have, with the null icecandidate then |
 | WEBRTC-4.3.3-1 | 4.3.3 | MUST | connectionState "closed" when the ICE connection state is closed | tested | src/peer_connection/internal.rs:1338 | test_peer_connection_state | |
 | WEBRTC-4.3.3-2 | 4.3.3 | MUST | "failed": ICE failed or any DTLS transport failed | tested | src/peer_connection/internal.rs:1340 | a_fingerprint_mismatch_fails_the_dtls_transport_and_the_connection | also test_peer_connection_state |
 | WEBRTC-4.3.3-3 | 4.3.3 | MUST | "disconnected": ICE disconnected and no earlier state applies | tested | src/peer_connection/internal.rs:1343 | test_peer_connection_state | |

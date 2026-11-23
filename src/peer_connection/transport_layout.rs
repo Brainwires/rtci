@@ -19,7 +19,6 @@
 
 use super::*;
 use crate::peer_connection::configuration::RTCBundlePolicy;
-use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::handler::dtls::DtlsHandlerContext;
 use crate::peer_connection::handler::ice::IceHandlerContext;
 use crate::peer_connection::handler::srtp::SrtpHandlerContext;
@@ -29,10 +28,8 @@ use crate::peer_connection::sdp::{
     extract_ice_details, get_mid_value, is_rejected_media,
 };
 use crate::peer_connection::transport::ice::IceTransport;
-use crate::peer_connection::transport::ice::candidate::{
-    RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
-};
-use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+use crate::peer_connection::transport::ice::candidate::rtc_ice_candidates_from_ice_candidates;
+use crate::peer_connection::transport::{RTCDtlsTransport, RTCTransportId, TransportKind};
 use ::sdp::description::common::Attribute;
 use ::sdp::description::session::{ATTR_KEY_GROUP, SessionDescription};
 use rand::RngExt;
@@ -202,15 +199,18 @@ impl RTCPeerConnection {
         }
         let default = transports.default_id();
         for id in transports.ids() {
-            if id != default && transports.mids_on(id).is_empty() {
+            if id != default && self.pipeline_context.transports.mids_on(id).is_empty() {
                 log::debug!("transport {id:?} carries no m= section any more: closed");
-                if let Some(mut bundle) = transports.remove(id) {
+                if let Some(mut bundle) = self.pipeline_context.remove_transport(id) {
                     let _ = sansio::Protocol::close(
                         &mut bundle.ice_handler_context.ice_transport.agent,
                     );
                 }
             }
         }
+        self.pipeline_context.describe_section_transports();
+        // A transport that closed no longer counts in the connection's gathering state.
+        self.update_gathering_state();
         Ok(())
     }
 
@@ -238,11 +238,11 @@ impl RTCPeerConnection {
         .and_then(|d| d.parsed.clone());
         let groups = answer.as_ref().map(transport_groups).unwrap_or_default();
         if groups.is_empty() {
-            let transports = &mut self.pipeline_context.transports;
+            let transports = &self.pipeline_context.transports;
             let default = transports.default_id();
             for id in transports.ids() {
                 if id != default {
-                    transports.remove(id);
+                    self.pipeline_context.remove_transport(id);
                 }
             }
             for mid in self
@@ -253,6 +253,8 @@ impl RTCPeerConnection {
             {
                 self.pipeline_context.transports.unassign(&mid);
             }
+            self.pipeline_context.describe_section_transports();
+            self.update_gathering_state();
             return;
         }
         if let Err(err) = self.apply_transport_layout(&groups) {
@@ -507,7 +509,8 @@ impl RTCPeerConnection {
 
     /// The local description's first section on each transport other than the default one:
     /// the `sdpMid` / `sdpMLineIndex` its candidates name (W3C 5.6), recorded on the
-    /// transport when a local description is set. Such a transport starts gathering then.
+    /// transport when a local description is set. Such a transport starts gathering its
+    /// generation then, with its events (W3C 5.6 "gathering begins").
     pub(crate) fn describe_other_transports(&mut self, local: &SessionDescription) {
         let default = self.pipeline_context.transports.default_id();
         for id in self.pipeline_context.transports.ids() {
@@ -523,15 +526,12 @@ impl RTCPeerConnection {
                     (self.pipeline_context.transports.transport_id_for(mid) == id)
                         .then(|| (mid.clone(), u16::try_from(index).unwrap_or(u16::MAX)))
                 });
-            if let Some(bundle) = self.pipeline_context.transports.transport_mut(id) {
-                let ice = &mut bundle.ice_handler_context.ice_transport;
+            self.with_transport(id, |pc| {
                 if section.is_some() {
-                    ice.local_media_section = section;
+                    pc.ice_transport_mut().local_media_section = section;
                 }
-                if ice.ice_gathering_state == RTCIceGatheringState::New {
-                    ice.ice_gathering_state = RTCIceGatheringState::Gathering;
-                }
-            }
+                pc.begin_gathering_generation();
+            });
         }
     }
 
@@ -539,64 +539,6 @@ impl RTCPeerConnection {
     /// description as it is read (`populate_local_candidates`).
     pub(crate) fn populate_other_transports_candidates(&self, d: &mut SessionDescription) {
         self.write_transport_attributes(d);
-    }
-
-    /// `add_local_candidate` for a transport other than the default one: the candidate is
-    /// the agent's, and announced with the transport's section; an empty one ends the
-    /// transport's gathering (RFC 8838 section 13) with its end-of-candidates candidate.
-    pub(crate) fn add_other_local_candidate(
-        &mut self,
-        local_candidate: RTCIceCandidateInit,
-    ) -> Result<()> {
-        if self.is_closed() {
-            return Err(Error::ErrConnectionClosed);
-        }
-        let value = local_candidate
-            .candidate
-            .strip_prefix("candidate:")
-            .unwrap_or(local_candidate.candidate.as_str());
-        if value.is_empty() {
-            if self.ice_transport().ice_gathering_state == RTCIceGatheringState::Complete {
-                return Ok(());
-            }
-            let mut end = RTCIceCandidate::end_of_candidates_for(None, None, None);
-            self.ice_transport().describe_local_candidate(&mut end);
-            self.ice_transport_mut()
-                .agent
-                .set_local_gathering_complete();
-            self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Complete;
-            self.pipeline_context.event_outs.push_back(
-                RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
-                    candidate: Some(end),
-                    url: None,
-                }),
-            );
-            return Ok(());
-        }
-        let candidate = ::ice::candidate::unmarshal_candidate(value)?;
-        let known = self.ice_transport().agent.get_local_candidates().len();
-        if !self.ice_transport_mut().add_local_candidate(candidate)? {
-            return Ok(());
-        }
-        let added: Vec<RTCIceCandidate> = self
-            .ice_transport()
-            .agent
-            .get_local_candidates()
-            .iter()
-            .skip(known)
-            .map(RTCIceCandidate::from)
-            .collect();
-        for mut rtc_candidate in added {
-            self.ice_transport()
-                .describe_local_candidate(&mut rtc_candidate);
-            self.pipeline_context.event_outs.push_back(
-                RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
-                    candidate: Some(rtc_candidate),
-                    url: local_candidate.url.clone(),
-                }),
-            );
-        }
-        Ok(())
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,
@@ -642,5 +584,42 @@ impl RTCPeerConnection {
             .into_iter()
             .map(|(_, mid, index)| (mid, index))
             .collect()
+    }
+
+    /// The connection's DTLS transports, one per transport, the default one first: the
+    /// objects the senders', receivers' and SCTP transport's `transport()` return (W3C
+    /// webrtc-pc 5.2 `RTCRtpSender.transport`, 6.1 `RTCSctpTransport.transport`). One while
+    /// every section is bundled.
+    pub fn dtls_transports(&self) -> Vec<RTCDtlsTransport<'_>> {
+        let transports = &self.pipeline_context.transports;
+        let default = transports.default_id();
+        let mut ids = transports.ids();
+        ids.sort_by_key(|id| *id != default);
+        ids.into_iter()
+            .map(|transport| RTCDtlsTransport {
+                peer_connection: self,
+                transport,
+            })
+            .collect()
+    }
+
+    /// The DTLS transport whose id, or whose ICE transport's id, is `id` (an
+    /// [`RTCTransportEvent`](crate::peer_connection::event::RTCTransportEvent) names both);
+    /// `None` for a transport the connection does not have (any more).
+    pub fn dtls_transport_by_id(&self, id: RTCTransportId) -> Option<RTCDtlsTransport<'_>> {
+        let transports = &self.pipeline_context.transports;
+        transports
+            .ids()
+            .into_iter()
+            .find(|transport| {
+                transports.transport(*transport).is_some_and(|bundle| {
+                    bundle.dtls_handler_context.dtls_transport.id == id
+                        || bundle.ice_handler_context.ice_transport.id == id
+                })
+            })
+            .map(|transport| RTCDtlsTransport {
+                peer_connection: self,
+                transport,
+            })
     }
 }
