@@ -139,6 +139,7 @@ under "Defaults the fork narrows on purpose" and in the `rtc::data_channel` modu
 | `a=rid` / `a=simulcast` per RFC 8851 and RFC 8853: restrictions, answer rules, applied answers | `src/peer_connection/sdp/simulcast.rs` (`section_rids`, `answered_rid_is_valid`), `src/peer_connection/sdp/mod.rs` (`add_transceiver_sdp`), `src/peer_connection/internal.rs` (`apply_negotiated_simulcast`), `src/rtp_transceiver/rtp_sender/internal.rs` (`apply_simulcast_answer`), `src/rtp_transceiver/rtp_sender/rtp_coding_parameters.rs` (`RTCRtpRidRestrictions`) | Received lines checked per RFC 8851 section 6.2.2 and RFC 8853 section 5.2 (first usable alternative of a layer, W3C webrtc-pc); restrictions written, echoed and exposed; an answer adds no stream the offer did not ask for; an applied answer prunes the sender's encodings (W3C "set a session description"); no `~` without RFC 7728 unless `with_rid_pause_marks(true)`. Upstream echoes every offered rid reversed, drops restrictions and never applies an answer's rids. |
 | Static audio payload types without `a=rtpmap`; undefined dynamic ones skipped | `src/peer_connection/sdp/mod.rs` (`codecs_from_media_description`) | RFC 3551's static audio types are read; an undefined dynamic payload type is left out instead of failing the description (RFC 9429 sections 5.3.1, 5.8). |
 | Unknown media types | `rtc-sdp/src/description/session.rs`, `src/peer_connection/internal.rs` (`generate_matched_sdp`), `src/peer_connection/sdp/mod.rs` (`MediaSection::rejected_name`, `unknown_media_name`) | `<media>` is any RFC 8866 token; a section of an unknown type is answered, and kept in later offers, rejected with its media type, protocol and formats (RFC 9429 sections 5.3.1, 5.2.2). |
+| Audio RED (RFC 2198) in the default codecs, sent and taken apart by the engine | `src/peer_connection/configuration/media_engine.rs` (`register_default_codecs`, `MIME_TYPE_RED`), `rtc-interceptor/src/audio_red.rs` (`RedAudioInterceptor`, `Slot::Redundancy`), `configure_audio_redundancy`, `src/peer_connection/mod.rs` (`with_rtcp_session`), `src/peer_connection/handler/interceptor.rs` (`red_primary_for`) | New; upstream offers no RED. `red/48000/2` with `a=fmtp:63 111/111`, after Opus, as Chromium and WebKit offer it (RFC 8854 section 4.2 asks for RED for audio). Every chain gets the interceptor unless the application fills `Slot::Redundancy`: a local Opus stream whose section negotiated RED is sent as RED with a copy of the previous packet; received RED is taken apart into Opus, a lost packet recovered from the next one's copy; the stream is bound with the primary codec. Video `red` + `ulpfec` stay out of the defaults (see the ULPFEC rows below and "Defaults the fork narrows on purpose"). |
 | ULPFEC (RFC 5109) in RED and as a separate stream | `rtc-interceptor/src/ulpfec/` (`UlpfecEncoder`, `UlpfecDecoder`, `UlpfecSendInterceptor`, `UlpfecReceiveInterceptor`), `configure_ulpfec`, `src/peer_connection/handler/interceptor.rs` | New; upstream has no ULPFEC coder. FEC header and level headers with 16- and 48-bit masks, any number of protection levels, level-aware iterated recovery over a bounded window, RED carriage (FEC as its own RED packet in the media sequence space, as libwebrtc sends it, or as a redundant block as in RFC 5109 10.3) and a separate stream on a repair SSRC. Opt-in; the RED block reader and writer are private to this carriage until `rtc-rtp` has a RED codec. |
 | Codec preferences keep only the repair formats they list | `src/rtp_transceiver/rtp_receiver/internal.rs` (`get_codecs`), `src/rtp_transceiver/rtp_sender/rtp_codec.rs` (`repair_family`), `src/peer_connection/sdp/mod.rs` (`add_sender_sdp`) | W3C `setCodecPreferences` can remove RTX, ULPFEC and FlexFEC; RTX / FEC SSRC groups are written only when the section has the format. |
 | The default AV1 codec's fmtp is `profile=0` | `src/peer_connection/configuration/media_engine.rs` | The AV1 RTP payload format's parameter is `profile`; it said VP9's `profile-id`. |
@@ -437,7 +438,28 @@ versions that support it. Raising it is a deliberate change of the manifest.
   when the nomination reached it, has its DTLS handshake answered. Upstream sends and
   receives data only on the selected pair.
 
+- BUNDLE fingerprints (jsep16): with a BUNDLE group only the tagged section's `a=fingerprint`
+  lines (or the session level's) are read, as RFC 8859 section 4.5 says for the TRANSPORT
+  category; the other bundled sections' are not compared. Upstream refused a description whose
+  sections disagreed. `SettingEngineBuilder::with_bundled_fingerprints_agreeing(true)` keeps
+  that refusal as a hardening.
+
+- Remote tracks: `SettingEngineBuilder::with_source_departure_ends_track(true)` ends a remote
+  track whose SSRCs all said BYE or timed out (RFC 8830 section 3); the default stays W3C
+  webrtc-pc 9.3's muting. Upstream neither mutes nor ends.
+
+- rtc-sdp reads descriptions in another character set named by `a=charset` (RFC 8866 section
+  6.10) and relative `u=` references (section 9); upstream refused both.
+
 ### Defaults the fork narrows on purpose
+
+- SDP (jsep15): remote descriptions without `c=` for a section, with an `a=imageattr` set
+  that differs for one payload type across one BUNDLE group, or with two `ccm pause` lines for
+  one payload type, are refused (RFC 8866 5.7, RFC 8859 4.7, RFC 7728 9); trickled candidates are grammar-checked (RFC 8839 5.1);
+  application ICE credentials outside RFC 8839 5.4 and local reflexive candidates without
+  `raddr` are refused; `create_offer` refuses a duplicate generated mid and ids that cannot be
+  an msid. With BUNDLE the DTLS role is read from the tagged section. The browser fixtures
+  (`tests/fixtures/browser-sdp/`, Chromium, Firefox, WebKit) pass all of it.
 
 - SDP (jsep13): a remote description with an attribute that does not follow its grammar is
   refused, also when the value would be ignored (RFC 9429 section 5.8; upstream skipped such
@@ -456,6 +478,15 @@ versions that support it. Raising it is a deliberate change of the manifest.
   negotiation too.
 - RFC 7728 (jsep14): `set_parameters` turning an encoding off is a local pause (PAUSED sent)
   when pause and resume is negotiated (RFC 8853 section 5.2).
+- Receiving before the answer (early1): upstream prepares its receivers when the answer is
+  applied, so media that overtakes the answer is dropped. Here an applied local offer
+  prepares each receiving section (formats, header extension ids, MID / rid / payload type
+  demultiplexing, RTX mapping; RFC 3264 section 5.1, RFC 9429 sections 4.1.11 and 5.9), and
+  early media goes straight to the receiver's track (W3C `[[Receptive]]`); the answer
+  settles it and a rollback takes it back (`src/peer_connection/early_media.rs`). An initial
+  offer still receives nothing before a remote description: no DTLS handshake runs without
+  the peer's fingerprint (RFC 8842 section 5.2), so there the case is a provisional answer's.
+  Formats newly offered get no RTCP feedback before the answer (RFC 4585 section 4.2).
 
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
   ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops
@@ -506,6 +537,15 @@ versions that support it. Raising it is a deliberate change of the manifest.
   `send` rids the offer did not ask for, and an applied answer prunes the sender's encodings
   to the ones it accepted (RFC 8853 section 5.3.2 / 5.3.3, W3C "set a session description").
   A local rid must be 1 to 255 alphanumerics (RFC 8852 section 3.1); no switch.
+- BUNDLE, IDENTICAL attributes (jsep16): a remote description whose bundled sections carry an
+  attribute of RFC 8859's IDENTICAL category (`a=rtcp-rsize`, `a=ecn-capable-rtp`,
+  `a=extmap-allow-mixed`, ...) with different values is refused (RFC 8859 section 4.3). An absence is not: the tagged
+  section speaks for the group. No browser description recorded by the interop harness breaks
+  the rule. An offer whose bundled sections list different ECN methods used to be answered
+  with the tagged section's; no switch.
+- Codecs: an encoding's codec is matched with the W3C codec dictionary match (webrtc-pc
+  5.4): no mime-type-only fallback (upstream's `codec_parameters_fuzzy_search` partial
+  match), and setCodecPreferences / setParameters compare every format parameter.
 - SCTP: a peer connection's association schedules its streams by weighted fair queueing
   (RFC 8831 section 6.4) and announces user message interleaving (RFC 8260), the zero checksum
   (RFC 9653) and a State Cookie with a MAC, each of which upstream leaves off or lacks;
@@ -527,6 +567,11 @@ versions that support it. Raising it is a deliberate change of the manifest.
   (`MdnsConfig::with_multiple_addresses(true)` takes the first, as upstream does).
   `MIME_TYPE_ULP_FEC` itself. RED + ULPFEC is now implemented as opt-in interceptors
   (`configure_ulpfec`, `rtc-interceptor/src/ulpfec/`); it is still not a default codec.
+  jsep17 re-examined it: the reason "nothing in the engine encodes or decodes it" no longer
+  holds for the coder, but `configure_ulpfec` takes fixed payload types rather than the
+  negotiated ones, and no browser interop cell exercises ULPFEC in RED, so nothing shows the
+  default would interoperate: video `red` + `ulpfec` stay out of the defaults. Audio RED
+  (Opus in Opus) is a default since jsep17.
 
 ### Upstream API replacements taken
 

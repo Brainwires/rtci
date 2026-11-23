@@ -867,18 +867,42 @@ impl RTCPeerConnection {
 
     /// The mids of the transceivers whose section is on the active transport; `None` while
     /// the connection has one transport.
+    ///
+    /// While a local offer is pending they include the sections that offer lists in a BUNDLE
+    /// group with one of them, although the offer stages such a section on a transport of
+    /// its own: RFC 9143 section 7.2, "When the offerer assigns unique addresses:ports to
+    /// multiple bundled 'm=' sections, the offerer needs to be prepared to receive bundled
+    /// media on each unique address:port until it receives the associated answer". An
+    /// answerer that bundles the section sends its media on the group's transport before the
+    /// offerer has seen the answer that says so.
     pub(crate) fn active_transport_mids(&self) -> Option<Vec<String>> {
         let transports = &self.pipeline_context.transports;
         if transports.len() == 1 {
             return None;
         }
         let active = transports.active_id();
-        Some(
-            self.rtp_transceivers
-                .iter()
-                .filter_map(|t| t.mid().clone())
-                .filter(|mid| transports.transport_id_for(mid) == active)
-                .collect(),
-        )
+        let mut mids: Vec<String> = self
+            .rtp_transceivers
+            .iter()
+            .filter_map(|t| t.mid().clone())
+            .filter(|mid| transports.transport_id_for(mid) == active)
+            .collect();
+        if let Some(offer) = self
+            .pending_local_description
+            .as_ref()
+            .filter(|description| description.sdp_type == RTCSdpType::Offer)
+            .and_then(|description| description.parsed.as_ref())
+        {
+            for group in bundle_groups(offer) {
+                if group.iter().any(|mid| mids.iter().any(|on| on == mid)) {
+                    for mid in group {
+                        if !mids.iter().any(|on| on == mid) {
+                            mids.push(mid.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        Some(mids)
     }
 }

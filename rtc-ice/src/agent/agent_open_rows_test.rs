@@ -172,6 +172,44 @@ fn test_two_lite_agents_with_several_pairs_select_by_rfc6724_and_update() {
     assert_eq!(full.get_remote_candidates().len(), 1);
 }
 
+/// RFC 8839 Section 4.4.2.2: a lite answerer offered `a=remote-candidates` forms its pair
+/// with the local candidate the attribute names, even where the RFC 6724 preference would
+/// take another local candidate (here the one on the remote's own network).
+#[test]
+fn test_a_lite_answerer_takes_the_local_candidate_remote_candidates_names() {
+    let now = Instant::now();
+    let remote = udp("192.168.0.9", 5000, 1000);
+    let mut b = lite_agent(now, false, &[remote.clone()]);
+    b.add_local_candidate(udp("10.0.0.2", 1000, 500)).unwrap();
+    run(&mut b, now, now + Duration::from_secs(1));
+    let local = |a: &Agent| a.get_selected_candidate_pair().map(|(l, _)| l.addr());
+    assert_eq!(
+        local(&b),
+        Some(addr(LOCAL)),
+        "the preference: the same network"
+    );
+
+    let later = now + Duration::from_secs(1);
+    assert!(b.replace_remote_candidates_pinning(
+        later,
+        vec![remote.clone()],
+        Some(addr("10.0.0.2:1000"))
+    ));
+    run(&mut b, later, later + Duration::from_secs(1));
+    assert_eq!(
+        local(&b),
+        Some(addr("10.0.0.2:1000")),
+        "the named local candidate"
+    );
+    assert_eq!(selected(&b), Some(addr("192.168.0.9:5000")));
+
+    // Without a name, the preference decides again.
+    let later = later + Duration::from_secs(1);
+    assert!(b.replace_remote_candidates(later, vec![remote]));
+    run(&mut b, later, later + Duration::from_secs(1));
+    assert_eq!(local(&b), Some(addr(LOCAL)));
+}
+
 /// A lite agent whose peer is full still waits for the nomination (Section 8.2): the pair is
 /// not selected from the candidate exchange.
 #[test]
@@ -986,4 +1024,105 @@ fn test_lost_mdns_name_is_replaced_and_the_candidate_announced_again() {
     // A candidate added later on that address is published under the new name too.
     a.add_local_candidate(udp("192.168.0.2", 1001, 0)).unwrap();
     assert_eq!(a.get_local_candidates()[1].address(), name);
+}
+
+/// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s (letters, digits, `+`, `/`) and
+/// "MUST NOT be longer than 32 characters when sending"; `ice-pwd` is 22 to 256. Credentials
+/// the application supplies outside that are refused, when the agent is made and when it
+/// restarts with them; the bounds themselves are taken.
+#[test]
+fn test_supplied_credentials_are_held_to_the_rfc_8839_grammar() {
+    let now = Instant::now();
+    let made = |ufrag: &str, pwd: &str| {
+        Agent::new(
+            now,
+            Arc::new(AgentConfig {
+                local_ufrag: ufrag.to_owned(),
+                local_pwd: pwd.to_owned(),
+                ..Default::default()
+            }),
+            provider(),
+        )
+        .map(|_| ())
+    };
+    let pwd = "p".repeat(22);
+    assert_eq!(made("abc", &pwd), Err(Error::ErrLocalUfragInsufficientBits));
+    assert_eq!(
+        made("abcd", &"p".repeat(21)),
+        Err(Error::ErrLocalPwdInsufficientBits)
+    );
+    assert_eq!(
+        made(&"u".repeat(33), &pwd),
+        Err(Error::ErrLocalUfragInvalid)
+    );
+    assert_eq!(made("ab-d", &pwd), Err(Error::ErrLocalUfragInvalid));
+    assert_eq!(made("ab d", &pwd), Err(Error::ErrLocalUfragInvalid));
+    assert_eq!(
+        made("abcd", &"p".repeat(257)),
+        Err(Error::ErrLocalPwdInvalid)
+    );
+    assert_eq!(
+        made("abcd", &format!("{}:", "p".repeat(22))),
+        Err(Error::ErrLocalPwdInvalid)
+    );
+    assert_eq!(made("abcd", &pwd), Ok(()));
+    assert_eq!(made(&"u".repeat(32), &"p".repeat(256)), Ok(()));
+    assert_eq!(made("a+/9", &format!("{}+/", "p".repeat(20))), Ok(()));
+
+    let mut a = Agent::new(now, Arc::new(AgentConfig::default()), provider()).unwrap();
+    assert_eq!(
+        a.restart(now, "ab-d".to_owned(), pwd.clone(), false),
+        Err(Error::ErrLocalUfragInvalid)
+    );
+    a.restart(now, "abcd".to_owned(), pwd, false).unwrap();
+    assert_eq!(a.get_local_credentials().ufrag, "abcd");
+}
+
+/// RFC 8839 section 5.1: `raddr` and `rport` "MUST be present for server reflexive,
+/// peer-reflexive and relayed candidates". A local server-reflexive or relayed candidate
+/// without a related address would be written `raddr  rport 0`: the agent refuses it; with
+/// one (or `0.0.0.0 0`, how a hidden base is written) it is taken.
+#[test]
+fn test_a_local_reflexive_candidate_needs_its_related_address() {
+    use crate::candidate::candidate_relay::CandidateRelayConfig;
+    use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
+    let now = Instant::now();
+    let mut a = Agent::new(now, Arc::new(AgentConfig::default()), provider()).unwrap();
+    let base = |port: u16| CandidateConfig {
+        network: "udp".to_owned(),
+        address: "198.51.100.7".to_owned(),
+        port,
+        component: 1,
+        ..Default::default()
+    };
+    let srflx = |rel_addr: &str, port: u16| {
+        CandidateServerReflexiveConfig {
+            base_config: base(port),
+            rel_addr: rel_addr.to_owned(),
+            rel_port: 5000,
+            url: None,
+        }
+        .new_candidate_server_reflexive()
+        .unwrap()
+    };
+    let relay = |rel_addr: &str, port: u16| {
+        CandidateRelayConfig {
+            base_config: base(port),
+            rel_addr: rel_addr.to_owned(),
+            rel_port: 5000,
+            url: None,
+        }
+        .new_candidate_relay()
+        .unwrap()
+    };
+    assert_eq!(
+        a.add_local_candidate(srflx("", 6000)),
+        Err(Error::ErrLocalCandidateWithoutRelatedAddress)
+    );
+    assert_eq!(
+        a.add_local_candidate(relay("", 6001)),
+        Err(Error::ErrLocalCandidateWithoutRelatedAddress)
+    );
+    assert_eq!(a.add_local_candidate(srflx("192.0.2.1", 6002)), Ok(true));
+    assert_eq!(a.add_local_candidate(relay("0.0.0.0", 6003)), Ok(true));
 }

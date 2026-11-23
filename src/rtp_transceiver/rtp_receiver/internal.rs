@@ -21,7 +21,7 @@ use crate::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpEncodingParameters, RTCRtpHeaderExtensionParameters,
 };
 use crate::rtp_transceiver::{PayloadType, SSRC};
-use interceptor::Interceptor;
+use interceptor::{Interceptor, StreamInfo};
 use shared::error::Result;
 use shared::time::SystemInstant;
 use std::time::{Duration, Instant};
@@ -51,6 +51,35 @@ pub(crate) fn linear_audio_level(level: u8) -> f64 {
     }
 }
 
+/// The receive state a pending local offer adds to a receiver (RFC 3264 section 5.1: "Once
+/// the offerer has sent the offer, it MUST be prepared to receive media for any recvonly
+/// streams described by that offer", and for sendrecv ones; RFC 9429 section 4.1.11: "the
+/// PeerConnection MUST be able to simultaneously support use of both the current and pending
+/// local descriptions"). It is provisional: the final answer settles it
+/// ([`RTCRtpReceiverInternal::settle_offered`]) and a rollback takes it back
+/// ([`RTCRtpReceiverInternal::roll_back_offered`]).
+#[derive(Default, Debug, Clone)]
+pub(crate) struct OfferedReceive {
+    /// The formats of the offer's m= section, as the offer states them, without RTCP
+    /// feedback: a feedback mechanism is used once the answer has it (RFC 4585 section 4.2:
+    /// "The offerer and answerer MUST only use feedback mechanisms negotiated in this way";
+    /// RFC 9429 section 5.11 enables them when an answer is applied).
+    codecs: Vec<RTCRtpCodecParameters>,
+    /// Whether the receiver's receive codecs are a negotiated list (the section was
+    /// answered before, or a provisional answer has been applied since the offer): they are
+    /// then received as well, with what was negotiated for them, and come first.
+    negotiated: bool,
+    /// The receive codings and the track's codings as the offer found them: what a rollback
+    /// returns to.
+    prior_codings: Vec<RTCRtpCodingParameters>,
+    prior_track_codings: Vec<crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters>,
+    /// Whether the track was muted when the offer was applied.
+    prior_muted: bool,
+    /// The streams bound to the interceptors while the offer was pending, with what they were
+    /// bound with; `None` when no stream arrived early.
+    early_streams: Option<Vec<StreamInfo>>,
+}
+
 /// RTPReceiver allows an application to inspect the receipt of a TrackRemote
 ///
 /// ## Specifications
@@ -75,10 +104,10 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// that carries a RID is bound by its rid, as without them.
     declared_codings: Vec<RTCRtpCodingParameters>,
     receive_codecs: Vec<RTCRtpCodecParameters>,
-    /// The payload types this endpoint's pending offer listed for the section, which it must
-    /// be ready to receive before the answer arrives (RFC 3264 section 5.1); cleared when the
-    /// receive codecs are set again.
-    offered_payload_types: Vec<PayloadType>,
+    /// What this endpoint's pending offer prepared the receiver for, which it must be ready
+    /// to receive before the answer arrives (RFC 3264 section 5.1, RFC 9429 sections 4.1.11
+    /// and 5.9); `None` outside `have-local-offer` and `have-remote-pranswer`.
+    offered: Option<OfferedReceive>,
     /// The ids of the remote MediaStreams the track is in, as the remote description's
     /// `a=msid` lines name them (W3C `[[AssociatedRemoteMediaStreams]]`).
     associated_media_stream_ids: Vec<MediaStreamId>,
@@ -131,7 +160,7 @@ impl RTCRtpReceiverInternal {
             declared_codings: vec![],
 
             receive_codecs: vec![],
-            offered_payload_types: vec![],
+            offered: None,
             associated_media_stream_ids: vec![],
             rtcp_reduced_size: false,
             last_returned_parameters: None,
@@ -688,22 +717,165 @@ impl RTCRtpReceiverInternal {
         &self.receive_codecs
     }
 
-    /// Records the payload types a local offer lists for the section
-    /// ([`offered_payload_types`](Self::offered_payload_types)).
-    pub(crate) fn set_offered_payload_types(&mut self, payload_types: Vec<PayloadType>) {
-        self.offered_payload_types = payload_types;
+    /// Prepares the receiver for the section a local offer lists it in with a receiving
+    /// direction: `codecs` are the section's formats as the offer states them, `negotiated`
+    /// whether the section was answered before (its receive codecs are then a negotiated list
+    /// and stay receivable beside the offered formats, RFC 9429 section 4.1.11). An offer
+    /// applied over a pending one replaces the formats and keeps what a rollback returns to.
+    pub(crate) fn set_offered(&mut self, mut codecs: Vec<RTCRtpCodecParameters>, negotiated: bool) {
+        for codec in &mut codecs {
+            codec.rtp_codec.rtcp_feedback.clear();
+        }
+        match self.offered.as_mut() {
+            Some(offered) => {
+                offered.codecs = codecs;
+                offered.negotiated = negotiated;
+            }
+            None => {
+                self.offered = Some(OfferedReceive {
+                    codecs,
+                    negotiated,
+                    prior_codings: self.receive_codings.clone(),
+                    prior_track_codings: self.track.codings().to_vec(),
+                    prior_muted: self.track.muted(),
+                    early_streams: None,
+                });
+            }
+        }
     }
 
-    /// The payload types of the pending local offer's section, accepted on receive until the
-    /// answer sets the receive codecs (RFC 3264 section 5.1: "the offerer MUST be prepared to
-    /// receive media" as the offer describes it once the offer is sent).
-    pub(crate) fn offered_payload_types(&self) -> &[PayloadType] {
-        &self.offered_payload_types
+    /// The payload types of the pending local offer's section.
+    #[cfg(test)]
+    pub(crate) fn offered_payload_types(&self) -> Vec<PayloadType> {
+        self.offered
+            .iter()
+            .flat_map(|offered| offered.codecs.iter().map(|codec| codec.payload_type))
+            .collect()
+    }
+
+    /// Forgets the pending offer, as the answer's settling does, for a test without one.
+    #[cfg(test)]
+    pub(crate) fn drop_offered(&mut self) {
+        self.offered = None;
+    }
+
+    /// Whether a local offer is pending for this receiver ([`Self::set_offered`]).
+    pub(crate) fn has_offered(&self) -> bool {
+        self.offered.is_some()
+    }
+
+    /// A provisional answer was applied: the receive codecs are what it answered, received
+    /// with what it negotiated for them; the other offered formats stay receivable until the
+    /// final answer (RFC 9429 section 4.1.11: the dual processing "continues until
+    /// setRemoteDescription is called with either (1) a final answer ... or (2) a rollback").
+    pub(crate) fn mark_offered_answered(&mut self) {
+        if let Some(offered) = self.offered.as_mut() {
+            offered.negotiated = true;
+        }
+    }
+
+    /// The simulcast streams a pending offer asks to receive (`a=rid:<id> recv`, RFC 8853
+    /// section 5.3.1) on a receiver that has no stream yet: a coding per rid without an SSRC,
+    /// which the first packet carrying the rid binds, as for the layers a remote description
+    /// names.
+    pub(crate) fn set_offered_layers(&mut self, rids: &[String]) {
+        if self.offered.is_none() || !self.receive_codings.is_empty() {
+            return;
+        }
+        let mut codings = vec![];
+        for rid in rids {
+            let rtp_coding_parameters = RTCRtpCodingParameters {
+                rid: rid.clone(),
+                ..Default::default()
+            };
+            self.receive_codings.push(rtp_coding_parameters.clone());
+            codings.push(
+                crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+                    rtp_coding_parameters,
+                    ..Default::default()
+                },
+            );
+        }
+        self.track.set_codings(codings);
+    }
+
+    /// Whether the receiver's codings are only the layers a pending offer asked for
+    /// ([`Self::set_offered_layers`]), none bound yet.
+    pub(crate) fn offered_layers_unbound(&self) -> bool {
+        self.offered
+            .as_ref()
+            .is_some_and(|offered| offered.prior_codings.is_empty())
+            && !self.receive_codings.is_empty()
+            && self
+                .receive_codings
+                .iter()
+                .all(|coding| !coding.rid.is_empty() && coding.ssrc.is_none())
+    }
+
+    /// The offered layers give way to a stream that carries no rid: the remote side sends one
+    /// stream where simulcast was offered (RFC 8853 section 5.3.2: an answerer may decline).
+    pub(crate) fn drop_offered_layers(&mut self) {
+        if self.offered_layers_unbound() {
+            self.receive_codings.clear();
+            self.track.set_codings(vec![]);
+        }
+    }
+
+    /// The formats a packet may arrive with: the receive codecs, and while a local offer is
+    /// pending every format it lists for the section (RFC 3264 section 5.1: "it MUST be
+    /// prepared to receive media" as the offer describes it once the offer is sent; RFC 9429
+    /// section 5.9: "For each specified media format, establish a mapping between the payload
+    /// type and the actual media format"). For a section that was never answered the receive
+    /// codecs are local preferences, not a negotiated list: the offer's formats alone count.
+    pub(crate) fn receivable_codecs(&self) -> impl Iterator<Item = &RTCRtpCodecParameters> {
+        let offered = self.offered.as_ref();
+        let negotiated = offered.is_none_or(|offered| offered.negotiated);
+        let listed = &self.receive_codecs;
+        listed.iter().filter(move |_| negotiated).chain(
+            offered
+                .into_iter()
+                .flat_map(|offered| offered.codecs.iter())
+                .filter(move |codec| {
+                    !negotiated
+                        || !listed
+                            .iter()
+                            .any(|listed| listed.payload_type == codec.payload_type)
+                }),
+        )
+    }
+
+    /// [`Self::get_parameters`] as a stream is bound with: while a local offer is pending the
+    /// codecs are the receivable ones ([`Self::receivable_codecs`]), the offered formats
+    /// without feedback.
+    pub(crate) fn stream_parameters(
+        &mut self,
+        media_engine: &MediaEngine,
+    ) -> RTCRtpReceiveParameters {
+        let mut parameters = self.get_parameters(media_engine).clone();
+        if let Some(offered) = self.offered.as_ref() {
+            if offered.negotiated {
+                let extra: Vec<RTCRtpCodecParameters> = offered
+                    .codecs
+                    .iter()
+                    .filter(|codec| {
+                        !parameters
+                            .rtp_parameters
+                            .codecs
+                            .iter()
+                            .any(|listed| listed.payload_type == codec.payload_type)
+                    })
+                    .cloned()
+                    .collect();
+                parameters.rtp_parameters.codecs.extend(extra);
+            } else {
+                parameters.rtp_parameters.codecs.clone_from(&offered.codecs);
+            }
+        }
+        parameters
     }
 
     pub(crate) fn set_codec_preferences(&mut self, codecs: Vec<RTCRtpCodecParameters>) {
         self.receive_codecs = codecs;
-        self.offered_payload_types.clear();
         self.last_returned_parameters = None;
     }
 
@@ -711,9 +883,299 @@ impl RTCRtpReceiverInternal {
     /// `[[LastStableStateReceiveCodecs]]`).
     pub(crate) fn restore_negotiated_state(&mut self, saved: &RTCRtpReceiverInternal) {
         self.receive_codecs.clone_from(&saved.receive_codecs);
-        self.offered_payload_types
-            .clone_from(&saved.offered_payload_types);
         self.last_returned_parameters = None;
+    }
+
+    /// The SSRCs (media, RTX and FEC) of `codings`.
+    fn coding_ssrcs(codings: &[RTCRtpCodingParameters]) -> Vec<SSRC> {
+        codings
+            .iter()
+            .flat_map(|coding| {
+                coding
+                    .ssrc
+                    .into_iter()
+                    .chain(coding.rtx.as_ref().map(|rtx| rtx.ssrc))
+                    .chain(coding.fec.as_ref().map(|fec| fec.ssrc))
+            })
+            .collect()
+    }
+
+    /// The streams of this receiver that the pending offer did not find (their SSRC is in
+    /// none of the codings it found), as [`Self::remote_stream_infos`] describes them now.
+    fn early_stream_infos(&mut self, media_engine: &MediaEngine) -> Vec<StreamInfo> {
+        let prior = self
+            .offered
+            .as_ref()
+            .map(|offered| Self::coding_ssrcs(&offered.prior_codings))
+            .unwrap_or_default();
+        self.remote_stream_infos(media_engine)
+            .into_iter()
+            .filter(|info| !prior.contains(&info.ssrc))
+            .collect()
+    }
+
+    /// A stream was bound to the interceptors while a local offer is pending: the receiver
+    /// remembers what its early streams are bound with, for the answer to compare with and a
+    /// rollback to unbind. A no-op without a pending offer.
+    pub(crate) fn note_early_streams(&mut self, media_engine: &MediaEngine) {
+        if self.offered.is_none() {
+            return;
+        }
+        let infos = self.early_stream_infos(media_engine);
+        if let Some(offered) = self.offered.as_mut() {
+            offered.early_streams = Some(infos);
+        }
+    }
+
+    /// The pending offer's early streams were unbound by a rollback that was then undone (an
+    /// implicit rollback whose remote offer was refused, which leaves the local offer
+    /// pending): they are no longer established, and each one's next packet establishes it
+    /// again, binding it and opening its statistics anew.
+    pub(crate) fn reestablish_early_streams(&mut self) {
+        let Some(offered) = self.offered.as_mut() else {
+            return;
+        };
+        if offered.early_streams.is_none() {
+            return;
+        }
+        offered.early_streams = Some(vec![]);
+        let prior = Self::coding_ssrcs(&offered.prior_codings);
+        let mut codings = self.track.codings().to_vec();
+        for coding in &mut codings {
+            if coding
+                .rtp_coding_parameters
+                .ssrc
+                .is_some_and(|ssrc| !prior.contains(&ssrc))
+            {
+                coding.codec = Default::default();
+            }
+        }
+        self.track.set_codings(codings);
+    }
+
+    /// Brings the interceptors' bindings of the early streams in line with the receiver's
+    /// codings and codecs as they are now: a stream whose description changed is unbound with
+    /// what it was bound with and bound again, one that is gone is unbound, a new one is
+    /// bound; a stream that is described as before is left alone, with everything the
+    /// interceptors keep for it. A no-op without a pending offer.
+    pub(crate) fn resync_early_streams(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) {
+        if self.offered.is_none() {
+            return;
+        }
+        let now = self.early_stream_infos(media_engine);
+        let Some(offered) = self.offered.as_mut() else {
+            return;
+        };
+        let before = offered
+            .early_streams
+            .replace(now.clone())
+            .unwrap_or_default();
+        Self::rebind_remote_streams(interceptor, &before, &now);
+    }
+
+    fn rebind_remote_streams(
+        interceptor: &mut dyn Interceptor,
+        before: &[StreamInfo],
+        now: &[StreamInfo],
+    ) {
+        for info in before {
+            if !now.contains(info) {
+                interceptor.unbind_remote_stream(info);
+            }
+        }
+        for info in now {
+            if !before.contains(info) {
+                interceptor.bind_remote_stream(info);
+            }
+        }
+    }
+
+    /// The codings early media gave an SSRC and a codec while the offer was pending (the
+    /// receive codings and the track's), for the answer to carry over
+    /// ([`Self::adopt_early_codings`]); `None` when no stream arrived early.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn early_codings(
+        &self,
+    ) -> Option<(
+        Vec<RTCRtpCodingParameters>,
+        Vec<crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters>,
+    )> {
+        self.offered
+            .as_ref()
+            .filter(|offered| offered.early_streams.is_some())
+            .map(|_| (self.receive_codings.clone(), self.track.codings().to_vec()))
+    }
+
+    /// The answer described the receiver's track anew (its SSRC, or its layers by rid, or
+    /// neither): what early media already established stays. A layer keeps the SSRC, repair
+    /// SSRCs and codec its rid was bound with; a declared SSRC that already arrived keeps its
+    /// codec (the declared repair SSRCs are the answer's); an answer that declares neither
+    /// keeps the stream the media itself placed (RFC 9143 section 9.2: `a=ssrc` lines are
+    /// optional). An early stream the answer describes otherwise (another SSRC, no such rid)
+    /// is not carried over.
+    pub(crate) fn adopt_early_codings(
+        &mut self,
+        early: (
+            Vec<RTCRtpCodingParameters>,
+            Vec<crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters>,
+        ),
+    ) {
+        let (early_codings, early_track_codings) = early;
+        if self.receive_codings.is_empty() && self.track.codings().is_empty() {
+            self.receive_codings = early_codings
+                .into_iter()
+                .filter(|coding| coding.rid.is_empty() && coding.ssrc.is_some())
+                .collect();
+            self.track.set_codings(
+                early_track_codings
+                    .into_iter()
+                    .filter(|coding| {
+                        coding.rtp_coding_parameters.rid.is_empty()
+                            && coding.rtp_coding_parameters.ssrc.is_some()
+                    })
+                    .collect(),
+            );
+            return;
+        }
+        for coding in &mut self.receive_codings {
+            if coding.rid.is_empty() {
+                continue;
+            }
+            if let Some(early) = early_codings
+                .iter()
+                .find(|early| early.rid == coding.rid && early.ssrc.is_some())
+            {
+                coding.ssrc = early.ssrc;
+                coding.rtx.clone_from(&early.rtx);
+                coding.fec.clone_from(&early.fec);
+            }
+        }
+        let mut track_codings = self.track.codings().to_vec();
+        for coding in &mut track_codings {
+            let parameters = &mut coding.rtp_coding_parameters;
+            let early = if parameters.rid.is_empty() {
+                early_track_codings.iter().find(|early| {
+                    early.rtp_coding_parameters.rid.is_empty()
+                        && early.rtp_coding_parameters.ssrc.is_some()
+                        && early.rtp_coding_parameters.ssrc == parameters.ssrc
+                })
+            } else {
+                early_track_codings.iter().find(|early| {
+                    early.rtp_coding_parameters.rid == parameters.rid
+                        && early.rtp_coding_parameters.ssrc.is_some()
+                })
+            };
+            let Some(early) = early else {
+                continue;
+            };
+            if !parameters.rid.is_empty() {
+                parameters.ssrc = early.rtp_coding_parameters.ssrc;
+                parameters.rtx.clone_from(&early.rtp_coding_parameters.rtx);
+                parameters.fec.clone_from(&early.rtp_coding_parameters.fec);
+            }
+            coding.codec.clone_from(&early.codec);
+        }
+        self.track.set_codings(track_codings);
+    }
+
+    /// The final answer to the pending offer was applied: the offered formats it did not
+    /// take stop being receivable (RFC 3264 section 8.3.2: "if the offered stream is
+    /// rejected, the offer can cease being prepared to receive using any new formats as soon
+    /// as the rejection is received"; the receive codecs are the answer's from here on), and
+    /// each stream that arrived early is bound with what the answer negotiated: its feedback
+    /// (RFC 9429 section 5.11), header extensions and repair flows. A stream the answer
+    /// changes nothing for keeps its binding, and so what the interceptors hold for it; one
+    /// that arrived in a format the answer left out is not established any more, and its
+    /// next packet in a format of the answer establishes it again.
+    ///
+    /// # Returns
+    ///
+    /// Whether the receiver had streams that arrived early.
+    pub(crate) fn settle_offered(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> bool {
+        let Some(offered) = self.offered.take() else {
+            return false;
+        };
+        self.last_returned_parameters = None;
+        let Some(early) = offered.early_streams else {
+            return false;
+        };
+        let prior = Self::coding_ssrcs(&offered.prior_codings);
+        let codecs = self
+            .get_parameters(media_engine)
+            .rtp_parameters
+            .codecs
+            .clone();
+        let mut codings = self.track.codings().to_vec();
+        for coding in &mut codings {
+            if coding
+                .rtp_coding_parameters
+                .ssrc
+                .is_none_or(|ssrc| prior.contains(&ssrc))
+                || coding.codec.mime_type.is_empty()
+            {
+                continue;
+            }
+            // The stream's codec is the negotiated format from here on, with its feedback.
+            let (negotiated, match_type) = codec_parameters_fuzzy_search(&coding.codec, &codecs);
+            coding.codec = if match_type == CodecMatch::None {
+                Default::default()
+            } else {
+                negotiated.rtp_codec
+            };
+        }
+        self.track.set_codings(codings);
+        let now: Vec<StreamInfo> = self
+            .remote_stream_infos(media_engine)
+            .into_iter()
+            .filter(|info| !prior.contains(&info.ssrc))
+            .collect();
+        Self::rebind_remote_streams(interceptor, &early, &now);
+        true
+    }
+
+    /// The pending offer was rolled back (RFC 9429 section 5.7: "the state of the session is
+    /// restored to the state it was in before the offer"): its formats are no longer
+    /// receivable, the streams that arrived early are unbound, and the codings are the ones
+    /// the offer found.
+    ///
+    /// # Returns
+    ///
+    /// The SSRCs of the streams that are gone, and whether the track, unmuted by early media,
+    /// is muted again.
+    pub(crate) fn roll_back_offered(
+        &mut self,
+        interceptor: &mut dyn Interceptor,
+    ) -> (Vec<SSRC>, bool) {
+        let Some(offered) = self.offered.take() else {
+            return (vec![], false);
+        };
+        self.last_returned_parameters = None;
+        let layers_offered = offered.prior_codings.is_empty() && !self.receive_codings.is_empty();
+        let Some(early) = offered.early_streams else {
+            if layers_offered {
+                self.receive_codings = offered.prior_codings;
+                self.track.set_codings(offered.prior_track_codings);
+            }
+            return (vec![], false);
+        };
+        for info in &early {
+            interceptor.unbind_remote_stream(info);
+        }
+        self.receive_codings = offered.prior_codings;
+        self.track.set_codings(offered.prior_track_codings);
+        let muted_again = offered.prior_muted && !self.track.muted();
+        if muted_again {
+            self.track.set_muted(true);
+        }
+        (early.iter().map(|info| info.ssrc).collect(), muted_again)
     }
 
     pub(crate) fn set_track(&mut self, mut track: MediaStreamTrack) {
@@ -758,6 +1220,17 @@ impl RTCRtpReceiverInternal {
         self.track.stop();
         self.end_unannounced = true;
         true
+    }
+
+    /// A new track in place of the receiver's (ended) one, as a new msid-appdata names it
+    /// (RFC 8830 section 3, `with_msid_appdata_change_renews_track`): a new id the engine
+    /// generates, live and muted, with the old one's stream, codings and label.
+    pub(crate) fn renew_track(&mut self) {
+        let mut track = self.track.clone();
+        track.track_id = shared::util::math_rand_alpha(16);
+        track.renew();
+        track.set_muted(true);
+        self.track = track;
     }
 
     /// Whether the track ended since the application was last told (once: the flag is
@@ -818,13 +1291,12 @@ impl RTCRtpReceiverInternal {
         }
     }
 
-    pub(crate) fn interceptor_remote_streams_op(
-        &mut self,
-        media_engine: &MediaEngine,
-        interceptor: &mut dyn Interceptor,
-        is_binding: bool,
-    ) {
-        let parameters = self.get_parameters(media_engine).clone();
+    /// The streams of this receiver as the interceptors are told of them: for each coding
+    /// of the track with an SSRC and a codec that is receivable, the media stream with its
+    /// repair associations, then its RTX flow and its FEC flow as streams of their own.
+    pub(crate) fn remote_stream_infos(&mut self, media_engine: &MediaEngine) -> Vec<StreamInfo> {
+        let parameters = self.stream_parameters(media_engine);
+        let mut infos = vec![];
 
         for coding in self.track().codings() {
             let (codec, match_type) =
@@ -844,9 +1316,7 @@ impl RTCRtpReceiverInternal {
                         .map(|fec_format| (fec.ssrc, fec_format))
                 });
 
-                RTCRtpReceiverInternal::interceptor_remote_stream_op(
-                    interceptor,
-                    is_binding,
+                infos.push(create_stream_info(
                     ssrc,
                     rtx.map(|(ssrc_rtx, _)| ssrc_rtx),
                     fec.as_ref().map(|(ssrc_fec, _)| *ssrc_fec),
@@ -856,16 +1326,14 @@ impl RTCRtpReceiverInternal {
                     &codec.rtp_codec,
                     &parameters.rtp_parameters.header_extensions,
                     &parameters.rtp_parameters.codecs,
-                );
+                ));
 
                 // Each repair flow is also bound in its own right, as it has been: it is a real
                 // RTP stream with its own SSRC and sequence-number space, and an interceptor that
                 // tracks arrival needs to know it exists. RTX and FEC are treated identically
                 // here — they are the same shape of thing.
                 if let Some((ssrc_rtx, payload_type_rtx)) = rtx {
-                    RTCRtpReceiverInternal::interceptor_remote_stream_op(
-                        interceptor,
-                        is_binding,
+                    infos.push(create_stream_info(
                         ssrc_rtx,
                         None,
                         None,
@@ -875,13 +1343,11 @@ impl RTCRtpReceiverInternal {
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                         &[],
-                    );
+                    ));
                 }
 
                 if let Some((ssrc_fec, fec_format)) = fec {
-                    RTCRtpReceiverInternal::interceptor_remote_stream_op(
-                        interceptor,
-                        is_binding,
+                    infos.push(create_stream_info(
                         ssrc_fec,
                         None,
                         None,
@@ -891,8 +1357,24 @@ impl RTCRtpReceiverInternal {
                         &repair_flow_codec(&codec.rtp_codec),
                         &parameters.rtp_parameters.header_extensions,
                         &[],
-                    );
+                    ));
                 }
+            }
+        }
+        infos
+    }
+
+    pub(crate) fn interceptor_remote_streams_op(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+        is_binding: bool,
+    ) {
+        for info in self.remote_stream_infos(media_engine) {
+            if is_binding {
+                interceptor.bind_remote_stream(&info);
+            } else {
+                interceptor.unbind_remote_stream(&info);
             }
         }
     }

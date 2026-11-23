@@ -19,7 +19,7 @@ use crate::peer_connection::sdp::{
     add_candidates_to_media_descriptions, bundle_group_mids, bundle_groups, effective_direction,
     extmap_allow_mixed_in, get_application_media, get_application_media_section_sctp_port,
     get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
-    is_rejected_media, is_rtp_profile, is_unknown_application_media,
+    is_rejected_media, is_rtp_profile, is_unknown_media_protocol,
     rtp_extensions_from_media_description, superseded_clear_extensions, track_details_from_sdp,
     unknown_media_name,
 };
@@ -363,7 +363,8 @@ impl RTCPeerConnection {
             ),
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
-            interceptor_handler_context: InterceptorHandlerContext::default(),
+            interceptor_handler_context: InterceptorHandlerContext::default()
+                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
             data_read_outs: VecDeque::new(),
@@ -411,6 +412,7 @@ impl RTCPeerConnection {
             last_offer: String::new(),
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
+            ssrc_history: HashSet::new(),
             local_description_was_set: false,
             transport_closed: false,
             seen_selected_pair_changes: 0,
@@ -941,7 +943,7 @@ impl RTCPeerConnection {
                     }
 
                     let kind = RtpCodecKind::from(media.media_name.media.as_str());
-                    if kind == RtpCodecKind::Unspecified || is_unknown_application_media(media) {
+                    if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
                         // A media type this endpoint doesn't know (RFC 8866
                         // lets <media> be any token): rejected with port 0,
                         // its media type, protocol and formats kept, so the
@@ -1459,6 +1461,9 @@ impl RTCPeerConnection {
             (_, RTCSdpType::Rollback) => {
                 self.pending_local_description = None;
                 self.pending_remote_description = None;
+                // What a local offer prepared the receivers for goes with it, before the
+                // transceivers it associated lose their mids.
+                self.roll_back_offered_receive();
                 // Undo what the abandoned offer changed (RFC 9429, Section 5.7). Its transport
                 // part was never applied: what it staged for the answer is dropped.
                 self.drop_pending_remote_transport();
@@ -2549,7 +2554,7 @@ impl RTCPeerConnection {
     /// Collects the set of mids associated by the current (last stable) local and remote
     /// descriptions. Used by rollback to distinguish transceivers associated by a prior,
     /// already-negotiated exchange from those associated only by the description being rolled back.
-    fn current_description_mids(&self) -> HashSet<String> {
+    pub(super) fn current_description_mids(&self) -> HashSet<String> {
         let mut mids = HashSet::new();
         for desc in [
             self.current_local_description.as_ref(),
@@ -2784,6 +2789,14 @@ impl RTCPeerConnection {
     pub(super) fn start_rtp(&mut self, remote_desc: RTCSessionDescription) -> Result<()> {
         self.start_rtp_senders()?;
 
+        // The simulcast streams a local offer asked for and no media has claimed yet: the
+        // answer says below which streams there are, if any.
+        for transceiver in &mut self.rtp_transceivers {
+            if let Some(receiver) = transceiver.receiver_mut() {
+                receiver.drop_offered_layers();
+            }
+        }
+
         let incoming_tracks = if let Some(parsed) = &remote_desc.parsed {
             track_details_from_sdp(parsed)
         } else {
@@ -2805,6 +2818,10 @@ impl RTCPeerConnection {
                     // the MID/RID header extension needed to learn them again.
                     continue;
                 }
+
+                // What media that arrived before this answer established (RFC 3264 section
+                // 5.1), carried over into the track the answer describes.
+                let early = receiver.early_codings();
 
                 // An `a=msid` without appdata names no track: "the recipient can assign the
                 // track ID itself" (RFC 8830 section 3; RFC 9429 section 5.2.1 has senders
@@ -2871,19 +2888,34 @@ impl RTCPeerConnection {
                         codings,
                     ));
                 } else if let Some(ssrc) = incoming_track.ssrc {
-                    let rtp_coding_parameters = RTCRtpCodingParameters {
-                        rid: "".to_string(),
-                        ssrc: Some(ssrc),
-                        rtx: incoming_track
-                            .rtx_ssrc
-                            .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
-                        fec: incoming_track
-                            .fec_ssrc
-                            .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
-                        ..Default::default()
-                    };
-
-                    receive_codings.push(rtp_coding_parameters.clone());
+                    // The declared stream, and (RFC 5576 `a=ssrc-group:SIM`) the further
+                    // simulcast streams of the track, each a coding with its repair flows.
+                    let layers = std::iter::once(sdp::SsrcLayer {
+                        ssrc,
+                        rtx_ssrc: incoming_track.rtx_ssrc,
+                        fec_ssrc: incoming_track.fec_ssrc,
+                    })
+                    .chain(std::mem::take(&mut incoming_track.ssrc_layers));
+                    let mut codings = vec![];
+                    for layer in layers {
+                        let rtp_coding_parameters = RTCRtpCodingParameters {
+                            rid: "".to_string(),
+                            ssrc: Some(layer.ssrc),
+                            rtx: layer
+                                .rtx_ssrc
+                                .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
+                            fec: layer
+                                .fec_ssrc
+                                .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
+                            ..Default::default()
+                        };
+                        receive_codings.push(rtp_coding_parameters.clone());
+                        codings.push(RTCRtpEncodingParameters {
+                            rtp_coding_parameters,
+                            codec: Default::default(), // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
+                            ..Default::default()
+                        });
+                    }
 
                     receiver.set_remote_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
@@ -2891,11 +2923,7 @@ impl RTCPeerConnection {
                         // W3C webrtc 4.4.1.6 (create an RTCRtpReceiver): "remote " + kind.
                         format!("remote {}", incoming_track.kind),
                         incoming_track.kind,
-                        vec![RTCRtpEncodingParameters {
-                            rtp_coding_parameters,
-                            codec: Default::default(), // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
-                            ..Default::default()
-                        }],
+                        codings,
                     ));
 
                     // Deliberately no `interceptor_remote_streams_op` here. It bound nothing: that
@@ -2923,6 +2951,9 @@ impl RTCPeerConnection {
                 }
 
                 receiver.set_coding_parameters(receive_codings);
+                if let Some(early) = early {
+                    receiver.adopt_early_codings(early);
+                }
             }
         }
 
@@ -3399,6 +3430,33 @@ impl RTCPeerConnection {
         self.unused_ssrc_drawn(minted, &mut rand::random::<u32>)
     }
 
+    /// Adds the SSRCs of every local stream (each sender's encodings with their RTX and FEC
+    /// flows, and the streams it parked for other clock rates) to
+    /// [`ssrc_history`](RTCPeerConnection::ssrc_history), which [`unused_ssrc`](Self::unused_ssrc)
+    /// draws outside of. Called when a local description is applied: what it describes has
+    /// been used. Past [`MAX_SSRC_HISTORY`] entries nothing more is kept (a draw then only
+    /// avoids the SSRCs in use, as RFC 5576 section 8 requires at the least).
+    pub(super) fn remember_local_ssrcs(&mut self) {
+        let mut used: Vec<SSRC> = vec![];
+        for transceiver in &self.rtp_transceivers {
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    let coding = &encoding.rtp_coding_parameters;
+                    used.extend(coding.ssrc);
+                    used.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                    used.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+                }
+                used.extend(sender.parked_ssrcs());
+            }
+        }
+        for ssrc in used {
+            if self.ssrc_history.len() >= MAX_SSRC_HISTORY {
+                break;
+            }
+            self.ssrc_history.insert(ssrc);
+        }
+    }
+
     /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
     fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
@@ -3422,6 +3480,8 @@ impl RTCPeerConnection {
                 taken.extend(described_ssrcs(parsed));
             }
         }
+        // RFC 5576 sections 5 and 8: nor one a local stream used before.
+        taken.extend(&self.ssrc_history);
         let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
@@ -4422,6 +4482,14 @@ impl RTCPeerConnection {
                 {
                     continue;
                 }
+                // RFC 2198 section 5: a RED format goes with the encodings its fmtp names, as
+                // RTX with its `apt`.
+                if !crate::peer_connection::configuration::media_engine::red_encodings_negotiated(
+                    codec,
+                    &codec_preferences,
+                ) {
+                    continue;
+                }
                 codec_preferences.push(codec.clone());
             }
             // So does telephone-event at a named codec's clock rate (RFC 4733, RFC 7874
@@ -4633,11 +4701,23 @@ fn is_same_remote_track(
     }
 
     match (codings, incoming_track.ssrc) {
-        ([coding], Some(ssrc)) => {
+        ([coding, ..], Some(ssrc)) if codings.len() == 1 + incoming_track.ssrc_layers.len() => {
+            let layers = std::iter::once((ssrc, incoming_track.rtx_ssrc, incoming_track.fec_ssrc))
+                .chain(
+                    incoming_track
+                        .ssrc_layers
+                        .iter()
+                        .map(|layer| (layer.ssrc, layer.rtx_ssrc, layer.fec_ssrc)),
+                );
             coding.rid.is_empty()
-                && coding.ssrc == Some(ssrc)
-                && coding.rtx.as_ref().map(|r| r.ssrc) == incoming_track.rtx_ssrc
-                && coding.fec.as_ref().map(|f| f.ssrc) == incoming_track.fec_ssrc
+                && codings
+                    .iter()
+                    .zip(layers)
+                    .all(|(coding, (ssrc, rtx, fec))| {
+                        coding.ssrc == Some(ssrc)
+                            && coding.rtx.as_ref().map(|r| r.ssrc) == rtx
+                            && coding.fec.as_ref().map(|f| f.ssrc) == fec
+                    })
         }
         _ => false,
     }
@@ -5086,6 +5166,10 @@ pub(crate) fn negotiated_receive_maximum(
 }
 
 /// The first of `draws` that is not in `taken` (and not 0, which some peers treat as unset).
+/// The most SSRCs [`RTCPeerConnection::ssrc_history`] keeps: enough for any session's streams
+/// and their renegotiations, small next to the 2^32 SSRC space.
+pub(crate) const MAX_SSRC_HISTORY: usize = 4096;
+
 pub(crate) fn unused_ssrc_from(
     draws: impl IntoIterator<Item = SSRC>,
     taken: &HashSet<SSRC>,
@@ -5202,6 +5286,35 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:2\r\n";
             Some(500_000)
         );
         assert_eq!(negotiated_receive_maximum(&local, &mids(&["2"])), None);
+    }
+
+    /// RFC 5576 section 5: an SSRC is not reused for another source within the participant
+    /// timeout, and "SHOULD NOT" ever be; section 8: an updated offer's new SSRCs differ from
+    /// "any previously used". A local description that is applied records the SSRCs of every
+    /// local stream (the media and its RTX flow); a later draw of one of them, or of any other
+    /// SSRC the history holds, is drawn again, also once no stream has it any more.
+    #[test]
+    fn an_ssrc_used_before_is_not_drawn_again() {
+        let mut pc = vp8_with_rtx();
+        pc.add_track(track(RTCRtpCodingParameters {
+            ssrc: Some(7),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 8 }),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(pc.ssrc_history.is_empty());
+        let offer = pc.create_offer(None).unwrap();
+        pc.set_local_description(Instant::now(), offer).unwrap();
+        assert!(pc.ssrc_history.contains(&7), "{:?}", pc.ssrc_history);
+        assert!(pc.ssrc_history.contains(&8), "{:?}", pc.ssrc_history);
+
+        // An SSRC of an earlier stream that no sender has now.
+        pc.ssrc_history.insert(33);
+        let mut draws = [33u32, 7, 8, 41].into_iter();
+        assert_eq!(
+            41,
+            pc.unused_ssrc_drawn(&mut vec![], &mut || draws.next().unwrap())
+        );
     }
 
     /// RFC 5576 sections 5 and 8: a drawn SSRC that a remote description mentions or another

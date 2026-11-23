@@ -95,19 +95,8 @@ impl RTCPeerConnection {
             let direction = get_peer_direction(&parsed.media_descriptions[index]);
             transceiver.set_receptive(receives(direction));
             if !matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
-                // RFC 3264 section 5.1: once the offer is sent the offerer "MUST be prepared
-                // to receive media" as it describes; the receive codecs follow the answer.
-                if sdp_type == RTCSdpType::Offer
-                    && let Some(receiver) = transceiver.receiver_mut()
-                {
-                    let offered = parsed.media_descriptions[index]
-                        .media_name
-                        .formats
-                        .iter()
-                        .filter_map(|format| format.parse().ok())
-                        .collect();
-                    receiver.set_offered_payload_types(offered);
-                }
+                // What a local offer prepares the receiver for is set by
+                // `prepare_offered_receive` (RFC 3264 section 5.1).
                 continue;
             }
             if does_not_receive(direction) && transceiver.fired_direction().is_some_and(receives) {
@@ -132,9 +121,24 @@ impl RTCPeerConnection {
         sdp_type: RTCSdpType,
         prior_state: RTCSignalingState,
         msid_sections: HashSet<String>,
+        renewed: Vec<RTCRtpTransceiverId>,
     ) {
         let mut ended = Vec::new();
         let mut changes = RemoteTrackChanges::default();
+        // RFC 8830 section 3 (`with_msid_appdata_change_renews_track`): a new msid-appdata is
+        // a new track: the receiver's track ends, and a new one takes its place, announced
+        // with a track event as a receiver's first track is.
+        for id in renewed {
+            let Some(receiver) = self.rtp_transceivers[id].receiver_mut() else {
+                continue;
+            };
+            receiver.end_track();
+            self.announce_receiver_track_ended(id);
+            if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
+                receiver.renew_track();
+            }
+            self.rtp_transceivers[id].set_fired_direction(None);
+        }
         if sdp_type == RTCSdpType::Rollback {
             // Rolling back a remote offer: every transceiver goes back to the streams of the
             // last stable state and the direction it negotiated then.
@@ -193,6 +197,37 @@ impl RTCPeerConnection {
             self.announce_receiver_track_ended(id);
         }
         self.after_description();
+    }
+
+    /// The transceivers whose receiver a remote description `parsed` gives a new
+    /// msid-appdata (one that names a track, other than the one the receiver's track was
+    /// last described with), when a new appdata renews the track
+    /// (`with_msid_appdata_change_renews_track`); empty otherwise.
+    pub(super) fn sections_with_new_msid_appdata(
+        &self,
+        parsed: Option<&SessionDescription>,
+    ) -> Vec<RTCRtpTransceiverId> {
+        if !self.setting_engine.msid_appdata_change_renews_track {
+            return vec![];
+        }
+        let Some(parsed) = parsed else {
+            return vec![];
+        };
+        associated_sections(&self.rtp_transceivers, parsed)
+            .into_iter()
+            .filter(|&(id, index)| {
+                let media = &parsed.media_descriptions[index];
+                let Some(receiver) = self.rtp_transceivers[id].receiver().as_ref() else {
+                    return false;
+                };
+                let previous = receiver.remote_track_id();
+                !is_rejected_media(media)
+                    && !previous.is_empty()
+                    && media_msid(media)
+                        .is_some_and(|(_, appdata)| !appdata.is_empty() && appdata != previous)
+            })
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// The mids of the remote description's media sections that list an `a=msid`, when the
