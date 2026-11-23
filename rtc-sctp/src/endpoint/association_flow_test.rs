@@ -12,8 +12,8 @@ use shared::error::Result;
 use std::time::Duration;
 
 /// 1) Send 4 messages and lose the first. 2) The other 3 arrive and their SACKs trigger fast
-/// retransmission. 3) The first is retransmitted, which makes the stream readable, all before
-/// an RTO (RFC 9260 7.2.4).
+///    retransmission. 3) The first is retransmitted, which makes the stream readable, all before
+///    an RTO (RFC 9260 7.2.4).
 #[test]
 fn test_assoc_congestion_control_fast_retransmission() -> Result<()> {
     let si: u16 = 6;

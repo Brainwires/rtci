@@ -28,7 +28,6 @@ use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use rtc::shared::marshal::Marshal;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use signal;
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -247,7 +246,6 @@ async fn run_peer_connection(
                 rtcp_feedback: vec![],
             },
             payload_type: 96,
-            ..Default::default()
         },
         RtpCodecKind::Video,
     )?;
@@ -263,7 +261,6 @@ async fn run_peer_connection(
                 rtcp_feedback: vec![],
             },
             payload_type: 111,
-            ..Default::default()
         },
         RtpCodecKind::Audio,
     )?;
@@ -476,7 +473,7 @@ async fn run_peer_connection(
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event })?;
                     }
                     None => {
                         eprintln!("event_rx closed");

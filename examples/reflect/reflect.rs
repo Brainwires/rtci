@@ -173,7 +173,6 @@ async fn run(
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -185,7 +184,6 @@ async fn run(
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     // Setup the codecs you want to use.
@@ -354,10 +352,9 @@ async fn run(
         while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, mut rtp_packet) => {
-                    let receiver_id = track_id2_receiver_id
+                    let receiver_id = *track_id2_receiver_id
                         .get(&track_id)
-                        .ok_or(Error::ErrRTPReceiverNotExisted)?
-                        .clone();
+                        .ok_or(Error::ErrRTPReceiverNotExisted)?;
                     let inbound_payload_type = rtp_packet.header.payload_type;
                     let (media_ssrc, track_kind, incoming_codec) = {
                         let mut rtp_receiver = peer_connection
@@ -456,7 +453,7 @@ async fn run(
             res = message_rx.recv() => {
                 match res {
                     Ok(message) => {
-                        peer_connection.handle_write(TaggedRTCMessage { now: Instant::now(), message: message })?;
+                        peer_connection.handle_write(TaggedRTCMessage { now: Instant::now(), message })?;
                     }
                     Err(err) => {
                         eprintln!("write_rx error: {}", err);
@@ -467,7 +464,7 @@ async fn run(
             res = event_rx.recv() => {
                 match res {
                     Ok(event) => {
-                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event })?;
                     }
                     Err(err) => {
                         eprintln!("event_rx error: {}", err);

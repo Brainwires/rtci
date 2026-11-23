@@ -118,19 +118,16 @@ impl TestEndpoint {
             }
         }
 
-        while self.inbound.front().map_or(false, |x| x.0 <= now) {
+        while self.inbound.front().is_some_and(|x| x.0 <= now) {
             let (recv_time, ecn, packet) = self.inbound.pop_front().unwrap();
-            if let Some((ch, event)) = self.endpoint.handle(recv_time, remote, ecn, packet.into()) {
+            if let Some((ch, event)) = self.endpoint.handle(recv_time, remote, ecn, packet) {
                 match event {
                     DatagramEvent::NewAssociation(conn) => {
                         self.associations.insert(ch, conn);
                         self.accepted = Some(ch);
                     }
                     DatagramEvent::AssociationEvent(event) => {
-                        self.conn_events
-                            .entry(ch)
-                            .or_insert_with(VecDeque::new)
-                            .push_back(event);
+                        self.conn_events.entry(ch).or_default().push_back(event);
                     }
                 }
             }
@@ -138,7 +135,7 @@ impl TestEndpoint {
 
         let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
         for (ch, conn) in self.associations.iter_mut() {
-            if self.timeout.map_or(false, |x| x <= now) {
+            if self.timeout.is_some_and(|x| x <= now) {
                 self.timeout = None;
                 conn.handle_timeout(now);
             }
@@ -345,12 +342,12 @@ impl Pair {
     fn finish_connect(&mut self, client_ch: AssociationHandle, server_ch: AssociationHandle) {
         assert_matches!(
             self.client_conn_mut(client_ch).poll(),
-            Some(Event::Connected { .. })
+            Some(Event::Connected)
         );
 
         assert_matches!(
             self.server_conn_mut(server_ch).poll(),
-            Some(Event::Connected { .. })
+            Some(Event::Connected)
         );
     }
 
@@ -425,7 +422,7 @@ fn establish_session_pair(
     {
         let s1 = pair.server_conn_mut(server_ch).accept_stream().unwrap();
         if si != s1.stream_identifier {
-            return Err(Error::Other("si should match".to_owned()).into());
+            return Err(Error::Other("si should match".to_owned()));
         }
     }
     pair.drive();
@@ -435,15 +432,15 @@ fn establish_session_pair(
     let n = chunks.read(&mut buf)?;
 
     if n != hello_msg.len() {
-        return Err(Error::Other("received data must by 3 bytes".to_owned()).into());
+        return Err(Error::Other("received data must by 3 bytes".to_owned()));
     }
 
     if chunks.ppi != PayloadProtocolIdentifier::Dcep {
-        return Err(Error::Other("unexpected ppi".to_owned()).into());
+        return Err(Error::Other("unexpected ppi".to_owned()));
     }
 
-    if &buf[..n] != &hello_msg {
-        return Err(Error::Other("received data mismatch".to_owned()).into());
+    if buf[..n] != hello_msg {
+        return Err(Error::Other("received data mismatch".to_owned()));
     }
     pair.drive();
 
@@ -2950,7 +2947,7 @@ fn test_association_handle_packet_before_init() -> Result<()> {
                     destination_port: 1,
                     verification_tag: 0,
                 },
-                chunks: vec![Box::new(ChunkShutdownAck::default())],
+                chunks: vec![Box::new(ChunkShutdownAck)],
             },
         ),
         (
@@ -3034,7 +3031,7 @@ fn test_old_rtx_on_regular_acks() -> Result<()> {
         pair.client.drive(pair.time, pair.server.addr);
 
         // drop a few transmits
-        if i >= 5 && i < 10 {
+        if (5..10).contains(&i) {
             pair.client.outbound.clear();
         }
 
@@ -3099,10 +3096,10 @@ fn deliver_to_server_rtc_style(
     let client_addr = pair.client.addr;
 
     while let Some((recv_time, ecn, packet)) = pair.server.inbound.pop_front() {
-        if let Some((ch, event)) =
-            pair.server
-                .endpoint
-                .handle(recv_time, client_addr, ecn, packet.into())
+        if let Some((ch, event)) = pair
+            .server
+            .endpoint
+            .handle(recv_time, client_addr, ecn, packet)
         {
             match event {
                 DatagramEvent::NewAssociation(conn) => {
@@ -3487,10 +3484,10 @@ fn deliver_to_server_rtc_style_no_read(pair: &mut Pair, server_ch: AssociationHa
     let client_addr = pair.client.addr;
     let mut n = 0;
     while let Some((recv_time, ecn, packet)) = pair.server.inbound.pop_front() {
-        if let Some((ch, event)) =
-            pair.server
-                .endpoint
-                .handle(recv_time, client_addr, ecn, packet.into())
+        if let Some((ch, event)) = pair
+            .server
+            .endpoint
+            .handle(recv_time, client_addr, ecn, packet)
         {
             match event {
                 DatagramEvent::NewAssociation(conn) => {

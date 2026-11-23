@@ -67,7 +67,7 @@ fn test_candidate_pair_priority() -> Result<()> {
     const SRFLX_INDEX: usize = 2;
     const RELAY_INDEX: usize = 3;
 
-    let candidates = vec![
+    let candidates = [
         host_candidate()?,
         prflx_candidate()?,
         srflx_candidate()?,
@@ -175,7 +175,7 @@ fn test_candidate_pair_equality() -> Result<()> {
     const SRFLX_INDEX: usize = 2;
     const RELAY_INDEX: usize = 3;
 
-    let candidates = vec![
+    let candidates = [
         host_candidate()?,
         prflx_candidate()?,
         srflx_candidate()?,

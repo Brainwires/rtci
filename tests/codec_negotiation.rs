@@ -27,7 +27,6 @@ fn video_codec(mime_type: &str, payload_type: u8) -> RTCRtpCodecParameters {
             rtcp_feedback: vec![],
         },
         payload_type,
-        ..Default::default()
     }
 }
 
@@ -161,7 +160,7 @@ fn test_add_transceiver_from_kind_negotiates_non_first_codec() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[h264.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&h264)))
         .build(Instant::now())
         .expect("build answerer");
 
@@ -240,7 +239,7 @@ fn test_add_transceiver_from_track_negotiates_non_first_codec() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[h264.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&h264)))
         .build(Instant::now())
         .expect("build answerer");
 
@@ -310,7 +309,7 @@ fn test_add_track_negotiates_non_first_codec() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[h264.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&h264)))
         .build(Instant::now())
         .expect("build answerer");
 
@@ -353,7 +352,7 @@ fn test_add_transceiver_from_kind_preserves_simulcast() {
     let config = RTCConfigurationBuilder::new().build();
     let mut offerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config.clone())
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build offerer");
 
@@ -384,7 +383,7 @@ fn test_add_transceiver_from_kind_preserves_simulcast() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build answerer");
 
@@ -422,7 +421,7 @@ fn test_add_transceiver_from_track_preserves_simulcast() {
     let config = RTCConfigurationBuilder::new().build();
     let mut offerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config.clone())
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build offerer");
 
@@ -459,7 +458,7 @@ fn test_add_transceiver_from_track_preserves_simulcast() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build answerer");
 
@@ -497,7 +496,7 @@ fn test_add_track_preserves_simulcast() {
     let config = RTCConfigurationBuilder::new().build();
     let mut offerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config.clone())
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build offerer");
 
@@ -525,7 +524,7 @@ fn test_add_track_preserves_simulcast() {
 
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .with_media_engine(video_media_engine(&[vp8.clone()]))
+        .with_media_engine(video_media_engine(std::slice::from_ref(&vp8)))
         .build(Instant::now())
         .expect("build answerer");
 

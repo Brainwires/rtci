@@ -378,10 +378,10 @@ async fn main() -> Result<()> {
 
     let video_file_state = Arc::new(Mutex::new(video_file.clone()));
 
-    if let Some(video_path) = &video_file {
-        if !Path::new(video_path).exists() {
-            return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
-        }
+    if let Some(video_path) = &video_file
+        && !Path::new(video_path).exists()
+    {
+        return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
     }
 
     let (stop_tx, stop_rx) = channel::<()>(1);
@@ -435,7 +435,6 @@ async fn run(
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     // Setup the video codec
@@ -698,7 +697,7 @@ async fn run(
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event })?;
                     }
                     None => {
                         eprintln!("event_rx.recv() is closed");

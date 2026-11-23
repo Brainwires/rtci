@@ -1801,7 +1801,6 @@ mod ulpfec_tests {
                     rtcp_feedback: vec![],
                 },
                 payload_type,
-                ..Default::default()
             }
         };
         let section = [
@@ -2149,8 +2148,10 @@ mod slot_order_tests {
     #[test]
     fn the_twcc_only_setting_neither_offers_nor_records_rfc8888() {
         let mut media_engine = MediaEngine::default();
-        let mut options = DefaultInterceptorOptions::default();
-        options.congestion_feedback = CongestionFeedback::Twcc;
+        let options = DefaultInterceptorOptions {
+            congestion_feedback: CongestionFeedback::Twcc,
+            ..Default::default()
+        };
         let (registry, _handles) = register_default_interceptors_with_options(
             Registry::new(),
             &mut media_engine,
