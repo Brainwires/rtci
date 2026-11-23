@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
+  engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
+  measured quality.
+  - `rtc-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
+    `libopus`), the RFC 7587 parameters both ways (`OpusFmtp`, `OpusEncoderConfig::for_remote`),
+    G.711 PCMU / PCMA and G.722, an Opus packet reader (TOC, frame offsets, the LBRR flag);
+    the receive pipeline `JitterBuffer` (adaptive delay from the 95th percentile of relative
+    arrival delay, `jitterBufferTarget`, minimum and maximum delay, reordering and duplicates,
+    Opus in-band FEC recovery, codec and generic concealment, Opus DTX and RFC 3389 comfort
+    noise, accelerate / preemptive expand by pitch periods, clock-drift compensation, RED
+    blocks, telephone events kept from the decoder, and the W3C inbound audio statistics);
+    `AudioProcessing` (high-pass, echo canceller with delay estimation, residual echo and
+    noise suppression, gain control, voice activity, each switchable); the `SendPipeline`
+    (bitrate from the congestion controller's share minus packet overhead, FEC on reported
+    loss, DTX, RFC 3389 SIDs, RFC 6464 levels); and `engine::{AudioSender, AudioReceiver}`,
+    the glue to `RTCRtpSender` / `RTCRtpReceiver` (packetizing with the engine's payloaders,
+    `write_rtp_with_audio_level`, RED, `target_bitrates`, RTCP loss, `getStats()` feeds).
+  - `rtc-devices`: capture and playout through real-time-safe rings, rate and channel
+    conversion to the pipeline's 48 kHz mono, device listing, selection, hot-swap and
+    replacement of a failed device, a fake backend for tests, and cpal behind feature
+    `devices`.
+  - `rtc-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
+    connections over a lossy link and back to WAV and Ogg; run in the test environment's env
+    stage, its Ogg decoded by GStreamer.
+  - The interop peer's `{"media":"pipeline"}` scenario and the browser matrix cell "audio
+    pipeline": the browser decodes the pipeline's Opus, the pipeline decodes the browser's.
+  - The root manifest optimises `rtc-audio` and `opus-rs` in the dev profile (their tests run
+    seconds of DSP); cargo.yml's MSRV job installs `libasound2-dev` for the `devices` feature.
+
 ### Breaking changes
 
 - **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no

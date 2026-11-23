@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "rtc-audio",
     "rtc-crypto",
     "rtc-datachannel",
+    "rtc-devices",
     "rtc-dtls",
     "rtc-ice",
     "rtc-interceptor",
@@ -22,6 +24,14 @@ resolver = "2"
 
 [profile.dev]
 opt-level = 0
+
+# The audio pipeline's tests run seconds of DSP and codec work on synthetic signals; unoptimised
+# they take minutes. Only these packages are optimised in the dev profile.
+[profile.dev.package.rtc-audio]
+opt-level = 2
+
+[profile.dev.package.opus-rs]
+opt-level = 2
 
 [workspace.package]
 version = "0.22.0+brainwires.5"

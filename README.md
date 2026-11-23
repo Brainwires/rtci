@@ -378,7 +378,13 @@ over SRTP and is subject to none of SCTP's flow control.
 - ✅ **RTP/RTCP** - Real-time media transport and control
 - ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
 - ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
-- ✅ **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
+- ✅ **Media Tracks** - Audio/video RTP transport; the engine itself does not encode, decode, capture or play out
+- ✅ **Audio pipeline** (`rtc-audio`, `rtc-devices`) - Opus (pure Rust; libopus opt-in) with the RFC 7587 parameters,
+  in-band FEC and DTX, G.711, G.722, RED; a NetEq-style jitter buffer (adaptive and `jitterBufferTarget` delay,
+  concealment, FEC recovery, comfort noise, accelerate / preemptive expand, clock-drift compensation, the W3C inbound
+  audio statistics fed into `getStats`); echo cancellation, noise suppression, gain control, high-pass filter and
+  voice activity detection; a send pipeline following the congestion controller; capture and playout (cpal, opt-in).
+  Sans-I/O like the engine; see [docs/media-pipeline.md](docs/media-pipeline.md) for the measured quality
 - ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
@@ -484,6 +490,7 @@ RTC is built from composable crates, each implementing a specific protocol:
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
     <br>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Audio (rtc-audio, rtc-devices)
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DataChannel<a href="https://crates.io/crates/rtc-datachannel"><img src="https://img.shields.io/crates/v/rtc-datachannel.svg"></a>
     <br>

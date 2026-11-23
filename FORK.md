@@ -288,6 +288,19 @@ under "Defaults the fork narrows on purpose" and in the `rtc::data_channel` modu
 | Several transports per peer connection (RFC 9429 4.1.1, 5.2.1, 5.3.1; RFC 9143 7; RFC 8835 4.2) | `src/peer_connection/handler/transport_set.rs`, `src/peer_connection/transport_layout.rs`, `src/peer_connection/handler/mod.rs` (`flush_writes`, `pump_reads`, `pump_events`, `handle_read`), `src/peer_connection/internal.rs` (`ice_transport_of`, `dtls_transport_of`) | Upstream has one ICE agent, DTLS endpoint and SRTP context pair per connection. The fork keeps them in a `TransportSet` keyed by transport id: each BUNDLE group, and a section outside every group (a remote offer without one, a `max-compat` offer, the first section of each media type of a `balanced` initial offer), has its own candidates, DTLS association and SRTP keys, and by default the first transport's ICE credentials, as browsers write them and Pion / webrtc-rs 0.17 require (`with_unique_transport_credentials(true)`: credentials of its own, RFC 9429 5.2.1); datagrams are routed by local address, packets by their SSRC's section, SCTP over the data section's transport; connection states aggregate every transport. `ice_transport_sections()` tells the application what to gather for. Every transport fires its own events (`OnTransportEvent`, with its ids; the variants that name no transport are the default transport's), the gathering state aggregates them (an end-of-candidates naming no section ends every transport's gathering), each restarts ICE and sets up DTLS associations on its own (`restart_ice` restarts all; `a=tls-id` per transport; `defer_other_remote_transports`), and each has its own `transport` statistics object (`src/statistics/accumulator/transports.rs`, `src/peer_connection/event/transport_event.rs`). |
 | H.265 MRST/MRMT receiver, ECN failure events, packed DTMF events | `rtc-rtp/src/codec/h265/mod.rs` (`H265MultiStreamDepacketizer`), `rtc-interceptor/src/rfc8888/ecn.rs` (`EcnFailure`, leap-of-faith reports), `rtc-interceptor/src/rtcp_session/mod.rs` (ECN summary subset), `src/peer_connection/event/mod.rs` (`OnEcnFailure`), `rtc-rtp/src/codec/telephone_event/mod.rs` (`packed_telephone_event_packets`) | Upstream receives one H.265 stream alone and logs nothing of ECN (it has no ECN). The fork orders NAL units across the streams of a bitstream by AbsDon or NTP time (RFC 7798 4.3, 6), hands ECN failures to the application (RFC 6679 7.2.1, 7.4.2), and packs consecutive telephone events (RFC 4733 2.5.1.5). |
 
+### Media pipeline (fork only)
+
+Upstream has no media coding. The fork adds it in crates beside the engine, which stays a
+transport (`docs/media-pipeline.md`):
+
+| Crate | What | Ported |
+|---|---|---|
+| `rtc-audio` | Opus (opus-rs; libopus opt-in), G.711, G.722, the RFC 7587 parameters, the jitter buffer with concealment, FEC, DTX / CN and time-stretching, audio processing (AEC, NS, AGC, HPF, VAD, delay estimation), the send pipeline, `engine` glue to `RTCRtpSender` / `RTCRtpReceiver` | The resampler (`dsp/resample.rs`) is ported unchanged from Brainwires `parol-social` `crates/parolnet-media/src/resample.rs` (MIT OR Apache-2.0, same owner); the rest is written here |
+| `rtc-devices` | capture and playout rings, device manager with hot-swap, fake backend, cpal (feature `devices`) | `cpal_backend.rs` is ported from `parolnet-media/src/audio_io.rs` (MIT OR Apache-2.0, same owner), adapted to the `Backend` trait |
+
+`parolnet-media`'s echo canceller is `sonora` (BSD-3-Clause, libwebrtc's APM in Rust), which
+needs Rust 1.91: above this workspace's MSRV, so not used (see MSRV below).
+
 ### Hardening (fork only)
 
 Peer-input hardening upstream does not have: bounded DTLS fragment reassembly, early-record queue
@@ -379,7 +392,10 @@ The workspace declares `rust-version = "1.89"`, inherited by every crate: the lo
 it builds on with every feature (uuid 1.29 needs 1.89; downstream ParolNet's MSRV is 1.91).
 cargo.yml's `msrv` job checks the workspace on that toolchain with
 `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`, so a fresh resolution picks dependency
-versions that support it. Raising it is a deliberate change of the manifest.
+versions that support it. Raising it is a deliberate change of the manifest. It is what keeps
+`sonora` (libwebrtc's audio processing in Rust, `rust-version = 1.91`) out of `rtc-audio`, even
+as an option; the job installs `libasound2-dev`, which `rtc-devices/devices` (cpal) links on
+Linux.
 
 ### Defaults the fork widens
 
