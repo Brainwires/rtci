@@ -290,15 +290,15 @@ impl Net {
             }
             StreamCommand::Close { id } => {
                 self.closes_seen.push((peer, id));
-                if let Some((i, other)) = self.other(peer, id) {
-                    if self.conns[i].open {
-                        self.conns[i].open = false;
-                        let l = self.latency;
-                        self.at(
-                            l,
-                            Delivery::Event(other.peer, StreamEvent::Closed { id: other.id }),
-                        );
-                    }
+                if let Some((i, other)) = self.other(peer, id)
+                    && self.conns[i].open
+                {
+                    self.conns[i].open = false;
+                    let l = self.latency;
+                    self.at(
+                        l,
+                        Delivery::Event(other.peer, StreamEvent::Closed { id: other.id }),
+                    );
                 }
                 self.at(
                     Duration::ZERO,
@@ -307,15 +307,15 @@ impl Net {
             }
             StreamCommand::Reset { id } => {
                 self.resets_seen.push((peer, id));
-                if let Some((i, other)) = self.other(peer, id) {
-                    if self.conns[i].open {
-                        self.conns[i].open = false;
-                        let l = self.latency;
-                        self.at(
-                            l,
-                            Delivery::Event(other.peer, StreamEvent::Reset { id: other.id }),
-                        );
-                    }
+                if let Some((i, other)) = self.other(peer, id)
+                    && self.conns[i].open
+                {
+                    self.conns[i].open = false;
+                    let l = self.latency;
+                    self.at(
+                        l,
+                        Delivery::Event(other.peer, StreamEvent::Reset { id: other.id }),
+                    );
                 }
             }
             _ => {}

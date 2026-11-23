@@ -439,6 +439,10 @@ pub struct SettingEngine {
     /// [`SettingEngineBuilder::with_max_bundle_as_must_bundle`].
     /// Inverted so that the derived default is "honoured".
     pub(crate) max_bundle_ignored: bool,
+    /// [`SettingEngineBuilder::with_unique_transport_credentials`]: every transport of the
+    /// connection gets ICE credentials of its own. The derived default `false` shares the first
+    /// transport's.
+    pub(crate) unique_transport_credentials: bool,
     /// [`SettingEngineBuilder::with_implicit_rollback`].
     /// Inverted so that the derived default is "implicit rollback on".
     pub(crate) explicit_rollback_only: bool,
@@ -1812,6 +1816,31 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Whether each transport of the connection has ICE credentials of its own (RFC 9429
+    /// section 5.2.1: "Each "m=" section, provided it is not marked as bundle-only, MUST
+    /// contain a unique set of ICE credentials"). The default is `false`: the transports an
+    /// offer or answer adds beside the first one (the first section of each media type in a
+    /// `balanced` initial offer, every section under `max-compat`, every section answered
+    /// outside a BUNDLE group) take the first transport's `ice-ufrag` and `ice-pwd`, and an ICE
+    /// restart gives them all one new pair. Each transport keeps its own candidates, DTLS
+    /// association and SRTP keys.
+    ///
+    /// The default is what the browsers write (Chrome and Firefox put one `ice-ufrag` /
+    /// `ice-pwd` pair in every m= section of a session, bundled or not) and RFC 8839 section
+    /// 5.4 allows ("If two data streams have identical "ice-ufrag"s, they MUST have identical
+    /// "ice-pwd"s"). Pion and webrtc-rs 0.17 refuse a description whose sections carry
+    /// different credentials (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so
+    /// the RFC 9429 form cannot reach them: with `true` an initial `balanced` offer with audio
+    /// and video, or media and a data channel, is refused by them.
+    ///
+    /// With shared credentials the transports are told apart by their local addresses only:
+    /// several transports on one local socket need `true`, since the ICE username of a STUN
+    /// request is then the same for each.
+    pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
+        self.0.unique_transport_credentials = unique;
+        self
+    }
+
     // SetICETCPMux enables ICE-TCP when set to a non-nil value. Make sure that
     // NetworkTypeTCP4 or NetworkTypeTCP6 is enabled as well.
     //pub fn SetICETCPMux(&mut self, tcpMux ice.TCPMux) {
@@ -2495,6 +2524,21 @@ impl SettingEngineBuilder {
     /// application's.
     pub fn with_turn_over_streams(mut self, run: bool) -> Self {
         self.0.streams.turn = run;
+        self
+    }
+
+    /// Who gathers server-reflexive candidates (RFC 8445 section 5.1.1.2). By default
+    /// ([`ReflexiveGathering::Engine`](crate::peer_connection::srflx::ReflexiveGathering)) the
+    /// engine sends a Binding request to each `stun:` / `stuns:` server of the configuration:
+    /// over UDP from each UDP host candidate the application adds (through `poll_write` /
+    /// `handle_read`), and over TCP / TLS from its ICE-TCP listeners for a driver that serves
+    /// the stream interface; a base for which the application adds a server-reflexive
+    /// candidate itself is left to it. `Application` keeps the engine out of it.
+    pub fn with_server_reflexive_gathering(
+        mut self,
+        who: crate::peer_connection::srflx::ReflexiveGathering,
+    ) -> Self {
+        self.0.streams.reflexive = who;
         self
     }
 

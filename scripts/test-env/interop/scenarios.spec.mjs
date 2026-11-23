@@ -444,7 +444,9 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
     };
   }, WS);
   expect(r.grouped, "Rust answers an offer without a BUNDLE group without one").toBe(false);
-  expect(r.ufrags, JSON.stringify(r)).toBe(2);
+  // Rust's transports share one set of ICE credentials by default, as the browsers' do
+  // (SettingEngineBuilder::with_unique_transport_credentials); they are two transports still.
+  expect(r.ufrags, JSON.stringify(r)).toBe(1);
   expect(r.sameTransport, "video and data are on two transports").toBe(false);
   // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
   // transport objects only.
@@ -463,7 +465,8 @@ test("unbundled: max-compat without a BUNDLE group, a transport per section", as
 // ---- bundlePolicy "balanced" (RFC 9429 4.1.1, 5.2.1; W3C webrtc-pc 4.2.4) ----
 
 // Rust's initial offer under the default policy gives the first section of each media type a
-// transport of its own (its own ICE credentials and candidates). The browser gets the offer
+// transport of its own (its own candidates; by default the session's one set of ICE
+// credentials, as the browsers write them). The browser gets the offer
 // without its BUNDLE group, as a peer that does not bundle would, and answers each section on
 // its own transport: audio and video each travel over theirs.
 test("balanced: Rust's offer has a transport per media type, answered without BUNDLE", async ({ page }) => {
@@ -499,7 +502,7 @@ test("balanced: Rust's offer has a transport per media type, answered without BU
       errors: report.errors.concat(s.errors),
     };
   }, WS);
-  expect(r.ufrags, "audio and video each have ICE credentials of their own").toBe(2);
+  expect(r.ufrags, "audio and video share the session's ICE credentials").toBe(1);
   if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
   expect(r.rust.transportsConnected, JSON.stringify(r.rust)).toBe(2);
   expect(r.video.error, JSON.stringify(r)).toBeUndefined();

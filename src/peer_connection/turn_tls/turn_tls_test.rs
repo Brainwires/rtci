@@ -189,3 +189,120 @@ fn without_roots_or_a_verifier_no_tls_configuration_is_made() {
         .is_none()
     );
 }
+
+/// The parts of a TLS ClientHello that RFC 9325 (BCP 195, which RFC 8656 section 3.1 asks
+/// for through RFC 7525) puts requirements on.
+struct Hello {
+    legacy_version: u16,
+    suites: Vec<u16>,
+    compression: Vec<u8>,
+    /// (type, body) of every extension.
+    extensions: Vec<(u16, Vec<u8>)>,
+}
+
+fn client_hello(config: Arc<rustls::ClientConfig>, name: &str) -> Hello {
+    let mut layer = TlsLayer::new(config, name).unwrap();
+    let mut wire = vec![];
+    layer.write_wire(&mut wire).unwrap();
+    assert_eq!(wire[0], 22, "a handshake record");
+    let h = &wire[5..];
+    assert_eq!(h[0], 1, "a ClientHello");
+    let body = &h[4..];
+    let legacy_version = u16::from_be_bytes([body[0], body[1]]);
+    let mut at = 2 + 32;
+    at += 1 + body[at] as usize; // session id
+    let n = u16::from_be_bytes([body[at], body[at + 1]]) as usize;
+    let suites = body[at + 2..at + 2 + n]
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    at += 2 + n;
+    let n = body[at] as usize;
+    let compression = body[at + 1..at + 1 + n].to_vec();
+    at += 1 + n;
+    let end = at + 2 + u16::from_be_bytes([body[at], body[at + 1]]) as usize;
+    at += 2;
+    let mut extensions = vec![];
+    while at < end {
+        let kind = u16::from_be_bytes([body[at], body[at + 1]]);
+        let len = u16::from_be_bytes([body[at + 2], body[at + 3]]) as usize;
+        extensions.push((kind, body[at + 4..at + 4 + len].to_vec()));
+        at += 4 + len;
+    }
+    Hello {
+        legacy_version,
+        suites,
+        compression,
+        extensions,
+    }
+}
+
+/// RFC 8656 section 3.1 (RFC 7525 / RFC 9325) for what this client sends: TLS 1.3 and 1.2
+/// only (`supported_versions`, 9325 3.1.1; with `disable_tls12` 1.3 alone), no compression
+/// (3.3), SNI with the URI's host (3.7), only forward-secret AEAD suites (4.1: ECDHE with GCM
+/// or ChaCha20-Poly1305 for 1.2, no NULL / RC4 / CBC / static RSA), and the renegotiation
+/// signal of RFC 5746 (3.5: rustls never renegotiates; it sends the SCSV or extension).
+#[test]
+fn the_turn_tls_client_hello_meets_bcp_195() {
+    let (_, roots) = server("turn.rtc.test");
+    for disable_tls12 in [false, true] {
+        let config = TurnTlsConfig {
+            roots: Some(roots.clone()),
+            disable_tls12,
+            ..Default::default()
+        }
+        .client_config()
+        .unwrap()
+        .unwrap();
+        let hello = client_hello(config, "turn.rtc.test");
+        assert_eq!(hello.legacy_version, 0x0303, "legacy_version TLS 1.2");
+        let versions = hello
+            .extensions
+            .iter()
+            .find(|(k, _)| *k == 43)
+            .map(|(_, b)| {
+                b[1..]
+                    .chunks(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .expect("supported_versions");
+        let expected = if disable_tls12 {
+            vec![0x0304]
+        } else {
+            vec![0x0304, 0x0303]
+        };
+        assert_eq!(versions, expected, "nothing below TLS 1.2");
+        assert_eq!(
+            hello.compression,
+            vec![0],
+            "the null compression method only"
+        );
+        let sni = hello
+            .extensions
+            .iter()
+            .find(|(k, _)| *k == 0)
+            .map(|(_, b)| b[5..].to_vec())
+            .expect("server_name");
+        assert_eq!(sni, b"turn.rtc.test");
+        // TLS 1.3 suites (0x13xx) and ECDHE AEAD TLS 1.2 suites only, or the SCSVs.
+        const ALLOWED_TLS12: [u16; 6] = [0xc02b, 0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9];
+        for s in &hello.suites {
+            assert!(
+                (0x1301..=0x1305).contains(s) || ALLOWED_TLS12.contains(s) || *s == 0x00ff,
+                "suite {s:#06x} is not a forward-secret AEAD one"
+            );
+        }
+        if !disable_tls12 {
+            assert!(
+                hello.suites.contains(&0xc02f),
+                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (RFC 7350 section 4, RFC 9325 4.2)"
+            );
+            assert!(
+                hello.suites.contains(&0x00ff)
+                    || hello.extensions.iter().any(|(k, _)| *k == 0xff01),
+                "RFC 5746 signalled"
+            );
+        }
+    }
+}

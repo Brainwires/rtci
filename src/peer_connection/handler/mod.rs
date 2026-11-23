@@ -144,19 +144,24 @@ impl RTCPeerConnection {
     fn hand_out_event(&mut self, evt: RTCPeerConnectionEvent) -> RTCPeerConnectionEvent {
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
             candidate: Some(candidate),
+            ice_transport,
             ..
         }) = &evt
         {
-            // The candidate is of the transport whose ufrag it carries (each transport has
-            // its own agent, RFC 9429 section 5.2.1).
+            // The candidate is of the transport the event names (each transport has its own
+            // agent, RFC 9429 section 5.2.1), or else of the one whose ufrag it carries; the
+            // transports share their ufrag unless `with_unique_transport_credentials`.
             let ufrag = candidate.username_fragment.clone();
             for bundle in self.pipeline_context.transports.iter_mut() {
-                let agent = &mut bundle.ice_handler_context.ice_transport.agent;
-                if ufrag
-                    .as_ref()
-                    .is_none_or(|u| *u == agent.get_local_credentials().ufrag)
-                {
-                    agent.local_candidate_conveyed(&candidate.id);
+                let ice = &mut bundle.ice_handler_context.ice_transport;
+                let its = match ice_transport {
+                    Some(id) => *id == ice.id,
+                    None => ufrag
+                        .as_ref()
+                        .is_none_or(|u| *u == ice.agent.get_local_credentials().ufrag),
+                };
+                if its {
+                    ice.agent.local_candidate_conveyed(&candidate.id);
                 }
             }
         }
@@ -760,6 +765,10 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
+        // The answer to one of the engine's own Binding requests to a STUN server.
+        let Some(msg) = self.take_srflx_response(msg) else {
+            return Ok(());
+        };
         // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
         // transport per BUNDLE group or unbundled section) reads it.
         let transport = self
@@ -893,8 +902,10 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }), [get_interceptor_handler, get_endpoint_handler]);
         // The DTMF senders' playout (W3C webrtc-pc section 7).
         self.run_dtmf(now)?;
-        // The engine's TURN-over-stream clients and connection races.
+        // The engine's TURN-over-stream clients and connection races, and its Binding
+        // requests to STUN servers.
         self.turn_handle_timeout(now);
+        self.srflx_handle_timeout(now);
         Ok(())
     }
 
@@ -929,6 +940,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }
         if let Some(turn) = self.turn_poll_timeout() {
             eto = Some(eto.map_or(turn, |curr| curr.min(turn)));
+        }
+        if let Some(srflx) = self.srflx_poll_timeout() {
+            eto = Some(eto.map_or(srflx, |curr| curr.min(srflx)));
         }
         eto
     }

@@ -18,6 +18,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
     register_default_interceptors_with_options,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
     RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTransportEventKind,
 };
@@ -60,9 +61,12 @@ struct Peer {
 }
 
 impl Peer {
+    /// A peer whose transports have credentials of their own (`unique`) or share the first
+    /// transport's (the default), with the default interceptors or the given options.
     fn with_options(
         ip: &str,
         policy: RTCBundlePolicy,
+        unique: bool,
         options: Option<&DefaultInterceptorOptions>,
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
@@ -82,6 +86,11 @@ impl Peer {
             .with_configuration(
                 RTCConfigurationBuilder::new()
                     .with_bundle_policy(policy)
+                    .build(),
+            )
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_unique_transport_credentials(unique)
                     .build(),
             )
             .with_media_engine(media_engine)
@@ -128,17 +137,31 @@ struct World {
 
 impl World {
     fn new(offerer: RTCBundlePolicy) -> Result<Self> {
-        Self::with_options(offerer, None)
+        Self::with_credentials(offerer, true)
     }
 
+    /// Two peers whose transports have credentials of their own (`unique`) or share them.
+    fn with_credentials(offerer: RTCBundlePolicy, unique: bool) -> Result<Self> {
+        Self::build(offerer, unique, None)
+    }
+
+    /// Two peers with credentials of their own and the given interceptor options.
     fn with_options(
         offerer: RTCBundlePolicy,
         options: Option<&DefaultInterceptorOptions>,
     ) -> Result<Self> {
+        Self::build(offerer, true, options)
+    }
+
+    fn build(
+        offerer: RTCBundlePolicy,
+        unique: bool,
+        options: Option<&DefaultInterceptorOptions>,
+    ) -> Result<Self> {
         Ok(Self {
             peers: [
-                Peer::with_options("10.0.0.1", offerer, options)?,
-                Peer::with_options("10.0.0.2", RTCBundlePolicy::Balanced, options)?,
+                Peer::with_options("10.0.0.1", offerer, unique, options)?,
+                Peer::with_options("10.0.0.2", RTCBundlePolicy::Balanced, unique, options)?,
             ],
             now: Instant::now(),
             paths: HashSet::new(),
@@ -699,6 +722,64 @@ fn the_gathering_state_is_complete_when_every_transport_is() -> Result<()> {
     Ok(())
 }
 
+/// An application that gathers on one socket for the default transport only and ends its
+/// gathering with an end-of-candidates naming no section: every transport finishes, so the
+/// connection's gathering state is "complete" (W3C 4.3.2) and the null `icecandidate` comes,
+/// as with one transport, though the other transports have no candidate.
+#[test]
+fn an_end_of_candidates_naming_no_section_finishes_every_transport() -> Result<()> {
+    let mut world = World::with_credentials(RTCBundlePolicy::Balanced, false)?;
+    world.negotiate(without_bundle_group)?;
+    assert_eq!(world.peers[0].pc.ice_transport_sections().len(), 3);
+    let addr = SocketAddr::new(world.peers[0].ip, 5000);
+    let mut candidate = Peer::host_candidate(addr, "", 0)?;
+    candidate.sdp_mid = None;
+    candidate.sdp_mline_index = None;
+    world.peers[0].pc.add_local_candidate(candidate)?;
+    world.run("candidates announced", |_| true)?;
+    assert_eq!(
+        world.peers[0].pc.ice_gathering_state(),
+        RTCIceGatheringState::Gathering
+    );
+    world.peers[0].events.clear();
+    world.peers[0]
+        .pc
+        .add_local_candidate(RTCIceCandidateInit::default())?;
+    world.run("events read", |_| true)?;
+    assert_eq!(
+        world.peers[0].pc.ice_gathering_state(),
+        RTCIceGatheringState::Complete
+    );
+    let events = &world.peers[0].events;
+    let ends: HashSet<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RTCPeerConnectionEvent::OnIceCandidateEvent(ice)
+                if ice.candidate.as_ref().is_some_and(|c| c.end_of_candidates) =>
+            {
+                ice.ice_transport
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        3,
+        "an end-of-candidates per transport: {events:?}"
+    );
+    let nulls = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ice) if ice.candidate.is_none()
+            )
+        })
+        .count();
+    assert_eq!(nulls, 1, "{events:?}");
+    Ok(())
+}
+
 /// The candidates each transport announces name it: the `ice_transport` of an `icecandidate`
 /// is the ICE transport that holds the candidate.
 #[test]
@@ -899,6 +980,70 @@ fn balanced_gives_each_media_type_a_transport_of_its_own() -> Result<()> {
         }
     }
     world.run("RTP of the audio and the first video delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
+    Ok(())
+}
+
+/// The default credentials: the transports of a `balanced` offer, and of the answer from a
+/// peer that does not bundle, share the first transport's `ice-ufrag` and `ice-pwd` (what the
+/// browsers write, and what Pion and webrtc-rs 0.17 require of every section; RFC 8839
+/// section 5.4 allows it). Each transport still has its own candidates, 5-tuple and DTLS
+/// association, told apart by the local address, and audio, video and data each run on
+/// their own.
+#[test]
+fn by_default_the_transports_share_credentials_and_still_run_apart() -> Result<()> {
+    let mut world = World::with_credentials(RTCBundlePolicy::Balanced, false)?;
+    let (senders, offer) = world.negotiate(without_bundle_group)?;
+    assert_eq!(ufrags(&offer).len(), 1, "one set of credentials:\n{offer}");
+    let sections: Vec<&str> = offer.split("\r\nm=").skip(1).collect();
+    assert_eq!(sections.len(), 3, "{offer}");
+    assert!(
+        sections.iter().all(|m| m.contains("a=ice-ufrag:")),
+        "every section of the initial offer carries them:\n{offer}"
+    );
+    let answer = world.peers[1]
+        .pc
+        .local_description()
+        .expect("an answer")
+        .sdp;
+    assert!(!answer.contains("a=group:BUNDLE"), "{answer}");
+    assert_eq!(ufrags(&answer).len(), 1, "{answer}");
+    for peer in &world.peers {
+        assert_eq!(peer.pc.ice_transport_sections().len(), 3);
+    }
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    assert_eq!(world.paths.len(), 6, "{:?}", world.paths);
+    let mut transports = HashSet::new();
+    for sender in &senders {
+        transports.insert(
+            world.peers[0]
+                .pc
+                .rtp_sender(*sender)
+                .expect("sender")
+                .transport()
+                .expect("a transport")
+                .id(),
+        );
+    }
+    transports.insert(world.peers[0].pc.sctp().expect("SCTP").transport().id());
+    assert_eq!(
+        transports.len(),
+        3,
+        "audio, video and data on three transports"
+    );
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    for seq in 1..=5 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("RTP of both senders delivered", |peers| {
         ssrcs
             .iter()
             .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))

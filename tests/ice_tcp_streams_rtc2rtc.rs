@@ -721,7 +721,9 @@ fn every_transport_of_an_unbundled_connection_gathers_and_connects_over_tcp() ->
 /// gives both transports' passive candidates the same address and reports every accept on
 /// one listener. The engine gives each accepted connection to the transport its first check
 /// names (RFC 8445 section 7.2.2) and answers on it; with simultaneous open off, every pair is
-/// active to passive, so both transports connect through the shared port.
+/// active to passive, so both transports connect through the shared port. The transports need
+/// credentials of their own for it (`with_unique_transport_credentials`): by default they
+/// share the first transport's, and the ufrag of a check then names none of them.
 #[test]
 fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check() -> Result<()> {
     let mut net = Net::new();
@@ -729,6 +731,7 @@ fn a_shared_passive_port_serves_every_transport_by_the_ufrag_of_its_first_check(
     let mut peers = max_compat_peers(|| {
         SettingEngineBuilder::new()
             .with_tcp_simultaneous_open(false)
+            .with_unique_transport_credentials(true)
             .build()
     })?;
     let channel = negotiate_two_transports(&mut peers, &net)?;
@@ -891,4 +894,66 @@ fn rtp_and_rtcp_of_two_ssrcs_share_one_tcp_connection() -> Result<()> {
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
     )
+}
+
+/// Two transports behind one shared passive port (`rtc-stream-driver`'s `shared_passive`),
+/// their selected connections broken: each active side reopens its transport's connection
+/// (RFC 6544 section 11.1) with the next write, which can be DTLS rather than a check. On the
+/// shared port nothing but a check names which transport such a connection carries (RFC 8445
+/// section 7.2.2): a frame before one is not given to a transport guessed from the peer's
+/// address, and the connection is tied to the transport the next check names. Data resumes
+/// on both transports' connections.
+#[test]
+fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transport() -> Result<()> {
+    let mut net = Net::new();
+    net.shared_passive_port = Some(7000);
+    let mut peers = max_compat_peers(|| {
+        SettingEngineBuilder::new()
+            .with_tcp_simultaneous_open(false)
+            .with_unique_transport_credentials(true)
+            .build()
+    })?;
+    let channel = negotiate_two_transports(&mut peers, &net)?;
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &[b"before".to_vec()],
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    let broken: Vec<usize> = (0..net.conns.len())
+        .filter(|i| net.conns[*i].open)
+        .collect();
+    assert!(!broken.is_empty(), "open connections to break");
+    for i in &broken {
+        net.break_connection(*i);
+    }
+    let mut expected = vec![b"before".to_vec()];
+    expected.extend((0..20u8).map(|i| vec![i; 500]));
+    let mut sent = false;
+    let deadline = net.elapsed() + Duration::from_secs(60);
+    while net.elapsed() < deadline {
+        net.step(&mut peers);
+        if !sent {
+            let mut dc = peers[0].pc.data_channel(channel).expect("channel");
+            for m in &expected[1..] {
+                dc.send(net.now, BytesMut::from(&m[..]))?;
+            }
+            sent = true;
+        }
+        if peers[1].received.len() >= expected.len() {
+            break;
+        }
+        net.advance(&mut peers);
+    }
+    assert_eq!(
+        peers[1].received, expected,
+        "data resumed on reopened connections: {:?}",
+        net.conns
+    );
+    for (i, p) in peers.iter().enumerate() {
+        assert!(!p.failed(), "peer {i} did not fail");
+    }
+    Ok(())
 }
