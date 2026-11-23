@@ -8,7 +8,7 @@ How members were judged. The Note column of every member row starts with one of:
 
 Totals (all rows):
 
-- MUST: tested 256 / untested 0 / partial 1 / missing 0 / violated 0 / n-a 1
+- MUST: tested 257 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - SHOULD: tested 4 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -131,7 +131,7 @@ Members by source:
 | STATS-8.5-fecSsrc | 8.5 | MUST | fecSsrc: the FEC stream's SSRC; absent without separate-stream FEC | tested | `src/statistics/accumulator/mod.rs:482` | `test_rtx_fec_tracking` | measured |
 | STATS-8.5-totalCorruptionProbability | 8.5 | MUST | totalCorruptionProbability (video only): sum of measurements in [0,1] | tested | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed |
 | STATS-8.5-totalSquaredCorruptionProbability | 8.5 | MUST | totalSquaredCorruptionProbability (video only) | tested | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed |
-| STATS-8.5-corruptionMeasurements | 8.5 | MUST | corruptionMeasurements; present when the corruption-detection extension is received | partial | `src/statistics/accumulator/media/app_provided.rs:28` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | app feed; the corruption-detection header extension is not parsed, so the engine cannot tell that measurements must exist |
+| STATS-8.5-corruptionMeasurements | 8.5 | MUST | corruptionMeasurements; present when the corruption-detection extension is received | tested | `rtc-rtp/src/extension/corruption_detection_extension/mod.rs`, `src/peer_connection/handler/interceptor.rs` (arrival accounting), `src/statistics/accumulator/rtp_stream/inbound.rs` (`corruption_detection_received`), `src/rtp_transceiver/rtp_receiver/mod.rs` (`encoded_frame_metadata`: `corruption_detection`) | `the_corruption_detection_extension_makes_the_corruption_measurements_present`, `a_full_message_parses_field_by_field_and_round_trips`, `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | from the first packet with the negotiated corruption-detection extension the three corruption members are present (0 until measured); the frame metadata carries the parsed message (samples, sequence index, std dev, thresholds) and the application's decoder, which measures, feeds DecoderStatsUpdate (pc-26) |
 | STATS-8.5-kindRule | 8.5 | MUST | Video-only members do not exist for audio, audio-only members not for video | tested | `src/statistics/accumulator/rtp_stream/inbound.rs:70` | `every_supplied_member_reaches_the_report_of_the_kind_it_applies_to` | Applied when the report is built |
 | STATS-8.6-timestamp | 8.6 | MUST | timestamp of a remote-inbound object is when the RTCP RR was received | tested | `src/statistics/accumulator/rtp_stream/outbound.rs:440` | `a_receiver_report_with_no_delay_since_last_sr_measures_no_round_trip` | The arrival of the latest report about the stream |
 | STATS-8.6-localId | 8.6 | MUST | localId: the outbound-rtp object for the SSRC | tested | `src/statistics/accumulator/rtp_stream/outbound.rs:359` | `every_reference_resolves_and_nothing_unmeasured_is_reported` | measured |
@@ -294,11 +294,10 @@ Every bug below is fixed, each with the test named in its row. Running the tests
 4. **A sender report's NTP time followed the machine's clock, not the caller's**: the sender-report interceptor re-read the wall clock at every frame (`rtc-interceptor/src/report/sender_stream.rs`).
 5. **A data channel created after the association is up has no DCEP handshake deadline** (`RTCPeerConnection::create_data_channel` dials without arming it). Not fixed here: it is outside the statistics; reported to the owner.
 
-Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9; of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
+Gaps closed: 1, 2, 3 (but see below), 4, 5, 7, 8, 9 (`STATS-8.5-corruptionMeasurements` with the corruption-detection extension parsed, pc-26); of gap 6, `totalPacketSendDelay` and `issuerCertificateId`.
 
 Still open:
 
-- `STATS-8.5-corruptionMeasurements` (partial): the corruption-detection header extension is not parsed.
 - `STATS-8.21-frozen`, `STATS-8.21-failed`: tested by the state mapping (pc-25); no rtc-to-rtc call here reaches them (the agent stops checking the other pairs once one is nominated).
 - Gap 6, the rest: `fecPacketsDiscarded` (the FlexFEC-03 decoder does not report unused repair packets), `packetsDiscarded` and the jitter-buffer members (the jitter-buffer interceptors do not feed the report), `framesReceived` and the assembly members, `scalabilityMode`, in-band FEC: all reach the report from the application feed only.
 

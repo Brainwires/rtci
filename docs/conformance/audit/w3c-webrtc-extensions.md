@@ -10,7 +10,7 @@ Totals:
 
 - MUST: tested 59 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 14
 - SHOULD: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 1
-- MAY: tested 0 / untested 0 / partial 0 / missing 1 / violated 0 / n-a 0
+- MAY: tested 1 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
 | ID | § | Level | Clause (short paraphrase) | Verdict | Code | Test | Note |
 |---|---|---|---|---|---|---|---|
@@ -32,7 +32,7 @@ Totals:
 | WEBRTC-EXT-4.2-3 | 4.2 | MUST | setHeaderExtensionsToNegotiate: a URI differing from the slot's at the same index is an InvalidModificationError | tested | src/rtp_transceiver/header_extension_control.rs (validate) | set_header_extensions_to_negotiate_refuses_the_four_modifications |  |
 | WEBRTC-EXT-4.2-4 | 4.2 | MUST | setHeaderExtensionsToNegotiate: a mandatory-to-use extension not "sendrecv" is an InvalidModificationError | tested | src/rtp_transceiver/header_extension_control.rs (MANDATORY_TO_USE) | set_header_extensions_to_negotiate_refuses_the_four_modifications | the mid (RFC 8843) |
 | WEBRTC-EXT-4.2-5 | 4.2 | MUST | setHeaderExtensionsToNegotiate: stopping a mandatory-to-implement extension is an InvalidModificationError | tested | src/rtp_transceiver/header_extension_control.rs (MANDATORY_TO_IMPLEMENT) | set_header_extensions_to_negotiate_refuses_the_four_modifications | the mid and the RFC 6464 audio level (RFC 8834 5.2) |
-| WEBRTC-EXT-4.2-6 | 4.2 | MAY | Directions are restricted to what the implementation can do | missing | - | - | - |
+| WEBRTC-EXT-4.2-6 | 4.2 | MAY | Directions are restricted to what the implementation can do | tested | `src/rtp_transceiver/header_extension_control.rs` (`restrict_to_capabilities`) | `set_header_extensions_to_negotiate_restricts_directions_to_the_capability` | a requested direction keeps only what the media engine registered the extension for (`register_header_extension` allowed direction); stopped stays stopped (pc-26) |
 | WEBRTC-EXT-4.2-7 | 4.2 | MUST | setHeaderExtensionsToNegotiate stores the list | tested | src/rtp_transceiver/mod.rs (set_header_extensions_to_negotiate) | set_header_extensions_to_negotiate_refuses_the_four_modifications |  |
 | WEBRTC-EXT-4.2-8 | 4.2 | MUST | getNegotiatedHeaderExtensions returns the per-transceiver negotiated list | tested | src/rtp_transceiver/mod.rs (get_negotiated_header_extensions) | offers_and_answers_carry_the_directions_and_the_answer_sets_them |  |
 | WEBRTC-EXT-5-1 | 5 | MUST | scaleResolutionDownTo member; when present scaleResolutionDownBy is ignored and frames are never upscaled | tested | `src/rtp_transceiver/rtp_sender/rtp_encoding_parameters.rs` (scale_resolution_down_to, scale_down_factor) | `scale_resolution_down_to_gives_one_factor_and_never_upscales` | carried for the application's encoder with the factor to apply; scaleResolutionDownBy ignored when set |

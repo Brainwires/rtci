@@ -407,6 +407,57 @@ impl RTCRtpSender<'_> {
         self.sender().allocated_bitrates().to_vec()
     }
 
+    /// webrtc-svc 3.2.3: "the user agent MAY configure a different scalability mode" than
+    /// the one requested, when the negotiated codec cannot carry it, and `getParameters` after
+    /// negotiation returns "the currently configured" mode. The engine does not encode: the
+    /// application's encoder reports the mode it configured for encoding `encoding` (its index
+    /// in `getParameters().encodings`) here, `None` for none, and `getParameters` returns it
+    /// from then on.
+    ///
+    /// # Errors
+    ///
+    /// - `TypeError` for a mode that is not in the webrtc-svc table, or one the encoding's
+    ///   negotiated codec (or, with none chosen, no send codec) cannot carry
+    /// - `RangeError` for an index past the sender's encodings
+    /// - `InvalidStateError` on an audio sender, which has no scalability mode
+    pub fn set_configured_scalability_mode(
+        &mut self,
+        encoding: usize,
+        mode: Option<&str>,
+    ) -> Result<()> {
+        use rtp::codec::svc::ScalabilityMode;
+        use std::str::FromStr;
+        let sender = self.sender();
+        if sender.kind() != RtpCodecKind::Video {
+            return Err(Error::InvalidStateError);
+        }
+        if let Some(name) = mode {
+            let parsed = ScalabilityMode::from_str(name)
+                .map_err(|_| Error::TypeError(format!("{name:?} is not a scalability mode")))?;
+            let codec = sender
+                .send_encodings()
+                .get(encoding)
+                .map(|e| e.codec.mime_type.clone())
+                .unwrap_or_default();
+            let carried = if codec.is_empty() {
+                let codecs = &self.peer_connection.media_engine;
+                codecs
+                    .get_codecs_by_kind(RtpCodecKind::Video)
+                    .iter()
+                    .any(|c| parsed.supported_by(&c.rtp_codec.mime_type))
+            } else {
+                parsed.supported_by(&codec)
+            };
+            if !carried {
+                return Err(Error::TypeError(format!(
+                    "no codec of the encoding can carry scalability mode {name}"
+                )));
+            }
+        }
+        self.sender_mut()
+            .set_configured_scalability_mode(encoding, mode.map(str::to_owned))
+    }
+
     /// Returns the sender's current RTP send parameters.
     ///
     /// The returned parameters describe how the track is encoded and transmitted,

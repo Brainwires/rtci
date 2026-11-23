@@ -60,7 +60,7 @@ pub use crate::association::{
     Association, AssociationError, Event, ReconfigEvent,
     stats::AssociationStats,
     stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamState},
-    timer::TimerConfig,
+    timer::{RtoConfig, TimerConfig},
 };
 
 pub(crate) mod chunk;

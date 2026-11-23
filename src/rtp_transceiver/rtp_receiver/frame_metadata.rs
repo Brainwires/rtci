@@ -103,6 +103,13 @@ pub struct RTCEncodedVideoFrameMetadata {
     /// VP9 TID, the AV1 OBU extension's temporal id); 0 for a stream without temporal
     /// layers.
     pub temporal_index: Option<u32>,
+    /// The frame's corruption detection message, when one of its packets carries the
+    /// negotiated `corruption-detection` extension (W3C webrtc-stats 8.5
+    /// `corruptionMeasurements`). The engine does not decode: the application compares the
+    /// message's samples with its decoded frame and supplies the measurement with
+    /// `DecoderStatsUpdate::corruption_measurements` and the probability sums.
+    pub corruption_detection:
+        Option<rtp::extension::corruption_detection_extension::CorruptionDetectionExtension>,
 }
 
 /// W3C webrtc-encoded-transform 4.4 `RTCEncodedAudioFrameMetadata`.

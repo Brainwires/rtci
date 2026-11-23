@@ -1439,6 +1439,31 @@ impl<'a>
                             .on_rtp_received(ssrc, overhead_bytes, payload_bytes, msg.now);
                     }
 
+                    // W3C webrtc-stats 8.5 corruptionMeasurements: "If the corruption-detection
+                    // header extension is present in the RTP packets, corruption probability
+                    // measurements MUST be present". The stream's corruption members exist
+                    // from the first such packet that arrives.
+                    if rtp_packet.header.extension {
+                        let (extension_id, _, video) = self.media_engine.get_header_extension_id(
+                            RTCRtpHeaderExtensionCapability {
+                                uri: rtp::extension::CORRUPTION_DETECTION_URI.to_owned(),
+                            },
+                        );
+                        if video
+                            && extension_id != 0
+                            && rtp_packet
+                                .header
+                                .get_extension(extension_id as u8)
+                                .is_some()
+                            && let Some(stream) = self
+                                .stats
+                                .inbound_rtp_streams
+                                .get_mut(&rtp_packet.header.ssrc)
+                        {
+                            stream.corruption_detection_received = true;
+                        }
+                    }
+
                     // The ECN codepoint the datagram arrived with (from the application's socket
                     // layer), counted on the stream the packet belongs to, a repaired one
                     // included.

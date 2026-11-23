@@ -181,6 +181,14 @@ pub(crate) struct SctpTransport {
     // (`SettingEngineBuilder::with_sctp_max_streams`); `None` keeps the association's 65535.
     pub(crate) max_streams: Option<u16>,
 
+    // RTO.Initial / RTO.Min / RTO.Max (`SettingEngineBuilder::with_sctp_rto`); `None` keeps
+    // RFC 9260's.
+    pub(crate) rto: Option<::sctp::RtoConfig>,
+
+    // Association.Max.Retrans (`SettingEngineBuilder::with_sctp_max_retransmissions`); `None`
+    // keeps RFC 9260's 10.
+    pub(crate) max_retransmissions: Option<usize>,
+
     // RFC 8831 section 6.6: "As long as message interleaving is not supported, the sender
     // SHOULD limit the maximum message size to 16 KB to avoid monopolization." On by default:
     // on an association that did not negotiate interleaving, a message over
@@ -258,6 +266,8 @@ impl SctpTransport {
             message_interleaving: true,
             zero_checksum: true,
             max_streams: None,
+            rto: None,
+            max_retransmissions: None,
             limit_message_size_without_interleaving: true,
             cookie_provider: None,
             path_mtu: None,
@@ -445,6 +455,19 @@ impl SctpTransport {
     /// direction; `None` keeps the default.
     pub(crate) fn with_max_streams(mut self, streams: Option<u16>) -> Self {
         self.max_streams = streams;
+        self
+    }
+
+    /// RTO.Initial, RTO.Min and RTO.Max of the association `start()` builds; `None` keeps
+    /// the defaults.
+    pub(crate) fn with_rto(mut self, rto: Option<::sctp::RtoConfig>) -> Self {
+        self.rto = rto;
+        self
+    }
+
+    /// Association.Max.Retrans of the association `start()` builds; `None` keeps the default.
+    pub(crate) fn with_max_retransmissions(mut self, limit: Option<usize>) -> Self {
+        self.max_retransmissions = limit;
         self
     }
 
@@ -703,6 +726,14 @@ impl SctpTransport {
             sctp_transport_config = sctp_transport_config
                 .with_max_num_outbound_streams(streams)
                 .with_max_num_inbound_streams(streams);
+        }
+        if let Some(rto) = self.rto {
+            sctp_transport_config = sctp_transport_config.with_rto_config(rto);
+        }
+        if let Some(limit) = self.max_retransmissions {
+            let mut timers = sctp_transport_config.timer_config();
+            timers.max_t3_rtx_retrans = limit;
+            sctp_transport_config = sctp_transport_config.with_timer_config(timers);
         }
 
         // One association per DTLS transport: once this side has initiated its own, or has

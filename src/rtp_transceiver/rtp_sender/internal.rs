@@ -366,6 +366,21 @@ impl RTCRtpSenderInternal {
         !self.send_encodings.is_empty()
     }
 
+    /// webrtc-svc 3.2.3: the scalability mode the encoder of encoding `index` is configured
+    /// with, which may differ from the one requested; `getParameters` returns it.
+    pub(crate) fn set_configured_scalability_mode(
+        &mut self,
+        index: usize,
+        mode: Option<String>,
+    ) -> Result<()> {
+        let encoding = self.send_encodings.get_mut(index).ok_or_else(|| {
+            Error::RangeError(format!("the sender has no encoding at index {index}"))
+        })?;
+        encoding.scalability_mode = mode;
+        self.last_returned_parameters = None;
+        Ok(())
+    }
+
     /// Gives a sender that has none its encodings (SSRCs allocated by the caller).
     pub(crate) fn set_send_encodings(&mut self, send_encodings: Vec<RTCRtpEncodingParameters>) {
         self.send_encodings = send_encodings;

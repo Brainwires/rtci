@@ -157,6 +157,9 @@ pub struct InboundRtpStreamAccumulator {
     pub rtx_ssrc: Option<u32>,
     /// FEC SSRC if available.
     pub fec_ssrc: Option<u32>,
+    /// A packet of the stream carried the negotiated corruption-detection header extension
+    /// (W3C webrtc-stats 8.5): the corruption members are present from then on.
+    pub corruption_detection_received: bool,
 
     // Remote sender info (from RTCP SR)
     /// Packets sent by the remote sender (from SR).
@@ -525,10 +528,23 @@ impl InboundRtpStreamAccumulator {
             retransmitted_bytes_received: self.rtx_ssrc.map(|_| self.retransmitted_bytes_received),
             rtx_ssrc: self.rtx_ssrc,
             fec_ssrc: self.fec_ssrc,
-            total_corruption_probability: video.the(decoder.total_corruption_probability),
-            total_squared_corruption_probability: video
-                .the(decoder.total_squared_corruption_probability),
-            corruption_measurements: video.the(decoder.corruption_measurements),
+            // Present once the application measured, or once the corruption-detection
+            // extension arrived (zero until the application's decoder measures).
+            total_corruption_probability: video.the(
+                decoder
+                    .total_corruption_probability
+                    .or(self.corruption_detection_received.then_some(0.0)),
+            ),
+            total_squared_corruption_probability: video.the(
+                decoder
+                    .total_squared_corruption_probability
+                    .or(self.corruption_detection_received.then_some(0.0)),
+            ),
+            corruption_measurements: video.the(
+                decoder
+                    .corruption_measurements
+                    .or(self.corruption_detection_received.then_some(0)),
+            ),
         }
     }
 

@@ -454,3 +454,49 @@ fn a_header_extensions_direction_shows_in_sender_and_receiver_parameters() -> Te
     assert_eq!(parameter_uris(&mut answerer, w, false), with_orientation);
     Ok(())
 }
+
+/// webrtc-extensions 4.2 setHeaderExtensionsToNegotiate: "If necessary, restrict
+/// extension.direction as to not exceed the user agent's capabilities for this extension."
+/// An extension the media engine registered receive-only (or send-only) keeps only that half
+/// of what the application asks; "stopped" and an allowed direction are kept as given.
+#[test]
+fn set_header_extensions_to_negotiate_restricts_directions_to_the_capability() -> TestResult {
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    for (uri, direction) in [
+        (MID, None),
+        (ABS, Some(Recvonly)),
+        (ORIENTATION, Some(Sendonly)),
+    ] {
+        media_engine.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: uri.to_owned(),
+            },
+            RtpCodecKind::Video,
+            direction,
+        )?;
+    }
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?;
+    let v = video(&mut pc)?;
+    set(
+        &mut pc,
+        v,
+        &[(MID, Sendrecv), (ABS, Sendrecv), (ORIENTATION, Recvonly)],
+    )?;
+    assert_eq!(
+        to_negotiate(&mut pc, v),
+        owned(&[(MID, Sendrecv), (ABS, Recvonly), (ORIENTATION, Inactive)])
+    );
+    set(
+        &mut pc,
+        v,
+        &[(MID, Sendrecv), (ABS, Stopped), (ORIENTATION, Sendonly)],
+    )?;
+    assert_eq!(
+        to_negotiate(&mut pc, v),
+        owned(&[(MID, Sendrecv), (ABS, Stopped), (ORIENTATION, Sendonly)])
+    );
+    Ok(())
+}

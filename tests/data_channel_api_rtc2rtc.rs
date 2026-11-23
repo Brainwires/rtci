@@ -8,7 +8,7 @@ mod dc_common;
 use anyhow::Result;
 use bytes::BytesMut;
 use dc_common::Pair;
-use rtc::data_channel::RTCDataChannelInit;
+use rtc::data_channel::{RTCDataChannelInit, RTCDataChannelState};
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::rtc_error::RTCErrorDetailType;
@@ -64,6 +64,37 @@ fn a_channel_dialed_on_a_live_association_fails_when_its_ack_never_comes() -> Re
             Err(Error::ErrDataChannelClosed)
         ));
     }
+    Ok(())
+}
+
+/// W3C webrtc-pc 6.2 `send()`: "If channel.[[ReadyState]] is not "open", throw an
+/// InvalidStateError". An in-band channel dialed on a live association is "connecting" until
+/// its DATA_CHANNEL_ACK, and refuses data until then (RFC 8832's early send is a setting);
+/// once open it sends.
+#[test]
+fn send_on_a_connecting_channel_is_an_invalid_state_error() -> Result<()> {
+    let (mut pair, _first) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let now = pair.now;
+    let mut early = pair.offerer.pc.create_data_channel("early", None)?;
+    assert_eq!(early.ready_state(), RTCDataChannelState::Connecting);
+    assert!(matches!(
+        early.send(now, BytesMut::from(&b"too early"[..])),
+        Err(Error::ErrDataChannelNotOpen)
+    ));
+    assert!(matches!(
+        early.send_text(now, "too early"),
+        Err(Error::ErrDataChannelNotOpen)
+    ));
+    assert_eq!(early.buffered_amount(), 0, "a refused send queues nothing");
+    let early = early.id();
+    assert!(pair.run_until(|p| p.offerer.opened().contains(&early))?);
+    let before = pair.answerer.received.len();
+    assert!(pair.deliver(false, early, b"in time")?);
+    assert_eq!(
+        pair.answerer.received.len(),
+        before + 1,
+        "only the open send arrived"
+    );
     Ok(())
 }
 
@@ -601,6 +632,149 @@ fn a_channel_the_peer_opened_is_announced_before_it_opens() -> Result<()> {
             .contains(&RTCDataChannelEvent::OnDataChannel(first)),
         "{:?}",
         pair.offerer.events
+    );
+    Ok(())
+}
+
+/// W3C webrtc-pc 6.2 `bufferedAmount`: "This value does not reset to zero once the channel
+/// closes", and a closed channel's other attributes stay readable. The engine forgets a closed
+/// channel (`data_channel(id)` is `None`) and keeps its final attributes for the handle:
+/// after a closing procedure that sent everything the final amount is 0; when signalling
+/// closes the association under data the peer never acknowledged (an answer with
+/// `a=sctp-port:0`), the bytes SCTP never took from the stream's queue stay counted, and the
+/// ones it sent do not.
+#[test]
+fn a_closed_channel_keeps_its_final_buffered_amount() -> Result<()> {
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    channel.set_buffered_amount_low_threshold(7);
+    channel.send(now, BytesMut::from(&[1u8; 1000][..]))?;
+    channel.close()?;
+    assert!(pair.run_until(|p| p.offerer.closed(first))?);
+    assert!(pair.offerer.pc.data_channel(first).is_none(), "forgotten");
+    let closed = pair
+        .offerer
+        .pc
+        .closed_data_channel(first)
+        .expect("the final attributes are kept");
+    assert_eq!(closed.label(), "first");
+    assert_eq!(closed.ready_state(), RTCDataChannelState::Closed);
+    assert_eq!(closed.buffered_amount(), 0, "everything was sent");
+    assert_eq!(closed.buffered_amount_low_threshold(), 7);
+    assert!(closed.stream_id().is_some());
+
+    const MESSAGE: usize = 10_000;
+    const MESSAGES: usize = 20;
+    let (mut pair, first) = Pair::connected(RTCDtlsRole::Client, "bulk")?;
+    // No SACK comes back: the congestion window stays at its first size and most of the
+    // data stays in the stream's queue.
+    pair.answerer.drop_outgoing = true;
+    let now = pair.now;
+    let mut channel = pair.offerer.pc.data_channel(first).expect("open");
+    for _ in 0..MESSAGES {
+        channel.send(now, BytesMut::from(&[2u8; MESSAGE][..]))?;
+    }
+    pair.run_for(Duration::from_millis(200))?;
+    let before = pair
+        .offerer
+        .pc
+        .data_channel(first)
+        .expect("open")
+        .buffered_amount();
+    assert!(
+        before > 0 && before < (MESSAGE * MESSAGES) as u64,
+        "some of it went out: {before}"
+    );
+
+    pair.exchange_with(
+        false,
+        |offer| offer.to_owned(),
+        |answer| {
+            let port = answer
+                .lines()
+                .find(|l| l.starts_with("a=sctp-port:"))
+                .expect("an sctp-port")
+                .to_owned();
+            answer.replace(&port, "a=sctp-port:0")
+        },
+    )?;
+    assert!(
+        pair.run_until(|p| p.offerer.closed(first))?,
+        "signalling closed the association and the channel with it"
+    );
+    assert!(pair.offerer.pc.data_channel(first).is_none(), "closed");
+    let closed = pair
+        .offerer
+        .pc
+        .closed_data_channel(first)
+        .expect("the final attributes are kept");
+    assert_eq!(closed.label(), "bulk");
+    assert!(
+        closed.buffered_amount() > 0 && closed.buffered_amount() <= before,
+        "the unsent bytes, not reset and not counting what was sent: {} (before {before})",
+        closed.buffered_amount()
+    );
+    Ok(())
+}
+
+/// W3C webrtc-pc 6.2 `send()`: the data is transmitted on the channel's transport, and "if an
+/// error is raised at the SCTP level, the user agent MUST ... run the steps to close the data
+/// channel" with an `RTCError` of `sctp-failure`. The offerer's association has short
+/// retransmission bounds (`with_sctp_rto`, `with_sctp_max_retransmissions`); the answerer
+/// stops answering after a `send()`, so the DATA is retransmitted until the limit fails the
+/// association long before ICE consent would: the channel fires `OnError` (`sctp-failure`),
+/// then `OnClose`.
+#[test]
+fn an_sctp_failure_while_sending_fails_the_channel_with_sctp_failure() -> Result<()> {
+    let mut pair = Pair::with_setting_engines(
+        "127.0.0.1:52040",
+        engine(RTCDtlsRole::Client)
+            .with_sctp_rto(
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+            )
+            .with_sctp_max_retransmissions(2),
+        "127.0.0.1:52041",
+        engine(RTCDtlsRole::Server),
+    )?;
+    let first = pair.offerer.pc.create_data_channel("first", None)?.id();
+    pair.negotiate()?;
+    assert!(pair.run_until(|p| p.offerer.opened().contains(&first))?);
+
+    pair.answerer.drop_outgoing = true;
+    let now = pair.now;
+    let started = pair.now;
+    pair.offerer
+        .pc
+        .data_channel(first)
+        .expect("open")
+        .send(now, BytesMut::from(&b"never acknowledged"[..]))?;
+    assert!(
+        pair.run_until(|p| p.offerer.closed(first))?,
+        "the SCTP failure closes the channel"
+    );
+    assert!(
+        pair.now - started < Duration::from_secs(5),
+        "SCTP failed it, not ICE: {:?}",
+        pair.now - started
+    );
+    assert_eq!(
+        pair.offerer.events_of(first),
+        [
+            RTCDataChannelEvent::OnOpen(first),
+            RTCDataChannelEvent::OnError(first),
+            RTCDataChannelEvent::OnClose(first)
+        ],
+        "an error, then the close, without the closing procedure"
+    );
+    assert_eq!(
+        pair.offerer
+            .pc
+            .data_channel_error(first)
+            .map(|e| e.error_detail),
+        Some(RTCErrorDetailType::SctpFailure)
     );
     Ok(())
 }

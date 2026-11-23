@@ -9,11 +9,11 @@ is a procedure step without a keyword.
 
 | Level | tested | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|
-| MUST | 4383 | 211 | 236 | 125 | 22 | 613 | 5590 |
+| MUST | 4387 | 210 | 233 | 125 | 22 | 613 | 5590 |
 | SHOULD | 668 | 82 | 78 | 76 | 6 | 327 | 1237 |
-| MAY | 391 | 33 | 36 | 128 | 0 | 168 | 756 |
+| MAY | 395 | 31 | 36 | 126 | 0 | 168 | 756 |
 | PROC | 58 | 3 | 3 | 3 | 0 | 0 | 67 |
-| all | 5500 | 329 | 353 | 332 | 28 | 1108 | 7650 |
+| all | 5508 | 326 | 350 | 330 | 28 | 1108 | 7650 |
 
 ## Per file
 
@@ -305,14 +305,14 @@ is a procedure step without a keyword.
 | `w3c-webrtc-encoded-transform.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `w3c-webrtc-extensions.md` | MUST | 59 | 0 | 0 | 0 | 0 | 14 | 73 |
 | `w3c-webrtc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 0 | 1 | 2 |
-| `w3c-webrtc-extensions.md` | MAY | 0 | 0 | 0 | 1 | 0 | 0 | 1 |
-| `w3c-webrtc-pc.md` | MUST | 827 | 2 | 22 | 17 | 0 | 61 | 929 |
+| `w3c-webrtc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
+| `w3c-webrtc-pc.md` | MUST | 830 | 1 | 20 | 17 | 0 | 61 | 929 |
 | `w3c-webrtc-pc.md` | SHOULD | 4 | 0 | 1 | 0 | 0 | 5 | 10 |
-| `w3c-webrtc-pc.md` | MAY | 3 | 2 | 0 | 0 | 0 | 13 | 18 |
+| `w3c-webrtc-pc.md` | MAY | 5 | 0 | 0 | 0 | 0 | 13 | 18 |
 | `w3c-webrtc-priority.md` | MUST | 14 | 0 | 0 | 0 | 0 | 0 | 14 |
 | `w3c-webrtc-priority.md` | MAY | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `w3c-webrtc-stats.md` | MUST | 256 | 0 | 1 | 0 | 0 | 1 | 258 |
+| `w3c-webrtc-stats.md` | MUST | 257 | 0 | 0 | 0 | 0 | 1 | 258 |
 | `w3c-webrtc-stats.md` | SHOULD | 4 | 0 | 0 | 0 | 0 | 1 | 5 |
 | `w3c-webrtc-svc.md` | MUST | 51 | 0 | 0 | 0 | 0 | 1 | 52 |
 | `w3c-webrtc-svc.md` | SHOULD | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| `w3c-webrtc-svc.md` | MAY | 1 | 0 | 0 | 1 | 0 | 1 | 3 |
+| `w3c-webrtc-svc.md` | MAY | 2 | 0 | 0 | 0 | 0 | 1 | 3 |

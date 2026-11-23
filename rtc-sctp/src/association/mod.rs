@@ -512,6 +512,9 @@ pub struct Association {
     /// Per-chunk lookups on the receive path; SIDs are bounded by the
     /// negotiated stream count, so the faster non-SipHash hasher is safe.
     pub(crate) streams: FxHashMap<StreamId, StreamState>,
+    /// The `bytes_dequeued` of each stream at the moment it was unregistered, until a stream
+    /// with the same identifier is created again (see [`Association::stream_bytes_dequeued`]).
+    closed_stream_bytes_dequeued: FxHashMap<StreamId, u64>,
     /// Bytes held in every stream's reassembly queue, kept as a running total so the receive
     /// window is not recomputed by walking every stream on each DATA chunk.
     reassembly_bytes: usize,
@@ -671,6 +674,7 @@ impl Default for Association {
             next_stream_generation: 0,
             next_message_id: 0,
             streams: FxHashMap::default(),
+            closed_stream_bytes_dequeued: FxHashMap::default(),
             reassembly_bytes: 0,
             readable_streams: FxHashSet::default(),
             streams_with_data: FxHashSet::default(),
@@ -749,8 +753,8 @@ impl Association {
             source_port: config.sctp_port(),
             destination_port: config.remote_sctp_port(),
 
-            rto_mgr: RtoManager::new(),
-            timers: TimerTable::new(config.timer_config()),
+            rto_mgr: RtoManager::with_config(config.rto_config()),
+            timers: TimerTable::new(config.timer_config()).with_rto_config(config.rto_config()),
             pending_queue: {
                 let mut queue = PendingQueue::with_scheduler(config.stream_scheduler());
                 queue.set_packet_budget(mtu.saturating_sub(COMMON_HEADER_SIZE) as usize);
@@ -1446,6 +1450,8 @@ impl Association {
     fn unregister_stream(&mut self, stream_identifier: StreamId, reason: AssociationError) {
         if let Some(mut s) = self.streams.remove(&stream_identifier) {
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
+            self.closed_stream_bytes_dequeued
+                .insert(stream_identifier, s.bytes_dequeued);
             self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
             // Messages held for a reset of the stream go with it.
             self.held_write_count = self.held_write_count.saturating_sub(s.held_writes.len());
@@ -3820,6 +3826,7 @@ impl Association {
 
         s.generation = self.next_stream_generation;
         self.next_stream_generation = self.next_stream_generation.wrapping_add(1);
+        self.closed_stream_bytes_dequeued.remove(&stream_identifier);
         s.reassembly_queue.interleaved = self.use_interleaving;
         self.pending_queue.forget_weight(stream_identifier);
 
@@ -4527,11 +4534,19 @@ impl Association {
     }
 
     /// Application bytes of `stream_identifier` that have left the send queue (see
-    /// [`Stream::bytes_dequeued`]); 0 for a stream this association does not hold.
+    /// [`Stream::bytes_dequeued`]). For a stream that was closed (reset, or lost with the
+    /// association), the count it had when it was closed, until a stream with the same
+    /// identifier is opened; 0 for a stream this association never held.
     pub fn stream_bytes_dequeued(&self, stream_identifier: StreamId) -> u64 {
-        self.streams
-            .get(&stream_identifier)
-            .map_or(0, |s| s.bytes_dequeued)
+        self.streams.get(&stream_identifier).map_or_else(
+            || {
+                self.closed_stream_bytes_dequeued
+                    .get(&stream_identifier)
+                    .copied()
+                    .unwrap_or(0)
+            },
+            |s| s.bytes_dequeued,
+        )
     }
 
     /// Credits a chunk leaving the send queue to its stream's `bytes_dequeued`.

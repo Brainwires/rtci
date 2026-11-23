@@ -706,6 +706,12 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPStreamDequeued(_association_handle, stream_id, dequeued) => {
+                if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id) {
+                    dc.bytes_dequeued_at_close = Some(dequeued);
+                }
+            }
+
             RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
                 let error = self.sctp_failure();
                 if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)

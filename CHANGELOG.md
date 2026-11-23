@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **data channels** (pc-26, W3C webrtc-pc 6.2 `send()`): `send()` / `send_text()` on an in-band
+  channel still "connecting" (its DATA_CHANNEL_ACK not yet received) fails with
+  `ErrDataChannelNotOpen` (InvalidStateError), as on any channel that is not "open"; it used to
+  be accepted. RFC 8832 section 6's early send is
+  `SettingEngineBuilder::with_data_channel_send_before_ack(true)`.
+- **encoded-transform** (pc-26): `RTCEncodedVideoFrameMetadata` has a new public field,
+  `corruption_detection`; struct literals add it (or `..Default::default()`).
+
 - **ice** (pc-24, W3C webrtc-pc 4.8.1): `RTCIceCandidateInit` has a new public field,
   `relay_protocol: Option<RTCIceServerTransportProtocol>` (`relayProtocol` of
   RTCLocalIceCandidateInit); struct literals without `..Default::default()` add
@@ -1276,6 +1284,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **data channels** (pc-26, W3C webrtc-pc 6.2): a closed channel's final attributes stay
+  readable with `RTCPeerConnection::closed_data_channel(id)` (`RTCClosedDataChannel`: label,
+  protocol, id, reliability, `bufferedAmount` "not reset to zero once the channel closes", the
+  low threshold), for the last 64 closed channels. rtc-sctp: `stream_bytes_dequeued` of a
+  stream that was closed returns its count at the close until the id is opened again.
+- **rtp** (pc-26, webrtc-extensions 4.2): `setHeaderExtensionsToNegotiate` restricts each
+  direction to what the media engine registered the extension for (its allowed direction):
+  "sendrecv" asked of a receive-only extension is stored as "recvonly".
+- **stats** (pc-26, webrtc-stats 8.5): an inbound video stream that received a packet with
+  the negotiated corruption-detection extension reports `corruptionMeasurements`,
+  `totalCorruptionProbability` and `totalSquaredCorruptionProbability` (0 until the
+  application supplies measurements).
+
 - **data channels** (pc-25, RFC 8832 section 6, W3C webrtc-pc 6.2.8): user data that reaches
   the opener of an in-band channel before its DATA_CHANNEL_ACK completes the handshake as the
   ACK would ("the DATA_CHANNEL_ACK or any other message"): the channel is announced open, then
@@ -1715,6 +1736,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **pc** (pc-26): `SettingEngineBuilder::with_sctp_rto(initial, min, max)` (RFC 9260 RTO.Initial,
+  RTO.Min, RTO.Max) and `with_sctp_max_retransmissions` (Association.Max.Retrans), so an
+  unanswering peer fails the association (data channels: `sctp-failure`) within a chosen time;
+  `with_data_channel_send_before_ack`; `RTCRtpSender::set_configured_scalability_mode` (the
+  encoder's configured webrtc-svc mode, returned by `getParameters`). rtc-sctp: `RtoConfig`
+  and `TransportConfig::{with_rto_config, rto_config}`; the timers' backoff stops at the
+  configured RTO.Max.
+- **rtp** (pc-26): `rtp::extension::corruption_detection_extension::CorruptionDetectionExtension`
+  and `CORRUPTION_DETECTION_URI`: the libwebrtc corruption-detection header extension (sequence
+  index with the B flag and its 14-bit extension, std dev, luma / chroma thresholds, up to 13
+  samples, synchronization messages); a received video frame's message is
+  `RTCEncodedVideoFrameMetadata::corruption_detection`.
 
 - **encoded-transform** (pc-25, webrtc-extensions 15): `RTCEncodedFrameMetadata::remote_capture_time`,
   a received frame's capture time on this side's clock, by the stream's RTCP sender reports

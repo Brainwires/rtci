@@ -702,6 +702,17 @@ pub(crate) enum RTCEventInternal {
     /// protected or accepted with it, and the DTLS transport that keyed it fails.
     SRTPKeyExhausted,
 
+    /// The application bytes that left a stream's send queue, reported once as the stream is
+    /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before
+    /// signalling closes the association), so the channel's final `bufferedAmount` stays
+    /// readable after it closed (W3C webrtc-pc 6.2: not reset when the channel closes).
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    /// - Bytes taken from the stream's send queue
+    SCTPStreamDequeued(usize /*AssociationHandle*/, u16 /*StreamID*/, u64),
+
     /// SCTP stream has been closed
     ///
     /// Parameters:

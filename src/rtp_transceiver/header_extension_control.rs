@@ -113,6 +113,40 @@ pub(crate) fn validate(
     Ok(())
 }
 
+/// webrtc-extensions 4.2 `setHeaderExtensionsToNegotiate`: "If necessary, restrict
+/// extension.direction as to not exceed the user agent's capabilities for this extension."
+/// The engine's capability for an extension is the direction the media engine registered it
+/// with for the transceiver's kind (`register_header_extension`'s `allowed_direction`; none
+/// is "sendrecv"): a requested direction keeps only the halves that one allows ("sendrecv"
+/// asked of a receive-only extension is "recvonly"). "stopped" stays "stopped".
+pub(crate) fn restrict_to_capabilities(
+    media_engine: &MediaEngine,
+    kind: RtpCodecKind,
+    extensions: &mut [RTCRtpHeaderExtensionToNegotiate],
+) {
+    for extension in extensions.iter_mut() {
+        if extension.direction == RTCRtpTransceiverDirection::Stopped {
+            continue;
+        }
+        let capability = media_engine.header_extensions.iter().find(|registered| {
+            registered.uri == extension.uri
+                && match kind {
+                    RtpCodecKind::Audio => registered.is_audio,
+                    RtpCodecKind::Video => registered.is_video,
+                    _ => false,
+                }
+        });
+        if let Some(
+            allowed @ (RTCRtpTransceiverDirection::Sendonly
+            | RTCRtpTransceiverDirection::Recvonly
+            | RTCRtpTransceiverDirection::Inactive),
+        ) = capability.and_then(|c| c.allowed_direction)
+        {
+            extension.direction = extension.direction.intersect(allowed);
+        }
+    }
+}
+
 /// webrtc-extensions 4.1, applying an answer: each extension of `to_negotiate` takes the
 /// direction of the answer's `a=extmap` for its URI, reversed to this side's point of view
 /// when the answer is the remote one (`remote_answer`), or "stopped" when the answer has

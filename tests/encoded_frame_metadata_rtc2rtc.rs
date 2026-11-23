@@ -62,6 +62,13 @@ impl Peer {
             RtpCodecKind::Video,
             None,
         )?;
+        media_engine.register_header_extension(
+            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtc::rtp::extension::CORRUPTION_DETECTION_URI.to_owned(),
+            },
+            RtpCodecKind::Video,
+            None,
+        )?;
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -971,6 +978,79 @@ fn a_frames_remote_capture_time_is_on_the_receivers_clock() -> Result<()> {
     assert!(
         placed > 30,
         "{placed} frames placed, {before_report} before a report"
+    );
+    Ok(())
+}
+
+/// W3C webrtc-stats 8.5 `corruptionMeasurements`: "If the corruption-detection header
+/// extension is present in the RTP packets, corruption probability measurements MUST be
+/// present." Before a packet carries it the corruption members do not exist; from the first
+/// that does they exist (0 until the application's decoder measures), the frame's metadata
+/// carries the parsed message the decoder compares with its frame, and what the application
+/// then measures is what the report shows.
+#[test]
+fn the_corruption_detection_extension_makes_the_corruption_measurements_present() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    let (ssrc, _, id) = sender_stream(
+        &mut world,
+        sender,
+        rtc::rtp::extension::CORRUPTION_DETECTION_URI,
+    );
+    let inbound = |world: &mut World| {
+        let now = world.now;
+        world.peers[1]
+            .pc
+            .get_stats(now, rtc::statistics::StatsSelector::None)
+            .inbound_rtp_streams()
+            .find(|s| s.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+            .map(|s| {
+                (
+                    s.corruption_measurements,
+                    s.total_corruption_probability,
+                    s.total_squared_corruption_probability,
+                )
+            })
+    };
+
+    world.send(sender, 1, &[])?;
+    assert_eq!(
+        inbound(&mut world),
+        Some((None, None, None)),
+        "no extension yet: the members do not exist"
+    );
+
+    // B set, sequence index 3, std dev 128, Y err 2, UV err 1, three samples.
+    let element = [0x80 | 3, 128, 0x21, 40, 50, 60];
+    world.send(sender, 2, &[(id, &element)])?;
+    assert_eq!(inbound(&mut world), Some((Some(0), Some(0.0), Some(0.0))));
+
+    let frame = read_frame(&world, 2 * 960);
+    let RTCEncodedFrameMetadataKind::Video(metadata) = receiver_metadata(&mut world, &frame)?
+    else {
+        bail!("a video frame");
+    };
+    let message = metadata.corruption_detection.expect("the frame's message");
+    assert!(message.interpret_sequence_index_as_most_significant_bits);
+    assert_eq!(message.sequence_index, 3);
+    assert_eq!(message.std_dev, 128);
+    assert_eq!(
+        (message.luma_error_threshold, message.chroma_error_threshold),
+        (2, 1)
+    );
+    assert_eq!(message.sample_values, vec![40, 50, 60]);
+
+    assert!(world.peers[1].pc.update_decoder_stats(
+        ssrc,
+        rtc::statistics::DecoderStatsUpdate {
+            corruption_measurements: Some(1),
+            total_corruption_probability: Some(0.25),
+            total_squared_corruption_probability: Some(0.0625),
+            ..Default::default()
+        }
+    ));
+    assert_eq!(
+        inbound(&mut world),
+        Some((Some(1), Some(0.25), Some(0.0625)))
     );
     Ok(())
 }

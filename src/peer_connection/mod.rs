@@ -3981,6 +3981,23 @@ impl RTCPeerConnection {
         }
     }
 
+    /// The final attributes of the closed data channel `id` (W3C webrtc-pc 6.2: a closed
+    /// `RTCDataChannel` still answers `bufferedAmount`, "not reset to zero once the channel
+    /// closes", and its other attributes), once [`Self::data_channel`] returns `None` for it;
+    /// `None` for a channel that is not closed, or one closed so long ago that its record went
+    /// (the last [`MAX_KEPT_CLOSED_DATA_CHANNELS`] are kept).
+    ///
+    /// [`MAX_KEPT_CLOSED_DATA_CHANNELS`]: crate::data_channel::MAX_KEPT_CLOSED_DATA_CHANNELS
+    pub fn closed_data_channel(
+        &self,
+        id: RTCDataChannelId,
+    ) -> Option<&crate::data_channel::RTCClosedDataChannel> {
+        if self.data_channels.contains(&id) {
+            return None;
+        }
+        self.data_channels.closed(id)
+    }
+
     /// The SCTP transport over which data channels are carried.
     ///
     /// `None` until SCTP has been negotiated — that is, until a description establishing an

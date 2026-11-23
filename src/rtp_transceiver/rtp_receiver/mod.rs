@@ -579,6 +579,16 @@ impl RTCRtpReceiver<'_> {
                     )
                     .ok()
                 });
+        // At most one packet of a frame carries the corruption detection message.
+        let corruption_detection = extension_payloads(rtp::extension::CORRUPTION_DETECTION_URI)
+            .first()
+            .and_then(|payload| {
+                use shared::marshal::Unmarshal;
+                rtp::extension::corruption_detection_extension::CorruptionDetectionExtension::unmarshal(
+                    &mut payload.as_ref(),
+                )
+                .ok()
+            });
         let payloads: Vec<&bytes::Bytes> = packets.iter().map(|p| &p.payload).collect();
         let info = frame_metadata::inspect_video_payloads(&mime_type, &payloads);
         let ssrc = first.header.ssrc;
@@ -629,6 +639,7 @@ impl RTCRtpReceiver<'_> {
                     .map(|d| d.temporal_id)
                     .or(info.temporal_id)
                     .map(u32::from),
+                corruption_detection,
             },
         ))
     }
