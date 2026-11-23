@@ -137,6 +137,8 @@ jobs:
         run: python3 scripts/check-workflow-pins.py
       - name: Clause audit counts agree with the tables (COUNTS.md up to date)
         run: python3 scripts/audit-count.py --check
+      - name: Every open MUST row of the audit has a class (OPEN-MUST.md up to date)
+        run: python3 scripts/open-must.py --check
 
   crypto_backend_baseline:
     name: Crypto baseline (${{ matrix.backend }})
