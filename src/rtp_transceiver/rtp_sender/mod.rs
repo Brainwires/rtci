@@ -766,6 +766,40 @@ impl RTCRtpSender<'_> {
         self.write_rtp(now, packet)
     }
 
+    /// [`Self::write_rtp`] of a video packet with the orientation of the frame it belongs to,
+    /// as the Coordination of Video Orientation element (`urn:3gpp:video-orientation`, 3GPP
+    /// TS 26.114 section 7.4.5): RFC 7742 section 4 has an endpoint that can produce video in
+    /// other orientations generate the R0 and R1 bits "and MUST send them for all
+    /// orientations when the peer indicates support for the mechanism". The element (camera,
+    /// flip and rotation) goes in only on a video sender whose peer negotiated the extension
+    /// (it is among the default header extensions); the packet is sent either way. TS 26.114
+    /// puts it in the last packet of a frame (the one with the marker bit): call this for that
+    /// packet, and [`Self::write_rtp`] for the others.
+    pub fn write_rtp_with_video_orientation(
+        &mut self,
+        now: Instant,
+        mut packet: rtp::Packet,
+        orientation: rtp::extension::video_orientation_extension::VideoOrientationExtension,
+    ) -> Result<()> {
+        use shared::marshal::Marshal;
+        let id = (self.sender().kind() == RtpCodecKind::Video)
+            .then(|| {
+                self.get_parameters()
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .find(|e| e.uri == ::sdp::extmap::VIDEO_ORIENTATION_URI)
+                    .map(|e| e.id)
+            })
+            .flatten();
+        if let Some(id) = id.and_then(|id| u8::try_from(id).ok()) {
+            packet
+                .header
+                .set_extension_upgrading(id, orientation.marshal()?.freeze())?;
+        }
+        self.write_rtp(now, packet)
+    }
+
     /// W3C `RTCRtpSender.dtmf`: the DTMF sender of an audio sender, `None` for a video one.
     pub fn dtmf(&mut self) -> Option<dtmf::RTCDTMFSender<'_>> {
         if self.sender().kind() != RtpCodecKind::Audio {
