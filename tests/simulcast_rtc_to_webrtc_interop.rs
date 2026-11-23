@@ -206,10 +206,6 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
             urls: vec!["stun:stun.l.google.com:19302".to_owned()],
             ..Default::default()
         }])
-        // The webrtc 0.17 peer refuses an offer whose sections carry ICE credentials of their
-        // own ("multiple conflicting ice-ufrag values"), the initial offer of the `balanced`
-        // policy for audio and video (RFC 9429 section 4.1.1): one transport for all.
-        .with_bundle_policy(rtc::peer_connection::configuration::RTCBundlePolicy::MaxBundle)
         .build();
 
     let mut rtc_pc = RTCPeerConnectionBuilder::new()
