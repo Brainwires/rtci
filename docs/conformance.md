@@ -139,6 +139,13 @@ means for each section that is not bundle-only, what an answerer has to give a s
 offered outside a BUNDLE group or moved out of one, and what an offerer falls back to when
 the answer has no BUNDLE group.
 
+Done (mt-1): the indirection. The ICE, DTLS and SRTP contexts are a `TransportSet`
+(`src/peer_connection/handler/transport_set.rs`) of transport bundles keyed by a transport id,
+reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport the
+SCTP association runs over; `handle_read` routes a datagram to a transport before the pipeline
+reads it; the sender's, receiver's and SCTP transport's `transport()` name their section's
+transport. The set holds one transport, so no row changes with it; the items below fill it.
+
 1. The transport as a value. `Transport { id, ice: IceTransport, dtls: DtlsTransport, srtp
    contexts, selected pair, stats }` replaces the single fields of the handler contexts
    (`IceHandlerContext`, `DtlsHandlerContext`, `SrtpHandlerContext`); `PipelineContext` holds

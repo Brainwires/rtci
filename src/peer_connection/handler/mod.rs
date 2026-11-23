@@ -6,18 +6,20 @@ pub(crate) mod ice;
 pub(crate) mod interceptor;
 pub(crate) mod sctp;
 pub(crate) mod srtp;
+pub(crate) mod transport_set;
 
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::event::RTCPeerConnectionEvent;
 use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent};
 use crate::peer_connection::handler::datachannel::{DataChannelHandler, DataChannelHandlerContext};
 use crate::peer_connection::handler::demuxer::{DemuxerHandler, DemuxerHandlerContext};
-use crate::peer_connection::handler::dtls::{DtlsHandler, DtlsHandlerContext};
+use crate::peer_connection::handler::dtls::DtlsHandler;
 use crate::peer_connection::handler::endpoint::{EndpointHandler, EndpointHandlerContext};
-use crate::peer_connection::handler::ice::{IceHandler, IceHandlerContext};
+use crate::peer_connection::handler::ice::IceHandler;
 use crate::peer_connection::handler::interceptor::{InterceptorHandler, InterceptorHandlerContext};
 use crate::peer_connection::handler::sctp::{SctpHandler, SctpHandlerContext};
-use crate::peer_connection::handler::srtp::{SrtpHandler, SrtpHandlerContext};
+use crate::peer_connection::handler::srtp::SrtpHandler;
+use crate::peer_connection::handler::transport_set::TransportSet;
 use crate::peer_connection::message::{
     RTCMessage, TaggedRTCMessage,
     internal::{
@@ -102,11 +104,10 @@ macro_rules! for_each_handler {
 pub(crate) struct PipelineContext {
     // Handler contexts
     pub(crate) demuxer_handler_context: DemuxerHandlerContext,
-    pub(crate) ice_handler_context: IceHandlerContext,
-    pub(crate) dtls_handler_context: DtlsHandlerContext,
+    /// The ICE, DTLS and SRTP contexts, one set per transport.
+    pub(crate) transports: TransportSet,
     pub(crate) sctp_handler_context: SctpHandlerContext,
     pub(crate) datachannel_handler_context: DataChannelHandlerContext,
-    pub(crate) srtp_handler_context: SrtpHandlerContext,
     pub(crate) interceptor_handler_context: InterceptorHandlerContext,
     pub(crate) endpoint_handler_context: EndpointHandlerContext,
 
@@ -163,14 +164,22 @@ impl RTCPeerConnection {
 
     pub(crate) fn get_ice_handler(&mut self) -> IceHandler<'_> {
         IceHandler::new(
-            &mut self.pipeline_context.ice_handler_context,
+            &mut self
+                .pipeline_context
+                .transports
+                .active_mut()
+                .ice_handler_context,
             &mut self.pipeline_context.stats,
         )
     }
 
     pub(crate) fn get_dtls_handler(&mut self) -> DtlsHandler<'_> {
         DtlsHandler::new(
-            &mut self.pipeline_context.dtls_handler_context,
+            &mut self
+                .pipeline_context
+                .transports
+                .active_mut()
+                .dtls_handler_context,
             &mut self.pipeline_context.stats,
         )
     }
@@ -215,6 +224,8 @@ impl RTCPeerConnection {
         // handshake completed since it was last looked at: a comparison, not work, per call.
         let selected_pair_changes = self
             .pipeline_context
+            .transports
+            .data_transport()
             .ice_handler_context
             .selected_pair_changes;
         let path = self
@@ -236,16 +247,15 @@ impl RTCPeerConnection {
     /// family, its transport, whether this side's candidate is relayed) and what the DTLS
     /// version and cipher suite add to a record. `None` while no pair is selected.
     fn sctp_path(&self) -> Option<SctpPath> {
-        let (local, remote) = self
-            .pipeline_context
+        let data = self.pipeline_context.transports.data_transport();
+        let (local, remote) = data
             .ice_handler_context
             .ice_transport
             .agent
             .get_selected_candidate_pair()?;
         // The record overhead of the version and suite negotiated (a DTLS 1.3 record is
         // smaller than a DTLS 1.2 one).
-        let dtls_record_overhead = self
-            .pipeline_context
+        let dtls_record_overhead = data
             .dtls_handler_context
             .dtls_transport
             .dtls_endpoint
@@ -266,7 +276,13 @@ impl RTCPeerConnection {
         // Read the Copy values before `&mut self.data_channels` borrows self mutably. The
         // handler needs the DTLS role to give stream ids the parity RFC 8832 §6 requires, and
         // the negotiated stream count to bound them.
-        let dtls_role = self.dtls_transport().role();
+        let dtls_role = self
+            .pipeline_context
+            .transports
+            .data_transport()
+            .dtls_handler_context
+            .dtls_transport
+            .role();
         let max_channels = self.sctp_transport().max_channels();
         DataChannelHandler::new(
             &mut self.pipeline_context.datachannel_handler_context,
@@ -279,7 +295,13 @@ impl RTCPeerConnection {
     }
 
     pub(crate) fn get_srtp_handler(&mut self) -> SrtpHandler<'_> {
-        SrtpHandler::new(&mut self.pipeline_context.srtp_handler_context)
+        SrtpHandler::new(
+            &mut self
+                .pipeline_context
+                .transports
+                .active_mut()
+                .srtp_handler_context,
+        )
     }
 
     pub(crate) fn get_interceptor_handler(&mut self) -> InterceptorHandler<'_> {
@@ -502,12 +524,17 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
         self.pipeline_context.observe(msg.now);
+        // The transport the datagram belongs to, by where it arrived (RFC 9143 section 9: a
+        // transport per BUNDLE group or unbundled section) reads it.
+        let transport = self.pipeline_context.transports.route(&msg.transport);
         let msg = TaggedRTCMessageInternal {
             now: msg.now,
             transport: msg.transport,
             message: RTCMessageInternal::Raw(msg.message),
         };
+        self.pipeline_context.transports.set_active(transport);
         self.pump_reads(Some(msg));
+        self.pipeline_context.transports.reset_active();
         Ok(())
     }
 
