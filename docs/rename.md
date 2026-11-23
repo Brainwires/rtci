@@ -52,7 +52,7 @@ first, with word boundaries for the file type.
 | Markdown | crate names and paths, code spans `` `rtc` ``, `rtc::` paths, cargo flags, TOML snippets (`rtc = "0.21"` -> `rtci = "0.1"`), Rust and shell code blocks with their own rules. |
 | CHANGELOG.md | only `## [Unreleased]` (created if missing), plus one entry describing the rename. Released sections stay byte for byte. |
 | Lock files | committed `Cargo.lock` files that name our crates (today `scripts/test-env/peers/layers/Cargo.lock`) are regenerated with `cargo metadata` (offline when the registry cache has everything); the script checks that no registry package changed version. |
-| C interface (when the tree has a `cdylib` / `staticlib` crate) | the library (`librtc_ffi` -> `librtci_ffi`), the header file (`rtc.h` -> `rtci.h`, `git mv`), and every name the header exports, see below. |
+| C interface (when the tree has a `cdylib` / `staticlib` crate) | the library (`librtc_ffi` -> `librtci_ffi`), the header file (`rtc.h` -> `rtci.h`, `git mv`), and every name the header exports, see below. The header's continuation lines are re-aligned to the longer names, so it equals what cbindgen 0.29.2 generates from the renamed sources (cargo.yml's `c_header` job). |
 | Formatting | `cargo fmt --all` on each workspace that was rustfmt-clean before the rename (the names get one character longer, which can move a line break). Workspaces that were not clean are left as they were and reported. |
 
 Two workflow patches keep CI meaning the same: cargo.yml's packaging job accepted only cargo's

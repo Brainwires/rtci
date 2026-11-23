@@ -215,6 +215,16 @@ class Ffi(unittest.TestCase):
         out, _, _ = rewrite("rtc-ffi/README.md", src)
         self.assertEqual(out, "lib=target/release/librtci_ffi.so; RTCI_FFI_LIB=x rtci-ffi-release RTC_TESTENV_TURN_USER\n")
 
+    def test_header_continuation_lines_follow_the_longer_name(self):
+        src = "int32_t rtc_pc_new(const char *json,\n                   struct rtc_pc **out);\n"
+        out, _, _ = rewrite("rtc-ffi/include/rtc.h", src)
+        self.assertEqual(out, "int32_t rtci_pc_new(const char *json,\n                    struct rtci_pc **out);\n")
+
+    def test_header_continuation_of_a_function_pointer_typedef(self):
+        src = "typedef void (*rtc_pc)(void *user,\n                       size_t len);\n"
+        out, _, _ = rewrite("rtc-ffi/include/rtc.h", src)
+        self.assertEqual(out, "typedef void (*rtci_pc)(void *user,\n                        size_t len);\n")
+
     def test_local_variables_outside_the_ffi_scope_stay(self):
         out, _, _ = rewrite("tests/a.rs", "let mut rtc_pc = pc; rtc_pc.close();\n")
         self.assertEqual(out, "let mut rtc_pc = pc; rtc_pc.close();\n")
