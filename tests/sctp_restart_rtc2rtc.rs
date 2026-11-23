@@ -116,3 +116,63 @@ fn a_peer_that_restarts_the_association_closes_the_old_channels_with_an_error() 
     }
     Ok(())
 }
+
+/// W3C webrtc-pc 6.2: a closed channel's `bufferedAmount` keeps the bytes that were never
+/// sent, and only those. The answerer's channel has queued more than the window lets out
+/// (the old offerer acknowledges nothing) when the newcomer restarts the association: the
+/// channel closes with the bytes still in its queue, not every byte it was given.
+#[test]
+fn a_channel_closed_by_a_restart_keeps_only_its_unsent_bytes_buffered() -> Result<()> {
+    use bytes::BytesMut;
+    use std::time::Duration;
+    const MESSAGE: usize = 10_000;
+    const MESSAGES: usize = 20;
+    let mut pair = Pair::with_setting_engines(
+        A,
+        offerer_engine(),
+        B,
+        SettingEngineBuilder::new().with_answering_dtls_role(RTCDtlsRole::Client),
+    )?;
+    let first = pair.open_channel("first")?;
+    let first_remote = pair.answerer.opened()[0];
+    assert!(pair.deliver(false, first, b"on the first association")?);
+
+    pair.offerer.drop_outgoing = true;
+    let now = pair.now;
+    let mut channel = pair.answerer.pc.data_channel(first_remote).expect("open");
+    for _ in 0..MESSAGES {
+        channel.send(now, BytesMut::from(&[3u8; MESSAGE][..]))?;
+    }
+    pair.run_for(Duration::from_millis(200))?;
+    let before = pair
+        .answerer
+        .pc
+        .data_channel(first_remote)
+        .expect("open")
+        .buffered_amount();
+    assert!(
+        before > 0 && before < (MESSAGE * MESSAGES) as u64,
+        "some of it went out: {before}"
+    );
+
+    pair.offerer = Peer::with_setting_engine(A.parse()?, offerer_engine(), pair.now)?;
+    pair.offerer.tolerate_read_errors = true;
+    pair.answerer.tolerate_read_errors = true;
+    pair.offerer.pc.create_data_channel("second", None)?;
+    pair.negotiate()?;
+    assert!(
+        pair.run_until(|p| p.answerer.closed(first_remote))?,
+        "the restart closes the old channel"
+    );
+    let closed = pair
+        .answerer
+        .pc
+        .closed_data_channel(first_remote)
+        .expect("the final attributes are kept");
+    assert!(
+        closed.buffered_amount() > 0 && closed.buffered_amount() <= before,
+        "the unsent bytes only: {} (before the restart {before})",
+        closed.buffered_amount()
+    );
+    Ok(())
+}

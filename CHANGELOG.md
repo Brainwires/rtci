@@ -2846,6 +2846,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **peer_connection**, **sctp**: a data channel closed by the peer's restart of the SCTP
+  association kept every byte it had been given as its final `bufferedAmount`: what its stream
+  had sent is now reported before the channel closes (`SCTPStreamDequeued`, from the new
+  `Association::streams_lost_in_restart`), so only the unsent bytes remain.
 - **dtls**: a DTLS 1.3 client whose ClientHello was retransmitted kept the backed-off
   retransmission timer only until the ServerHello: the association that goes on as DTLS 1.3
   started again from the initial value. It now takes the backed-off value over (RFC 9147

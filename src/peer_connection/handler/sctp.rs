@@ -384,6 +384,14 @@ impl<'a> SctpHandler<'a> {
                     pending_readable.retain(|(handle, _)| *handle != ch);
                     peer_opened.retain(|(handle, _)| *handle != ch);
                     ordered_until_reply.retain(|(handle, _), _| *handle != ch);
+                    // What each closed stream had sent, before its channel is closed: the
+                    // channel's final `bufferedAmount` counts only what was never sent.
+                    for (id, dequeued) in conn.streams_lost_in_restart() {
+                        event_outs.push_back(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::SCTPStreamDequeued(ch.0, *id, *dequeued),
+                        });
+                    }
                     event_outs.push_back(TaggedRTCEventInternal {
                         now,
                         event: RTCEventInternal::SCTPRestarted(ch.0),

@@ -545,6 +545,9 @@ pub struct Association {
     /// The `bytes_dequeued` of each stream at the moment it was unregistered, until a stream
     /// with the same identifier is created again (see [`Association::stream_bytes_dequeued`]).
     closed_stream_bytes_dequeued: FxHashMap<StreamId, u64>,
+    /// The streams the association held when the peer restarted it (RFC 9260 5.2.4 action
+    /// A), with the application bytes each had sent: see [`Self::streams_lost_in_restart`].
+    streams_lost_in_restart: Vec<(StreamId, u64)>,
     /// Bytes held in every stream's reassembly queue, kept as a running total so the receive
     /// window is not recomputed by walking every stream on each DATA chunk.
     reassembly_bytes: usize,
@@ -715,6 +718,7 @@ impl Default for Association {
             next_message_id: 0,
             streams: FxHashMap::default(),
             closed_stream_bytes_dequeued: FxHashMap::default(),
+            streams_lost_in_restart: vec![],
             reassembly_bytes: 0,
             readable_streams: FxHashSet::default(),
             streams_with_data: FxHashSet::default(),
@@ -2692,6 +2696,20 @@ impl Association {
         fresh.sack_packet_immediately = true;
         // What the application has not read of the old association's events stays, and the
         // restart follows it.
+        // The old association's streams are gone: what each had sent is kept, for the
+        // application to settle its own accounts of them (`streams_lost_in_restart`,
+        // `stream_bytes_dequeued`).
+        let mut lost: Vec<(StreamId, u64)> = self
+            .streams
+            .iter()
+            .map(|(id, s)| (*id, s.bytes_dequeued))
+            .collect();
+        lost.sort_unstable();
+        fresh.closed_stream_bytes_dequeued = std::mem::take(&mut self.closed_stream_bytes_dequeued);
+        fresh
+            .closed_stream_bytes_dequeued
+            .extend(lost.iter().copied());
+        fresh.streams_lost_in_restart = lost;
         fresh.events = std::mem::take(&mut self.events);
         fresh.events.push_back(Event::Restarted);
         fresh.endpoint_events = std::mem::take(&mut self.endpoint_events);
@@ -5103,6 +5121,13 @@ impl Association {
             },
             |s| s.bytes_dequeued,
         )
+    }
+
+    /// The streams of the association before the peer's last restart (`Event::Restarted`),
+    /// each with the application bytes that had left its send queue: what was sent on it
+    /// before it went with the restart.
+    pub fn streams_lost_in_restart(&self) -> &[(StreamId, u64)] {
+        &self.streams_lost_in_restart
     }
 
     /// Credits a chunk leaving the send queue to its stream's `bytes_dequeued`.
