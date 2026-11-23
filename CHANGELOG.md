@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `tests/circuit_breaker_reordering_rtc2rtc.rs`: the default interceptors over a link that
     reorders, and the sweep (`-- --ignored sweep`) of where the breaker fires.
 
+- **peer connection**: one SSRC across clock rates is the default again
+  (`conf/media-23-clock-rate-default`). `SettingEngineBuilder::with_ssrc_per_clock_rate`
+  defaults to `false`; `true` is RFC 7160 section 4.1's SSRC per clock rate, as before. In the
+  browser matrix (train 9 round 4) Chromium and WebKit kept the track on the signalled SSRC and
+  counted no packet after a switch to a new one, in both offer directions; Firefox followed. The
+  RFC-form browser cells now run with `?ssrc_per_clock_rate=1` (interop-peer's query; `=0` is
+  gone) and are na-browser on Chromium and WebKit on that observation; the default cells check
+  one SSRC on every browser. Rows RFC7160-4.1-1 to 4.1-3 and RFC8834-4.3-6 are `partial`.
+- **peer connection**: `setCodecPreferences` no longer renumbers the codecs a sender's
+  `get_parameters()` lists. Before the first answer they carry the engine's payload types for
+  the preferred formats (they carried the 0 of each preference, so Opus read as PCMU's number);
+  once negotiated, the negotiated codecs stay until the next answer (W3C webrtc 4.4.1.4). The
+  browser matrix's clock-rate cells with Rust offering sent Opus on PCMU's payload type this
+  way: interop-peer took the number before the answer and kept it in its packetizer (it now also
+  puts the current number on every packet), and the cells check the format each phase was
+  decoded as.
+
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
     section 5.2.2): the formats of the most recent answer first in its order, then every
@@ -4307,6 +4324,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
   `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
   lossy-link run takes another course now (no RTCP on its data-only connection).
+- **rtc**: after the RTCP session moved to joining per transport, its first report waited the
+  initial interval of RFC 3550 section 6.2 after the join (it had gone at DTLS-up before, from a
+  timer the negotiation had armed): a peer that heard the other's media before any report
+  resolved an SSRC collision alone, so the other never learnt of it
+  (`rtcp_session_rtc2rtc::a_sender_moves_to_a_new_ssrc_after_a_collision` failed in 6 of 8
+  runs of train 9), and the reports congestion control reads came later
+  (`the_receive_bandwidth_is_signalled_and_bounds_what_the_sender_sends`). The sessions the
+  peer connection installs send the first compound packet when they join, which RFC 8834
+  section 4.1 allows ("the delay before sending the initial compound RTCP packet can be set to
+  zero", RFC 8108); `RtcpSessionBuilder::with_first_report_at_join` is the setting. Test:
+  `rtcp_session_joins_on_start.rs::the_first_report_leaves_when_the_session_joins`.
 - **sctp**: in Fast Recovery, a SACK that advanced the Cumulative TSN Ack Point and brought a
   chunk to its third miss indication sent it at once in a packet that ignored cwnd. RFC 9260
   section 7.2.4 step 3 is "If not in Fast Recovery": during one the chunk is marked for
@@ -4316,6 +4344,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (fails before); with `miss_indications_count_below_the_highest_tsn_newly_acknowledged_only`
   and `a_fast_retransmitted_chunk_is_not_fast_retransmitted_again` for the sentences of 7.2.4
   that had none.
+- **sctp**: a lost COOKIE ACK held DATA back until T3-rtx. The side that sent the COOKIE ECHO
+  stays in COOKIE-ECHOED and discards the DATA its ESTABLISHED peer sends (RFC 9260 5.1, as it
+  SHOULD), and each discard backs the peer's RTO off: after crossed INITs at 10 % loss a data
+  channel's DATA_CHANNEL_OPEN waited 16 s and more and the channel did not open within 30 s.
+  The COOKIE ACK that answers a duplicate COOKIE ECHO in ESTABLISHED (5.2.4 D) now carries the
+  outstanding DATA that fits after it (5.1 D: a COOKIE ACK "MAY be bundled with any pending
+  DATA chunks"), counted as a retransmission (no RTT sample, 6.3.1 C5); the peer takes the
+  COOKIE ACK first and accepts the DATA in ESTABLISHED. Test:
+  `cookie_ack_loss_test.rs::outstanding_data_follows_the_cookie_ack_that_answers_a_repeated_cookie_echo`
+  (fails before); `data_written_when_the_cookie_ack_arrives_leaves_at_once` and
+  `handshake_timers_back_off_on_their_own_and_leave_the_rto_alone` pin that DATA written as
+  the COOKIE ACK arrives leaves at that instant and that T1-init / T1-cookie back off on their
+  own without touching the RTO.
 
 - **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
   HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are

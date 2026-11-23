@@ -3001,6 +3001,20 @@ impl Association {
             }
             // RFC 9260 5.2.4 D, and case E of 5.2: the cookie of the association that exists
             // (the COOKIE ACK was lost) is acknowledged again, whatever its age.
+            AssociationState::Established => {
+                let mut chunks: Vec<Box<dyn Chunk>> = vec![Box::new(ChunkCookieAck {})];
+                for data in self.outstanding_data_after_a_cookie_ack(now)? {
+                    chunks.push(Box::new(data));
+                }
+                return Ok(vec![Packet {
+                    common_header: CommonHeader {
+                        verification_tag: self.peer_verification_tag,
+                        source_port: self.source_port,
+                        destination_port: self.destination_port,
+                    },
+                    chunks,
+                }]);
+            }
             _ => {}
         };
 
@@ -3012,6 +3026,62 @@ impl Association {
             },
             chunks: vec![Box::new(ChunkCookieAck {})],
         }])
+    }
+
+    /// The DATA that goes after the COOKIE ACK answering a duplicate COOKIE ECHO in
+    /// ESTABLISHED: the earliest outstanding chunks that fit the packet with it, sent again.
+    ///
+    /// The duplicate says the peer is still in COOKIE-ECHOED: it did not receive the COOKIE
+    /// ACK, and it discarded what DATA reached it (RFC 9260 5.1, "SHOULD discard" in
+    /// COOKIE-ECHOED), so what is outstanding is waiting for T3-rtx, whose RTO those discards
+    /// have backed off. RFC 9260 5.1 D lets DATA come with the COOKIE ACK, and the peer takes
+    /// the packet's COOKIE ACK first (5.1 E), so this DATA arrives in ESTABLISHED. It counts as
+    /// a retransmission: no round trip is measured with it (6.3.1 C5), and partially reliable
+    /// DATA whose retransmissions are spent is abandoned instead (RFC 3758 3.5 A3).
+    fn outstanding_data_after_a_cookie_ack(
+        &mut self,
+        now: Instant,
+    ) -> Result<Vec<ChunkPayloadData>> {
+        // The common header and the COOKIE ACK chunk (a 4-byte chunk header).
+        let mut size = COMMON_HEADER_SIZE as usize + 4;
+        let mut chosen = vec![];
+        let mut tsn = self.cumulative_tsn_ack_point.wrapping_add(1);
+        while sna32lt(tsn, self.my_next_tsn) {
+            let outstanding = self
+                .inflight_queue
+                .get(tsn)
+                .is_some_and(|c| c.is_outstanding() && c.nsent > 0);
+            if outstanding && !self.abandon_retransmit_candidate(tsn, now)? {
+                let Some(c) = self.inflight_queue.get(tsn) else {
+                    break;
+                };
+                if size + c.wire_size() > self.mtu as usize {
+                    break;
+                }
+                size += c.wire_size();
+                chosen.push(tsn);
+            }
+            tsn = tsn.wrapping_add(1);
+        }
+        let mut chunks = vec![];
+        for tsn in chosen {
+            if let Some(c) = self.inflight_queue.get_mut(tsn)
+                && c.is_outstanding()
+            {
+                c.retransmit = false;
+                c.nsent += 1;
+                chunks.push(c.clone());
+            }
+        }
+        if !chunks.is_empty() {
+            debug!(
+                "[{}] COOKIE ACK again, with {} outstanding DATA chunk(s)",
+                self.side,
+                chunks.len()
+            );
+            self.min_tsn2measure_rtt = self.my_next_tsn;
+        }
+        Ok(chunks)
     }
 
     fn handle_cookie_ack(&mut self, now: Instant) -> Result<Vec<Packet>> {

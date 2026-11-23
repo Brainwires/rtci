@@ -125,3 +125,33 @@ fn by_default_the_session_joins_at_the_first_control() {
     control(&mut chain, base, RtcpSessionControl::TrrIntCleared);
     assert!(!run(&mut chain, base + secs(5.0)).is_empty());
 }
+
+/// RFC 8834 section 4.1 (RFC 3550 section 6.2 as RFC 8108 updates it): "the delay before
+/// sending the initial compound RTCP packet can be set to zero". With
+/// `with_first_report_at_join`, the first report leaves at the instant of `Start`; the reports
+/// after it keep the calculated interval. Without it, the first waits its initial interval.
+#[test]
+fn the_first_report_leaves_when_the_session_joins() {
+    let base = Instant::now();
+    let mut at_join = chain(
+        builder()
+            .with_joins_on_start(true)
+            .with_first_report_at_join(true),
+    );
+    at_join.bind_remote_stream(&video(200));
+    control(&mut at_join, base, RtcpSessionControl::Start);
+    assert_eq!(Some(base), at_join.poll_timeout());
+    let sent = run(&mut at_join, base + secs(5.0));
+    assert_eq!(base, sent[0].at, "the first report at the join");
+    assert_eq!(Some(REPORTER), sent[0].leader());
+    assert!(
+        sent.len() >= 2 && sent[1].at > base,
+        "the next on its interval"
+    );
+
+    let mut delayed = chain(builder().with_joins_on_start(true));
+    delayed.bind_remote_stream(&video(200));
+    control(&mut delayed, base, RtcpSessionControl::Start);
+    let sent = run(&mut delayed, base + secs(5.0));
+    assert!(sent[0].at > base, "the initial interval first");
+}
