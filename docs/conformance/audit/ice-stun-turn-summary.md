@@ -21,7 +21,7 @@ is listed too. Where a file counts those separately the "proc" row below carries
 
 | Spec | File | Level | tested | untested | partial | missing | violated | n/a |
 |---|---|---|---|---|---|---|---|---|
-| RFC 8445 ICE | `rfc8445.md` | MUST | 133 | 0 | 1 | 0 | 0 | 22 |
+| RFC 8445 ICE | `rfc8445.md` | MUST | 134 | 0 | 0 | 0 | 0 | 22 |
 | | | SHOULD | 20 | 0 | 0 | 0 | 0 | 29 |
 | | | MAY | 7 | 0 | 0 | 3 | 0 | 6 |
 | RFC 8838 trickle ICE | `rfc8838.md` | MUST | 31 | 0 | 0 | 0 | 0 | 3 |
@@ -51,8 +51,8 @@ is listed too. Where a file counts those separately the "proc" row below carries
 | RFC 8421 dual stack | `rfc8421.md` | MUST | 1 | 0 | 0 | 0 | 0 | 0 |
 | | | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 |
 | | | MAY | 0 | 0 | 0 | 0 | 0 | 0 |
-| RFC 8489 STUN | `rfc8489.md` | MUST | 103 | 0 | 2 | 0 | 0 | 14 |
-| | | SHOULD | 21 | 1 | 1 | 0 | 0 | 1 |
+| RFC 8489 STUN | `rfc8489.md` | MUST | 105 | 0 | 0 | 0 | 0 | 14 |
+| | | SHOULD | 23 | 0 | 0 | 0 | 0 | 1 |
 | | | MAY | 5 | 0 | 0 | 3 | 0 | 0 |
 | RFC 5780 NAT discovery | `rfc5780.md` | MUST | 2 | 0 | 0 | 0 | 0 | 2 |
 | | | SHOULD | 0 | 0 | 0 | 0 | 0 | 0 |

@@ -918,13 +918,29 @@ impl Agent {
     }
 
     /// A response with the transaction id `id` failed its integrity check and was discarded.
+    ///
+    /// Over UDP the transaction stays open: a genuine response may still come. Over a
+    /// reliable transport (ICE-TCP, where a check is sent once) none will: RFC 8489 Section
+    /// 9.1.4, "the transaction MUST be ended immediately and the layer MUST signal an
+    /// integrity protection violation". The transaction is ended at the next timer pass, which
+    /// is due at once: the pair fails and `Event::IntegrityViolation` is raised.
     pub(crate) fn note_unauthentic_response(&mut self, id: TransactionId) {
+        let clock = self.clock;
+        let tcp = |local_index: usize, candidates: &[Candidate]| {
+            candidates
+                .get(local_index)
+                .is_some_and(|c| c.network_type().is_tcp())
+        };
         if let Some(r) = self
             .pending_binding_requests
             .iter_mut()
             .find(|r| r.transaction_id == id)
         {
             r.unauthentic_response = true;
+            if tcp(r.local_index, &self.local_candidates) {
+                r.retransmit = false;
+                r.next_event = r.next_event.min(clock);
+            }
         }
     }
 

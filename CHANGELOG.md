@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **turn**: `ClientConfig::default()` now sends SOFTWARE `rtc-turn <version>` (it sent none);
+  set `software` to an empty string for the old behaviour. A TURN request over UDP beyond the
+  path MTU is an `ErrPacketTooBig` where it was sent.
+
 - **ICE-TCP built into the engine** (branch `conf/tcp-2-ice-tcp`): TCP candidates are
   gathered by default (RFC 6544 section 4.1; browsers do), by the engine itself, for a driver
   that serves the new stream interface. An application that adds a UDP host candidate and
@@ -1660,6 +1664,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **turn, ice: STUN rows of the TURN client and ICE-TCP** (branch `conf/tcp-4-stun-turn-rows`).
+  The TURN client's requests carry SOFTWARE `rtc-turn <version>` by default
+  (`turn::client::DEFAULT_SOFTWARE`; an empty `ClientConfig::software` sends none, RFC 8489
+  6.1, 16.1.2); a request over UDP larger than the path MTU (`Client::set_path_mtu`, else 576 /
+  1280 bytes) is refused with `ErrPacketTooBig` before anything is sent (6.1); an ICE-TCP check
+  answered by a response that fails its integrity check ends at once as an integrity violation
+  (`Event::IntegrityViolation`, the pair fails; 9.1.4). A 400 to a TURN request is shown not to
+  be retried (14.8).
 
 - **TURN over TCP and TLS in the engine** (RFC 8656 section 3.1, RFC 8305, RFC 7443; branch
   `conf/tcp-3-turn-tls`). The configuration's `turn:...?transport=tcp` and `turns:` servers are

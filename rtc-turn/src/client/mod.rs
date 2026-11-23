@@ -24,6 +24,8 @@ mod client_permission_test;
 #[cfg(test)]
 mod client_retry_test;
 #[cfg(test)]
+mod client_software_mtu_test;
+#[cfg(test)]
 mod client_stale_nonce_test;
 #[cfg(test)]
 mod client_stun8489_config_test;
@@ -345,7 +347,10 @@ pub struct ClientConfig {
     pub password: String,
     /// Not used: the realm is the one the server names in its 401 (RFC 8489 §9.2.5).
     pub realm: String,
-    /// An optional `SOFTWARE` attribute value, sent for diagnostics.
+    /// The `SOFTWARE` attribute of every request (RFC 8489 Section 6.1: requests "SHOULD"
+    /// carry one; Section 16.1.2: its use "SHOULD" be configurable). The default is
+    /// [`DEFAULT_SOFTWARE`] (`rtc-turn` and its version); empty sends none, for an
+    /// application that would not tell its software to the path.
     pub software: String,
     /// The initial retransmission timeout in milliseconds; each retransmission doubles the
     /// wait. `0` selects the default, the 500 ms RFC 8489 §6.2.1 asks for at least.
@@ -377,7 +382,7 @@ impl Default for ClientConfig {
             username: "".to_string(),
             password: "".to_string(),
             realm: "".to_string(),
-            software: "".to_string(),
+            software: DEFAULT_SOFTWARE.to_string(),
             rto_in_ms: 0,
             retransmission: RetransmissionConfig::default(),
             password_algorithms: vec![],
@@ -385,6 +390,16 @@ impl Default for ClientConfig {
         }
     }
 }
+
+/// The default `SOFTWARE` of the TURN client's requests ([`ClientConfig::software`]).
+pub const DEFAULT_SOFTWARE: &str = concat!("rtc-turn ", env!("CARGO_PKG_VERSION"));
+
+/// RFC 8489 Section 6.1: with the path MTU unknown, a STUN message over UDP is at most 576
+/// bytes of IPv4 datagram, 1280 of IPv6 (the IP and UDP headers taken off).
+const UNKNOWN_PATH_MTU_V4: usize = 576;
+const UNKNOWN_PATH_MTU_V6: usize = 1280;
+const IP_UDP_OVERHEAD_V4: usize = 28;
+const IP_UDP_OVERHEAD_V6: usize = 48;
 
 /// Client is a STUN client
 pub struct Client {
@@ -396,6 +411,8 @@ pub struct Client {
     /// What the application authenticates with; each allocation has its own state of it.
     login: Arc<Login>,
     software: Software,
+    /// The path MTU for requests over UDP ([`Client::set_path_mtu`]); `None`: unknown.
+    path_mtu: Option<usize>,
     tr_map: TransactionMap,
     /// The TURN servers an Allocate was sent to, against redirection loops (RFC 8489 §10).
     redirects: RedirectGuard,
@@ -446,6 +463,7 @@ impl Client {
                 password_algorithms: config.password_algorithms,
             }),
             software: Software::new(ATTR_SOFTWARE, config.software),
+            path_mtu: None,
             tr_map: TransactionMap::new(TimerSettings {
                 initial_rto: if config.rto_in_ms != 0 {
                     Duration::from_millis(config.rto_in_ms)
@@ -1076,7 +1094,7 @@ impl Client {
         };
 
         debug!("client.SendBindingRequestTo call PerformTransaction 1");
-        Ok(self.perform_transaction(now, &msg, to, TransactionType::BindingRequest, None))
+        self.perform_transaction(now, &msg, to, TransactionType::BindingRequest, None)
     }
 
     /// send_binding_request sends a new STUN request to the STUN server
@@ -1288,7 +1306,7 @@ impl Client {
             to,
             TransactionType::OrphanRelease,
             Some(credential.clone()),
-        );
+        )?;
         Ok(())
     }
 
@@ -1341,6 +1359,13 @@ impl Client {
         Ok(server)
     }
 
+    /// The path MTU to the server, when the application knows it (RFC 8489 Section 6.1): a
+    /// request over UDP larger than it allows is refused with `ErrPacketTooBig`. `None` (the
+    /// default): unknown, 576 bytes for IPv4 and 1280 for IPv6.
+    pub fn set_path_mtu(&mut self, mtu: Option<usize>) {
+        self.path_mtu = mtu;
+    }
+
     /// Returns the TURN server address, if configured.
     pub fn turn_server_addr(&self) -> Option<SocketAddr> {
         self.turn_serv_addr
@@ -1378,7 +1403,26 @@ impl Client {
         to: SocketAddr,
         transaction_type: TransactionType,
         credential: Option<Arc<Credential>>,
-    ) -> TransactionId {
+    ) -> Result<TransactionId> {
+        // RFC 8489 Section 6.1: outside MTU probing, a request over UDP does not exceed the
+        // path MTU (configured with `set_path_mtu`, else the RFC's 576 / 1280 bytes). Data
+        // indications are not requests and are left to the path.
+        if self.transport_protocol == TransportProtocol::UDP {
+            let (unknown, overhead) = if to.is_ipv4() {
+                (UNKNOWN_PATH_MTU_V4, IP_UDP_OVERHEAD_V4)
+            } else {
+                (UNKNOWN_PATH_MTU_V6, IP_UDP_OVERHEAD_V6)
+            };
+            let limit = self.path_mtu.unwrap_or(unknown).saturating_sub(overhead);
+            if msg.raw.len() > limit {
+                debug!(
+                    "{} request of {} bytes not sent: the path takes {limit}",
+                    msg.typ,
+                    msg.raw.len()
+                );
+                return Err(Error::ErrPacketTooBig);
+            }
+        }
         trace!(
             "start {} transaction {:?} to {}",
             msg.typ, msg.transaction_id, to
@@ -1401,6 +1445,6 @@ impl Client {
             self.transmits.push_back(transmit);
         }
 
-        msg.transaction_id
+        Ok(msg.transaction_id)
     }
 }

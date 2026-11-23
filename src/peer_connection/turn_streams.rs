@@ -344,7 +344,6 @@ impl RTCPeerConnection {
             username: link.url.username.clone(),
             password: link.url.password.clone(),
             realm: String::new(),
-            software: String::new(),
             rto_in_ms: 0,
             allocation_refresh_interval_cap: self
                 .setting_engine
