@@ -178,6 +178,7 @@ pub use ice::state::RTCIceTransportState;
 pub use sctp::state::RTCSctpTransportState;
 
 use crate::peer_connection::RTCPeerConnection;
+use crate::peer_connection::handler::transport_set::TransportId;
 use crate::peer_connection::state::RTCIceGatheringState;
 pub use ice::component::RTCIceComponent;
 
@@ -258,12 +259,14 @@ impl fmt::Display for RTCTransportId {
 /// [W3C]: https://www.w3.org/TR/webrtc/#dom-rtcicetransport
 pub struct RTCIceTransport<'a> {
     pub(crate) peer_connection: &'a RTCPeerConnection,
+    /// Which of the connection's transports this is.
+    pub(crate) transport: TransportId,
 }
 
 impl RTCIceTransport<'_> {
     /// This transport's identity. See [`RTCTransportId`].
     pub fn id(&self) -> RTCTransportId {
-        self.peer_connection.ice_transport().id
+        self.peer_connection.ice_transport_of(self.transport).id
     }
 
     /// The ICE component this transport carries.
@@ -271,7 +274,9 @@ impl RTCIceTransport<'_> {
     /// Always [`RTCIceComponent::Rtp`]: RTCP multiplexing is required, and the spec specifies
     /// `rtp` for a transport carrying both.
     pub fn component(&self) -> RTCIceComponent {
-        self.peer_connection.ice_transport().component()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .component()
     }
 
     /// Whether this agent is controlling or controlled: [`RTCIceRole::Unspecified`] (W3C
@@ -279,12 +284,16 @@ impl RTCIceTransport<'_> {
     /// it controlling; a remote one follows RFC 8445 (controlled, or controlling when the
     /// remote is lite). It then follows the ICE agent, which repairs a role conflict.
     pub fn role(&self) -> RTCIceRole {
-        self.peer_connection.ice_transport().w3c_role()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .w3c_role()
     }
 
     /// The current state of ICE connectivity.
     pub fn state(&self) -> RTCIceTransportState {
-        self.peer_connection.ice_transport().state()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .state()
     }
 
     /// How far candidate gathering has progressed.
@@ -292,13 +301,15 @@ impl RTCIceTransport<'_> {
     /// The spec types this `RTCIceGathererState`, a second enum whose values are identical to
     /// [`RTCIceGatheringState`]'s; this crate carries one type for both.
     pub fn gathering_state(&self) -> RTCIceGatheringState {
-        self.peer_connection.ice_transport().gathering_state()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .gathering_state()
     }
 
     /// The local candidates gathered so far.
     pub fn get_local_candidates(&self) -> Vec<RTCIceCandidate> {
         self.peer_connection
-            .ice_transport()
+            .ice_transport_of(self.transport)
             .get_local_candidates()
             .unwrap_or_default()
     }
@@ -314,7 +325,9 @@ impl RTCIceTransport<'_> {
     /// webrtc-extensions 7 `getCandidatePairs()`: the ICE agent's candidate pairs, in the
     /// order they were formed (`OnIceCandidatePairAdd` announced each).
     pub fn get_candidate_pairs(&self) -> Vec<RTCIceCandidatePair> {
-        self.peer_connection.ice_transport().get_candidate_pairs()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .get_candidate_pairs()
     }
 
     /// The nominated candidate pair, or `None` until ICE selects one, and `None` while the
@@ -329,7 +342,7 @@ impl RTCIceTransport<'_> {
             return None;
         }
         self.peer_connection
-            .ice_transport()
+            .ice_transport_of(self.transport)
             .get_selected_candidate_pair()
     }
 
@@ -340,7 +353,9 @@ impl RTCIceTransport<'_> {
 
     /// The remote ICE parameters, or `None` before a remote description has supplied them.
     pub fn get_remote_parameters(&self) -> Option<RTCIceParameters> {
-        self.peer_connection.ice_transport().get_remote_parameters()
+        self.peer_connection
+            .ice_transport_of(self.transport)
+            .get_remote_parameters()
     }
 }
 
@@ -357,12 +372,14 @@ impl RTCIceTransport<'_> {
 /// [W3C]: https://www.w3.org/TR/webrtc/#dom-rtcdtlstransport
 pub struct RTCDtlsTransport<'a> {
     pub(crate) peer_connection: &'a RTCPeerConnection,
+    /// Which of the connection's transports this is.
+    pub(crate) transport: TransportId,
 }
 
 impl<'a> RTCDtlsTransport<'a> {
     /// This transport's identity. See [`RTCTransportId`].
     pub fn id(&self) -> RTCTransportId {
-        self.peer_connection.dtls_transport().id
+        self.peer_connection.dtls_transport_of(self.transport).id
     }
 
     /// The ICE transport this DTLS transport runs over.
@@ -371,12 +388,15 @@ impl<'a> RTCDtlsTransport<'a> {
     pub fn ice_transport(&self) -> RTCIceTransport<'a> {
         RTCIceTransport {
             peer_connection: self.peer_connection,
+            transport: self.transport,
         }
     }
 
     /// The current state of the DTLS connection.
     pub fn state(&self) -> RTCDtlsTransportState {
-        self.peer_connection.dtls_transport().state()
+        self.peer_connection
+            .dtls_transport_of(self.transport)
+            .state()
     }
 
     /// The peer's certificate chain, DER-encoded — the analogue of the browser's
@@ -385,7 +405,7 @@ impl<'a> RTCDtlsTransport<'a> {
     /// Empty until the handshake completes.
     pub fn get_remote_certificates(&self) -> &'a [Vec<u8>] {
         self.peer_connection
-            .dtls_transport()
+            .dtls_transport_of(self.transport)
             .get_remote_certificates()
     }
 }
@@ -416,6 +436,11 @@ impl<'a> RTCSctpTransport<'a> {
     pub fn transport(&self) -> RTCDtlsTransport<'a> {
         RTCDtlsTransport {
             peer_connection: self.peer_connection,
+            transport: self
+                .peer_connection
+                .pipeline_context
+                .transports
+                .data_transport_id(),
         }
     }
 

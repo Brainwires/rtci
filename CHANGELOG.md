@@ -1442,6 +1442,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The peer connection's transports are a set** (mt-1). The ICE, DTLS and SRTP contexts that
+  `PipelineContext` held once are now a `TransportSet` of transport bundles keyed by a transport
+  id, reached through `default()`, `transport(id)`, `transport_for(mid)` and the data transport
+  the SCTP association runs over; an inbound datagram is routed to a transport by where it
+  arrived before the pipeline reads it, and `RTCRtpSender::transport`,
+  `RTCRtpReceiver::transport` and `RTCSctpTransport::transport` name the transport of their
+  section. The set holds exactly one transport, so nothing behaves differently; it is the
+  ground for unbundled sections, several BUNDLE groups and `bundlePolicy` balanced /
+  max-compat (RFC 9429 4.1.1, RFC 9143). No public API changes.
 - **rtcp**: `configure_rtcp_reports` registers the RTCP session instead of
   `SenderReportInterceptor` and `ReceiverReportInterceptor` (both stay, for a chain built by
   hand: fixed timers, no scheduling). What changes on the wire with the default interceptors:
