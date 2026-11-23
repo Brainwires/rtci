@@ -346,8 +346,9 @@ fn is_srtp(datagram: &[u8]) -> bool {
 /// Re-keying by a new DTLS association (RFC 3711 sections 9.2 and 11.3, RFC 7714 sections
 /// 8.4 and 9.4, RFC 5764 section 4.1.2): with a key lifetime of 40 packets, the caller sends
 /// 30, asks for a new association (`renew_dtls_association`) and negotiates; the new DTLS
-/// handshake exports new SRTP keys, and the caller sends 45 more, past the lifetime the old
-/// key had, without the transport failing: the packet count started over with the new key.
+/// handshake exports new SRTP keys, and the caller sends 35 more, past the lifetime the old
+/// key had (65 in all), without the transport failing: the packet count started over with the
+/// new key, whose own 40 are not used up.
 /// A packet protected with the old key, held back on the wire and delivered after the
 /// re-key, is not accepted: the keys changed.
 #[test]
@@ -403,7 +404,7 @@ fn a_new_dtls_association_re_keys_srtp_and_starts_the_key_lifetime_over() -> Res
             exchange(&mut caller, &mut callee, now)?;
             continue;
         }
-        if renewed && received(&callee) >= received_at_renewal + 45 {
+        if renewed && received(&callee) >= received_at_renewal + 35 {
             break;
         }
         let may_send = if renewed {
@@ -444,7 +445,7 @@ fn a_new_dtls_association_re_keys_srtp_and_starts_the_key_lifetime_over() -> Res
     assert!(renewed, "the first key carried packets");
     let after = received(&callee) - received_at_renewal;
     assert!(
-        after >= 45,
+        after >= 35,
         "{after} packets after the renewal, {} written in all",
         seq
     );
