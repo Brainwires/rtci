@@ -662,6 +662,88 @@ impl Candidate {
     }
 }
 
+/// Whether two local candidates compete for local preferences: same type, component,
+/// transport and TCP direction (RFC 8445 Section 5.1.2.1, RFC 6544 Section 4.2), neither with a
+/// whole priority of its own.
+pub(crate) fn same_rank_group(a: &Candidate, b: &Candidate) -> bool {
+    a.candidate_type() == b.candidate_type()
+        && a.component() == b.component()
+        && a.network_type().is_tcp() == b.network_type().is_tcp()
+        && a.tcp_type() == b.tcp_type()
+        && a.priority_override == 0
+        && b.priority_override == 0
+}
+
+/// Ranks a set of local candidates gathered together, as RFC 8421 Section 4 recommends for a
+/// dual-stack host: within each type, the IPv6 candidates get a head start of
+/// `Hi = (N_4 + N_6) / N_4` places ("If a host has two IPv4 addresses and six IPv6 addresses,
+/// it will insert an IPv4 address after four IPv6 addresses"), then the two families
+/// alternate, so that both get checks early. Candidates that have a rank or a priority keep
+/// it, and their ranks are not given out again (RFC 8445 Section 5.1.2.1: unique local
+/// preferences); a set of one family is ranked in its order, the first keeping 65535 (Section
+/// 5.1.2.1: "When there is only a single IP address, this value SHOULD be set to 65535").
+///
+/// For candidates added one at a time the agent can only rank in the order they come (a
+/// priority once signalled does not change); an application that has its host candidates
+/// together ranks them here before it signals them, or adds them with
+/// [`Agent::add_local_candidates`](crate::Agent::add_local_candidates), which does this
+/// against the candidates the agent holds.
+pub fn rank_local_candidates(candidates: &mut [Candidate]) {
+    assign_dual_stack_ranks(&[], candidates);
+}
+
+/// [`rank_local_candidates`] for `batch`, with the ranks of `held` (candidates already
+/// ranked) taken.
+pub(crate) fn assign_dual_stack_ranks(held: &[Candidate], batch: &mut [Candidate]) {
+    let unranked = |c: &Candidate| c.priority_override == 0 && c.local_preference_rank.is_none();
+    let mut done = vec![false; batch.len()];
+    for first in 0..batch.len() {
+        if done[first] || !unranked(&batch[first]) {
+            continue;
+        }
+        // The group of `first`: its unranked members in the batch, by family, in order.
+        let members: Vec<usize> = (first..batch.len())
+            .filter(|&i| {
+                !done[i] && unranked(&batch[i]) && same_rank_group(&batch[first], &batch[i])
+            })
+            .collect();
+        for &i in &members {
+            done[i] = true;
+        }
+        let (v6, v4): (Vec<usize>, Vec<usize>) = members
+            .iter()
+            .partition(|&&i| batch[i].network_type().is_ipv6());
+        let head_start = if v4.is_empty() {
+            v6.len()
+        } else {
+            (v4.len() + v6.len()) / v4.len()
+        };
+        let mut order: Vec<usize> = v6.iter().take(head_start).copied().collect();
+        let (mut rest6, mut rest4) = (v6.iter().skip(head_start), v4.iter());
+        loop {
+            let (a, b) = (rest4.next(), rest6.next());
+            if a.is_none() && b.is_none() {
+                break;
+            }
+            order.extend(a.into_iter().chain(b).copied());
+        }
+        let mut taken: Vec<u16> = held
+            .iter()
+            .chain(batch.iter())
+            .filter(|c| same_rank_group(&batch[first], c))
+            .filter_map(|c| c.local_preference_rank)
+            .collect();
+        let mut rank = 0u16;
+        for i in order {
+            while taken.contains(&rank) {
+                rank = rank.saturating_add(1);
+            }
+            batch[i].local_preference_rank = Some(rank);
+            taken.push(rank);
+        }
+    }
+}
+
 /// Creates a Candidate from its string representation.
 pub fn unmarshal_candidate(raw: &str) -> Result<Candidate> {
     let split: Vec<&str> = raw.split_whitespace().collect();

@@ -67,6 +67,9 @@ pub(crate) struct InterceptorHandlerContext {
     /// 15.1): the m= section of a stream whose packets carry no MID header extension and whose
     /// SSRC no description declares.
     pub(crate) sdes_mids: HashMap<SSRC, String>,
+    /// A sender moved to another SSRC after a collision, and the negotiation-needed flag is
+    /// still to be updated for the description that signals it.
+    pub(crate) ssrcs_replaced: bool,
     /// The RtpStreamId and RepairedRtpStreamId each remote SSRC named in RTCP SDES items (RFC
     /// 8852 sections 3.1, 3.2): the rid of a stream whose packets carry no RID / RRID header
     /// extension.
@@ -100,6 +103,7 @@ impl Default for InterceptorHandlerContext {
             cname: interceptor::generate_rtcp_cname(),
             remote_cnames: Default::default(),
             sdes_mids: Default::default(),
+            ssrcs_replaced: false,
             sdes_rids: Default::default(),
             ssrc_collisions: Default::default(),
             wall_clock: None,
@@ -401,11 +405,13 @@ impl<'a> InterceptorHandler<'a> {
                     self.ctx.remote_cnames.insert(*ssrc, cname.clone());
                 }
             }
-            RtcpSessionEvent::SsrcCollision { ssrc, .. } => {
-                // RFC 3550 8.2. The session's own reporting SSRC has already moved. A
-                // sender's SSRC is signalled in the session description, so replacing it is a
-                // renegotiation: the application is told, once per SSRC, and stops or
-                // replaces the sender, which says BYE for the SSRC.
+            RtcpSessionEvent::SsrcCollision { ssrc, replacement } => {
+                // RFC 3550 8.2, RFC 5576 section 5, RFC 8834 section 4.8. The session's own
+                // reporting SSRC has already moved. A sender's moves to `replacement`: its
+                // streams are bound again (the RTCP session says BYE for the old SSRC when its
+                // stream is unbound), its statistics start over under the new one, and the
+                // next description signals it with `previous-ssrc` (negotiation-needed). The
+                // application is told, once per SSRC.
                 let is_sender = self.rtp_transceivers.iter().any(|transceiver| {
                     transceiver.sender().as_ref().is_some_and(|sender| {
                         sender.track().codings().iter().any(|coding| {
@@ -418,6 +424,19 @@ impl<'a> InterceptorHandler<'a> {
                 });
                 log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
                 if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
+                    for transceiver in self.rtp_transceivers.iter_mut() {
+                        let Some(sender) = transceiver.sender_mut() else {
+                            continue;
+                        };
+                        let Some(primary) = sender.replace_ssrc(*ssrc, *replacement) else {
+                            continue;
+                        };
+                        sender.rebind_local_streams(self.media_engine, self.interceptor);
+                        if primary == *ssrc {
+                            self.stats.replace_outbound_rtp_stream(*ssrc, *replacement);
+                        }
+                        self.ctx.ssrcs_replaced = true;
+                    }
                     self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                         now,
                         event: RTCEventInternal::RTCPeerConnectionEvent(
@@ -1181,7 +1200,7 @@ impl<'a> InterceptorHandler<'a> {
             });
         let receptive = self.rtp_transceivers[id].receptive();
         if let Some(receiver) = self.rtp_transceivers[id].receiver_mut() {
-            receiver.record_sources(
+            let (ssrc_changed, csrc_changed) = receiver.record_sources(
                 now,
                 wall_clock,
                 header,
@@ -1191,6 +1210,26 @@ impl<'a> InterceptorHandler<'a> {
                 capture,
                 clock_rate,
             );
+            // webrtc-extensions 11: `ssrcchange`, then `csrcchange`, once both lists are
+            // updated.
+            let receiver_id = crate::rtp_transceiver::RTCRtpReceiverId::from(id);
+            for (changed, event) in [
+                (
+                    ssrc_changed,
+                    RTCPeerConnectionEvent::OnSsrcChange(receiver_id),
+                ),
+                (
+                    csrc_changed,
+                    RTCPeerConnectionEvent::OnCsrcChange(receiver_id),
+                ),
+            ] {
+                if changed {
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(event),
+                    });
+                }
+            }
             // W3C webrtc 9.3: data for a muted, not ended track of a receptive transceiver
             // unmutes it.
             let track = receiver.track_mut();
@@ -2149,6 +2188,9 @@ mod stream_binding_tests {
                 priority: Default::default(),
                 network_priority: None,
                 scalability_mode: None,
+                scale_resolution_down_to: None,
+                ptime: None,
+                adaptive_ptime: false,
             }],
         ));
         transceiver
@@ -2403,6 +2445,9 @@ mod stream_binding_tests {
                     priority: Default::default(),
                     network_priority: None,
                     scalability_mode: None,
+                    scale_resolution_down_to: None,
+                    ptime: None,
+                    adaptive_ptime: false,
                 }],
             ));
         }
@@ -2545,6 +2590,9 @@ mod stream_binding_tests {
                     priority: Default::default(),
                     network_priority: None,
                     scalability_mode: None,
+                    scale_resolution_down_to: None,
+                    ptime: None,
+                    adaptive_ptime: false,
                 }],
             ));
         }

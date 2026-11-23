@@ -686,3 +686,332 @@ fn a_remote_track_has_no_capabilities() -> TestResult {
     );
     Ok(())
 }
+
+/// W3C 4.4.2 addIceCandidate: a candidate that names neither `sdpMid` nor `sdpMLineIndex` is
+/// a TypeError (checked before the remote description is); an end-of-candidates indication
+/// without either is for every media description.
+#[test]
+fn add_ice_candidate_without_a_mid_or_an_index_is_a_type_error() -> TestResult {
+    let unnamed = |candidate: &str| RTCIceCandidateInit {
+        candidate: candidate.to_owned(),
+        ..Default::default()
+    };
+    let mut answerer = default_peer()?;
+    let refused = answerer.add_remote_candidate(unnamed(
+        "candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host",
+    ));
+    assert!(matches!(refused, Err(Error::TypeError(_))), "{refused:?}");
+
+    let mut offerer = peer_with_data()?;
+    let offer = offerer.create_offer(None)?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let refused = answerer.add_remote_candidate(unnamed(
+        "candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host",
+    ));
+    assert!(matches!(refused, Err(Error::TypeError(_))), "{refused:?}");
+    let remote = answerer.remote_description().expect("offer").sdp.clone();
+    assert!(!remote.contains("a=candidate:"), "{remote}");
+
+    answerer.add_remote_candidate(unnamed(""))?;
+    let remote = answerer.remote_description().expect("offer").sdp.clone();
+    assert!(remote.contains("a=end-of-candidates"), "{remote}");
+    Ok(())
+}
+
+/// W3C 4.4.2 addIceCandidate, "add the ICE candidate": a candidate for a media description
+/// whose transceiver is stopped resolves without doing anything; the description's other
+/// sections still take theirs.
+#[test]
+fn add_ice_candidate_for_a_stopped_transceivers_section_does_nothing() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("a", 0x0101_0101))?;
+    let second = offerer.add_track(video_track("b", 0x0202_0202))?;
+    exchange(&mut offerer, &mut answerer)?;
+    offerer
+        .rtp_transceiver(second.into())
+        .expect("transceiver")
+        .stop()?;
+    // The offer rejects the section: applying it stops the answerer's transceiver, which is
+    // removed only once the answer completes the exchange.
+    let offer = offerer.create_offer(None)?;
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    let stopped_mid = answerer
+        .get_transceivers()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .find_map(|id| {
+            let t = answerer.rtp_transceiver(id)?;
+            t.is_stopped().then(|| t.mid().clone()).flatten()
+        })
+        .expect("the answerer's transceiver of the rejected section is stopped");
+    let live_mid = if stopped_mid == "0" { "1" } else { "0" };
+
+    let candidate = |mid: &str, port: u16| RTCIceCandidateInit {
+        candidate: format!("candidate:1 1 udp 2130706431 10.0.0.1 {port} typ host"),
+        sdp_mid: Some(mid.to_owned()),
+        ..Default::default()
+    };
+    answerer.add_remote_candidate(candidate(&stopped_mid, 5000))?;
+    answerer.add_remote_candidate(candidate(live_mid, 5001))?;
+
+    let remote = answerer.remote_description().expect("offer").sdp.clone();
+    let sections = media_sections(&remote);
+    let section = |mid: &str| {
+        sections
+            .iter()
+            .find(|s| mid_of(s) == Some(mid))
+            .unwrap_or_else(|| panic!("no section {mid}: {remote}"))
+    };
+    assert!(
+        !section(&stopped_mid)
+            .iter()
+            .any(|l| l.starts_with("a=candidate:")),
+        "{remote}"
+    );
+    assert!(
+        section(live_mid)
+            .iter()
+            .any(|l| l.contains("10.0.0.1 5001 typ host")),
+        "{remote}"
+    );
+    Ok(())
+}
+
+/// W3C 4.7.3, "check if negotiation is needed": with no current local description and no
+/// data channel or transceiver to negotiate, the result is false. A remote offer whose
+/// rollback removes the transceivers it created leaves the answerer with nothing to
+/// negotiate: no negotiationneeded is fired.
+#[test]
+fn a_rollback_to_an_empty_stable_state_needs_no_negotiation() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("v", 0x0303_0303))?;
+    let offer = offerer.create_offer(None)?;
+    answerer.set_remote_description(Instant::now(), offer)?;
+    assert_eq!(answerer.get_transceivers().count(), 1);
+    events(&mut answerer);
+
+    answerer.set_remote_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    assert_eq!(answerer.signaling_state(), RTCSignalingState::Stable);
+    assert_eq!(
+        answerer.get_transceivers().count(),
+        0,
+        "the rollback removed the transceiver the offer created"
+    );
+    assert_eq!(negotiation_needed(&mut answerer), 0);
+
+    // A data channel created now is something to negotiate.
+    answerer.create_data_channel("d", None)?;
+    assert_eq!(negotiation_needed(&mut answerer), 1);
+    Ok(())
+}
+
+/// W3C 4.4.1.2 and 4.4.2 close: once the connection is closed, every operation that chains
+/// (createOffer, createAnswer, setLocalDescription, setRemoteDescription, addIceCandidate)
+/// and createDataChannel / setConfiguration are an InvalidStateError; a candidate the
+/// application gathered is no longer surfaced; restartIce fires no negotiationneeded.
+#[test]
+fn every_operation_on_a_closed_connection_is_an_invalid_state_error() -> TestResult {
+    let mut offerer = peer_with_data()?;
+    let mut answerer = default_peer()?;
+    let (offer, _) = exchange(&mut offerer, &mut answerer)?;
+    answerer.close()?;
+    events(&mut answerer);
+
+    let candidate = |line: &str| RTCIceCandidateInit {
+        candidate: line.to_owned(),
+        sdp_mid: Some("0".to_owned()),
+        ..Default::default()
+    };
+    let closed = |result: Result<(), Error>| matches!(result, Err(Error::ErrConnectionClosed));
+    assert!(closed(answerer.add_remote_candidate(candidate(
+        "candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host"
+    ))));
+    assert!(closed(answerer.add_remote_candidate(candidate(""))));
+    assert!(closed(answerer.add_local_candidate(candidate(
+        "candidate:2 1 udp 2130706431 10.0.0.2 5000 typ host"
+    ))));
+    assert!(closed(answerer.create_offer(None).map(|_| ())));
+    assert!(closed(answerer.create_answer(None).map(|_| ())));
+    assert!(closed(answerer.set_remote_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer.clone())?
+    )));
+    assert!(closed(answerer.set_local_description(
+        Instant::now(),
+        RTCSessionDescription::offer(offer)?
+    )));
+    assert!(closed(
+        answerer.create_data_channel("late", None).map(|_| ())
+    ));
+    assert!(closed(
+        answerer.set_configuration(RTCConfigurationBuilder::new().build())
+    ));
+    answerer.restart_ice();
+    assert!(events(&mut answerer).is_empty(), "no event after close");
+    Ok(())
+}
+
+/// W3C 5.6 `[[IceRole]]` and 4.4.1.4 (RFC 8445 rules): the role is "unknown" until the first
+/// offer is processed; a local offer makes it controlling (before any answer arrives), a
+/// remote offer without `a=ice-lite` controlled.
+#[test]
+fn the_ice_role_is_unknown_until_the_first_offer() -> TestResult {
+    fn role(pc: &mut RTCPeerConnection) -> RTCIceRole {
+        let transceiver = pc.get_transceivers().next().expect("a transceiver");
+        pc.rtp_sender(transceiver.into())
+            .and_then(|s| s.transport().map(|t| t.ice_transport().role()))
+            .expect("an associated transceiver names its transport")
+    }
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    offerer.add_track(video_track("v", 0x0404_0404))?;
+    let offer = offerer.create_offer(None)?;
+    assert_eq!(role(&mut offerer), RTCIceRole::Unspecified, "unknown");
+
+    offerer.set_local_description(Instant::now(), offer.clone())?;
+    assert_eq!(role(&mut offerer), RTCIceRole::Controlling);
+
+    answerer.set_remote_description(Instant::now(), offer)?;
+    assert_eq!(role(&mut answerer), RTCIceRole::Controlled);
+    Ok(())
+}
+
+/// W3C 4.4.1.5 set a configuration: iceCandidatePoolSize may change until setLocalDescription
+/// has been called; after that a different size is an InvalidModificationError, also once a
+/// rollback has emptied the local description again.
+#[test]
+fn the_candidate_pool_size_is_fixed_once_set_local_description_was_called() -> TestResult {
+    let pool = |size: u8| {
+        RTCConfigurationBuilder::new()
+            .with_ice_candidate_pool_size(size)
+            .build()
+    };
+    let mut pc = peer_with_data()?;
+    pc.set_configuration(pool(2))?;
+    assert_eq!(pc.get_configuration().ice_candidate_pool_size(), 2);
+    let offer = pc.create_offer(None)?;
+    pc.set_local_description(Instant::now(), offer)?;
+    pc.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    assert!(pc.local_description().is_none());
+    let refused = pc.set_configuration(pool(4));
+    assert!(
+        matches!(refused, Err(Error::ErrModifyingICECandidatePoolSize)),
+        "{refused:?}"
+    );
+    pc.set_configuration(pool(2))?;
+    Ok(())
+}
+
+/// W3C 4.4.2 setLocalDescription and 4.6.2 RTCLocalSessionDescriptionInit: the type is
+/// optional ("offer" in stable, "answer" in have-remote-offer) and without an sdp the
+/// connection creates the offer or answer itself; [[LastCreatedOffer]] starts empty, so a
+/// fresh connection's first call needs no createOffer.
+#[test]
+fn set_local_description_without_a_type_or_sdp_creates_the_description() -> TestResult {
+    let mut offerer = peer_with_data()?;
+    let mut answerer = default_peer()?;
+    offerer.set_local_description(Instant::now(), RTCSessionDescription::default())?;
+    assert_eq!(offerer.signaling_state(), RTCSignalingState::HaveLocalOffer);
+    let offer = offerer.local_description().expect("an offer").clone();
+    assert!(offer.sdp.contains("m=application"), "{}", offer.sdp);
+
+    answerer.set_remote_description(Instant::now(), offer)?;
+    answerer.set_local_description(Instant::now(), RTCSessionDescription::default())?;
+    assert_eq!(answerer.signaling_state(), RTCSignalingState::Stable);
+    let answer = answerer.current_local_description().expect("an answer");
+    assert_eq!(
+        answer.sdp_type,
+        rtc::peer_connection::sdp::RTCSdpType::Answer
+    );
+
+    offerer.set_remote_description(Instant::now(), answer)?;
+    assert_eq!(offerer.signaling_state(), RTCSignalingState::Stable);
+    Ok(())
+}
+
+/// W3C 4.4.1.4 (set the description, an answer): the sender's [[SendCodecs]] are the codecs
+/// negotiated for sending, so a transceiver negotiated recvonly lists none in its sender's
+/// getParameters, while its receiver lists the codecs it receives.
+#[test]
+fn a_recvonly_transceivers_sender_lists_no_send_codecs() -> TestResult {
+    let mut offerer = default_peer()?;
+    let mut answerer = default_peer()?;
+    let recvonly = offerer
+        .add_transceiver_from_kind(RtpCodecKind::Video, Some(RTCRtpTransceiverInit::recvonly()))?;
+    // The answerer sends: its addTrack transceiver takes the offered section.
+    let answering = answerer.add_track(video_track("v", 0x0505_0505))?;
+    let before = offerer
+        .rtp_sender(recvonly.into())
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .len();
+    exchange(&mut offerer, &mut answerer)?;
+    let send_codecs = offerer
+        .rtp_sender(recvonly.into())
+        .expect("sender")
+        .get_parameters()
+        .rtp_parameters
+        .codecs
+        .clone();
+    assert!(
+        send_codecs.is_empty(),
+        "negotiated recvonly: nothing is sent ({before} before): {send_codecs:?}"
+    );
+    assert!(
+        !offerer
+            .rtp_receiver(recvonly.into())
+            .expect("receiver")
+            .get_parameters()
+            .rtp_parameters
+            .codecs
+            .is_empty()
+    );
+    assert!(
+        !answerer
+            .rtp_sender(answering)
+            .expect("sender")
+            .get_parameters()
+            .rtp_parameters
+            .codecs
+            .is_empty(),
+        "the answerer's sender sends"
+    );
+    Ok(())
+}
+
+/// W3C 4.4.2 currentLocalDescription and currentRemoteDescription: the descriptions of the
+/// last completed exchange, with the local candidates gathered since and the remote
+/// candidates addIceCandidate added since.
+#[test]
+fn current_descriptions_carry_the_candidates_added_since() -> TestResult {
+    let mut offerer = peer_with_data()?;
+    let mut answerer = default_peer()?;
+    exchange(&mut offerer, &mut answerer)?;
+    let candidate = |line: &str| RTCIceCandidateInit {
+        candidate: line.to_owned(),
+        sdp_mid: Some("0".to_owned()),
+        ..Default::default()
+    };
+    offerer.add_local_candidate(candidate(
+        "candidate:1 1 udp 2130706431 192.0.2.10 50000 typ host",
+    ))?;
+    answerer.add_remote_candidate(candidate(
+        "candidate:1 1 udp 2130706431 192.0.2.10 50000 typ host",
+    ))?;
+    assert!(offerer.pending_local_description().is_none());
+    let local = offerer.current_local_description().expect("offer").sdp;
+    assert!(local.contains("192.0.2.10 50000 typ host"), "{local}");
+    assert!(answerer.pending_remote_description().is_none());
+    let remote = answerer
+        .current_remote_description()
+        .expect("offer")
+        .sdp
+        .clone();
+    assert!(remote.contains("192.0.2.10 50000 typ host"), "{remote}");
+    Ok(())
+}

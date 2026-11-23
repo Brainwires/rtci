@@ -73,6 +73,10 @@ pub(crate) struct RTCRtpSenderInternal {
     bound_streams: Vec<StreamInfo>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
+    /// The transceiver's negotiated direction does not send (a recvonly or inactive
+    /// exchange): W3C 4.4.1.4 sets `[[SendCodecs]]` to the codecs negotiated for sending,
+    /// none, and `get_parameters` lists none.
+    negotiated_not_sending: bool,
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
@@ -85,6 +89,11 @@ pub(crate) struct RTCRtpSenderInternal {
     /// the two-byte form from then on (RFC 8285 section 4.1.2: "A stream MUST contain only
     /// one-byte headers or only two-byte headers").
     two_byte_ssrcs: Vec<SSRC>,
+    /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
+    /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
+    /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
+    /// with an old SSRC goes out with the new one.
+    previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
 }
 
 impl RTCRtpSenderInternal {
@@ -414,6 +423,9 @@ impl RTCRtpSenderInternal {
         validate_scalability_modes(self.kind(), &mut parameters.encodings, &send_codecs, |_| {
             Error::InvalidModificationError
         })?;
+        validate_extension_members(self.kind(), &mut parameters.encodings, |_| {
+            Error::InvalidModificationError
+        })?;
 
         self.send_encodings = parameters.encodings;
         self.last_returned_parameters = None;
@@ -436,7 +448,11 @@ impl RTCRtpSenderInternal {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Sendonly);
 
-            rtp_parameters.codecs = self.send_codecs.clone();
+            rtp_parameters.codecs = if self.negotiated_not_sending {
+                vec![]
+            } else {
+                self.send_codecs.clone()
+            };
             rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
             // RFC 7022 / RFC 8834 section 4.9: one CNAME for every stream of the connection.
             rtp_parameters.rtcp.cname = media_engine.rtcp_cname.clone();
@@ -592,6 +608,16 @@ impl RTCRtpSenderInternal {
         }
     }
 
+    /// Records whether the transceiver's negotiated direction does not send; the parameters
+    /// `get_parameters` returned are dropped when that changes (W3C 4.4.1.4: an answer sets
+    /// `[[SendCodecs]]` and `[[LastReturnedParameters]]` to null).
+    pub(crate) fn set_negotiated_not_sending(&mut self, not_sending: bool) {
+        if self.negotiated_not_sending != not_sending {
+            self.negotiated_not_sending = not_sending;
+            self.last_returned_parameters = None;
+        }
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         if self.rtcp_reduced_size != reduced_size {
             self.rtcp_reduced_size = reduced_size;
@@ -650,6 +676,62 @@ impl RTCRtpSenderInternal {
         self.send_encodings = kept;
         self.last_returned_parameters = None;
         self.sync_tracks();
+    }
+
+    /// Moves the encoding (media, RTX or FEC flow) that sends from `old` to `new`, after a
+    /// collision (RFC 3550 section 8.2): `Some` with the encoding's media SSRC as it was before,
+    /// `None` when no encoding has `old`. The streams are re-bound by the caller.
+    pub(crate) fn replace_ssrc(&mut self, old: SSRC, new: SSRC) -> Option<SSRC> {
+        let mut primary = None;
+        for encoding in &mut self.send_encodings {
+            let coding = &mut encoding.rtp_coding_parameters;
+            let before = coding.ssrc;
+            let slots = [
+                coding.ssrc.as_mut(),
+                coding.rtx.as_mut().map(|rtx| &mut rtx.ssrc),
+                coding.fec.as_mut().map(|fec| &mut fec.ssrc),
+            ];
+            for slot in slots.into_iter().flatten() {
+                if *slot == old {
+                    *slot = new;
+                    primary = before;
+                }
+            }
+        }
+        primary?;
+        let mut replaced = self
+            .previous_ssrcs
+            .iter()
+            .position(|(ssrc, _)| *ssrc == old)
+            .map(|i| self.previous_ssrcs.remove(i).1)
+            .unwrap_or_default();
+        replaced.push(old);
+        self.previous_ssrcs.push((new, replaced));
+        self.last_returned_parameters = None;
+        self.sync_tracks();
+        primary
+    }
+
+    /// The SSRCs `ssrc` replaced after collisions (`replace_ssrc`), oldest first.
+    pub(crate) fn previous_ssrcs(&self, ssrc: SSRC) -> &[SSRC] {
+        self.previous_ssrcs
+            .iter()
+            .find(|(new, _)| *new == ssrc)
+            .map_or(&[], |(_, replaced)| replaced.as_slice())
+    }
+
+    /// The SSRCs collisions moved the sender to (`replace_ssrc`).
+    pub(crate) fn replacement_ssrcs(&self) -> impl Iterator<Item = SSRC> + '_ {
+        self.previous_ssrcs.iter().map(|(new, _)| *new)
+    }
+
+    /// The SSRC a packet the application wrote with `ssrc` is sent with: the one a collision
+    /// moved it to, else `ssrc`.
+    pub(crate) fn current_ssrc(&self, ssrc: SSRC) -> SSRC {
+        self.previous_ssrcs
+            .iter()
+            .find(|(_, replaced)| replaced.contains(&ssrc))
+            .map_or(ssrc, |(new, _)| *new)
     }
 
     /// Whether `ssrc` is the SSRC of an encoding an answer removed (`apply_simulcast_answer`).
@@ -771,6 +853,50 @@ impl RTCRtpSenderInternal {
             interceptor.unbind_local_stream(&info);
         }
     }
+}
+
+/// webrtc-extensions 5: `scaleResolutionDownTo` is removed from audio encodings; when one
+/// encoding has it, every active encoding must, each with both dimensions above 0 (`error`:
+/// OperationError in addTransceiver, InvalidModificationError in setParameters);
+/// `adaptivePtime` with `ptime` is an InvalidModificationError.
+pub(crate) fn validate_extension_members(
+    kind: RtpCodecKind,
+    encodings: &mut [RTCRtpEncodingParameters],
+    error: impl Fn(String) -> Error,
+) -> Result<()> {
+    if kind != RtpCodecKind::Video {
+        for encoding in encodings.iter_mut() {
+            encoding.scale_resolution_down_to = None;
+        }
+    }
+    if encodings
+        .iter()
+        .any(|e| e.scale_resolution_down_to.is_some())
+    {
+        if encodings
+            .iter()
+            .any(|e| e.active && e.scale_resolution_down_to.is_none())
+        {
+            return Err(error(
+                "scaleResolutionDownTo must be on every active encoding".to_owned(),
+            ));
+        }
+        if encodings.iter().any(|e| {
+            e.scale_resolution_down_to
+                .is_some_and(|r| r.max_width == 0 || r.max_height == 0)
+        }) {
+            return Err(error(
+                "scaleResolutionDownTo dimensions must be greater than 0".to_owned(),
+            ));
+        }
+    }
+    if encodings
+        .iter()
+        .any(|e| e.adaptive_ptime && e.ptime.is_some())
+    {
+        return Err(Error::InvalidModificationError);
+    }
+    Ok(())
 }
 
 /// W3C webrtc-svc 3.2: the `scalabilityMode` checks of `addTransceiver` (refused with

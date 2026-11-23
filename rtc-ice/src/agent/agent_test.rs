@@ -1329,8 +1329,24 @@ fn test_handle_inbound_request_defers_failing_connectivity_check() -> Result<()>
         "a connectivity check should have been deferred to the timeout handler"
     );
 
-    // The deferred check now runs via the timeout handler, fails, and cleans up fully.
-    a.handle_timeout(Instant::now())?;
+    // The deferred check now runs via the timeout handler. Past its timeouts the agent does
+    // not fail while the pair the request created is being checked (RFC 8445 Section 8.1.2:
+    // the checklist fails when every pair has failed): the triggered check goes out.
+    let now = Instant::now();
+    a.handle_timeout(now)?;
+    assert_eq!(a.connection_state, ConnectionState::Checking);
+    let mut checks = 0;
+    while let Some(out) = a.poll_write() {
+        let mut m = Message::new();
+        m.raw = out.message.to_vec();
+        if m.decode().is_ok() && m.typ == BINDING_REQUEST {
+            checks += 1;
+        }
+    }
+    assert!(checks >= 1, "the triggered check was sent");
+
+    // When it fails, it cleans up fully.
+    a.update_connection_state(Some(now), ConnectionState::Failed);
     assert_eq!(a.connection_state, ConnectionState::Failed);
     assert!(a.candidate_pairs.is_empty());
     assert!(a.local_candidates.is_empty());

@@ -44,8 +44,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Default, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RTCBundlePolicy {
-    /// Unspecified - not a valid policy, used as default value
-    #[default]
+    /// Unspecified - not a W3C value. Behaves as the default, "balanced", which is what
+    /// [`Default`] gives (W3C webrtc-pc 4.2.1).
     Unspecified = 0,
 
     /// Gather ICE candidates for each media type (audio, video, data).
@@ -58,6 +58,7 @@ pub enum RTCBundlePolicy {
     ///
     /// **In this engine:** the default. In an initial offer the second and later m= section
     /// of each media type is `a=bundle-only`; every section shares one transport.
+    #[default]
     #[serde(rename = "balanced")]
     Balanced = 1,
 

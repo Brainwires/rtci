@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Default, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RTCRtcpMuxPolicy {
-    /// Unspecified - not a valid policy, used as default value
-    #[default]
+    /// Unspecified - not a W3C value. Behaves as the default, "require", which is what
+    /// [`Default`] gives (W3C webrtc-pc 4.2.1).
     Unspecified = 0,
 
     /// Gather ICE candidates for both RTP and RTCP.
@@ -49,6 +49,11 @@ pub enum RTCRtcpMuxPolicy {
     /// more ICE candidates.
     ///
     /// **Use when:** Compatibility with legacy systems is required
+    ///
+    /// Not a W3C value: webrtc-pc 4.2.5 has `"require"` only, and a W3C API layer offers no
+    /// other. This is RFC 9429 section 4.1.1's `negotiate` policy, an engine setting: the
+    /// offer leaves out `a=rtcp-mux-only`, and a section the answer does not multiplex is
+    /// rejected (the engine always multiplexes).
     #[serde(rename = "negotiate")]
     Negotiate = 1,
 
@@ -62,6 +67,7 @@ pub enum RTCRtcpMuxPolicy {
     /// browsers support this mode.
     ///
     /// **Use when:** Connecting to modern WebRTC implementations (recommended)
+    #[default]
     #[serde(rename = "require")]
     Require = 2,
 }

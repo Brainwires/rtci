@@ -22,7 +22,8 @@ use rtc::peer_connection::transport::{
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RtpCodecKind,
 };
 use rtc::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -65,6 +66,14 @@ struct Peer {
     read_rtp: Vec<(u32, u16)>,
     /// The RTCP datagrams this peer put on the wire.
     rtcp_datagrams: usize,
+    /// The `ssrcchange` / `csrcchange` events (webrtc-extensions 11), in order.
+    source_changes: Vec<&'static str>,
+    /// The SSRCs `OnSsrcCollision` named.
+    collisions: Vec<u32>,
+    /// How many times negotiation was asked for.
+    negotiation_needed: usize,
+    /// `OnSsrcCollision` and `OnNegotiationNeededEvent`, in the order they came.
+    log: Vec<&'static str>,
 }
 
 impl Peer {
@@ -165,6 +174,10 @@ impl Peer {
             read_rtcp: Vec::new(),
             read_rtp: Vec::new(),
             rtcp_datagrams: 0,
+            source_changes: Vec::new(),
+            collisions: Vec::new(),
+            negotiation_needed: 0,
+            log: Vec::new(),
         })
     }
 
@@ -292,6 +305,16 @@ impl World {
                     }
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnMute(_)) => {
                         peer.muted += 1;
+                    }
+                    RTCPeerConnectionEvent::OnSsrcChange(_) => peer.source_changes.push("ssrc"),
+                    RTCPeerConnectionEvent::OnCsrcChange(_) => peer.source_changes.push("csrc"),
+                    RTCPeerConnectionEvent::OnSsrcCollision(ssrc) => {
+                        peer.collisions.push(ssrc);
+                        peer.log.push("collision");
+                    }
+                    RTCPeerConnectionEvent::OnNegotiationNeededEvent => {
+                        peer.negotiation_needed += 1;
+                        peer.log.push("negotiation-needed");
                     }
                     _ => {}
                 }
@@ -684,6 +707,216 @@ fn closing_the_sender_mutes_the_receivers_track() -> Result<()> {
     Ok(())
 }
 
+const SHARED: u32 = 0x5151_5151;
+
+/// Two peers whose video senders both have the SSRC [`SHARED`]; `signal` is what the
+/// signalling channel does to each description. Not connected yet.
+fn shared_ssrc_world(signal: fn(&str) -> String) -> Result<(World, Vec<RTCRtpSenderId>, String)> {
+    let mut world = World {
+        peers: [
+            Peer::new("10.0.0.1:5000", false)?,
+            Peer::new("10.0.0.2:5000", false)?,
+        ],
+        now: Instant::now(),
+        drop_once: None,
+        fec_on_wire: 0,
+        fec_ssrc: None,
+        lose_for_good: None,
+        lost_copies: 0,
+        blocked_ssrcs: Vec::new(),
+    };
+    let mut senders = vec![];
+    for peer in world.peers.iter_mut() {
+        let transceiver = peer.pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendrecv,
+                streams: vec!["shared".to_owned()],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(SHARED),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            }),
+        )?;
+        senders.push(
+            peer.pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sender"),
+        );
+    }
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(
+        now,
+        rtc::peer_connection::sdp::RTCSessionDescription::offer(signal(&offer.sdp))?,
+    )?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[0].pc.set_remote_description(
+        now,
+        rtc::peer_connection::sdp::RTCSessionDescription::answer(signal(&answer.sdp))?,
+    )?;
+    Ok((world, senders, answer.sdp))
+}
+
+/// The SSRC of the first encoding of a sender, and its RTX SSRC.
+fn encoding_ssrcs(world: &mut World, peer: usize, sender: RTCRtpSenderId) -> (u32, Option<u32>) {
+    let mut sender = world.peers[peer].pc.rtp_sender(sender).expect("sender");
+    let coding = &sender.get_parameters().encodings[0].rtp_coding_parameters;
+    (
+        coding.ssrc.expect("an SSRC"),
+        coding.rtx.as_ref().map(|rtx| rtx.ssrc),
+    )
+}
+
+/// RFC 3550 section 8.2, RFC 5576 sections 5 and 6.2, RFC 8834 section 4.8: two peers send
+/// from one SSRC that no description names (the signalling channel takes the source lines out,
+/// as for a peer that signals none). Each, hearing the other's packets on its own SSRC, moves
+/// its sender to a new one: what the application still writes with the old SSRC goes out
+/// with the new, the RTX flow stays, the statistics follow the new SSRC, negotiation is asked
+/// for, and the next offer signals the new SSRC with `previous-ssrc`.
+#[test]
+fn a_sender_moves_to_a_new_ssrc_after_a_collision() -> Result<()> {
+    fn without_sources(sdp: &str) -> String {
+        sdp.split_inclusive("\r\n")
+            .filter(|line| !line.starts_with("a=ssrc:") && !line.starts_with("a=ssrc-group:"))
+            .collect()
+    }
+    let (mut world, senders, _) = shared_ssrc_world(without_sources)?;
+    for i in 0..2 {
+        let candidate = world.peers[i].candidate()?;
+        world.peers[i].pc.add_local_candidate(candidate.clone())?;
+        world.peers[1 - i].pc.add_remote_candidate(candidate)?;
+    }
+    let deadline = world.now + CONNECT_WITHIN;
+    while !world.peers.iter().all(|p| p.connected) {
+        if world.now >= deadline {
+            bail!("not connected");
+        }
+        let step = world.now + Duration::from_millis(50);
+        world.run_until(step)?;
+    }
+    let (_, rtx_before) = encoding_ssrcs(&mut world, 0, senders[0]);
+
+    // Both write with the shared SSRC, as the application keeps doing.
+    let mut wire_ssrcs = vec![];
+    for n in 0..20u16 {
+        for (i, sender) in senders.iter().enumerate() {
+            let now = world.now;
+            let mut rtp_sender = world.peers[i].pc.rtp_sender(*sender).expect("sender");
+            let pt = rtp_sender.get_parameters().rtp_parameters.codecs[0].payload_type;
+            rtp_sender.write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: FIRST_SEQ + n,
+                        timestamp: u32::from(n) * 1800,
+                        ssrc: SHARED,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        }
+        while let Some(msg) = world.peers[0].pc.poll_write() {
+            if let Some((ssrc, _)) = wire_rtp(&msg.message) {
+                wire_ssrcs.push(ssrc);
+            }
+            let _ = world.peers[1].pc.handle_read(TaggedBytesMut {
+                now: world.now,
+                transport: TransportContext {
+                    local_addr: msg.transport.peer_addr,
+                    peer_addr: msg.transport.local_addr,
+                    ecn: None,
+                    transport_protocol: TransportProtocol::UDP,
+                },
+                message: msg.message,
+            });
+        }
+        world.pump()?;
+        let step = world.now + Duration::from_millis(20);
+        world.run_until(step)?;
+    }
+    assert_eq!(world.peers[0].collisions, vec![SHARED], "reported once");
+    // Negotiation is asked for the first exchange, and again for the new SSRC (each peer
+    // may hear the other's sender report on the shared SSRC before any media).
+    assert_eq!(
+        world.peers[0].negotiation_needed, 2,
+        "the new SSRC is to be signalled: {:?}",
+        world.peers[0].log
+    );
+
+    let (moved, rtx_after) = encoding_ssrcs(&mut world, 0, senders[0]);
+    assert_ne!(moved, SHARED, "the sender has a new SSRC");
+    assert_eq!(rtx_after, rtx_before, "the RTX flow keeps its own");
+    assert_eq!(
+        wire_ssrcs.last(),
+        Some(&moved),
+        "what is written with the old SSRC goes out with the new: {wire_ssrcs:?}"
+    );
+
+    let stats = world.peers[0]
+        .pc
+        .get_stats(world.now, rtc::statistics::StatsSelector::None);
+    let outbound: Vec<u32> = stats
+        .outbound_rtp_streams()
+        .map(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc)
+        .collect();
+    assert!(outbound.contains(&moved), "{outbound:?}");
+    assert!(!outbound.contains(&SHARED), "{outbound:?}");
+
+    let offer = world.peers[0].pc.create_offer(None)?;
+    assert!(
+        offer
+            .sdp
+            .contains(&format!("a=ssrc:{moved} previous-ssrc:{SHARED}\r\n")),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        !offer.sdp.contains(&format!("a=ssrc:{SHARED} ")),
+        "{}",
+        offer.sdp
+    );
+    Ok(())
+}
+
+/// RFC 5576 section 5: "collisions between two signalled sources MUST be resolved
+/// immediately". The answerer, whose sender has the SSRC the offer describes, moves before it
+/// answers: the answer describes the new SSRC, with `previous-ssrc`.
+#[test]
+fn a_description_that_names_a_local_ssrc_moves_the_sender_at_once() -> Result<()> {
+    let (mut world, senders, answer) = shared_ssrc_world(str::to_owned)?;
+    let (moved, _) = encoding_ssrcs(&mut world, 1, senders[1]);
+    assert_ne!(moved, SHARED, "the answerer's sender moved");
+    assert!(
+        answer.contains(&format!("a=ssrc:{moved} previous-ssrc:{SHARED}\r\n")),
+        "{answer}"
+    );
+    assert!(!answer.contains(&format!("a=ssrc:{SHARED} ")), "{answer}");
+    let (offerer, _) = encoding_ssrcs(&mut world, 0, senders[0]);
+    assert_eq!(
+        offerer, SHARED,
+        "the offerer, whose SSRC no description took, keeps it"
+    );
+    world.pump()?;
+    assert_eq!(world.peers[1].collisions, vec![SHARED]);
+    Ok(())
+}
+
 /// RFC 5956 / flexfec-03: with a FEC format registered, an encoding the application gives
 /// without a FEC SSRC gets one, offered in an `a=ssrc-group:FEC-FR`, and its repair flow
 /// recovers a media packet the link lost; the test names no FEC SSRC. NACK and RTX are
@@ -763,5 +996,138 @@ fn a_receiver_asks_the_sender_to_limit_its_rate_with_tmmbr() -> Result<()> {
     let now = world.now;
     let limited = outgoing(&mut world.peers[0].pc, now).expect("an estimate");
     assert!(limited <= LIMIT as f64, "{before} -> {limited}");
+    Ok(())
+}
+
+/// W3C webrtc 5.3: stopping the receiver's track does not stop the receiver: the media
+/// still arrives and the receiver still sends its reception reports (RFC 3550 6.4.2).
+#[test]
+fn stopping_the_receivers_track_keeps_the_receiver_reporting() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .track_mut()
+        .stop();
+    let received = world.peers[1].read_rtp.len();
+    let reports = world.peers[1].rtcp_datagrams;
+
+    world.send_media(sender, FIRST_SEQ + 25, 150)?;
+    assert!(
+        world.peers[1].read_rtp.len() >= received + 100,
+        "the media still arrives"
+    );
+    // The receiver sends no media: its RTCP is its receiver reports (and their SDES).
+    assert!(
+        world.peers[1].rtcp_datagrams > reports,
+        "the receiver still reports"
+    );
+    Ok(())
+}
+
+/// W3C webrtc 5.4 "stop sending and receiving": `stop()` on the sending transceiver says
+/// BYE for each RTP stream its sender sent (RFC 3550 6.6); on the receiving one, media that
+/// still arrives is no longer received.
+#[test]
+fn stop_says_bye_for_the_senders_streams_and_stops_receiving() -> Result<()> {
+    use rtc::rtp_transceiver::RTCRtpTransceiverId;
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    assert_eq!(0, world.peers[1].muted);
+
+    world.peers[0]
+        .pc
+        .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+        .expect("transceiver")
+        .stop()?;
+    let until = world.now + Duration::from_secs(2);
+    world.run_until(until)?;
+    // No description was exchanged: only the BYE for the sender's stream mutes the remote
+    // track (W3C 9.3), which stays live.
+    assert_eq!(1, world.peers[1].muted, "the BYE arrived");
+    assert_eq!(0, world.peers[1].closed);
+
+    // The receiving side stops: what the sender writes is not received any more.
+    let (mut world, sender) = World::connected()?;
+    world.send_media(sender, FIRST_SEQ, 25)?;
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    world.peers[1]
+        .pc
+        .rtp_transceiver(RTCRtpTransceiverId::from(receiver))
+        .expect("transceiver")
+        .stop()?;
+    world.pump()?;
+    let received = world.peers[1].read_rtp.len();
+    world.send_media(sender, FIRST_SEQ + 25, 50)?;
+    assert_eq!(
+        world.peers[1].read_rtp.len(),
+        received,
+        "nothing is received"
+    );
+    Ok(())
+}
+
+/// webrtc-extensions 11: the receiver fires `ssrcchange` when the synchronization source of
+/// the last frame changes (the first frame's included) and `csrcchange` when its contributing
+/// sources do, `ssrcchange` first, once both lists are updated; frames that change nothing
+/// fire nothing.
+#[test]
+fn source_changes_fire_ssrcchange_and_csrcchange() -> Result<()> {
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, _, pt) = world.sender_stream(sender);
+    let send = |world: &mut World, seq: u16, csrc: Vec<u32>| -> Result<()> {
+        let now = world.now;
+        world.peers[0]
+            .pc
+            .rtp_sender(sender)
+            .expect("sender")
+            .write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: pt,
+                        sequence_number: seq,
+                        timestamp: u32::from(seq) * 1800,
+                        ssrc,
+                        marker: true,
+                        csrc,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from(vec![0x10u8; 200]),
+                },
+            )?;
+        world.pump()?;
+        let until = now + Duration::from_millis(20);
+        world.run_until(until)
+    };
+    send(&mut world, FIRST_SEQ, vec![])?;
+    assert_eq!(
+        world.peers[1].source_changes,
+        ["ssrc"],
+        "the first frame's source"
+    );
+    send(&mut world, FIRST_SEQ + 1, vec![])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc"], "nothing changed");
+    send(&mut world, FIRST_SEQ + 2, vec![11, 12])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc", "csrc"]);
+    send(&mut world, FIRST_SEQ + 3, vec![11, 12])?;
+    send(&mut world, FIRST_SEQ + 4, vec![12])?;
+    assert_eq!(world.peers[1].source_changes, ["ssrc", "csrc", "csrc"]);
+    let receiver = *world.peers[1].opened.first().expect("the track opened");
+    let contributing: Vec<u32> = world.peers[1]
+        .pc
+        .rtp_receiver(receiver)
+        .expect("receiver")
+        .get_contributing_sources()
+        .map(|source| source.source)
+        .collect();
+    assert!(
+        contributing.contains(&12),
+        "the list was updated first: {contributing:?}"
+    );
     Ok(())
 }

@@ -1146,3 +1146,169 @@ fn test_at_most_ten_transactions_are_outstanding_to_a_server() -> Result<()> {
     assert!(answered.contains(&next[0].transaction_id));
     client.close()
 }
+
+// --- FINGERPRINT on the wire: RFC 8489 §7 -----------------------------------------------
+
+/// Every datagram the client has queued, raw, in order.
+fn wire(client: &mut Client) -> Vec<Vec<u8>> {
+    let mut out = vec![];
+    while let Some(transmit) = client.poll_write() {
+        out.push(transmit.message.to_vec());
+    }
+    out
+}
+
+/// The STUN requests among `datagrams`, decoded.
+fn requests_in(datagrams: &[Vec<u8>]) -> Vec<Message> {
+    datagrams
+        .iter()
+        .filter(|raw| is_stun_message(raw))
+        .map(|raw| {
+            let mut m = Message::new();
+            m.raw = raw.clone();
+            m.decode().expect("the client's message decodes");
+            m
+        })
+        .filter(|m| m.typ.class == CLASS_REQUEST)
+        .collect()
+}
+
+/// RFC 8489 §7: "When present, the FINGERPRINT attribute MUST be the last attribute in the
+/// message", and the client uses it on every message (RFC 8656 §3 lets a TURN client do so,
+/// and an ICE agent sharing the socket needs it to tell TURN apart). Read off the wire: a
+/// Binding request (which had none) and its retransmissions, both Allocates of the 401 exchange,
+/// CreatePermission, a Send indication, ChannelBind, Refresh and the deallocating Refresh all
+/// end with a FINGERPRINT that verifies. (ChannelData is not STUN and carries none.)
+#[test]
+fn test_every_stun_message_the_client_sends_ends_with_a_valid_fingerprint() -> Result<()> {
+    let now = Instant::now();
+    let server = TestServer::new()?;
+    let mut client = new_client(TransportProtocol::UDP)?;
+    let peer: SocketAddr = "192.0.2.99:4000".parse().unwrap();
+    let mut all: Vec<Vec<u8>> = vec![];
+
+    // A Binding request, retransmitted on its timer and never answered.
+    client.send_binding_request_to(now, server_addr())?;
+    all.extend(wire(&mut client));
+    let mut at = now;
+    for _ in 0..3 {
+        at = client.poll_timeout().expect("a retransmission is due");
+        client.handle_timeout(at)?;
+        all.extend(wire(&mut client));
+    }
+
+    // Allocate: the 401 exchange, then success.
+    client.allocate(at)?;
+    let sent = wire(&mut client);
+    let first = requests_in(&sent).pop().expect("an Allocate");
+    all.extend(sent);
+    server.answer(
+        &mut client,
+        at,
+        &first,
+        CLASS_ERROR_RESPONSE,
+        vec![
+            error(CODE_UNAUTHORIZED),
+            text(ATTR_NONCE, "nonce"),
+            text(ATTR_REALM, REALM),
+        ],
+        None,
+    )?;
+    let sent = wire(&mut client);
+    let second = requests_in(&sent)
+        .pop()
+        .expect("the Allocate with credentials");
+    all.extend(sent);
+    server.answer(
+        &mut client,
+        at,
+        &second,
+        CLASS_SUCCESS_RESPONSE,
+        vec![relayed(relayed_addr()), lifetime(600)],
+        Some(&server.key),
+    )?;
+    while client.poll_event().is_some() {}
+
+    // CreatePermission.
+    client.relay(relayed_addr())?.create_permission(at, peer)?;
+    let sent = wire(&mut client);
+    let permission = requests_in(&sent).pop().expect("a CreatePermission");
+    all.extend(sent);
+    server.succeed(&mut client, at, &permission)?;
+
+    // The first data: a Send indication and a ChannelBind; once bound, ChannelData.
+    client.relay(relayed_addr())?.send_to(at, b"first", peer)?;
+    let sent = wire(&mut client);
+    let bind = requests_in(&sent)
+        .into_iter()
+        .find(|m| m.typ.method == METHOD_CHANNEL_BIND)
+        .expect("a ChannelBind");
+    all.extend(sent);
+    server.succeed(&mut client, at, &bind)?;
+    client.relay(relayed_addr())?.send_to(at, b"second", peer)?;
+    all.extend(wire(&mut client));
+
+    // Refresh, then the Refresh with LIFETIME 0 that releases the allocation.
+    client.refresh_allocations(at)?;
+    let sent = wire(&mut client);
+    let refresh = requests_in(&sent)
+        .into_iter()
+        .find(|m| m.typ.method == METHOD_REFRESH)
+        .expect("a Refresh");
+    all.extend(sent);
+    server.answer(
+        &mut client,
+        at,
+        &refresh,
+        CLASS_SUCCESS_RESPONSE,
+        vec![lifetime(600)],
+        Some(&server.key),
+    )?;
+    client.relay(relayed_addr())?.close(at)?;
+    all.extend(wire(&mut client));
+
+    let mut methods = vec![];
+    let mut stun_messages = 0;
+    for raw in &all {
+        if !is_stun_message(raw) {
+            continue;
+        }
+        stun_messages += 1;
+        let mut m = Message::new();
+        m.raw = raw.clone();
+        m.decode()?;
+        assert_eq!(
+            m.attributes.0.last().map(|a| a.typ),
+            Some(ATTR_FINGERPRINT),
+            "{m} ends with FINGERPRINT"
+        );
+        FINGERPRINT.check(&m)?;
+        methods.push((m.typ.method, m.typ.class));
+    }
+    for expected in [
+        (METHOD_BINDING, CLASS_REQUEST),
+        (METHOD_ALLOCATE, CLASS_REQUEST),
+        (METHOD_CREATE_PERMISSION, CLASS_REQUEST),
+        (METHOD_SEND, CLASS_INDICATION),
+        (METHOD_CHANNEL_BIND, CLASS_REQUEST),
+        (METHOD_REFRESH, CLASS_REQUEST),
+    ] {
+        assert!(methods.contains(&expected), "{expected:?} was sent");
+    }
+    let bindings = methods
+        .iter()
+        .filter(|m| **m == (METHOD_BINDING, CLASS_REQUEST))
+        .count();
+    assert_eq!(bindings, 4, "the Binding request and three retransmissions");
+    let refreshes = methods
+        .iter()
+        .filter(|m| **m == (METHOD_REFRESH, CLASS_REQUEST))
+        .count();
+    assert_eq!(refreshes, 2, "the refresh and the release");
+    assert!(
+        all.iter().any(|raw| !is_stun_message(raw)),
+        "ChannelData went out too"
+    );
+    assert!(stun_messages >= 11);
+    Ok(())
+}

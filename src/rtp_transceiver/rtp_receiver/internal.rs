@@ -92,6 +92,11 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// The track ended and the application has not been told yet
     /// ([`take_unannounced_end`](Self::take_unannounced_end)).
     end_unannounced: bool,
+    /// When each video frame reported in the last second was received
+    /// ([`report_received_frame`](Self::report_received_frame)), oldest first.
+    received_frames: std::collections::VecDeque<Instant>,
+    /// The SSRC and the CSRCs of the last packet received (webrtc-extensions 11).
+    last_frame_sources: Option<(SSRC, Vec<SSRC>)>,
 }
 
 impl RTCRtpReceiverInternal {
@@ -114,6 +119,8 @@ impl RTCRtpReceiverInternal {
             remote_streams: vec![],
             last_stable_remote_streams: vec![],
             end_unannounced: false,
+            received_frames: Default::default(),
+            last_frame_sources: None,
         }
         .with_own_track()
     }
@@ -130,6 +137,7 @@ impl RTCRtpReceiverInternal {
             vec![],
         );
         track.set_muted(true);
+        track.set_remote();
         self.track = track;
         self
     }
@@ -143,6 +151,8 @@ impl RTCRtpReceiverInternal {
         track.track_id = self.track.track_id.clone();
         track.label = self.track.label.clone();
         track.set_muted(self.track.muted());
+        track.set_remote();
+        track.take_settings_from(&self.track);
         if self.track.ready_state()
             == crate::media_stream::track_state::MediaStreamTrackState::Ended
         {
@@ -309,7 +319,13 @@ impl RTCRtpReceiverInternal {
         vad: bool,
         capture: Option<rtp::extension::abs_capture_time_extension::AbsCaptureTimeExtension>,
         clock_rate: Option<u32>,
-    ) {
+    ) -> (bool, bool) {
+        // webrtc-extensions 11: whether the SSRC, and the CSRCs, of the last frame changed.
+        let changes = match &self.last_frame_sources {
+            None => (true, !header.csrc.is_empty()),
+            Some((ssrc, csrcs)) => (*ssrc != header.ssrc, *csrcs != header.csrc),
+        };
+        self.last_frame_sources = Some((header.ssrc, header.csrc.clone()));
         let timestamp = wall_clock.unix(now);
         let live = |source: &RTCRtpContributingSource| {
             timestamp.saturating_sub(source.timestamp) < SOURCE_LIFETIME
@@ -354,6 +370,7 @@ impl RTCRtpReceiverInternal {
             let excess = self.contributing_sources.len() - MAX_CONTRIBUTING_SOURCES;
             self.contributing_sources.drain(..excess);
         }
+        changes
     }
 
     /// webrtc-extensions 8: the capture time and the sender's clock offset of a packet of
@@ -550,8 +567,33 @@ impl RTCRtpReceiverInternal {
         self.last_returned_parameters = None;
     }
 
-    pub(crate) fn set_track(&mut self, track: MediaStreamTrack) {
+    pub(crate) fn set_track(&mut self, mut track: MediaStreamTrack) {
+        track.set_remote();
         self.track = track;
+    }
+
+    /// webrtc-pc 9.3.1, the settings of a remote video track: the application (its decoder,
+    /// or a depacketizer that reads the frame size from a key frame) reports each video frame
+    /// it received, with its size. The track's `width`, `height` and `aspectRatio` are the
+    /// latest frame's; `frameRate` is estimated from the frames of the last second: the frame
+    /// intervals in it over the time they span, once there are two.
+    pub(crate) fn report_received_frame(&mut self, now: Instant, width: u32, height: u32) {
+        const WINDOW: Duration = Duration::from_secs(1);
+        while self
+            .received_frames
+            .front()
+            .is_some_and(|&first| now.saturating_duration_since(first) > WINDOW)
+        {
+            self.received_frames.pop_front();
+        }
+        self.received_frames.push_back(now);
+        let frame_rate = match (self.received_frames.front(), self.received_frames.back()) {
+            (Some(&first), Some(&last)) if self.received_frames.len() >= 2 && last > first => {
+                Some((self.received_frames.len() - 1) as f64 / (last - first).as_secs_f64())
+            }
+            _ => None,
+        };
+        self.track.record_received_frame(width, height, frame_rate);
     }
 
     /// Ends the receiver's track (W3C webrtc 5.4 "stop sending and receiving").

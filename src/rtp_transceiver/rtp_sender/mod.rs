@@ -212,7 +212,7 @@ pub use rtp_codec_parameters::RTCRtpCodecParameters;
 pub use rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRidRestrictions, RTCRtpRtxParameters,
 };
-pub use rtp_encoding_parameters::RTCRtpEncodingParameters;
+pub use rtp_encoding_parameters::{RTCResolutionRestriction, RTCRtpEncodingParameters};
 pub use rtp_header_extension_capability::{
     RTCRtpHeaderExtensionCapability, RTCRtpHeaderExtensionEncryption,
     RTCRtpHeaderExtensionToNegotiate,
@@ -272,12 +272,17 @@ impl RTCRtpSender<'_> {
         // negotiation — the point at which the transceiver acquires a mid. Before that the slot
         // is null, which is what the spec means by "prior to construction of the
         // `RTCDtlsTransport` object".
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .as_ref()?;
 
         Some(RTCDtlsTransport {
             peer_connection: self.peer_connection,
+            transport: self
+                .peer_connection
+                .pipeline_context
+                .transports
+                .transport_id_for(mid),
         })
     }
     fn sender(&self) -> &internal::RTCRtpSenderInternal {
@@ -393,11 +398,17 @@ impl RTCRtpSender<'_> {
     /// [`set_parameters`](Self::set_parameters) return the same parameters, with the same
     /// transaction id.
     pub fn get_parameters(&mut self) -> &RTCRtpSendParameters {
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let transceiver = &mut self.peer_connection.rtp_transceivers[self.id.0];
+        let negotiated = transceiver.current_direction();
+        let negotiated_not_sending = negotiated
+            != crate::rtp_transceiver::RTCRtpTransceiverDirection::Unspecified
+            && !negotiated.has_send();
+        let sender = transceiver
             .sender_mut()
             .as_mut()
-            .expect("every transceiver has a sender")
-            .get_parameters(&self.peer_connection.media_engine)
+            .expect("every transceiver has a sender");
+        sender.set_negotiated_not_sending(negotiated_not_sending);
+        sender.get_parameters(&self.peer_connection.media_engine)
     }
 
     /// Replaces the track this sender sends, without negotiation (W3C `replaceTrack`).
@@ -538,6 +549,12 @@ impl RTCRtpSender<'_> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
+        // draft-ietf-avtcore-rtp-sframe-03 section 6: SFrame offered and not answered, the
+        // offerer "MUST NOT send media for that m-section and MUST NOT fall back to sending
+        // unencrypted RTP".
+        if self.peer_connection.rtp_transceivers[self.id.0].sframe_refused() {
+            return Err(Error::ErrSFrameRefused);
+        }
         let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .clone();
@@ -556,6 +573,8 @@ impl RTCRtpSender<'_> {
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
         }
+        // An SSRC a collision replaced (RFC 3550 section 8.2) goes out as its replacement.
+        packet.header.ssrc = sender.current_ssrc(packet.header.ssrc);
 
         // RFC 8853 section 5.3.3: no RTP for a simulcast stream the answer removed. Dropped
         // like an inactive encoding's packet, so an encoder that has not re-read the

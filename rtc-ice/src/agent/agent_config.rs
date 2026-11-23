@@ -141,6 +141,27 @@ pub enum NominationAcceptance {
     Latest,
 }
 
+/// What the controlling agent does when the transaction of its nomination (a check with
+/// USE-CANDIDATE on a valid pair) times out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FailedNomination {
+    /// The pair stays valid (it has received a success response, RFC 8445 Section
+    /// 7.2.5.3.3) and is nominated again, for as long as the peer is heard from on it (an
+    /// authenticated request or response less than the consent expiry, 30 seconds, ago).
+    /// Once the peer has not been heard from for that long, the pair fails and the next valid
+    /// pair is nominated; with none left the checklist fails. Under heavy loss every request
+    /// of a transaction, or every response, can be lost while the peer is there and has
+    /// accepted the nomination: giving up then leaves the peer connected and this agent
+    /// failed.
+    #[default]
+    Retry,
+    /// RFC 8445 Section 7.2.5.3.4 to the letter: "If the request fails (Section 7.2.5.2), the
+    /// agent MUST remove the candidate pair from the valid list, set the candidate pair state
+    /// to Failed, and set the checklist state to Failed." The agent fails.
+    FailChecklist,
+}
+
 /// What the agent does with a Binding request that fails the short-term credential check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -258,6 +279,14 @@ pub struct AgentConfig {
     /// lite agents do not perform connectivity check and only provide host candidates.
     pub lite: bool,
 
+    /// webrtc-extensions 7 `icecandidatepairnominate`, cancelable: when true, a controlling
+    /// agent that has picked a pair to nominate proposes it first
+    /// ([`Event::CandidatePairNominationProposed`](crate::agent::Event)) and waits for
+    /// [`Agent::resolve_nomination_proposal`](crate::agent::Agent::resolve_nomination_proposal);
+    /// a declined pair is not nominated, and the agent keeps checking. False (the default):
+    /// the agent nominates at once, as for an event nobody cancels.
+    pub candidate_pair_proposals: bool,
+
     /// Specify a minimum wait time before selecting host candidates.
     pub host_acceptance_min_wait: Option<Duration>,
     /// Specify a minimum wait time before selecting srflx candidates.
@@ -306,6 +335,12 @@ pub struct AgentConfig {
     /// (the nominated pair with the highest priority); [`NominationAcceptance::Latest`] is
     /// libwebrtc's.
     pub nomination_acceptance: NominationAcceptance,
+
+    /// What the controlling agent does when its nomination times out:
+    /// [`FailedNomination::Retry`] (the default) nominates the pair again while the peer is
+    /// heard from; [`FailedNomination::FailChecklist`] is RFC 8445 Section 7.2.5.3.4 to the
+    /// letter.
+    pub failed_nomination: FailedNomination,
 
     /// The controlling agent's consent checks on the selected pair carry USE-CANDIDATE, as
     /// libwebrtc's do. Off by default: RFC 8445 Section 7.1.2 asks for the attribute "in order
