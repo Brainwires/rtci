@@ -84,6 +84,19 @@ struct Attempt {
     transaction: [u8; 12],
     /// The connection, over TCP / TLS.
     stream: Option<StreamId>,
+    /// Over TCP / TLS: this is the new connection opened after one whose transaction failed
+    /// (RFC 8489 section 6.2.2: RST, then a new connection), so a second failure fails it.
+    retried: bool,
+}
+
+/// How an attempt's transaction ended.
+enum Outcome {
+    /// A success response with the reflexive address.
+    Mapped(SocketAddr),
+    /// No response within the transaction's time (Ti over TCP).
+    TimedOut,
+    /// An error response, a response without an address, or another end.
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +125,12 @@ struct Probe {
     mapped: Option<SocketAddr>,
     /// The SRV discovery of a server whose URI gives no port.
     discovery: Option<crate::peer_connection::dns_discovery::Discovery>,
+    /// The ICE generation (local ufrag) the probe gathers for: a new one asks again.
+    ufrag: String,
+    /// Over TCP / TLS, the Binding connection that answered and the server's address: kept
+    /// open while the mapped address may be used (RFC 8489 section 6.2.2), until ICE of its
+    /// transport has completed.
+    kept: Option<(StreamId, SocketAddr)>,
 }
 
 impl Probe {
@@ -180,13 +199,16 @@ impl EngineSrflx {
         })
     }
 
-    /// Probes from `base` on `transport`, one per server; returns what earlier probes from it
-    /// found (a new ICE generation announces them again).
+    /// Probes from `base` on `transport` for the ICE generation `ufrag`, one per server;
+    /// returns what earlier probes of the same generation found. A new generation (an ICE
+    /// restart) asks each server again: the NAT's mapping may have changed with the path that
+    /// made the restart necessary, so a cached address is not announced for it.
     fn add(
         &mut self,
         transport: TransportId,
         base: SocketAddr,
         kind: Base,
+        ufrag: &str,
     ) -> Vec<(SocketAddr, String)> {
         let mut found = vec![];
         if self.mode != ReflexiveGathering::Engine || self.application_bases.contains(&base) {
@@ -198,11 +220,25 @@ impl EngineSrflx {
             if tls && kind == Base::Udp {
                 continue;
             }
-            if let Some(p) = self.probes.iter().find(|p| {
+            if let Some(p) = self.probes.iter_mut().find(|p| {
                 p.transport == transport && p.base == base && p.url.to_string() == url.to_string()
             }) {
-                if let Some(mapped) = p.mapped {
-                    found.push((mapped, p.url_string()));
+                if p.ufrag == ufrag {
+                    if let Some(mapped) = p.mapped {
+                        found.push((mapped, p.url_string()));
+                    }
+                } else {
+                    p.ufrag = ufrag.to_owned();
+                    // One still on its way answers for the new generation; one that is done
+                    // starts over, from the name (RFC 8445 section 9: the new generation's
+                    // candidates are gathered anew).
+                    if p.state == ProbeState::Done {
+                        p.state = ProbeState::Pending;
+                        p.mapped = None;
+                        p.race = None;
+                        p.query = None;
+                        p.discovery = None;
+                    }
                 }
                 continue;
             }
@@ -218,6 +254,8 @@ impl EngineSrflx {
                 query: None,
                 mapped: None,
                 discovery: None,
+                ufrag: ufrag.to_owned(),
+                kept: None,
             });
         }
         found
@@ -232,6 +270,15 @@ impl EngineSrflx {
             p.state = ProbeState::Done;
             p.attempts.clear();
         }
+    }
+
+    /// The Binding connections kept open: probe index, connection.
+    fn kept_streams(&self) -> Vec<(usize, StreamId)> {
+        self.probes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.kept.map(|(id, _)| (i, id)))
+            .collect()
     }
 
     fn probe_of_stream(&self, id: StreamId) -> Option<(usize, usize)> {
@@ -284,6 +331,15 @@ impl RTCPeerConnection {
             && !self.is_closed()
     }
 
+    /// The local ufrag of `transport`'s current ICE generation.
+    fn ice_username_fragment_of(&self, transport: TransportId) -> String {
+        self.ice_transport_of(transport)
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone()
+    }
+
     /// Probes for a UDP host candidate the application just added (`candidate_value`) on the
     /// active transport; a server-reflexive candidate the application adds marks its base as
     /// the application's.
@@ -325,7 +381,8 @@ impl RTCPeerConnection {
             .iter()
             .any(|c| c.addr() == base && !c.network_type().is_tcp());
         if accepted {
-            for (mapped, url) in self.streams.srflx.add(on, base, Base::Udp) {
+            let ufrag = self.ice_username_fragment_of(on);
+            for (mapped, url) in self.streams.srflx.add(on, base, Base::Udp, &ufrag) {
                 self.announce_srflx(on, base, Base::Udp, mapped, &url);
             }
             self.drive_srflx(self.pipeline_context.now);
@@ -342,7 +399,12 @@ impl RTCPeerConnection {
         if !self.srflx_wanted() || tcp_type == TcpType::Active {
             return;
         }
-        for (mapped, url) in self.streams.srflx.add(transport, base, Base::Tcp(tcp_type)) {
+        let ufrag = self.ice_username_fragment_of(transport);
+        for (mapped, url) in self
+            .streams
+            .srflx
+            .add(transport, base, Base::Tcp(tcp_type), &ufrag)
+        {
             self.announce_tcp_srflx(transport, base, tcp_type, mapped, &url);
         }
         self.drive_srflx(self.pipeline_context.now);
@@ -351,6 +413,22 @@ impl RTCPeerConnection {
     /// Starts what is due: names to resolve, races to start, transactions at most one per Ta.
     pub(crate) fn drive_srflx(&mut self, now: Instant) {
         let ids = self.pipeline_context.transports.ids();
+        let gone: Vec<StreamId> = self
+            .streams
+            .srflx
+            .probes
+            .iter()
+            .filter(|p| !ids.contains(&p.transport))
+            .flat_map(|p| {
+                p.attempts
+                    .iter()
+                    .filter_map(|a| a.stream)
+                    .chain(p.kept.map(|(id, _)| id))
+            })
+            .collect();
+        for id in gone {
+            self.streams.table.close(id);
+        }
         self.streams
             .srflx
             .probes
@@ -443,9 +521,38 @@ impl RTCPeerConnection {
     }
 
     fn start_srflx_attempt(&mut self, now: Instant, index: usize, server: SocketAddr) {
+        self.start_srflx_attempt_on(now, index, server, false);
+    }
+
+    /// Starts a Binding transaction to `server`: over UDP from the base; over TCP / TLS on the
+    /// connection kept open from an earlier answer of that server (RFC 8489 section 6.2.2-4:
+    /// several transactions may share one), or on a new connection (`retried`: one that
+    /// replaces a connection whose transaction failed).
+    fn start_srflx_attempt_on(
+        &mut self,
+        now: Instant,
+        index: usize,
+        server: SocketAddr,
+        retried: bool,
+    ) {
         let (base, kind, tls, host) = {
             let p = &self.streams.srflx.probes[index];
             (p.base, p.kind, p.tls, p.url.host.clone())
+        };
+        // The connection an earlier answer left open, when it is to this server and open.
+        let reuse = match self.streams.srflx.probes[index].kept {
+            Some((id, to))
+                if to == server
+                    && self
+                        .streams
+                        .table
+                        .info(id)
+                        .is_some_and(|c| c.state == shared::stream::StreamState::Open) =>
+            {
+                self.streams.srflx.probes[index].kept = None;
+                Some(id)
+            }
+            _ => None,
         };
         let protocol = if kind == Base::Udp {
             TransportProtocol::UDP
@@ -462,6 +569,8 @@ impl RTCPeerConnection {
             })?;
             let stream = if kind == Base::Udp {
                 None
+            } else if let Some(id) = reuse {
+                Some(id)
             } else {
                 let layer: Option<Box<dyn StreamLayer>> = if tls {
                     let config = self.streams.srflx.tls_config.clone().ok_or_else(|| {
@@ -485,6 +594,7 @@ impl RTCPeerConnection {
                 client,
                 transaction,
                 stream,
+                retried,
             })
         })();
         match started {
@@ -507,7 +617,7 @@ impl RTCPeerConnection {
 
     /// Sends what an attempt's client has to send and acts on its events.
     fn pump_srflx_attempt(&mut self, now: Instant, index: usize, attempt: usize) {
-        let mut outcome: Option<Option<SocketAddr>> = None;
+        let mut outcome: Option<Outcome> = None;
         {
             let probe = &mut self.streams.srflx.probes[index];
             let a = &mut probe.attempts[attempt];
@@ -521,27 +631,49 @@ impl RTCPeerConnection {
             }
             while let Some(event) = a.client.poll_event() {
                 outcome = Some(match event {
-                    StunEvent::Message(response) => {
-                        let mapped = mapped_address(&response);
-                        if mapped.is_none() {
+                    StunEvent::Message(response) => match mapped_address(&response) {
+                        Some(mapped) => Outcome::Mapped(mapped),
+                        None => {
                             debug!("{}: Binding error or no mapped address", a.server);
+                            Outcome::Failed
                         }
-                        mapped
+                    },
+                    StunEvent::TransactionTimeOut => {
+                        debug!("{}: Binding transaction timed out", a.server);
+                        Outcome::TimedOut
                     }
                     other => {
                         debug!("{}: Binding transaction ended: {other:?}", a.server);
-                        None
+                        Outcome::Failed
                     }
                 });
             }
         }
         match outcome {
             None => {}
-            Some(Some(mapped)) => self.srflx_won(now, index, attempt, mapped),
-            Some(None) => self.srflx_attempt_failed(now, index, attempt),
+            Some(Outcome::Mapped(mapped)) => self.srflx_won(now, index, attempt, mapped),
+            Some(Outcome::TimedOut) => self.srflx_attempt_timed_out(now, index, attempt),
+            Some(Outcome::Failed) => self.srflx_attempt_failed(now, index, attempt),
         }
     }
 
+    /// RFC 8489 section 6.2.2: a transaction that failed on a connection that does not work
+    /// any more is answered with a RST and a new connection, once; over UDP (and on the new
+    /// connection) the attempt has failed.
+    fn srflx_attempt_timed_out(&mut self, now: Instant, index: usize, attempt: usize) {
+        let a = &self.streams.srflx.probes[index].attempts[attempt];
+        let Some(id) = a.stream.filter(|_| !a.retried) else {
+            return self.srflx_attempt_failed(now, index, attempt);
+        };
+        let server = a.server;
+        self.streams.srflx.probes[index].attempts.remove(attempt);
+        debug!("{server}: no answer on the Binding connection: RST and a new connection");
+        self.streams.table.reset(id);
+        self.start_srflx_attempt_on(now, index, server, true);
+    }
+
+    /// An attempt failed: its connection is closed and the race goes on with the server's
+    /// next address (or its next SRV target).
     fn srflx_attempt_failed(&mut self, now: Instant, index: usize, attempt: usize) {
         let a = self.streams.srflx.probes[index].attempts.remove(attempt);
         if let Some(id) = a.stream {
@@ -565,11 +697,19 @@ impl RTCPeerConnection {
         let losers: Vec<Attempt> = std::mem::take(&mut probe.attempts);
         let (transport, base, kind, url) =
             (probe.transport, probe.base, probe.kind, probe.url_string());
-        for a in losers.iter().chain(std::iter::once(&winner)) {
-            // RFC 8489 section 6.2.2: the client closes the connection once it is done.
-            if let Some(id) = a.stream {
-                self.streams.table.close(id);
-            }
+        // RFC 8489 section 6.2.2: the client keeps the connection open while it may use the
+        // mapped address learned over it (the NAT binding lives as long as the connection),
+        // so the winner's stays open until ICE of its transport has completed
+        // (`close_settled_srflx_connections`); the others are done.
+        let previous = probe.kept.take();
+        probe.kept = winner.stream.map(|id| (id, winner.server));
+        for id in losers
+            .iter()
+            .filter_map(|a| a.stream)
+            .chain(previous.map(|(id, _)| id))
+            .filter(|id| Some(*id) != winner.stream)
+        {
+            self.streams.table.close(id);
         }
         match kind {
             Base::Udp => self.announce_srflx(transport, base, kind, mapped, &url),
@@ -718,11 +858,42 @@ impl RTCPeerConnection {
         self.pump_srflx_attempt(now, index, attempt);
     }
 
-    /// A Binding connection could not be made or ended before its answer.
+    /// A Binding connection could not be made or ended before its answer (the race goes on
+    /// with the server's next address), or a connection kept open after its answer ended.
     pub(crate) fn srflx_connection_ended(&mut self, now: Instant, id: StreamId) {
+        for p in self.streams.srflx.probes.iter_mut() {
+            if p.kept.is_some_and(|(kept, _)| kept == id) {
+                p.kept = None;
+            }
+        }
         if let Some((index, attempt)) = self.streams.srflx.probe_of_stream(id) {
             self.streams.srflx.probes[index].attempts[attempt].stream = None;
             self.srflx_attempt_failed(now, index, attempt);
+        }
+    }
+
+    /// Closes the Binding connections kept open (RFC 8489 section 6.2.2) once they are no
+    /// longer needed: ICE of their transport has completed (a pair is selected: the mapped
+    /// address has been used with the peer or will not be), or the connection is closing.
+    pub(crate) fn close_settled_srflx_connections(&mut self) {
+        let closed = self.is_closed();
+        for (index, id) in self.streams.srflx.kept_streams() {
+            let transport = self.streams.srflx.probes[index].transport;
+            let settled = closed
+                || self
+                    .pipeline_context
+                    .transports
+                    .transport(transport)
+                    .is_none()
+                || self
+                    .ice_transport_of(transport)
+                    .agent
+                    .get_selected_candidate_pair()
+                    .is_some();
+            if settled {
+                self.streams.srflx.probes[index].kept = None;
+                self.streams.table.close(id);
+            }
         }
     }
 
@@ -1097,5 +1268,120 @@ mod tests {
             "{candidate}"
         );
         assert_eq!(url.as_deref(), Some("stuns:stun.rtc.test:5349"));
+    }
+
+    /// RFC 8489 section 6.2.2: the client keeps the connection open until it "has no plans to
+    /// use any resources (such as a mapped address ...) that were learned though STUN requests
+    /// sent over that connection" and, "if using that learned port with a remote peer, has
+    /// established communications with that remote peer". The engine's Binding connection
+    /// stays open after its answer and closes once ICE of its transport has completed.
+    #[test]
+    fn the_binding_connection_stays_open_until_ice_has_completed() {
+        use crate::peer_connection::transport::RTCDtlsRole;
+        use crate::peer_connection::util_test::{Pair, new_pair, signal_pair};
+        let now = Instant::now();
+        let (_, mut answerer) = new_pair().unwrap();
+        let mut offerer = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(vec![RTCIceServer {
+                        urls: vec!["stun:192.0.2.10:3478".to_owned()],
+                        ..Default::default()
+                    }])
+                    .build(),
+            )
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_answering_dtls_role(RTCDtlsRole::Server)
+                    .with_tcp_simultaneous_open(false)
+                    .build(),
+            )
+            .build(now)
+            .unwrap();
+        offerer.create_data_channel("kept", None).unwrap();
+        offerer
+            .add_local_candidate(RTCIceCandidateInit {
+                candidate: format!(
+                    "candidate:1 1 udp 2130706431 127.0.0.1 {} typ host",
+                    crate::peer_connection::util_test::OFFERER_ADDR
+                        .parse::<SocketAddr>()
+                        .unwrap()
+                        .port()
+                ),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut commands = vec![];
+        let drain = |pc: &mut RTCPeerConnection, commands: &mut Vec<StreamCommand>| {
+            while let Some(c) = pc.poll_stream_command() {
+                commands.push(c);
+            }
+        };
+        drain(&mut offerer, &mut commands);
+        let listener = commands
+            .iter()
+            .find_map(|c| match c {
+                StreamCommand::Listen { listener, .. } => Some(*listener),
+                _ => None,
+            })
+            .unwrap();
+        let bound: SocketAddr = "127.0.0.1:7000".parse().unwrap();
+        offerer
+            .handle_stream_event(
+                now,
+                StreamEvent::Listening {
+                    listener,
+                    local: bound,
+                },
+            )
+            .unwrap();
+        // The TCP transaction waits one Ta behind the UDP one.
+        offerer.handle_timeout(now + TA).unwrap();
+        drain(&mut offerer, &mut commands);
+        let server: SocketAddr = "192.0.2.10:3478".parse().unwrap();
+        let id = commands
+            .iter()
+            .find_map(|c| match c {
+                StreamCommand::Connect {
+                    id, local, remote, ..
+                } if *local == bound && *remote == server => Some(*id),
+                _ => None,
+            })
+            .expect("the Binding connection");
+        offerer
+            .handle_stream_event(now + TA, StreamEvent::Connected { id, local: bound })
+            .unwrap();
+        let mut wire = vec![];
+        while let Some(t) = offerer.poll_stream_transmit() {
+            wire.extend(t.data);
+        }
+        let mut request = Message::new();
+        request.unmarshal_binary(&wire).unwrap();
+        let mut response = Message::new();
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(request.transaction_id),
+            Box::new(stun::message::BINDING_SUCCESS),
+            Box::new(XorMappedAddress {
+                ip: "203.0.113.5".parse().unwrap(),
+                port: 62000,
+            }),
+        ];
+        response.build(&setters).unwrap();
+        offerer
+            .handle_stream_read(now + TA, id, &response.raw)
+            .unwrap();
+        drain(&mut offerer, &mut commands);
+        let closed = |commands: &[StreamCommand]| {
+            commands.iter().any(|c| {
+                matches!(c, StreamCommand::Close { id: c } | StreamCommand::Reset { id: c } if *c == id)
+            })
+        };
+        assert!(!closed(&commands), "open after the answer, while ICE runs");
+
+        signal_pair(&mut offerer, &mut answerer).unwrap();
+        let mut pair = Pair::new(offerer, answerer);
+        pair.connect().unwrap();
+        drain(&mut pair.offerer, &mut commands);
+        assert!(closed(&commands), "closed once ICE has completed");
     }
 }

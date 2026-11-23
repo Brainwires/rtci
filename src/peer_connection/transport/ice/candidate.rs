@@ -80,6 +80,10 @@ pub enum RTCIceServerTransportProtocol {
     /// Reached over TLS.
     #[serde(rename = "tls")]
     Tls,
+    /// Reached over DTLS (`turns:...?transport=udp`, RFC 7350). W3C webrtc-pc's
+    /// `RTCIceServerTransportProtocol` names no value for it; this one is libwebrtc's.
+    #[serde(rename = "dtls")]
+    Dtls,
 }
 
 /// ICECandidate represents a ice candidate

@@ -26,7 +26,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::Active,
                 ..Default::default()
             },
-            2128609279,
+            2111832063,
         ),
         (
             Candidate {
@@ -36,7 +36,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::Passive,
                 ..Default::default()
             },
-            2124414975,
+            2107637759,
         ),
         (
             Candidate {
@@ -46,7 +46,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::SimultaneousOpen,
                 ..Default::default()
             },
-            2120220671,
+            2103443455,
         ),
         (
             Candidate {
@@ -64,7 +64,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::SimultaneousOpen,
                 ..Default::default()
             },
-            1860173823,
+            1843396607,
         ),
         (
             Candidate {
@@ -74,7 +74,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::Active,
                 ..Default::default()
             },
-            1855979519,
+            1839202303,
         ),
         (
             Candidate {
@@ -84,7 +84,7 @@ fn test_candidate_priority() -> Result<()> {
                 tcp_type: TcpType::Passive,
                 ..Default::default()
             },
-            1851785215,
+            1835007999,
         ),
         (
             Candidate {
@@ -695,7 +695,8 @@ fn test_peer_reflexive_priority_keeps_local_preference_and_component() {
     };
     assert_eq!(
         tcp.peer_reflexive_priority(),
-        (110 << 24) + (u32::from(tcp.local_preference()) << 8) + 255
+        (109 << 24) + (u32::from(tcp.local_preference()) << 8) + 255,
+        "the TCP peer-reflexive type preference (RFC 6544 section 4.2)"
     );
     // A priority the application chose keeps its low 24 bits.
     let chosen = Candidate {
@@ -708,4 +709,48 @@ fn test_peer_reflexive_priority_keeps_local_preference_and_component() {
         chosen.peer_reflexive_priority(),
         (110 << 24) + (1234 << 8) + 255
     );
+}
+
+/// RFC 6544 section 4.2: with UDP and TCP candidates for one stream, the other transport's type
+/// preferences are lowered by one ("For RTP-based media streams, it is RECOMMENDED that UDP
+/// candidates are preferred over TCP candidates"; the candidate type still counts first): a
+/// TCP candidate has the type preference of its type less one, a TCP host candidate stays above
+/// a UDP server-reflexive one, and relayed candidates stay last.
+#[test]
+fn tcp_candidates_take_the_type_preference_less_one() {
+    let candidate =
+        |candidate_type: CandidateType, network_type: NetworkType, tcp_type: TcpType| Candidate {
+            candidate_type,
+            component: COMPONENT_RTP,
+            network_type,
+            tcp_type,
+            ..Default::default()
+        };
+    for (t, udp) in [
+        (CandidateType::Host, 126),
+        (CandidateType::PeerReflexive, 110),
+        (CandidateType::ServerReflexive, 100),
+    ] {
+        let tcp = candidate(t, NetworkType::Tcp4, TcpType::Active);
+        assert_eq!(tcp.priority() >> 24, udp - 1, "{t:?} over TCP");
+        assert_eq!(
+            candidate(t, NetworkType::Udp4, TcpType::Unspecified).priority() >> 24,
+            udp
+        );
+    }
+    let tcp_host = candidate(CandidateType::Host, NetworkType::Tcp4, TcpType::Passive);
+    let udp_srflx = candidate(
+        CandidateType::ServerReflexive,
+        NetworkType::Udp4,
+        TcpType::Unspecified,
+    );
+    assert!(tcp_host.priority() > udp_srflx.priority());
+    let tcp_relay = candidate(CandidateType::Relay, NetworkType::Tcp4, TcpType::Passive);
+    let udp_relay = candidate(
+        CandidateType::Relay,
+        NetworkType::Udp4,
+        TcpType::Unspecified,
+    );
+    assert!(udp_relay.priority() > tcp_relay.priority());
+    assert!(tcp_relay.priority() < udp_srflx.priority());
 }

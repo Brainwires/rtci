@@ -274,11 +274,13 @@ impl RTCPeerConnection {
             streams_settings.reflexive,
             turn_tls.client_config().ok().flatten(),
         );
-        let engine_turn = super::turn_streams::EngineTurn::new(
+        let mut engine_turn = super::turn_streams::EngineTurn::new(
             &agent_config.urls,
             streams_settings.turn,
             turn_tls,
         );
+        engine_turn.tcp_relay = streams_settings.turn_tcp_relay;
+        engine_turn.relay_gathering = streams_settings.relay;
 
         // One random nonce per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
@@ -4671,13 +4673,17 @@ fn rejects_every_media_section(desc: &RTCSessionDescription) -> bool {
     })
 }
 
-/// The transport a TURN URL (RFC 7065) says its server is reached over: TLS for `turns:`, else
-/// the `transport` parameter, UDP when there is none. `Unspecified` for anything that is not a
-/// TURN URL.
+/// The transport a TURN URL (RFC 7065) says its server is reached over: for `turns:` TLS, or
+/// DTLS with `transport=udp` (RFC 7350 section 4.1); else the `transport` parameter, UDP when
+/// there is none. `Unspecified` for anything that is not a TURN URL.
 pub(super) fn relay_protocol_of_turn_url(url: &str) -> RTCIceServerTransportProtocol {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("turns:") {
-        return RTCIceServerTransportProtocol::Tls;
+        return if lower.ends_with("?transport=udp") {
+            RTCIceServerTransportProtocol::Dtls
+        } else {
+            RTCIceServerTransportProtocol::Tls
+        };
     }
     if !lower.starts_with("turn:") {
         return RTCIceServerTransportProtocol::Unspecified;

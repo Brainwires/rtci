@@ -150,6 +150,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interceptor**: `InterGroupDelay` and `DelayTrend` (GCC) have a new public field, `arrival`
   (the group's arrival time on the receiver's clock, for `ThresholdTimeBase::Arrival`): a
   struct literal outside the crate must name it.
+- **ICE-TCP type preferences** (branch `conf/tcp-18-rows`, RFC 6544 section 4.2): a TCP
+  candidate's priority now uses its type's preference less one (host 125, peer-reflexive 109,
+  server-reflexive 99, relayed 0), as RFC 6544 recommends when UDP is preferred for RTP: a UDP
+  candidate outranks the TCP candidate of its type. `Candidate::type_preference` (rtc-ice,
+  new); `Candidate::priority` and `peer_reflexive_priority` change for TCP candidates.
+- **NAT-assisted candidates in the reference driver** (`conf/tcp-18-rows`, RFC 6544 section
+  5.3): `rtc_stream_driver::nat_mapping` (opt-in, no new dependency): `map_port` asks the
+  gateway with PCP (RFC 6887 MAP) and falls back to NAT-PMP (RFC 6886); `candidate_line`
+  writes the mapping as a server-reflexive candidate with type preference 105.
+
+- **TURN over plain UDP run by the engine** (branch `conf/tcp-17-udp-turn`; RFC 8656 sections
+  3.9 and 7, RFC 8445 section 5.1.1.2). A `turn:` server over UDP of the configuration is now
+  allocated on by the engine, per transport, from the transport's first UDP host candidate of
+  the server's family, on the application's socket: the Allocate and everything after it leave
+  through `poll_write`, and `handle_read` takes out the answers to the engine's own
+  transactions and the Data indications and ChannelData of its own allocations (anything else
+  from the server, an application client's answers say, still reaches ICE). The relayed
+  candidate has `relayProtocol` "udp" and the server's URL; the end of gathering waits for it.
+  The server's addresses race as RFC 8656 section 3.9 asks for UDP: an unauthenticated Allocate
+  to each family, the first answered kept, a later 401 dropped, an allocation a later answer
+  made deleted with a Refresh of LIFETIME 0. Allocations are deleted at `close()` and when a
+  description removes their transport. New `rtc::peer_connection::turn_streams` (now public)
+  with `RelayGathering { Engine, Application }`, `SettingEngineBuilder::with_relay_gathering`,
+  and a new public field `StreamSettings::relay` (struct literals add it). An application that
+  runs its own UDP TURN client either sets `RelayGathering::Application` or adds its relayed
+  candidate with the server's `url` (or none: any server) before the engine has announced one:
+  that server is then left to it. `tests/turn_udp.rs`; env
+  `testenv_turn_streams.rs::the_engine_relays_through_turn_over_udp` and
+  `testenv_turn.rs::an_application_gathering_its_own_relay_gets_no_engine_allocation_beside`.
+
+- **Relayed TCP candidates by the engine** (branch `conf/tcp-13-relayed-tcp`): for each
+  `turn:...?transport=tcp` and `turns:` server the engine now also asks for a TCP allocation
+  (RFC 6062, a second control connection) and announces two more candidates, a passive relayed
+  TCP candidate and an active one on port 9. `StreamSettings` has a new public field
+  `turn_tcp_relay`; `SettingEngineBuilder::with_turn_tcp_relay(false)` restores one UDP
+  allocation per server. Once ICE of a transport has completed, the connection to a TURN
+  server whose relayed candidate is not selected is closed (RFC 6544 section 11.2); it was kept
+  for the life of the connection. `rtc_shared::stream::Framing` has a new variant `Raw`
+  (`Framing` is `#[non_exhaustive]`).
 
 - **jsep**: train fixes for the JSEP stack (`conf/jsep-44-train-fixes`, merged with tcp-10,
   mt-8 and sec-11).
@@ -1878,6 +1917,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
+  engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
+  answer, while the mapped address may be used (the NAT binding lives as long as the
+  connection), and is closed once ICE of its transport has completed (it was closed at the
+  answer). A connection that carries the request but brings no answer within Ti is reset (RST)
+  and one new connection is opened to the same server; a connection that fails or ends before
+  its answer moves on to the server's next address at once. After an ICE restart (mt-8, per
+  transport) the new generation asks each server again, over a kept connection when there is
+  one, instead of announcing the address the previous generation learned.
+
 - **ice**: through the peer connection a local candidate is paired only once it has been
   conveyed to the peer (RFC 8838 section 10): when the application takes its
   `OnIceCandidateEvent` from `poll_event`, or sets a local description that lists it. An
@@ -2686,6 +2735,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `rtp::codec::telephone_event::packed_telephone_event_packets` (`PackedEventPacket`):
     consecutive events in one packet, RFC 4733 section 2.5.1.5 (timestamp of the first event,
     M set, each event's own E bit and duration).
+- **The reference driver documented as the crate a first-time user runs** (branch
+  `conf/tcp-15-driver-crate`): `rtc-stream-driver`'s crate documentation states what is the
+  engine's and what is the driver's, with the command table, the loop, the server socket
+  choices and the `dns-records` feature. New example `stream-driver-loopback` (`cargo run
+  --example stream-driver-loopback`): two peer connections over loopback TCP through the driver,
+  UDP blocked, 50 data-channel messages in order; the test environment's env stage runs it. The
+  README's "Driving the Engine" says which parts are engine, driver and application.
+
+- **TURN resolution rules and RFC 8155 discovery** (branch `conf/tcp-14-resolution-rows`; RFC
+  5928 section 3, RFC 8656 section 7.4, RFC 8155). A refused Allocate on an engine TURN link
+  now fails only that server: a 300 (Try Alternate) is followed to its ALTERNATE-SERVER (up to
+  three redirects), a 486 or 508 holds the server address back for a minute and a 437 for two,
+  also against later resolutions, and the next SRV target is tried; a link whose allocations
+  all failed runs its resolution again from the beginning for the next ICE generation (it
+  stayed failed). New `rtc::peer_connection::turn_discovery` (opt-in): `domain_of_identity`,
+  `urls_for_domain` (port-less `turns:` / `turn:` URLs found by S-NAPTR `RELAY` and SRV),
+  `anycast_urls` (`TURN_ANYCAST_IPV4` 192.0.0.10, `TURN_ANYCAST_IPV6` 2001:1::2, followed through
+  the anycast server's 300) and `MDNS_SERVICES` for a driver's mDNS browser.
+
+- **Relayed TCP candidates and TURN connection upkeep in the engine** (branch
+  `conf/tcp-13-relayed-tcp`; RFC 6544 sections 5.5 and 11.2, RFC 6062). A TCP allocation per
+  TCP / TLS server (REQUESTED-TRANSPORT TCP on a control connection of its own); its relayed
+  address becomes a passive TCP candidate and, on port 9, an active one. A peer reaching the
+  passive candidate is announced by ConnectionAttempt; a check from the active one sends
+  Connect (after CreatePermission); either way the engine opens a data connection to the
+  server (`Framing::Raw`, TLS for `turns:`), binds it with ConnectionBind and then carries the
+  peer's RFC 4571 stream to and from ICE. Permissions are created for the remote TCP
+  candidates' addresses as they are learned (the server refuses a peer without one). Once ICE
+  has completed, TURN connections whose relayed candidate the selected pair does not use are
+  closed and the selected one's kept (11.2); a lost TURN connection or DTLS association whose
+  candidate is in use is reconnected, allocated again and ICE restarted (`restart_ice`).
+  `tests/turn_tcp_relay.rs`; env `testenv_turn_streams.rs::the_engine_connects_over_a_relayed_tcp_candidate`.
+
+- **TURN over DTLS in the engine** (branch `conf/tcp-12-turn-dtls`; RFC 7350, RFC 8656 section
+  3.1). A `turns:...?transport=udp` server of the configuration is reached with a client-role
+  `rtc-dtls` association from the first UDP host candidate (of the server's family) of each
+  transport, on the application's socket: its records leave through `poll_write` and are taken
+  out of `handle_read` before ICE sees them. The server's certificate is checked against the
+  URI's host with the roots or verifier of `with_turn_tls` (as for TLS; nothing is contacted
+  without one); only forward-secret AEAD suites are offered (DTLS 1.2 and 1.3, 1.3 alone with
+  `disable_tls12`). The TURN client runs over it with UDP's retransmissions, allocates a UDP
+  relay and announces the relayed candidate with `relayProtocol` `dtls`
+  (`RTCIceServerTransportProtocol::Dtls`, new; libwebrtc's value: W3C names none). A name
+  without a port is found by S-NAPTR (`turn.dtls`) and SRV (`_turns._udp`), else port 5349.
+  The application needs no stream driver for a server given by address. New
+  `rtc_dtls::config::ConfigBuilder::with_server_cert_verifier` (a rustls verifier for the
+  client's server check). The test environment's coturn now listens for DTLS on 5349/udp;
+  `testenv_turn_streams.rs::the_engine_relays_through_turn_over_dtls`.
+
+
 - **Decoding dependencies** (RFC 5583; RFC 7798 section 7.2.5; branch `conf/jsep-47-depend`).
   `sdp::attribute::{Depend, Dependency, DependencyType}` parse and write `a=depend` (one
   dependency per format; `lay`, `mdc` or another token). `RTCPeerConnection::

@@ -309,6 +309,10 @@ pub enum Framing {
     /// TURN over TCP / TLS (RFC 8656 section 12.5): STUN and ChannelData messages back to
     /// back, each delimited by its own header.
     Turn,
+    /// None: bytes go out as they are given and come back in the pieces the socket reads.
+    /// A TURN-TCP data connection (RFC 6062 section 4.5), whose ConnectionBind exchange and
+    /// then the peer's stream its user delimits itself.
+    Raw,
 }
 
 impl Framing {
@@ -328,7 +332,7 @@ impl Framing {
                 framed.extend_from_slice(message);
                 Ok(framed)
             }
-            Framing::Turn => Ok(message.to_vec()),
+            Framing::Turn | Framing::Raw => Ok(message.to_vec()),
         }
     }
 
@@ -338,6 +342,7 @@ impl Framing {
             Framing::Rfc4571 => FRAMING_HEADER_LEN + MAX_FRAMED_PACKET_SIZE,
             // A STUN header (20) or a padded ChannelData message (4 + 65535 + 1).
             Framing::Turn => 20 + MAX_FRAMED_PACKET_SIZE,
+            Framing::Raw => MAX_FRAMED_PACKET_SIZE,
         }
     }
 }
@@ -385,6 +390,11 @@ impl StreamDecoder {
                         out.push(message);
                     }
                 }
+                Framing::Raw => {
+                    if !chunk.is_empty() {
+                        out.push(chunk.to_vec());
+                    }
+                }
             }
         }
         Ok(out)
@@ -395,6 +405,7 @@ impl StreamDecoder {
         match self.framing {
             Framing::Rfc4571 => self.rfc4571.buffered_len(),
             Framing::Turn => self.turn.buffered_len(),
+            Framing::Raw => 0,
         }
     }
 }
