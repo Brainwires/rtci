@@ -375,6 +375,25 @@ impl<'a> SctpHandler<'a> {
                     // Its data waits for the event (see `unannounced`).
                     unannounced.insert(ch);
                 }
+                // RFC 9260 section 5.2.4 action A: the peer lost its state and set the
+                // association up again. The old association's streams are gone with what was
+                // remembered about them, its channels close, and the new association is
+                // announced as one that just came up, its data held back until it is.
+                Event::Restarted => {
+                    debug!("association_handle {} was restarted by the peer", ch.0);
+                    pending_readable.retain(|(handle, _)| *handle != ch);
+                    peer_opened.retain(|(handle, _)| *handle != ch);
+                    ordered_until_reply.retain(|(handle, _), _| *handle != ch);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPRestarted(ch.0),
+                    });
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
+                    });
+                    unannounced.insert(ch);
+                }
                 Event::AssociationLost { reason, id } => {
                     debug!("association_handle {} is closed due to {}", ch.0, reason);
                     // The stream is gone, and with it what was remembered about it.
@@ -996,7 +1015,13 @@ impl<'a>
                     )?;
 
                     while let Some(event) = conn.poll_endpoint_event() {
-                        endpoint_events.push((*ch, event));
+                        // Only a drained association goes; any other event (new tags
+                        // after a restart, RFC 9260 5.2.4) is the endpoint's alone.
+                        if event.is_drained() {
+                            endpoint_events.push((*ch, event));
+                        } else {
+                            sctp_endpoint.handle_event(*ch, event);
+                        }
                     }
                     // Transmit flush is deferred to poll_write (batch-drain) so a
                     // burst of inbound DATA coalesces into one SACK.
@@ -1452,7 +1477,12 @@ impl<'a>
             }
 
             while let Some(event) = conn.poll_endpoint_event() {
-                endpoint_events.push((*ch, event));
+                // As in `handle_read`: only a drained association is removed.
+                if event.is_drained() {
+                    endpoint_events.push((*ch, event));
+                } else {
+                    sctp_endpoint.handle_event(*ch, event);
+                }
             }
             // Transmit flush is deferred to poll_write (batch-drain).
         }

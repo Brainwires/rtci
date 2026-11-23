@@ -700,6 +700,15 @@ pub(crate) enum RTCEventInternal {
     /// Parameter: Association handle
     SCTPAssociationFailed(usize /*AssociationHandle*/),
 
+    /// The peer restarted the SCTP association (RFC 9260 section 5.2.4 action A): the
+    /// association is a new one, with no streams. Every data channel that ran over the old one
+    /// is closed with an error (W3C webrtc 6.2: its underlying data transport is gone); an
+    /// `SCTPHandshakeComplete` for the new association follows, which dials the channels that
+    /// were waiting for one and opens the negotiated ones.
+    ///
+    /// Parameter: Association handle
+    SCTPRestarted(usize /*AssociationHandle*/),
+
     /// SCTP released outgoing buffered bytes (acknowledged or abandoned) for a
     /// stream, used to decrement the per-channel send back-pressure counter.
     ///
