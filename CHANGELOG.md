@@ -1338,6 +1338,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both sides (RFC 5746 sections 3.4 and 3.6); it was skipped with a warning. The server recognises
   `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`.
 
+### Testing (sec-10)
+
+- **sctp** interop: `sctp_rfc_defaults_interop::an_ordered_lifetime_channel_goes_on_after_messages_expire_unsent`
+  checks RFC 3758 4.1 TR3 numbering at transmission against the `webrtc` 0.17 SCTP: messages
+  of an ordered lifetime channel that expire unsent take no stream sequence number, and the
+  messages written after them are delivered in order. The browser matrix logs each cell's
+  negotiated `tlsVersion`, `dtlsCipher` and `srtpCipher` and accepts AES-256-GCM suites.
+
 ### Behaviour changes
 
 - **peer_connection**: the default DTLS-SRTP profiles put `SRTP_AEAD_AES_256_GCM` first, ahead
