@@ -32,10 +32,19 @@ jobs:
     # The name master's branch rules require (it carried the matrix's OS suffix before).
     name: Test (default backend) (ubuntu-latest)
     runs-on: ubuntu-latest
+    # No incremental cache and no debug info (panics still print file:line): the test build of
+    # the whole workspace filled the self-hosted Windows runner's disk (56 GB build directory).
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run tests
         run: cargo test --verbose
+      - name: Disk left after the build
+        if: always()
+        run: df -h
 
   # macOS and Windows: the whole workspace's tests with default features, on our runners first
   # (GitHub's when ours are busy).
@@ -76,6 +85,12 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository) &&
       !cancelled()
     timeout-minutes: 90
+    # No incremental cache and no debug info (panics still print file:line): the test build of
+    # the whole workspace filled the self-hosted Windows runner's disk (56 GB build directory).
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy: &platform-strategy
       fail-fast: false
       matrix:
@@ -107,6 +122,13 @@ jobs:
         run: cargo test --workspace --no-fail-fast --verbose
       - name: Doctests
         run: cargo test --workspace --doc --verbose
+      - name: Disk left after the build (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: Get-PSDrive C
+      - name: Disk left after the build
+        if: always() && runner.os != 'Windows'
+        run: df -h
 
   # A pull request from a fork: the same tests on GitHub's runners only.
   test_platforms_fork:
@@ -116,6 +138,12 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository
     timeout-minutes: 90
+    # No incremental cache and no debug info (panics still print file:line): the test build of
+    # the whole workspace filled the self-hosted Windows runner's disk (56 GB build directory).
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy: *platform-strategy
     steps: *platform-steps
 
@@ -176,6 +204,12 @@ jobs:
   rtc_crypto_provider_matrix:
     name: rtc-crypto (${{ matrix.name }})
     runs-on: ubuntu-latest
+    # No incremental cache and no debug info (panics still print file:line): the test build of
+    # the whole workspace filled the self-hosted Windows runner's disk (56 GB build directory).
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -196,10 +230,19 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test provider configuration
         run: cargo test --package rtc-crypto ${{ matrix.args }} --verbose
+      - name: Disk left after the build
+        if: always()
+        run: df -h
 
   rtc_crypto_custom_provider:
     name: rtc-crypto (no built-in, custom provider)
     runs-on: ubuntu-latest
+    # No incremental cache and no debug info (panics still print file:line): the test build of
+    # the whole workspace filled the self-hosted Windows runner's disk (56 GB build directory).
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
@@ -210,6 +253,9 @@ jobs:
         run: cargo test --package rtc-crypto --no-default-features --features test-support --test custom_provider --verbose
       - name: Verify publishable package
         run: cargo package --package rtc-crypto --no-default-features
+      - name: Disk left after the build
+        if: always()
+        run: df -h
 
   workspace_provider_matrix:
     name: Workspace (${{ matrix.name }})

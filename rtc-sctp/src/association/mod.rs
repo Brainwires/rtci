@@ -317,6 +317,10 @@ pub struct Association {
     side: Side,
     state: AssociationState,
     handshake_completed: bool,
+    /// This side entered ESTABLISHED on the peer's COOKIE ECHO and nothing from the peer has
+    /// shown since that its COOKIE ACK arrived: the peer may still be in COOKIE-ECHOED,
+    /// discarding DATA (RFC 9260 5.1).
+    peer_awaits_cookie_ack: bool,
     max_message_size: u32,
     /// The largest message accepted from the peer: what this side advertised (RFC 8841 6.1).
     max_receive_message_size: u32,
@@ -593,6 +597,7 @@ impl Default for Association {
             side: Side::default(),
             state: AssociationState::default(),
             handshake_completed: false,
+            peer_awaits_cookie_ack: false,
             max_message_size: 0,
             max_receive_message_size: 0,
             zero_window_overcommit: false,
@@ -778,6 +783,7 @@ impl Association {
         let mut this = Association {
             side,
             handshake_completed: false,
+            peer_awaits_cookie_ack: false,
             max_receive_buffer_size: config.max_receive_buffer_size(),
             max_message_size: config.max_message_size(),
             max_receive_message_size: config.max_receive_message_size(),
@@ -1870,6 +1876,11 @@ impl Association {
             return Ok(false);
         }
         let chunk_any = chunk.as_any();
+        // Anything but the handshake's own chunks comes from a peer past COOKIE-ECHOED
+        // (RFC 9260 5.1 C: it sends nothing else until the COOKIE ACK arrives).
+        if !chunk_any.is::<ChunkInit>() && !chunk_any.is::<ChunkCookieEcho>() {
+            self.peer_awaits_cookie_ack = false;
+        }
         let packets = if let Some(c) = chunk_any.downcast_ref::<ChunkInit>() {
             if c.is_ack {
                 self.handle_init_ack(p, c, now)?
@@ -2871,6 +2882,36 @@ impl Association {
 
     fn handle_heartbeat(&self, c: &ChunkHeartbeat) -> Result<Vec<Packet>> {
         trace!("[{}] chunkHeartbeat", self.side);
+        // RFC 9260 5.1 C: in COOKIE-WAIT and COOKIE-ECHOED, "until the COOKIE ACK chunk is
+        // returned, the sender MUST NOT send any other packets to the peer" (than the INIT and
+        // the COOKIE ECHO). A HEARTBEAT (or a path MTU probe) from a peer that is ESTABLISHED
+        // while its COOKIE ACK to this side was lost is not answered: the answer told the peer
+        // this side was up when it was not.
+        if matches!(
+            self.state(),
+            AssociationState::CookieWait | AssociationState::CookieEchoed
+        ) {
+            debug!(
+                "[{}] HEARTBEAT before the COOKIE ACK: not answered",
+                self.side
+            );
+            return Ok(vec![]);
+        }
+        // RFC 9260 5.1 C: in COOKIE-WAIT and COOKIE-ECHOED, "until the COOKIE ACK chunk is
+        // returned, the sender MUST NOT send any other packets to the peer" (than the INIT and
+        // the COOKIE ECHO). A HEARTBEAT (or a path MTU probe) from a peer that is ESTABLISHED
+        // while its COOKIE ACK to this side was lost is not answered: the answer also told the
+        // peer this side was up when it was not.
+        if matches!(
+            self.state(),
+            AssociationState::CookieWait | AssociationState::CookieEchoed
+        ) {
+            debug!(
+                "[{}] HEARTBEAT before the COOKIE ACK: not answered",
+                self.side
+            );
+            return Ok(vec![]);
+        }
         if let Some(p) = c.params.first() {
             if let Some(hbi) = p.as_any().downcast_ref::<ParamHeartbeatInfo>() {
                 return Ok(vec![Packet {
@@ -2994,6 +3035,7 @@ impl Association {
                 self.events.push_back(Event::Connected);
                 self.set_state(AssociationState::Established);
                 self.handshake_completed = true;
+                self.peer_awaits_cookie_ack = true;
                 self.start_heartbeat_timer(now);
                 // RFC 9260 5.1.5 7): DATA that came with the COOKIE ECHO is acknowledged
                 // at once.
@@ -6048,6 +6090,34 @@ impl Association {
 
                 self.inflight_queue.mark_all_to_retrasmit();
                 self.t3_retransmit_pending = true;
+                // RFC 9260 5.1 D, 5.2.5: while nothing from the peer has shown that the COOKIE
+                // ACK reached it, the peer may be in COOKIE-ECHOED, discarding this DATA
+                // again. The retransmission goes behind a COOKIE ACK, which a peer in
+                // COOKIE-ECHOED takes first, and one in ESTABLISHED discards. Without it the
+                // DATA waits until the peer's T1-cookie, backed off to 16 s and more, gets a
+                // COOKIE ECHO through and its answer back.
+                if self.peer_awaits_cookie_ack && self.state() == AssociationState::Established {
+                    match self.outstanding_data_after_a_cookie_ack(now) {
+                        Ok(chunks) => {
+                            let mut packet: Vec<Box<dyn Chunk>> = vec![Box::new(ChunkCookieAck {})];
+                            for chunk in chunks {
+                                packet.push(Box::new(chunk));
+                            }
+                            self.control_queue.push_back(Packet {
+                                common_header: CommonHeader {
+                                    verification_tag: self.peer_verification_tag,
+                                    source_port: self.source_port,
+                                    destination_port: self.destination_port,
+                                },
+                                chunks: packet,
+                            });
+                        }
+                        Err(err) => {
+                            self.fail_message_queue(err);
+                            return;
+                        }
+                    }
+                }
                 self.awake_write_loop();
             }
 

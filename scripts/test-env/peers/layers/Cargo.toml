@@ -1,0 +1,29 @@
+# Layer interop tests (scripts/test-env/peers/README.md, "Layers"): rtc-dtls against dimpl,
+# rtc-ice against librice's sans-I/O agent (rice-proto). A workspace of its own, so neither
+# stack reaches the engine's dependency graph; built and run in the test image (entry.sh,
+# stage unit).
+[package]
+name = "layer-interop"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[dev-dependencies]
+dtls = { path = "../../../../rtc-dtls", package = "rtc-dtls" }
+ice = { path = "../../../../rtc-ice", package = "rtc-ice" }
+crypto = { path = "../../../../rtc-crypto", package = "rtc-crypto", features = ["crypto-ring"] }
+shared = { path = "../../../../rtc-shared", package = "rtc-shared" }
+sansio = "1"
+bytes = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# The independent stacks under test, pinned: dimpl with its pure-Rust crypto, rice-proto
+# without its TURN-over-TLS clients (no OpenSSL).
+dimpl = { version = "=0.9.0", default-features = false, features = ["rust-crypto"] }
+rice-proto = { version = "=0.4.3", default-features = false, features = ["std"] }
+stun-proto = "2"

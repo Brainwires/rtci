@@ -86,6 +86,23 @@ pub enum CircuitBreakerState {
     },
 }
 
+/// How the congestion breaker takes s, the packet size of the TCP throughput equation (RFC
+/// 8083 section 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PacketSize {
+    /// The mean size of the RTP packets sent over the reporting intervals the sending rate is
+    /// measured over: s = (bytes sent) / (packets sent) over the last CB_INTERVAL intervals.
+    /// The default: s and the rate it is compared with describe the same packets.
+    #[default]
+    SendingWindow,
+    /// Section 3's definition as written: the mean size of the packets of the last 4 * G
+    /// frames. For speech with silence frames between talkspurts s is then the silence
+    /// frames' size (23 bytes) while the rate is that of the talkspurts, and a call over a
+    /// link with 1 to 5 % loss is ceased.
+    LastFrames,
+}
+
 /// The application's bound on what is still usable media (section 4.4). The RFC leaves the
 /// bound to the application on purpose.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,6 +122,7 @@ struct Config {
     non_reporting_threshold: u32,
     frame_group_size: u32,
     full_tcp_equation: bool,
+    packet_size: PacketSize,
     reduce_before_ceasing: bool,
     group: bool,
     usability: Option<MediaUsability>,
@@ -135,6 +153,7 @@ impl Default for CircuitBreakerBuilder {
                 non_reporting_threshold: DEFAULT_NON_REPORTING_THRESHOLD,
                 frame_group_size: 1,
                 full_tcp_equation: false,
+                packet_size: PacketSize::SendingWindow,
                 reduce_before_ceasing: false,
                 group: false,
                 usability: None,
@@ -182,6 +201,14 @@ impl CircuitBreakerBuilder {
     /// is more sensitive to loss and trips earlier).
     pub fn with_full_tcp_equation(mut self, full: bool) -> Self {
         self.config.full_tcp_equation = full;
+        self
+    }
+
+    /// How s, the packet size of the TCP throughput equation, is taken (section 4.3).
+    /// [`PacketSize::SendingWindow`] by default; [`PacketSize::LastFrames`] is section 3's
+    /// "last 4 * G frames".
+    pub fn with_packet_size(mut self, packet_size: PacketSize) -> Self {
+        self.config.packet_size = packet_size;
         self
     }
 
@@ -340,6 +367,12 @@ struct LossSample {
     fraction_lost: f64,
     duration: Duration,
     bytes_sent: u64,
+    packets_sent: u64,
+    /// What the report's cumulative number lost and extended highest sequence number moved
+    /// by since the previous report (RFC 3550 6.4.1): the interval's net loss, in which a
+    /// packet that was only reordered counts in neither interval.
+    net_lost: i64,
+    net_expected: i64,
 }
 
 /// One frame's worth of packets, for the average packet size.
@@ -366,6 +399,9 @@ struct Flow {
     receiver_interval: Option<Duration>,
     /// The extended highest sequence number the receiver last reported.
     highest_sequence: Option<u32>,
+    /// The previous report's cumulative number lost and extended highest sequence number,
+    /// as reported (for the net loss of the next interval).
+    previous_report: Option<(i32, u32)>,
     /// Consecutive reports that showed no progress while media was being sent.
     stalled_reports: u32,
     media_timeout: u32,
@@ -392,6 +428,7 @@ impl Flow {
             last_report_at: None,
             receiver_interval: None,
             highest_sequence: None,
+            previous_report: None,
             stalled_reports: 0,
             media_timeout: 0,
             losses: VecDeque::new(),
@@ -497,6 +534,49 @@ fn cb_interval(g: u32, tf: Duration, tr: Duration, tdr: Duration, td: Duration) 
     ((3.0 * reaction.min(cap)) / (3.0 * tdr) - 1e-9)
         .ceil()
         .max(1.0) as u32
+}
+
+/// s over the reporting intervals the sending rate is measured over: the bytes sent in them
+/// divided by the packets sent in them, `None` when none were sent.
+fn window_packet_size(samples: &VecDeque<LossSample>) -> Option<f64> {
+    let (bytes, packets) = samples
+        .iter()
+        .fold((0u64, 0u64), |(bytes, packets), sample| {
+            (bytes + sample.bytes_sent, packets + sample.packets_sent)
+        });
+    (packets > 0).then(|| bytes as f64 / packets as f64)
+}
+
+/// The share of the packets expected over `samples` that the cumulative count says were lost
+/// (RFC 3550 6.4.1: expected less received, late packets counted as received), `None` when
+/// the window expected none.
+///
+/// The fraction lost of each report cannot be negative (RFC 3550 A.3), so a packet that is
+/// only reordered across a report's boundary counts as lost in the interval that should have
+/// had it and is not given back in the next: on a path that reorders, the average of the
+/// fractions shows loss that never happened. RFC 8083 section 4.3 approximates the loss event
+/// rate by that average, a figure meant to err on the side of more loss; it cannot be more
+/// than the share actually lost, so the breaker takes the smaller of the two.
+///
+/// The newest report's own count is taken only where it gives packets back: a packet missing
+/// at that report may still be on its way (overtaken a moment before the report went), and
+/// the next report says whether it was lost. A packet really lost counts from then on, one
+/// reporting interval later.
+fn net_loss(samples: &VecDeque<LossSample>) -> Option<f64> {
+    let newest = samples.len().saturating_sub(1);
+    let (lost, expected) =
+        samples
+            .iter()
+            .enumerate()
+            .fold((0i64, 0i64), |(lost, expected), (index, sample)| {
+                let net_lost = if index == newest {
+                    sample.net_lost.min(0)
+                } else {
+                    sample.net_lost
+                };
+                (lost + net_lost, expected + sample.net_expected)
+            });
+    (expected > 0).then(|| lost.max(0) as f64 / expected as f64)
 }
 
 /// The throughput, in bytes per second, a TCP connection would achieve with packets of `s`
@@ -617,6 +697,25 @@ impl CircuitBreakerInterceptor {
         let tdr = flow.receiver_interval.unwrap_or(config.rtcp_interval);
         let sent_packets = std::mem::take(&mut flow.packets_since_report);
         let sent_bytes = std::mem::take(&mut flow.bytes_since_report);
+        log::debug!(
+            "circuit breaker: report on {:#x}: fraction lost {}/256, cumulative lost {}, \
+             extended highest {}, jitter {}, LSR {:#x}, DLSR {}; Tr {:?} (shared {:?}), Tdr {:?}, \
+             Tf {:?}, sent since last {} packets / {} bytes, report {}",
+            report.ssrc,
+            report.fraction_lost,
+            report.total_lost,
+            report.last_sequence_number,
+            report.jitter,
+            report.last_sender_report,
+            report.delay,
+            flow.round_trip_time,
+            lock(&self.shared).round_trip_time,
+            tdr,
+            tf,
+            sent_packets,
+            sent_bytes,
+            flow.reports_received,
+        );
 
         // --- Media timeout (section 4.2) ---
         let timeout = media_timeout(config.non_reporting_threshold, tf, tr, tdr);
@@ -640,10 +739,29 @@ impl CircuitBreakerInterceptor {
             // ever extends.
             flow.media_timeout = flow.media_timeout.max(timeout);
             flow.stalled_reports += 1;
+            log::debug!(
+                "circuit breaker: {:#x}: no progress, {} of MEDIA_TIMEOUT {}",
+                report.ssrc,
+                flow.stalled_reports,
+                flow.media_timeout
+            );
             if flow.stalled_reports >= flow.media_timeout {
                 trip = Some((CircuitBreakerReason::MediaTimeout, tdr * flow.media_timeout));
             }
         }
+
+        // The interval's net loss by the cumulative count (RFC 3550 6.4.1, A.3).
+        let cumulative = report.cumulative_lost();
+        let (net_lost, net_expected) = match flow
+            .previous_report
+            .replace((cumulative, report.last_sequence_number))
+        {
+            Some((previous_lost, previous_highest)) => (
+                i64::from(cumulative) - i64::from(previous_lost),
+                i64::from(report.last_sequence_number.wrapping_sub(previous_highest) as i32),
+            ),
+            None => (0, 0),
+        };
 
         // --- Congestion (section 4.3) ---
         let cb_tdr = config.t_rr_interval.map_or(tdr, |t_rr| t_rr.max(tdr));
@@ -664,6 +782,9 @@ impl CircuitBreakerInterceptor {
                     fraction_lost: f64::from(report.fraction_lost) / 256.0,
                     duration,
                     bytes_sent: sent_bytes,
+                    packets_sent: sent_packets,
+                    net_lost,
+                    net_expected,
                 });
             } else {
                 flow.losses.clear();
@@ -681,16 +802,26 @@ impl CircuitBreakerInterceptor {
             && flow.losses.len() >= interval as usize
             && !window.is_zero()
             && let Some(tr) = flow.round_trip_time
-            && let Some(packet_size) = flow.packet_size()
+            && let Some(packet_size) = match config.packet_size {
+                PacketSize::SendingWindow => window_packet_size(&flow.losses),
+                PacketSize::LastFrames => flow.packet_size(),
+            }
         {
-            let loss = flow
+            let average = flow
                 .losses
                 .iter()
                 .map(|sample| sample.fraction_lost * sample.duration.as_secs_f64())
                 .sum::<f64>()
                 / window.as_secs_f64();
+            let loss = average.min(net_loss(&flow.losses).unwrap_or(average));
             let bytes: u64 = flow.losses.iter().map(|sample| sample.bytes_sent).sum();
             let sending_rate = bytes as f64 / window.as_secs_f64();
+            log::debug!(
+                "circuit breaker: {:#x}: CB_INTERVAL {interval}, loss {loss:.4} over {window:?}, \
+                 sending {sending_rate:.0} B/s, s {packet_size:.0} B, Tr {tr:?}, TCP {:.0} B/s",
+                report.ssrc,
+                tcp_throughput(packet_size, tr, loss, config.full_tcp_equation),
+            );
             if loss > 0.0
                 && sending_rate
                     > 10.0 * tcp_throughput(packet_size, tr, loss, config.full_tcp_equation)
