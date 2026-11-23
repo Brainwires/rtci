@@ -24,3 +24,4 @@ check fails, naming each one, until they are. The same tests are `port` rows in
 
 | Kind | File | Test | Reason | Covered by |
 |---|---|---|---|---|
+| ignored | tests/lossy_link_rtc2rtc.rs | sweep | An investigation tool, not a check: it runs one session per seed of a range set by `LOSSY_LINK_SEEDS` (with `LOSSY_LINK_LOSS`, `LOSSY_LINK_SALT`, `LOSSY_LINK_REPEAT`) and prints each outcome and the fingerprint of its course; thousands of sessions take minutes. | The seeded tests of `tests/lossy_link_rtc2rtc.rs` (5, 10 and 30 % loss, the failing seeds found by sweeps) and `the_same_seed_gives_the_same_run` |

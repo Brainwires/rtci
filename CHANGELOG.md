@@ -3938,6 +3938,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **rtc**: a data-channel-only connection sent RTCP. The RTCP session the peer connection
+  installs joined at the first DTLS handshake whatever was negotiated, and with no media SSRC
+  reported from one of its own: each peer sent a 56-byte SRTCP compound packet (an empty
+  receiver report and an SDES CNAME, AEAD_AES_256_GCM) about every 0.4 s, for the life of the
+  connection. Nothing left in the clear (SRTCP keeps the header and the sender SSRC readable
+  as RFC 3711 has it; without `use_srtp` on the association there were no keys and the SRTP
+  handler refused every packet), but there is no RTP session without an RTP m= section (RFC
+  3550 section 6, RFC 8834 section 4.1), and the reports gave away a random per-connection SSRC
+  and the connection's timing. After the last media section was removed the session also went
+  on reporting, from a new SSRC, for good. Each transport's RTCP session now joins when the
+  transport carries a negotiated RTP section (not rejected, not stopped, any direction) and its
+  DTLS association has SRTP keys, and leaves with one BYE when its last section goes; a media
+  section added again joins it afresh. `RtcpSessionBuilder::with_joins_on_start(true)` (what
+  `configure_rtcp_reports_with` builds) makes a session join on `RtcpSessionControl::Start`
+  only; `Leave` then `Start` joins again. The RTCP of each transport's session goes down that
+  transport: a receive-only session's empty reports went down the data transport. RTCP for a
+  transport without an RTP session is dropped before SRTP. Tests:
+  `tests/rtcp_session_scope_rtc2rtc.rs` (`a_data_channel_only_connection_sends_no_rtcp`,
+  `media_added_later_starts_rtcp_and_every_rtcp_packet_is_protected`,
+  `removing_all_media_ends_rtcp_with_one_goodbye_and_adding_media_starts_it_again`; all three
+  fail before the change), `multi_transport_rtc2rtc.rs::rtcp_runs_on_each_media_transport_and_never_on_the_data_transport`,
+  `rtc-interceptor/tests/rtcp_session_joins_on_start.rs`,
+  `interceptor_session_test.rs::the_handshake_alone_starts_no_rtcp_session`. Every seeded
+  lossy-link run takes another course now (no RTCP on its data-only connection).
+
+- **sctp**: a DATA chunk lost during Fast Recovery was not retransmitted on gap reports. The
+  HTNA rule (RFC 9260 section 7.2.4: "for each incoming SACK chunk, miss indications are
+  incremented only for missing TSNs prior to the HTNA") was applied only outside Fast
+  Recovery; in Fast Recovery only a SACK that advanced the Cumulative TSN Ack Point counted
+  any, so a chunk lost inside the recovery window after it began waited for T3-rtx: one packet
+  in flight at an RTO doubling to 60 s. At 10 % loss a few lost SACKs after that held a
+  reliable channel's messages back for more than 90 s (124 of 300 delivered; the shape of the
+  train 8 CI failure, 205 of 300). Every SACK now counts below its HTNA; a chunk that reaches
+  three reports during a Fast Recovery that began earlier is retransmitted as soon as cwnd
+  allows and is not fast retransmitted again (steps 5 and 6). The test that asserted the old
+  rule, `reliable_loss_in_fast_recovery_keeps_htna_miss_indications`, is now
+  `reliable_loss_in_fast_recovery_is_retransmitted_by_gap_reports`, and
+  `fast_recovery_retransmits_only_the_reported_loss` counts its three reports instead of
+  setting them by hand; also
+  `tests/lossy_link_rtc2rtc.rs::a_loss_during_fast_recovery_is_retransmitted_on_gap_reports`.
+- **ice**: over a lossy link the data channel could take more than 30 seconds to open because
+  the controlling agent dropped the peer's DTLS handshake while the responses to its
+  nomination were lost. The controlled agent selects the pair when the first USE-CANDIDATE
+  request reaches it and its DTLS client starts at once; the controlling agent, with no pair
+  selected until a response came, had no media path, so it discarded every non-STUN datagram
+  and could send none. At 10 % loss, two lost responses (3.5 s) cost the client four
+  ClientHellos and backed its retransmission timer off to 6.4 s, and two ordinary losses after
+  that took the handshake past 30 s (seeds 760, 1629 and 1963 with aws-lc-rs, 992 with ring,
+  of 2000). `Agent::media_path` is now the nominated pair's path while the controlling agent's
+  nomination is in flight: the pair is valid (RFC 8445 section 12.1: data MAY be sent on any
+  valid pair before selection) and data from it is received (section 12.2). Tests:
+  `agent_rfc8445_test.rs::test_data_flows_on_the_pair_being_nominated_until_its_response_comes`,
+  `tests/lossy_link_rtc2rtc.rs::the_handshake_is_answered_while_the_nominations_responses_are_lost`.
+- **rtc**: a seed did not fix a run. The RTCP session the peer connection installs by default
+  drew its report intervals (RFC 3550 section 6.3.1), feedback dither, SSRC and CNAME from
+  `rand` instead of the crypto provider's `random()`; its reports go out from the moment DTLS
+  is up, also on a data-channel-only session, and moved every later datagram, so the seeded
+  lossy-link tests ran a different course each time (the 10 % test failed once in CI on seed
+  2, 205 of 300 messages delivered, and passed on the same code before and after). It now
+  draws from the provider set with `SettingEngineBuilder::with_crypto_provider`. Test:
+  `tests/lossy_link_rtc2rtc.rs::the_same_seed_gives_the_same_run` (same seed twice, same
+  course, both providers). The lossy-link harness takes `LOSSY_LINK_SEEDS` and has an
+  ignored `sweep` (`LOSSY_LINK_LOSS`, `LOSSY_LINK_SALT`, `LOSSY_LINK_REPEAT`).
+
 - **interceptor**: inbound RTCP that no interceptor annotated reached the application as an
   empty carrier once the chain held a `PerRtpSession` wrapper. The wrapper tags what each
   session's instance hands on with its `RtpSession`, and the terminus (`NoopInterceptor`)

@@ -92,6 +92,16 @@ pub(crate) struct InterceptorHandlerContext {
     /// The congestion controller's last target, in bits per second: what
     /// `allocate_target_bitrate` divides again when the encodings change.
     pub(crate) target_bitrate: Option<f64>,
+    /// The RTP sessions (transport ids) whose RTCP session has been told to join and not to
+    /// leave since (`RTCPeerConnection::sync_rtcp_sessions`).
+    pub(crate) rtcp_joined: std::collections::BTreeSet<usize>,
+    /// The RTP sessions told to leave since the writes were last flushed: their BYE still
+    /// goes out.
+    pub(crate) rtcp_leaving: std::collections::BTreeSet<usize>,
+    /// The transports whose DTLS association has given SRTP keys: RTCP can be protected on
+    /// them (RFC 5764 section 4.1). Kept while the transport lives, so that a new association
+    /// on it (re-keying) does not end the RTP session.
+    pub(crate) srtp_keyed: HashSet<usize>,
 }
 
 fn receiver_declares_ssrc(transceiver: &RTCRtpTransceiverInternal, ssrc: SSRC) -> bool {
@@ -122,6 +132,9 @@ impl Default for InterceptorHandlerContext {
             wall_clock: None,
             arrival_mids: None,
             target_bitrate: None,
+            rtcp_joined: Default::default(),
+            rtcp_leaving: Default::default(),
+            srtp_keyed: Default::default(),
         }
     }
 }
@@ -538,6 +551,44 @@ impl<'a> InterceptorHandler<'a> {
             }
             _ => {}
         }
+    }
+
+    /// The RTCP session of RTP session `session` (a transport) joins, under the connection's
+    /// CNAME and with what SRTCP adds to each of its packets (RFC 3711 section 3.4): the
+    /// transport has SRTP keys and carries a negotiated RTP m= section (RFC 3550 section 6;
+    /// RFC 8834 section 4.1). Before this the session sends nothing.
+    pub(crate) fn join_rtcp_session(
+        &mut self,
+        now: Instant,
+        session: usize,
+        srtcp_overhead: usize,
+    ) -> Result<()> {
+        for control in [
+            RtcpSessionControl::Cname(self.ctx.cname.clone()),
+            RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
+            RtcpSessionControl::Start,
+        ] {
+            let mut packet = control.into_packet(now);
+            packet
+                .message
+                .add(interceptor::RtpSession(session).attribute());
+            self.interceptor.handle_write(packet)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ctx_mut(&mut self) -> &mut InterceptorHandlerContext {
+        self.ctx
+    }
+
+    /// The RTP session `session` has no negotiated RTP m= section any more: its RTCP session
+    /// says BYE for every SSRC it used (RFC 3550 section 6.6) and is silent from then on.
+    pub(crate) fn leave_rtcp_session(&mut self, now: Instant, session: usize) -> Result<()> {
+        let mut packet = RtcpSessionControl::Leave.into_packet(now);
+        packet
+            .message
+            .add(interceptor::RtpSession(session).attribute());
+        self.interceptor.handle_write(packet)
     }
 
     /// RFC 3550 6.6: the connection is closing, so every local SSRC says BYE. Called before
@@ -1764,10 +1815,22 @@ impl<'a>
                     _ => None,
                 };
 
+                // With several transports, the RTCP an RTP session's instance wrote names the
+                // session: it goes down that session's transport, also when none of its SSRCs
+                // is a section's (a receive-only endpoint's reporting SSRC).
+                let session = self
+                    .rtp_session
+                    .and_then(|_| interceptor::RtpSession::of(&packet.message));
+                let message = match (session, packet.message.packet) {
+                    (Some(session), Packet::Rtcp(packets)) => {
+                        RTPMessage::SessionRtcp(session, packets)
+                    }
+                    (_, packet) => RTPMessage::Packet(packet),
+                };
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: packet.now,
                     transport: packet.transport,
-                    message: RTCMessageInternal::Rtp(RTPMessage::Packet(packet.message.packet)),
+                    message: RTCMessageInternal::Rtp(message),
                 });
                 trace!("interceptor write {:?}", packet.transport.peer_addr);
             }
@@ -1777,27 +1840,12 @@ impl<'a>
     }
 
     fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
-        if let RTCEventInternal::DTLSHandshakeComplete(local_srtp_context, _) = &evt.event {
+        if let RTCEventInternal::DTLSHandshakeComplete(_, _) = &evt.event {
             debug!("interceptor recv dtls handshake complete");
-            let first = !self.ctx.is_dtls_handshake_complete;
             self.ctx.is_dtls_handshake_complete = true;
-            if first {
-                // RFC 3711 section 3.4: what SRTCP adds to each compound packet (E flag and
-                // index, the tag; no MKI is used) is part of the size the RTCP interval rests
-                // on.
-                let srtcp_overhead = srtcp_overhead(local_srtp_context.as_ref());
-                // The RTCP session joins when the transport is up, under the connection's
-                // CNAME: an endpoint that only receives reports from then on, not from its
-                // first inbound packet (RFC 3550 6.2).
-                for control in [
-                    RtcpSessionControl::Cname(self.ctx.cname.clone()),
-                    RtcpSessionControl::SrtcpOverhead(srtcp_overhead),
-                    RtcpSessionControl::Start,
-                ] {
-                    self.interceptor
-                        .handle_write(control.into_packet(evt.now))?;
-                }
-            }
+            // The RTCP session of the transport joins once it also carries a negotiated RTP
+            // m= section (`RTCPeerConnection::sync_rtcp_sessions`), not at the handshake: a
+            // data-channel-only connection has no RTP session and sends no RTCP.
         }
 
         self.ctx.event_outs.push_back(evt);
