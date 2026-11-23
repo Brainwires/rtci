@@ -215,7 +215,10 @@ fn compare(engine: &str, chromium: &str, what: &str) -> Result<BTreeMap<String, 
             if SCENARIO_KEYS.contains(&key.as_str()) || residual_missing(&theirs.kind, key) {
                 continue;
             }
-            if !ours.keys.contains(key) {
+            // An attribute the engine writes at session level instead (RFC 8839 5.6 allows
+            // `a=ice-options` at either) is there for every section.
+            let at_session = engine_sections[0].keys.contains(key);
+            if !ours.keys.contains(key) && !at_session {
                 problems.push(format!("{}: a={key} missing", theirs.kind));
             }
         }
@@ -460,13 +463,23 @@ fn the_chrome_profiles_answer_has_what_chromiums_answer_has() -> Result<()> {
             }
             text
         };
-        let extras = compare(&answer.sdp, &reference, name)?;
-        check_superset(&extras, name)?;
-        // An answer names nothing the offer did not (RFC 3264 6.1, RFC 8285 5).
+        // An answer names nothing the offer did not (RFC 3264 6.1, RFC 8285 5): Chromium's
+        // answer to the engine's offer has extensions this Chromium offer lacks.
         let offered: BTreeSet<String> = sections(&fixture(name)?)
             .into_iter()
             .flat_map(|s| s.extensions)
             .collect();
+        let reference: String = reference
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("a=extmap:")
+                    .and_then(|v| v.split_whitespace().nth(1))
+                    .is_none_or(|uri| offered.contains(uri))
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let extras = compare(&answer.sdp, &reference, name)?;
+        check_superset(&extras, name)?;
         for section in sections(&answer.sdp) {
             for uri in &section.extensions {
                 assert!(offered.contains(uri), "{name}: answered {uri} unoffered");

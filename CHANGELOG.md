@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection**: behaviour profiles (`conf/profile-1-behaviour-profiles`).
+  - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtc::peer_connection::configuration`), applied by
+    `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
+    `DefaultInterceptorOptions::for_profile`; `register_default_interceptors` (and `_with_handles`,
+    `_without_congestion_control`, `configure_congestion_control`) take the options of the media
+    engine's profile, and the RTCP session a peer connection installs follows the setting engine's.
+    `Rfc` is the defaults unchanged. `docs/behaviour-profiles.md` (rendered by
+    `scripts/behaviour-profiles.py`, a Python gate with `--check`) lists 33 governed behaviours with
+    their clause, each profile's value and the source of each Chrome value (7 observed in the recorded
+    Chromium descriptions or the browser matrix, 26 unverified), the settings left alone with their
+    class, and 8 Chrome behaviours the engine cannot express.
+  - Cargo feature `chrome-defaults`: `BehaviourProfile::default()`, and with it every
+    `SettingEngine::default()`, `SettingEngineBuilder::new()`, `MediaEngine::default()` and
+    `DefaultInterceptorOptions::default()`, is `Chrome`. Cargo unifies features: one crate of a build
+    that turns it on changes the defaults of every user of `rtc` in that build.
+    `BehaviourProfile::compiled_default()` reports it. CI: one job checks the workspace and runs the
+    profile's tests with it.
+  - New settings: `SettingEngineBuilder::with_ice_software` (the SOFTWARE attribute of ICE checks,
+    RFC 8489 16.1.2), `without_sctp_rto`; `DefaultInterceptorOptions` fields `rtcp_t_rr_interval`,
+    `rtcp_immediate_congestion_feedback`, `rtcp_report_from_every_ssrc`, `twcc_rereport_received`,
+    `gcc_threshold_time_base`, `gcc_one_decrease_per_round_trip` (the struct is `#[non_exhaustive]`).
+    `SettingEngine::behaviour_profile`, `MediaEngine::behaviour_profile`.
+  - Breaking: `SettingEngine`, `MediaEngine` and `DefaultInterceptorOptions` implement `Default` by
+    hand (the build's default profile) instead of deriving it; `SctpMaxMessageSize` derives `Debug`,
+    `PartialEq` and `Eq`.
+  - Seven Chromium descriptions of the train 9 test environment are fixtures
+    (`tests/fixtures/browser-sdp/chromium--*.sdp`). One of them corrects the doc of
+    `with_unique_transport_credentials`: a Chromium answer without BUNDLE gives each transport
+    credentials of its own, so the `Chrome` profile does too.
+  - The browser matrix has five cells with the Rust peer under `Chrome`
+    (`scripts/test-env/interop/profile.spec.mjs`; `examples/interop-peer` takes `?profile=`).
+
 - **audit**: the open MUST rows, classified (`conf/audit-2-classify`). No engine change.
   - New verdict `setting` (`docs/conformance/audit/RULES.md`): the clause's behaviour is
     implemented and tested, selected by a named setting, and the default differs because a

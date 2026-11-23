@@ -387,6 +387,15 @@ pub struct DefaultInterceptorOptions {
     /// or on every update (draft-ietf-rmcat-gcc-02 section 5.5). See
     /// [`Gcc::with_one_decrease_per_round_trip`](interceptor::Gcc::with_one_decrease_per_round_trip).
     pub gcc_one_decrease_per_round_trip: bool,
+    /// Whether the abs-send-time header extension is offered on audio as well as on video
+    /// ([`configure_abs_send_time`]). `false` by default: it serves the receive-side estimate
+    /// (REMB), which runs on video; Chromium offers it on audio too.
+    pub abs_send_time_on_audio: bool,
+    /// Whether receiver reference times (`a=rtcp-fb:<pt> rrtr`, written as
+    /// `a=rtcp-xr:rcvr-rtt=all`, RFC 3611 section 4.4) are negotiated on audio as well as on
+    /// video ([`configure_receiver_reference_time`]). `false` by default; Chromium offers them
+    /// on audio too.
+    pub receiver_reference_time_on_audio: bool,
 }
 
 impl DefaultInterceptorOptions {
@@ -404,7 +413,32 @@ impl DefaultInterceptorOptions {
             twcc_rereport_received: false,
             gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
             gcc_one_decrease_per_round_trip: true,
+            abs_send_time_on_audio: false,
+            receiver_reference_time_on_audio: false,
         }
+    }
+
+    /// What these options register on the media engine beyond the video defaults.
+    fn register_audio_extras(&self, media_engine: &mut MediaEngine) -> Result<()> {
+        if self.receiver_reference_time_on_audio {
+            media_engine.register_feedback(
+                RTCPFeedback {
+                    typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                    parameter: "".to_owned(),
+                },
+                RtpCodecKind::Audio,
+            );
+        }
+        if self.abs_send_time_on_audio {
+            media_engine.register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: sdp::extmap::ABS_SEND_TIME_URI.to_owned(),
+                },
+                RtpCodecKind::Audio,
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     /// The options a [`BehaviourProfile`] gives (`docs/behaviour-profiles.md`); those it does
@@ -565,6 +599,7 @@ pub fn register_default_interceptors_with_options(
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
+    options.register_audio_extras(media_engine)?;
     let registry = if options.rapid_synchronisation {
         configure_rapid_synchronisation(registry, media_engine)?
     } else {
@@ -617,6 +652,7 @@ pub fn register_default_interceptors_without_congestion_control(
 
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
+    options.register_audio_extras(media_engine)?;
 
     Ok(registry)
 }

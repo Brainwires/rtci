@@ -439,6 +439,40 @@ Each claim above, with its specification section, where it is implemented and th
 [docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
 I-DATA, a TURN server and others).
 
+## Behaviour profiles
+
+The defaults follow the RFCs, MUST and SHOULD alike, except where a named browser or deployed peer cannot
+interoperate with the RFC form. Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
+differently is a setting, and a `BehaviourProfile` sets all of them in one call:
+
+```rust
+use rtc::peer_connection::configuration::BehaviourProfile;
+
+let profile = BehaviourProfile::Chrome; // or Rfc (the defaults), or StrictRfc
+let setting_engine = SettingEngineBuilder::new().with_behaviour_profile(profile).build();
+let mut media_engine = MediaEngine::for_profile(profile);
+media_engine.register_default_codecs()?;
+// Reads the media engine's profile.
+let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+```
+
+- `Rfc`: the engine's defaults, unchanged.
+- `Chrome`: libwebrtc's choice wherever both do a thing and choose differently (a timer, an order, a form on the wire,
+  a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (DTLS 1.3, SCTP
+  interleaving, RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
+- `StrictRfc`: the RFC form even where the default is the interoperable one; for conformance testing, it **does not
+  interoperate with browsers**.
+
+Settings given after `with_behaviour_profile` override it. The cargo feature `chrome-defaults` makes
+`BehaviourProfile::default()`, and with it every `Default` / `new()` of those objects, `Chrome`. **Cargo unifies
+features: one crate of a build that turns it on changes the defaults of every user of `rtc` in that build.** Prefer the
+explicit call; `BehaviourProfile::compiled_default()` says which default a build has.
+
+[docs/behaviour-profiles.md](docs/behaviour-profiles.md) lists every governed behaviour: the setting, the clause, its
+value in each profile and the source of each Chrome value (observed in the recorded Chromium descriptions and the
+browser matrix, or marked unverified), the engine-only capabilities, and what Chrome does that the engine cannot
+express.
+
 ## What's New in 0.21
 
 **A provider-neutral cryptographic API.** Every cryptographic operation in the stack now goes through the new

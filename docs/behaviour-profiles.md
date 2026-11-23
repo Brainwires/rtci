@@ -42,10 +42,10 @@ With the `chrome-defaults` feature of the `rtc` crate, `BehaviourProfile::defaul
 that never asked for it included. Prefer the explicit `with_behaviour_profile` call;
 `BehaviourProfile::compiled_default()` tells which default a build has.
 
-## 1. Defaults that differ: governed by the profile (33)
+## 1. Defaults that differ: governed by the profile (35)
 
-33 governed behaviours: the `Chrome` value differs from `Rfc` in 21, the
-`StrictRfc` value in 13. Chrome values: 7 observed, 26 unverified.
+35 governed behaviours: the `Chrome` value differs from `Rfc` in 23, the
+`StrictRfc` value in 13. Chrome values: 9 observed, 26 unverified.
 
 A value is what `{:?}` of the setting writes; the crate's tests compare each with the
 setting a profile leaves, and the `Rfc` column with the engine's defaults before any
@@ -87,6 +87,8 @@ train 9, round 3: Playwright 1.64.1's Chromium) or a cell of the browser matrix.
 | `rtcp.immediate-congestion-feedback` | `DefaultInterceptorOptions::rtcp_immediate_congestion_feedback` | RFC 4585 3.5.2 | `true` | `true` | `false` | **unverified**: libwebrtc sends transport-wide feedback on its own timer, outside the RTCP report schedule |
 | `rtcp.report-from-every-ssrc` | `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` | RFC 8108 5.1 | `false` | `false` | `true` | **unverified**: libwebrtc reports the remote SSRCs once, from one local SSRC per RTCP packet |
 | `twcc.rereport-received` | `DefaultInterceptorOptions::twcc_rereport_received` | draft-holmer-rmcat-transport-wide-cc-extensions-01 3.1.1 | `false` | `true` | `false` | **unverified**: libwebrtc TransportFeedback: a packet reported received is reported received again when the base sequence number moves back over it |
+| `rtp.abs-send-time-on-audio` | `DefaultInterceptorOptions::abs_send_time_on_audio` | RFC 8285 5 (draft-ietf-rmcat-gcc-02 3) | `false` | `true` | `false` | observed: Chromium's audio offers carry the abs-send-time extension (fixture chromium--reflect-audio-opus--1-offer.sdp) |
+| `rtcp.receiver-reference-time-on-audio` | `DefaultInterceptorOptions::receiver_reference_time_on_audio` | RFC 3611 4.4, 5.1 | `false` | `true` | `false` | observed: Chromium's audio offers carry a=rtcp-xr:rcvr-rtt=all (fixture chromium--reflect-audio-opus--1-offer.sdp) |
 | `gcc.threshold-time-base` | `DefaultInterceptorOptions::gcc_threshold_time_base` | draft-ietf-rmcat-gcc-02 5.4 | `Departure` | `Departure` | `Arrival` | **unverified**: libwebrtc TrendlineEstimator / OveruseDetector step the adaptive threshold by the send-time gaps |
 | `gcc.one-decrease-per-round-trip` | `DefaultInterceptorOptions::gcc_one_decrease_per_round_trip` | draft-ietf-rmcat-gcc-02 5.5 | `true` | `true` | `false` | **unverified**: libwebrtc AimdRateControl::TimeToReduceFurther lowers the estimate at most once per round trip |
 
@@ -207,7 +209,7 @@ reports beyond Chrome's.
 | `SettingEngineBuilder::with_disable_media_engine_copy` | not read |
 | `SettingEngineBuilder::with_receive_mtu` | not read |
 
-## 3. Not expressible (8)
+## 3. Not expressible (10)
 
 What Chrome does that no setting of the engine can express, and what it would take.
 
@@ -220,6 +222,8 @@ What Chrome does that no setting of the engine can express, and what it would ta
 | Payload type numbering and codec order | Chromium's numbering (opus 111, red 63, VP8 96, VP9 98 / 100, AV1 45, H264 102...; fixtures) | a Chrome codec table; the application registers its own codecs with MediaEngine::register_codec. Payload types are negotiated, so this changes no behaviour |
 | Header extensions the engine does not implement | toffset, playout-delay, video-content-type, video-timing, color-space (fixtures) | an implementation of each; offering them without one would announce what the engine does not send |
 | RTCP report interval per media type | regular reports about every 1 s for video and 5 s for audio (unverified) | a per-kind interval in the RTCP session; the Chrome profile sets T_rr to 1 s for every section |
+| Where a=ice-options is written | a=ice-options:trickle in every media section (fixtures) | a placement setting; the engine writes a=ice-options:trickle ice2 once at session level, which RFC 8839 5.6 allows as well |
+| Transports of a balanced initial offer | every section of its own offer on the first transport: one ice-ufrag in all sections, candidates in the first (fixtures) | a bundle layout setting; the engine gives each media type a transport of its own (RFC 9429 4.1.1 balanced), each with credentials of its own under Chrome's per-transport rule |
 | Candidate network-cost / generation attributes | a=candidate lines end with generation 0 network-cost 999 (fixtures) | nothing to negotiate: extension attributes the engine ignores when it reads them |
 
 ## How it is checked

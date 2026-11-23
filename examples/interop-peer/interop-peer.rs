@@ -17,7 +17,11 @@
 //!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
 //!
 //! The WebSocket URL's query `?ssrc_per_clock_rate=0` builds the peer connection with
-//! `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` (one SSRC across clock rates).
+//! `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` (one SSRC across clock rates), and
+//! `?profile=chrome` (or `rfc`, `strict-rfc`) under that behaviour profile
+//! (`docs/behaviour-profiles.md`): `SettingEngineBuilder::with_behaviour_profile` and
+//! `MediaEngine::for_profile`, the settings below applied after it. Without it the peer takes
+//! the build's default profile.
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -48,6 +52,7 @@ use rtc::media::io::h26x_reader::H26xSampleReader;
 use rtc::media::io::ivf_reader::IVFReader;
 use rtc::media::io::ogg_reader::OggReader;
 use rtc::media_stream::{MediaStreamTrack, MediaStreamTrackId};
+use rtc::peer_connection::configuration::BehaviourProfile;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_simulcast_extension_headers, register_default_interceptors,
 };
@@ -115,21 +120,31 @@ async fn main() -> Result<()> {
         let (stream, from) = listener.accept().await?;
         let (ip, dir) = (cli.ice_ip, cli.media_dir.clone());
         tokio::spawn(async move {
-            let mut ssrc_per_clock_rate = true;
+            let mut ssrc_per_clock_rate = None;
+            let mut profile = BehaviourProfile::default();
+            let mut unknown_profile = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
             #[allow(clippy::result_large_err)]
             let options = |request: &Request, response: Response| {
-                ssrc_per_clock_rate = !request
-                    .uri()
-                    .query()
-                    .unwrap_or_default()
-                    .split('&')
-                    .any(|pair| pair == "ssrc_per_clock_rate=0");
+                for pair in request.uri().query().unwrap_or_default().split('&') {
+                    if pair == "ssrc_per_clock_rate=0" {
+                        ssrc_per_clock_rate = Some(false);
+                    } else if let Some(name) = pair.strip_prefix("profile=") {
+                        match BehaviourProfile::from_name(name) {
+                            Some(named) => profile = named,
+                            None => unknown_profile = Some(name.to_owned()),
+                        }
+                    }
+                }
                 Ok::<_, ErrorResponse>(response)
             };
             match tokio_tungstenite::accept_hdr_async(stream, options).await {
                 Ok(ws) => {
-                    if let Err(e) = Session::run(ws, ip, dir, ssrc_per_clock_rate).await {
+                    if let Some(name) = unknown_profile {
+                        eprintln!("session {from}: unknown profile {name:?}");
+                        return;
+                    }
+                    if let Err(e) = Session::run(ws, ip, dir, ssrc_per_clock_rate, profile).await {
                         eprintln!("session {from}: {e:#}");
                     }
                 }
@@ -397,12 +412,13 @@ impl Session {
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         ip: IpAddr,
         media_dir: String,
-        ssrc_per_clock_rate: bool,
+        ssrc_per_clock_rate: Option<bool>,
+        profile: BehaviourProfile,
     ) -> Result<()> {
         let (mut ws_tx, mut ws_rx) = ws.split();
         let sock = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
         let local = sock.local_addr()?;
-        let mut me = MediaEngine::default();
+        let mut me = MediaEngine::for_profile(profile);
         me.register_default_codecs()?;
         configure_simulcast_extension_headers(&mut me)?;
         let registry = register_default_interceptors(Registry::new(), &mut me)?;
@@ -412,13 +428,19 @@ impl Session {
         // holds what it sends to 16 KB (RFC 8831 section 6.6); the scenarios echo 64 KiB and
         // 256 KiB messages to a browser, so this peer sends as browsers do.
         let setting_engine = SettingEngineBuilder::new()
+            .with_behaviour_profile(profile)
             .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
                 SctpMaxMessageSize::MAX_MESSAGE_SIZE,
             ))
             .with_sctp_message_size_limit_without_interleaving(false)
-            .with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
-            .with_ssrc_per_clock_rate(ssrc_per_clock_rate)
-            .build();
+            .with_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+        // The profile's value unless the URL names one (`Rfc`: a new SSRC per clock rate).
+        let setting_engine = match ssrc_per_clock_rate {
+            Some(per_clock_rate) => setting_engine.with_ssrc_per_clock_rate(per_clock_rate),
+            None => setting_engine,
+        }
+        .build();
+        println!("session on {local}: behaviour profile {profile}");
         let pc = RTCPeerConnectionBuilder::new()
             .with_media_engine(me)
             .with_setting_engine(setting_engine)
