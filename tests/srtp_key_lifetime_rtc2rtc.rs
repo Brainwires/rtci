@@ -284,3 +284,180 @@ fn an_exhausted_srtp_key_fails_the_transport_with_its_reason() -> Result<()> {
     );
     Ok(())
 }
+
+/// An Opus track the caller sends with `AUDIO_SSRC`.
+fn audio_track() -> MediaStreamTrack {
+    MediaStreamTrack::new(
+        "stream".to_owned(),
+        "audio".to_owned(),
+        "audio".to_owned(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(AUDIO_SSRC),
+                ..Default::default()
+            },
+            codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                clock_rate: 48000,
+                channels: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+    )
+}
+
+fn exchange(offerer: &mut Peer, answerer: &mut Peer, now: Instant) -> Result<()> {
+    let offer = offerer.pc.create_offer(None)?;
+    offerer.pc.set_local_description(now, offer.clone())?;
+    answerer.pc.set_remote_description(now, offer)?;
+    let answer = answerer.pc.create_answer(None)?;
+    answerer.pc.set_local_description(now, answer.clone())?;
+    offerer.pc.set_remote_description(now, answer)?;
+    Ok(())
+}
+
+/// Whether the peer's DTLS transport is connected (`RTCTransportStats.dtlsState`).
+fn dtls_connected(peer: &mut Peer, now: Instant) -> bool {
+    peer.pc
+        .get_stats(now, rtc::statistics::StatsSelector::None)
+        .transport()
+        .is_some_and(|t| {
+            t.dtls_state == rtc::peer_connection::transport::RTCDtlsTransportState::Connected
+        })
+}
+
+/// How many RTP packets of the caller's track the callee received.
+fn received(callee: &Peer) -> usize {
+    callee
+        .rtp
+        .iter()
+        .filter(|(_, p)| p.header.ssrc == AUDIO_SSRC)
+        .count()
+}
+
+/// Whether a datagram is SRTP (RFC 7983: first byte 128 to 191) and not SRTCP (RFC 5761:
+/// payload types 72 to 76 with the marker bit, i.e. RTCP packet types 200 to 204).
+fn is_srtp(datagram: &[u8]) -> bool {
+    datagram.len() > 1 && (128..=191).contains(&datagram[0]) && !(200..=204).contains(&datagram[1])
+}
+
+/// Re-keying by a new DTLS association (RFC 3711 sections 9.2 and 11.3, RFC 7714 sections
+/// 8.4 and 9.4, RFC 5764 section 4.1.2): with a key lifetime of 40 packets, the caller sends
+/// 30, asks for a new association (`renew_dtls_association`) and negotiates; the new DTLS
+/// handshake exports new SRTP keys, and the caller sends 35 more, past the lifetime the old
+/// key had (65 in all), without the transport failing: the packet count started over with the
+/// new key, whose own 40 are not used up.
+/// A packet protected with the old key, held back on the wire and delivered after the
+/// re-key, is not accepted: the keys changed.
+#[test]
+fn a_new_dtls_association_re_keys_srtp_and_starts_the_key_lifetime_over() -> Result<()> {
+    let start = Instant::now();
+    let lifetime = KeyLifetime {
+        srtp_packets: 40,
+        srtcp_packets: 1 << 31,
+    };
+    let mut caller = Peer::with(
+        "127.0.0.1:55020".parse()?,
+        SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Client)
+            .with_srtp_key_lifetime(Some(lifetime)),
+        start,
+    )?;
+    let mut callee = Peer::new("127.0.0.1:55021".parse()?, RTCDtlsRole::Server, start)?;
+    let sender = caller.pc.add_track(audio_track())?;
+    exchange(&mut caller, &mut callee, start)?;
+    let (a, b) = (caller.addr, callee.addr);
+    caller.pc.add_local_candidate(host(a)?)?;
+    callee.pc.add_local_candidate(host(b)?)?;
+    caller.pc.add_remote_candidate(host(b)?)?;
+    callee.pc.add_remote_candidate(host(a)?)?;
+
+    let mut now = start;
+    let mut seq = 0u16;
+    let mut held: Option<TaggedBytesMut> = None;
+    let mut renewed = false;
+    let mut received_at_renewal = 0;
+    for _ in 0..100_000 {
+        let mut out = caller.turn(now)?;
+        if seq == 31 && held.is_none() && !renewed {
+            // Packet 31, protected with the first key, is held back.
+            if let Some(i) = out.iter().position(|d| is_srtp(&d.message)) {
+                held = Some(out.remove(i));
+            }
+        }
+        callee.deliver(caller.addr, out, now);
+        let out = callee.turn(now)?;
+        caller.deliver(callee.addr, out, now);
+        assert_ne!(
+            caller.pc.connection_state(),
+            RTCPeerConnectionState::Failed,
+            "the caller failed after {seq} packets"
+        );
+        let connected = caller.pc.connection_state() == RTCPeerConnectionState::Connected
+            && callee.pc.connection_state() == RTCPeerConnectionState::Connected;
+        if held.is_some() && !renewed {
+            renewed = true;
+            received_at_renewal = received(&callee);
+            caller.pc.renew_dtls_association();
+            exchange(&mut caller, &mut callee, now)?;
+            continue;
+        }
+        if renewed && received(&callee) >= received_at_renewal + 35 {
+            break;
+        }
+        let may_send = if renewed {
+            // After the renewal, once the new association has keyed SRTP on both sides.
+            connected && dtls_connected(&mut caller, now) && dtls_connected(&mut callee, now)
+        } else {
+            connected && seq < 31
+        };
+        if may_send {
+            seq += 1;
+            let _ = caller.pc.rtp_sender(sender).expect("sender").write_rtp(
+                now,
+                rtc::rtp::Packet {
+                    header: rtc::rtp::header::Header {
+                        version: 2,
+                        payload_type: 111,
+                        sequence_number: seq,
+                        timestamp: u32::from(seq) * 960,
+                        ssrc: AUDIO_SSRC,
+                        ..Default::default()
+                    },
+                    payload: Bytes::from_static(&[0xF8, 0xFF, 0xFE]),
+                },
+            );
+            continue;
+        }
+        if caller.inbox.is_empty() && callee.inbox.is_empty() {
+            let next = [caller.pc.poll_timeout(), callee.pc.poll_timeout()]
+                .into_iter()
+                .flatten()
+                .min();
+            let Some(next) = next else { break };
+            now = now.max(next);
+            caller.pc.handle_timeout(now)?;
+            callee.pc.handle_timeout(now)?;
+        }
+    }
+    assert!(renewed, "the first key carried packets");
+    let after = received(&callee) - received_at_renewal;
+    assert!(
+        after >= 35,
+        "{after} packets after the renewal, {} written in all",
+        seq
+    );
+
+    // The held packet: protected with the first association's key.
+    let before = received(&callee);
+    callee.deliver(caller.addr, vec![held.expect("held")], now);
+    let _ = callee.turn(now);
+    assert_eq!(
+        received(&callee),
+        before,
+        "a packet under the old key was accepted"
+    );
+    Ok(())
+}

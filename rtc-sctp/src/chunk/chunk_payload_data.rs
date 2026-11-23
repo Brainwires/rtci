@@ -176,6 +176,10 @@ pub struct ChunkPayloadData {
 
     /// Acknowledged by a peer SACK, independently of local payload release.
     pub(crate) acknowledged: bool,
+    /// Sender: the chunk was acknowledged by a Gap Ack Block, so its bytes no longer count as
+    /// outstanding, and its payload is kept until the Cumulative TSN Ack covers it, in case
+    /// the receiver reneges (RFC 9260 6.2.1 D iii).
+    pub(crate) payload_held: bool,
     pub(crate) miss_indicator: u32,
 
     /// Partial-reliability parameters used only by sender.
@@ -228,6 +232,7 @@ impl Default for ChunkPayloadData {
             mid: 0,
             fsn: 0,
             acknowledged: false,
+            payload_held: false,
             miss_indicator: 0,
             since: None,
             created_at: None,
@@ -343,6 +348,7 @@ impl Chunk for ChunkPayloadData {
             fsn,
 
             acknowledged: false,
+            payload_held: false,
             miss_indicator: 0,
             since: None,
             created_at: None,
@@ -440,6 +446,12 @@ impl ChunkPayloadData {
         self.acknowledged = true;
         self.retransmit = false;
         newly_acknowledged
+    }
+
+    /// The receiver reneged on this chunk, which a Gap Ack Block had acknowledged (RFC 9260
+    /// 6.2.1 D iii): it is outstanding again.
+    pub(crate) fn renege(&mut self) {
+        self.acknowledged = false;
     }
 
     pub(crate) fn mark_abandoned(&mut self) {
