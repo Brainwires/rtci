@@ -26,7 +26,7 @@ states something true and checkable.
 | Verdict | Meaning |
 |---|---|
 | `tested` | Implemented, and a test that would fail if the behaviour broke exercises production code. |
-| `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it. |
+| `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it, or because a named test of the repository measured it worse ("measured", below). |
 | `conflict` | Two specifications conflict for this endpoint: the clause's behaviour is implemented and has a test that fails without it, selected by the named setting; the other specification's form, which governs this endpoint (a W3C specification of the JavaScript API the engine is under, or RFC 9429 for a JSEP endpoint), is the default and has a test of its own. |
 | `untested` | Implemented, no such test (or the test is hollow: it asserts constants or mocks the unit). |
 | `partial` | Some of it is implemented; the note says what is missing. |
@@ -41,10 +41,21 @@ A `setting` row's note starts in this form, which `audit-count.py` checks:
 
 The setting's last path segment must be a `fn` in the Rust sources and each test must exist (as
 `scripts/check-test-inventory.py` finds tests). The test must run the RFC form (the setting
-turned to it) and fail without it, which is checked by mutation before the verdict is given. A
-setting whose default differs for another reason (measured performance, a design rule, a
-specification conflict) is not `setting`: the row stays `partial` until the default changes or a
-failing cell or peer is named.
+turned to it) and fail without it, which is checked by mutation before the verdict is given.
+
+One more kind of evidence makes a `setting` (coordinator decision, audit-5): **measured**. The
+RFC or draft form is implemented, has its own mutation-checked test and is selected by the named
+setting, and it is not the default because a recorded measurement on the repository's own
+congestion or impairment tests shows it performs worse. The note then reads
+
+    Setting: `X::with_y(..)`. RFC test: `path.rs::the_rfc_form`.
+    Default differs: measured by `path.rs::the_measurement`: <the numbers, both forms>. <rest>
+
+and `audit-count.py --check` requires the word "measured", the setting, the RFC test and the
+measurement test to exist, and numbers. A setting whose default differs for another reason (a
+design rule, a specification conflict, performance that no repository test measures) is not
+`setting`: the row stays `partial` until the default changes, or a failing cell or peer, or
+such a measurement, is named.
 
 A `conflict` row's note starts in this form, which `audit-count.py` checks the same way (the
 setting is a `fn`, both tests exist):
@@ -70,7 +81,7 @@ class in `open-must.tsv`, with a size (S, M, L), an owner area and what would cl
 
 | Class | Meaning | Closes by |
 |---|---|---|
-| A | RFC behaviour implemented and tested, a named setting, not the default because a named browser cell or deployed peer cannot interoperate | Verdict `setting` (the setting, the RFC-form test and the cell or peer with its error cited) |
+| A | RFC behaviour implemented and tested, a named setting, not the default because a named browser cell or deployed peer cannot interoperate, or a named repository test measured it worse | Verdict `setting` (the setting, the RFC-form test and the cell or peer with its error, or the measurement test with its numbers, cited) |
 | B | Implemented, lacking a test that fails without it | A test, checked by mutation |
 | C | Partly implemented | The missing part, with tests |
 | D | Not implemented | An implementation, with tests |

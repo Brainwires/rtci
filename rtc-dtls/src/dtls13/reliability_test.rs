@@ -515,6 +515,9 @@ fn a_key_update_takes_effect_once_acknowledged() -> Result<()> {
         .write(pair.now, server_addr(), b"before the ack")?;
     let before = take(&mut pair.client);
     assert_eq!(record_first_bytes(&before[0]), [0x2f]);
+    pair.client
+        .write(pair.now, server_addr(), b"held in epoch 3")?;
+    let held = take(&mut pair.client);
 
     pair.deliver_to_server(key_update);
     let ack = take(&mut pair.server);
@@ -526,13 +529,14 @@ fn a_key_update_takes_effect_once_acknowledged() -> Result<()> {
     assert_eq!(record_first_bytes(&after[0]), [0x2c], "epoch 4");
 
     // The record sent before the update arrives after one sent under the new keys, and is
-    // not read any more (section 4.2.1: earlier epochs are discarded).
+    // still read with the epoch before (section 8: "They SHOULD attempt to process those
+    // records with that epoch").
     pair.to_server.clear();
     pair.deliver_to_server(after);
     pair.deliver_to_server(before);
     assert_eq!(
         application_data(&pair.to_server),
-        vec![b"after the ack".to_vec()]
+        vec![b"after the ack".to_vec(), b"before the ack".to_vec()]
     );
 
     // The server still sends in epoch 3, until it is asked to update.
@@ -563,6 +567,10 @@ fn a_key_update_takes_effect_once_acknowledged() -> Result<()> {
         application_data(&pair.to_server),
         vec![b"client epoch 5".to_vec()]
     );
+    // Two epochs on, epoch 3 is gone: its last record, held back until now, is not read.
+    pair.to_server.clear();
+    pair.deliver_to_server(held);
+    assert!(application_data(&pair.to_server).is_empty());
     assert_eq!(
         application_data(&pair.to_client),
         vec![b"server epoch 3".to_vec(), b"server epoch 4".to_vec()]

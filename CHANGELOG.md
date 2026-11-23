@@ -2126,6 +2126,80 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
 
 ### Behaviour changes
 
+- **sdp** (audit-5, RFC 6679 section 7.1): with ECN signalled (`with_ecn(true)` without
+  `with_ecn_without_signalling`) every audio and video format takes `nack ecn` and the XR ECN
+  summary: an offer's RTP sections carry `a=rtcp-fb:* nack ecn` and `a=rtcp-xr:ecn-sum` beside
+  `a=ecn-capable-rtp`, an answer keeps what the offer had of them (`ack ccfb` replacing
+  `nack ecn`, RFC 8888 section 7). Two such peers without RFC 8888 now mark their media on
+  RFC 6679's own reports (they marked nothing).
+- **sdp** (audit-5, RFC 7742 section 6.2): every H.264 fmtp line this endpoint writes has
+  `profile-level-id` (a format registered without one is written with RFC 6184's default,
+  `42000a`) and none has `sprop-parameter-sets` (it was written as registered). An offer
+  without `profile-level-id` is answered at no more than Level 1, the default it stands for
+  (it was answered at this endpoint's own level).
+- **peer_connection** (audit-5, RFC 8852 section 3): the RID and RRID header extension
+  elements are read through `RtpStreamId` / `RepairedRtpStreamId`; one that is not 1 to 255
+  ASCII letters and digits names no stream (its bytes were taken as the rid).
+- **audit** (audit-5): `setting` takes a second kind of evidence, "measured" (RULES.md):
+  the RFC form has its own mutation-checked test and a named repository test measured it
+  worse; `scripts/audit-count.py --check` requires the measurement test and its numbers.
+  GCC-5.4-4 and RFC4585-3.5.2-5 are such rows, RFC7941-6-1 a `setting` for the recorded
+  Firefox 152 offer; RFC9429-5.3.2-9, FLEXFEC03-5.1-5 and RFC7164-5-1 are `n/a`.
+  `rtc-interceptor` tests `congestion_feedback_rate.rs::rfc_4585_timing_of_congestion_feedback_measured_against_immediate`
+  and `gcc/overuse.rs::the_drafts_threshold_adapts_over_the_uncapped_arrival_gap` added.
+
+- **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
+  engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
+  answer, while the mapped address may be used (the NAT binding lives as long as the
+  connection), and is closed once ICE of its transport has completed (it was closed at the
+  answer). A connection that carries the request but brings no answer within Ti is reset (RST)
+  and one new connection is opened to the same server; a connection that fails or ends before
+  its answer moves on to the server's next address at once. After an ICE restart (mt-8, per
+  transport) the new generation asks each server again, over a kept connection when there is
+  one, instead of announcing the address the previous generation learned.
+
+- **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always
+  makes progress. With sec-12 every SACK that kept a_rwnd at 0 re-armed the one-RTO wait
+  before the next probe, also when it acknowledged the probe just sent, so a message larger
+  than the receiver's buffer (webrtc-rs/webrtc#822, `tests/sctp_receive_buffer_deadlock.rs`)
+  arrived at one fragment per RTO (64 KiB through 16 KiB: about a minute). A SACK that
+  acknowledges the outstanding zero window probe is now progress and the next probe goes at
+  once; only a probe the receiver drops waits, for T3-rtx and its doubling interval. The
+  receiver acknowledges a chunk it takes through its closed window at once instead of after
+  the SACK delay (the test's message arrives in 1.6 s, 9.4 s on master). With I-DATA the
+  probes finish a part-sent message before another is started, so several interleaved
+  messages that together fill the buffer still complete one at a time; and an association
+  that negotiated I-DATA takes the in-sequence chunk that unblocks reassembly through a closed
+  window whatever `with_zero_window_overcommit` says (RFC 8260 section 6). Without that,
+  interleaved messages that each fit the buffer but fill it together (six 16 KiB messages,
+  16 KiB buffer, weighted fair queueing) deadlocked: the RFC 9260 6.2 drop refused the chunk
+  that would complete one of them, for ever. Toward peers without I-DATA (browsers) the drop
+  is unchanged. The literal drop stays available for I-DATA associations too:
+  `TransportConfig::with_strict_zero_window_drop(true)` (new, off by default; it can deadlock
+  interleaved messages, as its documentation says). Audit: RFC9260-6.2-2 is now the
+  association without I-DATA (`tested`); the I-DATA case is the new row RFC9260-6.2-34,
+  `setting` (measured: 0 of 24 messages with the drop, 24 of 24 by default).
+- **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
+  waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
+  expiry count and the path error count, so probes the receiver keeps answering never end the
+  association.
+- **sctp** (sec-12, RFC 9260 6.2.1 B, C): chunks marked for retransmission (T3-rtx, Fast
+  Retransmit) give their size back to the peer's rwnd, and every retransmission takes it
+  again; T3-rtx retransmissions are limited by cwnd and by rwnd separately.
+- **dtls** (sec-12, RFC 9147 8): after a key update the epoch before stays readable until a
+  record of the next arrives, so a late record of it is processed (it was dropped once a
+  record under the new keys had been read).
+- **dtls** (sec-12, RFC 8446 4.4.2.4): a DTLS 1.3 endpoint that validates the peer's chain
+  refuses a certificate signed with SHA-1 (bad_certificate). Fingerprint authentication
+  (WebRTC) validates no certificate signature and is not affected.
+- **dtls** (sec-12, RFC 8446 C.2): a signature from an RSA key above 8192 bits is refused.
+- **dtls** (sec-12, RFC 8446 7.1): the DTLS 1.3 handshake traffic secrets are erased once
+  both Finished are done; the key schedule keeps no copy of the application traffic secrets.
+- **peer_connection** (sec-12, RFC 9147 9, 11): `SettingEngineBuilder::with_dtls_connection_id`
+  sets the DTLS connection id length; with connection ids in use a spare id is requested once
+  the association is up, and a change of ICE selected pair switches to a fresh one.
+- **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
+  association of every transport of the connection, not only the first.
 - **server-reflexive gathering** (tcp-11, RFC 8489 section 6.2.2, RFC 6544 section 11.2): the
   engine's Binding connection to a `stun:` / `stuns:` server over TCP or TLS stays open after its
   answer, while the mapped address may be used (the NAT binding lives as long as the

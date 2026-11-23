@@ -103,6 +103,13 @@ pub(crate) struct DtlsTransport {
     pub(crate) failure: Option<crate::peer_connection::rtc_error::RTCError>,
     /// The SRTP key lifetime the setting engine sets, if any (`DtlsHandler::key_lifetime`).
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
+    /// `SettingEngineBuilder::with_dtls_connection_id`: the length of the connection id this
+    /// side asks the peer to send (RFC 9146, RFC 9147 section 9); `None` keeps the DTLS
+    /// crate's default (the extension, asking for none).
+    pub(crate) connection_id_length: Option<usize>,
+    /// The ICE selected pair the association last sent on, to tell a new path (RFC 9147
+    /// section 9) from the first selection.
+    pub(crate) selected_pair_id: Option<String>,
 
     // The peer's certificate chain in DER form, retained at handshake completion so
     // `get_remote_certificates()` has something to return. Previously the bytes reached
@@ -250,6 +257,8 @@ impl DtlsTransport {
             fingerprint_mismatch: Arc::default(),
             failure: None,
             srtp_key_lifetime: None,
+            connection_id_length: None,
+            selected_pair_id: None,
             remote_certificates: vec![],
             remote_dtls_parameters: None,
             remote_tls_id: None,
@@ -475,6 +484,7 @@ impl DtlsTransport {
                 // no tickets and keeps no session cache (and so accepts no resumption: it has
                 // no key to open a ticket with and no session to find); as a client it keeps
                 // nothing and offers no PSK, session id or ticket.
+                .with_connection_id(self.connection_id_length.or(Some(0)))
                 .with_session_tickets(0)
                 .with_session_cache(None)
                 .with_session_store(None)
