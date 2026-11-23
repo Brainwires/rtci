@@ -180,8 +180,10 @@ struct FrameArrival {
 pub(crate) struct FrameRecords {
     arrivals: VecDeque<FrameArrival>,
     descriptors: Vec<DescriptorStream>,
-    /// The last frame size each stream stated.
-    sizes: Vec<(u32, u16, u16)>,
+    /// The last frame size of each stream and spatial layer.
+    sizes: Vec<(u32, u32, u16, u16)>,
+    /// The layer resolutions of each stream's last VP9 scalability structure.
+    layer_sizes: Vec<(u32, Vec<(u16, u16)>)>,
 }
 
 impl FrameRecords {
@@ -306,22 +308,38 @@ impl FrameRecords {
         }
     }
 
-    /// Remembers the size a frame of `ssrc` stated, or gives the last one stated.
-    pub(crate) fn size(&mut self, ssrc: u32, stated: Option<(u16, u16)>) -> Option<(u16, u16)> {
-        match stated {
-            Some((width, height)) => {
-                match self.sizes.iter_mut().find(|s| s.0 == ssrc) {
-                    Some(size) => *size = (ssrc, width, height),
-                    None => self.sizes.push((ssrc, width, height)),
-                }
-                Some((width, height))
+    /// The size of a frame of `ssrc` in spatial layer `layer`: the one it `stated`, else the
+    /// layer's in the last VP9 scalability structure of the stream (`layer_sizes` is this
+    /// frame's, when it carries one), else the last one a frame of that layer stated.
+    pub(crate) fn size(
+        &mut self,
+        ssrc: u32,
+        layer: u32,
+        stated: Option<(u16, u16)>,
+        layer_sizes: &[(u16, u16)],
+    ) -> Option<(u16, u16)> {
+        if !layer_sizes.is_empty() {
+            match self.layer_sizes.iter_mut().find(|s| s.0 == ssrc) {
+                Some(entry) => entry.1 = layer_sizes.to_vec(),
+                None => self.layer_sizes.push((ssrc, layer_sizes.to_vec())),
             }
-            None => self
-                .sizes
-                .iter()
-                .find(|s| s.0 == ssrc)
-                .map(|&(_, width, height)| (width, height)),
         }
+        let from_structure = self
+            .layer_sizes
+            .iter()
+            .find(|s| s.0 == ssrc)
+            .and_then(|s| s.1.get(layer as usize).copied());
+        let last = self
+            .sizes
+            .iter()
+            .find(|s| s.0 == ssrc && s.1 == layer)
+            .map(|&(_, _, width, height)| (width, height));
+        let size = stated.or(from_structure).or(last)?;
+        match self.sizes.iter_mut().find(|s| s.0 == ssrc && s.1 == layer) {
+            Some(entry) => *entry = (ssrc, layer, size.0, size.1),
+            None => self.sizes.push((ssrc, layer, size.0, size.1)),
+        }
+        Some(size)
     }
 }
 
@@ -331,6 +349,8 @@ pub(crate) struct PayloadFrameInfo {
     /// Whether it is a key frame, when the payload says.
     pub(crate) key_frame: Option<bool>,
     pub(crate) size: Option<(u16, u16)>,
+    /// Every spatial layer's resolution, from a VP9 scalability structure.
+    pub(crate) layer_sizes: Vec<(u16, u16)>,
     pub(crate) spatial_id: Option<u8>,
     pub(crate) temporal_id: Option<u8>,
 }
@@ -394,11 +414,15 @@ fn inspect_vp9(payloads: &[&Bytes]) -> PayloadFrameInfo {
             info.temporal_id.get_or_insert(packet.tid);
         }
         if packet.v && packet.y {
+            info.layer_sizes = packet
+                .width
+                .iter()
+                .zip(packet.height.iter())
+                .map(|(&width, &height)| (width, height))
+                .collect();
             let layer = usize::from(if packet.l { packet.sid } else { 0 });
-            if let (Some(&width), Some(&height)) =
-                (packet.width.get(layer), packet.height.get(layer))
-            {
-                info.size = Some((width, height));
+            if let Some(&size) = info.layer_sizes.get(layer) {
+                info.size = Some(size);
             }
         }
     }

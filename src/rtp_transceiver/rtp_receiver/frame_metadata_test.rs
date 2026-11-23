@@ -16,7 +16,7 @@ struct Bits {
 
 impl Bits {
     fn bit(&mut self, bit: u32) -> &mut Self {
-        if self.len % 8 == 0 {
+        if self.len.is_multiple_of(8) {
             self.bytes.push(0);
         }
         if bit != 0 {

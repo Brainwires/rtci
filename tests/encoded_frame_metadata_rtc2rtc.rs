@@ -705,15 +705,31 @@ fn request_key_frame(world: &mut World) -> Result<bool, Error> {
 }
 
 /// webrtc-encoded-transform 6.5 "send request key frame" and 6.4 `keyframerequest`: a video
-/// receiver sends nothing before a stream arrived; then a Full Intra Request for the stream,
+/// receiver that does not receive sends nothing; one that does, a Full Intra Request for the
+/// stream,
 /// with a sequence number one more per request (RFC 5104 4.3.1.2), which reaches the sender's
 /// peer as the FIR and as a key frame request for its sender (no RID: not simulcast).
 #[test]
 fn a_key_frame_request_reaches_the_sender_as_a_fir_and_an_event() -> Result<()> {
     let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
-    assert!(!request_key_frame(&mut world)?, "no stream received yet");
+    // The sending peer's own receiver does not receive (its transceiver is sendonly): the
+    // request resolves with nothing sent.
+    let now = world.now;
+    let own_receiver = world.peers[0]
+        .pc
+        .get_receivers()
+        .next()
+        .expect("a receiver");
+    assert!(
+        !world.peers[0]
+            .pc
+            .rtp_receiver(own_receiver)
+            .expect("receiver")
+            .send_key_frame_request(now)?,
+        "not receiving"
+    );
     world.run_until(world.now + Duration::from_millis(50))?;
-    assert!(world.peers[0].read_fir.is_empty());
+    assert!(world.peers[1].read_fir.is_empty());
 
     let (ssrc, pt, _) = sender_stream(&mut world, sender, DEPENDENCY_DESCRIPTOR_URI);
     let now = world.now;

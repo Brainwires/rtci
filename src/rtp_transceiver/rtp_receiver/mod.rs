@@ -555,9 +555,16 @@ impl RTCRtpReceiver<'_> {
             })
             .cloned();
         let frame = receiver.frame_records().common(&first.header, mime_type);
+        let spatial_index = described
+            .as_ref()
+            .map(|d| d.spatial_id)
+            .or(info.spatial_id)
+            .map(u32::from);
         let size = receiver.frame_records_mut().size(
             ssrc,
+            spatial_index.unwrap_or(0),
             described.as_ref().and_then(|d| d.resolution).or(info.size),
+            &info.layer_sizes,
         );
         let frame_type = if packets.iter().all(|p| p.payload.is_empty()) {
             RTCEncodedVideoFrameType::Empty
@@ -581,11 +588,7 @@ impl RTCRtpReceiver<'_> {
                     .unwrap_or_default(),
                 width: size.map(|s| s.0),
                 height: size.map(|s| s.1),
-                spatial_index: described
-                    .as_ref()
-                    .map(|d| d.spatial_id)
-                    .or(info.spatial_id)
-                    .map(u32::from),
+                spatial_index,
                 temporal_index: described
                     .as_ref()
                     .map(|d| d.temporal_id)
