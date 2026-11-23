@@ -1909,10 +1909,107 @@ impl RTCPeerConnection {
             bundle.srtp_handler_context.rtcp_reduced_size =
                 per_transport.get(&bundle.id).copied().unwrap_or(false);
         }
-        let mut controls = vec![
-            RtcpSessionControl::ReducedSize(reduced_size).into_packet(now),
-            RtcpSessionControl::Bandwidth(bandwidth).into_packet(now),
-        ];
+        let mut controls = vec![];
+        // The SSRCs of each transport's sections: the RTP session each stream runs in
+        // (RFC 8834 section 4.4: a transport per unbundled section, an RTCP session, a
+        // congestion controller and a pacer each), told before what is per session.
+        let mut assignments: std::collections::BTreeMap<usize, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for id in self.pipeline_context.transports.ids() {
+            assignments.entry(id.0).or_default();
+        }
+        for transceiver in self.rtp_transceivers.iter().filter(live) {
+            let Some(mid) = transceiver.mid() else {
+                continue;
+            };
+            let id = self.pipeline_context.transports.transport_id_for(mid).0;
+            let ssrcs = assignments.entry(id).or_default();
+            let mut add = |coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters| {
+                ssrcs.extend(coding.ssrc);
+                ssrcs.extend(coding.rtx.as_ref().map(|rtx| rtx.ssrc));
+                ssrcs.extend(coding.fec.as_ref().map(|fec| fec.ssrc));
+            };
+            if let Some(sender) = transceiver.sender() {
+                for encoding in sender.send_encodings() {
+                    add(&encoding.rtp_coding_parameters);
+                }
+            }
+            if let Some(receiver) = transceiver.receiver() {
+                for coding in receiver.get_coding_parameters() {
+                    add(coding);
+                }
+            }
+        }
+        for (session, ssrcs) in &assignments {
+            controls.push(
+                interceptor::RtpSessionAssignment {
+                    session: *session,
+                    ssrcs: ssrcs.clone(),
+                }
+                .into_packet(now),
+            );
+        }
+        // Reduced-size RTCP and the bandwidth are each RTCP session's: those of the sections
+        // on its transport. With one transport that is every section.
+        let single = self.pipeline_context.transports.len() == 1;
+        let per_session: Vec<(usize, bool, RtcpBandwidth)> = if single {
+            vec![(
+                self.pipeline_context.transports.default_id().0,
+                reduced_size,
+                bandwidth,
+            )]
+        } else {
+            self.pipeline_context
+                .transports
+                .ids()
+                .into_iter()
+                .map(|id| {
+                    let on = |t: &&RTCRtpTransceiverInternal| {
+                        live(t)
+                            && t.mid().as_ref().is_some_and(|mid| {
+                                self.pipeline_context.transports.transport_id_for(mid) == id
+                            })
+                    };
+                    let of = |value: fn(&RTCRemoteBandwidth) -> Option<u64>| {
+                        sum(self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .map(|t| value(&t.remote_bandwidth()))
+                            .collect())
+                    };
+                    let reduced = self.rtp_transceivers.iter().any(|t| on(&t))
+                        && self
+                            .rtp_transceivers
+                            .iter()
+                            .filter(on)
+                            .all(|t| t.rtcp_reduced_size());
+                    (
+                        id.0,
+                        reduced,
+                        RtcpBandwidth {
+                            session: of(|b| b.session_bitrate),
+                            rs: of(|b| b.rtcp_senders_bitrate),
+                            rr: of(|b| b.rtcp_receivers_bitrate),
+                        },
+                    )
+                })
+                .collect()
+        };
+        for (session, reduced_size, bandwidth) in per_session {
+            let tag = |mut packet: interceptor::TaggedPacket| {
+                packet
+                    .message
+                    .add(interceptor::RtpSession(session).attribute());
+                packet
+            };
+            controls.push(tag(
+                RtcpSessionControl::ReducedSize(reduced_size).into_packet(now)
+            ));
+            controls.push(tag(
+                RtcpSessionControl::Bandwidth(bandwidth).into_packet(now)
+            ));
+        }
         // A `trr-int` an earlier negotiation set and this one does not have is undone.
         controls.push(
             match trr_int {

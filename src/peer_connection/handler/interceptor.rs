@@ -120,6 +120,9 @@ pub(crate) struct InterceptorHandler<'a> {
     media_engine: &'a MediaEngine,
     interceptor: &'a mut dyn Interceptor,
     stats: &'a mut RTCStatsAccumulator,
+    /// The RTP session (transport) what is read now arrived on, while the connection has
+    /// more than one: it tags the packets for the per-session interceptors.
+    rtp_session: Option<usize>,
 }
 
 impl<'a> InterceptorHandler<'a> {
@@ -129,6 +132,7 @@ impl<'a> InterceptorHandler<'a> {
         media_engine: &'a MediaEngine,
         interceptor: &'a mut dyn Interceptor,
         stats: &'a mut RTCStatsAccumulator,
+        rtp_session: Option<usize>,
     ) -> Self {
         InterceptorHandler {
             ctx,
@@ -136,6 +140,7 @@ impl<'a> InterceptorHandler<'a> {
             media_engine,
             interceptor,
             stats,
+            rtp_session,
         }
     }
 
@@ -1400,6 +1405,9 @@ impl<'a>
                     sequence_number,
                 });
             }
+            if let Some(session) = self.rtp_session {
+                message.add(interceptor::RtpSession(session).attribute());
+            }
             self.interceptor.handle_read(TaggedPacket {
                 now: msg.now,
                 transport: msg.transport,
@@ -1762,6 +1770,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         let message = handler.poll_read();
 
@@ -1817,6 +1826,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         let mut delivered = Vec::new();
         while let Some(message) = handler.poll_read() {
@@ -1856,6 +1866,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         while handler.poll_read().is_some() {}
 
@@ -1891,6 +1902,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
 
         assert!(
@@ -1916,6 +1928,7 @@ mod boundary_tests {
             &media_engine,
             &mut chain,
             stats,
+            None,
         );
         handler
             .handle_read(TaggedRTCMessageInternal {
@@ -2240,6 +2253,7 @@ mod stream_binding_tests {
             &media_engine,
             interceptor,
             &mut stats,
+            None,
         );
 
         for sequence_number in 1..=packets {
@@ -2488,6 +2502,7 @@ mod stream_binding_tests {
                 &media_engine,
                 &mut interceptor,
                 &mut stats,
+                None,
             );
             handler
                 .handle_read(TaggedRTCMessageInternal {
@@ -2649,6 +2664,7 @@ mod stream_binding_tests {
                 &media_engine,
                 &mut interceptor,
                 stats,
+                None,
             );
             handler
                 .handle_read(TaggedRTCMessageInternal {

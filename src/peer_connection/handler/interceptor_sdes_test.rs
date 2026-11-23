@@ -95,6 +95,7 @@ fn written(packets: Vec<TaggedPacket>) -> Vec<Vec<Box<dyn rtcp::Packet>>> {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
 
     std::iter::from_fn(|| handler.poll_write())

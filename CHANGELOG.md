@@ -1745,6 +1745,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: an RTCP session, transport-wide numbering, congestion controller and
+  pacer per transport. With m= sections on several transports (mt-2) each transport is an RTP
+  session of its own (RFC 8834 section 4.4, RFC 3550 section 6): its RTCP reports name only
+  its streams, its bandwidth and reduced-size RTCP are those of its sections, and the default
+  chain numbers, estimates and paces each transport on its own (draft-holmer section 3.1:
+  the sequence is per transport; RFC 8836 section 2: each path its own capacity).
+  - `interceptor::PerRtpSession<T>`: one instance of an interceptor per RTP session, routed
+    by `RtpSessionAssignment` (the SSRCs of each transport's sections, written by the peer
+    connection when an answer is applied) and by the `RtpSession` tag the peer connection
+    puts on what it reads with more than one transport; control messages go to every session
+    and leave once. `Registry::with_per_rtp_session`,
+    `RtcpSessionBuilder::build_per_rtp_session` (one CNAME for all sessions).
+  - The default chain (`register_default_interceptors*`, `configure_rtcp_reports*`) holds
+    the RTCP session, the TWCC sender and recorder, the RFC 8888 recorder, the congestion
+    controller, the remote bit rate bound and the pacer per session. With every section
+    bundled there is one session and nothing changes. `configure_congestion_control` with an
+    application's estimator keeps one controller and one numbering for the connection.
+  - `RtcpSessionControl::{ReducedSize, Bandwidth}` are written per transport, tagged with
+    its session.
+
 - **media conformance**: RFC 6679 ECN for RTP.
   - `rtcp::transport_feedbacks::ecn_feedback::{EcnFeedback, EcnCounters}` (RTCP ECN Feedback
     packet, RTPFB FMT 8, `FORMAT_ECN`) and `rtcp::extended_report::{EcnSummaryReportBlock,
