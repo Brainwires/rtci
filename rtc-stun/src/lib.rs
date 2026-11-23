@@ -109,7 +109,6 @@ pub mod addr;
 pub mod agent;
 /// The client side of 300 (Try Alternate): `ALTERNATE-SERVER` and the redirection-loop rule.
 pub mod alternate;
-/// The STUN attribute types and the raw attribute representation.
 pub mod attributes;
 /// Validation helpers for received messages and attributes.
 pub mod checks;

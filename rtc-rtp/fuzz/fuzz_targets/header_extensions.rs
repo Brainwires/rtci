@@ -18,7 +18,7 @@ use rtc_rtp::extension::playout_delay_extension::PlayoutDelayExtension;
 use rtc_rtp::extension::transport_cc_extension::TransportCcExtension;
 use rtc_rtp::extension::video_orientation_extension::VideoOrientationExtension;
 use rtc_rtp::packet::Packet;
-use rtc_shared::marshal::{Marshal, Unmarshal};
+use rtc_shared::marshal::{Marshal, MarshalSize, Unmarshal};
 
 fn parse_all(data: &[u8]) {
     let _ = AudioLevelExtension::unmarshal(&mut &data[..]);

@@ -19,7 +19,9 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::codec::telephone_event::TelephoneEvent;
+use rtc::rtp::codec::telephone_event::{
+    TelephoneEvent, TelephoneEventReceiver, TelephoneEventReport, dtmf_char_from_event,
+};
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
@@ -608,5 +610,124 @@ fn the_playout_stops_when_dtmf_can_no_longer_be_sent() -> Result<()> {
         !tones.iter().any(|t| t == "2" || t == "3"),
         "no tone after the sender stopped: {tones:?}"
     );
+    Ok(())
+}
+
+/// What the callee's application makes of the telephone-event packets it received, consumed
+/// with RFC 4733's receiving procedures: each event that ended, as its DTMF character, with
+/// its total duration in timestamp units.
+fn events_consumed(call: &Call) -> Vec<(char, u32)> {
+    let mut receiver = TelephoneEventReceiver::new();
+    let mut consumed = Vec::new();
+    for (_, packet, _) in call.events_received() {
+        let reports = receiver
+            .receive(
+                packet.header.timestamp,
+                packet.header.marker,
+                &packet.payload,
+            )
+            .expect("a well-formed event packet");
+        for report in reports {
+            if let TelephoneEventReport::Ended {
+                event,
+                total_duration,
+            } = report
+            {
+                consumed.push((
+                    dtmf_char_from_event(event).expect("a DTMF event"),
+                    total_duration,
+                ));
+            }
+        }
+    }
+    consumed
+}
+
+/// RFC 7874 section 3: "Generated DTMF events MUST last no more than 8000 ms and no less than
+/// 40 ms (default 100 ms)" and the gap "MUST be at least 30 ms (default 70 ms)". A tone asked
+/// for 9000 ms is played for 6000 ms (W3C 7.2's bound, within the RFC's), a tone and a gap
+/// left to the default last 100 ms and 70 ms; the callee consumes each event with the
+/// duration it was played for (48 units a millisecond), the 6000 ms one across segments.
+#[test]
+fn generated_events_last_at_most_6000_ms_and_default_to_100_ms_with_70_ms_gaps() -> Result<()> {
+    let mut call = Call::connected(53170)?;
+    let start = call.now;
+    call.insert("1", Some(Duration::from_millis(9000)), None)?;
+    call.run_until(Duration::from_secs(12), |c| {
+        c.caller.tone_changes().iter().any(|(_, t)| t.is_empty())
+    })?;
+    call.run_until(Duration::from_millis(300), |_| false)?;
+    let long: Vec<(Duration, String)> = call
+        .caller
+        .tone_changes()
+        .into_iter()
+        .map(|(at, tone)| (at - start, tone))
+        .collect();
+    assert_eq!(
+        long.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+        ["1", ""]
+    );
+    assert_eq!(
+        long[1].0 - long[0].0,
+        Duration::from_millis(6000 + 70),
+        "the tone for 6000 ms, then the default gap"
+    );
+    assert_eq!(events_consumed(&call), [('1', 6000 * 48)]);
+
+    let second = call.now;
+    call.insert("23", None, None)?;
+    call.run_until(Duration::from_secs(2), |c| {
+        c.caller
+            .tone_changes()
+            .iter()
+            .filter(|(at, t)| *at >= second && t.is_empty())
+            .count()
+            == 1
+    })?;
+    call.run_until(Duration::from_millis(300), |_| false)?;
+    let changes: Vec<Instant> = call
+        .caller
+        .tone_changes()
+        .into_iter()
+        .filter(|(at, _)| *at >= second)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(changes.len(), 3, "2, 3 and the end of the buffer");
+    assert_eq!(changes[1] - changes[0], Duration::from_millis(100 + 70));
+    assert_eq!(
+        events_consumed(&call),
+        [('1', 6000 * 48), ('2', 100 * 48), ('3', 100 * 48)]
+    );
+    Ok(())
+}
+
+/// RFC 7874 section 3: "the endpoint MUST be able to generate and consume events 0 through
+/// 15" (the digits, `*`, `#` and A to D). All sixteen go out as telephone events with the
+/// codes of RFC 4733 section 3.2, in order, and the callee consumes them as the same sixteen
+/// characters.
+#[test]
+fn all_sixteen_dtmf_events_are_generated_and_consumed() -> Result<()> {
+    let mut call = Call::connected(53180)?;
+    let tones = "0123456789*#ABCD";
+    call.insert(
+        tones,
+        Some(Duration::from_millis(40)),
+        Some(Duration::from_millis(30)),
+    )?;
+    call.run_until(Duration::from_secs(5), |c| {
+        c.caller.tone_changes().iter().any(|(_, t)| t.is_empty())
+    })?;
+    call.run_until(Duration::from_millis(300), |_| false)?;
+    // The first packet of each event has M (the final reports of one event still go out
+    // after the next has begun).
+    let codes: Vec<u8> = call
+        .events_received()
+        .into_iter()
+        .filter(|(_, packet, _)| packet.header.marker)
+        .map(|(_, _, report)| report.event)
+        .collect();
+    assert_eq!(codes, (0u8..=15).collect::<Vec<_>>(), "the event codes");
+    let consumed: String = events_consumed(&call).into_iter().map(|(c, _)| c).collect();
+    assert_eq!(consumed, tones);
     Ok(())
 }

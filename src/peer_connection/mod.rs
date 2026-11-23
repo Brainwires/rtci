@@ -263,12 +263,10 @@ pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
-/// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
 pub mod turn_discovery;
 /// The TURN clients the engine runs itself (RFC 8656, RFC 7350, RFC 6062): who gathers from
 /// `turn:` servers over UDP, [`turn_streams::RelayGathering`].
 pub mod turn_streams;
-/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
@@ -1768,7 +1766,7 @@ impl RTCPeerConnection {
     ///
     /// How many RTP packets were discarded because no media section or track could take them
     /// (RFC 8830 section 3.1: the engine buffers no unassociated media, and says so; see
-    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`]). Not a W3C attribute: a fork
+    /// [`RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded`](crate::peer_connection::event::RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded)). Not a W3C attribute: a fork
     /// addition.
     pub fn discarded_rtp_packets(&self) -> u64 {
         self.pipeline_context
@@ -3689,6 +3687,21 @@ impl RTCPeerConnection {
     /// # }
     /// ```
     ///
+    /// # During an ICE restart
+    ///
+    /// A candidate added while a restart is staged belongs to the generation the restart
+    /// begins: on the answerer, between `set_remote_description` of the restart offer and
+    /// `set_local_description` of the answer; on the offerer, between the restart offer's
+    /// `create_offer` and its `set_local_description`. It is announced with the new username
+    /// fragment, the restart keeps it even with
+    /// [`with_discard_local_candidates_during_ice_restart`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_discard_local_candidates_during_ice_restart),
+    /// and an answer created after it lists it (RFC 9429 section 5.3.1). It is not paired in
+    /// the session the restart ends once that session has nominated a pair (RFC 8838 section
+    /// 13). So an answerer that gathers for the restart may add its candidates as soon as the
+    /// offer is applied, and need not add them again after `set_local_description`. The
+    /// `username_fragment` of `local_candidate` is not read: the generation is the one staged,
+    /// or the current one when no restart is staged.
+    ///
     /// # Parameters
     ///
     /// - `local_candidate`: The ICE candidate initialization data, or a value whose `candidate`
@@ -4671,7 +4684,7 @@ impl RTCPeerConnection {
     ///
     /// The send encodings are otherwise taken as W3C `addTransceiver` takes them: for audio
     /// `scale_resolution_down_by` and `max_framerate` are removed; at most
-    /// [`MAX_SEND_ENCODINGS`] are kept; video encodings without `scale_resolution_down_by`
+    /// [`MAX_SEND_ENCODINGS`](crate::rtp_transceiver::rtp_sender::MAX_SEND_ENCODINGS) are kept; video encodings without `scale_resolution_down_by`
     /// get 1.0 when another has one and otherwise halve per layer from the last (4, 2, 1);
     /// a single encoding loses its rid. Without send encodings the sender has one, which the
     /// engine fills in.

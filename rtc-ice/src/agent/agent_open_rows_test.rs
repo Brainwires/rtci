@@ -179,7 +179,7 @@ fn test_two_lite_agents_with_several_pairs_select_by_rfc6724_and_update() {
 fn test_a_lite_answerer_takes_the_local_candidate_remote_candidates_names() {
     let now = Instant::now();
     let remote = udp("192.168.0.9", 5000, 1000);
-    let mut b = lite_agent(now, false, &[remote.clone()]);
+    let mut b = lite_agent(now, false, std::slice::from_ref(&remote));
     b.add_local_candidate(udp("10.0.0.2", 1000, 500)).unwrap();
     run(&mut b, now, now + Duration::from_secs(1));
     let local = |a: &Agent| a.get_selected_candidate_pair().map(|(l, _)| l.addr());
@@ -717,6 +717,48 @@ fn test_local_candidates_are_refused_after_the_nomination() {
     )
     .unwrap();
     assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
+}
+
+/// The same rule binds the session the nomination was made in, not the one a staged restart
+/// begins: a candidate gathered while the restart is staged is taken, but not paired with the
+/// current session's remote candidates, and the restart keeps it even when it discards the
+/// previous generation's local candidates. A candidate held already that is gathered again in
+/// that window is kept too; one that is not is discarded.
+#[test]
+fn test_a_candidate_gathered_for_a_staged_restart_is_kept_and_not_paired_before_it() {
+    let now = Instant::now();
+    let mut a = started_agent(now, config(true), &[REMOTE_A]);
+    assert!(a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    assert!(a.add_local_candidate(udp("192.168.0.22", 1000, 0)).unwrap());
+    run_answering(&mut a, now, now + Duration::from_secs(1), |_, _| true);
+    assert!(a.get_selected_candidate_pair().is_some());
+    let pairs = a.get_candidate_pairs().len();
+
+    a.generate_restart_credentials(String::new(), String::new())
+        .unwrap();
+    assert!(a.add_local_candidate(udp("192.168.0.21", 1000, 0)).unwrap());
+    assert!(!a.add_local_candidate(udp("192.168.0.20", 1000, 0)).unwrap());
+    assert_eq!(
+        a.get_candidate_pairs().len(),
+        pairs,
+        "not paired in the session that nominated"
+    );
+    let staged: Vec<String> = a
+        .get_restart_generation_local_candidates()
+        .iter()
+        .map(|c| c.address().to_owned())
+        .collect();
+    assert_eq!(staged, ["192.168.0.20", "192.168.0.21"]);
+
+    a.apply_restart(now + Duration::from_secs(2), false)
+        .unwrap();
+    let kept: Vec<String> = a
+        .get_local_candidates()
+        .iter()
+        .map(|c| c.address().to_owned())
+        .collect();
+    assert_eq!(kept, ["192.168.0.20", "192.168.0.21"]);
+    assert!(a.get_restart_generation_local_candidates().is_empty());
 }
 
 // --- RFC 7675 Section 5.1 ---

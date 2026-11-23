@@ -27,10 +27,17 @@ Please give us time to release a fix before disclosing the issue publicly.
 
 ## Supported versions
 
-| Version                      | Supported |
-| ---------------------------- | --------- |
-| 0.21.x (`+brainwires.N`)     | yes       |
-| 0.20.x and older fork builds | no        |
+Fixes are released on the newest minor line only; while the version is `0.x`, a minor
+release may contain breaking changes (see the README's "Semantic Versioning").
+
+| Version                                   | Supported |
+| ----------------------------------------- | --------- |
+| newest `0.x` minor release, from 0.1.0    | yes       |
+| older `0.x` minor releases                | no        |
+| `0.22.0+brainwires.N` and earlier builds  | no        |
+
+The `0.22.0+brainwires.N` and `0.21.1+brainwires.N` builds are git tags of this repository
+under the earlier crate names; move to the current release line to receive fixes.
 
 ## Upstream
 

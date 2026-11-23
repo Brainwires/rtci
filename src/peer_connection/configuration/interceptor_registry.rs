@@ -946,7 +946,7 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
 /// CNAME. What a session description negotiates beyond that reaches it as an
 /// [`RtcpSessionControl`](interceptor::RtcpSessionControl) (bandwidth from `b=` lines,
 /// `a=rtcp-rsize`, `trr-int`) or through
-/// [`RtcpSessionBuilder`](interceptor::RtcpSessionBuilder) when the chain is built by hand:
+/// [`RtcpSessionBuilder`] when the chain is built by hand:
 ///
 /// ```
 /// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
@@ -1830,7 +1830,6 @@ mod ulpfec_tests {
                     rtcp_feedback: vec![],
                 },
                 payload_type,
-                ..Default::default()
             }
         };
         let section = [
@@ -2178,8 +2177,10 @@ mod slot_order_tests {
     #[test]
     fn the_twcc_only_setting_neither_offers_nor_records_rfc8888() {
         let mut media_engine = MediaEngine::default();
-        let mut options = DefaultInterceptorOptions::default();
-        options.congestion_feedback = CongestionFeedback::Twcc;
+        let options = DefaultInterceptorOptions {
+            congestion_feedback: CongestionFeedback::Twcc,
+            ..Default::default()
+        };
         let (registry, _handles) = register_default_interceptors_with_options(
             Registry::new(),
             &mut media_engine,

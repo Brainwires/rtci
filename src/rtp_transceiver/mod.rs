@@ -355,7 +355,7 @@ impl RTCRtpTransceiver<'_> {
     /// The mid uniquely identifies the media description in the SDP. `create_offer` and
     /// `create_answer` choose it (W3C `[[JsepMid]]`), but it is the transceiver's mid only
     /// once a description that has it is applied: W3C webrtc-pc 4.4.1.6, "set the
-    /// transceiver's [[Mid]] slot to transceiver.[[JsepMid]]" when a local description is
+    /// transceiver's \[\[Mid\]\] slot to transceiver.\[\[JsepMid\]\]" when a local description is
     /// applied, and from the remote description's section when a remote one is. Until then,
     /// and after a rollback that disassociates it, it is `None`.
     ///

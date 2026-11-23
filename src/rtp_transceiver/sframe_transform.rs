@@ -8,7 +8,7 @@
 //! receiver's application reassembles (`SFrameReassembler`) and runs
 //! [`RTCRtpSFrameDecryptor::transform`]. Setting such a transform on a sender or a receiver is
 //! [`RTCRtpTransceiver::set_transform_use_sframe`](crate::rtp_transceiver::RTCRtpTransceiver::set_transform_use_sframe)
-//! `(true)`: `[[useSFrame]]` (the constructors' "Set this.[[useSFrame]] to true").
+//! `(true)`: `[[useSFrame]]` (the constructors' "Set this.\[\[useSFrame\]\] to true").
 
 use crate::sframe::{CipherSuite, ErrorKind, SFrameContext};
 use shared::error::{Error, Result};

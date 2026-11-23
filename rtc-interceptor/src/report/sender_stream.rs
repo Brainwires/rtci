@@ -5,6 +5,12 @@ use std::time::Instant;
 pub(crate) struct SenderStream {
     ssrc: u32,
     clock_rate: f64,
+    /// The clock rates of the other payload types the stream may be sent with on this SSRC
+    /// (RFC 7160: one SSRC across clock rates).
+    payload_clock_rates: Vec<(u8, f64)>,
+    /// The clock rate of the packet the RTP / wall clock pair below was taken from: what the
+    /// sender report extrapolates with.
+    last_clock_rate: f64,
 
     /// Whether to always use the latest packet, even if out-of-order.
     use_latest_packet: bool,
@@ -31,6 +37,8 @@ impl SenderStream {
         SenderStream {
             ssrc,
             clock_rate: clock_rate as f64,
+            payload_clock_rates: Vec::new(),
+            last_clock_rate: clock_rate as f64,
 
             use_latest_packet,
 
@@ -52,6 +60,26 @@ impl SenderStream {
     /// The clock rate of the codec the stream is now sent with (a renegotiation changed it).
     pub(crate) fn set_clock_rate(&mut self, clock_rate: u32) {
         self.clock_rate = clock_rate as f64;
+        if self.last_rtp_time_time.is_none() {
+            self.last_clock_rate = self.clock_rate;
+        }
+    }
+
+    /// The clock rates of the other payload types the stream may be sent with (the m=
+    /// section's other formats): a packet of one of them is timed with its own rate.
+    pub(crate) fn set_payload_clock_rates(&mut self, rates: &[(u8, u32)]) {
+        self.payload_clock_rates = rates
+            .iter()
+            .filter(|(_, rate)| *rate > 0)
+            .map(|(pt, rate)| (*pt, f64::from(*rate)))
+            .collect();
+    }
+
+    fn clock_rate_of(&self, payload_type: u8) -> f64 {
+        self.payload_clock_rates
+            .iter()
+            .find(|(pt, _)| *pt == payload_type)
+            .map_or(self.clock_rate, |(_, rate)| *rate)
     }
 
     pub(crate) fn process_rtp(&mut self, now: Instant, pkt: &rtp::packet::Packet) {
@@ -78,6 +106,7 @@ impl SenderStream {
             if self.last_rtp_time_time.is_none() || pkt.header.timestamp != self.last_rtp_time_rtp {
                 self.last_rtp_time_rtp = pkt.header.timestamp;
                 self.last_rtp_time_time = Some(now);
+                self.last_clock_rate = self.clock_rate_of(pkt.header.payload_type);
                 // The wall clock is read once, when the stream starts; every later NTP
                 // timestamp is that reading plus the time the caller says has passed. Read
                 // again at each frame, the NTP time followed the machine's clock instead of
@@ -141,8 +170,13 @@ impl SenderStream {
             // names, extrapolated from the last packet. The ticks elapsed are reduced modulo
             // 2^32 like every RTP timestamp; a float cast to `u32` would stop at `u32::MAX`
             // instead once a stream has been idle for 2^32 ticks (13 h at 90 kHz).
-            let elapsed_ticks =
-                (now.duration_since(last_rtp_time_time).as_secs_f64() * self.clock_rate) as u64;
+            //
+            // RFC 7160 section 3.2: on one SSRC across clock rates the timestamp runs at the
+            // rate of the format being sent, so the extrapolation is at the rate of the last
+            // packet's payload type, never across a change with the rate the stream was bound
+            // with (it gave PCMU's 8 kHz stream 48 kHz worth of ticks).
+            let elapsed_ticks = (now.duration_since(last_rtp_time_time).as_secs_f64()
+                * self.last_clock_rate) as u64;
             Some(rtcp::sender_report::SenderReport {
                 ssrc: self.ssrc,
                 ntp_time: time_baseline.ntp(now),
@@ -206,7 +240,6 @@ mod tests {
                 ..Default::default()
             },
             payload: vec![0u8; payload_len].into(),
-            ..Default::default()
         }
     }
 
@@ -363,11 +396,11 @@ mod tests {
 
     #[test]
     fn test_counters_wrapping() {
-        let mut counters = Counters::default();
-
         // Set to max - 1
-        counters.packets = u32::MAX - 1;
-        counters.octets = u32::MAX - 1;
+        let mut counters = Counters {
+            packets: u32::MAX - 1,
+            octets: u32::MAX - 1,
+        };
 
         // Increment should wrap
         counters.increment_packets();
@@ -422,6 +455,32 @@ mod tests {
             ntp_delta.abs_diff(expected) < (1 << 12),
             "ntp advanced by {ntp_delta:#x}, expected {expected:#x}"
         );
+    }
+
+    /// RFC 7160 section 3.2 (one SSRC across clock rates): the sender report's RTP timestamp
+    /// is extrapolated at the rate of the format the stream is sent with now. Bound with Opus
+    /// (48 kHz, payload type 111) and switched to PCMU (8 kHz, payload type 0), one second
+    /// after the last PCMU frame the report is 8000 ticks on, not 48000; back on Opus it is
+    /// 48000 again.
+    #[test]
+    fn the_report_extrapolates_at_the_rate_of_the_format_sent_last() {
+        let packet = |seq: u16, timestamp: u32, payload_type: u8| {
+            let mut packet = make_rtp_packet(seq, timestamp, 10);
+            packet.header.payload_type = payload_type;
+            packet
+        };
+        let mut stream = SenderStream::new(123456, 48000, false);
+        stream.set_payload_clock_rates(&[(0, 8000), (8, 8000)]);
+        let base = Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        stream.process_rtp(base, &packet(0, 10_000, 111));
+        stream.process_rtp(base, &packet(1, 20_000, 0));
+        let report = stream.generate_report(base + second).unwrap();
+        assert_eq!(report.rtp_time, 28_000, "PCMU: 8 kHz");
+
+        stream.process_rtp(base + second, &packet(2, 90_000, 111));
+        let report = stream.generate_report(base + second * 2).unwrap();
+        assert_eq!(report.rtp_time, 138_000, "Opus: 48 kHz");
     }
 
     /// RFC 3550 6.4: a sender report only while data was sent "during the interval since

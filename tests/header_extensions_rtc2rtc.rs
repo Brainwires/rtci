@@ -734,3 +734,134 @@ fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear()
     );
     Ok(())
 }
+
+const VIDEO_ORIENTATION: &str = "urn:3gpp:video-orientation";
+
+/// The id a description maps `uri` to, if it has an `a=extmap` line for it.
+fn extmap_id(sdp: &str, uri: &str) -> Option<u8> {
+    sdp.lines().find_map(|l| {
+        let rest = l.strip_prefix("a=extmap:")?;
+        let (id, rest) = rest.split_once(' ')?;
+        (rest.split(' ').next() == Some(uri))
+            .then(|| id.split('/').next()?.parse().ok())
+            .flatten()
+    })
+}
+
+/// RFC 7742 section 4: an endpoint that can produce video in other orientations "MUST
+/// support generating the R0 and R1 bits of the Coordination of Video Orientation (CVO)
+/// mechanism ... and MUST send them for all orientations when the peer indicates support".
+/// CVO is among the default header extensions; a frame written with each of the four
+/// rotations (and the back camera, flipped, once) reaches the receiving application with its
+/// CVO element. A peer that leaves `urn:3gpp:video-orientation` out of its answer gets no
+/// element: the sender only sends what was negotiated.
+#[test]
+fn every_video_orientation_is_sent_when_the_peer_indicates_support() -> Result<()> {
+    use rtc::rtp::extension::video_orientation_extension::{
+        CameraDirection, VideoOrientationExtension, VideoRotation,
+    };
+    let orientations: Vec<VideoOrientationExtension> = [
+        VideoRotation::Degree0,
+        VideoRotation::Degree90,
+        VideoRotation::Degree180,
+        VideoRotation::Degree270,
+    ]
+    .into_iter()
+    .map(|rotation| VideoOrientationExtension {
+        rotation,
+        ..Default::default()
+    })
+    .chain([VideoOrientationExtension {
+        direction: CameraDirection::Back,
+        flip: true,
+        rotation: VideoRotation::Degree90,
+    }])
+    .collect();
+    for supported in [true, false] {
+        let (mut world, sender) = World::connected(RtpCodecKind::Video, |answer| {
+            if supported {
+                return answer;
+            }
+            answer
+                .split("\r\n")
+                .filter(|l| !(l.starts_with("a=extmap:") && l.ends_with(VIDEO_ORIENTATION)))
+                .collect::<Vec<_>>()
+                .join("\r\n")
+        })?;
+        let offer = world.peers[0]
+            .pc
+            .local_description()
+            .expect("the offer")
+            .sdp;
+        let id = extmap_id(&offer, VIDEO_ORIENTATION).expect("CVO is offered by default");
+        let (ssrc, pt) = {
+            let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+            let parameters = sender.get_parameters();
+            (
+                parameters.encodings[0]
+                    .rtp_coding_parameters
+                    .ssrc
+                    .expect("an SSRC"),
+                parameters.rtp_parameters.codecs[0].payload_type,
+            )
+        };
+        world.media_ssrc = Some(ssrc);
+        for (n, orientation) in orientations.iter().enumerate() {
+            let now = world.now;
+            let seq = 500 + n as u16;
+            world.peers[0]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp_with_video_orientation(
+                    now,
+                    rtc::rtp::Packet {
+                        header: Header {
+                            version: 2,
+                            payload_type: pt,
+                            sequence_number: seq,
+                            timestamp: u32::from(seq) * 3000,
+                            ssrc,
+                            marker: true,
+                            ..Default::default()
+                        },
+                        payload: Bytes::from(vec![0x10u8; 100]),
+                    },
+                    *orientation,
+                )?;
+            world.pump()?;
+            world.run_until(now + Duration::from_millis(33))?;
+        }
+        let read: Vec<Option<VideoOrientationExtension>> = world.peers[1]
+            .read_rtp
+            .iter()
+            .filter(|h| h.ssrc == ssrc && h.sequence_number >= 500)
+            .map(|h| {
+                h.get_extension(id)
+                    .map(|mut value| VideoOrientationExtension::unmarshal(&mut value))
+                    .transpose()
+            })
+            .collect::<Result<_, _>>()?;
+        if supported {
+            assert_eq!(
+                read,
+                orientations.iter().copied().map(Some).collect::<Vec<_>>(),
+                "every orientation, as it was written"
+            );
+        } else {
+            assert_eq!(read.len(), orientations.len(), "every frame was read");
+            assert!(
+                read.iter().all(Option::is_none),
+                "no CVO element without the peer's support: {read:?}"
+            );
+            assert!(
+                world
+                    .media_wire()
+                    .iter()
+                    .all(|h| h.get_extension(id).is_none()),
+                "none on the wire either"
+            );
+        }
+    }
+    Ok(())
+}

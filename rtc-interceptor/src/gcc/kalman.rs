@@ -42,7 +42,7 @@ pub struct Kalman {
     noise_gain: f64,
     /// `chi` of draft-ietf-rmcat-gcc-02 section 5.3, in [0.001, 0.1].
     chi: f64,
-    /// The departure periods of the last [`PERIOD_HISTORY`] groups, milliseconds, for
+    /// The departure periods of the last `PERIOD_HISTORY` groups, milliseconds, for
     /// `f_max`; zero where none was recorded yet.
     periods: [f64; PERIOD_HISTORY],
     next_period: usize,
@@ -96,7 +96,7 @@ impl Kalman {
 
     /// `update` for a group that departed `period_ms` after the one before: the weight of the
     /// sample in the noise variance is `1 - alpha`, `alpha = (1 - chi)^(30 / (1000 f_max))`,
-    /// `f_max` the highest group rate over the last [`PERIOD_HISTORY`] groups (section 5.3).
+    /// `f_max` the highest group rate over the last `PERIOD_HISTORY` groups (section 5.3).
     pub fn update_with_period(&mut self, measurement: f64, period_ms: f64) -> f64 {
         if period_ms.is_finite() && period_ms > 0.0 {
             self.periods[self.next_period] = period_ms;

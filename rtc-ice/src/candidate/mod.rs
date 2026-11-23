@@ -236,6 +236,15 @@ pub struct Candidate {
     /// it is not paired until it is (RFC 8838 Section 10). See
     /// [`Agent::add_unconveyed_local_candidate`](crate::agent::Agent::add_unconveyed_local_candidate).
     pub(crate) unconveyed: bool,
+    /// A local candidate gathered (or gathered again) while an ICE restart is staged
+    /// ([`Agent::generate_restart_credentials`](crate::agent::Agent::generate_restart_credentials)):
+    /// it is the new generation's, so the restart keeps it even when it discards the previous
+    /// generation's local candidates.
+    pub(crate) restart_generation: bool,
+    /// A local candidate new to the agent that arrived while a restart was staged and the
+    /// current session had nominated a pair: it is not paired in that session (RFC 8838
+    /// Section 13), only in the one the restart begins.
+    pub(crate) awaiting_restart: bool,
 
     pub(crate) network: String,
 
@@ -267,6 +276,8 @@ impl Default for Candidate {
             local_preference_rank: None,
             hide_related_address: false,
             unconveyed: false,
+            restart_generation: false,
+            awaiting_restart: false,
             network: String::new(),
 
             url: None,
@@ -350,6 +361,12 @@ impl Candidate {
     /// Sets candidate component.
     pub fn set_component(&mut self, component: u16) {
         self.component = component;
+    }
+
+    /// A local candidate the agent does not pair yet: not conveyed to the peer, or waiting
+    /// for the restart it was gathered for.
+    pub(crate) fn held_from_pairing(&self) -> bool {
+        self.unconveyed || self.awaiting_restart
     }
 
     /// When traffic was last received on this candidate.

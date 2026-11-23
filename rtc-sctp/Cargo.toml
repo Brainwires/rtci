@@ -4,13 +4,16 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "RTC SCTP in Rust"
+description = "Sans-I/O SCTP (RFC 9260) with partial reliability and stream reconfiguration, for WebRTC data channels"
 license.workspace = true
-documentation = "https://docs.rs/rtc-sctp"
-homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
+keywords = ["webrtc", "sctp", "datachannel", "sans-io"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+# Default features only: `bench` exposes internals to the benchmarks.
+features = []
 
 [features]
 # Exposes the internal `fuzzing` module (marshal/unmarshal shims) for

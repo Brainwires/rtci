@@ -136,10 +136,10 @@ fn test_client_with_stun_send_binding_request() -> Result<()> {
                 assert_eq!(tid, id);
                 debug!("mapped-addr: {}", refl_addr);
             }
-            _ => assert!(false),
+            _ => panic!(),
         }
     } else {
-        assert!(false);
+        panic!();
     }
 
     assert_eq!(0, client.tr_map.size(), "should be no transaction left");
@@ -179,12 +179,9 @@ fn test_client_with_stun_send_binding_request_to_parallel() -> Result<()> {
 
     let mut tids = HashSet::new();
     while let Some(event) = client.poll_event() {
-        match event {
-            Event::BindingResponse(tid, refl_addr) => {
-                tids.insert(tid);
-                debug!("mapped-addr: {}", refl_addr);
-            }
-            _ => {}
+        if let Event::BindingResponse(tid, refl_addr) = event {
+            tids.insert(tid);
+            debug!("mapped-addr: {}", refl_addr);
         }
     }
 
@@ -217,10 +214,10 @@ fn test_client_with_stun_send_binding_request_to_timeout() -> Result<()> {
             Event::TransactionTimeout(id) => {
                 assert_eq!(tid, id);
             }
-            _ => assert!(false),
+            _ => panic!(),
         }
     } else {
-        assert!(false);
+        panic!();
     }
 
     client.close()

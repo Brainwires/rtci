@@ -1,30 +1,35 @@
-<h1 align="center">
- <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
- <br>
-</h1>
-<p align="center">
- <a href="https://github.com/webrtc-rs/rtc/actions">
-  <img src="https://github.com/webrtc-rs/rtc/workflows/cargo/badge.svg">
- </a>
- <a href="https://codecov.io/gh/webrtc-rs/rtc">
-  <img src="https://codecov.io/gh/webrtc-rs/rtc/branch/main/graph/badge.svg">
- </a>
- <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
-  <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
- </a>
- <a href="https://crates.io/crates/rtc-rtcp">
-  <img src="https://img.shields.io/crates/v/rtc-rtcp.svg">
- </a>
- <a href="https://docs.rs/rtc-rtcp">
-  <img src="https://docs.rs/rtc-rtcp/badge.svg">
- </a>
- <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
- </a>
- <a href="https://discord.gg/4Ju8UHdXMs">
-  <img src="https://img.shields.io/discord/800204819540869120?logo=discord" alt="Discord">
- </a>
-</p>
-<p align="center">
- RTC RTCP Protocol in Rust With Sans-IO
-</p>
+# rtc-rtcp
+
+RTCP packet parsing and serialization: sender and receiver reports, source description,
+BYE, application-defined packets, the transport-layer and payload-specific feedback messages
+(NACK, TWCC, PLI, FIR, REMB and others), extended reports and congestion control feedback,
+and compound packets.
+
+## Specifications
+
+- RFC 3550, RTCP packet formats; RFC 5506, reduced-size RTCP
+- RFC 4585, RTP/AVPF feedback; RFC 5104, codec control messages
+- RFC 3611, RTCP extended reports; RFC 6679, ECN feedback
+- RFC 8888, RTCP congestion control feedback; RFC 7728, pause and resume
+
+Clause-by-clause status, with the test that proves each clause: [rfc3550](../docs/conformance/audit/rfc3550.md), [rfc4585](../docs/conformance/audit/rfc4585.md), [rfc5104](../docs/conformance/audit/rfc5104.md), [rfc3611](../docs/conformance/audit/rfc3611.md), [rfc6679](../docs/conformance/audit/rfc6679.md), [rfc8888](../docs/conformance/audit/rfc8888.md).
+
+## Use
+
+`rtc_rtcp::packet::unmarshal` parses a (compound) RTCP datagram into packets; every packet
+type implements `rtc-shared`'s `Marshal` / `Unmarshal`. The RTCP session logic (when to send
+what) is in `rtc-interceptor`.
+
+## Sans-I/O
+
+A codec only: bytes in, typed packets out, and back. It holds no state between packets and reads no clock.
+
+## Licence
+
+Licensed under either of the [MIT licence](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+This crate is part of the [`rtc`](../README.md) workspace, which descends from
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
+[FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
+notices are retained.
