@@ -401,11 +401,16 @@ impl EngineTurn {
         }
     }
 
-    /// The first UDP base of `transport` of the family of `server`.
-    fn udp_base(&self, transport: TransportId, server: SocketAddr) -> Option<SocketAddr> {
+    /// The first UDP base of `transport` of the family of `server` that is `usable`.
+    fn udp_base(
+        &self,
+        transport: TransportId,
+        server: SocketAddr,
+        usable: impl Fn(SocketAddr) -> bool,
+    ) -> Option<SocketAddr> {
         self.udp_bases
             .iter()
-            .find(|(t, b)| *t == transport && b.is_ipv4() == server.is_ipv4())
+            .find(|(t, b)| *t == transport && b.is_ipv4() == server.is_ipv4() && usable(*b))
             .map(|(_, b)| *b)
     }
 
@@ -548,7 +553,7 @@ impl RTCPeerConnection {
                         .turn
                         .udp_bases
                         .iter()
-                        .any(|(t, _)| *t == link.transport))
+                        .any(|(t, b)| *t == link.transport && self.turn_base_usable(*t, *b)))
             {
                 continue;
             }
@@ -1623,6 +1628,25 @@ impl RTCPeerConnection {
         }
     }
 
+    /// Whether a link of `transport` may start from the UDP base `base`: not when it is a
+    /// transport address of a DTLS association a new one replaced (RFC 8842 section 5.1: the
+    /// new association's 3-tuple is a new one, the relayed one included, so its allocation
+    /// is made from a base the application gathered for it).
+    fn turn_base_usable(&self, transport: TransportId, base: SocketAddr) -> bool {
+        !self
+            .ice_transport_of(transport)
+            .previous_association_addresses
+            .contains(&base)
+    }
+
+    /// The UDP base of `transport` of the family of `server` a link starts from
+    /// ([`Self::turn_base_usable`]).
+    fn turn_udp_base(&self, transport: TransportId, server: SocketAddr) -> Option<SocketAddr> {
+        self.streams.turn.udp_base(transport, server, |base| {
+            self.turn_base_usable(transport, base)
+        })
+    }
+
     /// Starts a DTLS handshake to `addr` for link `index`, from the transport's UDP base of
     /// that family. Returns whether it started; a link nothing can verify has failed.
     fn start_dtls_attempt(&mut self, now: Instant, index: usize, addr: SocketAddr) -> bool {
@@ -1630,7 +1654,7 @@ impl RTCPeerConnection {
             let l = &self.streams.turn.links[index];
             (l.transport, l.url.host.clone())
         };
-        let Some(base) = self.streams.turn.udp_base(transport, addr) else {
+        let Some(base) = self.turn_udp_base(transport, addr) else {
             debug!("TURN over DTLS to {addr}: no UDP base of that family");
             return false;
         };
@@ -1850,7 +1874,7 @@ impl RTCPeerConnection {
     /// transport's UDP base of that family (RFC 8656 section 3.9). Returns whether it started.
     fn start_udp_attempt(&mut self, now: Instant, index: usize, addr: SocketAddr) -> bool {
         let transport = self.streams.turn.links[index].transport;
-        let Some(base) = self.streams.turn.udp_base(transport, addr) else {
+        let Some(base) = self.turn_udp_base(transport, addr) else {
             debug!("TURN over UDP to {addr}: no UDP base of that family");
             return false;
         };
