@@ -2117,6 +2117,23 @@ impl RTCPeerConnection {
                 continue;
             };
             let offered_rids = get_rids(offered);
+            // RFC 8853 section 5.2 (a local answer: the offer's `recv` streams marked
+            // paused) and section 5.3.3 (a remote answer: the answer's): the streams the
+            // remote description marks `~` start paused.
+            let remote_rids = if answer_is_local {
+                offered_rids.clone()
+            } else {
+                get_rids(answered)
+            };
+            sender.set_initially_paused_rids(
+                remote_rids
+                    .iter()
+                    .filter(|rid| {
+                        rid.direction == SimulcastDirection::Recv && rid.simulcast && rid.paused
+                    })
+                    .map(|rid| rid.id.clone())
+                    .collect(),
+            );
             let formats = same_format(offered, answered);
             let accepted: Vec<(String, RTCRtpRidRestrictions)> = get_rids(answered)
                 .into_iter()

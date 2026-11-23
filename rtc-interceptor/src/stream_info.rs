@@ -182,6 +182,11 @@ pub struct StreamInfo {
     /// source that switches payload type (and with it clock rate, RFC 7160 section 4.3), e.g.
     /// Opus at 48000 and PCMU at 8000 on one SSRC. Empty: every packet is at `clock_rate`.
     pub payload_clock_rates: Vec<(u8, u32)>,
+
+    /// A local stream the session description starts paused (RFC 8853 section 5.2: a rid-id
+    /// marked `~`, "an unsolicited locally paused stream"). The RFC 7728 interceptor starts
+    /// it paused when pause and resume were negotiated for it; other interceptors ignore it.
+    pub initially_paused: bool,
 }
 
 impl StreamInfo {

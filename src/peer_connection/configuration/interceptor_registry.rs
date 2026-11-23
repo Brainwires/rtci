@@ -1496,6 +1496,8 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
     }
 }
 

@@ -38,7 +38,8 @@ fn a_local_description_that_does_not_parse_or_apply_is_refused_and_changes_nothi
 }
 
 /// Section 5.8.1: "Any 'a=ice-options' attributes MUST be parsed ... and the options stored":
-/// every option of the remote description, the ones the engine does not act on included.
+/// every option of the remote description, the ones the engine does not act on included
+/// (`ice-option-tag = 1*ice-char`, RFC 8839 section 5.6: letters, digits, `+` and `/`).
 #[test]
 fn remote_ice_options_are_parsed_and_stored() -> TestResult {
     let mut offerer = default_peer()?;
@@ -47,16 +48,13 @@ fn remote_ice_options_are_parsed_and_stored() -> TestResult {
     let offer = offerer.create_offer(None)?;
     let sdp = offer.sdp.replace(
         "a=ice-options:trickle",
-        "a=ice-options:trickle x-future-option",
+        "a=ice-options:trickle xfutureoption",
     );
     assert_ne!(sdp, offer.sdp, "the offer states ice-options");
     answerer.set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp)?)?;
     let options = answerer.remote_ice_options();
     assert!(options.iter().any(|o| o == "trickle"), "{options:?}");
-    assert!(
-        options.iter().any(|o| o == "x-future-option"),
-        "{options:?}"
-    );
+    assert!(options.iter().any(|o| o == "xfutureoption"), "{options:?}");
     Ok(())
 }
 

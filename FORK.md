@@ -401,6 +401,15 @@ versions that support it. Raising it is a deliberate change of the manifest.
 
 ### Defaults the fork narrows on purpose
 
+- SDP (jsep13): a remote description with an attribute that does not follow its grammar is
+  refused, also when the value would be ignored (RFC 9429 section 5.8; upstream skipped such
+  lines, or used them), except `a=msid` and `a=rid` lines, which RFC 8830 and RFC 8851 have
+  ignored; an answer with `a=setup:actpass`, or one that flips the role of a continued DTLS
+  association, is refused (RFC 5763 section 5, RFC 9429 section 5.8.3); bundled sections
+  that give a payload type different `a=rtcp-fb` are refused (RFC 8859 appendix A). White
+  space at the end of a value is tolerated by default for webrtc-rs 0.17 / Pion
+  (`with_strict_sdp_attribute_grammar(true)` refuses it).
+
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
   ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops
   multiplexing RTCP on a negotiated section is refused under every mux policy (RFC 9429

@@ -81,6 +81,9 @@ pub(crate) struct RTCRtpSenderInternal {
     /// The SSRCs of the simulcast encodings an answer removed (`apply_simulcast_answer`): the
     /// track still has them, but they are neither bound nor sent.
     removed_ssrcs: Vec<SSRC>,
+    /// The rids of the encodings the first negotiation starts paused (RFC 8853 section 5.2:
+    /// the remote description marks them `~`); bound with `StreamInfo::initially_paused`.
+    initially_paused_rids: Vec<String>,
     /// W3C `[[LastStableRidlessSendEncodings]]`: the lone rid-less encoding a remote offer to
     /// receive simulcast replaced by its proposed encodings, which a rollback restores.
     last_stable_ridless_send_encodings: Option<Vec<RTCRtpEncodingParameters>>,
@@ -126,6 +129,19 @@ struct MaxBitrateLimiter {
     refilled: std::time::Instant,
     /// The frame being sent: its RTP timestamp and whether it was admitted.
     frame: Option<(u32, bool)>,
+}
+
+/// The streams `add_track` associates a sender with: the one its track names, or none when
+/// the track names none (an empty stream id, or `-`, the msid-id RFC 8830 section 3 gives
+/// "no MediaStream"; W3C `addTrack(track)` with no streams). A sender in no stream is
+/// written `a=msid:- <id>` (RFC 9429 section 5.2.1).
+pub(crate) fn track_streams(track: &MediaStreamTrack) -> Vec<MediaStreamId> {
+    let stream = track.stream_id();
+    if stream.is_empty() || stream == "-" {
+        vec![]
+    } else {
+        vec![stream.to_string()]
+    }
 }
 
 impl RTCRtpSenderInternal {
@@ -248,7 +264,7 @@ impl RTCRtpSenderInternal {
         send_encodings: Vec<RTCRtpEncodingParameters>,
     ) -> Self {
         let streams = if streams.is_empty() {
-            vec![track.stream_id().to_string()]
+            track_streams(&track)
         } else {
             streams
         };
@@ -998,7 +1014,7 @@ impl RTCRtpSenderInternal {
             {
                 let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);
                 let fec_format = find_fec_format(codecs);
-                infos.push(create_stream_info(
+                let mut info = create_stream_info(
                     ssrc,
                     // A repair SSRC goes with a repair payload type: without one negotiated it
                     // could not be sent, so the stream does not name it.
@@ -1020,10 +1036,26 @@ impl RTCRtpSenderInternal {
                     &codec.rtp_codec,
                     &header_extensions,
                     codecs,
-                ));
+                );
+                info.initially_paused = !coding.rtp_coding_parameters.rid.is_empty()
+                    && self
+                        .initially_paused_rids
+                        .contains(&coding.rtp_coding_parameters.rid);
+                infos.push(info);
             }
         }
         infos
+    }
+
+    /// RFC 8853 sections 5.2 and 5.3.3: the simulcast streams the remote description marks
+    /// initially paused (`~`) start in an unsolicited local pause, with RFC 7728 pause and
+    /// resume negotiated for them (the pause and resume interceptor does it). Only the
+    /// negotiation that first binds the sender's streams sets them: afterwards RFC 7728
+    /// signalling decides, not the marks of later descriptions (section 5.3.4, item 2).
+    pub(crate) fn set_initially_paused_rids(&mut self, rids: Vec<String>) {
+        if self.bound_streams.is_empty() {
+            self.initially_paused_rids = rids;
+        }
     }
 
     /// The sender's encodings as `set_parameters` last left them (their `active` flags are what
