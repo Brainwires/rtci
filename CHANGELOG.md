@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: an offerer receives as its offer describes before the answer arrives
+  (`conf/early-1-receive-at-offer`, early1; RFC 3264 section 5.1, RFC 9429 sections 4.1.11,
+  5.9 and 5.11). No signature changes; the behaviour an application sees changes:
+  - From `set_local_description(offer)` on, each receiver whose m= section the offer lists
+    `sendrecv` or `recvonly` takes that section's formats beside the ones negotiated before,
+    and the offer's header extension ids are read where none is negotiated yet. Media that
+    overtakes the answer (a later offer on a transport that is up; an offer followed by a
+    provisional answer) is delivered at once, as `RTCMessage::RtpPacket` for the track of the
+    receiver the application has from `add_transceiver_*` / `add_track`, where it used to be
+    discarded (`discarded_rtp_packets`) or let through without its stream being established.
+    `RTCTrackEvent::OnOpen` and `OnUnmute` therefore fire before the answer; the W3C `track`
+    event (`OnRemoteTrack`) still fires when the remote description is applied. Nothing is
+    buffered.
+  - A provisional answer no longer narrows what is received: every format of the offer
+    stays receivable until the final answer or a rollback (RFC 9429 section 4.1.11).
+  - The final answer keeps a stream that arrived early (its SSRC, track and statistics) and
+    binds it to the interceptors again only when it changes what the stream was bound with.
+    A format that was offered and never negotiated before is bound without RTCP feedback
+    until the answer has it (RFC 4585 section 4.2), so for a new section NACK, PLI and
+    congestion feedback start with the answer; receiver reports of an RTP session that
+    already exists cover the early stream. A format the answer leaves out stops being
+    received with the answer.
+  - A rollback of the offer (explicit, or the implicit one of a glare) takes back what the
+    offer prepared: the early streams are unbound, their inbound-rtp statistics are retired,
+    a track their media unmuted is muted again (`RTCTrackEvent::OnMute`), and what the peer
+    still sends for them is unassociated media (`OnUnassociatedRtpDiscarded`).
+  - With several transports, a section a pending local offer lists in a BUNDLE group is
+    accepted on that group's transport as well as on the transport the offer stages for it
+    (RFC 9143 section 7.2), until the answer says where it is.
+  - While a local offer is pending, an RTX or FEC packet on an SSRC no description names yet
+    is taken as the repair flow of the one stream its section receives (RFC 4588 section
+    5.3), and a repair packet that precedes its stream is dropped without being reported as
+    unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
+    of codec `video/rtx` (at any time).
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
     section 5.2.2): the formats of the most recent answer first in its order, then every

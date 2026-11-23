@@ -429,6 +429,15 @@ versions that support it. Raising it is a deliberate change of the manifest.
   negotiation too.
 - RFC 7728 (jsep14): `set_parameters` turning an encoding off is a local pause (PAUSED sent)
   when pause and resume is negotiated (RFC 8853 section 5.2).
+- Receiving before the answer (early1): upstream prepares its receivers when the answer is
+  applied, so media that overtakes the answer is dropped. Here an applied local offer
+  prepares each receiving section (formats, header extension ids, MID / rid / payload type
+  demultiplexing, RTX mapping; RFC 3264 section 5.1, RFC 9429 sections 4.1.11 and 5.9), and
+  early media goes straight to the receiver's track (W3C `[[Receptive]]`); the answer
+  settles it and a rollback takes it back (`src/peer_connection/early_media.rs`). An initial
+  offer still receives nothing before a remote description: no DTLS handshake runs without
+  the peer's fingerprint (RFC 8842 section 5.2), so there the case is a provisional answer's.
+  Formats newly offered get no RTCP feedback before the answer (RFC 4585 section 4.2).
 
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
   ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops
