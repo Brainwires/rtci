@@ -438,9 +438,10 @@ mod tests {
         // Extended sequence number should show 1 cycle (1 << 16)
         assert_eq!(rr.reports[0].last_sequence_number, 1 << 16);
         assert_eq!(rr.reports[0].fraction_lost, 0);
-        // RFC 3550 Appendix A.3: two packets expected from the first sequence number on
-        // (0xffff, 0x0000), three received, so the cumulative loss is minus one.
-        assert_eq!(rr.reports[0].cumulative_lost(), -1);
+        // RFC 3550 6.4.1: 0xfffe was sent before the first packet received and overtaken by
+        // it: the sequence starts there, three packets expected and three received. (Counted
+        // as a duplicate, it left the cumulative loss at -1 on a path that lost nothing.)
+        assert_eq!(rr.reports[0].cumulative_lost(), 0);
     }
 
     #[test]
