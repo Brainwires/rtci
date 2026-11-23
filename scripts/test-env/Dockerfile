@@ -73,5 +73,16 @@ RUN python3 -m venv /opt/peers/aiortc/venv \
     && /opt/peers/aiortc/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
        --require-hashes --only-binary :all: --no-deps -r /opt/peers/aiortc/requirements.txt \
     && chmod -R a+rX /opt/peers/aiortc
+# aiortc 1.16.0 refuses a description with an a=extmap extension attribute (RFC 8285 5; the
+# RFC 6904 encrypted form the engine offers): https://github.com/aiortc/aiortc/issues/1492.
+# Until upstream releases the fix, the wheel's sdp.py is replaced by the fork's (Brainwires/
+# aiortc, branch fix/extmap-extension-attributes-1.16.0, commit 4982300: 1.16.0 plus the fix),
+# both files checked by SHA-256. To be dropped when upstream releases the fix.
+COPY peers/aiortc/image/sdp.py /opt/peers/aiortc/sdp.py
+RUN set -eu; \
+    target=$(/opt/peers/aiortc/venv/bin/python -I -c 'import aiortc.sdp; print(aiortc.sdp.__file__)'); \
+    echo "0fae9213911b75a548deb434d4d1e2036da77d7c96a7049c9c315752e6135a22  $target" | sha256sum -c -; \
+    echo "60de8a8818aa16fbc4d4f8d322c1f2655ace12f5999bab55a449ae1f0141fe7b  /opt/peers/aiortc/sdp.py" | sha256sum -c -; \
+    cp /opt/peers/aiortc/sdp.py "$target"; rm -rf "$(dirname "$target")/__pycache__"
 
 WORKDIR /src
