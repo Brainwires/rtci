@@ -24,6 +24,10 @@
     "unbundled": {
       "reason": "str0m runs one ICE transport per session: every m-line must be bundled",
       "cite": "str0m 0.26.0 docs/SDP.md, \"BUNDLE and Bundle Policies\": \"str0m only supports a single ICE transport, meaning all m-lines must be bundled together\""
+    },
+    "simulcastWithoutRid": {
+      "reason": "str0m always writes the MID and RID header extensions on the layers it sends",
+      "cite": "str0m 0.26.0 src/streams/send.rs (header_ref.ext_vals.mid = Some(mid); header_ref.ext_vals.rid = rid)"
     }
   }
 }

@@ -21,16 +21,20 @@ if (cells.length === 0) problems.push("the summary has no cells: the matrix did 
 for (const b of browsers) {
   if (!cells.some((c) => c.browser === b)) problems.push(`${b}: ran no test`);
 }
-const ok = new Set(["pass", "na-browser", "na-env", "na-peer"]);
+// xfail: a known gap, an expected failure with its cited verdict (matrix.mjs).
+const ok = new Set(["pass", "na-browser", "na-env", "na-peer", "xfail"]);
 for (const c of cells) {
   if (!ok.has(c.status)) problems.push(`${c.test} [${c.browser}]: ${c.status}${c.detail ? ` (${c.detail})` : ""}`);
 }
 const count = (s) => cells.filter((c) => c.status === s).length;
 console.log(
   `interop gate: ${count("pass")} pass, ${count("na-browser")} na-browser, ${count("na-peer")} na-peer, ` +
-    `${count("na-env")} na-env (not tested), ` +
-    `${cells.length - count("pass") - count("na-browser") - count("na-peer") - count("na-env")} failing`,
+    `${count("na-env")} na-env (not tested), ${count("xfail")} known gaps, ` +
+    `${cells.length - count("pass") - count("na-browser") - count("na-peer") - count("na-env") - count("xfail")} failing`,
 );
+for (const c of cells.filter((c) => c.status === "xfail")) {
+  console.log(`  known gap: ${c.test} [${c.browser}]: ${c.reason} [${c.cite}]`);
+}
 for (const c of cells.filter((c) => c.status === "na-env")) {
   console.log(`  not tested: ${c.test} [${c.browser}]: ${c.reason} [${c.cite}]`);
 }

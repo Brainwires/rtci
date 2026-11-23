@@ -685,6 +685,34 @@ test("simulcast: three RIDs from the peer reach Rust", async () => {
   }
 });
 
+// The same three layers with no MID or RID extension on the wire, identified only by the SSRCs
+// the offer declares for the section (`a=ssrc`, `a=ssrc-group:FID`): RFC 9143 9.2 associates
+// a declared SSRC with its m= section. Known engine gap (train 10 round 4): the engine drops a
+// rid section's declared SSRCs and discards RID-less packets there; the cell is an expected
+// failure with that verdict until `conf/demux-1-declared-ssrc-in-rid-section` lands.
+const DECLARED_SSRC_GAP =
+  "engine-gap: a stream whose SSRC the offer declared for a section with a=rid is discarded when its packets carry no RID " +
+  "[RFC 9143 9.2; docs/interop.md Findings, train 10 round 4; fix scheduled on conf/demux-1-declared-ssrc-in-rid-section]";
+test("simulcast without MID or RID on the wire: the layers' declared SSRCs reach Rust's section", async () => {
+  test.fail(peerName() === "pion", DECLARED_SSRC_GAP);
+  const r = await run(test.info().title, {
+    scenario: { media: "count" },
+    steps: [
+      { op: "track", kind: "video", codec: "vp8", simulcast: ["q", "h", "f"], ridExtensions: false },
+      { op: "offer" },
+      { op: "connected" },
+      { op: "wait", ms: 8000 },
+      { op: "report" },
+    ],
+  }, ["simulcastSend", "simulcastWithoutRid"]);
+  expectOk(r);
+  const declared = [...lastDescription(r, "sent", "offer").matchAll(/^a=ssrc-group:FID (\d+) \d+/gm)].map((m) => Number(m[1]));
+  expect(declared.length, ctx(r)).toBe(3);
+  expect(r.rust?.discardedSsrcs || [], `Rust discarded the declared layers: ${ctx(r, { peerFirstHeaders: r.firstHeaders })}`).toEqual([]);
+  const inbound = (r.rust?.stats?.inbound || []).filter((i) => i.kind === "video").map((i) => i.ssrc);
+  for (const ssrc of declared) expect(inbound, ctx(r)).toContain(ssrc);
+});
+
 // ---- several transports (RFC 9429 4.1.1, 5.2.1, 5.3.1; RFC 9143 7) ----
 
 test("balanced: Rust's offer with a transport per media type, the peer bundles it", async () => {

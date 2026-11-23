@@ -2467,6 +2467,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins that the engine binds RID layers of an offer that also declares their SSRCs, as Pion's
   does; interop-peer reports the SSRCs it discarded as unassociated and the Pion peer the first
   RTP header it writes per SSRC.
+  Round 4: the Pion peer writes the sdes:mid and sdes:rtp-stream-id header extensions on its
+  simulcast layers (Pion leaves them to the application); a second cell sends the layers
+  without them, an expected failure (`xfail`, accepted by the gate with its cited verdict) for
+  the engine gap RFC 9143 9.2 describes (declared SSRCs of a rid section are discarded).
 
 - **interop** (branch `conf/peers-5-layers`): layer interop tests against independent
   implementations, in `scripts/test-env/peers/layers` (a crate outside the workspace, run in
