@@ -11,8 +11,10 @@
 //! are refused. The driver reacts by itself: it binds new UDP ports (inside
 //! [`PeerDriverConfig::udp_port_range`], skipping ports the host refuses), adds their host
 //! candidates for the event's section, ends the generation, and closes the previous sockets
-//! only once a candidate pair on a new one is selected for that transport, or the transport is
-//! closed: until then the previous path keeps carrying the transport's packets. The engine's
+//! only once a candidate pair on a new one is selected for that transport (and then after
+//! [`PeerDriverConfig::retired_socket_linger`], for what the peer still sends there before its
+//! own selection switches), or the transport is closed: until then the previous path keeps
+//! carrying the transport's packets. The engine's
 //! ICE-TCP listener is kept (RFC 8842 asks a new 3-tuple of unordered transports only), and
 //! its server-reflexive and TURN gathering follow the new host candidates by themselves.
 //!
@@ -72,6 +74,11 @@ pub struct PeerDriverConfig {
     pub udp_port_range: Option<PortRange>,
     /// The engine's TCP sockets (ICE-TCP, TURN over TCP and TLS), with their port range.
     pub streams: DriverConfig,
+    /// How long a previous socket stays open after its transport selected a pair on a new one:
+    /// the peer may still send to the previous address until its own selection switches
+    /// (each side selects on its own), and those packets must not be lost. 5 seconds by
+    /// default.
+    pub retired_socket_linger: Duration,
 }
 
 impl PeerDriverConfig {
@@ -81,6 +88,7 @@ impl PeerDriverConfig {
             addresses,
             udp_port_range: None,
             streams: DriverConfig::default(),
+            retired_socket_linger: Duration::from_secs(5),
         }
     }
 }
@@ -94,6 +102,8 @@ struct HostSocket {
     /// Set when the engine refused its address for `transport` (`OnLocalCandidatesNeeded`):
     /// it is closed once that transport has selected a pair on another socket, or closed.
     retired_for: Option<RTCTransportId>,
+    /// Once its transport selected a pair on another socket: when it is closed.
+    close_at: Option<Instant>,
     reader: JoinHandle<()>,
 }
 
@@ -219,7 +229,10 @@ impl PeerDriver {
             _ = tokio::time::sleep_until(deadline.into()) => {}
         }
         // The engine's timers; one that fails is the connection's to report (its states).
-        let _ = self.pc.handle_timeout(Instant::now());
+        let now = Instant::now();
+        let _ = self.pc.handle_timeout(now);
+        self.sockets
+            .retain(|s| s.close_at.is_none_or(|close_at| close_at > now));
         self.flush()
     }
 
@@ -293,7 +306,7 @@ impl PeerDriver {
                             && s.local.ip().to_string() == local.address
                     });
                     if !on_retired {
-                        self.release(event.ice_transport);
+                        self.release_after_linger(event.ice_transport);
                     }
                     Ok(())
                 }
@@ -425,6 +438,7 @@ impl PeerDriver {
                 local,
                 mid: mid.to_owned(),
                 retired_for: None,
+                close_at: None,
                 reader,
             });
             self.pc
@@ -441,9 +455,22 @@ impl PeerDriver {
         })
     }
 
-    /// Closes the sockets retired for `transport`.
+    /// Closes the sockets retired for `transport` (it is closed: nothing travels over them).
     fn release(&mut self, transport: RTCTransportId) {
         self.sockets.retain(|s| s.retired_for != Some(transport));
+    }
+
+    /// `transport` selected a pair on a new socket: its retired sockets are closed after
+    /// [`PeerDriverConfig::retired_socket_linger`], for what the peer still sends to them.
+    fn release_after_linger(&mut self, transport: RTCTransportId) {
+        let close_at = Instant::now() + self.config.retired_socket_linger;
+        for host in self
+            .sockets
+            .iter_mut()
+            .filter(|s| s.retired_for == Some(transport) && s.close_at.is_none())
+        {
+            host.close_at = Some(close_at);
+        }
     }
 }
 

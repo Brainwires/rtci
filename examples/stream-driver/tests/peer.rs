@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// How long a previous socket stays open after a pair on a new one is selected.
+const LINGER: Duration = Duration::from_secs(2);
 
 /// One side: the driver, and what the application saw.
 struct Side {
@@ -55,7 +57,13 @@ impl Side {
             .with_setting_engine(settings.build())
             .build(Instant::now())?;
         Ok(Self {
-            driver: PeerDriver::new(pc, PeerDriverConfig::on(vec![LOOPBACK])),
+            driver: PeerDriver::new(
+                pc,
+                PeerDriverConfig {
+                    retired_socket_linger: LINGER,
+                    ..PeerDriverConfig::on(vec![LOOPBACK])
+                },
+            ),
             outgoing: vec![],
             negotiation_needed: false,
             needed: vec![],
@@ -368,13 +376,14 @@ async fn automatic_srtp_re_keying_carries_every_packet_onto_new_sockets() -> Res
             side.needed
         );
     }
-    run_for(&mut a, &mut b, Duration::from_millis(500)).await?;
+    run_for(&mut a, &mut b, LINGER * 3).await?;
     for (who, side, before) in [("a", &a, &before.0), ("b", &b, &before.1)] {
         let after = side.driver.local_addresses();
         assert_eq!(
             after.len(),
             1,
-            "{who}: the previous sockets are closed once the new pair is selected: {after:?}"
+            "{who}: the previous sockets are closed once the new pair is selected (after the \
+             linger): {after:?}"
         );
         assert!(
             disjoint(before, &after),
