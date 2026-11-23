@@ -1117,7 +1117,10 @@ pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuild
     // last such section goes: a data-channel-only connection sends no RTCP.
     registry.with_per_rtp_session(
         Slot::RtcpSession,
-        session.with_joins_on_start(true).build_per_rtp_session(),
+        session
+            .with_joins_on_start(true)
+            .with_first_report_at_join(true)
+            .build_per_rtp_session(),
     )
 }
 

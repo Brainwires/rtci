@@ -2271,3 +2271,6 @@ mod cookie_test;
 
 #[path = "zero_checksum_test.rs"]
 mod zero_checksum_test;
+
+#[path = "cookie_ack_loss_test.rs"]
+mod cookie_ack_loss_test;
