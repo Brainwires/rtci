@@ -335,6 +335,34 @@ fn normalize(name: &str) -> (String, String) {
 }
 
 impl Mdns {
+    /// Feeds a received datagram together with the destination address of its IP header, as
+    /// the driver reads it (`IP_PKTINFO`, `IPV6_PKTINFO`, `IP_RECVDSTADDR`). With it the RFC
+    /// 6762 rules that turn on the destination apply exactly:
+    ///
+    /// - section 6: a response that arrived by unicast is taken only for a recent question
+    ///   asked with the QU bit; others are ignored;
+    /// - section 11: a response that arrived at the mDNS multicast address (224.0.0.251 or
+    ///   FF02::FB) "originated on the local link, regardless of source IP address"; one that
+    ///   arrived by unicast is held to the on-link test.
+    ///
+    /// [`handle_read`](sansio::Protocol::handle_read) is the same without a known
+    /// destination: then the address scope of the source decides (see
+    /// [`MdnsConfig::with_on_link_subnets`]).
+    ///
+    /// # Errors
+    ///
+    /// As `handle_read`.
+    pub fn handle_datagram(&mut self, msg: TaggedBytesMut, destination: IpAddr) -> Result<()> {
+        if self.closed {
+            return Err(Error::ErrConnectionClosed);
+        }
+        self.last_now = msg.now;
+        self.process_message(&msg, Some(destination));
+        self.flush(msg.now);
+        self.update_next_timeout();
+        Ok(())
+    }
+
     /// Create a new mDNS connection with the given configuration.
     ///
     /// # Arguments
@@ -665,12 +693,15 @@ impl Mdns {
     }
 
     /// Whether an answer naming `addr` is believed from `src`: see
-    /// [`answer_is_from_its_owner`].
-    fn trusts(&self, addr: IpAddr, src: IpAddr) -> bool {
+    /// [`answer_is_from_its_owner`]. `on_link` overrides the scope test: a response the
+    /// driver says arrived at the mDNS multicast address originated on the link (RFC 6762
+    /// section 11). An A record must still name its sender (the fork's hardening).
+    fn trusts(&self, addr: IpAddr, src: IpAddr, on_link: bool) -> bool {
         let (addr, src) = (addr.to_canonical(), src.to_canonical());
+        let on_link = on_link || self.is_on_link(src);
         match addr {
-            IpAddr::V4(_) => addr == src && self.is_on_link(src),
-            IpAddr::V6(_) => addr == src || self.is_on_link(src),
+            IpAddr::V4(_) => addr == src && on_link,
+            IpAddr::V6(_) => addr == src || on_link,
         }
     }
 
@@ -753,7 +784,7 @@ impl Mdns {
         self.asap = asap;
     }
 
-    fn process_message(&mut self, msg: &TaggedBytesMut) {
+    fn process_message(&mut self, msg: &TaggedBytesMut, destination: Option<IpAddr>) {
         let Some(inbound) = wire::parse(&msg.message) else {
             log::debug!("mDNS ignores a datagram that is not a DNS message");
             return;
@@ -766,15 +797,26 @@ impl Mdns {
         let src = msg.transport.peer_addr;
         // The destination, where the caller reports it: a unicast arrival is held to stricter
         // rules (RFC 6762 sections 5.5, 6, 11).
-        let dst = msg.transport.local_addr.ip();
-        let unicast_arrival =
-            self.config.destination_reported && !(dst.is_unspecified() || dst.is_multicast());
+        // A destination the driver read from the IP header (`handle_datagram`) is believed
+        // as given; otherwise the datagram's `local_addr` is, where the configuration says
+        // the driver puts the destination there.
+        let (unicast_arrival, multicast_arrival) = match destination {
+            Some(dst) => (!dst.is_multicast(), dst.is_multicast()),
+            None => {
+                let dst = msg.transport.local_addr.ip();
+                (
+                    self.config.destination_reported
+                        && !(dst.is_unspecified() || dst.is_multicast()),
+                    false,
+                )
+            }
+        };
 
         if inbound.header.response {
             // RFC 6762 section 6: a response from another source port is silently ignored.
             // Its questions, if it has any, are too.
             if src.port() == MDNS_PORT {
-                self.process_response(&inbound, src, unicast_arrival, msg.now);
+                self.process_response(&inbound, src, unicast_arrival, multicast_arrival, msg.now);
             }
         } else {
             // The Answer section of a query is its sender's known answers: it resolves
@@ -897,7 +939,7 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Mdns {
             return Err(Error::ErrConnectionClosed);
         }
         self.last_now = msg.now;
-        self.process_message(&msg);
+        self.process_message(&msg, None);
         self.flush(msg.now);
         self.update_next_timeout();
         Ok(())

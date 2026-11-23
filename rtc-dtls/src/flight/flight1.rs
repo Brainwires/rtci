@@ -145,15 +145,23 @@ impl Flight for Flight1 {
         };
         state.local_connection_id = None;
         state.remote_connection_id = None;
+        // RFC 5246 7.4.1.2, RFC 5077 section 3.2: the DTLS 1.2 session to resume, if there is
+        // one, and the request for a ticket. (A ClientHello that also offers DTLS 1.3 carries
+        // the session id as its legacy_session_id, RFC 9147 section 5.3.)
+        if let Err(error) = crate::resumption::client_offer(state, cfg) {
+            return Err((None, Some(error)));
+        }
         let extensions = client_hello_extensions(
             cfg,
             state.tls13_offer.as_ref(),
             state.connection_id_offer.as_deref(),
+            state.session_ticket_offer.as_deref(),
         );
 
         let mut client_hello = HandshakeMessageClientHello {
             version: PROTOCOL_VERSION1_2,
             random: state.local_random.clone(),
+            session_id: state.session_id.clone(),
             cookie: state.cookie.clone(),
 
             cipher_suites: client_hello_cipher_suites(cfg),
@@ -203,6 +211,7 @@ pub(crate) fn client_hello_extensions(
     cfg: &HandshakeConfig,
     tls13_offer: Option<&crate::dtls13::hello::ClientOffer>,
     connection_id: Option<&[u8]>,
+    session_ticket: Option<&[u8]>,
 ) -> Vec<Extension> {
     let mut extensions = vec![
         Extension::SupportedSignatureAlgorithms(ExtensionSupportedSignatureAlgorithms {
@@ -249,6 +258,12 @@ pub(crate) fn client_hello_extensions(
         extensions.push(Extension::ServerName(ExtensionServerName {
             server_name: host_name.to_owned(),
         }));
+    }
+
+    // RFC 5077 section 3.2: a ticket to resume with, or nothing to ask for one. Ahead of the
+    // DTLS 1.3 extensions, whose pre_shared_key is the last of all (RFC 8446 section 4.2.11).
+    if let Some(session_ticket) = session_ticket {
+        extensions.push(crate::resumption::session_ticket_extension(session_ticket));
     }
 
     if let Some(offer) = tls13_offer {

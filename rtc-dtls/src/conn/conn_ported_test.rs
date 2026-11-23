@@ -255,6 +255,7 @@ fn test_sequence_number_overflow_on_handshake() -> Result<()> {
             0,
             Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
                 HandshakeMessageClientHello {
+                    session_id: vec![],
                     version: PROTOCOL_VERSION1_2,
                     random: HandshakeRandom::default(),
                     cookie: vec![0; 64],
@@ -1287,6 +1288,7 @@ fn test_server_timeout() -> Result<()> {
         0,
         Content::Handshake(Handshake::new(HandshakeMessage::ClientHello(
             HandshakeMessageClientHello {
+                session_id: vec![],
                 version: PROTOCOL_VERSION1_2,
                 cookie,
                 random: random_at(500),
@@ -1335,6 +1337,7 @@ fn test_protocol_version_validation() -> Result<()> {
     let client_hello = |version: ProtocolVersion, sequence: u64, cookie: &[u8]| {
         let mut handshake =
             Handshake::new(HandshakeMessage::ClientHello(HandshakeMessageClientHello {
+                session_id: vec![],
                 version,
                 cookie: cookie.to_vec(),
                 random: random.clone(),
@@ -1418,6 +1421,7 @@ fn test_protocol_version_validation() -> Result<()> {
         ),
         server_flight(
             HandshakeMessage::ServerHello(HandshakeMessageServerHello {
+                session_id: vec![],
                 version: downgraded,
                 random: random.clone(),
                 cipher_suite: CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,

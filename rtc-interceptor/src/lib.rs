@@ -244,9 +244,11 @@ pub(crate) mod rfc8888;
 pub(crate) mod rtcp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
+pub(crate) mod tst;
 pub(crate) mod twcc;
 pub(crate) mod ulpfec;
 pub(crate) mod wire_image;
+pub(crate) mod xr;
 
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
@@ -386,6 +388,7 @@ pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;
 pub use stream_info::{RTCPFeedback, RTPHeaderExtension, StreamInfo};
+pub use tst::{TstnResponderBuilder, TstnResponderInterceptor, TstrCommands, VbcmCommands};
 pub use twcc::receiver::{TwccReceiverBuilder, TwccReceiverInterceptor};
 pub use twcc::sender::{TwccSenderBuilder, TwccSenderInterceptor};
 pub use ulpfec::decoder::{ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW};
@@ -401,6 +404,10 @@ pub use ulpfec::{
     validate_scheme as validate_ulpfec_scheme,
 };
 pub use wire_image::{MAX_HELD_WIRE_IMAGES, WireImageTap, WireImages, wire_image_tap};
+pub use xr::{
+    DEFAULT_GMIN as XR_DEFAULT_GMIN, DEFAULT_INTERVAL as XR_DEFAULT_INTERVAL, JitterBufferMetrics,
+    RTCP_FB_XR, XrReportBuilder, XrReportInterceptor,
+};
 
 /// One interceptor of packet processing.
 ///

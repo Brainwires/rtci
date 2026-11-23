@@ -129,6 +129,8 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     enum Response {
         Offer(String),
         Connected,
+        /// The ICE transport selected a pair (of the generation in progress).
+        PairSelected,
         DataChannelOpen,
         Error(String),
     }
@@ -459,6 +461,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                             resp_tx.send(Response::Connected).ok();
                         }
                     }
+                    RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
+                        resp_tx.send(Response::PairSelected).ok();
+                    }
                     RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
                         RTCDataChannelEvent::OnOpen(data_channel_id) => {
                             log::info!("RTC: Data channel {} opened", data_channel_id);
@@ -596,6 +601,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     webrtc_connected.store(false, Ordering::SeqCst);
     *webrtc_message_received.lock().await = None;
 
+    // What the first connection reported is behind us.
+    while resp_rx.try_recv().is_ok() {}
+
     // Send restart command
     cmd_tx.send(Command::RestartIce)?;
 
@@ -643,7 +651,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     loop {
         while let Ok(resp) = resp_rx.try_recv() {
             match resp {
-                Response::Connected => rtc_reconnected = true,
+                // A restart begun in "connected" stays "connected" (W3C webrtc-pc 5.6.4):
+                // the new generation's selected pair is the reconnection.
+                Response::Connected | Response::PairSelected => rtc_reconnected = true,
                 Response::Error(e) => log::warn!("RTC error: {}", e),
                 _ => {}
             }

@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod sample_builder_frame_start_test;
 #[cfg(test)]
+mod sample_builder_h26x_test;
+#[cfg(test)]
 mod sample_builder_test;
 #[cfg(test)]
 mod sample_sequence_location_test;
@@ -46,6 +48,11 @@ pub struct SampleBuilder<T: Depacketizer> {
     /// number of padding packets detected and dropped. This number will be a subset of
     /// `dropped_packets`
     padding_packets: u16,
+
+    /// Whether any packet has been consumed (built into a sample or dropped). Until then the
+    /// segment being built starts at the earliest packet that has arrived, not at the first
+    /// one to arrive: packets of the first access unit may come out of order.
+    consumed_any: bool,
 }
 
 impl<T: Depacketizer> SampleBuilder<T> {
@@ -68,6 +75,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
             prepared: SampleSequenceLocation::new(),
             dropped_packets: 0,
             padding_packets: 0,
+            consumed_any: false,
         }
     }
 
@@ -189,6 +197,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
                 }
 
                 // could not build the sample so drop it
+                self.consumed_any = true;
                 self.active.head = self.active.head.wrapping_add(1);
             }
 
@@ -211,6 +220,13 @@ impl<T: Depacketizer> SampleBuilder<T> {
             }
             Comparison::Before => {
                 self.filled.head = sequence_number;
+                // RFC 6184 5.6, 5.8 and RFC 7798 6: NAL units are passed on in RTP
+                // sequence-number order. Before anything was consumed there is no earlier
+                // sample to be late for: a packet that arrives after a later one of the
+                // first sample still belongs in it, so the segment being built starts there.
+                if !self.consumed_any && self.active.has_data() {
+                    self.active.head = sequence_number;
+                }
             }
             Comparison::After => {
                 self.filled.tail = sequence_number.wrapping_add(1);
@@ -322,11 +338,13 @@ impl<T: Depacketizer> SampleBuilder<T> {
             self.purge_consumed_location(&consume, true);
             self.purge_consumed_buffers();
 
+            self.consumed_any = true;
             self.active.head = consume.tail;
             return Err(BuildError::InvalidPartition(consume));
         }
 
         // the head set of packets is now fully consumed
+        self.consumed_any = true;
         self.active.head = consume.tail;
 
         // Assemble the sample payload from the consumed packets. For the common

@@ -272,12 +272,17 @@ impl RTCRtpSender<'_> {
         // negotiation — the point at which the transceiver acquires a mid. Before that the slot
         // is null, which is what the spec means by "prior to construction of the
         // `RTCDtlsTransport` object".
-        self.peer_connection.rtp_transceivers[self.id.0]
+        let mid = self.peer_connection.rtp_transceivers[self.id.0]
             .mid()
             .as_ref()?;
 
         Some(RTCDtlsTransport {
             peer_connection: self.peer_connection,
+            transport: self
+                .peer_connection
+                .pipeline_context
+                .transports
+                .transport_id_for(mid),
         })
     }
     fn sender(&self) -> &internal::RTCRtpSenderInternal {

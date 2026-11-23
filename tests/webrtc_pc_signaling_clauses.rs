@@ -209,6 +209,7 @@ fn add_ice_candidate_refuses_without_a_remote_description_or_a_section() -> Test
         sdp_mline_index: index,
         username_fragment: None,
         url: None,
+        relay_protocol: None,
     };
     let mut answerer = default_peer()?;
     let refused = answerer.add_remote_candidate(candidate(Some(0)));

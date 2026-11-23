@@ -94,26 +94,38 @@ impl Uri {
         ))
     }
 
-    /// Parses a URI and applies the rule of RFC 8489 section 8.1 that
-    /// [`parse_uri`](Self::parse_uri) leaves out: "A 'stuns' URI containing an IP address MUST
-    /// be rejected", since a certificate is checked against a domain name.
-    ///
-    /// `parse_uri` accepts such a URI because browsers do; an application that validates the
-    /// server's certificate itself, by IP address or by a name it holds, depends on that.
+    /// Parses a STUN URI (RFC 7064) and applies RFC 8489 section 8.1: "A 'stuns' URI
+    /// containing an IP address MUST be rejected", since the server's certificate is checked
+    /// against a domain name.
     ///
     /// # Errors
     ///
-    /// As `parse_uri`, and `ErrHost` for a `stuns` URI whose host is an IP address.
-    pub fn parse_uri_strict(raw: &str) -> Result<Self> {
-        let uri = Self::parse_uri(raw)?;
+    /// On a malformed URI, and `ErrHost` for a `stuns` URI whose host is an IP address.
+    pub fn parse_uri(raw: &str) -> Result<Self> {
+        let uri = Self::parse_uri_lenient(raw)?;
         if uri.is_secure() && uri.host_is_ip() {
             return Err(Error::ErrHost);
         }
         Ok(uri)
     }
 
-    /// Parse_uri parses URI from string.
-    pub fn parse_uri(raw: &str) -> Result<Self> {
+    /// The same as [`parse_uri`](Self::parse_uri), the RFC 8489 section 8.1 rule included.
+    ///
+    /// # Errors
+    ///
+    /// As `parse_uri`.
+    pub fn parse_uri_strict(raw: &str) -> Result<Self> {
+        Self::parse_uri(raw)
+    }
+
+    /// Parses a URI as browsers do, accepting a `stuns` URI whose host is an IP address
+    /// (which RFC 8489 section 8.1 rejects): for an application that validates the server's
+    /// certificate itself, by IP address or by a name it holds.
+    ///
+    /// # Errors
+    ///
+    /// On a malformed URI.
+    pub fn parse_uri_lenient(raw: &str) -> Result<Self> {
         // work around for url crate
         if raw.contains("//") {
             return Err(Error::ErrInvalidUrl);

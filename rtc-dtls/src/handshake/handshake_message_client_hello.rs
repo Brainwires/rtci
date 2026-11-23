@@ -24,6 +24,8 @@ existing connection.
 pub struct HandshakeMessageClientHello {
     pub(crate) version: ProtocolVersion,
     pub(crate) random: HandshakeRandom,
+    /// The session the client asks to resume (RFC 5246 7.4.1.2), empty for none.
+    pub(crate) session_id: Vec<u8>,
     pub(crate) cookie: Vec<u8>,
 
     pub(crate) cipher_suites: Vec<CipherSuiteId>,
@@ -35,6 +37,7 @@ impl PartialEq for HandshakeMessageClientHello {
     fn eq(&self, other: &Self) -> bool {
         if !(self.version == other.version
             && self.random == other.random
+            && self.session_id == other.session_id
             && self.cookie == other.cookie
             && self.compression_methods == other.compression_methods
             && self.extensions == other.extensions
@@ -62,6 +65,7 @@ impl fmt::Debug for HandshakeMessageClientHello {
         }
         let s = [
             format!("version: {:?} random: {:?}", self.version, self.random),
+            format!("session_id: {:?}", self.session_id),
             format!("cookie: {:?}", self.cookie),
             format!("cipher_suites: {cipher_suites_str:?}"),
             format!("compression_methods: {:?}", self.compression_methods),
@@ -90,7 +94,7 @@ impl HandshakeMessageClientHello {
         len += self.random.size();
 
         // SessionID
-        len += 1;
+        len += 1 + self.session_id.len();
 
         len += 1 + self.cookie.len();
 
@@ -115,13 +119,17 @@ impl HandshakeMessageClientHello {
         if self.cookie.len() > 255 {
             return Err(Error::ErrCookieTooLong);
         }
+        if self.session_id.len() > MAX_SESSION_ID_LENGTH {
+            return Err(Error::ErrInvalidPacketLength);
+        }
 
         writer.write_u8(self.version.major)?;
         writer.write_u8(self.version.minor)?;
         self.random.marshal(writer)?;
 
-        // SessionID
-        writer.write_u8(0x00)?;
+        // SessionID<0..32>
+        writer.write_u8(self.session_id.len() as u8)?;
+        writer.write_all(&self.session_id)?;
 
         writer.write_u8(self.cookie.len() as u8)?;
         writer.write_all(&self.cookie)?;
@@ -157,14 +165,13 @@ impl HandshakeMessageClientHello {
         let minor = reader.read_u8()?;
         let random = HandshakeRandom::unmarshal(reader)?;
 
-        // SessionID<0..32> (RFC 5246 7.4.1.2). A client may offer one from an earlier session;
-        // this crate resumes none, so it is read and answered with a full handshake.
+        // SessionID<0..32> (RFC 5246 7.4.1.2): the session the client asks to resume.
         let session_id_len = reader.read_u8()? as usize;
         if session_id_len > MAX_SESSION_ID_LENGTH {
             return Err(Error::ErrInvalidPacketLength);
         }
-        let mut session_id = [0u8; MAX_SESSION_ID_LENGTH];
-        reader.read_exact(&mut session_id[..session_id_len])?;
+        let mut session_id = vec![0u8; session_id_len];
+        reader.read_exact(&mut session_id)?;
 
         let cookie_len = reader.read_u8()? as usize;
         let mut cookie = vec![0; cookie_len];
@@ -189,6 +196,7 @@ impl HandshakeMessageClientHello {
         Ok(HandshakeMessageClientHello {
             version: ProtocolVersion { major, minor },
             random,
+            session_id,
             cookie,
 
             cipher_suites,

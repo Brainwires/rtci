@@ -141,25 +141,71 @@ pub enum NominationAcceptance {
     Latest,
 }
 
-/// What the controlling agent does when the transaction of its nomination (a check with
-/// USE-CANDIDATE on a valid pair) times out.
+/// A pacing budget several agents share (RFC 8445 Section 14.2: "all agents together send
+/// no more than one transaction per 5 ms" — the "global" Ta of an implementation that runs
+/// several agents). Give the same `Arc` to every agent (through
+/// [`AgentConfig::pacing_group`] or the peer connection's
+/// `SettingEngineBuilder::with_ice_pacing_group`): each starts a connectivity check only when
+/// none of them has started one in the last 5 ms, on top of its own Ta. An agent without a
+/// group paces alone, by its Ta.
+#[derive(Debug, Default)]
+pub struct PacingGroup {
+    next: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl PacingGroup {
+    /// A new budget, shared by every agent given it.
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// Takes the budget at `now` if it is free: `Ok(())`, or `Err(at)` with when it next is.
+    pub(crate) fn take(
+        &self,
+        now: std::time::Instant,
+    ) -> std::result::Result<(), std::time::Instant> {
+        let mut next = self
+            .next
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *next {
+            Some(at) if at > now => Err(at),
+            _ => {
+                *next = Some(now + MIN_TA);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// What an agent does when a nomination fails (RFC 8445 Section 7.2.5.2): the controlling
+/// agent's check with USE-CANDIDATE on a valid pair, or the controlled agent's check that a
+/// received USE-CANDIDATE triggered (Section 7.3.1.5). The check fails when its transaction times out (`Rc` requests, the
+/// last given `Rm` times the RTO, Section 14.3 and RFC 8489 Section 6.2.1: 39.5 seconds at an
+/// RTO of 500 ms), it is answered with an unrecoverable error response, or the response is
+/// not symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum FailedNomination {
-    /// The pair stays valid (it has received a success response, RFC 8445 Section
-    /// 7.2.5.3.3) and is nominated again, for as long as the peer is heard from on it (an
-    /// authenticated request or response less than the consent expiry, 30 seconds, ago).
-    /// Once the peer has not been heard from for that long, the pair fails and the next valid
-    /// pair is nominated; with none left the checklist fails. Under heavy loss every request
-    /// of a transaction, or every response, can be lost while the peer is there and has
-    /// accepted the nomination: giving up then leaves the peer connected and this agent
-    /// failed.
+    /// RFC 8445 Section 7.2.5.3.4 (the default), for both roles: "If the request fails
+    /// (Section 7.2.5.2), the agent MUST remove the candidate pair from the valid list, set
+    /// the candidate pair state to Failed, and set the checklist state to Failed", and for
+    /// the controlled agent "If the triggered request fails, [...] set the checklist state to
+    /// Failed". The agent fails; the peer may stay connected until its consent expires (RFC
+    /// 7675).
     #[default]
-    Retry,
-    /// RFC 8445 Section 7.2.5.3.4 to the letter: "If the request fails (Section 7.2.5.2), the
-    /// agent MUST remove the candidate pair from the valid list, set the candidate pair state
-    /// to Failed, and set the checklist state to Failed." The agent fails.
     FailChecklist,
+    /// The pair stays valid (it has received a success response, RFC 8445 Section
+    /// 7.2.5.3.3) and a nomination that times out is sent again, for as long as the peer is
+    /// heard from on it (an authenticated request or response less than the consent expiry,
+    /// 30 seconds, ago). Once the peer has not been heard from for that long, or the
+    /// nomination is answered with an error or from the wrong address, the pair fails and
+    /// the next valid pair is nominated; with none left the checklist fails. Under heavy
+    /// loss every request of a transaction, or every response, can be lost while the peer is
+    /// there and has accepted the nomination: this keeps both sides connected then. A
+    /// controlled agent whose triggered check fails fails that pair only: the checklist keeps
+    /// running, and the controlling agent may nominate another pair.
+    Retry,
 }
 
 /// What the agent does with a Binding request that fails the short-term credential check.
@@ -336,11 +382,15 @@ pub struct AgentConfig {
     /// libwebrtc's.
     pub nomination_acceptance: NominationAcceptance,
 
-    /// What the controlling agent does when its nomination times out:
-    /// [`FailedNomination::Retry`] (the default) nominates the pair again while the peer is
-    /// heard from; [`FailedNomination::FailChecklist`] is RFC 8445 Section 7.2.5.3.4 to the
-    /// letter.
+    /// What the controlling agent does when its nomination fails:
+    /// [`FailedNomination::FailChecklist`] (the default) is RFC 8445 Section 7.2.5.3.4, the
+    /// pair and the checklist fail; [`FailedNomination::Retry`] nominates the pair again
+    /// while the peer is heard from.
     pub failed_nomination: FailedNomination,
+
+    /// A pacing budget shared with other agents (RFC 8445 Section 14.2), if the application
+    /// runs several: see [`PacingGroup`]. `None`, the default, paces this agent alone.
+    pub pacing_group: Option<std::sync::Arc<PacingGroup>>,
 
     /// The controlling agent's consent checks on the selected pair carry USE-CANDIDATE, as
     /// libwebrtc's do. Off by default: RFC 8445 Section 7.1.2 asks for the attribute "in order
