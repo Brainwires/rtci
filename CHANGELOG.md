@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors**: the RTP circuit breaker's packet size follows the sending rate
+  (`conf/cb-2-breaker-packet-size`). RFC 8083 section 4.3 compares the sending rate with ten
+  times X = s / (Tr * sqrt(2p/3)); section 3 takes s over "the last 4 * G frames". For speech
+  those are often 23-byte silence frames while the rate is the talkspurts', and a talking call
+  over 1 to 5 % loss was ceased. By default s is now the mean size of the packets sent over the
+  same last CB_INTERVAL reporting intervals the rate is measured over (bytes sent / packets
+  sent there). The RFC form is `CircuitBreakerPacketSize::LastFrames`
+  (`CircuitBreakerBuilder::with_packet_size`,
+  `DefaultInterceptorOptions::circuit_breaker_packet_size`). Row RFC8083-3-3 is `partial`.
+  - `tests/circuit_breaker_reordering_rtc2rtc.rs` reads the receiver's statistics only once
+    every packet the application wrote has left the sender and arrived: these flows write at a
+    fixed rate above the congestion controller's target on a reordering link (250 to 420 kbit/s
+    for the 500 kbit/s video flow), the pacer held 11 to 25 s of media at the last write, and a
+    receiver report taken while packets were still arriving counted one lost (RFC 3550 6.4.1
+    at that instant). The tests check that everything written left the sender instead of a
+    packet rate in the last second, which the pacer spreading a talkspurt made 35 of 50.
+
+- **interceptors**: reordering is no longer taken for loss (`conf/cb-1-false-trip`).
+  - RFC 8083 section 4.3: the RTP circuit breaker ceased a speech flow (the audio pipeline's
+    rtc-to-rtc test, 0 % loss, 0 to 40 ms of jitter) about a second in. A packet overtaken
+    across a report's boundary made one report's fraction lost 25/256 and the next 0 (the
+    fraction cannot go negative, RFC 3550 A.3, while the cumulative count came back to 0);
+    averaged over CB_INTERVAL with the 23-byte packets of the silence frames as s, ten times
+    the TCP rate fell under the flow's rate. The breaker now uses the smaller of that average
+    and the share of the window's packets the cumulative count says were lost, the newest
+    report's count taken only where it gives packets back (a packet missing then may still
+    arrive). Loss that stays lost trips the breaker as before, one report later at most.
+  - RFC 3550 6.4.1: a packet older than the first one received (it was overtaken by it)
+    extends the sequence back instead of counting as a duplicate; it left `packetsLost` at
+    -1 for the whole session on a lossless reordering path.
+  - RFC 4588 6.3: the NACK generator learns how late each stream's out-of-order packets come
+    and holds a first request back that long (the last 10 s, a quarter more, at most 500 ms;
+    `with_reorder_delay` is the floor). A 500 kbit/s video flow with 40 ms of reordering and
+    no loss sent 164 NACKs a minute and had 154 packets retransmitted; now none.
+  - `tests/circuit_breaker_reordering_rtc2rtc.rs`: the default interceptors over a link that
+    reorders, and the sweep (`-- --ignored sweep`) of where the breaker fires.
+
 - **jsep**: `SettingEngineBuilder::with_msid_appdata_change_renews_track`
   (`conf/jsep-69-msid-appdata`, jsep17). RFC 8830 section 3's form: a remote description that
   names a new msid-appdata ends the receiver's track and gives it a new one with a `track`
@@ -356,6 +393,29 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   way: interop-peer took the number before the answer and kept it in its packetizer (it now also
   puts the current number on every packet), and the cells check the format each phase was
   decoded as.
+- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
+  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
+  1.3 (it was `handshake_failure` / `certificate_required`). New
+  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
+  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
+  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
+- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
+  engine change; new tests, each checked by mutation in the container.
+  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
+    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
+    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
+    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
+    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
+    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
+    dependency structure (RFC 5583 section 5.2.1).
+  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
+    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
+    received gracefully, SRTP re-keying, PR-SCTP).
+  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
+    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
+    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
+    `n/a`: it binds the script-facing API.
+  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
 
 - **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
   - A later offer lists every available format, not only the negotiated ones (RFC 9429
@@ -4251,6 +4311,28 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   RE-CONFIG request parameters.
 
 ### Bug Fixes
+
+- **rtc**: a stream whose SSRC the remote description declares for an m= section with
+  `a=rid` / `a=simulcast` is received when its packets carry no RID
+  (`conf/demux-1-declared-ssrc-in-rid-section`). Pion v4.2.29 offers simulcast by RID and also
+  declares each layer with `a=ssrc` and `a=ssrc-group:FID`, then writes no MID or RID header
+  extension (interop matrix, train 10 round 4); the engine dropped a rid section's `a=ssrc`
+  lines (`track_details_from_sdp`) and discarded those packets as unassociated
+  (`OnUnassociatedRtpDiscarded`). RFC 9143 section 9.2 associates a packet whose SSRC is in the
+  table built "for each SSRC configured for receiving in that m= section" with the section.
+  The section's declared SSRCs are now kept on its receiver; a packet of one that carries no RID
+  nor RRID, and no MID naming another section, opens a stream of the section without a rid
+  (`RTCTrackEventInit::rid` is `None`; the track is the section's), with the RTX SSRC its FID
+  group names, and a declared RTX packet resolves to its primary. No rid is guessed from the
+  order of the `a=ssrc` lines; each member of an `a=ssrc-group:SIM` there is a declared SSRC
+  too. A packet that carries a RID is bound by its rid as before
+  (Firefox, which also declares its layers' SSRCs). Tests:
+  `simulcast_repair_rtc2rtc::declared_layer_ssrcs_sent_without_mid_or_rid_are_received_as_streams_of_their_section`,
+  `a_declared_layer_without_rid_is_repaired_over_its_declared_rtx_ssrc`,
+  `interceptor_declared_rid_section_test.rs` (Firefox 152's offer: a layer with its RID binds by
+  rid; one without MID or RID, and a declared RTX packet, without a rid). The interop cell
+  `simulcast without MID or RID on the wire: *` is no longer an expected failure for Pion.
+  Row RFC9143-9.2-7.
 
 - **rtc-interceptor**: a TMMBR held the media sender at the bit rate left at the packet rate of
   the moment it came (`conf/media-22-train-fixes`, train 9). The congestion controller turned

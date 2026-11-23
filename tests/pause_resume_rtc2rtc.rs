@@ -40,6 +40,9 @@ enum Pause {
     Off,
     On,
     NoWait,
+    /// The default line, with a hold-off period of exactly 1 s whatever round trip the RTCP
+    /// session measures: no assumed round trip, `T_dither_max` 1 s.
+    OneSecondHoldOff,
 }
 
 /// The RTCP compound packets a peer's chain writes, as they leave its RTCP session.
@@ -131,6 +134,17 @@ impl Peer {
             Pause::Off => (registry, None),
             Pause::On => {
                 let (registry, handle) = configure_pause_resume(registry, &mut media_engine);
+                (registry, Some(handle))
+            }
+            Pause::OneSecondHoldOff => {
+                let (registry, handle) = configure_pause_resume_with(
+                    registry,
+                    &mut media_engine,
+                    PauseResumeBuilder::new()
+                        .with_round_trip_time(Duration::ZERO)
+                        .with_dither_max(Duration::from_secs(1)),
+                    false,
+                );
                 (registry, Some(handle))
             }
             Pause::NoWait => {
@@ -394,13 +408,19 @@ fn ccm_pause_is_offered_and_answered() -> Result<()> {
 }
 
 /// Sections 6 and 8 end to end: the receiver's PAUSE pauses the stream after the hold-off
-/// period (1 s: twice the 500 ms default round trip), no media crosses the wire while it is
+/// period, no media crosses the wire while it is
 /// paused though the application keeps writing, the receiver learns from PAUSED; its RESUME
 /// plays the stream again, and the packets on the wire go on from the sequence number after
 /// the last one sent.
+///
+/// The hold-off is `2 * RTT + T_dither_max` with RTT the longest round trip the sender
+/// measured (section 6.2), 500 ms until it measured one. This virtual network has no delay, so
+/// the measured round trip is about 0, and whether one is measured before the PAUSE arrives
+/// depends on when the first reports go: the hold-off would be 1 s or nearly 0. The peers are
+/// set to a known one, 1 s (no assumed round trip, `T_dither_max` 1 s), whatever is measured.
 #[test]
 fn the_receiver_pauses_and_resumes_the_senders_stream() -> Result<()> {
-    let mut world = World::connected(Pause::On, Pause::On)?;
+    let mut world = World::connected(Pause::OneSecondHoldOff, Pause::OneSecondHoldOff)?;
     world.send(10)?;
     assert_eq!(world.on_the_wire.len(), 10);
     let ssrc = world.ssrc;

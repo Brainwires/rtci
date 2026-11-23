@@ -133,6 +133,31 @@ fn cryptex_is_negotiated_only_when_every_bundled_rtp_section_has_it() -> TestRes
     Ok(())
 }
 
+/// RFC 9335 section 4: "the same procedure" for including `a=cryptex` applies to subsequent
+/// offers and answers. Under the default policy (`negotiate`) a re-offer from either side and
+/// its answer carry it again, and Cryptex stays negotiated after each exchange.
+#[test]
+fn later_offers_and_answers_keep_cryptex() -> TestResult {
+    let mut offerer = default_peer()?;
+    offerer.add_track(video_track("video", 0x0c0c_0004))?;
+    let mut answerer = default_peer()?;
+    let (offer, answer) = jsep_common::exchange(&mut offerer, &mut answerer)?;
+    assert!(offer.contains("a=cryptex") && answer.contains("a=cryptex"));
+    assert!(offerer.cryptex_negotiated() && answerer.cryptex_negotiated());
+
+    for turn in 0..2 {
+        let (offer, answer) = if turn == 0 {
+            jsep_common::exchange(&mut offerer, &mut answerer)?
+        } else {
+            jsep_common::exchange(&mut answerer, &mut offerer)?
+        };
+        assert!(offer.contains("a=cryptex"), "re-offer {turn}:\n{offer}");
+        assert!(answer.contains("a=cryptex"), "answer {turn}:\n{answer}");
+        assert!(offerer.cryptex_negotiated() && answerer.cryptex_negotiated());
+    }
+    Ok(())
+}
+
 /// W3C webrtc-extensions 10.2: `rtpHeaderEncryptionPolicy` defaults to "negotiate": Cryptex
 /// is offered and used when the peer signals it, and a peer that does not is accepted, the
 /// header extensions (MID, RtpStreamId among them) then going in the clear. This is the
@@ -162,5 +187,106 @@ fn by_default_cryptex_is_negotiated_and_a_peer_without_it_is_accepted() -> TestR
     offerer.set_remote_description(now, answer)?;
     assert!(offerer.remote_description().is_some(), "accepted");
     assert!(!offerer.cryptex_negotiated());
+    Ok(())
+}
+
+/// A peer with the default codecs and the MID header extension for video.
+fn peer_with_mid() -> Result<rtc::peer_connection::RTCPeerConnection, Box<dyn std::error::Error>> {
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::rtp_transceiver::rtp_sender::{RTCRtpHeaderExtensionCapability, RtpCodecKind};
+    let mut media_engine = MediaEngine::default();
+    media_engine.register_default_codecs()?;
+    media_engine.register_header_extension(
+        RTCRtpHeaderExtensionCapability {
+            uri: MID_URI.to_owned(),
+        },
+        RtpCodecKind::Video,
+        None,
+    )?;
+    Ok(rtc::peer_connection::RTCPeerConnectionBuilder::new()
+        .with_media_engine(media_engine)
+        .build(Instant::now())?)
+}
+
+const MID_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
+
+/// RFC 9335 section 5: with two-byte header extensions "the extension identifier with value
+/// 256 MUST NOT be negotiated" (it names the `appbits`). An offer that maps the MID extension,
+/// which the answerer knows, to 256 is applied, and the answer neither takes 256 nor maps the
+/// extension (RFC 8285 section 6: it is passed over); the same offer with the extension at a
+/// local identifier (here 200, two-byte) is answered with it.
+#[test]
+fn the_appbits_identifier_256_is_never_negotiated() -> TestResult {
+    let mut offerer = peer_with_mid()?;
+    offerer.add_track(video_track("video", 0x0c0c_0005))?;
+    let offer = offerer.create_offer(None)?;
+    let mid_line = offer
+        .sdp
+        .lines()
+        .find(|l| l.starts_with("a=extmap:") && l.ends_with(&format!(" {MID_URI}")))
+        .expect("the offer maps the MID extension")
+        .to_owned();
+    for (id, answered) in [("200", true), ("256", false)] {
+        let edited = offer
+            .sdp
+            .replace(&mid_line, &format!("a=extmap:{id} {MID_URI}"));
+        let mut answerer = peer_with_mid()?;
+        answerer.set_remote_description(
+            Instant::now(),
+            rtc::peer_connection::sdp::RTCSessionDescription::offer(edited)?,
+        )?;
+        let answer = answerer.create_answer(None)?;
+        assert_eq!(
+            answer.sdp.contains(&format!("a=extmap:{id} {MID_URI}")),
+            answered,
+            "id {id}:\n{}",
+            answer.sdp
+        );
+        if !answered {
+            assert!(!answer.sdp.contains(MID_URI), "{}", answer.sdp);
+        }
+    }
+    Ok(())
+}
+
+/// RFC 9335 section 9.1: `a=cryptex` is of the TRANSPORT category, so under BUNDLE the
+/// BUNDLE-tagged section's attribute applies to every section of the group (RFC 8859 section
+/// 4.5; RFC 9143 section 7.1.3 lets a description carry it there only). An offer with
+/// `a=cryptex` in its tagged section alone satisfies a `Require` answerer, which answers with
+/// it; the attribute in a section that is not the tagged one does not stand for the group.
+#[test]
+fn a_cryptex_attribute_in_the_bundle_tagged_section_applies_to_the_group() -> TestResult {
+    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    let mut offerer = default_peer()?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+    offerer.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
+    let offer = offerer.create_offer(None)?.sdp;
+    assert!(offer.contains("a=group:BUNDLE 0 1"), "{offer}");
+    let session_level = offer.replacen("a=cryptex\r\n", "", 1);
+    assert!(!session_level.contains("a=cryptex"), "{offer}");
+    for (mid, accepted) in [("0", true), ("1", false)] {
+        let edited = session_level.replacen(
+            &format!("a=mid:{mid}\r\n"),
+            &format!("a=mid:{mid}\r\na=cryptex\r\n"),
+            1,
+        );
+        let mut answerer = default_peer()?;
+        answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
+        let applied = answerer.set_remote_description(
+            Instant::now(),
+            rtc::peer_connection::sdp::RTCSessionDescription::offer(edited.clone())?,
+        );
+        if accepted {
+            applied?;
+            let answer = answerer.create_answer(None)?;
+            assert!(answer.sdp.contains("a=cryptex"), "{}", answer.sdp);
+        } else {
+            assert_eq!(
+                applied.expect_err("a=cryptex outside the tagged section only"),
+                Error::ErrSessionDescriptionMissingCryptex,
+                "{edited}"
+            );
+        }
+    }
     Ok(())
 }

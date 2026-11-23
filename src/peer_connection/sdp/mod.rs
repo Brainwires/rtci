@@ -649,13 +649,21 @@ pub(crate) struct TrackDetails {
     /// The further simulcast streams of the track an `a=ssrc-group:SIM` names, after the
     /// first one (`ssrc`).
     pub(crate) ssrc_layers: Vec<SsrcLayer>,
+    /// With `rids`: the streams the section also declares by SSRC (`a=ssrc`, each `SIM`
+    /// member one), with the repair flows `a=ssrc-group:FID` / `FEC-FR` pair them with, in
+    /// the order of their `a=ssrc` lines. RFC 9143 section 9.2 associates a packet whose SSRC
+    /// the section declares with the section; a packet of one that carries no RID is received
+    /// as a stream without a rid.
+    pub(crate) declared_ssrcs: Vec<SsrcLayer>,
 }
 
 /// The `ssrc-group` semantics of simulcast streams sent as SSRCs of one track, without
 /// RFC 8853 rids (registered in RFC 5576's registry by libwebrtc's use; "SIM").
 const SEMANTIC_TOKEN_SIMULCAST: &str = "SIM";
 
-/// One simulcast stream of an `a=ssrc-group:SIM` track with its repair flows.
+/// A stream an m= section declares by SSRC with its repair flows (RFC 5576 section 4.2, RFC
+/// 4588 section 8.1): one simulcast stream of an `a=ssrc-group:SIM` track, or a declared
+/// stream of a section with `a=rid`.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SsrcLayer {
     pub(crate) ssrc: SSRC,
@@ -928,9 +936,10 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
         }
 
         // If media line is using RTP Stream Identifier Source Description per RFC8851
-        // we will need to override tracks, and remove ssrcs.
-        // This is in particular important for Firefox, as it uses both 'rid', 'simulcast'
-        // and 'a=ssrc' lines.
+        // the section is one track whose streams are its rids. Its `a=ssrc` lines (Firefox
+        // and Pion write them beside 'rid' and 'simulcast') are kept on that track as the
+        // SSRCs the section declares (RFC 9143 section 9.2): a packet that carries a RID is
+        // bound by its rid, one that carries none by its declared SSRC.
         if has_media_msid || (!track_id.is_empty() && !stream_id.is_empty()) {
             // The streams the remote side sends: its `send` rids. A `recv` rid is one of this
             // endpoint's own streams, which the remote side takes.
@@ -949,6 +958,22 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
                     rid_restrictions: rids
                         .iter()
                         .map(|r| (r.id.clone(), r.to_restrictions()))
+                        .collect(),
+                    // Each track's SSRC, then its further `SIM` streams: every one a
+                    // declared primary with its own repair flows.
+                    declared_ssrcs: tracks_in_media_section
+                        .iter()
+                        .flat_map(|track| {
+                            track
+                                .ssrc
+                                .map(|ssrc| SsrcLayer {
+                                    ssrc,
+                                    rtx_ssrc: track.rtx_ssrc,
+                                    fec_ssrc: track.fec_ssrc,
+                                })
+                                .into_iter()
+                                .chain(track.ssrc_layers.iter().cloned())
+                        })
                         .collect(),
                     ..Default::default()
                 };
