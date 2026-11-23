@@ -2453,6 +2453,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **ffi**: a reference Deno binding of the driven layer, `bindings/deno/` (not published; the
+  Denext project maintains its own): `RTCPeerConnection`, `RTCDataChannel`,
+  `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their
+  events and `getStats` over `Deno.dlopen`, the server options as the second constructor
+  argument, `RTCSharedPort`, and encoded media (`writeFrame`, `writeRtp`, the receiver's `rtp`
+  event). The library comes from `RTC_FFI_LIB` or beside the module; nothing is downloaded.
 - **ffi**: the driven layer of `rtc-ffi` (feature `driver`, on by default): `rtc_driven_*`, a
   peer connection that owns its sockets and a thread running the reference tokio driver
   (`examples/stream-driver`), driven by method name and JSON (`rtc_driven_call`, the
