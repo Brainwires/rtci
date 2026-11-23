@@ -124,8 +124,8 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
     // RFC 8859 puts `a=setup` and `a=fingerprint` in the TRANSPORT category: the one of the
     // tagged section of the BUNDLE group is in force for every bundled section (RFC 9143
     // section 7.1.3), whether or not the others repeat it. So the tagged section (the first:
-    // `a=group:BUNDLE 0 ...`) states a role, every role stated is the same one, and the
-    // fingerprint is the session's.
+    // `a=group:BUNDLE 0 ...`) states a role, every role stated is the same one, and so is
+    // every fingerprint.
     for sdp in [offer, answer] {
         let sections: Vec<&str> = sdp.split("\r\nm=").skip(1).collect();
         assert!(sections[0].contains("\r\na=setup:"), "{sdp}");
@@ -142,7 +142,11 @@ fn dtls_srtp_is_offered_for_every_media_section() -> Result<()> {
             }
         }
         assert!(!sdp.contains("a=crypto"), "{sdp}");
-        assert_eq!(attribute_values(&sdp, "fingerprint").len(), 1, "{sdp}");
+        // One certificate: every fingerprint line (one per section, RFC 9429 section 5.2.1's
+        // media level) states the same one.
+        let fingerprints = attribute_values(&sdp, "fingerprint");
+        assert!(!fingerprints.is_empty(), "{sdp}");
+        assert!(fingerprints.iter().all(|f| f == &fingerprints[0]), "{sdp}");
         assert!(sdp.contains("a=group:BUNDLE "), "{sdp}");
     }
     Ok(())
@@ -175,7 +179,7 @@ fn sdp_security_descriptions_are_not_used() -> Result<()> {
     })?;
     let now = world.now;
     for i in 0..2 {
-        assert_eq!(world.peers[i].srtp_cipher(now), "SRTP_AEAD_AES_128_GCM");
+        assert_eq!(world.peers[i].srtp_cipher(now), "SRTP_AEAD_AES_256_GCM");
     }
 
     let mut offerer = peer("10.0.0.1:5000")?;
@@ -497,5 +501,77 @@ fn a_new_dtls_association_keeps_the_fingerprints_the_identity_covers() -> Result
         peers.iter().all(|p| p.connected())
     })?;
     world.ping_pong("after the new association")?;
+    Ok(())
+}
+
+/// RFC 8827 section 6.5: "The API MUST NOT permit the JS to obtain the negotiated keying
+/// material." No public function or field of the peer connection API (everything under
+/// `src/`) hands out the DTLS exporter, the master secret, the SRTP master keys or the SRTP or
+/// DTLS state that holds them: each public item is read from the source, and one whose
+/// signature names any of them fails the test. (The sub-crates `rtc::dtls` and `rtc::srtp`
+/// export their own state for a standalone DTLS or SRTP session; nothing in the peer
+/// connection reaches the association's.)
+#[test]
+fn the_api_gives_the_application_no_keying_material() -> Result<()> {
+    const FORBIDDEN: [&str; 10] = [
+        "keying_material",
+        "export_keying",
+        "master_secret",
+        "master_key",
+        "master_salt",
+        "SessionKeys",
+        "SecretVec",
+        "srtp::context::Context",
+        "dtls::state::State",
+        "DTLSConn",
+    ];
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(&path, files)?;
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = vec![];
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    )?;
+    assert!(files.len() > 50, "the sources are found");
+    let mut offending = vec![];
+    for file in files {
+        let name = file.display().to_string();
+        if name.ends_with("_test.rs") || name.contains("/tests/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file)?;
+        // A public item's signature: from `pub fn`, `pub ` field or `pub type` to the body or
+        // the end of the line.
+        for (number, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub ") {
+                continue;
+            }
+            let signature: String = text
+                .lines()
+                .skip(number)
+                .take(8)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let signature = signature.split(['{', ';']).next().unwrap_or_default();
+            if let Some(word) = FORBIDDEN.iter().find(|w| signature.contains(*w)) {
+                offending.push(format!("{name}:{}: {word}: {}", number + 1, trimmed));
+            }
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "public items that expose keying material:\n{}",
+        offending.join("\n")
+    );
     Ok(())
 }

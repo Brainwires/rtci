@@ -1336,6 +1336,252 @@ impl H265DepacketizationBuffer {
     }
 }
 
+/// One RTP stream of an [`H265MultiStreamDepacketizer`].
+#[derive(Debug, Clone)]
+struct H265ReceivedStream {
+    id: u32,
+    max_don_diff: u16,
+    parser: H265Packet,
+    /// The sequence number of the last packet taken.
+    last_sequence_number: Option<u16>,
+    /// The DON and AbsDon of this stream's NAL unit received last (RFC 7798 section 4.6:
+    /// AbsDon is derived along each stream's transmission order).
+    last_don: Option<(u16, i64)>,
+    /// The greatest NTP timestamp seen on the stream.
+    latest_ntp: Option<u64>,
+}
+
+/// A NAL unit waiting in an [`H265MultiStreamDepacketizer`].
+#[derive(Debug, Clone)]
+struct PendingH265NalUnit {
+    unit: H265NalUnit,
+    /// The position of its stream in the dependency order.
+    rank: usize,
+    /// AbsDon when decoding order numbers are in use, else 0.
+    abs_don: i64,
+    /// The NTP timestamp when no decoding order numbers are in use, else 0.
+    ntp: u64,
+    /// Reception order.
+    arrival: u64,
+}
+
+/// The receiver of an HEVC bitstream carried in several RTP streams: MRST (several streams on
+/// one transport) and MRMT (several streams on several transports), RFC 7798 section 4.3:
+/// "Receivers MUST support all of SRST, MRST, and MRMT". It holds the RTP streams of one
+/// bitstream, in dependency order, and passes their NAL units on in decoding order as RFC 7798
+/// section 6 describes:
+///
+/// - When `sprop-max-don-diff` is greater than 0 for any of the streams, the NAL units of all
+///   of them are stored in one de-packetization buffer with their AbsDon (section 4.6, derived
+///   along each stream) and leave, the smallest AbsDon first, while the AbsDon values span the
+///   highest stream's `sprop-max-don-diff` or more (condition A) or the buffer holds more than
+///   `sprop-depack-buf-nalus` NAL units (condition B). Among equal AbsDon values a stream lower
+///   in the dependency order goes first.
+/// - Otherwise the NAL units are passed on in the order of their NTP timestamps; of the same
+///   timestamp, a dependee stream's before a dependent's, and one stream's in transmission
+///   order. The caller gives each packet's NTP timestamp (its RTP timestamp mapped through the
+///   stream's sender reports). A NAL unit leaves once no stream can still deliver one that goes
+///   before it: every stream it depends on has shown a later timestamp, and every dependent
+///   stream received so far the same timestamp or a later one.
+///
+/// Duplicated and outdated packets (a sequence number not after the stream's last) are removed
+/// (section 6). Give each stream's packets in sequence number order, after the jitter buffer:
+/// an MRMT receiver feeds the packets of each transport's streams into the same instance. The
+/// grouping of the streams (which streams make one bitstream and their dependency order) is
+/// signalled with RFC 5583 `a=depend`, which the application reads from the description.
+#[derive(Debug, Clone)]
+pub struct H265MultiStreamDepacketizer {
+    depack_buf_nalus: usize,
+    streams: Vec<H265ReceivedStream>,
+    pending: Vec<PendingH265NalUnit>,
+    bytes: usize,
+    arrivals: u64,
+}
+
+impl H265MultiStreamDepacketizer {
+    /// A receiver whose bitstream has this `sprop-depack-buf-nalus` (RFC 7798 section 7.1; 0
+    /// when the description gives none).
+    pub fn new(sprop_depack_buf_nalus: u16) -> Self {
+        H265MultiStreamDepacketizer {
+            depack_buf_nalus: usize::from(sprop_depack_buf_nalus),
+            streams: Vec::new(),
+            pending: Vec::new(),
+            bytes: 0,
+            arrivals: 0,
+        }
+    }
+
+    /// Adds the RTP stream `id` (an SSRC, or any number the caller tells the streams apart by)
+    /// with its `sprop-max-don-diff`. Streams are added in dependency order: a stream depends
+    /// only on streams added before it. Adding a stream already held changes nothing.
+    pub fn add_stream(&mut self, id: u32, sprop_max_don_diff: u16) {
+        if self.streams.iter().any(|stream| stream.id == id) {
+            return;
+        }
+        self.streams.push(H265ReceivedStream {
+            id,
+            max_don_diff: sprop_max_don_diff,
+            parser: H265Packet::default(),
+            last_sequence_number: None,
+            last_don: None,
+            latest_ntp: None,
+        });
+        // DONL and DOND are present on every stream as soon as one of them carries DONs.
+        let donl = self.uses_don();
+        for stream in &mut self.streams {
+            stream.parser.with_donl(donl);
+        }
+    }
+
+    /// NAL units waiting.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether no NAL unit is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Whether decoding order numbers are in use: `sprop-max-don-diff` greater than 0 for any
+    /// of the streams (RFC 7798 section 4.6).
+    fn uses_don(&self) -> bool {
+        self.streams.iter().any(|stream| stream.max_don_diff > 0)
+    }
+
+    /// Takes one RTP packet of stream `stream`: its sequence number, its NTP timestamp and its
+    /// payload. Returns the NAL units now due, in decoding order. A packet of a stream not
+    /// added, a duplicate and an outdated packet give nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`H265Packet::nal_units`].
+    pub fn push(
+        &mut self,
+        stream: u32,
+        sequence_number: u16,
+        ntp: u64,
+        payload: &Bytes,
+    ) -> Result<Vec<H265NalUnit>> {
+        let uses_don = self.uses_don();
+        let Some(rank) = self.streams.iter().position(|s| s.id == stream) else {
+            return Ok(vec![]);
+        };
+        let received = &mut self.streams[rank];
+        if let Some(last) = received.last_sequence_number {
+            let ahead = sequence_number.wrapping_sub(last);
+            if ahead == 0 || ahead >= 0x8000 {
+                return Ok(vec![]);
+            }
+        }
+        received.last_sequence_number = Some(sequence_number);
+        received.parser.note_sequence_number(sequence_number);
+        let units = received.parser.nal_units(payload)?;
+        received.latest_ntp = Some(received.latest_ntp.map_or(ntp, |latest| latest.max(ntp)));
+        for unit in units {
+            let (abs_don, ntp) = if uses_don {
+                // DONL is present on every stream when any of them uses decoding order
+                // numbers (RFC 7798 section 4.4.1).
+                let Some(don) = unit.don else {
+                    continue;
+                };
+                let abs_don = match received.last_don {
+                    Some((last_don, last_abs)) => last_abs + i64::from(don_diff(last_don, don)),
+                    None => i64::from(don),
+                };
+                received.last_don = Some((don, abs_don));
+                (abs_don, 0)
+            } else {
+                (0, ntp)
+            };
+            self.bytes += unit.data.len();
+            self.arrivals += 1;
+            self.pending.push(PendingH265NalUnit {
+                unit,
+                rank,
+                abs_don,
+                ntp,
+                arrival: self.arrivals,
+            });
+        }
+        Ok(self.release())
+    }
+
+    /// The index of the waiting NAL unit that goes first in decoding order.
+    fn first(&self) -> Option<usize> {
+        (0..self.pending.len()).min_by_key(|&i| {
+            let unit = &self.pending[i];
+            (unit.abs_don, unit.ntp, unit.rank, unit.arrival)
+        })
+    }
+
+    fn over_bound(&self) -> bool {
+        self.pending.len() > MAX_DEPACKETIZATION_NAL_UNITS || self.bytes > MAX_DEPACKETIZATION_BYTES
+    }
+
+    /// Whether the waiting NAL unit `index` may leave.
+    fn due(&self, index: usize) -> bool {
+        if self.over_bound() {
+            return true;
+        }
+        if self.uses_don() {
+            let (smallest, greatest) = self.pending.iter().fold((i64::MAX, i64::MIN), |acc, u| {
+                (acc.0.min(u.abs_don), acc.1.max(u.abs_don))
+            });
+            // The highest stream in the dependency order that uses decoding order numbers.
+            let max_don_diff = self
+                .streams
+                .iter()
+                .rev()
+                .map(|stream| stream.max_don_diff)
+                .find(|diff| *diff > 0)
+                .unwrap_or(0);
+            // Condition A or condition B.
+            greatest - smallest >= i64::from(max_don_diff)
+                || self.pending.len() > self.depack_buf_nalus
+        } else {
+            // No stream can still deliver a NAL unit that goes before this one: a dependee
+            // (lower in the dependency order) has shown a later timestamp, and a dependent
+            // received so far has shown this one or a later one. A dependent's NAL unit waits
+            // for its dependees to be received at all: it cannot be decoded without them.
+            let unit = &self.pending[index];
+            self.streams
+                .iter()
+                .enumerate()
+                .all(|(rank, stream)| match rank.cmp(&unit.rank) {
+                    std::cmp::Ordering::Equal => true,
+                    std::cmp::Ordering::Less => {
+                        stream.latest_ntp.is_some_and(|latest| latest > unit.ntp)
+                    }
+                    std::cmp::Ordering::Greater => {
+                        stream.latest_ntp.is_none_or(|latest| latest >= unit.ntp)
+                    }
+                })
+        }
+    }
+
+    fn release(&mut self) -> Vec<H265NalUnit> {
+        let mut out = vec![];
+        while let Some(index) = self.first() {
+            if !self.due(index) {
+                break;
+            }
+            let pending = self.pending.remove(index);
+            self.bytes -= pending.unit.data.len();
+            out.push(pending.unit);
+        }
+        out
+    }
+
+    /// Every NAL unit still waiting, in decoding order: no more packets are coming.
+    pub fn flush(&mut self) -> Vec<H265NalUnit> {
+        let mut pending = std::mem::take(&mut self.pending);
+        self.bytes = 0;
+        pending.sort_by_key(|unit| (unit.abs_don, unit.ntp, unit.rank, unit.arrival));
+        pending.into_iter().map(|pending| pending.unit).collect()
+    }
+}
+
 ///
 /// Packet implementation
 ///
@@ -1415,6 +1661,13 @@ impl H265Packet {
         sequence_number: u16,
         payload: &Bytes,
     ) -> Result<Bytes> {
+        self.note_sequence_number(sequence_number);
+        self.depacketize(payload)
+    }
+
+    /// Takes note of the next packet's sequence number: after a gap the fragments collected so
+    /// far are discarded.
+    fn note_sequence_number(&mut self, sequence_number: u16) {
         // A repeated number is a duplicate, not a gap.
         if let Some(last) = self.last_sequence_number
             && sequence_number != last.wrapping_add(1)
@@ -1424,7 +1677,6 @@ impl H265Packet {
             self.fu_don = None;
         }
         self.last_sequence_number = Some(sequence_number);
-        self.depacketize(payload)
     }
 
     /// Whether a NAL unit may be passed to a decoder: a whole header and a type below 48.

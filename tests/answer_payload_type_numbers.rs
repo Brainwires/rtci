@@ -38,7 +38,10 @@ fn answers_under_120(rtpmap: &str, fmtp: &str) -> TestResult {
         .lines()
         .find(|l| l.starts_with("m=video"))
         .expect("a video section");
-    assert!(media.ends_with(" 120"), "{media}\n{answer}");
+    // The offered format first, under the offer's number; the answerer's other formats follow
+    // it (RFC 9429 section 5.3.1: formats absent from the offer "MUST be added after all
+    // existing formats").
+    assert_eq!(media.split(' ').nth(3), Some("120"), "{media}\n{answer}");
     assert!(
         answer.contains(&format!("a=rtpmap:120 {rtpmap}")),
         "{answer}"

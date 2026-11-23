@@ -308,7 +308,10 @@ fn the_handshake_completes_when_every_flight_is_lost_twice() {
         let result = handshake_losing(&mut pair, first, Duration::from_secs(300), |seen| {
             seen.kind != Kind::Other && seen.nth < 2
         });
-        check(name, result, Duration::from_secs(60));
+        // The backed-off timer is kept until a flight gets through the first time (RFC 9147
+        // section 5.8.2), which here none does: each flight waits longer than the one before,
+        // up to the 60-second maximum.
+        check(name, result, Duration::from_secs(300));
     }
 }
 

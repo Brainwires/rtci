@@ -1849,3 +1849,38 @@ impl ConnectionInformationForTest {
         crate::description::common::ConnectionInformation::parse("IN IP4 0.0.0.0").ok()
     }
 }
+
+/// RFC 5583 section 5.2.2 and the examples of section 6.5 (`a=depend:97 lay L1:96`, an MDC
+/// section depending on none, several formats, a list of alternatives): parsed and printed
+/// back; a format named twice ("exactly one dependency-tag ... per dependent-fmt"), a tag
+/// without its formats, two tags for one format and a missing type are refused.
+#[test]
+fn depend_follows_the_rfc_5583_abnf() {
+    check::<Depend>(
+        &[
+            "97 lay L1:96",
+            "96 mdc",
+            "100 lay L1:96,97; 101 lay L1:97",
+            "104 lay L2:102,103",
+            "98 x-other",
+        ],
+        &[
+            "",
+            "97",
+            "97 lay L1",
+            "97 lay L1:",
+            "97 lay L1:96 L2:95",
+            "97 lay L1:96; 97 lay L1:95",
+        ],
+    );
+    let depend = Depend::parse("100 lay L1:96,97; 101 mdc").unwrap();
+    assert_eq!(
+        depend.of("100"),
+        Some(&Dependency {
+            fmt: "100".to_owned(),
+            typ: DependencyType::Lay,
+            on: Some(("L1".to_owned(), vec!["96".to_owned(), "97".to_owned()])),
+        })
+    );
+    assert_eq!(depend.of("101").map(|d| &d.typ), Some(&DependencyType::Mdc));
+}

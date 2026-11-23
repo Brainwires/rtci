@@ -222,3 +222,58 @@ fn a_stream_that_negotiated_neither_gets_no_ecn_reports() {
     assert!(ecn_feedback(&sent).is_empty());
     assert!(summaries(&sent).is_empty());
 }
+
+/// RFC 6679 section 5.2: "If the RTCP SR or RR packet and the XR ECN summary report together
+/// exceed the MTU, a subset of the senders is reported, chosen in a round-robin fashion." Forty
+/// ECN-capable senders and a 400-octet MTU: no compound packet with a summary goes over the
+/// MTU, the summary reports fewer than all of them, and within two minutes every sender has
+/// been in one.
+#[test]
+fn an_ecn_summary_too_large_for_the_mtu_reports_the_senders_round_robin() {
+    const MTU: usize = 400;
+    let mut chain = chain(builder().with_mtu(MTU));
+    let base = Instant::now();
+    let senders: Vec<u32> = (0..40u32).map(|n| 0x7000 + n).collect();
+    for ssrc in &senders {
+        let mut info = video(*ssrc);
+        info.rtcp_feedback
+            .push(feedback(RTCP_FB_XR, RTCP_XR_ECN_SUMMARY));
+        chain.bind_remote_stream(&info);
+    }
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut seen = std::collections::HashSet::new();
+    let mut subsets = 0;
+    let mut summaries_sent = 0;
+    for step in 0..2400u16 {
+        if seen.len() == senders.len() {
+            break;
+        }
+        let at = base + secs(0.05 * f64::from(step));
+        for ssrc in &senders {
+            let mut packet = rtp(at, *ssrc, step, u32::from(step) * 3000);
+            packet.transport.ecn = Some(EcnCodepoint::Ect0);
+            chain.handle_read(packet).unwrap();
+        }
+        for sent in run(&mut chain, at) {
+            let blocks = summaries(std::slice::from_ref(&sent));
+            if blocks.is_empty() {
+                continue;
+            }
+            summaries_sent += 1;
+            let size: usize = sent.packets.iter().map(|p| p.marshal_size()).sum();
+            assert!(size <= MTU, "a compound packet of {size} octets");
+            for block in &blocks {
+                if !block.reports.is_empty() && block.reports.len() < senders.len() {
+                    subsets += 1;
+                }
+                seen.extend(block.reports.iter().map(|report| report.ssrc));
+            }
+        }
+    }
+    assert!(subsets > 0, "the summary was cut to a subset");
+    assert_eq!(
+        seen.len(),
+        senders.len(),
+        "every sender reported in turn, over {summaries_sent} summaries"
+    );
+}

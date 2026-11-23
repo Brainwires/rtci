@@ -109,6 +109,22 @@ impl SimulcastRid {
         .to_string()
     }
 
+    /// The `a=rid` value with no restrictions: `<id> <direction>` (W3C webrtc-pc
+    /// `createAnswer`, `SettingEngineBuilder::with_w3c_simulcast_answer`).
+    pub(crate) fn bare_line(&self, direction: SimulcastDirection) -> String {
+        self.line_without_restrictions(direction)
+    }
+
+    fn line_without_restrictions(&self, direction: SimulcastDirection) -> String {
+        Rid {
+            id: self.id.clone(),
+            direction: direction.into(),
+            formats: vec![],
+            restrictions: vec![],
+        }
+        .to_string()
+    }
+
     /// The restrictions as the application sees them. One this endpoint does not know (only
     /// a `send` line keeps such a one) is left out.
     pub(crate) fn to_restrictions(&self) -> RTCRtpRidRestrictions {
@@ -391,6 +407,43 @@ pub(crate) fn malformed_simulcast_line(media: &MediaDescription) -> Option<Strin
         })
 }
 
+/// W3C webrtc-pc `createAnswer` (section 4.4.2): identically named rids of an `a=simulcast`
+/// line are reduced to the first. The value with each rid-id after its first occurrence taken
+/// out (with the stream it leaves empty); `None` when nothing is repeated.
+pub(crate) fn without_repeated_rids(value: &str) -> Option<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut repeated = false;
+    let mut parts: Vec<String> = vec![];
+    let mut tokens = value.split_ascii_whitespace();
+    while let Some(direction) = tokens.next() {
+        let Some(list) = tokens.next() else {
+            parts.push(direction.to_owned());
+            break;
+        };
+        let streams: Vec<String> = list
+            .split(';')
+            .filter_map(|stream| {
+                let alternatives: Vec<&str> = stream
+                    .split(',')
+                    .filter(|alternative| {
+                        let id = alternative.trim_start_matches('~');
+                        if seen.insert(id) {
+                            true
+                        } else {
+                            repeated = true;
+                            false
+                        }
+                    })
+                    .collect();
+                (!alternatives.is_empty()).then(|| alternatives.join(","))
+            })
+            .collect();
+        parts.push(direction.to_owned());
+        parts.push(streams.join(";"));
+    }
+    repeated.then(|| parts.join(" "))
+}
+
 /// RFC 9429 section 5.8.3: "All rid-ids referenced in an 'a=simulcast' line MUST exist as
 /// 'a=rid' lines", or the description is refused. The first rid-id of `media` that has
 /// none.
@@ -505,6 +558,17 @@ mod tests {
 
     /// RFC 8851 section 6.2.2 step 1: "In the case of a syntax error, the 'a=rid' line is
     /// discarded"; the others stand.
+    /// W3C webrtc-pc createAnswer: a rid-id named again is taken out, with a stream it
+    /// leaves empty.
+    #[test]
+    fn a_repeated_rid_is_reduced_to_its_first_occurrence() {
+        assert_eq!(without_repeated_rids("send a;b"), None);
+        assert_eq!(
+            without_repeated_rids("send a;b;a recv c;~b,d").as_deref(),
+            Some("send a;b recv c;d")
+        );
+    }
+
     #[test]
     fn a_malformed_rid_line_is_discarded() {
         let section = section_rids(&video(

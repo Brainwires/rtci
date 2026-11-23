@@ -29,6 +29,7 @@ use crate::peer_connection::transport::ice::candidate_pair::RTCIceCandidatePair;
 use crate::peer_connection::transport::ice::state::RTCIceTransportState;
 use shared::TransportContext;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 /// Names one transport of a [`TransportSet`]. Internal: the W3C objects carry
 /// [`RTCTransportId`](crate::peer_connection::transport::RTCTransportId)s, which stay what
@@ -86,12 +87,24 @@ enum Direction {
     Outbound,
 }
 
-/// The `(receiver, sender)` ufrags of a STUN Binding request's USERNAME (RFC 8445 section
-/// 7.2.2: `<receiver's ufrag>:<sender's ufrag>`); `None` for anything else.
-pub(crate) fn binding_request_ufrags(datagram: &[u8]) -> Option<(&str, &str)> {
+/// What routing reads from a STUN Binding request: its USERNAME's two ufrags (RFC 8445
+/// section 7.2.2: `<receiver's ufrag>:<sender's ufrag>`) and the sender's tie-breaker, the value
+/// of its ICE-CONTROLLING or ICE-CONTROLLED attribute (RFC 8445 section 7.1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BindingRequest<'a> {
+    pub(crate) receiver: &'a str,
+    pub(crate) sender: &'a str,
+    pub(crate) tie_breaker: Option<u64>,
+}
+
+/// The [`BindingRequest`] a datagram is; `None` for anything else, a Binding request without
+/// a USERNAME of two parts included.
+pub(crate) fn binding_request(datagram: &[u8]) -> Option<BindingRequest<'_>> {
     const BINDING_REQUEST: u16 = 0x0001;
     const MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
     const USERNAME: u16 = 0x0006;
+    const ICE_CONTROLLED: u16 = 0x8029;
+    const ICE_CONTROLLING: u16 = 0x802a;
     if datagram.len() < 20 || datagram[4..8] != MAGIC_COOKIE {
         return None;
     }
@@ -100,17 +113,58 @@ pub(crate) fn binding_request_ufrags(datagram: &[u8]) -> Option<(&str, &str)> {
     }
     let length = usize::from(u16::from_be_bytes([datagram[2], datagram[3]]));
     let attributes = datagram.get(20..20 + length)?;
+    let mut username = None;
+    let mut tie_breaker = None;
     let mut at = 0;
     while at + 4 <= attributes.len() {
         let kind = u16::from_be_bytes([attributes[at], attributes[at + 1]]);
         let len = usize::from(u16::from_be_bytes([attributes[at + 2], attributes[at + 3]]));
         let value = attributes.get(at + 4..at + 4 + len)?;
-        if kind == USERNAME {
-            return std::str::from_utf8(value).ok()?.split_once(':');
+        match kind {
+            USERNAME if username.is_none() => username = Some(value),
+            ICE_CONTROLLED | ICE_CONTROLLING if tie_breaker.is_none() => {
+                tie_breaker = <[u8; 8]>::try_from(value).ok().map(u64::from_be_bytes);
+            }
+            _ => {}
         }
         at += 4 + len.next_multiple_of(4);
     }
-    None
+    let (receiver, sender) = std::str::from_utf8(username?).ok()?.split_once(':')?;
+    Some(BindingRequest {
+        receiver,
+        sender,
+        tie_breaker,
+    })
+}
+
+/// The `(receiver, sender)` ufrags of a STUN Binding request's USERNAME (RFC 8445 section
+/// 7.2.2: `<receiver's ufrag>:<sender's ufrag>`); `None` for anything else.
+pub(crate) fn binding_request_ufrags(datagram: &[u8]) -> Option<(&str, &str)> {
+    binding_request(datagram).map(|request| (request.receiver, request.sender))
+}
+
+/// What a shared local address has taught the routing of a [`TransportSet`]: which transport a
+/// 5-tuple, and a remote agent's tie-breaker, belong to. `None` once two transports claimed it:
+/// it decides nothing any more.
+#[derive(Debug, Default)]
+struct Learned {
+    paths: HashMap<(SocketAddr, SocketAddr), Option<TransportId>>,
+    tie_breakers: HashMap<u64, Option<TransportId>>,
+}
+
+/// Records that `key` is `id`'s; a key two transports claim is nobody's from then on.
+fn claim<K: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, Option<TransportId>>,
+    key: K,
+    id: TransportId,
+) {
+    map.entry(key)
+        .and_modify(|on| {
+            if *on != Some(id) {
+                *on = None;
+            }
+        })
+        .or_insert(Some(id));
 }
 
 /// The transports of a peer connection; never empty.
@@ -129,10 +183,20 @@ pub(crate) struct TransportSet {
     /// The transport the pipeline's ICE, DTLS and SRTP handlers act on: the default one,
     /// except while a datagram routed to another is read.
     active: TransportId,
+    /// What routing learned on local addresses several transports share.
+    learned: Learned,
 }
 
 fn agent_of(bundle: &TransportBundle) -> &ice::Agent {
     &bundle.ice_handler_context.ice_transport.agent
+}
+
+/// Whether one of `bundle`'s local candidates has the address (or the base) `local`.
+fn on_address(bundle: &TransportBundle, local: SocketAddr) -> bool {
+    agent_of(bundle)
+        .get_local_candidates()
+        .iter()
+        .any(|candidate| candidate.addr() == local || candidate.base_addr() == local)
 }
 
 impl TransportSet {
@@ -156,6 +220,7 @@ impl TransportSet {
             default: id,
             data: id,
             active: id,
+            learned: Learned::default(),
         }
     }
 
@@ -265,113 +330,245 @@ impl TransportSet {
     ///
     /// Each transport normally has a local address of its own (RFC 9429 section 5.2.1 gives
     /// every transport its own candidates). A driver that shares one port between transports
-    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port) gives several transports the same
-    /// address: then a Binding request names its transport by the receiver's ufrag of its
-    /// USERNAME (RFC 8445 section 7.2.2), and anything else goes to the transport that knows
-    /// the sender as a remote candidate (a check from it has made it a peer-reflexive one if
-    /// it was not signalled). Two transports on one 5-tuple cannot be told apart once DTLS
-    /// runs on both: the default transport takes what is left.
-    pub(crate) fn route(&self, transport: &TransportContext, datagram: &[u8]) -> TransportId {
+    /// (one socket for the whole connection, or `rtc-stream-driver`'s shared UDP or ICE-TCP
+    /// port) gives several transports the same address. Among those, the datagram goes to
+    /// the first rule that leaves one transport:
+    ///
+    /// 1. a Binding request: the transports whose local ufrag is the receiver's part of its
+    ///    USERNAME and whose remote ufrag, once known, is the sender's part (RFC 8445 section
+    ///    7.2.2); with credentials of their own this names one;
+    /// 2. the transport that sent on this 5-tuple, or read a request on it that named it;
+    /// 3. the transport that knows the sender as a remote candidate (signalled for its
+    ///    section, or peer-reflexive from a check it answered);
+    /// 4. a Binding request: the transport an earlier request with the same tie-breaker
+    ///    (ICE-CONTROLLING / ICE-CONTROLLED) went to, when the remote's agents have one each.
+    ///
+    /// A Binding request none of them settles (shared credentials, from an address no
+    /// transport knows yet) goes to none: answered by the wrong transport, it would make that
+    /// transport's peer-reflexive candidate of a path that is another's. It is dropped
+    /// (`None`), and the remote's retransmission is routed once the address has been signalled
+    /// or checked. Anything else none of them settles goes to the default transport (two
+    /// transports on one 5-tuple cannot be told apart once DTLS runs on both).
+    pub(crate) fn route(
+        &mut self,
+        transport: &TransportContext,
+        datagram: &[u8],
+    ) -> Option<TransportId> {
         self.route_datagram(transport, datagram, Direction::Inbound)
     }
 
     /// The transport a datagram the connection is about to send from `transport.local_addr`
-    /// belongs to: as [`Self::route`], with the sender's ufrag of a Binding request's
-    /// USERNAME (this side's) naming it.
+    /// belongs to: as [`Self::route`], with the sender's part of a Binding request's USERNAME
+    /// (this side's) naming it.
     pub(crate) fn route_outbound(
-        &self,
+        &mut self,
         transport: &TransportContext,
         datagram: &[u8],
-    ) -> TransportId {
+    ) -> Option<TransportId> {
         self.route_datagram(transport, datagram, Direction::Outbound)
     }
 
     /// The transport a datagram on a connection that names none yet belongs to, only when
     /// that is certain: one transport, an address only one transport gathered on, or a
-    /// Binding request whose USERNAME names one (RFC 8445 section 7.2.2). `None` where
-    /// [`Self::route`] would guess from the peer's address, which two transports may both
-    /// know (two of this side's active ICE-TCP candidates to one remote candidate).
+    /// Binding request whose USERNAME names one (rule 1 of [`Self::route`], RFC 8445 section
+    /// 7.2.2) or whose tie-breaker only one transport was reached with (rule 4). `None` where
+    /// [`Self::route`] would go by a path or the peer's address, which two transports may
+    /// share (two of this side's active ICE-TCP candidates to one remote candidate).
     pub(crate) fn route_named(
         &self,
         transport: &TransportContext,
         datagram: &[u8],
     ) -> Option<TransportId> {
-        match self.route_with_certainty(transport, datagram, Direction::Inbound) {
-            (id, true) => Some(id),
-            (_, false) => None,
+        if self.bundles.len() == 1 {
+            return Some(self.default);
         }
+        let on = self.on_address_ids(transport.local_addr);
+        match on.as_slice() {
+            [] => return None,
+            [only] => return Some(*only),
+            _ => {}
+        }
+        let request = binding_request(datagram)?;
+        let named = self.named_by(&on, request, Direction::Inbound);
+        match named[..] {
+            [only] => return Some(only),
+            [] => return None,
+            _ => {}
+        }
+        // Rule 4: a tie-breaker one transport alone was reached with (`claim` makes one that
+        // two transports saw decide nothing).
+        match self.learned.tie_breakers.get(&request.tie_breaker?) {
+            Some(Some(id)) if named.contains(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The transports that gathered on `local`.
+    fn on_address_ids(&self, local: SocketAddr) -> Vec<TransportId> {
+        self.bundles
+            .iter()
+            .filter(|bundle| on_address(bundle, local))
+            .map(|bundle| bundle.id)
+            .collect()
+    }
+
+    /// Rule 1 of [`Self::route`]: those of `candidates` whose local ufrag is this side's part
+    /// of the request's USERNAME and whose remote ufrag, once known, is the other part.
+    fn named_by(
+        &self,
+        candidates: &[TransportId],
+        request: BindingRequest<'_>,
+        direction: Direction,
+    ) -> Vec<TransportId> {
+        let (ours, theirs) = match direction {
+            Direction::Inbound => (request.receiver, request.sender),
+            Direction::Outbound => (request.sender, request.receiver),
+        };
+        candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                let agent = agent_of(self.bundle(*id));
+                agent.get_local_credentials().ufrag == ours
+                    && agent
+                        .get_remote_credentials()
+                        .is_none_or(|remote| remote.ufrag.is_empty() || remote.ufrag == theirs)
+            })
+            .collect()
+    }
+
+    /// Records that transport `id` sends on `transport`'s 5-tuple (rule 2 of [`Self::route`]),
+    /// when its local address is one several transports gathered on.
+    pub(crate) fn learn_path(&mut self, id: TransportId, transport: &TransportContext) {
+        if self.bundles.len() == 1 {
+            return;
+        }
+        let key = (transport.local_addr, transport.peer_addr);
+        if self.learned.paths.get(&key) == Some(&Some(id)) || !self.is_shared(key.0) {
+            return;
+        }
+        claim(&mut self.learned.paths, key, id);
+    }
+
+    /// Whether several transports gathered on `local`.
+    fn is_shared(&self, local: SocketAddr) -> bool {
+        self.bundles
+            .iter()
+            .filter(|bundle| on_address(bundle, local))
+            .take(2)
+            .count()
+            == 2
     }
 
     fn route_datagram(
-        &self,
+        &mut self,
         transport: &TransportContext,
         datagram: &[u8],
         direction: Direction,
-    ) -> TransportId {
-        self.route_with_certainty(transport, datagram, direction).0
-    }
-
-    /// The transport, and whether the datagram's address or USERNAME named it (`false`: it
-    /// was chosen by the peer's address or as the default).
-    fn route_with_certainty(
-        &self,
-        transport: &TransportContext,
-        datagram: &[u8],
-        direction: Direction,
-    ) -> (TransportId, bool) {
+    ) -> Option<TransportId> {
         if self.bundles.len() == 1 {
-            return (self.default, true);
+            return Some(self.default);
         }
         let local = transport.local_addr;
-        let on: Vec<&TransportBundle> = self
-            .bundles
-            .iter()
-            .filter(|bundle| {
-                agent_of(bundle)
-                    .get_local_candidates()
-                    .iter()
-                    .any(|candidate| candidate.addr() == local || candidate.base_addr() == local)
-            })
-            .collect();
+        let peer = transport.peer_addr;
+        let on = self.on_address_ids(local);
         match on.as_slice() {
-            [] => return (self.default, false),
-            [only] => return (only.id, true),
+            [] => return Some(self.default),
+            [only] => return Some(*only),
             _ => {}
         }
-        if let Some((receiver, sender)) = binding_request_ufrags(datagram) {
-            let ours = match direction {
-                Direction::Inbound => receiver,
-                Direction::Outbound => sender,
-            };
-            // Transports that share one set of credentials (the default since mt-7) are not
-            // told apart by it: the first is taken, but not for certain.
-            let named: Vec<TransportId> = on
-                .iter()
-                .filter(|bundle| agent_of(bundle).get_local_credentials().ufrag == ours)
-                .map(|bundle| bundle.id)
-                .collect();
-            match named.as_slice() {
-                [only] => return (*only, true),
-                [first, ..] => return (*first, false),
-                [] => {}
+        let request = binding_request(datagram);
+        let settled = |candidates: &[TransportId]| match candidates {
+            [only] => Some(*only),
+            _ => None,
+        };
+        let mut candidates = on;
+        if let Some(request) = request {
+            // Rule 1: the USERNAME, both parts.
+            let named = self.named_by(&candidates, request, direction);
+            if !named.is_empty() {
+                candidates = named;
+            }
+            if let Some(id) = settled(&candidates) {
+                return Some(self.learned_inbound(id, transport, request, direction));
             }
         }
-        let peer = transport.peer_addr;
-        if let Some(bundle) = on.iter().find(|bundle| {
-            agent_of(bundle)
-                .get_remote_candidates()
-                .iter()
-                .any(|candidate| candidate.addr() == peer)
-        }) {
-            return (bundle.id, false);
+        // Rule 2: the path a transport has used.
+        if let Some(Some(id)) = self.learned.paths.get(&(local, peer))
+            && candidates.contains(id)
+        {
+            let id = *id;
+            return Some(match request {
+                Some(request) => self.learned_inbound(id, transport, request, direction),
+                None => id,
+            });
+        }
+        // Rule 3: the sender is a remote candidate of one transport.
+        let knows_peer: Vec<TransportId> = candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                agent_of(self.bundle(*id))
+                    .get_remote_candidates()
+                    .iter()
+                    .any(|candidate| candidate.addr() == peer)
+            })
+            .collect();
+        if let Some(id) = settled(&knows_peer) {
+            return Some(match request {
+                Some(request) => self.learned_inbound(id, transport, request, direction),
+                None => id,
+            });
+        }
+        if let Some(request) = request {
+            // Rule 4: the remote agent's tie-breaker.
+            if let Direction::Inbound = direction
+                && let Some(tie_breaker) = request.tie_breaker
+                && let Some(Some(id)) = self.learned.tie_breakers.get(&tie_breaker)
+                && candidates.contains(id)
+            {
+                let id = *id;
+                return Some(self.learned_inbound(id, transport, request, direction));
+            }
+            log::debug!(
+                "a Binding request from {peer} on {local}, shared by {} transports, names none \
+                 of them: dropped",
+                candidates.len()
+            );
+            return None;
         }
         // The default transport first: an address several transports gathered on is its.
-        let id = on
-            .iter()
-            .find(|bundle| bundle.id == self.default)
-            .unwrap_or(&on[0])
-            .id;
-        (id, false)
+        Some(if candidates.contains(&self.default) {
+            self.default
+        } else {
+            candidates[0]
+        })
+    }
+
+    /// `id`, which a Binding request on `transport` was routed to: the path and the sender's
+    /// tie-breaker are `id`'s from now on (rules 2 and 4 of [`Self::route`]).
+    fn learned_inbound(
+        &mut self,
+        id: TransportId,
+        transport: &TransportContext,
+        request: BindingRequest<'_>,
+        direction: Direction,
+    ) -> TransportId {
+        if let Direction::Inbound = direction {
+            claim(
+                &mut self.learned.paths,
+                (transport.local_addr, transport.peer_addr),
+                id,
+            );
+            if let Some(tie_breaker) = request.tie_breaker {
+                claim(&mut self.learned.tie_breakers, tie_breaker, id);
+            }
+        }
+        id
+    }
+
+    fn bundle(&self, id: TransportId) -> &TransportBundle {
+        self.transport(id).unwrap_or_else(|| self.default())
     }
 
     /// Every transport, in the order they were created.
@@ -413,6 +610,8 @@ impl TransportSet {
         let index = self.index(id)?;
         let bundle = self.bundles.remove(index);
         self.by_mid.retain(|_, on| *on != id);
+        self.learned.paths.retain(|_, on| *on != Some(id));
+        self.learned.tie_breakers.retain(|_, on| *on != Some(id));
         let first = self.bundles[0].id;
         if self.default == id {
             self.default = first;
@@ -663,16 +862,20 @@ mod tests {
     /// one every section and datagram goes to.
     #[test]
     fn a_new_connection_has_one_transport_for_everything() {
-        let pc = RTCPeerConnectionBuilder::new()
+        let mut pc = RTCPeerConnectionBuilder::new()
             .build(Instant::now())
             .expect("a default peer connection builds");
+        let routed = pc
+            .pipeline_context
+            .transports
+            .route(&TransportContext::default(), &[]);
         let transports = &pc.pipeline_context.transports;
+        assert_eq!(routed, Some(transports.default_id()));
         assert_eq!(transports.len(), 1);
         let default = transports.default().id;
         assert_eq!(transports.data_transport_id(), default);
         assert_eq!(transports.transport_id_for("0"), default);
         assert_eq!(transports.transport_for("audio").id, default);
-        assert_eq!(transports.route(&TransportContext::default(), &[]), default);
         // The single-transport accessors are the default transport's.
         assert_eq!(
             pc.ice_transport().id,
@@ -986,158 +1189,303 @@ mod tests {
         );
     }
 
-    /// A STUN Binding request with `username` as its USERNAME, and nothing else.
-    fn binding_request(username: &str) -> Vec<u8> {
-        let mut attribute = vec![0x00, 0x06];
-        attribute.extend_from_slice(&(username.len() as u16).to_be_bytes());
-        attribute.extend_from_slice(username.as_bytes());
-        while attribute.len() % 4 != 0 {
-            attribute.push(0);
+    /// A STUN Binding request with `username` as its USERNAME, and an ICE-CONTROLLING
+    /// attribute with `tie_breaker` when there is one.
+    fn binding_request_with(username: &str, tie_breaker: Option<u64>) -> Vec<u8> {
+        let mut attributes = vec![0x00, 0x06];
+        attributes.extend_from_slice(&(username.len() as u16).to_be_bytes());
+        attributes.extend_from_slice(username.as_bytes());
+        while attributes.len() % 4 != 0 {
+            attributes.push(0);
+        }
+        if let Some(tie_breaker) = tie_breaker {
+            attributes.extend_from_slice(&[0x80, 0x2a, 0x00, 0x08]);
+            attributes.extend_from_slice(&tie_breaker.to_be_bytes());
         }
         let mut message = vec![0x00, 0x01];
-        message.extend_from_slice(&(attribute.len() as u16).to_be_bytes());
+        message.extend_from_slice(&(attributes.len() as u16).to_be_bytes());
         message.extend_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
         message.extend_from_slice(&[7; 12]);
-        message.extend_from_slice(&attribute);
+        message.extend_from_slice(&attributes);
         message
     }
 
-    /// A driver that shares one port between transports gives them the same local address
-    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port). A Binding request then goes to the
-    /// transport whose ufrag it names (RFC 8445 section 7.2.2), on the way in by the
-    /// receiver's part and on the way out by the sender's; what follows from a peer goes to
-    /// the transport that knows it as a remote candidate; the rest to the default one.
+    fn binding_request(username: &str) -> Vec<u8> {
+        binding_request_with(username, None)
+    }
+
+    /// The USERNAME's two parts and the tie-breaker are read; a request without a USERNAME of
+    /// two parts, a response and a DTLS record are no Binding request.
     #[test]
-    fn a_port_shared_by_two_transports_is_routed_by_ufrag_then_by_peer() {
-        // Routing by ufrag needs credentials per transport; by default they are shared.
+    fn a_binding_request_gives_its_ufrags_and_tie_breaker() {
+        let request = binding_request_with("ours:theirs", Some(0x0102_0304_0506_0708));
+        assert_eq!(
+            super::binding_request(&request),
+            Some(BindingRequest {
+                receiver: "ours",
+                sender: "theirs",
+                tie_breaker: Some(0x0102_0304_0506_0708),
+            })
+        );
+        assert_eq!(super::binding_request(&binding_request("nocolon")), None);
+        let mut response = binding_request("ours:theirs");
+        response[1] = 0x01;
+        response[0] = 0x01;
+        assert_eq!(super::binding_request(&response), None);
+        assert_eq!(super::binding_request(&[0x16, 0xfe, 0xfd]), None);
+    }
+
+    fn add_candidate(
+        pc: &mut crate::peer_connection::RTCPeerConnection,
+        id: TransportId,
+        candidate: &str,
+        remote: bool,
+    ) {
+        pc.with_transport(id, |pc| {
+            let candidate = ice::candidate::unmarshal_candidate(candidate).unwrap();
+            if remote {
+                pc.ice_transport_mut()
+                    .add_remote_candidate(candidate)
+                    .expect("the remote candidate is added")
+            } else {
+                pc.ice_transport_mut()
+                    .add_local_candidate(candidate)
+                    .expect("the local candidate is added")
+            }
+        });
+    }
+
+    /// Two transports gathered on one local address, with credentials of their own
+    /// (`unique`) or the shared ones.
+    fn two_transports_on_one_address(
+        unique: bool,
+    ) -> (
+        crate::peer_connection::RTCPeerConnection,
+        TransportId,
+        TransportId,
+    ) {
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_setting_engine(
                 crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
-                    .with_unique_transport_credentials(true)
+                    .with_unique_transport_credentials(unique)
                     .build(),
             )
             .build(Instant::now())
-            .expect("a default peer connection builds");
+            .expect("a peer connection builds");
         let default = pc.pipeline_context.transports.default_id();
         let other = pc.add_transport().expect("a second transport");
-        let shared = "candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host";
         for id in [default, other] {
-            pc.with_transport(id, |pc| {
-                let candidate = ice::candidate::unmarshal_candidate(shared).unwrap();
-                pc.ice_transport_mut()
-                    .add_local_candidate(candidate)
-                    .expect("the shared candidate is added")
-            });
+            add_candidate(
+                &mut pc,
+                id,
+                "candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host",
+                false,
+            );
         }
-        let ufrag = |pc: &crate::peer_connection::RTCPeerConnection, id| {
-            pc.ice_transport_of(id)
-                .agent
-                .get_local_credentials()
-                .ufrag
-                .clone()
-        };
-        let (ours, theirs) = (ufrag(&pc, other), "peer");
-        let peer: std::net::SocketAddr = "10.0.0.2:5000".parse().unwrap();
-        let context = TransportContext {
+        (pc, default, other)
+    }
+
+    fn ufrag(pc: &crate::peer_connection::RTCPeerConnection, id: TransportId) -> String {
+        pc.ice_transport_of(id)
+            .agent
+            .get_local_credentials()
+            .ufrag
+            .clone()
+    }
+
+    fn from(peer: &str) -> TransportContext {
+        TransportContext {
             local_addr: "10.0.0.1:4000".parse().unwrap(),
-            peer_addr: peer,
+            peer_addr: peer.parse().unwrap(),
             ..Default::default()
-        };
-        let transports = &pc.pipeline_context.transports;
+        }
+    }
+
+    /// A driver that shares one port between transports gives them the same local address
+    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port). With credentials of their own a
+    /// Binding request goes to the transport whose ufrag it names (RFC 8445 section 7.2.2),
+    /// on the way in by the receiver's part and on the way out by the sender's; what follows
+    /// from a peer goes to the transport that knows it as a remote candidate; the rest to the
+    /// default one.
+    #[test]
+    fn a_port_shared_by_two_transports_is_routed_by_ufrag_then_by_peer() {
+        let (mut pc, default, other) = two_transports_on_one_address(true);
+        let (ours, theirs) = (ufrag(&pc, other), "peer");
+        let context = from("10.0.0.2:5000");
+        let transports = &mut pc.pipeline_context.transports;
         assert_eq!(
             transports.route(&context, &binding_request(&format!("{ours}:{theirs}"))),
-            other,
+            Some(other),
             "a check names the second transport's ufrag"
         );
         assert_eq!(
             transports.route_outbound(&context, &binding_request(&format!("{theirs}:{ours}"))),
-            other,
+            Some(other),
             "a check the second transport sends names it as the sender"
         );
+        let fresh = from("10.0.0.3:5000");
         assert_eq!(
-            transports.route(&context, &binding_request(&format!("{theirs}:{ours}"))),
-            default,
-            "an inbound request is routed by its receiver part only"
+            transports.route(&fresh, &binding_request(&format!("{theirs}:{ours}"))),
+            None,
+            "an inbound request is routed by its receiver part only: this one names none"
         );
-        assert_eq!(transports.route(&context, &[0x16, 0xfe, 0xfd]), default);
+        assert_eq!(transports.route(&fresh, &[0x16, 0xfe, 0xfd]), Some(default));
         // Once the second transport knows the peer, the peer's DTLS goes to it.
-        pc.with_transport(other, |pc| {
-            let candidate = ice::candidate::unmarshal_candidate(
-                "candidate:2 1 udp 2130706431 10.0.0.2 5000 typ host",
-            )
-            .unwrap();
-            pc.ice_transport_mut()
-                .add_remote_candidate(candidate)
-                .expect("the remote candidate is added")
-        });
+        add_candidate(
+            &mut pc,
+            other,
+            "candidate:2 1 udp 2130706431 10.0.0.3 5000 typ host",
+            true,
+        );
         assert_eq!(
             pc.pipeline_context
                 .transports
-                .route(&context, &[0x16, 0xfe, 0xfd]),
-            other
+                .route(&fresh, &[0x16, 0xfe, 0xfd]),
+            Some(other)
         );
         // An address only one transport has is that transport's, whatever it carries.
+        add_candidate(
+            &mut pc,
+            other,
+            "candidate:3 1 udp 2130706431 10.0.0.1 4001 typ host",
+            false,
+        );
         let own = TransportContext {
             local_addr: "10.0.0.1:4001".parse().unwrap(),
             ..context
         };
-        pc.with_transport(other, |pc| {
-            let candidate = ice::candidate::unmarshal_candidate(
-                "candidate:3 1 udp 2130706431 10.0.0.1 4001 typ host",
-            )
-            .unwrap();
-            pc.ice_transport_mut()
-                .add_local_candidate(candidate)
-                .unwrap()
-        });
+        let default_ufrag = ufrag(&pc, default);
         assert_eq!(
-            pc.pipeline_context.transports.route(
-                &own,
-                &binding_request(&format!("{}:x", ufrag(&pc, default)))
-            ),
-            other
+            pc.pipeline_context
+                .transports
+                .route(&own, &binding_request(&format!("{default_ufrag}:x"))),
+            Some(other)
+        );
+    }
+
+    /// Shared credentials (the default) on one local address: the receiver's ufrag names both
+    /// transports, so the rest of the USERNAME, the path a transport used, the remote
+    /// candidates and the remote agent's tie-breaker decide, in that order; a request none of
+    /// them settles is dropped rather than answered by a transport it may not be for.
+    #[test]
+    fn a_port_shared_with_shared_credentials_is_routed_by_username_path_candidate_and_tie_breaker()
+    {
+        let (mut pc, default, other) = two_transports_on_one_address(false);
+        let shared = ufrag(&pc, default);
+        assert_eq!(shared, ufrag(&pc, other));
+        let request = |sender: &str, tie_breaker| {
+            binding_request_with(&format!("{shared}:{sender}"), tie_breaker)
+        };
+
+        // Nothing known yet: dropped, and a DTLS record goes to the default transport.
+        let a = from("10.0.0.2:5000");
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&a, &request("x", None)),
+            None
+        );
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&a, &[0x16, 0xfe, 0xfd]),
+            Some(default)
+        );
+
+        // Rule 1: the remote ufrags differ (a peer with credentials of its own per transport).
+        for (id, remote) in [(default, "remA"), (other, "remB")] {
+            pc.with_transport(id, |pc| {
+                pc.ice_transport_mut()
+                    .agent
+                    .set_remote_credentials(remote.to_owned(), "p".repeat(22))
+                    .expect("remote credentials")
+            });
+        }
+        let b = from("10.0.0.2:5001");
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&b, &request("remB", Some(42))),
+            Some(other),
+            "the sender's part names the second transport"
+        );
+        // ... which taught the path and the tie-breaker: the response-less datagrams of that
+        // 5-tuple, and a check of the same remote agent from a new address, follow.
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&b, &[0x16, 0xfe, 0xfd]),
+            Some(other)
+        );
+
+        // From here on the remote shares its credentials too: only the other rules decide.
+        for id in [default, other] {
+            pc.with_transport(id, |pc| {
+                pc.ice_transport_mut()
+                    .agent
+                    .set_remote_credentials("rem".to_owned(), "p".repeat(22))
+                    .expect("remote credentials")
+            });
+        }
+        let c = from("10.0.0.2:5002");
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&c, &request("rem", Some(42))),
+            Some(other),
+            "rule 4: the tie-breaker the second transport's remote agent sent with"
+        );
+        // Rule 2: a path the default transport sent on.
+        let d = from("10.0.0.2:5003");
+        pc.pipeline_context.transports.learn_path(default, &d);
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&d, &request("rem", Some(7))),
+            Some(default)
+        );
+        // Rule 3: a remote candidate of one transport.
+        add_candidate(
+            &mut pc,
+            other,
+            "candidate:9 1 udp 2130706431 10.0.0.2 5004 typ host",
+            true,
+        );
+        let e = from("10.0.0.2:5004");
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&e, &request("rem", None)),
+            Some(other)
+        );
+        // A path both transports sent on decides nothing; a request on it is dropped.
+        let f = from("10.0.0.2:5005");
+        pc.pipeline_context.transports.learn_path(default, &f);
+        pc.pipeline_context.transports.learn_path(other, &f);
+        assert_eq!(
+            pc.pipeline_context
+                .transports
+                .route(&f, &request("rem", None)),
+            None
         );
     }
 
     /// Transports that share one set of ICE credentials (the default) are not told apart by
-    /// a check's USERNAME: on an address they share, `route_named` names none of them.
+    /// a check's USERNAME: on an address they share, from a peer neither knows, `route_named`
+    /// names none of them and `route` drops the check (tcp-10's test, kept under mt-9's rules).
     #[test]
     fn a_ufrag_several_transports_share_names_none_of_them() {
-        let mut pc = RTCPeerConnectionBuilder::new()
-            .build(Instant::now())
-            .expect("a default peer connection builds");
-        let default = pc.pipeline_context.transports.default_id();
-        let other = pc.add_transport().expect("a second transport");
-        for id in [default, other] {
-            pc.with_transport(id, |pc| {
-                let local = ice::candidate::unmarshal_candidate(
-                    "candidate:1 1 udp 2130706431 10.0.0.1 4000 typ host",
-                )
-                .unwrap();
-                pc.ice_transport_mut().add_local_candidate(local).unwrap()
-            });
-        }
-        let ufrag = |id| {
-            pc.ice_transport_of(id)
-                .agent
-                .get_local_credentials()
-                .ufrag
-                .clone()
-        };
-        let shared = ufrag(default);
-        assert_eq!(shared, ufrag(other), "shared by default");
-        let context = TransportContext {
-            local_addr: "10.0.0.1:4000".parse().unwrap(),
-            peer_addr: "10.0.0.2:5000".parse().unwrap(),
-            ..Default::default()
-        };
+        let (mut pc, default, other) = two_transports_on_one_address(false);
+        let shared = ufrag(&pc, default);
+        assert_eq!(shared, ufrag(&pc, other), "shared by default");
+        let context = from("10.0.0.2:5000");
         let check = binding_request(&format!("{shared}:peer"));
-        let transports = &pc.pipeline_context.transports;
+        let transports = &mut pc.pipeline_context.transports;
         assert_eq!(transports.route_named(&context, &check), None);
         assert_eq!(
             transports.route(&context, &check),
-            default,
-            "route takes the first"
+            None,
+            "a check no rule settles goes to no transport"
         );
     }
 
@@ -1146,6 +1494,8 @@ mod tests {
     /// transport that knows the peer, is no one's until a check names it.
     #[test]
     fn only_an_address_or_a_checks_username_names_the_transport_for_certain() {
+        // A ufrag names one transport when each has credentials of its own; by default they
+        // are shared (see the shared-credentials test above).
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_setting_engine(
                 crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
@@ -1182,11 +1532,13 @@ mod tests {
                 pc.ice_transport_mut().add_remote_candidate(remote).unwrap()
             });
         }
-        let transports = &pc.pipeline_context.transports;
-        assert_eq!(transports.route_named(&context, &dtls), None);
         assert_eq!(
-            transports.route(&context, &dtls),
-            default,
+            pc.pipeline_context.transports.route_named(&context, &dtls),
+            None
+        );
+        assert_eq!(
+            pc.pipeline_context.transports.route(&context, &dtls),
+            Some(default),
             "route still guesses for the datagram path"
         );
         let ours = pc

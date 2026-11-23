@@ -275,7 +275,15 @@ fn ecn_call() -> RTCStatsAccumulator {
         RTCStatsAccumulator::for_connection(true, interceptor::EcnInitiation::RtpAndRtcp, [1, 2]);
     stats.get_or_create_outbound_rtp_streams(OUT_SSRC, RtpCodecKind::Video, "0", "", 0, None, 0);
     stats.set_outbound_rfc6679(OUT_SSRC, true);
-    stats.set_outbound_ccfb(OUT_SSRC, false);
+    // ECN negotiated with `a=ecn-capable-rtp` (RFC 6679 section 6.1.1).
+    stats.set_outbound_ccfb(
+        OUT_SSRC,
+        false,
+        Some(crate::peer_connection::sdp::ecn::NegotiatedEcn {
+            initiation: interceptor::EcnInitiation::RtpAndRtcp,
+            preference: Some(interceptor::EctPreference::Ect0),
+        }),
+    );
     stats
 }
 
@@ -333,9 +341,24 @@ fn an_ecn_summary_counting_the_probes_ect_makes_every_packet_go_out_ect() {
 fn a_stream_without_ecn_reports_sends_nothing_ect() {
     let mut stats = ecn_call();
     stats.set_outbound_rfc6679(OUT_SSRC, false);
-    stats.set_outbound_ccfb(OUT_SSRC, false);
+    stats.set_outbound_ccfb(
+        OUT_SSRC,
+        false,
+        Some(crate::peer_connection::sdp::ecn::NegotiatedEcn {
+            initiation: interceptor::EcnInitiation::RtpAndRtcp,
+            preference: Some(interceptor::EctPreference::Ect0),
+        }),
+    );
     let now = Instant::now();
     assert!((0..40u16).all(|seq| stats.ecn_for_rtp_sent(OUT_SSRC, seq, now).is_none()));
+}
+
+/// ECN negotiated with the leap-of-faith initiation and no `ect=` (ECT(0) implied).
+fn leap_negotiated() -> crate::peer_connection::sdp::ecn::NegotiatedEcn {
+    crate::peer_connection::sdp::ecn::NegotiatedEcn {
+        initiation: interceptor::EcnInitiation::LeapOfFaith,
+        preference: None,
+    }
 }
 
 /// RFC 6679 section 7.3.1: a sender "SHOULD use ECT(0)", unless the receiver's `ect=`
@@ -360,7 +383,7 @@ fn a_marking_stream_sends_ect0_unless_the_receiver_asks_for_ect1() {
             0,
         );
         stats.set_outbound_rfc6679(OUT_SSRC, true);
-        stats.set_outbound_ccfb(OUT_SSRC, false);
+        stats.set_outbound_ccfb(OUT_SSRC, false, Some(leap_negotiated()));
         stats
     };
     let now = Instant::now();
@@ -395,7 +418,7 @@ fn a_marking_stream_sends_ect0_unless_the_receiver_asks_for_ect1() {
     assert!(random.contains(&EcnCodepoint::Ect0) && random.contains(&EcnCodepoint::Ect1));
 
     let mut l4s = leap().with_ecn_marking(interceptor::EcnMarking::L4s);
-    l4s.set_outbound_ccfb(OUT_SSRC, false);
+    l4s.set_outbound_ccfb(OUT_SSRC, false, Some(leap_negotiated()));
     assert!(marks(&mut l4s, 0).iter().all(|m| *m == EcnCodepoint::Ect1));
 }
 

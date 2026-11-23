@@ -145,8 +145,13 @@ test("DTLS and SRTP are negotiated", async ({ page }) => {
     return t;
   }, WS);
   expect(t.dtlsState).toBe("connected");
+  // Which version, suite and SRTP profile each browser cell settled on, for the train's log:
+  // the engine offers AEAD_AES_256_GCM first and the TLS 1.3 suites before the 1.2 ones.
+  console.log(
+    `[${test.info().project.name}] negotiated tlsVersion=${t.tlsVersion} dtlsCipher=${t.dtlsCipher} srtpCipher=${t.srtpCipher}`,
+  );
   // Chromium and Firefox report the negotiated suites; WebKit may not fill them in.
-  if (t.dtlsCipher !== undefined) expect(t.dtlsCipher).toMatch(/AES_128_GCM|CHACHA20/);
+  if (t.dtlsCipher !== undefined) expect(t.dtlsCipher).toMatch(/AES_128_GCM|AES_256_GCM|CHACHA20/);
   if (t.srtpCipher !== undefined) expect(t.srtpCipher).toMatch(/AES|AEAD/);
 });
 

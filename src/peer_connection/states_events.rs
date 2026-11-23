@@ -228,6 +228,29 @@ impl RTCPeerConnection {
         self.update_connection_state(false);
     }
 
+    /// W3C 4.4.1.6 (set the session description, stable): a transport no non-stopped
+    /// transceiver uses any more is closed, "the RTCDtlsTransports and their associated
+    /// RTCIceTransports", and "this results in events firing on these objects": the active
+    /// transport's DTLS and then ICE `statechange` to "closed", when it had not announced that
+    /// already.
+    pub(crate) fn announce_transport_closed(&mut self) {
+        if self.active_announced().dtls != RTCDtlsTransportState::Closed {
+            self.active_announced_mut().dtls = RTCDtlsTransportState::Closed;
+            self.fire_transport_event(
+                RTCPeerConnectionEvent::OnDtlsTransportStateChange(RTCDtlsTransportState::Closed),
+                RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Closed),
+            );
+        }
+        if self.active_announced().ice != RTCIceTransportState::Closed {
+            self.active_announced_mut().ice = RTCIceTransportState::Closed;
+            self.active_announced_mut().selected_pair = None;
+            self.fire_transport_event(
+                RTCPeerConnectionEvent::OnIceTransportStateChange(RTCIceTransportState::Closed),
+                RTCTransportEventKind::IceStateChange(RTCIceTransportState::Closed),
+            );
+        }
+    }
+
     /// What `close()` changes without telling (W3C `close()`: the states are set "without
     /// firing any event"): the announced states become the closed ones.
     pub(crate) fn close_announced_states(&mut self) {
@@ -282,6 +305,23 @@ impl RTCPeerConnection {
                 }),
             );
         }
+    }
+
+    /// The gatherer state last announced and the username fragment of the generation it
+    /// belongs to.
+    pub(crate) fn announced_gathering(&self) -> (RTCIceGatheringState, Option<String>) {
+        let announced = self.active_announced();
+        (announced.gathering, announced.gathering_ufrag.clone())
+    }
+
+    /// Announces again the gathering [`Self::announced_gathering`] returned: a rolled-back
+    /// local offer's ICE restart was taken back.
+    pub(crate) fn restore_announced_gathering(
+        &mut self,
+        (state, ufrag): (RTCIceGatheringState, Option<String>),
+    ) {
+        self.active_announced_mut().gathering_ufrag = ufrag;
+        self.set_gathering_state(state);
     }
 
     /// W3C 5.6 "gathering begins", at `set_local_description`: when the description's ICE

@@ -40,6 +40,11 @@ pub(crate) struct IceTransport {
     /// connection surfaces (W3C webrtc-pc section 5.6, "surface the candidate").
     pub(crate) local_media_section: Option<(String, u16)>,
 
+    /// While a local offer's ICE restart can still be rolled back
+    /// ([`Agent::apply_restart_revertible`]): the gathering state and the generation's
+    /// username fragment announced before it, which a rollback announces again.
+    pub(crate) gathering_before_local_restart: Option<(RTCIceGatheringState, Option<String>)>,
+
     /// Whether W3C `[[IceRole]]` has left "unknown": set by the first offer processed, local
     /// (controlling) or remote (by RFC 8445's rules), and kept for the life of the transport.
     /// The role itself is the agent's, which an ICE role conflict may change (RFC 8445
@@ -64,6 +69,7 @@ impl IceTransport {
             // W3C 4.4.1.1: [[IceConnectionState]] starts "new".
             ice_connection_state: RTCIceConnectionState::New,
             local_media_section: None,
+            gathering_before_local_restart: None,
             role_determined: false,
         })
     }

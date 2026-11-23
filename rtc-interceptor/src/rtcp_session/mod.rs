@@ -445,6 +445,7 @@ impl RtcpSessionBuilder {
             departing: Vec::new(),
             remotes: HashMap::new(),
             remote_order: Vec::new(),
+            ecn_summary_next: 0,
             report_cursor: 0,
             members: HashMap::new(),
             pmembers: 0,
@@ -691,6 +692,9 @@ pub struct RtcpSessionInterceptor {
     /// The bound remote SSRCs in the order they were bound, for the round robin of report
     /// blocks.
     remote_order: Vec<u32>,
+    /// Where the next ECN summary starts in `remote_order` when not every sender fits (RFC
+    /// 6679 section 5.2: a subset, round-robin).
+    ecn_summary_next: usize,
     report_cursor: usize,
     /// The remote members of the session.
     members: HashMap<u32, Member>,
@@ -1745,6 +1749,7 @@ impl RtcpSessionInterceptor {
         now: Instant,
         ssrc: u32,
         any_sender: bool,
+        budget: usize,
     ) -> Option<ExtendedReport> {
         let mut blocks: Vec<Box<dyn rtcp::Packet>> = vec![];
         if self
@@ -1812,14 +1817,53 @@ impl RtcpSessionInterceptor {
                     })
                 })
                 .collect();
-            // One XR block's length field counts at most 65535 words.
-            reports.truncate(usize::from(u16::MAX) / 5);
+            // RFC 6679 section 5.2: "If the RTCP SR or RR packet and the XR ECN summary
+            // report together exceed the MTU, a subset of the senders is reported, chosen in a
+            // round-robin fashion" across the compound packets. Room is what the compound
+            // packet has left after the XR header and the blocks before this one; one entry
+            // goes at least. One XR block's length field counts at most 65535 words.
+            let used = 8 + blocks.iter().map(|b| b.marshal_size()).sum::<usize>() + 4;
+            let fit = (budget.saturating_sub(used) / 20)
+                .max(1)
+                .min(usize::from(u16::MAX) / 5);
+            if reports.len() > fit {
+                let start = self.ecn_summary_next % reports.len();
+                reports.rotate_left(start);
+                reports.truncate(fit);
+                self.ecn_summary_next = start + fit;
+            } else {
+                self.ecn_summary_next = 0;
+            }
             blocks.push(Box::new(EcnSummaryReportBlock { reports }));
         }
         (!blocks.is_empty()).then_some(ExtendedReport {
             sender_ssrc: ssrc,
             reports: blocks,
         })
+    }
+
+    /// The octets an XR ECN Summary Report about the senders heard takes, at most `limit`
+    /// (one entry at least): 0 when no remote negotiated the summary.
+    fn ecn_summary_reserve(&self, limit: usize) -> usize {
+        let wanted = self
+            .remotes
+            .values()
+            .any(|remote| remote.ecn_summary && !remote.gone);
+        if !wanted {
+            return 0;
+        }
+        let senders = self
+            .remotes
+            .values()
+            .filter(|remote| {
+                remote.ecn_summary
+                    && !remote.gone
+                    && remote.ecn.as_deref().is_some_and(|t| t.heard())
+            })
+            .count();
+        // XR header, block header, 20 octets an entry.
+        let entries = senders.min(limit.saturating_sub(12) / 20).max(1);
+        12 + 20 * entries
     }
 
     /// Moves what is waiting into `packets`, as far as `budget` octets go. What does not fit
@@ -1866,7 +1910,11 @@ impl RtcpSessionInterceptor {
             // What is left for report blocks once every participant's report and CNAME are
             // in: the streams that do not fit are reported next time (RFC 3550 6.1).
             let participants = self.locals.iter().filter(|l| l.participates()).count();
-            let room = budget.saturating_sub(participants * (28 + chunk) + 4) / block;
+            // RFC 6679 section 5.2: the reports and the ECN summary share the MTU; the summary
+            // is given room for its senders, up to half the packet, before the blocks are sized.
+            let summary_reserve = self.ecn_summary_reserve(budget / 2);
+            let room =
+                budget.saturating_sub(participants * (28 + chunk) + 4 + summary_reserve) / block;
             blocks = self.report_blocks(now, room.max(1));
         }
         // RFC 3550 6.1: a report carries 31 blocks; further ones follow in additional RR
@@ -1952,7 +2000,7 @@ impl RtcpSessionInterceptor {
         if shape == Shape::Full {
             let any_sender = included.iter().any(|&index| self.we_sent(index, now));
             let ssrc = self.locals[reporter.filter(|r| included.contains(r)).unwrap_or(first)].ssrc;
-            if let Some(xr) = self.extended_report(now, ssrc, any_sender) {
+            if let Some(xr) = self.extended_report(now, ssrc, any_sender, budget) {
                 budget = budget.saturating_sub(xr.marshal_size());
                 packets.push(boxed(xr));
             }

@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use bytes::BytesMut;
 use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -40,8 +41,13 @@ struct Peer {
 
 impl Peer {
     fn new(addr: &str) -> Result<Self> {
+        Self::with_setting_engine(addr, SettingEngine::default())
+    }
+
+    fn with_setting_engine(addr: &str, setting_engine: SettingEngine) -> Result<Self> {
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(setting_engine)
             .build(Instant::now())?;
         Ok(Self {
             pc,
@@ -342,6 +348,14 @@ fn a_rolled_back_ice_restart_offer_leaves_the_ice_session_as_it_was() -> Result<
 #[test]
 fn a_rolled_back_offer_for_a_new_dtls_association_keeps_the_association() -> Result<()> {
     let mut world = World::new()?;
+    // The munged offer asks for a new association without an ICE restart, which the answerer
+    // takes only with this setting (RFC 9429 section 5.8.3 refuses it by default).
+    world.peers[1] = Peer::with_setting_engine(
+        "10.0.0.2:5000",
+        SettingEngineBuilder::new()
+            .with_dtls_new_association_without_ice_restart(true)
+            .build(),
+    )?;
     world.connect()?;
     let first_answer = world.peers[1]
         .pc
@@ -392,5 +406,120 @@ fn a_rolled_back_offer_for_a_new_dtls_association_keeps_the_association() -> Res
     let next = world.peers[1].pc.create_offer(None);
     assert!(next.is_ok(), "{next:?}");
     assert_eq!(attribute(&next?.sdp, "tls-id"), answered_tls_id);
+    Ok(())
+}
+
+/// This side's own ICE restart offer, rolled back (RFC 9429 section 5.7: "any resources
+/// allocated by the abandoned local description are discarded"): the agent goes on with the
+/// session it had, its credentials, its peer's and its selected pair, past the 30 s within
+/// which consent would expire. A restart offered afterwards and answered works as usual.
+#[test]
+fn a_rolled_back_local_ice_restart_offer_keeps_the_ice_session() -> Result<()> {
+    let mut world = World::new()?;
+    world.connect()?;
+    let ufrag = attribute(
+        &world.peers[0].pc.local_description().expect("an offer").sdp,
+        "ice-ufrag",
+    );
+
+    world.peers[0].pc.restart_ice();
+    let offer = world.peers[0].pc.create_offer(None)?;
+    assert_ne!(attribute(&offer.sdp, "ice-ufrag"), ufrag, "a restart offer");
+    let now = world.now;
+    world.peers[0].pc.set_local_description(now, offer)?;
+    world.peers[0]
+        .pc
+        .set_local_description(world.now, rollback())?;
+    assert_eq!(
+        attribute(
+            &world.peers[0]
+                .pc
+                .local_description()
+                .expect("the offer before")
+                .sdp,
+            "ice-ufrag"
+        ),
+        ufrag
+    );
+
+    world.idle(Duration::from_secs(40));
+    world.ping_pong("after the rollback")?;
+    assert!(
+        matches!(
+            world.peers[0].pc.ice_connection_state(),
+            RTCIceConnectionState::Connected | RTCIceConnectionState::Completed
+        ),
+        "the ICE session is the one before the restart: {:?}",
+        world.peers[0].pc.ice_connection_state()
+    );
+
+    // The restart the application asked for is still to be made (W3C restartIce): offered
+    // and answered this time, it completes.
+    let offer = world.peers[0].pc.create_offer(None)?;
+    assert_ne!(attribute(&offer.sdp, "ice-ufrag"), ufrag);
+    let now = world.now;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(now, offer)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    world.trickle()?;
+    world.idle(Duration::from_secs(5));
+    world.ping_pong("after the restart")
+}
+
+/// The same restart offer, rolled back implicitly by an offer from the peer (glare, W3C
+/// `setRemoteDescription`): the peer's offer, made with the credentials in use, is answered
+/// and the session goes on.
+#[test]
+fn a_local_ice_restart_offer_rolled_back_by_a_remote_offer_keeps_the_ice_session() -> Result<()> {
+    let mut world = World::new()?;
+    world.connect()?;
+    let local = |world: &World| {
+        let sdp = world.peers[0]
+            .pc
+            .local_description()
+            .expect("a local description")
+            .sdp;
+        (attribute(&sdp, "ice-ufrag"), attribute(&sdp, "ice-pwd"))
+    };
+    let credentials = local(&world);
+
+    world.peers[0].pc.restart_ice();
+    let offer = world.peers[0].pc.create_offer(None)?;
+    let now = world.now;
+    world.peers[0].pc.set_local_description(now, offer)?;
+    assert_ne!(local(&world), credentials, "the restart offer is applied");
+
+    let glare = world.peers[1].pc.create_offer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, glare.clone())?;
+    world.peers[0].pc.set_remote_description(now, glare)?;
+    let answer = world.peers[0].pc.create_answer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    world.peers[1].pc.set_remote_description(now, answer)?;
+    assert_eq!(
+        local(&world),
+        credentials,
+        "the answer is made in the ICE session the restart offer would have replaced"
+    );
+
+    world.idle(Duration::from_secs(40));
+    world.ping_pong("after the glare")?;
+    assert!(
+        matches!(
+            world.peers[0].pc.ice_connection_state(),
+            RTCIceConnectionState::Connected | RTCIceConnectionState::Completed
+        ),
+        "{:?}",
+        world.peers[0].pc.ice_connection_state()
+    );
     Ok(())
 }

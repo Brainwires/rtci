@@ -715,6 +715,32 @@ fn tmmbr_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<RTCPFeedback
     })
 }
 
+/// `Some` when `a` (this endpoint's) and `b` (the peer's) are both `ccm pause` lines: the
+/// negotiated line (RFC 7728 section 9.1), or `None` when the peer's cannot be answered.
+fn pause_intersection(a: &RTCPFeedback, b: &RTCPFeedback) -> Option<Option<RTCPFeedback>> {
+    if a.typ != TYPE_RTCP_FB_CCM || b.typ != TYPE_RTCP_FB_CCM {
+        return None;
+    }
+    let (ours, theirs) = (
+        interceptor::PauseCapability::parse(&a.parameter)?,
+        interceptor::PauseCapability::parse(&b.parameter),
+    );
+    let Some(theirs) = theirs else {
+        return b
+            .parameter
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case(interceptor::RTCP_FB_CCM_PAUSE))
+            .then_some(None);
+    };
+    Some(
+        interceptor::PauseCapability::negotiate(&ours, &theirs).map(|negotiated| RTCPFeedback {
+            typ: TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: negotiated.parameter(),
+        }),
+    )
+}
+
 pub(crate) fn rtcp_feedback_intersection(
     a: &[RTCPFeedback],
     b: &[RTCPFeedback],
@@ -722,6 +748,15 @@ pub(crate) fn rtcp_feedback_intersection(
     let mut out = vec![];
     for a_feedback in a {
         for b_feeback in b {
+            // RFC 7728 section 9.1: `ccm pause` is answered with the complementary `config`
+            // and `nowait` only when both sides have it; a `config` the section does not
+            // define removes the line.
+            if let Some(pause) = pause_intersection(a_feedback, b_feeback) {
+                if let Some(pause) = pause {
+                    out.push(pause);
+                }
+                break;
+            }
             if a_feedback.typ == b_feeback.typ
                 && (a_feedback.parameter == b_feeback.parameter || a_feedback.typ == "trr-int")
             {
@@ -958,5 +993,56 @@ mod rtx_apt_test {
         assert_eq!(parse_rtx_apt("apt=notanumber"), None);
         // Out of the u8 payload-type range.
         assert_eq!(parse_rtx_apt("apt=300"), None);
+    }
+
+    fn tmmbr(parameter: &str) -> Vec<super::RTCPFeedback> {
+        vec![super::RTCPFeedback {
+            typ: super::TYPE_RTCP_FB_CCM.to_owned(),
+            parameter: parameter.to_owned(),
+        }]
+    }
+
+    /// RFC 5104 section 7.2: "the highest value from offer and answer SHALL be used", and
+    /// section 7.1: without `smaxpr` the rate "defaults to infinity". This endpoint's offered
+    /// `smaxpr` against a remote answer: a higher answered value wins, a lower one loses, and
+    /// an answer without one leaves the session without a limit (infinity is the highest).
+    #[test]
+    fn the_session_maximum_packet_rate_is_the_highest_of_offer_and_answer() {
+        let ours = tmmbr("tmmbr smaxpr=120");
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=200")),
+            tmmbr("tmmbr smaxpr=200")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr smaxpr=60")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+        assert_eq!(
+            super::rtcp_feedback_intersection(&ours, &tmmbr("tmmbr")),
+            tmmbr("tmmbr")
+        );
+        // An answerer without a limit of its own keeps the offered one: the highest of the
+        // two is the offer's, which it states (section 7.2 forbids only adding one).
+        assert_eq!(
+            super::rtcp_feedback_intersection(&tmmbr("tmmbr"), &tmmbr("tmmbr smaxpr=120")),
+            tmmbr("tmmbr smaxpr=120")
+        );
+    }
+
+    /// RFC 3611 section 5.1: `rcvr-rtt=<mode>[:<max size>]` reaches the stream as the remote
+    /// side signalled it, mode and maximum DLRR size included, whatever form this endpoint
+    /// registered, so that the RTCP session keeps its DLRR blocks within the peer's maximum.
+    #[test]
+    fn the_remote_rcvr_rtt_mode_and_maximum_are_negotiated() {
+        let rrtr = |parameter: &str| {
+            vec![super::RTCPFeedback {
+                typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                parameter: parameter.to_owned(),
+            }]
+        };
+        assert_eq!(
+            super::rtcp_feedback_intersection(&rrtr("rcvr-rtt=all"), &rrtr("rcvr-rtt=sender:64")),
+            rrtr("rcvr-rtt=sender:64")
+        );
     }
 }

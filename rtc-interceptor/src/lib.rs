@@ -239,6 +239,7 @@ pub(crate) mod keyframe;
 pub(crate) mod nack;
 pub(crate) mod pacing;
 pub(crate) mod packet;
+pub(crate) mod pause_resume;
 pub(crate) mod report;
 pub(crate) mod rfc8888;
 pub(crate) mod rtcp_session;
@@ -334,7 +335,9 @@ pub use gcc::remb::{
 };
 pub use gcc::slope::{DelayTrend, SlopeEstimator};
 pub use gcc::state::RateControlState;
-pub use gcc::threshold::{AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS};
+pub use gcc::threshold::{
+    AdaptiveThreshold, DEFAULT_INITIAL_MS as GCC_THRESHOLD_INITIAL_MS, ThresholdTimeBase,
+};
 pub use gcc::twcc_gcc::{GccHandle, GccInterceptor, GccInterceptorBuilder, GccShared};
 /// Derive macros for nested (`#[next]`-field) interceptors.
 pub use interceptor_derive::{Interceptor, interceptor};
@@ -366,11 +369,16 @@ pub use pacing::sender::{
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;
+pub use pause_resume::{
+    PAUSE_DEFAULT_REPORT_INTERVAL, PAUSE_DEFAULT_ROUND_TRIP_TIME, PAUSED_REPETITIONS,
+    PauseCapability, PauseResumeBuilder, PauseResumeHandle, PauseResumeInterceptor, PauseState,
+    RTCP_FB_CCM_PAUSE, RemotePauseState, pause_config_answer,
+};
 pub use registry::{Registry, Slot};
 pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
 pub use rfc8888::ecn::{
-    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
+    CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER, EcnFailure,
     EcnInitiation, EcnMarking, EcnState, EcnValidation, EctPreference,
     PROBE_INTERVAL as ECN_PROBE_INTERVAL, PROBE_SPACING as ECN_PROBE_SPACING,
 };

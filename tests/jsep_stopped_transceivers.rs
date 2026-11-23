@@ -30,6 +30,8 @@ fn a_stopped_transceiver_without_a_mid_gets_no_section() -> TestResult {
 
     let offer = pc.create_offer(None)?;
     assert_eq!(media_sections(&offer.sdp).len(), 1, "{}", offer.sdp);
+    // The mid is the transceiver's once the offer is applied (W3C 4.4.1.6).
+    pc.set_local_description(std::time::Instant::now(), offer)?;
     assert!(
         pc.rtp_transceiver(kept)
             .expect("transceiver")
@@ -93,12 +95,14 @@ fn a_rejected_section_is_recycled_for_a_new_transceiver() -> TestResult {
         offer.sdp
     );
     assert_ne!(port_of(&sections[0]), 0, "{}", offer.sdp);
+    // The mid is the transceiver's once the offer is applied (W3C 4.4.1.6).
+    offerer.set_local_description(std::time::Instant::now(), offer.clone())?;
     let new_mid = offerer
         .rtp_transceiver(rtc::rtp_transceiver::RTCRtpTransceiverId::from(second))
         .expect("transceiver")
         .mid()
         .clone()
-        .expect("the offer gave it a mid");
+        .expect("the applied offer gave it a mid");
     assert_ne!(
         new_mid, old_mid,
         "the recycled m= line has the new transceiver's mid"

@@ -5,6 +5,18 @@ use std::time::{Duration, Instant};
 /// Starting threshold, in milliseconds — draft-ietf-rmcat-gcc-02 §5.4.
 pub const DEFAULT_INITIAL_MS: f64 = 12.5;
 
+/// Which time step the threshold adaptation of draft-ietf-rmcat-gcc-02 section 5.4 takes,
+/// `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)| - del_var_th(i-1))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThresholdTimeBase {
+    /// The draft's: t(i) is the arrival time of group i on the receiver's clock (section 5.3),
+    /// the step not capped.
+    Arrival,
+    /// libwebrtc's: the gap between the groups' departures, capped at 100 ms.
+    #[default]
+    Departure,
+}
+
 /// A threshold that follows the trend it is judging.
 ///
 /// # Why it adapts
@@ -65,7 +77,16 @@ impl AdaptiveThreshold {
             }
         };
         self.last_update = Some(now);
+        self.adapt(elapsed.min(Duration::from_millis(100)), estimate_ms)
+    }
 
+    /// Moves the threshold towards `estimate_ms` over a time step of `elapsed` (t(i) - t(i-1)
+    /// of the draft), uncapped. Returns the updated threshold.
+    pub fn update_over(&mut self, elapsed: Duration, estimate_ms: f64) -> f64 {
+        self.adapt(elapsed, estimate_ms)
+    }
+
+    fn adapt(&mut self, elapsed: Duration, estimate_ms: f64) -> f64 {
         let magnitude = estimate_ms.abs();
 
         // A wild sample is not evidence about where the threshold belongs; it is evidence that
@@ -81,10 +102,9 @@ impl AdaptiveThreshold {
             self.decrease_gain
         };
 
-        // Time-scaled, and capped: a long gap between reports must not move the threshold by an
-        // unbounded amount.
+        // Time-scaled. The clamp below bounds what a long step can do.
         let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
-        let step = gain * (magnitude - self.value_ms) * elapsed_ms.min(100.0);
+        let step = gain * (magnitude - self.value_ms) * elapsed_ms;
         self.value_ms = (self.value_ms + step).clamp(6.0, 600.0);
 
         self.value_ms

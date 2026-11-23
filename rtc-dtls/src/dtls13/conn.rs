@@ -1135,6 +1135,16 @@ impl Conn13 {
     // that may have armed a timer, and `handle_timeout` when one is due.
     // ------------------------------------------------------------------------------------
 
+    /// Takes over the retransmission timer of the handshake so far (a client's ClientHello is
+    /// sent by the version-neutral path until the ServerHello says DTLS 1.3): a value backed
+    /// off by its retransmissions is kept until a flight gets through the first time (RFC
+    /// 9147 section 5.8.2).
+    pub(crate) fn continue_retransmit_interval(&mut self, interval: Duration) {
+        self.retransmit_interval = interval
+            .max(self.cfg.retransmit_interval)
+            .min(self.cfg.maximum_retransmit_interval);
+    }
+
     /// Sets the timers that what happened since the last call armed, and sends what is due
     /// at once.
     pub(crate) fn drive(&mut self, now: Instant) -> Result<()> {

@@ -21,7 +21,7 @@ use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 
-const GCM: &str = "SRTP_AEAD_AES_128_GCM";
+const GCM: &str = "SRTP_AEAD_AES_256_GCM";
 
 fn peer(addr: &str, always: bool, answering_role: Option<RTCDtlsRole>) -> Result<Peer> {
     let mut setting_engine =
