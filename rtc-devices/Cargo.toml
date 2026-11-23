@@ -1,0 +1,36 @@
+[package]
+name = "rtc-devices"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Audio capture and playout for the rtc-audio pipeline: ring buffers, device selection and hot-swap, a fake backend, and cpal behind an opt-in feature"
+license.workspace = true
+documentation = "https://docs.rs/rtc-devices"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# No device is opened, and no thread started, unless the application turns `devices` on and
+# opens one. Without it the crate has the device-independent parts (ring buffers, the device
+# manager, rate conversion) and the fake backend the tests use.
+[features]
+default = []
+# Microphones and speakers through cpal (CoreAudio, WASAPI, ALSA; Apache-2.0). On Linux it
+# needs the ALSA development headers (libasound2-dev).
+devices = ["dep:cpal"]
+
+[dependencies]
+audio = { version = "0.22.0", path = "../rtc-audio", package = "rtc-audio", default-features = false }
+log.workspace = true
+thiserror.workspace = true
+rtrb = "0.4.1"
+
+cpal = { version = "0.18.2", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

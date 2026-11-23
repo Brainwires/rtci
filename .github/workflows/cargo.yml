@@ -503,6 +503,9 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # `rtc-devices/devices` (cpal) links ALSA on Linux; the image has no headers for it.
+      - name: ALSA headers for the audio devices feature
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: Check the workspace
         run: cargo check --workspace --all-features --verbose
 

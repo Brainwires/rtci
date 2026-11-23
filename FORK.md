@@ -309,6 +309,19 @@ under "Defaults the fork narrows on purpose" and in the `rtc::data_channel` modu
 | Reordering is not loss: the congestion circuit breaker, the cumulative count, NACK (RFC 8083 4.3, RFC 3550 6.4.1, RFC 4588 6.3) | `rtc-interceptor/src/circuit_breaker/mod.rs` (`net_loss`), `rtc-interceptor/src/report/receiver_stream.rs` (`update_seq`), `rtc-interceptor/src/nack/generator.rs` (`Reordering`) | Upstream has no circuit breaker; its receiver counts a first packet that was overtaken as a duplicate and asks for every gap at the next NACK cycle. The fork's congestion breaker compares the smaller of the average fraction lost and the share the reports' cumulative count confirms (the newest report's count only where it gives packets back), so a lossless path that reorders does not cease a flow; a packet older than the first received extends the sequence back; the NACK generator waits for as long as the stream's reordering showed (10 s window, a quarter more, at most 500 ms). The congestion breaker's packet size s is by default the mean size of the packets sent over the CB_INTERVAL window the rate is measured over; RFC 8083 section 3's last 4 * G frames is `CircuitBreakerPacketSize::LastFrames`. `tests/circuit_breaker_reordering_rtc2rtc.rs`, `rtc-interceptor/tests/{circuit_breaker,nack_request_policy}.rs`. |
 | A C ABI (`rtc-ffi`) | `rtc-ffi/` (`src/pc.rs`, `src/json.rs`, `include/rtc.h`, `cbindgen.toml`), `.github/workflows/cargo.yml` (`c_header`), `.github/workflows/release-binaries.yml` | Upstream has no C interface and no release artefacts. The sans-I/O layer (`rtc_pc_*`) mirrors the Rust API with JSON for configuration, settings, events, stream commands and statistics, numeric ids for channels, transceivers, senders and receivers, and caller-owned buffers; time is the caller's nanoseconds on a process-wide anchor (`rtc-ffi/src/clock.rs`: the anchor and the driven layer's clock are the two permanent reads the time boundary allows it). The driven layer (`rtc-ffi/src/driver/`, feature `driver`) embeds the reference tokio driver behind `rtc_driven_*` (a browser-like object with its own sockets and thread) and `rtc_mux_*` (a shared UDP / ICE-TCP port); `bindings/deno/` is a reference Deno binding of it with the browser API. `release-binaries.yml` (tag or dispatch only, never run) builds the libraries for five platforms. Not published (`publish = false`): the `rtc*` names on crates.io are upstream's. See `docs/packaging.md`. |
 
+### Media pipeline (fork only)
+
+Upstream has no media coding. The fork adds it in crates beside the engine, which stays a
+transport (`docs/media-pipeline.md`):
+
+| Crate | What | Ported |
+|---|---|---|
+| `rtc-audio` | Opus (opus-rs; libopus opt-in), G.711, G.722, the RFC 7587 parameters, the jitter buffer with concealment, FEC, DTX / CN and time-stretching, audio processing (AEC, NS, AGC, HPF, VAD, delay estimation), the send pipeline, `engine` glue to `RTCRtpSender` / `RTCRtpReceiver` | The resampler (`dsp/resample.rs`) is ported unchanged from Brainwires `parol-social` `crates/parolnet-media/src/resample.rs` (MIT OR Apache-2.0, same owner); the rest is written here |
+| `rtc-devices` | capture and playout rings, device manager with hot-swap, fake backend, cpal (feature `devices`) | `cpal_backend.rs` is ported from `parolnet-media/src/audio_io.rs` (MIT OR Apache-2.0, same owner), adapted to the `Backend` trait |
+
+`parolnet-media`'s echo canceller is `sonora` (BSD-3-Clause, libwebrtc's APM in Rust), which
+needs Rust 1.91: above this workspace's MSRV, so not used (see MSRV below).
+
 ### Hardening (fork only)
 
 Peer-input hardening upstream does not have: bounded DTLS fragment reassembly, early-record queue
@@ -400,7 +413,10 @@ The workspace declares `rust-version = "1.89"`, inherited by every crate: the lo
 it builds on with every feature (uuid 1.29 needs 1.89; downstream ParolNet's MSRV is 1.91).
 cargo.yml's `msrv` job checks the workspace on that toolchain with
 `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`, so a fresh resolution picks dependency
-versions that support it. Raising it is a deliberate change of the manifest.
+versions that support it. Raising it is a deliberate change of the manifest. It is what keeps
+`sonora` (libwebrtc's audio processing in Rust, `rust-version = 1.91`) out of `rtc-audio`, even
+as an option; the job installs `libasound2-dev`, which `rtc-devices/devices` (cpal) links on
+Linux.
 
 ### Defaults the fork widens
 
