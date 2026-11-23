@@ -510,8 +510,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         Ok(())
     }
 
+    /// Due at once while packets wait in the write queue. A retransmission or a probe cluster's
+    /// padding is made on the read leg (a NACK, a [`ProbeRequest`]), which a driver reaches
+    /// after its `poll_write` (`poll_write`, `poll_event`, `poll_read`, then `poll_timeout`
+    /// and sleep, as the crate's event loop has it): without a deadline the packets would wait
+    /// for whatever wakes the driver next, a timer or an incoming datagram, which can be a
+    /// long time on a connection with little traffic. The deadline is the instant they were
+    /// made, so the driver's `handle_timeout` and the `poll_write` after it take them out at
+    /// once; it is gone when the queue is drained.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        None
+        self.write_queue.front().map(|packet| packet.now)
     }
 }
 
