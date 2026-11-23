@@ -32,10 +32,10 @@ manifest, so they must resolve on crates.io too).
 16. `rtc-ice`
 17. `rtc-turn`
 18. `rtc`
-19. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
+19. `rtc-audio`
+20. `rtc-devices`
+21. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
     dev-dependency on it has no version, so `cargo publish` drops it)
-20. `rtc-audio`
-21. `rtc-devices`
 
 The rename commit gives every crate its `rtci` name (`docs/rename.md`) and keeps this order.
 `scripts/rename-to-rtci.py` prints it and writes it into release.yml.
@@ -146,7 +146,7 @@ From a clean checkout of the release commit:
 # What goes into each package, and nothing large or unintended
 for p in rtc-crypto rtc-interceptor-derive rtc-sframe rtc-shared rtc-dtls rtc-mdns rtc-rtcp \
          rtc-rtp rtc-interceptor rtc-media rtc-sctp rtc-datachannel rtc-sdp rtc-srtp \
-         rtc-stun rtc-ice rtc-turn rtc rtc-stream-driver rtc-audio rtc-devices; do
+         rtc-stun rtc-ice rtc-turn rtc rtc-audio rtc-devices rtc-stream-driver; do
   cargo package --list -p "$p" > "/tmp/$p.files"
 done
 
@@ -181,9 +181,9 @@ cargo publish -p rtc-crypto
 cargo publish -p rtc-interceptor-derive
 # ... every crate of the list, in order ...
 cargo publish -p rtc
-cargo publish -p rtc-stream-driver
 cargo publish -p rtc-audio
 cargo publish -p rtc-devices
+cargo publish -p rtc-stream-driver
 ```
 
 `cargo publish` returns only once the crate is in the crates.io index (it waits up to

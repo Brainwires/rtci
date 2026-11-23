@@ -1165,7 +1165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
 - **New crates** (`conf/publish-2-new-crates`): `rtc-audio` and `rtc-devices` are published
-  after `rtc` (21 crates); they gain the README their manifests named, `LICENSE-MIT` /
+  after `rtc`, before `rtc-stream-driver` (21 crates; the order `cargo metadata` gives and
+  `scripts/rename-to-rtci.py` writes); they gain the README their manifests named, `LICENSE-MIT` /
   `LICENSE-APACHE` (without them `cargo package` failed) and `[package.metadata.docs.rs]` with
   the features that build or link no C (not `libopus`, not `devices`); their explicit
   `documentation` URLs are removed. `rtc-ffi` stays `publish = false`: a C library delivered as

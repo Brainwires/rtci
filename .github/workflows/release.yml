@@ -88,6 +88,6 @@ jobs:
       #     cargo publish -p rtc-ice --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-turn --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc --token ${{ secrets.CRATES_IO_TOKEN }}
-      #     cargo publish -p rtc-stream-driver --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-audio --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-devices --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-stream-driver --token ${{ secrets.CRATES_IO_TOKEN }}
