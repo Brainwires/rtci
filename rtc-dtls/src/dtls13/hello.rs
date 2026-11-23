@@ -420,7 +420,17 @@ pub(crate) fn negotiate(
         .iter()
         .map(|code| SignatureHashAlgorithm::from_scheme_code(*code))
         .collect();
-    let candidates = || std::iter::once(&named).chain(cfg.local_certificates.iter());
+    // RFC 8446 section 4.4.2.2: only a certificate whose key may sign is sent at all.
+    let candidates = || {
+        std::iter::once(&named)
+            .chain(cfg.local_certificates.iter())
+            .filter(|certificate| {
+                certificate
+                    .certificate
+                    .first()
+                    .is_some_and(|leaf| super::certificate_checks::allows_signing(leaf.as_ref()))
+            })
+    };
     let (certificate, signature_scheme) = candidates()
         .filter(|certificate| {
             crate::crypto::certificates_signed_within(&certificate.certificate, &client_pairs)

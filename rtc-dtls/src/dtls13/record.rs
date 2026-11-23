@@ -262,6 +262,30 @@ impl RecordKeys {
         if content.len() > MAX_PLAINTEXT {
             return Err(Error::ErrRecordOverflow);
         }
+        self.seal_any_length(number, connection_id, form, content_type, content, padding)
+    }
+
+    /// A record longer than a record may be, which no peer of this crate sends: for the
+    /// tests of what the receiver does with one (RFC 8446 section 5.1).
+    #[cfg(test)]
+    pub(crate) fn seal_oversized(
+        &mut self,
+        number: RecordNumber,
+        content_type: u8,
+        content: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.seal_any_length(number, &[], HeaderForm::FULL, content_type, content, 0)
+    }
+
+    fn seal_any_length(
+        &mut self,
+        number: RecordNumber,
+        connection_id: &[u8],
+        form: HeaderForm,
+        content_type: u8,
+        content: &[u8],
+        padding: usize,
+    ) -> Result<Vec<u8>> {
         if number.sequence > MAX_SEQUENCE_NUMBER {
             return Err(Error::ErrSequenceNumberOverflow);
         }

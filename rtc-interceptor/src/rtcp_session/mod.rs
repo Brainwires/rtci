@@ -153,6 +153,11 @@ pub enum RtcpSessionControl {
     Bandwidth(RtcpBandwidth),
     /// Whether reduced-size RTCP (`a=rtcp-rsize`, RFC 5506) was negotiated.
     ReducedSize(bool),
+    /// The octets SRTCP adds to every compound packet: the E flag and SRTCP index, the
+    /// authentication tag and the MKI. RFC 3711 section 3.4: they are part of the packet size
+    /// avg_rtcp_size is computed from, the initial estimate included. Give it before
+    /// [`Self::Start`]; 0 (the default) for plain RTCP.
+    SrtcpOverhead(usize),
     /// The negotiated `trr-int` (RFC 4585 4.2), the minimum interval between regular reports.
     TrrInt(Duration),
     /// The negotiation has no `trr-int` (any more): the interval the session was built with
@@ -444,6 +449,7 @@ impl RtcpSessionBuilder {
             members: HashMap::new(),
             pmembers: 0,
             avg_rtcp_size: 0.0,
+            srtcp_overhead: 0,
             rate: RateWindow::default(),
             immediate_congestion_feedback: self.immediate_congestion_feedback,
             outside_budget: false,
@@ -690,6 +696,8 @@ pub struct RtcpSessionInterceptor {
     members: HashMap<u32, Member>,
     pmembers: usize,
     avg_rtcp_size: f64,
+    /// What SRTCP adds to each compound packet ([`RtcpSessionControl::SrtcpOverhead`]).
+    srtcp_overhead: usize,
     rate: RateWindow,
     /// Whether congestion control feedback leaves as soon as it is written.
     immediate_congestion_feedback: bool,
@@ -877,7 +885,8 @@ impl RtcpSessionInterceptor {
         }
         // RFC 3550 6.3.6 with RFC 8108 5.3.1: the average takes the size per reporting SSRC.
         if !self.outside_budget {
-            let size = wire_size(&packets) as f64 / reporting_ssrcs(&packets) as f64;
+            let size = (wire_size(&packets) + self.srtcp_overhead) as f64
+                / reporting_ssrcs(&packets) as f64;
             self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
         }
         self.write_queue.push_back(TaggedPacket {
@@ -1144,12 +1153,13 @@ impl RtcpSessionInterceptor {
             self.started = true;
             // RFC 3550 6.3.2: avg_rtcp_size starts at the probable size of the first packet:
             // a report, an SDES with the CNAME, and a block for each stream bound so far.
+            // RFC 3711 section 3.4: with the SRTCP fields.
             self.avg_rtcp_size = (LOWER_LAYER_OVERHEAD
                 + 8
                 + 12
                 + self.cname.len()
-                + 24 * self.remotes.len().min(MAX_REPORT_BLOCKS))
-                as f64;
+                + 24 * self.remotes.len().min(MAX_REPORT_BLOCKS)
+                + self.srtcp_overhead) as f64;
             self.pmembers = self.member_count().max(1);
         }
         for index in 0..self.locals.len() {
@@ -1412,7 +1422,9 @@ impl RtcpSessionInterceptor {
         if packets.is_empty() {
             return;
         }
-        let size = wire_size(packets) as f64 / reporting_ssrcs(packets) as f64;
+        // RFC 3711 section 3.4: the SRTCP fields count, though they are gone by now.
+        let size =
+            (wire_size(packets) + self.srtcp_overhead) as f64 / reporting_ssrcs(packets) as f64;
         let mut goodbyes = 0;
 
         for packet in packets {
@@ -2082,7 +2094,7 @@ impl RtcpSessionInterceptor {
 
         if self.member_count() >= BYE_BACKOFF_MEMBERS && !self.left {
             // RFC 3550 6.3.7: in a large session the BYE takes its turn.
-            let size = wire_size(&packets) as f64;
+            let size = (wire_size(&packets) + self.srtcp_overhead) as f64;
             let mut input = self.interval_input(now, false, true, 0);
             input.members = 1;
             input.avg_rtcp_size = size;
@@ -2287,6 +2299,15 @@ impl RtcpSessionInterceptor {
             RtcpSessionControl::Cname(cname) => self.cname = cname.clone(),
             RtcpSessionControl::Bandwidth(bandwidth) => self.bandwidth = *bandwidth,
             RtcpSessionControl::ReducedSize(reduced_size) => self.reduced_size = *reduced_size,
+            RtcpSessionControl::SrtcpOverhead(overhead) => {
+                // Given after the session started (any control starts it), the average moves
+                // by the difference: an average of sizes that each carry the overhead is the
+                // average of the sizes plus the overhead.
+                if self.started {
+                    self.avg_rtcp_size += *overhead as f64 - self.srtcp_overhead as f64;
+                }
+                self.srtcp_overhead = *overhead;
+            }
             RtcpSessionControl::TrrInt(t_rr_interval) => {
                 self.t_rr_interval = t_rr_interval.as_secs_f64();
             }
@@ -2583,6 +2604,39 @@ mod tests {
         session.send(Instant::now(), vec![rr(1), rr(2)]);
         // (28 + 16) / 2 = 22: 100 * 15/16 + 22 / 16.
         assert!((session.avg_rtcp_size - (93.75 + 1.375)).abs() < 1e-9);
+    }
+
+    /// RFC 3711 section 3.4: the SRTCP index, E flag and authentication tag are part of the
+    /// packet size: in the initial avg_rtcp_size and in every packet sent or received.
+    #[test]
+    fn the_srtcp_fields_count_in_the_average_packet_size() {
+        let now = Instant::now();
+        let started = |overhead: Option<usize>| {
+            let mut session = RtcpSessionBuilder::new().build();
+            session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+            if let Some(overhead) = overhead {
+                session.control(now, &RtcpSessionControl::SrtcpOverhead(overhead));
+            }
+            session
+        };
+        let (plain, mut protected) = (started(None), started(Some(14)));
+        assert!(plain.started && protected.started);
+        assert!((protected.avg_rtcp_size - plain.avg_rtcp_size - 14.0).abs() < 1e-9);
+        // Given before the session starts, the initial estimate has it.
+        let mut early = RtcpSessionBuilder::new().build();
+        early.srtcp_overhead = 14;
+        early.cname = "cname".to_owned();
+        early.sync(now);
+        assert!((early.avg_rtcp_size - plain.avg_rtcp_size - 14.0).abs() < 1e-9);
+
+        // A packet sent: 36 octets of RR, UDP and IPv4, and 14 of SRTCP.
+        protected.avg_rtcp_size = 100.0;
+        protected.send(now, vec![rr(1)]);
+        assert!((protected.avg_rtcp_size - (93.75 + 50.0 / 16.0)).abs() < 1e-9);
+        // One received: the same.
+        protected.avg_rtcp_size = 100.0;
+        protected.observe_rtcp(now, &[rr(2)]);
+        assert!((protected.avg_rtcp_size - (93.75 + 50.0 / 16.0)).abs() < 1e-9);
     }
 
     /// RFC 4585 6.1: the packet sender of a feedback message is rewritten, whatever its type.

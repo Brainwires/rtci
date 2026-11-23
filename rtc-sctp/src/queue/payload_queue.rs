@@ -164,7 +164,9 @@ impl PayloadQueue {
         }
         let c = entry.remove();
         self.sorted.pop_front();
-        self.n_bytes -= c.user_data.len();
+        if !c.payload_held {
+            self.n_bytes -= c.user_data.len();
+        }
         Some(c)
     }
 
@@ -248,16 +250,66 @@ impl PayloadQueue {
             .is_some_and(ChunkPayloadData::acknowledge)
     }
 
-    /// Release each payload byte once, preserving its acknowledgment state.
+    /// Release each payload byte once, preserving its acknowledgment state. A held payload
+    /// ([`Self::hold_acknowledged`]) is dropped now; its bytes were counted out already.
     pub(crate) fn release_payload(&mut self, tsn: u32) -> usize {
         if let Some(c) = self.chunk_map.get_mut(&tsn) {
             let n = c.user_data.len();
+            if c.payload_held {
+                c.user_data.clear();
+                return 0;
+            }
             self.n_bytes -= n;
             c.user_data.clear();
             n
         } else {
             0
         }
+    }
+
+    /// A chunk a Gap Ack Block acknowledged: its bytes leave the outstanding count, once, and
+    /// its payload stays until the Cumulative TSN Ack covers the chunk, so that it can be
+    /// sent again if the receiver reneges (RFC 9260 6.2.1). Returns the bytes counted out.
+    pub(crate) fn hold_acknowledged(&mut self, tsn: u32) -> usize {
+        match self.chunk_map.get_mut(&tsn) {
+            Some(c) if !c.payload_held => {
+                let n = c.user_data.len();
+                self.n_bytes -= n;
+                c.payload_held = true;
+                n
+            }
+            _ => 0,
+        }
+    }
+
+    /// The receiver reneged on `tsn` (RFC 9260 6.2.1 D iii): it is outstanding again, its
+    /// bytes with it. Returns whether it was a gap-acknowledged chunk.
+    pub(crate) fn renege(&mut self, tsn: u32) -> bool {
+        match self.chunk_map.get_mut(&tsn) {
+            Some(c) if c.acknowledged && !c.abandoned() => {
+                c.renege();
+                if c.payload_held {
+                    c.payload_held = false;
+                    self.n_bytes += c.user_data.len();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The TSNs a Gap Ack Block acknowledged and that are still here (above the Cumulative
+    /// TSN Ack).
+    pub(crate) fn gap_acknowledged(&self) -> Vec<u32> {
+        self.sorted
+            .iter()
+            .copied()
+            .filter(|tsn| {
+                self.chunk_map
+                    .get(tsn)
+                    .is_some_and(|c| c.acknowledged && !c.abandoned())
+            })
+            .collect()
     }
 
     pub(crate) fn get_last_tsn_received(&self) -> Option<&u32> {
