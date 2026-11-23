@@ -110,6 +110,11 @@ impl Agent {
         self.ufrag_pwd.remote_credentials = undo.remote_credentials;
         self.ufrag_pwd.pending_local_credentials = None;
         self.local_candidates = undo.local_candidates;
+        // The snapshot was taken while the restart was staged: what was gathered for it
+        // belongs to no generation now.
+        for c in &mut self.local_candidates {
+            c.restart_generation = false;
+        }
         self.remote_candidates = undo.remote_candidates;
         self.candidate_pairs = undo.candidate_pairs;
         self.nominated_pair = undo.nominated_pair;

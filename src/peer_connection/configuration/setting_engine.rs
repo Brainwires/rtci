@@ -305,8 +305,9 @@ pub struct IceBehaviour {
     pub send_data_before_nomination: bool,
     /// See [`SettingEngineBuilder::with_ice_pairing_before_candidates_are_conveyed`].
     pub pair_before_conveyed: bool,
-    /// See [`SettingEngineBuilder::with_ice_software`].
-    pub software: Option<String>,
+    /// See [`SettingEngineBuilder::with_ice_software`]: `None` until it is called (each
+    /// stack's own SOFTWARE), then the value it was given.
+    pub software: Option<Option<String>>,
 }
 
 /// Replay attack protection window sizes.
@@ -469,6 +470,8 @@ pub struct SettingEngine {
     pub(crate) allow_insecure_verification_algorithm: bool,
     pub(crate) disable_media_engine_copy: bool,
     pub(crate) disable_media_engine_multiple_codecs: bool,
+    /// [`SettingEngineBuilder::with_own_payload_types_in_answers`].
+    pub(crate) own_payload_types_in_answers: bool,
     pub(crate) srtp_protection_profiles: Vec<SrtpProtectionProfile>,
     pub(crate) dtls_cipher_suites: Vec<CipherSuiteId>,
     pub(crate) receive_mtu: usize,
@@ -542,6 +545,9 @@ pub struct SettingEngine {
     /// the stream to a new SSRC (RFC 7160 section 4.1). Off by default: one SSRC across clock
     /// rates, which every browser receiver follows.
     pub(crate) ssrc_per_clock_rate: bool,
+    /// [`SettingEngineBuilder::with_audio_redundancy`]: when an audio stream that negotiated
+    /// RED (RFC 2198) is sent in it.
+    pub(crate) audio_redundancy: interceptor::AudioRedundancy,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
     /// The application's socket layer reports each received datagram's ECN codepoint and
     /// applies the one each sent datagram carries ([`SettingEngineBuilder::with_ecn`]).
@@ -694,6 +700,9 @@ impl SettingEngine {
             ice_options_in_media_sections: Default::default(),
             default_ice_pacing_omitted: Default::default(),
             dtls_flight_interval: Default::default(),
+            // Master's fields of the train-12 merge, at the value the derive gave them.
+            own_payload_types_in_answers: Default::default(),
+            audio_redundancy: Default::default(),
         }
     }
 
@@ -747,6 +756,26 @@ impl SettingEngine {
     /// the server.
     pub fn turn_allocation_refresh_interval_cap(&self) -> Option<Duration> {
         self.turn_allocation_refresh_interval_cap
+    }
+
+    /// The SOFTWARE of the ICE agent's STUN messages, in the form of
+    /// [`ice::agent::agent_config::AgentConfig::software`] (`None`: its default, empty: none);
+    /// see [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn ice_agent_software(&self) -> Option<String> {
+        self.ice
+            .software
+            .as_ref()
+            .map(|software| software.clone().unwrap_or_default())
+    }
+
+    /// The SOFTWARE of the requests of the TURN clients the engine runs, in the form of
+    /// [`turn::client::ClientConfig::software`] (empty: none); see
+    /// [`SettingEngineBuilder::with_ice_software`].
+    pub(crate) fn turn_software(&self) -> String {
+        match &self.ice.software {
+            None => turn::client::DEFAULT_SOFTWARE.to_owned(),
+            Some(software) => software.clone().unwrap_or_default(),
+        }
     }
 
     /// Whether an ICE restart discards the local candidates gathered by the previous generation.
@@ -1512,6 +1541,12 @@ impl SettingEngineBuilder {
     /// are then written for a local address with no socket behind it and silently go nowhere, so
     /// the restarted generation exchanges credentials successfully and never leaves `Checking`.
     ///
+    /// Only the previous generation's candidates are discarded. Those added while the restart
+    /// is staged (an answerer's between `set_remote_description` of the restart offer and
+    /// `set_local_description` of its answer, an offerer's between `create_offer` and its
+    /// `set_local_description`) are the new generation's: the restart keeps them and the
+    /// answer lists them (see [`RTCPeerConnection::add_local_candidate`](crate::peer_connection::RTCPeerConnection::add_local_candidate)).
+    ///
     /// # Parameters
     ///
     /// * `discard` - `true` to drop local candidates on restart, `false` (default) to keep them
@@ -1756,13 +1791,42 @@ impl SettingEngineBuilder {
         self
     }
 
-    /// The SOFTWARE attribute (RFC 8489 section 14.14) of the ICE agent's connectivity checks
-    /// and of its success responses to the peer's: RFC 8489 sections 6.1 and 6.3.1.1 say
-    /// requests and responses "SHOULD" carry one, and section 16.1.2 that its use "SHOULD" be
-    /// configurable. `None`, the default, is `rtc-ice` and its version; `Some(String::new())`
-    /// sends none (what libwebrtc's checks carry, and what an application that would not name
-    /// its software to the path wants); any other value is sent as it is.
+    /// The SOFTWARE attribute (RFC 8489 section 14.14) of the STUN messages the peer
+    /// connection sends: the ICE agent's connectivity checks (consent checks and nominations
+    /// included) and its success responses to the peer's, and the requests of the TURN
+    /// clients the engine runs for the configuration's `turn:` / `turns:` servers, over UDP,
+    /// TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind, ConnectionBind).
+    ///
+    /// Without this call the ICE agent sends `rtc-ice` and its version
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
+    /// ([`turn::client::DEFAULT_SOFTWARE`]): RFC 8489 sections 6.1 and 6.3.1.1, requests and
+    /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
+    /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
+    /// an implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD
+    /// make usage of the SOFTWARE attribute a configurable option"). The engine's server-reflexive Binding requests, the agent's error
+    /// responses, the consent checks it keeps up on the previous generation's path during a
+    /// restart, keepalive indications and TURN Send indications carry none in any case.
+    ///
+    /// `text` is fewer than 128 characters and at most 509 bytes (section 14.14); building the
+    /// peer connection with a longer one fails with `ErrAttributeSizeOverflow`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// // No SOFTWARE attribute in any STUN message of the peer connection.
+    /// let _setting_engine = SettingEngineBuilder::new().with_ice_software(None).build();
+    /// ```
     pub fn with_ice_software(mut self, software: Option<String>) -> Self {
+        self.0.ice.software = Some(software);
+        self
+    }
+
+    /// [`Self::with_ice_software`] with "never called" expressible: `None` restores each
+    /// stack's own SOFTWARE text, `Some(software)` is `with_ice_software(software)`. For the
+    /// behaviour profiles, whose `Rfc` value is the uncalled state.
+    pub(crate) fn ice_software_choice(mut self, software: Option<Option<String>>) -> Self {
         self.0.ice.software = software;
         self
     }
@@ -2282,6 +2346,31 @@ impl SettingEngineBuilder {
     /// that set.
     pub fn with_disable_media_engine_multiple_codecs(mut self, is_disabled: bool) -> Self {
         self.0.disable_media_engine_multiple_codecs = is_disabled;
+        self
+    }
+
+    /// Whether an answer numbers the formats with this endpoint's own payload types (the ones
+    /// the [`MediaEngine`](crate::peer_connection::configuration::media_engine::MediaEngine)
+    /// registered them with) instead of the offer's. `false` by default.
+    ///
+    /// RFC 3264 section 6.1: "if a particular codec was referenced with a specific payload
+    /// type number in the offer, that same payload type number SHOULD be used for that codec
+    /// in the answer", which is the default. An answerer may number the formats otherwise
+    /// (section 5.1: "the answer might indicate different payload type numbers for the same
+    /// codecs, in which case, the offerer MUST send with the payload type numbers from the
+    /// answer"; a gateway to a system with fixed numbers does), and that is `true`: each
+    /// format of an offer this endpoint negotiates is answered under its registered payload
+    /// type (the one a description of this endpoint already gave it, once it has one), RTX
+    /// (`apt`) and RED (the encodings of its fmtp) following their primaries. The endpoint
+    /// then receives with its own numbers and sends with the offer's (section 6.1: the
+    /// answerer "MUST use the payload type numbers from the offer, even if they differ from
+    /// those in the answer").
+    ///
+    /// Either way each direction of a media section follows the description that governs it:
+    /// what is sent carries the remote description's payload types and what is received is
+    /// read with the local description's (RFC 9429 sections 5.9 to 5.11).
+    pub fn with_own_payload_types_in_answers(mut self, own: bool) -> Self {
+        self.0.own_payload_types_in_answers = own;
         self
     }
 
@@ -2864,6 +2953,35 @@ impl SettingEngineBuilder {
     /// connection does).
     pub fn with_ssrc_per_clock_rate(mut self, ssrc_per_clock_rate: bool) -> Self {
         self.0.ssrc_per_clock_rate = ssrc_per_clock_rate;
+        self
+    }
+
+    /// When a local audio stream whose section negotiated RED (RFC 2198) is sent in RED, each
+    /// packet carrying a copy of the one before. The default is
+    /// [`AudioRedundancy::WhenPreferred`](interceptor::AudioRedundancy::WhenPreferred): only
+    /// when the remote description lists RED ahead of the stream's codec. Received RED is
+    /// taken apart in every case.
+    ///
+    /// RFC 3264 sections 5.1 and 6.1: the formats of an m= line are "listed in order of
+    /// preference", and the sender "SHOULD use the format with the highest preference". The
+    /// default codecs offer RED after Opus, as Chromium and WebKit do, and those browsers
+    /// answer it after Opus too; libwebrtc sends RED only when it precedes the codec it
+    /// protects. So by default a call with them, or with another `rtc` peer connection,
+    /// carries plain Opus: RED is negotiated, not used. RFC 8854 recommends Opus's in-band FEC
+    /// for Opus (section 4.1) and FEC only for the loss observed or when the application asks
+    /// (section 8).
+    ///
+    /// [`AudioRedundancy::Always`](interceptor::AudioRedundancy::Always) is that request: RED
+    /// whenever negotiated, whatever the order. It about doubles the audio bitrate (a copy of
+    /// the previous packet in each). [`AudioRedundancy::Never`](interceptor::AudioRedundancy::Never)
+    /// sends the codec even to a peer that prefers RED.
+    ///
+    /// Applies to the RED interceptor the connection installs
+    /// ([`configure_audio_redundancy_with`](crate::peer_connection::configuration::interceptor_registry::configure_audio_redundancy_with));
+    /// a registry that fills [`Slot::Redundancy`](interceptor::Slot::Redundancy) itself
+    /// decides with its own interceptor.
+    pub fn with_audio_redundancy(mut self, audio_redundancy: interceptor::AudioRedundancy) -> Self {
+        self.0.audio_redundancy = audio_redundancy;
         self
     }
 

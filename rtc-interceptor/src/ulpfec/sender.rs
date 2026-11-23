@@ -222,6 +222,9 @@ impl UlpfecSendBuilder {
 
 /// One protected media stream.
 struct ProtectedStream {
+    /// How this stream's FEC travels, with the negotiated payload types
+    /// ([`UlpfecSendInterceptor::negotiated_carriage`]).
+    carriage: Carriage,
     /// The packets of the block being gathered, as protected: sequence number and wire image.
     block: Vec<(u16, Bytes)>,
     /// RED, [`RedPlacement::WithNextMedia`]: FEC payloads waiting for the next media packet.
@@ -307,6 +310,63 @@ pub struct UlpfecSendInterceptor {
 }
 
 impl UlpfecSendInterceptor {
+    /// How the FEC of `info`'s stream travels: RFC 5109 section 14, "the multiplexing
+    /// configuration ... MUST be indicated out of band", and section 14.2, "An rtpmap attribute
+    /// MUST be used to indicate a dynamic payload type number for the FEC packets". So the
+    /// stream's negotiated formats ([`StreamInfo::section_mime_types`]) decide, not only the
+    /// builder:
+    ///
+    /// - RED: the section's `red` and `ulpfec` formats, the builder's payload types when the
+    ///   section has them under those numbers, else the section's own; without a `red` and a
+    ///   `ulpfec` format the stream is not protected as RED, and goes as a separate stream when
+    ///   the description gives it a ULPFEC repair flow.
+    /// - A separate stream: the repair flow of [`StreamInfo::ssrc_fec`] /
+    ///   [`StreamInfo::payload_type_fec`] when its format is `ulpfec`; without one, RED when the
+    ///   section negotiated `red` and `ulpfec`.
+    ///
+    /// `None`: the stream is not protected. A binder that names no formats (an empty
+    /// `section_mime_types`) gets the builder's carriage as it is.
+    fn negotiated_carriage(&self, info: &StreamInfo) -> Option<Carriage> {
+        if info.section_mime_types.is_empty() {
+            return Some(self.carriage);
+        }
+        let formats = |subtype: &str| -> Vec<u8> {
+            info.section_mime_types
+                .iter()
+                .filter(|(_, mime_type)| {
+                    mime_type
+                        .rsplit_once('/')
+                        .is_some_and(|(_, sub)| sub.eq_ignore_ascii_case(subtype))
+                })
+                .map(|(payload_type, _)| *payload_type)
+                .collect()
+        };
+        let red = |wanted: Option<(u8, u8)>| -> Option<Carriage> {
+            let (reds, fecs) = (formats("red"), formats("ulpfec"));
+            let pick = |found: &[u8], wanted: Option<u8>| {
+                wanted
+                    .filter(|payload_type| found.contains(payload_type))
+                    .or_else(|| found.first().copied())
+            };
+            Some(Carriage::Red {
+                red_payload_type: pick(&reds, wanted.map(|(red, _)| red))?,
+                fec_payload_type: pick(&fecs, wanted.map(|(_, fec)| fec))?,
+            })
+        };
+        let separate = (info.ssrc_fec.is_some()
+            && info
+                .payload_type_fec
+                .is_some_and(|payload_type| formats("ulpfec").contains(&payload_type)))
+        .then_some(Carriage::Stream);
+        match self.carriage {
+            Carriage::Red {
+                red_payload_type,
+                fec_payload_type,
+            } => red(Some((red_payload_type, fec_payload_type))).or(separate),
+            Carriage::Stream => separate.or_else(|| red(None)),
+        }
+    }
+
     /// The media SSRCs currently being protected.
     pub fn protected_streams(&self) -> impl Iterator<Item = u32> + '_ {
         self.streams.keys().copied()
@@ -410,7 +470,7 @@ impl UlpfecSendInterceptor {
         if let Carriage::Red {
             red_payload_type,
             fec_payload_type,
-        } = self.carriage
+        } = stream.carriage
         {
             let pending: Vec<Bytes> = stream.pending.drain(..).collect();
             let redundant: Vec<(u8, u16, &[u8])> = pending
@@ -434,7 +494,7 @@ impl UlpfecSendInterceptor {
                 stream.passing = 0;
                 // The FEC packets of this block take the next sequence numbers of the media
                 // stream, now, so the media that follows is numbered past them.
-                let own_packets = matches!(self.carriage, Carriage::Red { .. })
+                let own_packets = matches!(stream.carriage, Carriage::Red { .. })
                     && self.placement == RedPlacement::OwnPacket;
                 let reserved = if own_packets {
                     let offset = self.sequence_offsets.entry(ssrc).or_insert(0);
@@ -514,7 +574,7 @@ impl UlpfecSendInterceptor {
         // The packet FEC protects: in RED, the virtual packet of RFC 5109 section 14.2, which is
         // the packet on the wire without its block headers and redundant data, under the
         // primary's payload type. That is what the receiver rebuilds from what arrives.
-        let protected = match self.carriage {
+        let protected = match stream.carriage {
             Carriage::Stream => wire_image(rtp_packet).ok(),
             Carriage::Red { .. } => {
                 red::parse(&rtp_packet.payload)
@@ -566,7 +626,7 @@ impl UlpfecSendInterceptor {
             return;
         };
         let mut packets = Vec::new();
-        match self.carriage {
+        match stream.carriage {
             Carriage::Stream => {
                 for fec in fec_payloads {
                     if let Some(packetizer) = stream.packetizer.as_mut()
@@ -664,7 +724,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
         }
 
         // A packet the application already built as RED, or as FEC, is not ours to protect.
-        let foreign = match self.carriage {
+        let foreign = match self.streams[&ssrc].carriage {
             Carriage::Red {
                 red_payload_type,
                 fec_payload_type,
@@ -710,7 +770,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
         if let Carriage::Red {
             red_payload_type,
             fec_payload_type,
-        } = self.carriage
+        } = stream.carriage
         {
             let pending: Vec<Bytes> = stream.pending.drain(..).collect();
             let redundant: Vec<(u8, u16, &[u8])> = pending
@@ -753,7 +813,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecSendInterceptor {
             return Ok(());
         };
         for fec in fec_payloads {
-            let packet = match self.carriage {
+            let packet = match stream.carriage {
                 Carriage::Stream => {
                     let Some(packetizer) = stream.packetizer.as_mut() else {
                         continue;
@@ -824,9 +884,12 @@ impl Interceptor for UlpfecSendInterceptor {
         if !(self.filter)(info) {
             return;
         }
+        let Some(carriage) = self.negotiated_carriage(info) else {
+            return;
+        };
         // RFC 5109 section 13: "If 1 is signaled, only one level of FEC protection SHALL be
         // used in the stream": `onelevelonly=1` on the negotiated `ulpfec` format.
-        let fec_format = match self.carriage {
+        let fec_format = match carriage {
             Carriage::Red {
                 fec_payload_type, ..
             } => Some(fec_payload_type),
@@ -837,7 +900,7 @@ impl Interceptor for UlpfecSendInterceptor {
                 .iter()
                 .any(|(pt, fmtp)| *pt == payload_type && super::one_level_only_from_fmtp(fmtp))
         });
-        let packetizer = match self.carriage {
+        let packetizer = match carriage {
             Carriage::Red { .. } => None,
             Carriage::Stream => {
                 // Both halves or neither, as for FlexFEC: a repair SSRC with no payload type has
@@ -859,6 +922,7 @@ impl Interceptor for UlpfecSendInterceptor {
         self.streams.insert(
             info.ssrc,
             ProtectedStream {
+                carriage,
                 block: Vec::new(),
                 pending: VecDeque::new(),
                 packetizer,

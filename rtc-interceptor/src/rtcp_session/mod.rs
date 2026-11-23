@@ -2935,11 +2935,18 @@ impl Interceptor for RtcpSessionInterceptor {
             .chain(info.ssrc_rtx.map(|ssrc| (ssrc, Role::Repair)))
             .chain(info.ssrc_fec.map(|ssrc| (ssrc, Role::Repair)));
         for (ssrc, role) in sources {
+            // The media SSRC may carry the section's other formats (RFC 7160, one SSRC).
+            let rates: &[(u8, u32)] = if role == Role::Media {
+                &info.payload_clock_rates
+            } else {
+                &[]
+            };
             if let Some(index) = self.local_index(ssrc) {
                 self.locals[index].stream.set_clock_rate(info.clock_rate);
+                self.locals[index].stream.set_payload_clock_rates(rates);
                 continue;
             }
-            let local = match self.departing.iter().position(|local| local.ssrc == ssrc) {
+            let mut local = match self.departing.iter().position(|local| local.ssrc == ssrc) {
                 Some(position) => {
                     let mut local = self.departing.remove(position);
                     local.stream.set_clock_rate(info.clock_rate);
@@ -2949,6 +2956,7 @@ impl Interceptor for RtcpSessionInterceptor {
                 }
                 None => Local::new(ssrc, kind, role, info.clock_rate),
             };
+            local.stream.set_payload_clock_rates(rates);
             self.locals.push(local);
         }
         self.sync_reporter();

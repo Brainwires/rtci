@@ -395,6 +395,8 @@ struct Flow {
     frames: VecDeque<FrameSize>,
     /// When the last report block for this flow arrived.
     last_report_at: Option<Instant>,
+    /// When the flow's last packet left.
+    last_departure: Option<Instant>,
     /// Smoothed interval between the receiver's reports: the estimate of Tdr.
     receiver_interval: Option<Duration>,
     /// The extended highest sequence number the receiver last reported.
@@ -426,6 +428,7 @@ impl Flow {
             frame_intervals: VecDeque::new(),
             frames: VecDeque::new(),
             last_report_at: None,
+            last_departure: None,
             receiver_interval: None,
             highest_sequence: None,
             previous_report: None,
@@ -465,6 +468,7 @@ impl Flow {
     }
 
     fn on_departure(&mut self, now: Instant, timestamp: u32, size: usize, frames_kept: usize) {
+        self.last_departure = Some(now);
         self.packets_since_report += 1;
         self.bytes_since_report += size as u64;
 
@@ -774,9 +778,19 @@ impl CircuitBreakerInterceptor {
         );
         if let Some(duration) = since_last {
             // Only while at least one packet is sent every max(Tdr, Tr): with fewer, the
-            // fraction lost is a measurement artefact.
+            // fraction lost is a measurement artefact. That is the sender's rate, not every
+            // report's: reports closer together than max(Tdr, Tr) (AVPF with early feedback
+            // compounds: every 10 ms on a video flow) often see no packet of a flow that sends
+            // a frame every 20 ms, and clearing the samples on each such report kept the
+            // breaker from ever judging the flow. Over an interval shorter than the period, a
+            // packet sent within the last period is enough.
             let period = tdr.max(tr).as_secs_f64().max(1e-3);
-            let enough = sent_packets as f64 >= (duration.as_secs_f64() / period).floor().max(1.0);
+            let enough = if duration.as_secs_f64() >= period {
+                sent_packets as f64 >= (duration.as_secs_f64() / period).floor()
+            } else {
+                flow.last_departure
+                    .is_some_and(|sent| now.saturating_duration_since(sent).as_secs_f64() <= period)
+            };
             if enough {
                 flow.losses.push_back(LossSample {
                     fraction_lost: f64::from(report.fraction_lost) / 256.0,

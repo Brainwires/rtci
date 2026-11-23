@@ -1862,6 +1862,28 @@ impl RTCPeerConnection {
                 written.push((id, uri, encrypted));
             }
         }
+        // RFC 6464 section 4: "the semantics chosen for a header extension element (including
+        // its vad setting) for a particular extension identifier value MUST NOT be changed
+        // within an RTP session". The extension attributes an id was negotiated with go with it:
+        // an answer repeats the offer's, a later offer the ones the remote description gave it.
+        let extension_attributes = |id: u16, uri: &str| -> Option<String> {
+            // The mapping the remote description gave the id: the offer an answer answers, or
+            // for a later offer the current remote description.
+            media_section
+                .match_extensions
+                .get(uri)
+                .filter(|matched| matched.id == id)
+                .and_then(|matched| matched.attributes.clone())
+                .filter(|attributes| !attributes.is_empty())
+        };
+        let ext_attr_of = |id: u16, uri: &str, encrypted: bool| -> Option<String> {
+            let attributes = extension_attributes(id, uri);
+            match (encrypted, attributes) {
+                (true, Some(attributes)) => Some(format!("{uri} {attributes}")),
+                (true, None) => Some(uri.to_owned()),
+                (false, attributes) => attributes,
+            }
+        };
         for (id, uri, encrypted) in &written {
             // RFC 8285 section 7: an extension may be restricted to a direction. An offer
             // states the one the extension was registered for when the section sends and
@@ -1881,11 +1903,8 @@ impl RTCPeerConnection {
             if registered == Some(RTCRtpTransceiverDirection::Inactive) {
                 // Offered inactive; in an answer, only as the offer allowed.
                 if is_offer || media_section.match_extensions.contains_key(uri) {
-                    let (ext_uri, ext_attr) = if *encrypted {
-                        (Url::parse(ENCRYPT_URI)?, Some(uri.clone()))
-                    } else {
-                        (Url::parse(uri.as_str())?, None)
-                    };
+                    let ext_uri = Url::parse(if *encrypted { ENCRYPT_URI } else { uri })?;
+                    let ext_attr = ext_attr_of(*id, uri, *encrypted);
                     media = media.with_extmap(sdp::extmap::ExtMap {
                         value: *id,
                         uri: Some(ext_uri),
@@ -1904,11 +1923,8 @@ impl RTCPeerConnection {
             ) else {
                 continue;
             };
-            let (ext_uri, ext_attr) = if *encrypted {
-                (Url::parse(ENCRYPT_URI)?, Some(uri.clone()))
-            } else {
-                (Url::parse(uri.as_str())?, None)
-            };
+            let ext_uri = Url::parse(if *encrypted { ENCRYPT_URI } else { uri })?;
+            let ext_attr = ext_attr_of(*id, uri, *encrypted);
             media = media.with_extmap(sdp::extmap::ExtMap {
                 value: *id,
                 uri: Some(ext_uri),
@@ -2892,6 +2908,10 @@ impl RTCPeerConnection {
                 {
                     desc.media_name.protos =
                         ["TCP", "DTLS", "RTP", "SAVPF"].map(str::to_owned).to_vec();
+                    // RFC 6679 section 6.1.3: `a=ecn-capable-rtp` "MUST NOT be used for RTP
+                    // sessions using TCP".
+                    desc.attributes
+                        .retain(|a| a.key != ecn::ATTR_KEY_ECN_CAPABLE_RTP);
                 }
                 should_add_id
             };

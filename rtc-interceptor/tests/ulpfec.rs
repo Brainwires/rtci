@@ -1133,3 +1133,152 @@ fn the_negotiated_onelevelonly_keeps_the_receiver_from_two_levels() {
         "used otherwise"
     );
 }
+
+// --- The carriage and payload types the description negotiated (RFC 5109 sections 14, 14.2) ---
+
+/// A sender chain built with `builder`, its stream bound with the m= section's formats
+/// `formats` (payload type, MIME type) and, when `separate_fec`, the repair flow of
+/// [`stream_info`].
+fn negotiated_sender(
+    builder: UlpfecSendBuilder,
+    separate_fec: bool,
+    formats: &[(u8, &str)],
+) -> impl Interceptor {
+    let mut chain = Registry::new()
+        .with(
+            Slot::FecEncoder,
+            builder
+                .with_num_media_packets(2)
+                .with_num_fec_packets(1)
+                .build(),
+        )
+        .build();
+    let mut info = stream_info("video/VP8", separate_fec);
+    info.section_mime_types = formats
+        .iter()
+        .map(|(payload_type, mime_type)| (*payload_type, (*mime_type).to_owned()))
+        .collect();
+    chain.bind_local_stream(&info);
+    chain
+}
+
+/// (SSRC, payload type, the first block's payload type for a RED packet) of each packet.
+fn shapes(wire: &[rtp::Packet], red_payload_type: u8) -> Vec<(u32, u8, Option<u8>)> {
+    wire.iter()
+        .map(|p| {
+            let block = (p.header.payload_type == red_payload_type).then(|| p.payload[0] & 0x7F);
+            (p.header.ssrc, p.header.payload_type, block)
+        })
+        .collect()
+}
+
+/// RFC 5109 section 14.2: "An rtpmap attribute MUST be used to indicate a dynamic payload type
+/// number for the FEC packets", and section 14: the configuration is "indicated out of band".
+/// The application built the sender for RED 100 and ULPFEC 127; the description negotiated
+/// `red` as 96 and `ulpfec` as 97: the media leaves as RED 96 and the FEC as block 97, the
+/// payload types the description gives them.
+#[test]
+fn the_fec_takes_the_red_and_ulpfec_payload_types_the_description_negotiated() {
+    let mut chain = negotiated_sender(
+        red_builder(),
+        false,
+        &[
+            (MEDIA_PT, "video/VP8"),
+            (96, "video/red"),
+            (97, "video/ulpfec"),
+        ],
+    );
+    let packets: Vec<_> = (100..102).map(|seq| media(seq, 3000, false, 50)).collect();
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(
+        vec![
+            (MEDIA_SSRC, 96, Some(MEDIA_PT)),
+            (MEDIA_SSRC, 96, Some(MEDIA_PT)),
+            (MEDIA_SSRC, 96, Some(97)),
+        ],
+        shapes(&wire, 96)
+    );
+
+    // Negotiated under the builder's numbers, those are kept.
+    let mut chain = negotiated_sender(
+        red_builder(),
+        false,
+        &[
+            (MEDIA_PT, "video/VP8"),
+            (96, "video/red"),
+            (RED_PT, "video/red"),
+            (FEC_PT, "video/ulpfec"),
+        ],
+    );
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(
+        vec![
+            (MEDIA_SSRC, RED_PT, Some(MEDIA_PT)),
+            (MEDIA_SSRC, RED_PT, Some(MEDIA_PT)),
+            (MEDIA_SSRC, RED_PT, Some(FEC_PT)),
+        ],
+        shapes(&wire, RED_PT)
+    );
+}
+
+/// RFC 5109 section 14.2: with no `ulpfec` format negotiated there is no payload type an
+/// rtpmap gives the FEC, so none is sent: the media leaves as the application wrote it, not
+/// as RED with FEC under a payload type the peer never agreed to.
+#[test]
+fn without_a_negotiated_ulpfec_format_no_fec_is_sent() {
+    let mut chain = negotiated_sender(
+        red_builder(),
+        false,
+        &[(MEDIA_PT, "video/VP8"), (RED_PT, "video/red")],
+    );
+    let packets: Vec<_> = (100..104).map(|seq| media(seq, 3000, false, 50)).collect();
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(packets.len(), wire.len(), "no FEC");
+    for (sent, written) in wire.iter().zip(&packets) {
+        assert_same_packet(written, sent);
+    }
+}
+
+/// RFC 5109 section 14: the carriage follows the description. A sender built for RED whose
+/// description gives the stream a ULPFEC repair flow (`a=ssrc-group:FEC-FR`) and no `red`
+/// sends a separate FEC stream; one built for a separate stream whose description has `red`
+/// and `ulpfec` and no repair flow sends RED.
+#[test]
+fn the_carriage_is_the_one_the_description_negotiated() {
+    let mut chain = negotiated_sender(
+        red_builder(),
+        true,
+        &[(MEDIA_PT, "video/VP8"), (FEC_PT, "video/ulpfec")],
+    );
+    let packets: Vec<_> = (100..102).map(|seq| media(seq, 3000, false, 50)).collect();
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(
+        vec![
+            (MEDIA_SSRC, MEDIA_PT, None),
+            (MEDIA_SSRC, MEDIA_PT, None),
+            (FEC_SSRC, FEC_PT, None),
+        ],
+        shapes(&wire, RED_PT),
+        "a separate FEC stream"
+    );
+
+    let mut chain = negotiated_sender(
+        UlpfecSendBuilder::stream().with_red_placement(RedPlacement::OwnPacket),
+        false,
+        &[
+            (MEDIA_PT, "video/VP8"),
+            (RED_PT, "video/red"),
+            (FEC_PT, "video/ulpfec"),
+        ],
+    );
+    let wire = send(&mut chain, Instant::now(), &packets);
+    assert_eq!(
+        vec![
+            (MEDIA_SSRC, RED_PT, Some(MEDIA_PT)),
+            (MEDIA_SSRC, RED_PT, Some(MEDIA_PT)),
+            (MEDIA_SSRC, RED_PT, Some(FEC_PT)),
+        ],
+        shapes(&wire, RED_PT),
+        "RED"
+    );
+}

@@ -31,6 +31,8 @@ pub struct NackResponderBuilder {
     size: u16,
     /// How long a sent packet stays available for retransmission.
     max_packet_age: Option<Duration>,
+    /// How retransmissions are held to the congestion controller's target.
+    rate_limit: RetransmissionRateLimit,
 }
 
 impl Default for NackResponderBuilder {
@@ -38,7 +40,71 @@ impl Default for NackResponderBuilder {
         Self {
             size: 1024,
             max_packet_age: None,
+            rate_limit: RetransmissionRateLimit::default(),
         }
+    }
+}
+
+/// How the NACK responder holds its retransmissions to the congestion controller's target
+/// (RFC 4588 section 7), read from [`Attribute::TargetBitrateChanged`] as it passes on the read
+/// leg. Until a target has passed, and in a chain without a congestion controller, nothing is
+/// held back.
+///
+/// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`]. A NACKed packet that
+/// does not fit is not retransmitted (section 7: the sender "MAY selectively retransmit only
+/// the packets that it deems important and ignore NACK messages for other packets in order to
+/// limit the bitrate"); the receiver asks again a round trip later.
+///
+/// The default is libwebrtc's rule, [`UpToTarget`](Self::UpToTarget), not the RFC's
+/// [`WithinTarget`](Self::WithinTarget), measured in `tests/capacity_cap_video_rtc2rtc.rs` (a
+/// video call whose path drops to 300 kbit/s, six seeds): with the RFC's rule the sender, its
+/// encoder at the controller's floor, had almost nothing left to repair with and the picture
+/// froze for 2.7 to 3.1 s; with retransmissions up to the target it froze for at most 1.2 s,
+/// and without any limit the retransmissions (about 300, five times the link) filled the 300 ms
+/// queue, three in four were dropped there, and it froze for up to 1.6 s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RetransmissionRateLimit {
+    /// RFC 4588 section 7: "the acceptable packet rate and bitrate include both the original
+    /// and retransmitted data". Retransmissions take what the original packets of every local
+    /// stream leave of the target.
+    WithinTarget,
+    /// libwebrtc's rule (`RateLimiter` on the retransmissions, its maximum the target): the
+    /// retransmissions alone stay under the target, whatever the original packets take. A
+    /// sender whose encoder sits at or above the target (at the congestion controller's
+    /// floor, or with a codec's minimum rate) still repairs at up to the target.
+    #[default]
+    UpToTarget,
+    /// No limit beyond the per-stream budget (one retransmission per original packet sent): the
+    /// fork's behaviour before. Retransmissions are then not congestion controlled.
+    Unlimited,
+}
+
+/// The window [`RetransmissionRateLimit`] measures the rates over (libwebrtc's
+/// `kRetransmitWindowSizeMs`).
+pub const RETRANSMISSION_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Octets sent within the last [`RETRANSMISSION_RATE_WINDOW`].
+#[derive(Default)]
+struct RateWindow {
+    sent: VecDeque<(Instant, usize)>,
+    octets: usize,
+}
+
+impl RateWindow {
+    fn expire(&mut self, now: Instant) {
+        while let Some(&(at, octets)) = self.sent.front() {
+            if now.saturating_duration_since(at) < RETRANSMISSION_RATE_WINDOW {
+                break;
+            }
+            self.sent.pop_front();
+            self.octets -= octets;
+        }
+    }
+
+    fn add(&mut self, now: Instant, octets: usize) {
+        self.sent.push_back((now, octets));
+        self.octets += octets;
     }
 }
 
@@ -66,10 +132,19 @@ impl NackResponderBuilder {
         self
     }
 
+    /// Set how retransmissions are held to the congestion controller's target (RFC 4588
+    /// section 7). Default: [`RetransmissionRateLimit::UpToTarget`];
+    /// [`RetransmissionRateLimit::WithinTarget`] is the RFC's form.
+    pub fn with_rate_limit(mut self, rate_limit: RetransmissionRateLimit) -> Self {
+        self.rate_limit = rate_limit;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> NackResponderInterceptor {
         let mut interceptor = NackResponderInterceptor::new(self.size);
         interceptor.max_packet_age = self.max_packet_age;
+        interceptor.rate_limit = self.rate_limit;
         interceptor
     }
 }
@@ -175,6 +250,14 @@ pub struct NackResponderInterceptor {
     /// The RTP session (transport) of each SSRC, from the peer connection's
     /// [`RtpSessionAssignment`](crate::RtpSessionAssignment)s; empty while there is one.
     sessions: HashMap<u32, usize>,
+
+    /// See [`NackResponderBuilder::with_rate_limit`].
+    rate_limit: RetransmissionRateLimit,
+    /// The congestion controller's latest target, bits per second.
+    target_bps: Option<f64>,
+    /// The original packets of the local streams, and the retransmissions, sent lately.
+    originals: RateWindow,
+    retransmitted: RateWindow,
 }
 
 impl NackResponderInterceptor {
@@ -189,7 +272,25 @@ impl NackResponderInterceptor {
             write_queue: VecDeque::new(),
             retransmissions_queued: 0,
             sessions: HashMap::new(),
+            rate_limit: RetransmissionRateLimit::default(),
+            target_bps: None,
+            originals: RateWindow::default(),
+            retransmitted: RateWindow::default(),
         }
+    }
+
+    /// The octets retransmissions may still take within the window, `None` for no limit.
+    fn retransmission_allowance(&mut self, now: Instant) -> Option<usize> {
+        let target_bps = self.target_bps?;
+        self.originals.expire(now);
+        self.retransmitted.expire(now);
+        let target = (target_bps / 8.0 * RETRANSMISSION_RATE_WINDOW.as_secs_f64()) as usize;
+        let limit = match self.rate_limit {
+            RetransmissionRateLimit::WithinTarget => target.saturating_sub(self.originals.octets),
+            RetransmissionRateLimit::UpToTarget => target,
+            RetransmissionRateLimit::Unlimited => return None,
+        };
+        Some(limit.saturating_sub(self.retransmitted.octets))
     }
 
     /// Fills a probe cluster ([`ProbeRequest`]) with padding-only packets on the RTX stream of
@@ -284,6 +385,7 @@ impl NackResponderInterceptor {
             }
         }
 
+        let mut allowance = self.retransmission_allowance(now);
         let Some(stream) = self.streams.get_mut(&nack.media_ssrc) else {
             return;
         };
@@ -324,6 +426,21 @@ impl NackResponderInterceptor {
             {
                 continue;
             }
+            // RFC 4588 section 7: the retransmissions stay within the congestion controller's
+            // rate. Asked for oldest first, so what does not fit now is the newest; the
+            // receiver asks for it again a round trip later.
+            let size = original_packet.marshal_size()
+                + if stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some() {
+                    2
+                } else {
+                    0
+                };
+            if let Some(left) = allowance.as_mut() {
+                if size > *left {
+                    break;
+                }
+                *left -= size;
+            }
             stream.last_retransmit.insert(seq, now);
             stream.retransmit_budget -= 1;
             self.retransmissions_queued += 1;
@@ -342,6 +459,7 @@ impl NackResponderInterceptor {
                 // No RTX: retransmit original packet as-is
                 original_packet.clone()
             };
+            self.retransmitted.add(now, size);
 
             // Tagged so a send history downstream counts it as new bytes on the wire rather
             // than as the original transmission. A bandwidth estimator that cannot tell the two
@@ -437,6 +555,17 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        // The congestion controller's target, which the retransmissions are held to.
+        if let Some(Attribute::TargetBitrateChanged { bits_per_second }) =
+            msg.message.get(&Attribute::TargetBitrateChanged {
+                bits_per_second: 0.0,
+            })
+            && bits_per_second.is_finite()
+            && *bits_per_second >= 0.0
+        {
+            self.target_bps = Some(*bits_per_second);
+        }
+
         // A probe cluster the congestion controller asks for: fill it.
         if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
             let session = crate::RtpSession::of(&msg.message);
@@ -480,6 +609,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
                 None => self.local_rtx_times.remove(payload_type_rtx),
             };
         }
+        // Every original packet counts against the target (RFC 4588 section 7), whether or
+        // not its stream is repaired.
+        if let Packet::Rtp(ref rtp_packet) = msg.message.packet
+            && !msg.message.has(&Attribute::Retransmission)
+        {
+            self.originals.expire(msg.now);
+            self.originals.add(msg.now, rtp_packet.marshal_size());
+        }
         // Buffer outgoing RTP packets
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet
             && let Some(stream) = self.streams.get_mut(&rtp_packet.header.ssrc)
@@ -510,8 +647,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         Ok(())
     }
 
+    /// Due at once while packets wait in the write queue. A retransmission or a probe cluster's
+    /// padding is made on the read leg (a NACK, a [`ProbeRequest`]), which a driver reaches
+    /// after its `poll_write` (`poll_write`, `poll_event`, `poll_read`, then `poll_timeout`
+    /// and sleep, as the crate's event loop has it): without a deadline the packets would wait
+    /// for whatever wakes the driver next, a timer or an incoming datagram, which can be a
+    /// long time on a connection with little traffic. The deadline is the instant they were
+    /// made, so the driver's `handle_timeout` and the `poll_write` after it take them out at
+    /// once; it is gone when the queue is drained.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        None
+        self.write_queue.front().map(|packet| packet.now)
     }
 }
 

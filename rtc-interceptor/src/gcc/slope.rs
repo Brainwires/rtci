@@ -155,4 +155,153 @@ mod tests {
 
         assert_eq!(1200, reading.size);
     }
+
+    /// An investigation, not a check: the delay-gradient readings of a reorder-only path (one
+    /// way 25 ms, a share of the packets held back by up to `hold` more, nothing queued) as our
+    /// grouping makes them, against libwebrtc's (`delay_based_bwe.cc`: feedback
+    /// `SortedByReceiveTime()`, then `InterArrivalDelta` with 5 ms send-time groups, a packet
+    /// sent before its group's first discarded as reordered, a group whose arrival goes
+    /// backwards discarded). Each sequence goes through the same Kalman filter and overuse
+    /// detector. `cargo test -p rtc-interceptor --lib reorder_trace -- --ignored --nocapture`
+    #[test]
+    #[ignore = "an investigation tool: prints the two groupings' readings"]
+    fn reorder_trace_against_libwebrtc_grouping() {
+        use crate::gcc::overuse::{OveruseDetector, Usage};
+        struct Rng(u64);
+        impl Rng {
+            fn unit(&mut self) -> f64 {
+                self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+            }
+        }
+        let epoch = Instant::now();
+        for (share, hold_ms) in [(0.0, 0.0), (0.5, 40.0), (1.0, 40.0), (0.5, 100.0)] {
+            let mut rng = Rng(7);
+            // 60 s of 100 packets a second (a 500 kbit/s video flow's packet rate).
+            let packets: Vec<(f64, f64)> = (0..6000u64)
+                .map(|n| {
+                    let sent = n as f64 * 10.0;
+                    let hold = if rng.unit() < share {
+                        hold_ms * rng.unit()
+                    } else {
+                        0.0
+                    };
+                    (sent, sent + 25.0 + hold)
+                })
+                .collect();
+            let at = |ms: f64| epoch + Duration::from_secs_f64(ms / 1000.0);
+
+            // Ours: reports in send (transport sequence) order.
+            let mut ours = Vec::new();
+            let mut groups = ArrivalGroupAccumulator::default();
+            for (sent, arrived) in &packets {
+                let mut r = report(at(*sent), 0);
+                r.arrival = Some(Duration::from_secs_f64(arrived / 1000.0));
+                if let Some(delay) = groups.accumulate(&r) {
+                    ours.push((delay.at, delay.delta_ms));
+                }
+            }
+
+            // libwebrtc: sorted by arrival, InterArrivalDelta.
+            let mut sorted = packets.clone();
+            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+            #[derive(Clone, Copy)]
+            struct Group {
+                first_send: f64,
+                send: f64,
+                first_arrival: f64,
+                complete: f64,
+            }
+            let mut current: Option<Group> = None;
+            let mut previous: Option<Group> = None;
+            let mut theirs = Vec::new();
+            let mut discarded = 0usize;
+            let mut reordered_groups = 0usize;
+            for (sent, arrived) in sorted {
+                let Some(mut group) = current else {
+                    current = Some(Group {
+                        first_send: sent,
+                        send: sent,
+                        first_arrival: arrived,
+                        complete: arrived,
+                    });
+                    continue;
+                };
+                if group.first_send > sent {
+                    discarded += 1;
+                    continue;
+                }
+                let arrival_delta = arrived - group.complete;
+                let send_delta = sent - group.send;
+                let burst = send_delta == 0.0
+                    || (arrival_delta - send_delta < 0.0
+                        && arrival_delta <= 5.0
+                        && arrived - group.first_arrival < 100.0);
+                if !burst && sent - group.first_send > 5.0 {
+                    if let Some(prev) = previous {
+                        let a = group.complete - prev.complete;
+                        let d = group.send - prev.send;
+                        if a < 0.0 {
+                            reordered_groups += 1;
+                        } else {
+                            theirs.push((at(group.send), a - d));
+                        }
+                    }
+                    previous = Some(group);
+                    group = Group {
+                        first_send: sent,
+                        send: sent,
+                        first_arrival: arrived,
+                        complete: arrived,
+                    };
+                } else {
+                    group.send = group.send.max(sent);
+                    group.complete = arrived;
+                }
+                current = Some(group);
+            }
+
+            let summarise = |name: &str, readings: &[(Instant, f64)]| {
+                let n = readings.len() as f64;
+                let mean = readings.iter().map(|r| r.1).sum::<f64>() / n;
+                let sd = (readings.iter().map(|r| (r.1 - mean).powi(2)).sum::<f64>() / n).sqrt();
+                let mut kalman = Kalman::new();
+                let mut detector = OveruseDetector::new();
+                let (mut over, mut under, mut last) = (0, 0, None);
+                let mut max_estimate: f64 = 0.0;
+                for (when, delta) in readings {
+                    let period = last.map_or(0.0, |l: Instant| {
+                        when.saturating_duration_since(l).as_secs_f64() * 1000.0
+                    });
+                    last = Some(*when);
+                    let estimate = kalman.update_with_period(*delta, period);
+                    max_estimate = max_estimate.max(estimate.abs());
+                    match detector.update(*when, estimate) {
+                        Usage::Over => over += 1,
+                        Usage::Under => under += 1,
+                        Usage::Normal => {}
+                    }
+                }
+                println!(
+                    "  {name}: {} readings, delta mean {mean:+.3} ms sd {sd:.2} ms, |estimate| max {max_estimate:.2} ms, readings in overuse {over}, underuse {under}",
+                    readings.len()
+                );
+                let first: Vec<String> = readings
+                    .iter()
+                    .take(12)
+                    .map(|r| format!("{:+.1}", r.1))
+                    .collect();
+                println!("    first deltas: {}", first.join(" "));
+            };
+            println!("share {share}, hold up to {hold_ms} ms:");
+            summarise("ours (send order, arrival-before-group ignored)", &ours);
+            summarise("libwebrtc (arrival order, InterArrivalDelta)", &theirs);
+            println!(
+                "    libwebrtc discarded {discarded} reordered packets, {reordered_groups} groups"
+            );
+        }
+    }
 }

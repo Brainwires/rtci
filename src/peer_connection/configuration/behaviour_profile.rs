@@ -286,6 +286,16 @@ fn srtp_profiles_shown(profiles: &[SrtpProtectionProfile]) -> Shown {
     })
 }
 
+/// The SOFTWARE text of the ICE agent's and the TURN clients' STUN messages.
+fn ice_software_shown(software: &Option<Option<String>>) -> Shown {
+    Shown(match software {
+        None => "rtc-ice / rtc-turn and version".to_owned(),
+        Some(None) => "none".to_owned(),
+        Some(Some(text)) if text.is_empty() => "none".to_owned(),
+        Some(Some(text)) => format!("{text:?}"),
+    })
+}
+
 fn sctp_rto(initial_ms: u64, min_ms: u64, max_ms: u64) -> Option<sctp::RtoConfig> {
     Some(sctp::RtoConfig {
         initial: Duration::from_millis(initial_ms),
@@ -444,14 +454,14 @@ governed_behaviours! {
     {
         id: "ice.software-attribute",
         setting: "SettingEngineBuilder::with_ice_software",
-        clause: "RFC 8489 6.1, 16.1.2",
-        rfc: None => "None",
-        chrome: Some(String::new()) => "Some(\"\")",
-        strict_rfc: None => "None",
-        chrome_source: "libwebrtc p2p/base/connection.cc::Connection::BuildPingRequest @ a222406d: a check carries USERNAME, GOOG-NETWORK-INFO, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE or NOMINATION, PRIORITY, MESSAGE-INTEGRITY and FINGERPRINT (GOOG-MISC-INFO, GOOG-DELTA, DTLS-in-STUN behind field trials); no SOFTWARE, nor in the response (Connection::SendStunBindingResponse)",
+        clause: "RFC 8489 6.1, 6.3.1.1, 16.1.2",
+        rfc: None => "rtc-ice / rtc-turn and version",
+        chrome: Some(None) => "none",
+        strict_rfc: None => "rtc-ice / rtc-turn and version",
+        chrome_source: "libwebrtc @ a222406d: no SOFTWARE attribute in any STUN message: p2p/base/connection.cc Connection::BuildPingRequest (1122-1199: USERNAME, GOOG-NETWORK-INFO, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE or NOMINATION, PRIORITY, MESSAGE-INTEGRITY, FINGERPRINT) and Connection::SendStunBindingResponse (771-847); p2p/base/turn_port.cc TurnAllocateRequest (1513-1532), TurnRefreshRequest (1709-1725), TurnCreatePermissionRequest (1793-1816), TurnChannelBindRequest (1864-1889) and TurnPort::AddRequestAuthInfo (1237-1261); grep for SOFTWARE in p2p/ finds none. Covers the ICE checks and responses and the TURN requests; the engine's server-reflexive Binding requests carry none in every profile (p2p/base/stun_port.cc StunBindingRequest, 63-75, none either)",
         evidence: Source,
-        apply_setting: |b: SettingEngineBuilder, v| b.with_ice_software(v),
-        read: |s: &SettingEngine| s.ice.software.clone(),
+        apply_setting: |b: SettingEngineBuilder, v| b.ice_software_choice(v),
+        read: |s: &SettingEngine| ice_software_shown(&s.ice.software),
     },
     {
         id: "ice.options-in-media-sections",
@@ -955,6 +965,30 @@ governed_behaviours! {
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.gcc_one_decrease_per_round_trip = v,
         read: |o: &DefaultInterceptorOptions| o.gcc_one_decrease_per_round_trip,
     },
+    {
+        id: "pacer.queue-overflow",
+        setting: "DefaultInterceptorOptions::pacer_queue_overflow",
+        clause: "RFC 8836 2, RFC 8083 4",
+        rfc: interceptor::PacerQueueOverflow::Drop => "Drop",
+        chrome: interceptor::PacerQueueOverflow::Drain => "Drain",
+        strict_rfc: interceptor::PacerQueueOverflow::Drop => "Drop",
+        chrome_source: "libwebrtc modules/pacing/pacing_controller.cc::PacingController::MaybeUpdateMediaRateDueToLongQueue @ a222406d (lines 706-728): with drain_large_queues (on by default, pacing_controller.h line 98, unless the WebRTC-Pacer-DrainQueue trial is disabled, pacing_controller.cc lines 62-63) the media rate is raised to queue size / (queue_time_limit - average queue time) when that exceeds the pacing rate, queue_time_limit kMaxExpectedQueueLength 2 s (pacing_controller.h lines 92, 104); nothing is dropped. Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.pacer_queue_overflow = v,
+        read: |o: &DefaultInterceptorOptions| o.pacer_queue_overflow,
+    },
+    {
+        id: "nack.max-requests-per-packet",
+        setting: "DefaultInterceptorOptions::nack_max_nacks_per_packet",
+        clause: "RFC 4588 6.3, Appendix A",
+        rfc: 0 => "0",
+        chrome: 100 => "100",
+        strict_rfc: 0 => "0",
+        chrome_source: "libwebrtc modules/video_coding/nack_requester.cc @ a222406d: kMaxNackRetries = 100 (line 39, \"Number of times a packet can be nacked before giving up. Nack is sent at most every RTT\", lines 37-38); NackRequester::GetNackBatch (lines 235-265) removes a packet from the NACK list once its retries reach it (lines 251-256). 0 is unlimited (NackGeneratorBuilder::with_max_nacks_per_packet). Not 10: the interceptor's SUGGESTED_MAX_NACKS_PER_PACKET says 10 is kMaxNackRetries, which it is not at this revision. libwebrtc's packet-count limits are under \"not expressible\". Performance: same as Rfc",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_max_nacks_per_packet = v,
+        read: |o: &DefaultInterceptorOptions| o.nack_max_nacks_per_packet,
+    },
 }
 
 /// Why a setting is not governed by the profiles.
@@ -1453,7 +1487,27 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow",
+        note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556)",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::nack_retransmission_rate_limit",
+        class: NotGovernedClass::Same,
+        note: "UpToTarget in every profile on this base: the retransmissions alone held under the congestion controller's target (measured in tests/capacity_cap_video_rtc2rtc.rs, see RetransmissionRateLimit). libwebrtc limits retransmissions by a RateLimiter of their own: modules/rtp_rtcp/source/rtp_sender.cc::RTPSender::ReSendPacket @ a222406d (lines 331-333) drops a retransmission retransmission_rate_limiter_->TryUseRate refuses (rtc_base/rate_limiter.cc lines 37, 59); where its maximum is set to the target was not found in the snapshot (searched call/call.cc, call/rtp_transport_controller_send.{h,cc}, call/rtp_video_sender.cc, video/), so the Chrome value is unverified beyond that. Pending: conf/gcc-2-rfc-retransmission makes Rfc and StrictRfc WithinTarget (RFC 4588 7) and leaves Chrome and Performance UpToTarget, which turns this into a governed row",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::rtcp_random",
+        class: NotGovernedClass::Input,
+        note: "an injected random source for the RTCP sessions (report interval variation, RFC 3550 6.3.1; early feedback dither, RFC 4585 3.5.2; SSRC and CNAME), for runs a seeded provider makes repeatable; `None` (rand) in every profile",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_audio_redundancy",
+        class: NotGovernedClass::Same,
+        note: "WhenPreferred in every profile: a local audio stream is sent in RED (RFC 2198) only when the remote description lists RED ahead of the primary (RFC 3264 5.1, 6.1). libwebrtc the same: media/engine/webrtc_voice_engine.cc::WebRtcVoiceSendChannel::SetSendCodecs @ a222406d (lines 1507-1641) looks for RED only among the codecs before the send codec (lines 1610-1622: \"RED codec needs to be negotiated before the actual codec they reference\", for (i = 0; i < send_codec_position; ++i))",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_own_payload_types_in_answers",
+        class: NotGovernedClass::Same,
+        note: "off: an answer uses the offer's payload type numbers (RFC 3264 6.1 SHOULD). libwebrtc the same: pc/codec_vendor.cc::NegotiateCodecs @ a222406d (lines 801-...) \"Use their ID, if available\" (lines 846-848: negotiated.id = theirs->id), apt values remapped after (lines 853-)",
     },
 ];
 
@@ -1466,6 +1520,11 @@ pub(crate) struct NotExpressible {
 
 /// `scripts/behaviour-profiles.py` renders it: keep each entry's fields on lines of their own.
 pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
+    NotExpressible {
+        behaviour: "NACK request limits counted in packets",
+        chrome: "modules/video_coding/nack_requester.cc @ a222406d: a missing packet more than kMaxPacketAge 10,000 sequence numbers behind the newest is no longer asked for (lines 34, 210-211), and a NACK list that would pass kMaxNackPackets 1000 entries is cleared and a key frame requested instead (lines 35, 214-219). kMaxPacketAgeToNack 450 in video/rtp_video_stream_receiver2.cc (line 114) is not a NACK limit: it is the receive statistics' reordering threshold (SetMaxReorderingThreshold, lines 337-340)",
+        needed: "limits in sequence numbers in NackGeneratorBuilder: its with_max_packet_age is a time (Duration), not a packet count, and no setting clears the list for a key frame. Both profiles keep no age limit (RFC 4588 6.3 gives none)",
+    },
     NotExpressible {
         behaviour: "ICE connectivity check retransmission",
         chrome: "no retransmission: each check is sent once and given kConnectionResponseTimeout 60 s (p2p/base/connection.cc::ConnectionRequest::OnSent / resend_delay @ a222406d); the channel sends a new check every kWeakPingInterval 48 ms while no pair is writable, a pair with no answer being unreliable after 5 checks and 5 s (Connection::UpdateState). Only requests to STUN / TURN servers retransmit: STUN_INITIAL_RTO 250 ms doubling to STUN_MAX_RTO 8 s, 9 sends (p2p/base/stun_request.cc)",

@@ -600,6 +600,34 @@ impl TransportSet {
         id
     }
 
+    /// Puts a new transport in the place of `id`, which keeps its number, and returns the one
+    /// that was there: how the set's last transport is closed (the set is never empty; any
+    /// other transport is [`Self::remove`]d). Nothing of the old one stays: the m= sections
+    /// assigned to it, what routing learned for it and what was announced of it go with it.
+    pub(crate) fn renew(
+        &mut self,
+        id: TransportId,
+        ice_handler_context: IceHandlerContext,
+        dtls_handler_context: DtlsHandlerContext,
+        srtp_handler_context: SrtpHandlerContext,
+    ) -> Option<TransportBundle> {
+        let index = self.index(id)?;
+        let old = std::mem::replace(
+            &mut self.bundles[index],
+            TransportBundle {
+                id,
+                ice_handler_context,
+                dtls_handler_context,
+                srtp_handler_context,
+                announced: TransportAnnounced::default(),
+            },
+        );
+        self.by_mid.retain(|_, on| *on != id);
+        self.learned.paths.retain(|_, on| *on != Some(id));
+        self.learned.tie_breakers.retain(|_, on| *on != Some(id));
+        Some(old)
+    }
+
     /// Takes the transport `id` out of the set, with the m= sections assigned to it, and
     /// returns it. The last transport is never removed; when the default or the data
     /// transport goes, the first remaining one takes its place.

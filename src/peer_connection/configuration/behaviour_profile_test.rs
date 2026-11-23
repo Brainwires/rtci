@@ -196,7 +196,31 @@ fn a_default_peer_connection_carries_its_profiles_values() -> shared::error::Res
             agent.hold_local_candidates_until_conveyed, !ice.pair_before_conveyed,
             "{profile}"
         );
-        assert_eq!(agent.software, ice.software, "{profile}");
+        // SOFTWARE: the ICE agent's checks and responses and the TURN clients' requests.
+        assert_eq!(
+            agent.software,
+            pc.setting_engine.ice_agent_software(),
+            "{profile}"
+        );
+        if profile == BehaviourProfile::Chrome {
+            assert_eq!(
+                agent.software.as_deref(),
+                Some(""),
+                "{profile}: no SOFTWARE"
+            );
+            assert_eq!(
+                pc.setting_engine.turn_software(),
+                "",
+                "{profile}: no SOFTWARE"
+            );
+        } else {
+            assert_eq!(agent.software, None, "{profile}: the agent's own SOFTWARE");
+            assert_eq!(
+                pc.setting_engine.turn_software(),
+                turn::client::DEFAULT_SOFTWARE,
+                "{profile}"
+            );
+        }
         // The DTLS transport starts its handshake by the profile's rule.
         assert_eq!(
             pc.dtls_transport().flight_interval_rule,

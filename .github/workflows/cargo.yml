@@ -169,6 +169,8 @@ jobs:
         run: python3 scripts/open-must.py --check
       - name: The behaviour profile table is what the code says (docs/behaviour-profiles.md)
         run: python3 scripts/behaviour-profiles.py --check
+      - name: Released CHANGELOG sections equal the latest release tag's
+        run: python3 scripts/check-changelog-released.py
 
   # The `chrome-defaults` feature makes `BehaviourProfile::default()` Chrome, and with it every
   # default of the setting engine, media engine and interceptor options. One job, not a test
