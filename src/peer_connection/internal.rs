@@ -413,6 +413,7 @@ impl RTCPeerConnection {
             ice_credentials_to_replace: Vec::new(),
             ssrc_history: HashSet::new(),
             local_description_was_set: false,
+            sctp_closed_by_answer: false,
             seen_selected_pair_changes: 0,
             identity_assertion: None,
             peer_identity: None,
@@ -1491,18 +1492,16 @@ impl RTCPeerConnection {
                 // W3C 6.1.2 "closed": the association is closed intentionally by "applying a
                 // remote description that rejects data or changes the SCTP port", so the
                 // transport the application holds goes to "closed" and fires statechange,
-                // although `sctp()` is null from now on.
+                // although `sctp()` is null from now on. The event is not one of the
+                // description's own: it is queued after them, and after the `close` of the
+                // channels the association carried (`announce_sctp_closed_by_answer`).
                 let was = self.sctp().map(|sctp| sctp.state());
                 self.sctp_transport_mut().described = false;
                 if was.is_some_and(|state| {
                     state != crate::peer_connection::transport::RTCSctpTransportState::Closed
                 }) {
                     self.announced.sctp = None;
-                    self.pipeline_context.event_outs.push_back(
-                        RTCPeerConnectionEvent::OnSctpTransportStateChange(
-                            crate::peer_connection::transport::RTCSctpTransportState::Closed,
-                        ),
-                    );
+                    self.sctp_closed_by_answer = true;
                 }
             }
             RTCSdpType::Answer | RTCSdpType::Pranswer if describes => {
@@ -1624,6 +1623,7 @@ impl RTCPeerConnection {
 
     /// Puts back what [`Self::description_snapshot`] copied, dropping the events queued since.
     pub(super) fn restore_description_snapshot(&mut self, snapshot: DescriptionSnapshot) {
+        self.sctp_closed_by_answer = false;
         self.signaling_state = snapshot.signaling_state;
         self.current_local_description = snapshot.current_local_description;
         self.pending_local_description = snapshot.pending_local_description;
@@ -4767,6 +4767,18 @@ fn offerer_tagged_section_is_rtcp_mux_only(offer: &SessionDescription) -> bool {
 }
 
 impl RTCPeerConnection {
+    /// The `statechange` to "closed" of the SCTP transport an applied answer closed (W3C
+    /// 6.1.2), queued once the description's own events and the `close` of its channels are.
+    pub(super) fn announce_sctp_closed_by_answer(&mut self) {
+        if std::mem::take(&mut self.sctp_closed_by_answer) {
+            self.pipeline_context.event_outs.push_back(
+                RTCPeerConnectionEvent::OnSctpTransportStateChange(
+                    crate::peer_connection::transport::RTCSctpTransportState::Closed,
+                ),
+            );
+        }
+    }
+
     /// W3C webrtc-pc "set a session description", once an answer made the state stable: "For
     /// any transceiver that was removed from the set of transceivers in a previous step, if
     /// any of its transports ... are still not closed and they're no longer referenced by a

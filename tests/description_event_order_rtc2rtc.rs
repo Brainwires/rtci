@@ -352,7 +352,10 @@ fn the_channels_of_a_rejected_data_section_close_after_the_descriptions_own_even
             "sctp:closed",
             "signaling:have-local-offer",
         ],
-        "the offerer"
+        "the offerer; the answer:\n{}",
+        a.pc.remote_description()
+            .map(|d| d.sdp.clone())
+            .unwrap_or_default()
     );
     assert_eq!(
         a.pc.sctp().map(|s| s.state()),

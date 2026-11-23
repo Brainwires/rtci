@@ -891,6 +891,10 @@ pub struct RTCPeerConnection {
     /// Whether `set_local_description` has succeeded once (a rollback included): from then
     /// on `set_configuration` refuses another `iceCandidatePoolSize` (W3C 4.4.1.5).
     pub(crate) local_description_was_set: bool,
+    /// An answer being applied closed the SCTP association: the transport's `statechange` to
+    /// "closed" is queued after the description's own events
+    /// (`announce_sctp_closed_by_answer`).
+    sctp_closed_by_answer: bool,
     /// How many selected-pair changes of the ICE handler were looked at for the RFC 8839
     /// section 4.3.4 alignment offer (`announce_lite_candidate_update`).
     seen_selected_pair_changes: u64,

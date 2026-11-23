@@ -385,6 +385,7 @@ impl RTCPeerConnection {
         if matches!(sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
             self.settle_description_events();
         }
+        self.announce_sctp_closed_by_answer();
         if stable && sdp_type == RTCSdpType::Answer {
             self.close_unused_transports();
         }
