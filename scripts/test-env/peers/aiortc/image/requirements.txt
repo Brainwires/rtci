@@ -1,12 +1,11 @@
 # The aiortc peer's Python packages (scripts/test-env/peers/aiortc): every wheel pinned by
 # version and SHA-256 (Linux x86_64 and aarch64, CPython 3.12, the Playwright image's
 # Python), installed with --require-hashes --only-binary :all: --no-deps. Licences beside each.
+# aiortc itself is not here: the Dockerfile builds it from a pinned upstream commit (by
+# SHA-256) with the setuptools below.
 # aioice 0.13.0 [BSD-3-Clause] files=1
 aioice==0.13.0 \
     --hash=sha256:15937b43f5f7a3587148049f1c93ff95fe4add1b7e0f5931eeec6408bc188d06
-# aiortc 1.16.0 [BSD-3-Clause] files=1
-aiortc==1.16.0 \
-    --hash=sha256:084844ba0542fc9f9a41d135e2c718c2122746e2d70e62974435de9b98ec92b2
 # av 19.0.2 [BSD-3-Clause] files=2
 av==19.0.2 \
     --hash=sha256:04c8e412642c652cb2b1997a9cb2114546ee7d894600c631f4be8ceb26a0d0d2 \
@@ -56,6 +55,9 @@ pylibsrtp==1.0.0 \
 # pyopenssl 26.4.0 [Apache License, Version 2.0] files=1
 pyopenssl==26.4.0 \
     --hash=sha256:f0eb0cb2d581d3ad2b9c489468485e7f2ab6727d08401bcf9d824c3caddf3c1c
+# setuptools 84.2.1 [MIT] files=1 (the build backend of aiortc's source; the peer never imports it)
+setuptools==84.2.1 \
+    --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
 # typing-extensions 4.16.0 [PSF-2.0] files=1
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
