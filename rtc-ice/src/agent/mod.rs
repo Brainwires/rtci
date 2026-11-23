@@ -2489,8 +2489,19 @@ impl Agent {
             self.candidate_pairs[pair_index].nominated = true;
             if self.selected_pair != Some(pair_index) {
                 // Consent on the new pair was given by the response that validated it; the
-                // first consent check follows one interval later.
-                self.next_consent_at = now.map(|now| now + self.next_consent_interval());
+                // first consent check follows one interval later. A pair the peer selects
+                // long after that response (its nomination's responses were lost, so the
+                // controlled agent waited) has less than 30 seconds of consent left (RFC 7675
+                // section 5.1), and the check that validated it was sent at least as long
+                // ago: the first consent check goes now, which keeps the period between
+                // checks above the minimum.
+                let interval = self.next_consent_interval();
+                let remote = self.candidate_pairs[pair_index].remote_index;
+                let last_consent = self.remote_candidates[remote].last_consent();
+                self.next_consent_at = now.map(|now| match last_consent {
+                    Some(at) if now.saturating_duration_since(at) >= interval => now,
+                    _ => now + interval,
+                });
                 self.consent_unanswered_since = None;
             }
             self.selected_pair = Some(pair_index);

@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 661; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5000 of 5084 (98.3 %).
-- Tested as the default (`tested`): 4977 of 5084 (97.9 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
-- Open (not tested in any form): 84: 19 untested, 45 partial, 19 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4999 of 5084 (98.3 %).
+- Tested as the default (`tested`): 4976 of 5084 (97.9 %); `setting`: 15; `conflict` (two specifications conflict, the governing one's form is the default): 8.
+- Open (not tested in any form): 85: 19 untested, 46 partial, 19 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 15 | 14 |
 | B | implemented, lacking a test that fails without it | 9 | 0 |
-| C | partly implemented | 40 | 16 |
+| C | partly implemented | 41 | 17 |
 | D | not implemented | 20 | 17 |
 | E | cannot be met or observed inside this engine | 18 | 11 |
 | F | stale note: already tested on this tree | 5 | 0 |
-| all | | 107 | 58 |
+| all | | 108 | 59 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 74 rows, 45 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 75 rows, 46 of size S, 20 of size M, 9 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 6 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -43,7 +43,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
 | jsep (running) | 0 | 3 | 0 | 0 | 0 | 3 | 1 | 1 | 1 |
-| media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
+| media (running) | 0 | 13 | 16 | 4 | 0 | 33 | 17 | 9 | 7 |
 | media (train 9) | 0 | 4 | 0 | 0 | 0 | 4 | 4 | 0 | 0 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
@@ -100,6 +100,7 @@ Sorted by class, then owner, size and ID.
 | RFC6464-4-1 | `rfc6464.md` | Declared in extmap with URI ... | untested | C | Register `ssrc-audio-level` by default so a browser's offer is answered with it | S | media (running) |
 | RFC6679-6.1.3-1 | `rfc6679.md` | The attribute is not used for RTP over TCP, SCTP, DCCP or non-RTP ... | missing | C | Clear the ECN codepoint when the selected pair is ICE-TCP; needs an ICE-TCP media test | S | media (running) |
 | RFC7742-4-2 | `rfc7742.md` | CVO is sent for all orientations when the peer indicates support | partial | C | Register `urn:3gpp:video-orientation` by default | S | media (running) |
+| RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form (s over the last 4 * G frames) is a setting (`CircuitBreakerPacketSize::LastFrames`), not the default: s over the CB_INTERVAL window the rate is measured over, because the literal form ceased a talking call at 1 to 5 % loss (measured, cb-2 sweep); no interop failure. Owner decision on the default | S | media (running) |
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | partial | C | Report blocks from every SSRC is a setting (`with_report_from_every_ssrc`), not the default (browser behaviour, no failing cell). Owner decision | S | media (running) |
 | RFC8108-6.1-2 | `rfc8108.md` | A new stream after a stopped one, or one that changes media type or ... | partial | C | A new SSRC on a clock-rate change | S | media (running) |
 | RFC5109-14-1 | `rfc5109.md` | The multiplexing configuration (separate stream or redundant ... | partial | C | Send side: derive the carriage (RED or separate stream) from the negotiated description instead of the application's choice | M | media (running) |

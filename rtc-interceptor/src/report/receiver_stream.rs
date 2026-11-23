@@ -162,7 +162,25 @@ impl ReceiverStream {
                 return false;
             }
         } else {
-            // A duplicate or a reordered packet.
+            // A duplicate or a reordered packet. One older than the first packet received
+            // was overtaken by it on the way: it extends the sequence back, so `base_seq` is
+            // the lowest sequence number received and the packet is expected as well as
+            // received. Counting it only as received would leave the cumulative number lost
+            // at -1 for the rest of the session on a path that lost nothing (RFC 3550 6.4.1:
+            // expected is "the highest sequence number received less the initial one", the
+            // initial one being the start of the sequence, whatever order it arrived in).
+            let extended = if seq <= self.max_seq {
+                self.cycles.wrapping_add(u32::from(seq))
+            } else {
+                // Before the most recent wrap.
+                self.cycles
+                    .wrapping_sub(RTP_SEQ_MOD)
+                    .wrapping_add(u32::from(seq))
+            };
+            let before_base = self.base_seq.wrapping_sub(extended);
+            if before_base != 0 && before_base < 1 << 31 {
+                self.base_seq = extended;
+            }
         }
         self.received = self.received.wrapping_add(1);
         true
@@ -337,6 +355,42 @@ mod tests {
         assert_eq!(rr.reports[0].jitter, 0);
     }
 
+    /// RFC 3550 6.4.1: a stream whose first packet was overtaken by the second loses nothing,
+    /// so once every packet is in, the cumulative number lost is 0 (it stayed at -1: the late
+    /// first packet was counted as received but not as expected). Also across the sequence
+    /// number wrap, where the overtaken packet is from the previous cycle.
+    #[test]
+    fn a_first_packet_overtaken_by_the_next_is_not_counted_as_a_duplicate() {
+        for first in [100u16, 65535] {
+            let mut stream = ReceiverStream::new(123456, 48000);
+            let now = Instant::now();
+            let order = [1u16, 0, 2, 4, 3, 5];
+            for i in order {
+                stream.process_rtp(now, &make_rtp_packet(first.wrapping_add(i), 0));
+            }
+            let rr = stream.generate_report(now);
+            assert_eq!(rr.reports[0].total_lost, 0, "first {first}");
+            assert_eq!(rr.reports[0].fraction_lost, 0, "first {first}");
+            // The cycle count starts at the first packet received (sequence number 0 when
+            // 65535 was overtaken).
+            let highest = u32::from(first.wrapping_add(5));
+            assert_eq!(rr.reports[0].last_sequence_number, highest, "first {first}");
+        }
+    }
+
+    /// A reordered packet inside the sequence leaves its start where it is: a loss before the
+    /// late packet still counts.
+    #[test]
+    fn a_reordered_packet_after_the_first_does_not_move_the_start() {
+        let mut stream = ReceiverStream::new(123456, 48000);
+        let now = Instant::now();
+        for i in [10u16, 12, 11, 14] {
+            stream.process_rtp(now, &make_rtp_packet(i, 0));
+        }
+        let rr = stream.generate_report(now);
+        assert_eq!(rr.reports[0].total_lost, 1, "13 is missing");
+    }
+
     #[test]
     fn test_receiver_stream_jitter_ts_wrap() {
         // steady 20 ms at 48 khz across u32::MAX: was ~2^32 / 16
@@ -384,9 +438,10 @@ mod tests {
         // Extended sequence number should show 1 cycle (1 << 16)
         assert_eq!(rr.reports[0].last_sequence_number, 1 << 16);
         assert_eq!(rr.reports[0].fraction_lost, 0);
-        // RFC 3550 Appendix A.3: two packets expected from the first sequence number on
-        // (0xffff, 0x0000), three received, so the cumulative loss is minus one.
-        assert_eq!(rr.reports[0].cumulative_lost(), -1);
+        // RFC 3550 6.4.1: 0xfffe was sent before the first packet received and overtaken by
+        // it: the sequence starts there, three packets expected and three received. (Counted
+        // as a duplicate, it left the cumulative loss at -1 on a path that lost nothing.)
+        assert_eq!(rr.reports[0].cumulative_lost(), 0);
     }
 
     #[test]

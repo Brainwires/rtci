@@ -4,9 +4,9 @@
 //! read on the way in, and the clock advanced through `handle_timeout`.
 
 use rtc_interceptor::{
-    AttributedPacket, CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerReason,
-    CircuitBreakerState, Interceptor, MediaUsability, Packet, Registry, Slot, StreamInfo,
-    TaggedPacket,
+    AttributedPacket, CircuitBreakerBuilder, CircuitBreakerHandle, CircuitBreakerPacketSize,
+    CircuitBreakerReason, CircuitBreakerState, Interceptor, MediaUsability, Packet, Registry, Slot,
+    StreamInfo, TaggedPacket,
 };
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
@@ -29,6 +29,9 @@ struct Harness {
     left: u64,
     /// The extended highest sequence number the receiver of the congestion tests reports.
     received: u32,
+    /// What the receiver last reported on each SSRC: the extended highest sequence number and
+    /// the cumulative number lost, which follows the fraction lost it reports (RFC 3550 A.3).
+    reported: std::collections::HashMap<u32, (u32, i32)>,
 }
 
 fn ms(milliseconds: u64) -> Duration {
@@ -53,6 +56,7 @@ impl Harness {
             sequence: 0,
             left: 0,
             received: 0,
+            reported: std::collections::HashMap::new(),
         }
     }
 
@@ -75,6 +79,11 @@ impl Harness {
 
     /// One RTP packet of 1200 bytes on the wire, one frame per packet.
     fn send(&mut self, at: Duration, ssrc: u32) {
+        self.send_sized(at, ssrc, 1188);
+    }
+
+    /// One RTP packet with a payload of `payload` bytes, one frame per packet.
+    fn send_sized(&mut self, at: Duration, ssrc: u32, payload: usize) {
         self.sequence = self.sequence.wrapping_add(1);
         let packet = rtp::Packet {
             header: rtp::header::Header {
@@ -85,7 +94,7 @@ impl Harness {
                 ssrc,
                 ..Default::default()
             },
-            payload: vec![0u8; 1188].into(),
+            payload: vec![0u8; payload].into(),
         };
         let message = self.tagged(at, Packet::Rtp(packet));
         self.chain.handle_write(message).expect("write");
@@ -122,19 +131,44 @@ impl Harness {
         self.drain();
     }
 
+    /// The cumulative number lost a receiver reporting `fraction_lost` of the packets up to
+    /// `highest` would report.
+    fn cumulative(&mut self, ssrc: u32, fraction_lost: u8, highest: u32) -> i32 {
+        let (previous, lost) = self.reported.get(&ssrc).copied().unwrap_or((0, 0));
+        let expected = i64::from(highest.saturating_sub(previous));
+        let lost = lost + (expected * i64::from(fraction_lost) / 256) as i32;
+        self.reported.insert(ssrc, (highest, lost));
+        lost
+    }
+
     /// A receiver report about `ssrc`: the fraction lost (in 1/256) and the extended highest
-    /// sequence number received.
+    /// sequence number received, with the cumulative number lost that goes with them.
     fn report(&mut self, at: Duration, ssrc: u32, fraction_lost: u8, highest: u32) {
+        let lost = self.cumulative(ssrc, fraction_lost, highest);
+        self.report_counts(at, ssrc, fraction_lost, highest, lost);
+    }
+
+    /// A receiver report with the cumulative number lost given as it is.
+    fn report_counts(
+        &mut self,
+        at: Duration,
+        ssrc: u32,
+        fraction_lost: u8,
+        highest: u32,
+        cumulative_lost: i32,
+    ) {
+        let mut block = ReceptionReport {
+            ssrc,
+            fraction_lost,
+            last_sequence_number: highest,
+            ..Default::default()
+        };
+        block.set_cumulative_lost(cumulative_lost);
         self.receive(
             at,
             vec![Box::new(ReceiverReport {
                 ssrc: 0x9999_9999,
-                reports: vec![ReceptionReport {
-                    ssrc,
-                    fraction_lost,
-                    last_sequence_number: highest,
-                    ..Default::default()
-                }],
+                reports: vec![block],
                 ..Default::default()
             })],
         );
@@ -151,18 +185,21 @@ impl Harness {
         rtt: Duration,
     ) {
         let held = at - sr_at - rtt;
+        let lost = self.cumulative(ssrc, fraction_lost, highest);
+        let mut block = ReceptionReport {
+            ssrc,
+            fraction_lost,
+            last_sequence_number: highest,
+            last_sender_report: (NTP >> 16) as u32,
+            delay: (held.as_secs_f64() * 65_536.0) as u32,
+            ..Default::default()
+        };
+        block.set_cumulative_lost(lost);
         self.receive(
             at,
             vec![Box::new(ReceiverReport {
                 ssrc: 0x9999_9999,
-                reports: vec![ReceptionReport {
-                    ssrc,
-                    fraction_lost,
-                    last_sequence_number: highest,
-                    last_sender_report: (NTP >> 16) as u32,
-                    delay: (held.as_secs_f64() * 65_536.0) as u32,
-                    ..Default::default()
-                }],
+                reports: vec![block],
                 ..Default::default()
             })],
         );
@@ -473,6 +510,110 @@ fn the_congestion_breaker_uses_a_reported_round_trip_time_when_it_sees_no_sender
         Some(CircuitBreakerState::Running),
         unmeasured.handle.state(VIDEO),
         "with no round trip time at all there is nothing to compare with"
+    );
+}
+
+/// Section 4.3 with RFC 3550's loss counts: on a path that reorders and loses nothing, a
+/// packet overtaken across a report's boundary is missing from one interval (its fraction
+/// lost is positive, the cumulative count goes up) and arrives in the next (whose fraction
+/// lost cannot go below zero, while the cumulative count comes back down). The average of
+/// the fractions then shows loss the receiver's own cumulative count says never happened.
+///
+/// 1000 packets a second of 1200 bytes (1.2 MB/s), a 100 ms round trip, a report every
+/// 200 ms (CB_INTERVAL 5): every other report says 10 of its 200 packets are missing (12/256)
+/// and the next one says none, the cumulative count back at 0. The average, 2.5 %, puts ten
+/// times TCP at 0.93 MB/s, under the flow's rate; the most the cumulative count shows over
+/// five reports is 10 of 1000 (the last interval's packets still on their way), which puts
+/// it at 1.47 MB/s. The flow keeps running. The same fractions with the cumulative count
+/// growing (the packets really lost) trip it.
+#[test]
+fn reordering_that_the_cumulative_count_takes_back_does_not_trip_the_congestion_breaker() {
+    let run = |real_loss: bool| {
+        let mut harness = Harness::new(CircuitBreakerBuilder::new());
+        harness.handle.report_round_trip_time(ms(100));
+        let mut lost = 0;
+        for interval in 0..40u64 {
+            let start = ms(interval * 200);
+            harness.send_for(start, start + ms(200), VIDEO, 1000);
+            harness.received += 200;
+            let fraction = if interval % 2 == 0 {
+                lost += 10;
+                12
+            } else {
+                if !real_loss {
+                    lost -= 10;
+                }
+                0
+            };
+            let received = harness.received;
+            harness.report_counts(start + ms(199), VIDEO, fraction, received, lost);
+        }
+        harness.handle.state(VIDEO)
+    };
+    assert_eq!(Some(CircuitBreakerState::Running), run(false));
+    assert!(
+        matches!(
+            run(true),
+            Some(CircuitBreakerState::Ceased {
+                reason: CircuitBreakerReason::Congestion,
+                ..
+            })
+        ),
+        "the same fractions with the packets really lost"
+    );
+}
+
+/// RFC 8083 section 4.3 compares the sending rate with ten times X = s / (Tr * sqrt(2p/3)).
+/// By default s is the mean size of the packets sent over the reporting intervals the rate is
+/// measured over (bytes sent / packets sent there), so both describe the same packets. A
+/// speech-like flow, each second 40 packets of 1200 bytes and then 10 silence frames of 23
+/// bytes (48 kB/s), over a path that loses one packet in 50 (each report: 5/256, the
+/// cumulative count one up) with a 100 ms round trip. Over CB_INTERVAL (3 reports) the
+/// confirmed loss is 2 in 150: by the window s is 965 bytes and ten times X about 1 MB/s, and
+/// the call keeps running. Section 3's "last 4 * G frames"
+/// (`CircuitBreakerPacketSize::LastFrames`) takes the silence frames' 23 bytes, ten times X
+/// falls to 24 kB/s, and the flow is ceased.
+#[test]
+fn the_packet_size_is_that_of_the_window_the_rate_is_measured_over() {
+    let run = |packet_size: Option<CircuitBreakerPacketSize>| {
+        let builder = match packet_size {
+            Some(packet_size) => CircuitBreakerBuilder::new().with_packet_size(packet_size),
+            None => CircuitBreakerBuilder::new(),
+        };
+        let mut harness = Harness::new(builder);
+        harness.handle.report_round_trip_time(ms(100));
+        let mut lost = 0;
+        for second in 0..12u64 {
+            let start = ms(second * 1000);
+            for n in 0..50u64 {
+                let payload = if n < 40 { 1188 } else { 11 };
+                harness.send_sized(start + ms(n * 20), VIDEO, payload);
+            }
+            harness.received += 50;
+            lost += 1;
+            let received = harness.received;
+            harness.report_counts(start + ms(999), VIDEO, 5, received, lost);
+        }
+        harness.handle.state(VIDEO)
+    };
+    assert_eq!(
+        Some(CircuitBreakerState::Running),
+        run(None),
+        "the default is the window's packet size"
+    );
+    assert_eq!(
+        Some(CircuitBreakerState::Running),
+        run(Some(CircuitBreakerPacketSize::SendingWindow))
+    );
+    assert!(
+        matches!(
+            run(Some(CircuitBreakerPacketSize::LastFrames)),
+            Some(CircuitBreakerState::Ceased {
+                reason: CircuitBreakerReason::Congestion,
+                ..
+            })
+        ),
+        "the last frames' packet size"
     );
 }
 

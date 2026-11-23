@@ -48,6 +48,9 @@ def load_audit_count():
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # Registered before it runs: a dataclass looks its module up in sys.modules
+    # (Python 3.14 fails on a module loaded from a file without it).
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

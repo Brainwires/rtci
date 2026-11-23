@@ -361,6 +361,13 @@ pub struct DefaultInterceptorOptions {
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
     /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
     pub rapid_synchronisation: bool,
+    /// How the RTP circuit breaker takes s, the packet size of RFC 8083 section 4.3's TCP
+    /// throughput equation: by default the mean size of the packets sent over the reporting
+    /// intervals the sending rate is measured over;
+    /// [`CircuitBreakerPacketSize::LastFrames`](interceptor::CircuitBreakerPacketSize::LastFrames)
+    /// is section 3's "last 4 * G frames". See
+    /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
+    pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
 }
 
 impl Default for DefaultInterceptorOptions {
@@ -371,6 +378,7 @@ impl Default for DefaultInterceptorOptions {
             pacer_immediate_release: true,
             bandwidth_probing: true,
             rapid_synchronisation: true,
+            circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
         }
     }
 }
@@ -426,12 +434,17 @@ pub fn register_default_interceptors_with_options(
     let circuit_breaker = transports.breaker_for(0);
     let registry = {
         let transports = transports.clone();
+        let packet_size = options.circuit_breaker_packet_size;
         registry.with_per_rtp_session(
             Slot::CircuitBreaker,
             PerRtpSession::with_first_for_sessions(
-                CircuitBreakerBuilder::new().build_with_handle(&circuit_breaker),
+                CircuitBreakerBuilder::new()
+                    .with_packet_size(packet_size)
+                    .build_with_handle(&circuit_breaker),
                 move |session| {
-                    CircuitBreakerBuilder::new().build_with_handle(&transports.breaker_for(session))
+                    CircuitBreakerBuilder::new()
+                        .with_packet_size(packet_size)
+                        .build_with_handle(&transports.breaker_for(session))
                 },
             ),
         )
