@@ -240,6 +240,7 @@ fn the_session_starts_with_dtls_under_the_connections_cname() {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
 
     let base = Instant::now();
@@ -280,6 +281,7 @@ fn feedback_the_application_writes_leaves_in_a_compound_packet() {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
@@ -321,6 +323,7 @@ fn closing_says_bye() {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
@@ -365,6 +368,7 @@ fn a_retransmission_is_reported_on_the_rtx_stream() {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();
@@ -420,6 +424,7 @@ fn a_remote_cname_is_recorded() {
             &media_engine,
             &mut chain,
             &mut stats,
+            None,
         );
         let base = Instant::now();
         handler.handle_event(handshake_complete(base)).unwrap();
@@ -467,6 +472,7 @@ fn a_collision_with_a_sender_ssrc_reaches_the_application() {
         &media_engine,
         &mut chain,
         &mut stats,
+        None,
     );
     let base = Instant::now();
     handler.handle_event(handshake_complete(base)).unwrap();

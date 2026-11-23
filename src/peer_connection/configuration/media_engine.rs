@@ -1924,6 +1924,90 @@ fn same_format(a: &RTCRtpCodec, b: &RTCRtpCodec) -> bool {
         && parameters(a) == parameters(b)
 }
 
+/// RFC 8834 section 4.3: where payload types associate RTP streams with m= lines (the
+/// sections of one BUNDLE group share an RTP session), "the payload type numbers MUST be
+/// unique across the signalling contexts"; RFC 9143 section 9.1 says the same of a BUNDLE
+/// group. Given the sections of one group (their mid and the formats their m= line lists),
+/// the payload types that two sections use for different formats, each with the mids that
+/// use it. Empty when the group's payload types are consistent. For the SDP layer, which
+/// refuses such a remote offer (or reads the packets by MID, not by payload type).
+pub(crate) fn payload_types_reused_across_sections(
+    sections: &[(&str, &[RTCRtpCodecParameters])],
+) -> Vec<(PayloadType, Vec<String>)> {
+    let mut conflicts: Vec<(PayloadType, Vec<String>)> = vec![];
+    for (i, (mid, codecs)) in sections.iter().enumerate() {
+        for codec in codecs.iter() {
+            for (other_mid, other_codecs) in &sections[i + 1..] {
+                let clash = other_codecs.iter().any(|other| {
+                    other.payload_type == codec.payload_type
+                        && !same_format(&other.rtp_codec, &codec.rtp_codec)
+                });
+                if !clash {
+                    continue;
+                }
+                let entry = match conflicts
+                    .iter_mut()
+                    .find(|(pt, _)| *pt == codec.payload_type)
+                {
+                    Some(entry) => entry,
+                    None => {
+                        conflicts.push((codec.payload_type, vec![]));
+                        conflicts.last_mut().expect("just pushed")
+                    }
+                };
+                for m in [*mid, *other_mid] {
+                    if !entry.1.iter().any(|known| known == m) {
+                        entry.1.push(m.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    conflicts
+}
+
+#[cfg(test)]
+mod payload_type_reuse_test {
+    use super::*;
+
+    fn codec(payload_type: PayloadType, mime_type: &str, clock_rate: u32) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels: 0,
+                sdp_fmtp_line: String::new(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    /// RFC 8834 section 4.3: one payload type names one format across the m= lines of an
+    /// RTP session; the same format under one number in two sections is fine.
+    #[test]
+    fn a_payload_type_naming_two_formats_in_one_group_is_found() {
+        let audio = [
+            codec(111, MIME_TYPE_OPUS, 48000),
+            codec(96, MIME_TYPE_PCMU, 8000),
+        ];
+        let video = [
+            codec(96, MIME_TYPE_VP8, 90000),
+            codec(97, MIME_TYPE_VP9, 90000),
+        ];
+        let more_video = [codec(97, MIME_TYPE_VP9, 90000)];
+        let conflicts = payload_types_reused_across_sections(&[
+            ("0", &audio),
+            ("1", &video),
+            ("2", &more_video),
+        ]);
+        assert_eq!(conflicts, vec![(96, vec!["0".to_owned(), "1".to_owned()])]);
+        assert!(
+            payload_types_reused_across_sections(&[("1", &video), ("2", &more_video)]).is_empty()
+        );
+    }
+}
+
 #[cfg(test)]
 mod same_format_test {
     use super::*;

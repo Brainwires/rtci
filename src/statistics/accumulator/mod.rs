@@ -138,6 +138,11 @@ pub(crate) struct RTCStatsAccumulator {
     pub(crate) ecn: bool,
     /// How a stream with ECN on starts marking (`SettingEngineBuilder::with_ecn_initiation`).
     pub(crate) ecn_initiation: interceptor::EcnInitiation,
+    /// Which ECT codepoint marked packets carry (`SettingEngineBuilder::with_ecn_marking`).
+    pub(crate) ecn_marking: interceptor::EcnMarking,
+    /// The RTCP CNAMEs remote sources named, in order (at most 16), for an ECN validation
+    /// that starts after them.
+    remote_cnames: Vec<String>,
 
     /// How many RTP stream objects have been deleted. A stream object created now carries it in
     /// its id, so that id differs from the id of every deleted object with the same SSRC
@@ -200,9 +205,16 @@ impl RTCStatsAccumulator {
         Self {
             ecn,
             ecn_initiation,
+            ecn_marking: interceptor::EcnMarking::default(),
             id_salt: Some(id_salt),
             ..Self::default()
         }
+    }
+
+    /// The ECT codepoint marked packets carry (`SettingEngineBuilder::with_ecn_marking`).
+    pub(crate) fn with_ecn_marking(mut self, marking: interceptor::EcnMarking) -> Self {
+        self.ecn_marking = marking;
+        self
     }
 
     /// What seals a report taken at `now`: the connection's id salt and the timestamp anchor,
@@ -1008,6 +1020,7 @@ impl RTCStatsAccumulator {
         } else {
             (*self.outbound_rtx_ssrc_to_primary.get(&ssrc)?, false)
         };
+        let marking = self.ecn_marking;
         let stream = self.outbound_rtp_streams.get_mut(&primary)?;
         if !stream.ect1_marking {
             return None;
@@ -1021,8 +1034,40 @@ impl RTCStatsAccumulator {
         if !marked {
             return None;
         }
-        stream.on_ect1_sent();
-        Some(shared::EcnCodepoint::Ect1)
+        let codepoint = marking.codepoint(stream.ect_preference, rand::random::<bool>());
+        if codepoint == shared::EcnCodepoint::Ect1 {
+            stream.on_ect1_sent();
+        }
+        Some(codepoint)
+    }
+
+    /// A remote source named its RTCP CNAME at `now`: each outbound stream's ECN validation
+    /// watches for a second participant while its success is provisional (RFC 6679
+    /// section 7.2.1).
+    pub(crate) fn on_remote_cname(&mut self, now: Instant, cname: &str) {
+        if !self.remote_cnames.iter().any(|known| known == cname) && self.remote_cnames.len() < 16 {
+            self.remote_cnames.push(cname.to_owned());
+        }
+        for stream in self.outbound_rtp_streams.values_mut() {
+            if let Some(validation) = stream.ecn_validation.as_deref_mut() {
+                validation.on_remote_cname(now, cname);
+            }
+        }
+    }
+
+    /// Records the ECT codepoint the receiver of the outbound stream `ssrc` asks for (the
+    /// `ect=` of its `a=ecn-capable-rtp`, RFC 6679 section 6.1); `None`: it asks for none,
+    /// ECT(0) applies (section 7.3.1).
+    pub(crate) fn set_outbound_ect_preference(
+        &mut self,
+        ssrc: SSRC,
+        preference: Option<interceptor::EctPreference>,
+    ) {
+        let l4s = self.ecn_marking == interceptor::EcnMarking::L4s;
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.ect_preference = preference;
+            stream.sends_ect1 = l4s || preference == Some(interceptor::EctPreference::Ect1);
+        }
     }
 
     /// Counts the ECN codepoint an RTP packet of the inbound stream `ssrc` arrived with.
@@ -1057,7 +1102,11 @@ impl RTCStatsAccumulator {
     pub(crate) fn set_outbound_ccfb(&mut self, ssrc: SSRC, negotiated: bool) {
         let ecn = self.ecn;
         let initiation = self.ecn_initiation;
+        let l4s = self.ecn_marking == interceptor::EcnMarking::L4s;
+        let remote_cnames = &self.remote_cnames;
         if let Some(stream) = self.outbound_rtp_streams.get_mut(&ssrc) {
+            stream.sends_ect1 =
+                l4s || stream.ect_preference == Some(interceptor::EctPreference::Ect1);
             stream.ccfb_negotiated = negotiated;
             // RFC 8888 reports, or RFC 6679's own ECN reports, carry the marks back.
             stream.ect1_marking = ecn && (negotiated || stream.rfc6679_negotiated);
@@ -1066,7 +1115,11 @@ impl RTCStatsAccumulator {
             if !stream.ect1_marking {
                 stream.ecn_validation = None;
             } else if stream.ecn_validation.is_none() {
-                stream.ecn_validation = Some(Box::new(interceptor::EcnValidation::new(initiation)));
+                let mut validation = interceptor::EcnValidation::new(initiation);
+                if let Some(first) = remote_cnames.first() {
+                    validation = validation.with_receiver_cname(first);
+                }
+                stream.ecn_validation = Some(Box::new(validation));
             }
         }
     }

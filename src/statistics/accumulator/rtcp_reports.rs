@@ -51,6 +51,40 @@ impl RTCStatsAccumulator {
     /// * An RFC 8888 report block describes, packet by packet, how the remote received one of
     ///   our outbound streams: ECN marks, losses and recoveries (the remote-inbound object).
     pub(crate) fn on_rtcp_received(&mut self, packets: &[Box<dyn rtcp::Packet>], now: Instant) {
+        // RFC 6679 section 7.2.1: a reception report about a stream that is initiating ECN,
+        // in a compound packet with no ECN report about it, ends the initiation when it shows
+        // more than three probes should have arrived (the receiver does not do ECN feedback).
+        let ecn_reported: Vec<u32> = packets
+            .iter()
+            .flat_map(|packet| {
+                let feedback = packet
+                    .as_any()
+                    .downcast_ref::<EcnFeedback>()
+                    .map(|f| f.media_ssrc);
+                let summaries: Vec<u32> = packet
+                    .as_any()
+                    .downcast_ref::<ExtendedReport>()
+                    .map(|xr| {
+                        xr.reports
+                            .iter()
+                            .filter_map(|b| b.as_any().downcast_ref::<EcnSummaryReportBlock>())
+                            .flat_map(|b| b.reports.iter().map(|r| r.ssrc))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                feedback.into_iter().chain(summaries)
+            })
+            .collect();
+        for report in packets.iter().flat_map(|p| reception_reports(p.as_ref())) {
+            if !ecn_reported.contains(&report.ssrc)
+                && let Some(stream) = self.outbound_rtp_streams.get_mut(&report.ssrc)
+                && !stream.ccfb_negotiated
+                && let Some(validation) = stream.ecn_validation.as_deref_mut()
+            {
+                validation.on_reception_report_without_ecn(now, report.last_sequence_number);
+            }
+        }
+
         // The sender reports first, wherever they stand in the compound packet: a sender
         // report ends the round trip time its stream had (webrtc-stats 8.10: none "if the
         // latest SR does not contain the DLRR report block"), and the DLRR block that came

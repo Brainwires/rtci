@@ -15,7 +15,7 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{EcnInitiation, Registry};
+use rtc::interceptor::{EcnInitiation, EcnMarking, Registry};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
@@ -109,6 +109,8 @@ impl Peer {
             .with_setting_engine(
                 SettingEngineBuilder::new()
                     .with_ecn(setup.ecn)
+                    // L4S: ECT(1) whatever the receiver asks (RFC 6679's default is ECT(0)).
+                    .with_ecn_marking(EcnMarking::L4s)
                     .with_ecn_initiation(if setup.leap_of_faith {
                         EcnInitiation::LeapOfFaith
                     } else {

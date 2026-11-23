@@ -242,6 +242,7 @@ pub(crate) mod packet;
 pub(crate) mod report;
 pub(crate) mod rfc8888;
 pub(crate) mod rtcp_session;
+pub(crate) mod rtp_session;
 pub(crate) mod rtpfb;
 pub(crate) mod stream_info;
 pub(crate) mod tst;
@@ -370,8 +371,8 @@ pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportIn
 pub use report::sender::{SenderReportBuilder, SenderReportInterceptor};
 pub use rfc8888::ecn::{
     CONFIRMATIONS as ECN_CONFIRMATIONS, DEFAULT_RETRY_AFTER as ECN_DEFAULT_RETRY_AFTER,
-    EcnInitiation, EcnState, EcnValidation, PROBE_INTERVAL as ECN_PROBE_INTERVAL,
-    PROBE_SPACING as ECN_PROBE_SPACING,
+    EcnInitiation, EcnMarking, EcnState, EcnValidation, EctPreference,
+    PROBE_INTERVAL as ECN_PROBE_INTERVAL, PROBE_SPACING as ECN_PROBE_SPACING,
 };
 pub use rfc8888::recorder::CcFeedbackRecorder;
 pub use rfc8888::sender::{
@@ -384,6 +385,7 @@ pub use rtcp_session::{
     RTCP_SESSION_NOMINAL_AUDIO_BANDWIDTH, RTCP_SESSION_NOMINAL_VIDEO_BANDWIDTH, RtcpBandwidth,
     RtcpProfile, RtcpSessionBuilder, RtcpSessionControl, RtcpSessionEvent, RtcpSessionInterceptor,
 };
+pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;

@@ -256,3 +256,53 @@ fn a_compound_packet_about_no_known_stream_is_not_delivered() {
     ]);
     assert!(out.is_empty(), "{out:?}");
 }
+
+/// RFC 7587 section 4.1: a receiver "MUST be prepared to receive duplicate RTP packets" and
+/// hands at most one copy on. A packet that arrives a second time (here the original after
+/// its retransmission had already been taken out of its RTX packet, both reaching the
+/// endpoint as the primary stream's sequence number) reaches the application once; packets
+/// after it, and one far behind the window, still go through.
+#[test]
+fn a_packet_arriving_twice_reaches_the_application_once() {
+    let mut transceivers = transceivers();
+    let mut stats = RTCStatsAccumulator::new();
+    let mut ctx = EndpointHandlerContext::default();
+    let mut handler = EndpointHandler::new(&mut ctx, &mut transceivers, &mut stats);
+    let mut send = |sequence_number: u16| {
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        ssrc: REMOTE_AUDIO,
+                        sequence_number,
+                        payload_type: 111,
+                        ..Default::default()
+                    },
+                    payload: vec![1u8; 10].into(),
+                }))),
+            })
+            .unwrap();
+        std::iter::from_fn(|| handler.poll_read())
+            .filter(|m| {
+                matches!(
+                    m.message,
+                    RTCMessageInternal::Rtp(RTPMessage::TrackPacket(TrackPacket {
+                        packet: Packet::Rtp(_),
+                        ..
+                    }))
+                )
+            })
+            .count()
+    };
+    assert_eq!(send(10), 1);
+    assert_eq!(send(12), 1);
+    assert_eq!(send(11), 1, "a late packet is not a duplicate");
+    assert_eq!(send(11), 0, "the second copy is dropped");
+    assert_eq!(send(10), 0);
+    assert_eq!(send(13), 1);
+    assert_eq!(send(13u16.wrapping_add(5000)), 1);
+    assert_eq!(send(13), 1, "older than the window: let through");
+}
