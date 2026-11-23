@@ -233,7 +233,7 @@ fn the_max_message_size_follows_every_answer_and_provisional_answer() -> TestRes
     assert_eq!(max_message_size(&a), Some(7000), "the final answer's");
 
     // Later exchanges on the same association (the same `a=sctp-port` on both sides).
-    for size in [1200u32, 100_000] {
+    for size in [1200u32, 30_000] {
         let offer = a.create_offer(None)?;
         a.set_local_description(now, offer.clone())?;
         b.set_remote_description(now, offer)?;

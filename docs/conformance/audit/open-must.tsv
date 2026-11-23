@@ -93,9 +93,6 @@ RFC9605-X-5	F	S	sframe	Stale note: `a=sframe` is offered and answered (`tests/en
 RFC9605-X-6	C	S	sframe	Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder)
 RFC9628-6-1	A	S	media (running)	`setting`: VP9 receiver limits
 RFC9653-4-3	E	S	sctp	Never testable: only the INIT / INIT ACK chunk type has an open parameter list; no other chunk the engine sends can carry the parameter, so there is nothing to mutate
-WEBRTC-4.4.1.4-36	C	S	w3c	Update the max message size on a pranswer and on renegotiation
-WEBRTC-4.4.1.4-91	C	M	w3c	Queue the data channel errors of a description in the spec order
-WEBRTC-4.5.1-1	C	S	jsep (running)	Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c)
 RFC8830-3-6	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-7	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default
 RFC8830-3-8	E	S	jsep (running)	`conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default

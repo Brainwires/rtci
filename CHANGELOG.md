@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: the events a description causes are queued when it is applied, in the W3C order,
+  data channels included (`conf/jsep-73-dc-error-order`). W3C webrtc-pc 4.4.1.4 fires
+  `signalingstatechange`, then `error` at each channel of errorList (a channel that got no id),
+  then the mutes, the stream changes and the track events; what the description closes is
+  announced in tasks queued after that ("When an RTCDataChannel object's underlying data
+  transport has been closed, the user agent MUST queue a task": `error` if it closed with an
+  error, then `close`). Changed: (1) `OnSctpTransportStateChange(Closed)` for an answer that
+  closes the SCTP association (a rejected data section, `a=sctp-port:0`) was queued before
+  `OnSignalingStateChangeEvent`; it now follows the description's events and the `OnClose` of
+  the association's channels. (2) Those channel events (`OnClose`; `OnError` then `OnClose`
+  for a channel that never opened) were produced by a later `poll_event`, behind whatever was
+  queued in between (the next description's `signalingstatechange`, say); they are now queued
+  with the description, channel by channel in the order the channels were created. An
+  application that relied on the SCTP event arriving first has to wait for it after the
+  channels'. Row WEBRTC-4.4.1.4-91 `tested`.
+- **sctp**: the data max message size follows every answer and provisional answer (W3C
+  webrtc-pc 4.4.1.4: "If description initiates the establishment of a new SCTP association
+  ... or an SCTP association already exists, update the data max message size"). An answer
+  that keeps the association now takes the `a=max-message-size` the peer states in it (before,
+  the first value stayed for the association's life), and the running association sends by
+  it; a provisional answer sets `RTCSctpTransport::max_message_size` (it was null until the
+  final answer). `rtc-sctp`: `Association::set_max_message_size` is public. Also: assigning
+  data channel ids with every id of this side's parity taken no longer overflows (a panic in
+  debug builds for the DTLS client). Rows WEBRTC-4.4.1.4-36 and the umbrella WEBRTC-4.5.1-1
+  `tested`.
+
 - **jsep**: an answer that rejects every m= section closes the transports
   (`conf/jsep-72-transport-close`). W3C webrtc-pc 4.4.1.4, once an answer made the state
   stable: the transports "no longer referenced by a non-stopped transceiver" are closed, "the
