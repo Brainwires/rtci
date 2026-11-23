@@ -527,7 +527,11 @@ fn a_changed_cryptex_extension_block_fails_authentication() {
         ProtectionProfile::AeadAes128Gcm,
     ] {
         let protected = context(profile, SEND).encrypt_rtp(plain).unwrap();
-        assert_eq!(&protected[12..14], &[0xC0, 0xDE], "{profile:?}: Cryptex profile");
+        assert_eq!(
+            &protected[12..14],
+            &[0xC0, 0xDE],
+            "{profile:?}: Cryptex profile"
+        );
         assert_ne!(
             &protected[16..20],
             &plain[16..20],
