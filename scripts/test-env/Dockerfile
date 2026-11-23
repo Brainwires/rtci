@@ -1,6 +1,7 @@
 # The webrtc-rs-rtc test environment: Rust, real network tooling (network namespaces, iptables
-# NAT, ipset, netem), a TURN/STUN server (coturn), synthetic media (GStreamer) and headless
-# Chromium, Firefox and WebKit (Playwright). Built and run by scripts/test-env/run.sh.
+# NAT, ipset, netem), a TURN/STUN server (coturn), synthetic media (GStreamer), headless
+# Chromium, Firefox and WebKit (Playwright), and what the non-browser interop peers
+# (peers/) build from. Built and run by scripts/test-env/run.sh.
 #
 # Playwright's image carries Node and the three browsers with their system libraries; the
 # version is pinned (by digest: the v1.64.1-noble index) and matches interop/package.json.
@@ -45,5 +46,50 @@ RUN set -eu; \
 # interop/package-lock.json resolved it (integrity-checked; no install scripts).
 COPY interop/package.json interop/package-lock.json /opt/interop/
 RUN cd /opt/interop && npm ci --ignore-scripts --no-audit --no-fund && npx playwright --version
+
+# Go for the Pion peer (peers/pion): the toolchain by version and SHA-256 (the checksums
+# go.dev/dl publishes), and every module peers/pion/image/go.sum pins, fetched (and checked
+# against go.sum) into the image's module cache, so the peer builds offline at run time.
+ARG GO_VERSION=1.27.4
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+      arm64) arch=arm64; sum=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+      *) echo "no pinned Go for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz"; \
+    echo "${sum}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH GOMODCACHE=/opt/go/mod GOTOOLCHAIN=local
+COPY peers/pion/image/go.mod peers/pion/image/go.sum /opt/peers/pion/
+RUN cd /opt/peers/pion && go mod download && chmod -R a+rX /opt/go
+
+# Python for the aiortc peer (peers/aiortc): a venv on the image's CPython with exactly the
+# wheels peers/aiortc/image/requirements.txt pins by SHA-256 (no source builds, no resolution).
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY peers/aiortc/image/requirements.txt /opt/peers/aiortc/
+RUN python3 -m venv /opt/peers/aiortc/venv \
+    && /opt/peers/aiortc/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
+       --require-hashes --only-binary :all: --no-deps -r /opt/peers/aiortc/requirements.txt \
+    && chmod -R a+rX /opt/peers/aiortc
+# Two aiortc 1.16.0 parser bugs the engine's RTCP and SDP meet, fixed in the fork
+# Brainwires/aiortc, branch fix/extmap-extension-attributes-1.16.0, commit 2245f90 (1.16.0 plus
+# both fixes); the wheel's sdp.py and rtp.py are replaced by that commit's, every file checked by
+# SHA-256 (the wheel's originals too). To be dropped when upstream releases the fixes.
+# - sdp.py: an a=extmap extension attribute (RFC 8285 5, the engine's RFC 6904 encrypted
+#   forms) made it refuse the description: https://github.com/aiortc/aiortc/issues/1492.
+# - rtp.py: an RTCP SDES packet with several chunks (RFC 3550 6.5 alignment) made it drop the
+#   whole compound packet, its RR and NACKs with it.
+COPY peers/aiortc/image/sdp.py peers/aiortc/image/rtp.py /opt/peers/aiortc/
+RUN set -eu; \
+    dir=$(dirname "$(/opt/peers/aiortc/venv/bin/python -I -c 'import aiortc; print(aiortc.__file__)')"); \
+    printf '%s  %s\n' \
+      0fae9213911b75a548deb434d4d1e2036da77d7c96a7049c9c315752e6135a22 "$dir/sdp.py" \
+      1d054ea25fa10aecfa8c5af94964b4ff5e9710c2597b4cd822fc2fe89f4b89bd "$dir/rtp.py" \
+      60de8a8818aa16fbc4d4f8d322c1f2655ace12f5999bab55a449ae1f0141fe7b /opt/peers/aiortc/sdp.py \
+      ef5e5167bb79034fb3b1e0b41c68673a90b07851330336d8002f73617d77814a /opt/peers/aiortc/rtp.py \
+      | sha256sum -c -; \
+    cp /opt/peers/aiortc/sdp.py /opt/peers/aiortc/rtp.py "$dir/"; rm -rf "$dir/__pycache__"
 
 WORKDIR /src

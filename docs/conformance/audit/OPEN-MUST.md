@@ -8,23 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 650; rows that
   apply: 5095.
-- RFC behaviour tested (`tested` + `setting`): 4910 of 5095 (96.4 %).
-- Tested as the default (`tested`): 4898 of 5095 (96.1 %); `setting`: 12.
-- Open (not tested in any form): 185: 32 untested, 128 partial, 24 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting`): 4905 of 5095 (96.3 %).
+- Tested as the default (`tested`): 4893 of 5095 (96.0 %); `setting`: 12.
+- Open (not tested in any form): 190: 32 untested, 133 partial, 24 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 20 | 10 |
-| C | partly implemented | 116 | 95 |
+| C | partly implemented | 121 | 99 |
 | D | not implemented | 23 | 19 |
 | E | cannot be met or observed inside this engine | 20 | 14 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 197 | 149 |
+| all | | 202 | 153 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 165 rows, 111 of size S, 44 of size M, 10 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 170 rows, 116 of size S, 44 of size M, 10 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 16 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,8 +42,9 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
+| interceptors | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | jsep (running) | 10 | 82 | 2 | 10 | 0 | 104 | 79 | 23 | 2 |
-| media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
+| media (running) | 0 | 16 | 16 | 4 | 0 | 36 | 20 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
 | sctp | 0 | 0 | 2 | 1 | 1 | 4 | 2 | 1 | 1 |
@@ -97,6 +98,7 @@ Sorted by class, then owner, size and ID.
 | RFC8842-5.1-3 | `rfc8842.md` | Answerer needing a new association allocates one if the offerer did ... | partial | C | As RFC8842-5.1-1, for the answer | M | dtls-srtp |
 | RFC8842-5.2-4 | `rfc8842.md` | Offerer is ready for a ClientHello before the answer arrives | partial | C | As RFC8122-6.2-6 | M | dtls-srtp |
 | RFC5761-5.1.3-4 | `rfc5761.md` | ICE checks run for the RTP component only once multiplexing is agreed | untested | C | Drop remote component-2 candidates (rtcp-mux is required), so no check runs for an RTCP component; overlaps RFC8839-5.1-6 | S | ice |
+| RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form is `CircuitBreakerPacketSize::LastFrames`; the default (the sending window's mean size) avoids the false trip of tests/circuit_breaker_reordering_rtc2rtc.rs. `setting` (measured) once the row cites the measurement | S | interceptors |
 | RFC5576-4.2-2 | `rfc5576.md` | A group lists at least one ssrc-id; MAY list more | partial | C | Use groups of three or more ids and `SIM` | S | jsep (running) |
 | RFC5576-5-3 | `rfc5576.md` | Local SSRCs are not ones mentioned in received descriptions | partial | C | Check application-named SSRCs; detect a remote description that mentions a local SSRC | S | jsep (running) |
 | RFC5576-5-9 | `rfc5576.md` | An SSRC is not reused for another source with the same CNAME within ... | untested | C | Keep a history of SSRCs used | S | jsep (running) |
@@ -185,9 +187,13 @@ Sorted by class, then owner, size and ID.
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | PDON starts at the DON before the earliest one, not 0 (kept on purpose); owner decision or a test that the RFC start orders a stream numbered from 0 | S | media (running) |
 | RFC6464-4-1 | `rfc6464.md` | Declared in extmap with URI ... | untested | C | Register `ssrc-audio-level` by default so a browser's offer is answered with it | S | media (running) |
 | RFC6679-6.1.3-1 | `rfc6679.md` | The attribute is not used for RTP over TCP, SCTP, DCCP or non-RTP ... | missing | C | Clear the ECN codepoint when the selected pair is ICE-TCP; needs an ICE-TCP media test | S | media (running) |
+| RFC7160-4.1-1 | `rfc7160.md` | A sender with RTCP on uses a different SSRC for each clock rate | partial | C | The RFC form is `SettingEngineBuilder::with_ssrc_per_clock_rate(true)`; the default keeps one SSRC because Chromium and WebKit do not follow a new SSRC (browser matrix, train 9 round 4). `setting` once the row cites the cell as RULES.md asks | S | media (running) |
+| RFC7160-4.1-2 | `rfc7160.md` | Send BYE and take a new SSRC when the clock rate switches back to one ... | partial | C | as RFC7160-4.1-1 | S | media (running) |
+| RFC7160-4.1-3 | `rfc7160.md` | Next compound RTCP carries several SRs: current clock rate first, ... | partial | C | as RFC7160-4.1-1 | S | media (running) |
 | RFC7742-4-2 | `rfc7742.md` | CVO is sent for all orientations when the peer indicates support | partial | C | Register `urn:3gpp:video-orientation` by default | S | media (running) |
 | RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | partial | C | Report blocks from every SSRC is a setting (`with_report_from_every_ssrc`), not the default (browser behaviour, no failing cell). Owner decision | S | media (running) |
 | RFC8108-6.1-2 | `rfc8108.md` | A new stream after a stopped one, or one that changes media type or ... | partial | C | A new SSRC on a clock-rate change | S | media (running) |
+| RFC8834-4.3-6 | `rfc8834.md` | Sender changing between clock rates follows RFC 7160 4.1 | partial | C | as RFC7160-4.1-1 | S | media (running) |
 | RFC5109-14-1 | `rfc5109.md` | The multiplexing configuration (separate stream or redundant ... | partial | C | Send side: derive the carriage (RED or separate stream) from the negotiated description instead of the application's choice | M | media (running) |
 | RFC7742-4-1 | `rfc7742.md` | An endpoint that can produce other orientations supports generating ... | partial | C | Attach CVO to the packets of a sender from the track's orientation | M | media (running) |
 | RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | partial | C | Tdr from the RFC 3550 6.2 algorithm instead of the report spacing | M | media (running) |

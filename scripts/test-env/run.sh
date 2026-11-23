@@ -29,7 +29,7 @@ mkdir -p "$ARTIFACTS" "$TARGET"
 if [ -n "${RTC_TESTENV_IMAGE:-}" ]; then
   IMAGE=$RTC_TESTENV_IMAGE
 else
-  TAG=$(cat "$HERE/Dockerfile" "$HERE/interop/package.json" "$HERE/interop/package-lock.json" | sha256sum | cut -c1-12)
+  TAG=$("$HERE/image-tag.sh")
   IMAGE=rtc-testenv:$TAG
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "== building $IMAGE"

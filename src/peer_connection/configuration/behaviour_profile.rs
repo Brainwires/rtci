@@ -651,13 +651,13 @@ governed_behaviours! {
         id: "rtp.ssrc-per-clock-rate",
         setting: "SettingEngineBuilder::with_ssrc_per_clock_rate",
         clause: "RFC 7160 4.1",
-        rfc: true => "true",
+        rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
         chrome_source: "libwebrtc audio/audio_send_stream.cc::AudioSendStream::ConfigureStream @ a222406d: \"Configuration parameters which cannot be changed\", RTC_DCHECK(old_config.rtp.ssrc == new_config.rtp.ssrc) when the send codec changes",
         evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.with_ssrc_per_clock_rate(v),
-        read: |s: &SettingEngine| !s.one_ssrc_across_clock_rates,
+        read: |s: &SettingEngine| s.ssrc_per_clock_rate,
     },
     {
         id: "rtcp.strict-validity",
@@ -1291,6 +1291,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "DefaultInterceptorOptions::rapid_synchronisation",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 6051 ntp-64 offered; Chromium answers without it",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow",
     },
 ];
 

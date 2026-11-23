@@ -46,8 +46,8 @@ that never asked for it included. Prefer the explicit `with_behaviour_profile` c
 
 ## 1. Defaults that differ: governed by the profile (40)
 
-40 governed behaviours: the `Chrome` value differs from `Rfc` in 29, the
-`StrictRfc` value in 13. Chrome values: 11 observed, 29 from
+40 governed behaviours: the `Chrome` value differs from `Rfc` in 28, the
+`StrictRfc` value in 14. Chrome values: 11 observed, 29 from
 the source, 0 unverified.
 
 A value is what `{:?}` of the setting writes; the crate's tests compare each with the
@@ -92,7 +92,7 @@ established neither way; each says why.
 | `sctp.rto` | `SettingEngineBuilder::with_sctp_rto` | RFC 9260 6.3.1, 16 | `None (1s / 1s / 60s)` | `500ms / 400ms / 3s` | `None (1s / 1s / 60s)` | source: libwebrtc net/dcsctp/public/dcsctp_options.h::DcSctpOptions @ a222406d: rto_initial 500 ms, rto_min 400 ms, rto_max 60 s (min_rtt_variance is the 220 ms); media/sctp/dcsctp_transport.cc::DcSctpTransport::CreateDcSctpOptions caps the timer backoff at kMaxTimerBackoffDuration 3 s, which the engine's RTO.Max (it bounds the doubling too, RFC 9260 6.3.3 rule E2) expresses as 3 s. A computed RTO over 3 s, which dcsctp keeps up to 60 s, is the difference |
 | `sctp.max-retransmissions` | `SettingEngineBuilder::with_sctp_max_retransmissions` | RFC 9260 8.1, 8.2, 16 (SHOULD) | `None (10)` | `unlimited` | `None (10)` | source: libwebrtc media/sctp/dcsctp_transport.cc::DcSctpTransport::CreateDcSctpOptions @ a222406d: "Don't close the connection automatically on too many retransmissions": max_retransmissions and max_init_retransmits none (dcsctp's own default is 10, net/dcsctp/public/dcsctp_options.h); an unreachable peer is left to ICE |
 | `datachannel.send-before-ack` | `SettingEngineBuilder::with_data_channel_send_before_ack` | RFC 8832 6 (MAY), W3C webrtc-pc 6.2 send() | `false` | `true` | `false` | source: libwebrtc pc/sctp_data_channel.cc::SctpDataChannel::UpdateState @ a222406d: an in-band channel turns kOpen in kHandshakeWaitingForAck, once its DATA_CHANNEL_OPEN is sent; until the ACK its messages go ordered (SctpDataChannel::SendDataMessage) |
-| `rtp.ssrc-per-clock-rate` | `SettingEngineBuilder::with_ssrc_per_clock_rate` | RFC 7160 4.1 | `true` | `false` | `true` | source: libwebrtc audio/audio_send_stream.cc::AudioSendStream::ConfigureStream @ a222406d: "Configuration parameters which cannot be changed", RTC_DCHECK(old_config.rtp.ssrc == new_config.rtp.ssrc) when the send codec changes |
+| `rtp.ssrc-per-clock-rate` | `SettingEngineBuilder::with_ssrc_per_clock_rate` | RFC 7160 4.1 | `false` | `false` | `true` | source: libwebrtc audio/audio_send_stream.cc::AudioSendStream::ConfigureStream @ a222406d: "Configuration parameters which cannot be changed", RTC_DCHECK(old_config.rtp.ssrc == new_config.rtp.ssrc) when the send codec changes |
 | `rtcp.strict-validity` | `SettingEngineBuilder::with_strict_rtcp_validity` | RFC 3550 A.2, 6.4.1 | `false` | `false` | `true` | source: libwebrtc modules/rtp_rtcp/source/rtcp_receiver.cc::RTCPReceiver::ParseCompoundPacket @ a222406d: each packet whose CommonHeader parses (version 2, length, its own padding: rtcp_packet/common_header.cc::CommonHeader::Parse) is handled, the first one need not be an SR or RR and padding is taken on any |
 | `ecn.initiation` | `SettingEngineBuilder::with_ecn_initiation` | RFC 6679 7.2.1, RFC 8888 7 | `RtpAndRtcp` | `LeapOfFaith` | `RtpAndRtcp` | source: libwebrtc modules/congestion_controller/ect1_policy.cc::Ect1Policy::ShouldSendEct1 @ a222406d: every packet goes ECT(1) from the first once RFC 8888 feedback is negotiated and the controller adapts to ECN, until no feedback came for 500 ms (kEct1FeedbackTimeoutBeforeAck) or feedback shows it bleached; RFC 8888 is behind the WebRTC-RFC8888CongestionControlFeedback field trial (pc/media_session.cc::OfferRfc8888), off by default |
 | `ecn.marking` | `SettingEngineBuilder::with_ecn_marking` | RFC 6679 7.3.1, RFC 9331 | `Rfc6679` | `L4s` | `Rfc6679` | source: libwebrtc modules/congestion_controller/ect1_policy.cc::Ect1Policy @ a222406d and media/base/media_channel_impl.cc (rtc_options.ect_1 = options.send_as_ect1): the codepoint is ECT(1) (L4S); behind the WebRTC-RFC8888CongestionControlFeedback field trial |
@@ -107,7 +107,7 @@ established neither way; each says why.
 | `gcc.threshold-time-base` | `DefaultInterceptorOptions::gcc_threshold_time_base` | draft-ietf-rmcat-gcc-02 5.4 | `Departure` | `ArrivalCapped` | `Arrival` | source: libwebrtc modules/congestion_controller/goog_cc/trendline_estimator.cc::TrendlineEstimator::UpdateThreshold @ a222406d: the step is now_ms - last_update_ms_ capped at kMaxTimeDeltaMs 100, where now_ms is the packet's receive_time (delay_based_bwe.cc::DelayBasedBwe::IncomingPacketFeedback): the arrival gaps, capped; remote_bitrate_estimator/overuse_detector.cc the same |
 | `gcc.one-decrease-per-round-trip` | `DefaultInterceptorOptions::gcc_one_decrease_per_round_trip` | draft-ietf-rmcat-gcc-02 5.5 | `true` | `true` | `false` | source: libwebrtc modules/remote_bitrate_estimator/aimd_rate_control.cc::AimdRateControl::TimeToReduceFurther @ a222406d: a decrease waits the round trip time held between 10 and 200 ms since the last change, or for the acknowledged rate to fall under half the estimate (delay_based_bwe.cc calls it on overuse) |
 
-## 2. Engine-only capabilities: the same in every profile (22)
+## 2. Engine-only capabilities: the same in every profile (23)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
@@ -144,6 +144,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `DefaultInterceptorOptions::congestion_feedback` | RFC 8888 (ack ccfb) offered beside transport-cc; libwebrtc offers and accepts it only under the WebRTC-RFC8888CongestionControlFeedback field trial (pc/media_session.cc::OfferRfc8888 @ a222406d), so Chromium answers transport-cc |
 | `DefaultInterceptorOptions::unnegotiated_tmmbr` | TMMBR (RFC 5104) offered; Chromium answers no ccm tmmbr |
 | `DefaultInterceptorOptions::rapid_synchronisation` | RFC 6051 ntp-64 offered; Chromium answers without it |
+| `DefaultInterceptorOptions::circuit_breaker_packet_size` | RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow |
 
 ## Examined: the default is libwebrtc's too, or already the RFC's (33)
 
