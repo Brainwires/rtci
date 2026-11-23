@@ -162,10 +162,8 @@ fn av1_and_vp9_answers_state_this_endpoints_parameters() -> TestResult {
         ),
     )?;
     assert_eq!(fmtp(&sdp, "45"), vec!["profile=0"], "{sdp}");
-    assert_eq!(
-        fmtp(&sdp, "98"),
-        vec!["max-fr=60", "max-fs=12288", "profile-id=0"],
-        "{sdp}"
-    );
+    // The offer's `max-fs` is the offerer's receiver limit, not this endpoint's; the
+    // default VP9 formats state none of their own (`set_vp9_receiver_limits`).
+    assert_eq!(fmtp(&sdp, "98"), vec!["profile-id=0"], "{sdp}");
     Ok(())
 }

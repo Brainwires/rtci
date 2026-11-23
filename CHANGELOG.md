@@ -137,9 +137,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the earlier packet's rate across a switch. Struct literals without `..Default::default()`
     need the field. The peer connection leaves it empty for now.
 - **media conformance**: payload formats.
-  - The default VP9 formats state `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6:
-    a receiver "MUST" provide both); new `media_engine::VP9_RECEIVER_LIMITS`. Offers and
-    answers with the default codecs change accordingly.
+  - `MediaEngine::set_vp9_receiver_limits(true)` has the default VP9 formats state
+    `max-fr=60;max-fs=12288` in their fmtp (RFC 9628 section 6: a receiver "MUST" provide
+    both); new `media_engine::VP9_RECEIVER_LIMITS`. Off by default: in the browser matrix a
+    WebKit sender answered with the limits sent no VP9 (train 5, "reflect video VP9"), so the
+    default VP9 fmtp stays `profile-id=<n>`.
   - Two VP8 formats that differ only in `max-fr` / `max-fs` match (RFC 7741 section 6.2.2:
     receiver capabilities, declarative); they were a mismatch.
 - **media conformance**: RTCP feedback and extended reports.
