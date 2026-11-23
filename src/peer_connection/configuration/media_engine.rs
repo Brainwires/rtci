@@ -299,6 +299,8 @@ pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 /// its own) sends during silence; static payload type 13 at 8000 Hz.
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_CN: &str = "audio/CN";
+/// MIME type for redundant audio data, RED (RFC 2198), as `a=rtpmap:<pt> red/48000/2`.
+pub const MIME_TYPE_RED: &str = "audio/red";
 
 /// SMPTE ST 336 (KLV) metadata MIME type
 ///
@@ -556,6 +558,21 @@ impl MediaEngine {
                     rtcp_feedback: vec![],
                 },
                 payload_type: 111,
+            },
+            // Redundant audio data (RFC 2198) with Opus as the primary and the redundant
+            // encoding: RFC 8854 section 4.2 has a WebRTC endpoint support RED for audio, and
+            // Chromium and WebKit offer it in this form (`a=rtpmap:63 red/48000/2`,
+            // `a=fmtp:63 111/111`, after Opus). The RED interceptor the peer connection
+            // installs sends and takes apart its packets.
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_RED.to_owned(),
+                    clock_rate: 48000,
+                    channels: 2,
+                    sdp_fmtp_line: "111/111".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 63,
             },
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {

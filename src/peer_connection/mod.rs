@@ -743,10 +743,18 @@ fn with_rtcp_session(registry: Registry, setting_engine: &SettingEngine) -> Regi
     // receive it and act on it, and RFC 4585 section 6.3.1 the same of PLI: only the
     // application's encoder can answer a key-frame request, so a chain without the
     // interceptor that delivers them (which the chain's terminus would otherwise end) gets it.
-    if registry.holds(interceptor::Slot::KeyFrameRequests) {
+    let registry = if registry.holds(interceptor::Slot::KeyFrameRequests) {
         registry
     } else {
         configuration::interceptor_registry::configure_key_frame_requests(registry)
+    };
+    // RFC 2198 (RFC 8854 section 4.2): the default codecs offer RED for audio, and a peer
+    // that negotiates it sends RED packets: every chain takes them apart (and sends RED where
+    // it was negotiated) unless the application put its own interceptor in the slot.
+    if registry.holds(interceptor::Slot::Redundancy) {
+        registry
+    } else {
+        configuration::interceptor_registry::configure_audio_redundancy(registry)
     }
 }
 

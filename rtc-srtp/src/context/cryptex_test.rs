@@ -511,3 +511,43 @@ fn cryptex_round_trips_a_padded_packet_with_csrcs() {
         );
     }
 }
+
+/// RFC 7941 section 6: SDES items carried in header extensions (MID, RtpStreamId) are
+/// protected "of commensurate strength" with RTCP's. Under Cryptex they are encrypted with
+/// the payload by the stream's own SRTP transform (the same cipher, key and authentication as
+/// the SRTCP of the session): the extension data on the wire is not the plaintext, and a
+/// packet whose extension block was changed in transit fails authentication, for the counter
+/// mode with HMAC-SHA1 and for AES-GCM.
+#[test]
+fn a_changed_cryptex_extension_block_fails_authentication() {
+    // RFC 9335 A.1.1's packet: a one-byte header extension, element id 5, two octets.
+    let plain = AES_CM_VECTORS[0].1;
+    for profile in [
+        ProtectionProfile::Aes128CmHmacSha1_80,
+        ProtectionProfile::AeadAes128Gcm,
+    ] {
+        let protected = context(profile, SEND).encrypt_rtp(plain).unwrap();
+        assert_eq!(&protected[12..14], &[0xC0, 0xDE], "{profile:?}: Cryptex profile");
+        assert_ne!(
+            &protected[16..20],
+            &plain[16..20],
+            "{profile:?}: the extension element is not in the clear"
+        );
+        assert_eq!(
+            &context(profile, Cryptex::default())
+                .decrypt_rtp(&protected)
+                .unwrap()[..],
+            plain
+        );
+        for offset in 16..20 {
+            let mut changed = protected.to_vec();
+            changed[offset] ^= 0x01;
+            assert!(
+                context(profile, Cryptex::default())
+                    .decrypt_rtp(&changed)
+                    .is_err(),
+                "{profile:?}: a change at octet {offset} of the extension block is detected"
+            );
+        }
+    }
+}

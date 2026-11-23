@@ -1671,7 +1671,25 @@ pub(crate) fn create_stream_info(
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
             .collect(),
+        section_mime_types: section_codecs
+            .iter()
+            .map(|c| (c.payload_type, c.rtp_codec.mime_type.clone()))
+            .collect(),
     }
+}
+
+/// Adds redundant audio data, RED (RFC 2198), in both directions
+/// ([`RedAudioInterceptor`](interceptor::RedAudioInterceptor), [`Slot::Redundancy`]): a local
+/// audio stream whose section negotiated a RED format with its own encoding as primary and
+/// redundancy (`a=fmtp:63 111/111`, the default codecs' form) is sent as RED with a copy of
+/// the previous packet, and received RED packets are taken apart into their primary encoding,
+/// with lost packets recovered from the next packet's copy. The peer connection installs it in
+/// any chain that does not fill the slot.
+pub fn configure_audio_redundancy(registry: Registry) -> Registry {
+    registry.with(
+        Slot::Redundancy,
+        interceptor::RedAudioBuilder::new().build(),
+    )
 }
 
 /// Adds ULPFEC (RFC 5109) carried in RED (RFC 2198) for video (`a=rtpmap:<red> red/90000`,
