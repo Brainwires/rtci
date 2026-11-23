@@ -283,19 +283,7 @@ class Peer:
                 sdp = strip_bundle(sdp)
             self.munge_remote = ""
             self.record("received", "offer", sdp)
-            try:
-                await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
-            except ValueError:
-                attrs = [l for l in sdp.splitlines() if l.startswith("a=extmap:") and len(l.split()) > 2]
-                if attrs:
-                    raise NotApplicable(
-                        "aiortc cannot parse an a=extmap line with extension attributes, which Rust's offer has "
-                        "for its RFC 6904 encrypted header extensions",
-                        "aiortc 1.16.0 sdp.py SessionDescription.parse: `ext_id, ext_uri = value.split()`; RFC 8285 "
-                        "section 5 allows `<extensionattributes>` after the URI and RFC 6904 section 4 uses them; "
-                        f"lines: {attrs}",
-                    )
-                raise
+            await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
             await self.pc.setLocalDescription(await self.pc.createAnswer())
             await self.send_description("answer", self.pc.localDescription.sdp)
         elif t == "candidate":

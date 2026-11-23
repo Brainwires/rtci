@@ -1,7 +1,7 @@
 {
   "name": "aiortc",
   "stack": "aiortc (Python, asyncio): its own SDP, SCTP and RTP; ICE from aioice; DTLS through pyOpenSSL (OpenSSL); SRTP through pylibsrtp (libsrtp); codecs through PyAV (FFmpeg: libvpx VP8, H.264, libopus)",
-  "version": "aiortc 1.16.0 with aioice 0.13.0, pyOpenSSL 26.4.0, cryptography 50.0.2, pylibsrtp 1.0.0, av 19.0.2 (peers/aiortc/image/requirements.txt, by SHA-256), on the image's CPython 3.12",
+  "version": "aiortc 1.16.0 with aioice 0.13.0, pyOpenSSL 26.4.0, cryptography 50.0.2, pylibsrtp 1.0.0, av 19.0.2 (peers/aiortc/image/requirements.txt, by SHA-256), on the image's CPython 3.12; sdp.py from the fork Brainwires/aiortc commit 4982300 (branch fix/extmap-extension-attributes-1.16.0: the fix for https://github.com/aiortc/aiortc/issues/1492), to be dropped when upstream releases the fix",
   "licence": "BSD-3-Clause (aiortc, aioice, pylibsrtp, PyAV; PyAV's wheel bundles FFmpeg under the LGPL; test image only)",
   "upstream": "https://github.com/aiortc/aiortc",
   "lacks": {
