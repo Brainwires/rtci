@@ -60,7 +60,7 @@ RFC7742-4-2	C	S	media (running)	Register `urn:3gpp:video-orientation` by default
 RFC7742-5-2	F	S	payload	`tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory_audio_and_video_formats` (VP8, H.264 42e0xx); mutation-check and cite
 RFC7742-6.2-6	C	S	payload	Give an application-registered H.264 format without fmtp a `profile-level-id`
 RFC7742-6.2-7	C	S	sdp	Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's)
-RFC7742-6.2-10	C	S	payload	Strip `sprop-parameter-sets` from the answered H.264 fmtp
+RFC7742-6.2-10	C	S	payload	Stale in part: the H.264 answer fmtp is this endpoint's own (`h264_answer_fmtp`, `tests/jsep_answer_fmtp.rs`), so an offered `sprop-parameter-sets` is not echoed (the audit's Bug 1 is gone; no test pins it). Open: an application-registered H.264 format whose fmtp has it is written as given: strip it from generated SDP, and test both
 RFC7798-7.2.5-1	D	L	media (running)	H.265 MRST / MRMT transmission (multi-stream), never negotiated now
 RFC7874-3-10	B	S	media (running)	Stale note: `RTCDTMFSender` exists (`dtmf.rs`); the 40 ms minimum is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes`; a test of the upper bound (6000 ms, within 8000) is missing
 RFC7874-3-11	F	S	media (running)	Stale note: the 30 ms minimum gap is pinned by `tests/dtmf_rtc2rtc.rs::tones_play_out_as_telephone_events_with_tone_changes` (10 ms asked, 40 + 30 ms between tone changes); mutation-check and cite
