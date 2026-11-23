@@ -95,7 +95,6 @@ WEBRTC-4.4.1.4-82	C	S	w3c	With one transport, a description rejecting every sect
 WEBRTC-4.4.1.4-91	C	M	w3c	Queue the data channel errors of a description in the spec order
 WEBRTC-4.5.1-1	C	S	jsep (running)	Umbrella: closes with WEBRTC-4.4.1.4-36, -82, -91 (owner w3c)
 RFC3264-5.1-8	C	M	jsep (running)	Follow an answer that renumbers a codec when sending
-RFC5576-4.2-2	C	S	jsep (running)	Use groups of three or more ids and `SIM`
 RFC7728-6.2-2	C	S	jsep (running)	Use the measured round trip
 RFC7728-6.2-4	D	M	jsep (running)	Detect several receivers (RFC7728-6.2-5)
 RFC7728-6.3-3	C	M	jsep (running)	As RFC7728-8.5-1 (the repeats ride the session's packets); still needed: tie the two repeats to the next two Regular packets (a session hook: attach to the next N regular compound packets) instead of a report-interval timer
