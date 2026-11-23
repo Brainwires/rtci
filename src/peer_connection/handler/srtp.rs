@@ -890,6 +890,81 @@ mod tests {
         .to_vec()
     }
 
+    /// RFC 8852 section 5 ("the identifiers ... need integrity protection and source
+    /// authentication"), met by SRTP authenticating the whole RTP header (RFC 3711 section
+    /// 4.2): a packet whose RtpStreamId element was changed on the way is not read, while the
+    /// packet as sent is, with its RtpStreamId.
+    #[test]
+    fn a_changed_rtp_stream_id_fails_srtp_authentication() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let mut packet = rtp_packet();
+        packet
+            .header
+            .set_extension(10, bytes::Bytes::from_static(b"hi"))
+            .unwrap();
+        let plain = packet.marshal().unwrap();
+        // 12 octets of fixed header, 4 of extension header, the element's own octet: the rid.
+        assert_eq!(&plain[17..19], b"hi");
+        let protected = context(1).encrypt_rtp(&plain).unwrap();
+        for at in [17, 18] {
+            let mut forged = protected.clone();
+            forged[at] ^= 0x01;
+            assert!(read_raw(&mut ctx, forged).is_err(), "octet {at} changed");
+        }
+        SrtpHandler::new(&mut ctx)
+            .handle_read(TaggedRTCMessageInternal {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Rtp(RTPMessage::Raw(protected)),
+            })
+            .unwrap();
+        match SrtpHandler::new(&mut ctx).poll_read().map(|m| m.message) {
+            Some(RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(read)))) => {
+                assert_eq!(read.header.get_extension(10).as_deref(), Some(&b"hi"[..]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// RFC 5124 section 2: "the RTP/SAVPF profile ... does not use the RTCP encryption prefix"
+    /// of RFC 3550 section 9.1 (a random 32-bit quantity before the compound packet). What the
+    /// handler protects opens to exactly the compound packet written, so the first octets
+    /// under SRTCP are the sender report's version-2 header (RFC 3711 section 3.4).
+    #[test]
+    fn srtcp_carries_no_rtcp_encryption_prefix() {
+        let mut ctx = SrtpHandlerContext::default();
+        handshake_complete(&mut ctx, 1);
+        let report = || -> Box<dyn rtcp::Packet> {
+            Box::new(rtcp::sender_report::SenderReport {
+                ssrc: 0x0102_0304,
+                ntp_time: 1,
+                rtp_time: 2,
+                packet_count: 3,
+                octet_count: 4,
+                ..Default::default()
+            })
+        };
+        let plain = rtcp::packet::marshal(&[report()]).unwrap();
+        write(&mut ctx, RTPMessage::Packet(Packet::Rtcp(vec![report()]))).unwrap();
+        let protected = match SrtpHandler::new(&mut ctx).poll_write().unwrap().message {
+            RTCMessageInternal::Rtp(RTPMessage::Raw(protected)) => protected,
+            other => panic!("unexpected {other:?}"),
+        };
+        let opened = context(1).decrypt_rtcp(&protected).unwrap();
+        assert_eq!(
+            &plain[..],
+            &opened[..],
+            "nothing before the compound packet"
+        );
+        assert_eq!(
+            opened[0] >> 6,
+            2,
+            "the first octet is a version-2 RTCP header"
+        );
+        assert_eq!(opened[1], 200, "and its packet type is SR");
+    }
+
     fn source_description() -> Vec<u8> {
         rtcp::source_description::SourceDescription {
             chunks: vec![rtcp::source_description::SourceDescriptionChunk {

@@ -32,8 +32,8 @@ pub enum RTCRtpHeaderEncryptionPolicy {
 }
 
 /// Whether Cryptex applies to every RTP `m=` section of a description: `a=cryptex` at the
-/// session level, or on each audio / video section that isn't rejected. A description with
-/// no RTP section doesn't have it.
+/// session level, or for each audio / video section that isn't rejected (see
+/// [`section_has_cryptex`]). A description with no RTP section doesn't have it.
 pub(crate) fn description_has_cryptex(d: &SessionDescription) -> bool {
     let rtp: Vec<&MediaDescription> = d
         .media_descriptions
@@ -43,7 +43,34 @@ pub(crate) fn description_has_cryptex(d: &SessionDescription) -> bool {
     if rtp.is_empty() {
         return false;
     }
-    d.has_attribute(ATTR_KEY_CRYPTEX) || rtp.iter().all(|m| m.has_attribute(ATTR_KEY_CRYPTEX))
+    d.has_attribute(ATTR_KEY_CRYPTEX) || rtp.iter().all(|m| section_has_cryptex(d, m))
+}
+
+/// Whether `a=cryptex` applies to the section `m` of `d`: on the section itself, or, the
+/// attribute being of the TRANSPORT category (RFC 9335 section 9.1, RFC 8859 section 4.5), on
+/// the BUNDLE-tagged section of a BUNDLE group `m` is in (the group's first identification-tag,
+/// RFC 9143 section 7.2).
+fn section_has_cryptex(d: &SessionDescription, m: &MediaDescription) -> bool {
+    if m.has_attribute(ATTR_KEY_CRYPTEX) {
+        return true;
+    }
+    let mid_of = |m: &MediaDescription| m.attribute("mid").flatten().map(str::to_owned);
+    let Some(mid) = mid_of(m) else {
+        return false;
+    };
+    d.attributes
+        .iter()
+        .filter(|a| a.key == "group")
+        .filter_map(|a| a.value.as_deref()?.strip_prefix("BUNDLE "))
+        .map(|tags| tags.split_whitespace().collect::<Vec<_>>())
+        .find(|tags| tags.contains(&mid.as_str()))
+        .and_then(|tags| tags.first().map(|tag| (*tag).to_owned()))
+        .and_then(|tag| {
+            d.media_descriptions
+                .iter()
+                .find(|s| mid_of(s).as_deref() == Some(tag.as_str()))
+        })
+        .is_some_and(|tagged| tagged.has_attribute(ATTR_KEY_CRYPTEX))
 }
 
 fn is_live_rtp_section(m: &MediaDescription) -> bool {

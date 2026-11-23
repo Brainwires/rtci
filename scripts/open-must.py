@@ -10,7 +10,8 @@ are defined in ``docs/conformance/audit/RULES.md``.
 It fails when an open MUST row has no class, a ``setting`` row is not class A or a class A row is
 not ``setting``, a class or size is not one of the defined ones, or (with ``--check``) when
 ``OPEN-MUST.md`` is not what it would write. A classified row that has since been closed
-(``tested`` / ``n/a``) is left out of the table and named on stderr, so its line can be removed.
+(``tested`` / ``n/a``) keeps its line: it is listed under "Closed since classified" with its
+class and the verdict it has now.
 
 Usage: ``python3 scripts/open-must.py [--check]``. Standard library only.
 """
@@ -228,6 +229,26 @@ def render(rows: list[dict[str, str]], classes: dict[str, dict[str, str]]) -> st
             f"| {r['ID']} | `{r['file']}` | {cell(few_words(r.get('Clause (short paraphrase)', '')))}"
             f" | {r['verdict']} | {c['class']} | {cell(c['close'])} | {c['size']} | {c['owner']} |"
         )
+    closed = [r for r in rows if r["ID"] in classes and r["verdict"] in ("tested", "n/a")]
+    if closed:
+        by = collections.Counter(classes[r["ID"]]["class"] for r in closed)
+        out += [
+            "",
+            "## Closed since classified",
+            "",
+            f"{len(closed)} rows: "
+            + ", ".join(f"{by[c]} of class {c}" for c in CLASSES if by[c])
+            + ". The note of each row says how it was closed.",
+            "",
+            "| ID | File | Clause | Class | Verdict now |",
+            "|---|---|---|---|---|",
+        ]
+        for r in sorted(closed, key=lambda r: (classes[r["ID"]]["class"], r["ID"])):
+            out.append(
+                f"| {r['ID']} | `{r['file']}` | "
+                f"{cell(few_words(r.get('Clause (short paraphrase)', '')))} | "
+                f"{classes[r['ID']]['class']} | {r['verdict']} |"
+            )
     return "\n".join(out) + "\n"
 
 
@@ -251,8 +272,6 @@ def main() -> int:
         r = by_id.get(rid)
         if r is None:
             errors.append(f"open-must.tsv: {rid} is not a MUST row of the audit")
-        elif r["verdict"] not in OPEN + ["setting"]:
-            print(f"open-must: {rid} is `{r['verdict']}` now; its class line can go", file=sys.stderr)
     if errors:
         for e in errors:
             print(f"open-must: {e}", file=sys.stderr)
