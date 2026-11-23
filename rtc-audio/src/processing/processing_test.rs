@@ -156,13 +156,13 @@ fn with_every_stage_off_the_capture_is_unchanged() {
 
 #[test]
 fn the_whole_chain_cancels_echo_and_levels_speech() {
-    let secs = 20;
+    let secs = 26;
     let mut far = vec![0.0f32; 48_000 * secs];
     SpeechLike::new(48_000, 51).fill(&mut far);
     let mut near = vec![0.0f32; 48_000 * secs];
     SpeechLike::new(48_000, 52).fill(&mut near);
     near.iter_mut().for_each(|v| *v *= 0.1); // a quiet talker, about -40 dBFS
-    near[..48_000 * 10].iter_mut().for_each(|v| *v = 0.0);
+    near[..48_000 * 14].iter_mut().for_each(|v| *v = 0.0);
     let h = room(60, 60, 0.5, 5);
     let echo = convolve(&far, &h);
     let mut noise = vec![0.0f32; far.len()];
@@ -173,9 +173,43 @@ fn the_whole_chain_cancels_echo_and_levels_speech() {
         .zip(&noise)
         .map(|((e, n), z)| e + n + z)
         .collect();
+    // Each stage off in turn, for the record.
+    for (name, config) in [
+        (
+            "no HPF",
+            ProcessingConfig {
+                high_pass: false,
+                ..ProcessingConfig::CALL
+            },
+        ),
+        (
+            "no NS",
+            ProcessingConfig {
+                noise_suppression: None,
+                ..ProcessingConfig::CALL
+            },
+        ),
+        (
+            "no AGC",
+            ProcessingConfig {
+                gain_control: false,
+                ..ProcessingConfig::CALL
+            },
+        ),
+    ] {
+        let v = run(config, &far, &capture);
+        let erle = 10.0
+            * (power(&capture[48_000 * 10..48_000 * 14])
+                / power(&v.output[48_000 * 10..48_000 * 14]))
+            .log10();
+        println!(
+            "MEASURE full chain, {name}: {erle:.1} dB, delay {:?}, gain {:?}",
+            v.stats.delay, v.stats.gain_db
+        );
+    }
     let r = run(ProcessingConfig::CALL, &far, &capture);
-    let echo_out = power(&r.output[48_000 * 6..48_000 * 10]);
-    let echo_in = power(&capture[48_000 * 6..48_000 * 10]);
+    let echo_out = power(&r.output[48_000 * 10..48_000 * 14]);
+    let echo_in = power(&capture[48_000 * 10..48_000 * 14]);
     let erle = 10.0 * (echo_in / echo_out).log10();
     println!(
         "MEASURE full chain: echo and noise down {erle:.1} dB where only the far end talks, gain {:?} dB",
@@ -185,9 +219,36 @@ fn the_whole_chain_cancels_echo_and_levels_speech() {
     // The quiet near end is raised towards the target.
     assert!(r.stats.gain_db.unwrap() > 6.0, "{:?}", r.stats.gain_db);
     let lag = best_lag(
-        &near[48_000 * 12..48_000 * 13],
-        &r.output[48_000 * 12..48_000 * 13],
+        &near[48_000 * 20..48_000 * 21],
+        &r.output[48_000 * 20..48_000 * 21],
         2000,
     );
     assert!((FRAME..=FRAME + 100).contains(&lag), "{lag}");
+}
+
+#[test]
+fn the_linear_filter_converges_on_white_noise() {
+    // The adaptive filter alone, no delay estimation: white noise through a 100 ms path that
+    // spans several partitions.
+    let mut far = vec![0.0f32; 48_000 * 8];
+    Noise::new(77, 0.1).fill(&mut far);
+    let h = room(5, 95, 0.5, 21);
+    let echo = convolve(&far, &h);
+    let mut aec = aec::EchoCanceller::new();
+    let mut out = Vec::new();
+    for (r, c) in far
+        .as_chunks::<FRAME>()
+        .0
+        .iter()
+        .zip(echo.as_chunks::<FRAME>().0)
+    {
+        aec.push_render(r);
+        let mut f = c.to_vec();
+        aec.process(&mut f);
+        out.extend(f);
+    }
+    let from = 48_000 * 6;
+    let erle = 10.0 * (power(&echo[from..]) / power(&out[from..])).log10();
+    println!("MEASURE AEC linear filter, white noise, 100 ms path: ERLE {erle:.1} dB after 6 s");
+    assert!(erle > 25.0, "{erle:.1} dB");
 }

@@ -6,7 +6,8 @@
 //!   CN), writes each packet with its RFC 6464 audio level
 //!   (`RTCRtpSender::write_rtp_with_audio_level`), optionally wrapped in RED (RFC 2198), and
 //!   follows the congestion controller's share for the sender
-//!   (`RTCRtpSender::target_bitrates`) and the loss the receiver reports in RTCP.
+//!   (`RTCRtpSender::target_bitrates`) and the loss the receiver reports in RTCP
+//!   (`AudioSender::update_network`, from the engine's `remote-inbound-rtp` statistics).
 //! - [`AudioReceiver`] binds a [`JitterBuffer`] to an `RTCRtpReceiver`: it registers a
 //!   decoder for every negotiated audio format, takes the RTP packets `poll_read` hands the
 //!   application for the receiver's track, follows the receiver's `jitterBufferTarget`, and
@@ -88,6 +89,7 @@ pub struct AudioSender {
     packetizer: Box<dyn Packetizer>,
     pipeline: SendPipeline,
     packets_sent: u64,
+    last_report: Option<(u64, u64)>,
 }
 
 impl std::fmt::Debug for AudioSender {
@@ -223,6 +225,7 @@ impl AudioSender {
             packetizer: Box::new(packetizer),
             pipeline,
             packets_sent: 0,
+            last_report: None,
         })
     }
 
@@ -332,6 +335,31 @@ impl AudioSender {
             .find(|(ssrc, _)| *ssrc == self.ssrc)
         {
             self.pipeline.set_target_bitrate(bps);
+        }
+    }
+
+    /// Follows the network: the congestion controller's share
+    /// ([`update_bitrate`](Self::update_bitrate)) and the loss the receiver last reported,
+    /// read from the engine's `remote-inbound-rtp` statistics for the sender's SSRC (the
+    /// reception reports' fraction lost, RFC 3550 section 6.4.1), which turns FEC on and
+    /// off. Call it every few hundred milliseconds.
+    pub fn update_network(&mut self, pc: &mut RTCPeerConnection, now: Instant) {
+        self.update_bitrate(pc);
+        let report = pc.get_stats(now, rtc::statistics::StatsSelector::None);
+        for entry in report.iter() {
+            if let rtc::statistics::report::RTCStatsReportEntry::RemoteInboundRtp(r) = entry
+                && r.received_rtp_stream_stats.rtp_stream_stats.ssrc == self.ssrc
+            {
+                // A new report changes what it says was received.
+                let key = (
+                    r.received_rtp_stream_stats.packets_received,
+                    r.round_trip_time_measurements,
+                );
+                if self.last_report != Some(key) {
+                    self.last_report = Some(key);
+                    self.pipeline.on_packet_loss(r.fraction_lost as f32);
+                }
+            }
         }
     }
 

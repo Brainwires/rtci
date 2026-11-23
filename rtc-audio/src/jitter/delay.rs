@@ -100,7 +100,8 @@ mod tests {
                 f64::from(i) * 0.02,
             );
         }
-        assert_eq!(d.jitter_estimate(), 0.0);
+        // One bucket: the estimate is its upper edge.
+        assert_eq!(d.jitter_estimate(), 0.0025);
         // Every fifth packet 60 ms late.
         for i in 500..2500u32 {
             let late = if i % 5 == 0 { 60 } else { 0 };

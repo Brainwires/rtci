@@ -552,7 +552,8 @@ impl JitterBuffer {
         // two packets on a clean link.
         let floor = self.config.min_delay.as_secs_f64().max(packet + 0.010);
         let ceiling = self.config.max_delay.as_secs_f64().max(floor);
-        let estimate = (self.delay.jitter_estimate() + packet).clamp(floor, ceiling);
+        // The jitter, a packet and a 10 ms pull.
+        let estimate = (self.delay.jitter_estimate() + packet + 0.010).clamp(floor, ceiling);
         let target = self
             .config
             .target_delay

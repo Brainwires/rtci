@@ -113,6 +113,8 @@ pub struct AudioProcessing {
     vad: VoiceActivityDetector,
     render_vad: VoiceActivityDetector,
     render_active: bool,
+    /// Render frames since the last one with audio in it (above -65 dBFS).
+    render_quiet_frames: u32,
 }
 
 impl AudioProcessing {
@@ -130,6 +132,7 @@ impl AudioProcessing {
             vad: VoiceActivityDetector::new(),
             render_vad: VoiceActivityDetector::new(),
             render_active: false,
+            render_quiet_frames: u32::MAX,
         }
     }
 
@@ -144,6 +147,11 @@ impl AudioProcessing {
             return;
         }
         self.render_active = self.render_vad.process(frame);
+        self.render_quiet_frames = if VoiceActivityDetector::frame_db(frame) > -65.0 {
+            0
+        } else {
+            self.render_quiet_frames.saturating_add(1)
+        };
         if let Some(aec) = self.aec.as_mut() {
             aec.push_render(frame);
             self.delay.push_render(frame);
@@ -197,8 +205,12 @@ impl AudioProcessing {
             true
         };
         if self.config.gain_control {
-            // Not on echo: the level the gain follows is the near end's.
-            self.agc.process(frame, voice && !far_end_only);
+            // Not while the far end talks: the level the gain follows is the near end's alone,
+            // and residual echo must not raise it.
+            // Echo, residual or not, follows the render by up to the canceller's tail: the
+            // gain adapts only after 300 ms of render silence.
+            self.agc
+                .process(frame, voice && self.render_quiet_frames > 30);
         }
         CaptureInfo {
             voice,

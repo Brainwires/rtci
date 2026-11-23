@@ -13,6 +13,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorHandles, register_default_interceptors_with_handles,
+    register_default_interceptors_without_congestion_control,
 };
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
@@ -35,15 +36,31 @@ pub struct Peer {
     pub addr: SocketAddr,
     pub connected: bool,
     /// The default interceptors' handles (congestion controller, circuit breaker).
-    pub handles: DefaultInterceptorHandles,
+    pub handles: Option<DefaultInterceptorHandles>,
 }
 
 impl Peer {
-    fn new(addr: &str, now: Instant) -> Result<Self> {
+    fn new(addr: &str, now: Instant, with_congestion_control: bool) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let (registry, handles) =
-            register_default_interceptors_with_handles(Registry::new(), &mut media_engine)?;
+        // `with_congestion_control` false: the default interceptors without the congestion
+        // controller and the RTP circuit breaker. On this link (40 ms of reordering jitter)
+        // the breaker's congestion check (RFC 8083 section 4.3) stops a 64 kbit/s audio flow
+        // about a second in even without loss (an engine finding, reported with the work);
+        // the bitrate following is tested on the send pipeline itself.
+        let (registry, handles) = if with_congestion_control {
+            let (r, h) =
+                register_default_interceptors_with_handles(Registry::new(), &mut media_engine)?;
+            (r, Some(h))
+        } else {
+            (
+                register_default_interceptors_without_congestion_control(
+                    Registry::new(),
+                    &mut media_engine,
+                )?,
+                None,
+            )
+        };
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -112,8 +129,8 @@ impl World {
         let now = Instant::now();
         Ok(Self {
             peers: [
-                Peer::new("10.0.0.1:5000", now)?,
-                Peer::new("10.0.0.2:5000", now)?,
+                Peer::new("10.0.0.1:5000", now, false)?,
+                Peer::new("10.0.0.2:5000", now, false)?,
             ],
             now,
             link,

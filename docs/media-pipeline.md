@@ -250,7 +250,87 @@ environment's env stage runs it and decodes its Ogg output with GStreamer.
 
 ## Measured quality
 
-MEASUREMENTS
+All numbers are from `cargo test -p rtc-audio -- --nocapture` (the `MEASURE` lines) in the
+Linux test container (rust:1.92), on the virtual clock, deterministic (fixed seeds): the same
+numbers on every run. The speech-like source (`signal::SpeechLike`) talks 66 % of the time at
+an RMS of 0.049 (-26 dBFS) while active.
+
+### Codecs
+
+| Measurement | Result |
+|---|---|
+| Opus (opus-rs) encode / decode repeatability | bit-identical packets and PCM across runs and encoder instances |
+| Opus, 440 Hz tone, 32 kbit/s, waveform SNR | 14.3 dB |
+| Opus, speech-like, 32 kbit/s | SNR 5.5 dB, segmental SNR 7.0 dB (a perceptual codec: waveform SNR is a floor, not a quality score); delay 309 samples (encoder lookahead 312) |
+| Opus in-band FEC at 20 % configured loss | 47 of 100 packets carry LBRR (all hybrid mode) |
+| Opus, every 7th packet lost, over the lost frames | FEC 7.9 dB against the clean decode, PLC 0.3 dB |
+| G.722, tones 400 / 1000 / 3000 / 5000 Hz | SNR 59.0 / 47.3 / 41.4 / 22.0 dB (the last in the 2-bit upper band) |
+| G.722, speech-like | SNR 13.1 dB, segmental SNR 15.2 dB, delay 22 samples |
+| G.711 | every code word round-trips; error within half a segment step for every 16-bit value |
+| libopus against opus-rs (feature `libopus`) | test written (`codec::libopus`): each decodes the other's stream within 40 dB SNR, and the LBRR reader agrees with libopus's `opus_packet_has_lbrr`; **not run** (the container image has no CMake) |
+
+### Receive pipeline (jitter buffer alone)
+
+20 ms packets, 30 ms network delay, playout pulling 10 ms every 10 ms.
+
+| Scenario | Concealed | Mean delay | Target | Accelerate / expand (samples) | Other |
+|---|---|---|---|---|---|
+| G.711, clean | 0 % | 17.9 ms | 32.5 ms | 57 / 0 | no underrun |
+| G.711, 60 ms jitter, 10 % duplicates | 0 % | 57.3 ms | 85.4 ms | 225 / 91 | 100 duplicates dropped |
+| G.711, 10 % periodic loss | 10.05 % | 17.9 ms | 32.5 ms | | 49 concealment events (one per loss), generic PLC |
+| G.711, `jitterBufferTarget` 200 ms | 0 % | 170.9 ms | 200 ms | | minimum delay (network only) 32.5 ms |
+| G.711, target 300 ms lowered to 60 ms | 0 % | 117.4 ms | 138.3 ms (mean over the run) | 1953 / 0 | the level follows down by acceleration |
+| G.711 + RFC 3389 SID | 0 % | | | | comfort noise at the SID's -40 dBov |
+| Opus, 5 % loss, 20 ms jitter, FEC | 2.01 % | 34.6 ms | 49.9 ms | 764 / 318 | 33 frames recovered by FEC |
+| Opus, 5 % loss, 20 ms jitter, no FEC | 5.22 % | 27.7 ms | 49.9 ms | 357 / 917 | |
+| Opus in RED (one redundant copy), 10 % loss | 1.01 % | 36.2 ms | 60 ms (set) | 346 / 0 | lost primaries played from RED |
+| Opus DTX (3 s of silence) | 0 % | 17.9 ms | | | comfort noise, not concealment |
+| Opus, +200 ppm sender clock, 10 ms jitter, 120 s | 0 % | 29.4 ms | 40 ms | 1050 / 0 | no underrun, delay bounded |
+| Opus, -200 ppm sender clock, 10 ms jitter, 120 s | 0.02 % | 22.1 ms | 40 ms | 335 / 257 | 2 underruns (10 ms each) in 120 s, delay bounded |
+
+### rtc to rtc through the whole pipeline
+
+Two `rtc` peer connections, Opus at 32 kbit/s (FEC turned on by the reported loss), 25 ms
+one-way delay plus 0 to 40 ms of uniform jitter per datagram (so packets reorder), loss as
+listed on every SRTP / SRTCP datagram both ways, 30 s each, seed 11
+(`tests/pipeline_rtc2rtc.rs`). The engine's `getStats()` reports the same `concealedSamples`.
+
+| Link loss (measured) | Concealed | FEC frames | Mean delay | Underruns | Accelerate / expand |
+|---|---|---|---|---|---|
+| 0 % (0 %) | 0.00 % | 0 | 44 ms | 0 | 0 / 868 |
+| 2 % (1.7 %) | 1.81 % | 0 | 47 ms | 1 | 368 / 844 |
+| 5 % (4.6 %) | 4.35 % | 3 | 49 ms | 1 | 0 / 1184 |
+| 10 % (9.9 %) | 5.95 % | 52 | 48 ms | 8 | 0 / 1226 |
+| 20 % (20.8 %) | 13.18 % | 115 | 62 ms | 15 | 778 / 1757 |
+
+At 5 % Opus spends no LBRR at 32 kbit/s full band (libopus's `decide_fec`, which opus-rs
+follows: above 5 % it narrows the band until FEC fits), so concealment there is the loss.
+
+The headless example (`audio-loopback`, 10 s, 5 % loss, 40 ms jitter, processing on): link
+loss 4.1 %, concealed 3.75 %, mean delay 47 ms, no underrun, 525 packets sent.
+
+### Processing
+
+| Measurement | Result |
+|---|---|
+| AEC, 20 ms bulk delay + 60 ms reverberant tail (ERL 10 dB), far end only | ERLE 32.9 dB (linear filter 33.8 dB); delay found 22.5 ms |
+| AEC, 120 ms bulk delay + 60 ms tail | ERLE 36.4 dB (linear 37.6 dB); delay found 121.5 ms |
+| AEC linear filter alone, white noise, 100 ms path | ERLE 103.5 dB after 6 s |
+| Double talk (near end at +5.2 dB over the echo) | near-end SNR 5.2 dB in the capture, 43.5 dB at the output |
+| Whole chain (HPF, AEC, NS moderate, AGC, VAD), far end only, with -60 dBFS noise | echo and noise 33.5 dB down; a -46 dBFS talker raised by 24.8 dB |
+| Noise suppression (High), white noise at -40 dBFS, in speech pauses | 12.5 dB less noise |
+| AGC, speech at x0.05 / x0.5 / x3 | within 4 dB of RFC 7874's -19 dBm0, peaks under -1 dBFS |
+| VAD, speech-like over -50 dBFS noise | 208 of 213 speech frames found, 0 of 200 noise frames taken for speech |
+| High-pass | -40 dB at 20 Hz, -3 dB at 80 Hz, flat at 300 Hz |
+| Delay estimation | 12, 80 and 230 ms found within 6 ms |
+| DTMF | all 16 keys detected once at 8, 16 and 48 kHz; none in noise |
+
+### Devices (fake backend)
+
+44.1 kHz stereo microphone to 48 kHz mono frames (99 of 100 frames in the first second, the
+tone's period intact, no overrun); 48 kHz to a 16 kHz stereo speaker (underruns counted to
+the sample); a vanished device replaced by the default with `InputLost` / `InputOpened`
+events; playout capped at 200 ms of queue.
 
 ## What runs where
 
@@ -265,7 +345,26 @@ MEASUREMENTS
 
 ## Not done in phase one
 
-NOTDONE
+| What | Size | Why not now |
+|---|---|---|
+| The ITU-T G.722 test vectors | S | not in the repository (ITU distribution terms); the codec is checked by SNR per band |
+| A `sonora` (libwebrtc AEC3 / NS / AGC2) backend | S | needs Rust 1.91; the workspace MSRV is 1.89 |
+| AEC robustness to capture / playout clock drift (RFC 7874 section 5) | M | not measured; the canceller re-adapts, a drift compensator in front of it is not written |
+| Comfort noise after echo suppression | S | the suppressor gates background noise while the far end talks; with noise suppression off, the gain control then lifts the noise that comes back (measured: -4.4 dB in the whole-chain test without NS) |
+| Opus frame-length adaptation and bitrate smoothing (libwebrtc's audio network adaptor) | M | bitrate follows the allocation directly |
+| Stereo processing (multi-channel AEC) | M | stereo bypasses processing |
+| Headset detection | S | not possible without device metadata; AEC is switchable |
+| The rtc to rtc test with the engine's congestion controller and circuit breaker | S | the breaker stops the flow there (engine finding below); bitrate following is tested on the send pipeline |
+| Perceptual quality scores (PESQ / POLQA / ViSQOL) | M | licences; SNR, segmental SNR, ERLE and concealment ratio are measured instead |
+
+**Engine finding.** With the default interceptors, the RTP circuit breaker's congestion check
+(RFC 8083 section 4.3, `rtc-interceptor/src/circuit_breaker`) ceased a 64 kbit/s Opus flow
+about a second into every run of `tests/pipeline_rtc2rtc.rs`, at 0 % loss too, on 25 ms
+delay with 0 to 40 ms of reordering jitter, also with bandwidth probing off. The likely cause
+is the fraction lost of frequent reception reports counting reordered packets as lost, with
+a short reporting interval; it was not investigated further here. The test runs the default
+interceptors without congestion control (`register_default_interceptors_without_congestion_control`)
+for that reason.
 
 ## Next phases (for approval)
 

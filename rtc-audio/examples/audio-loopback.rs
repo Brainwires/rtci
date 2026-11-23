@@ -193,7 +193,7 @@ fn main() -> Result<()> {
             },
         )?;
         if tick % 50 == 0 {
-            sender.update_bitrate(&mut world.peers[0].pc);
+            sender.update_network(&mut world.peers[0].pc, t);
         }
         let rtcp = std::mem::take(&mut world.rtcp_in);
         sender.handle_rtcp(&rtcp);

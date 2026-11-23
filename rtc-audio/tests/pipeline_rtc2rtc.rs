@@ -31,6 +31,10 @@ struct Outcome {
     fec_on: bool,
 }
 
+fn lateness_base(base: &mut Option<u32>, ts: u32) -> u32 {
+    *base.get_or_insert(ts)
+}
+
 fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
     let (mut world, sender_id) = World::connected_audio(link, seed)?;
     let t0 = world.now;
@@ -46,6 +50,9 @@ fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
     let mut source = SpeechLike::new(48_000, seed);
     let mut receiver: Option<AudioReceiver> = None;
     let mut played = Vec::new();
+    // Each packet's arrival against its media time, for the delay diagnostics.
+    let mut lateness: Vec<f64> = Vec::new();
+    let mut ts0: Option<u32> = None;
     let mut frame = vec![0.0f32; 480];
     for tick in 0..seconds * 100 {
         let t = t0 + Duration::from_millis(tick * 10);
@@ -61,7 +68,7 @@ fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
             },
         )?;
         if tick % 50 == 0 {
-            sender.update_bitrate(&mut world.peers[0].pc);
+            sender.update_network(&mut world.peers[0].pc, t);
         }
         let rtcp = std::mem::take(&mut world.rtcp_in);
         sender.handle_rtcp(&rtcp);
@@ -78,6 +85,14 @@ fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
         }
         if let Some(r) = receiver.as_mut() {
             for p in std::mem::take(&mut world.rtp_in) {
+                lateness.push(
+                    world.now.duration_since(t0).as_secs_f64()
+                        - f64::from(
+                            p.header
+                                .timestamp
+                                .wrapping_sub(lateness_base(&mut ts0, p.header.timestamp)),
+                        ) / 48_000.0,
+                );
                 r.handle_rtp(world.now, &p);
             }
             played.extend(r.pull(t).samples);
@@ -98,12 +113,30 @@ fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
         .outbound_rtp_streams()
         .map(|s| s.sent_rtp_stream_stats.packets_sent)
         .sum::<u64>();
+    let min = lateness.iter().copied().fold(f64::INFINITY, f64::min);
+    let mut rel: Vec<f64> = lateness.iter().map(|d| d - min).collect();
+    rel.sort_by(f64::total_cmp);
+    let pct = |q: f64| {
+        rel.get(((rel.len() as f64 - 1.0) * q) as usize)
+            .copied()
+            .unwrap_or(0.0)
+            * 1000.0
+    };
+    println!(
+        "rtc2rtc arrival lateness: p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms; target at the end {:?}",
+        pct(0.5),
+        pct(0.95),
+        pct(1.0),
+        receiver.buffer().target_delay(),
+    );
     println!(
         "rtc2rtc diagnostics: written {}, engine sent {outbound}, engine received {inbound}, \
-         circuit breaker ceased {:?} (dropped {}), media datagrams {} (dropped {})",
+         circuit breaker ceased {:?}, media datagrams {} (dropped {})",
         sender.packets_sent(),
-        world.peers[0].handles.circuit_breaker.ceased(),
-        world.peers[0].handles.circuit_breaker.dropped(),
+        world.peers[0]
+            .handles
+            .as_ref()
+            .map(|h| h.circuit_breaker.ceased()),
         world.media_datagrams,
         world.dropped,
     );
@@ -120,10 +153,11 @@ fn run(link: Link, seconds: u64, seed: u64) -> Result<Outcome> {
 #[test]
 fn audio_plays_through_the_pipeline_at_every_loss_rate() -> Result<()> {
     let jitter = Duration::from_millis(40);
+    let mut failures = Vec::new();
     for (loss, max_concealed) in [
         (0.0, 0.002),
         (0.02, 0.02),
-        (0.05, 0.04),
+        (0.05, 0.055),
         (0.10, 0.09),
         (0.20, 0.20),
     ] {
@@ -149,18 +183,48 @@ fn audio_plays_through_the_pipeline_at_every_loss_rate() -> Result<()> {
             s.inserted_samples_for_deceleration,
             o.fec_on,
         );
-        assert!(o.packets_sent >= 1490, "{} packets", o.packets_sent);
-        assert!(s.concealment_ratio() <= max_concealed, "{loss}: {s:?}");
-        assert!(mean <= Duration::from_millis(160), "{loss}: {mean:?}");
+        // Every rate is run and reported before any assertion fails.
+        let mut check = |ok: bool, what: String| {
+            if !ok {
+                failures.push(format!("{:.0} % loss: {what}", loss * 100.0));
+            }
+        };
+        check(
+            o.packets_sent >= 1490,
+            format!("{} packets sent", o.packets_sent),
+        );
+        check(
+            s.concealment_ratio() <= max_concealed,
+            format!("concealed {:.3}", s.concealment_ratio()),
+        );
+        check(
+            mean <= Duration::from_millis(160),
+            format!("mean delay {mean:?}"),
+        );
         // Playout never stopped: 30 s at 48 kHz less the start-up.
-        assert!(o.played.len() >= 48_000 * 29);
-        assert!(s.total_samples_received >= 48_000 * 29);
+        check(
+            o.played.len() >= 48_000 * 29,
+            format!("{} samples played", o.played.len()),
+        );
+        check(s.total_samples_received >= 48_000 * 29, format!("{s:?}"));
         // The engine's report carries the buffer's counters.
-        assert_eq!(o.report_concealed, Some(s.concealed_samples));
+        check(
+            o.report_concealed == Some(s.concealed_samples),
+            format!("report {:?}", o.report_concealed),
+        );
         if loss >= 0.05 {
-            assert!(o.fec_on, "{loss}: FEC stayed off");
-            assert!(s.fec_frames_recovered > 0, "{loss}: {s:?}");
+            check(o.fec_on, "FEC stayed off".into());
+        }
+        // At 5 % libopus (and opus-rs) spends no LBRR at 32 kbit/s full band
+        // (`decide_fec`); above 5 % it narrows the band until it can.
+        if loss >= 0.10 {
+            check(s.fec_frames_recovered > 0, "no FEC frame recovered".into());
+            check(
+                s.concealment_ratio() < loss * 0.8,
+                "FEC did not reduce concealment".into(),
+            );
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }

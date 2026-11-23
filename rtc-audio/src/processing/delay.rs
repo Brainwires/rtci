@@ -108,7 +108,8 @@ impl DelayEstimator {
             return;
         }
         // Capture sample i of this frame is simultaneous with render sample r - n + i.
-        let forget = 0.995f32.powi(n as i32);
+        // About one second of memory at 4 kHz.
+        let forget = 0.99975f32.powi(n as i32);
         let max_lag = self.lags.min(r - n);
         for lag in 0..max_lag {
             let mut acc = 0.0f32;

@@ -10,6 +10,7 @@
 #[derive(Debug, Clone)]
 pub struct GainController {
     target_db: f64,
+    /// The speech level as a mean square (despite the name).
     level_db: Option<f64>,
     gain_db: f64,
     applied: f32,
@@ -48,13 +49,15 @@ impl GainController {
     /// Processes one 10 ms frame in place; `speech` is the voice activity decision for it.
     pub fn process(&mut self, frame: &mut [f32], speech: bool) {
         if speech {
-            let db = crate::dsp::vad::VoiceActivityDetector::frame_db(frame);
+            // The speech level is its RMS (a mean of powers, not of decibels), as RFC 7874's
+            // target is.
+            let p = 10f64.powf(crate::dsp::vad::VoiceActivityDetector::frame_db(frame) / 10.0);
             self.level_db = Some(match self.level_db {
-                None => db,
-                Some(l) => 0.95 * l + 0.05 * db,
+                None => p,
+                Some(l) => 0.97 * l + 0.03 * p,
             });
         }
-        if let Some(level) = self.level_db {
+        if let Some(level) = self.level_db.map(|p| 10.0 * p.max(1e-12).log10()) {
             let want = (self.target_db - level).clamp(self.min_gain_db, self.max_gain_db);
             let step = if want > self.gain_db { 0.06 } else { 0.3 };
             self.gain_db += (want - self.gain_db).clamp(-step, step);
