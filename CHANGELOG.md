@@ -2275,6 +2275,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **interop** (branch `conf/peers-4-aiortc`): aiortc 1.16.0 (BSD-3-Clause, Python) is a peer of
+  the interop matrix (`scripts/test-env/peers/aiortc`). The test image has a venv with exactly
+  the wheels `peers/aiortc/image/requirements.txt` pins by SHA-256 (aiortc, aioice, pyOpenSSL,
+  cryptography, pylibsrtp, PyAV and their dependencies; `--require-hashes --only-binary :all:`).
+  Media comes from aiortc's own test sources and encoders (VP8, H.264, Opus through PyAV).
+  aiortc exposes no RTCP, so the peer counts it by wrapping the RTP sender's and receiver's
+  RTCP handlers. Its TURN-over-TLS client is held to TLS 1.2, the environment's coturn failing
+  TLS 1.3 handshakes (as for the engine's own client in `tests/testenv`).
+
 - **interop** (branch `conf/peers-3-str0m`): str0m 0.26.0 (MIT OR Apache-2.0, sans-I/O Rust,
   with its pure-Rust `rust-crypto` backend: dimpl DTLS) is a peer of the interop matrix
   (`scripts/test-env/peers/str0m`, a crate of its own outside the workspace, built `--locked` in

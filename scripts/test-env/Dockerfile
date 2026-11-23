@@ -64,4 +64,14 @@ ENV PATH=/usr/local/go/bin:$PATH GOMODCACHE=/opt/go/mod GOTOOLCHAIN=local
 COPY peers/pion/image/go.mod peers/pion/image/go.sum /opt/peers/pion/
 RUN cd /opt/peers/pion && go mod download && chmod -R a+rX /opt/go
 
+# Python for the aiortc peer (peers/aiortc): a venv on the image's CPython with exactly the
+# wheels peers/aiortc/image/requirements.txt pins by SHA-256 (no source builds, no resolution).
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY peers/aiortc/image/requirements.txt /opt/peers/aiortc/
+RUN python3 -m venv /opt/peers/aiortc/venv \
+    && /opt/peers/aiortc/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
+       --require-hashes --only-binary :all: --no-deps -r /opt/peers/aiortc/requirements.txt \
+    && chmod -R a+rX /opt/peers/aiortc
+
 WORKDIR /src
