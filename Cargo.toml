@@ -139,6 +139,9 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+# The test environment's interop peers (other languages, third-party test-image content) are
+# not part of the crate.
+exclude = ["scripts/test-env/peers/"]
 
 [features]
 default = ["crypto-ring"]
