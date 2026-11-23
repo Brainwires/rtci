@@ -751,6 +751,8 @@ pub struct H264DeinterleavingBuffer {
     first_arrival: Option<Instant>,
     /// Initial buffering ended by the depth or the DON spread (section 7.2.2).
     initial_buffering_over: bool,
+    /// PDON starts at 0, as section 7.2.2 has it ([`with_literal_pdon`](Self::with_literal_pdon)).
+    literal_pdon: bool,
 }
 
 impl H264DeinterleavingBuffer {
@@ -768,7 +770,19 @@ impl H264DeinterleavingBuffer {
             init_buf_time: None,
             first_arrival: None,
             initial_buffering_over: false,
+            literal_pdon: false,
         }
+    }
+
+    /// RFC 6184 section 7.2.2 as written: "Let PDON be a variable that is initialized to 0 at
+    /// the beginning of the RTP session". A NAL unit whose DON is 0 then has the largest DON
+    /// distance, so a stream numbered from DON 0 (or whose first DONs wrap through 0) has those
+    /// NAL units passed on after the others. Default off: until a NAL unit has been passed on,
+    /// PDON is the DON just before the earliest one buffered, which gives the RFC's order for
+    /// every other stream and decoding order for those.
+    pub fn with_literal_pdon(mut self, literal: bool) -> Self {
+        self.literal_pdon = literal;
+        self
     }
 
     /// The stream's `sprop-init-buf-time` (RFC 6184 section 8.1), in ticks of a 90 kHz
@@ -824,6 +838,9 @@ impl H264DeinterleavingBuffer {
     /// whatever DON the sender started from (section 5.5 lets it start anywhere).
     fn distance(&self, don: u16) -> u32 {
         let previous_don = self.previous_don.unwrap_or_else(|| {
+            if self.literal_pdon {
+                return 0;
+            }
             self.units
                 .iter()
                 .min_by_key(|buffered| buffered.abs_don)
