@@ -3309,12 +3309,24 @@ fn fingerprints_in_force(
 fn make_msid_pairs_unique(desc: &mut SessionDescription) {
     let mut used: HashSet<(String, String)> = HashSet::new();
     for media in &mut desc.media_descriptions {
+        // The line is `a=msid:<id> <appdata>`: written as a property attribute whose key
+        // holds it all (`add_sender_sdp`), or parsed as key `msid` and a value.
+        let msid_value = |a: &sdp::description::common::Attribute| -> Option<String> {
+            if a.key == "msid" {
+                a.value.clone()
+            } else {
+                a.key
+                    .strip_prefix("msid:")
+                    .filter(|_| a.value.is_none())
+                    .map(str::to_owned)
+            }
+        };
         let pairs: Vec<(String, String)> = media
             .attributes
             .iter()
-            .filter(|a| a.key == "msid")
             .filter_map(|a| {
-                let (id, appdata) = a.value.as_deref()?.split_once(' ')?;
+                let value = msid_value(a)?;
+                let (id, appdata) = value.split_once(' ')?;
                 Some((id.to_owned(), appdata.to_owned()))
             })
             .collect();
@@ -3341,6 +3353,16 @@ fn make_msid_pairs_unique(desc: &mut SessionDescription) {
             continue;
         }
         for a in media.attributes.iter_mut() {
+            if a.value.is_none()
+                && let Some(id) = a
+                    .key
+                    .strip_prefix("msid:")
+                    .and_then(|v| v.split_once(' '))
+                    .map(|(id, _)| id.to_owned())
+            {
+                a.key = format!("msid:{id} {unique}");
+                continue;
+            }
             let Some(value) = a.value.as_mut() else {
                 continue;
             };
