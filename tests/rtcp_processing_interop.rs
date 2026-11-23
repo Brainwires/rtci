@@ -72,7 +72,7 @@ impl Default for RtcpForwarderBuilder {
 
 impl RtcpForwarderBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     pub fn build(self) -> RtcpForwarderInterceptor {
@@ -945,7 +945,7 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
         // The receiver asks for a keyframe. Nothing in the default interceptor set generates one,
         // so the test drives it: this is the packet the forwarder is there to surface, and the
         // one an SFU would relay to the publisher.
-        if connected && keyframe_requests_sent < 8 && rtp_packets_sent % 25 == 0 {
+        if connected && keyframe_requests_sent < 8 && rtp_packets_sent.is_multiple_of(25) {
             let pli = WebrtcPictureLossIndication {
                 sender_ssrc: 0,
                 media_ssrc: SENDER_SSRC,
@@ -955,22 +955,23 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
         }
 
         // Keep the webrtc receiver active (so it keeps reporting) by streaming RTP.
-        if connected && rtp_packets_sent < 300 {
-            if let Some(mut sender) = rtc_pc.rtp_sender(sender_id) {
-                let packet = rtc::rtp::packet::Packet {
-                    header: rtc::rtp::header::Header {
-                        version: 2,
-                        payload_type: 96,
-                        sequence_number: rtp_packets_sent as u16,
-                        timestamp: rtp_packets_sent.wrapping_mul(3000),
-                        ssrc: SENDER_SSRC,
-                        ..Default::default()
-                    },
-                    payload: bytes::Bytes::from(vec![0xAAu8; 100]),
-                };
-                let _ = sender.write_rtp(Instant::now(), packet);
-                rtp_packets_sent += 1;
-            }
+        if connected
+            && rtp_packets_sent < 300
+            && let Some(mut sender) = rtc_pc.rtp_sender(sender_id)
+        {
+            let packet = rtc::rtp::packet::Packet {
+                header: rtc::rtp::header::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: rtp_packets_sent as u16,
+                    timestamp: rtp_packets_sent.wrapping_mul(3000),
+                    ssrc: SENDER_SSRC,
+                    ..Default::default()
+                },
+                payload: bytes::Bytes::from(vec![0xAAu8; 100]),
+            };
+            let _ = sender.write_rtp(Instant::now(), packet);
+            rtp_packets_sent += 1;
         }
 
         while let Some(msg) = rtc_pc.poll_write() {
@@ -979,9 +980,9 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
 
         while let Some(event) = rtc_pc.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state)
-                    if state == RTCIceConnectionState::Failed =>
-                {
+                RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(
+                    RTCIceConnectionState::Failed,
+                ) => {
                     return Err(anyhow::anyhow!("RTC ICE connection failed"));
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
@@ -1006,9 +1007,7 @@ async fn test_rtcp_processing_rtc_sender_receives_feedback() -> Result<()> {
                 );
                 // And the forwarder narrowed it: reports were dropped, keyframe requests kept.
                 assert!(
-                    rtcp_packets
-                        .iter()
-                        .all(|packet| is_keyframe_request(packet)),
+                    rtcp_packets.iter().all(is_keyframe_request),
                     "the forwarder passes PLI and FIR only, but let something else through"
                 );
                 rtcp_packets_received += 1;
