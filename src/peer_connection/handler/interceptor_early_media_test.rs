@@ -392,8 +392,10 @@ fn the_offers_header_extension_ids_place_an_early_stream_by_its_mid() {
 /// RFC 4588 section 5.3: a receiver with one original stream associates a retransmission
 /// stream with it. While the offer is pending, the `a=ssrc-group:FID` that would name the RTX
 /// SSRC is still in the answer; an RTX packet on an unknown SSRC of the section becomes the
-/// early stream's repair flow, bound as a stream of its own. Without a pending offer it is
-/// left alone, and it is never taken for a media stream.
+/// early stream's repair flow, bound as a stream of its own. Without a pending offer the
+/// receiver's one original stream takes it as well, by its payload type's `apt` (RFC 4588
+/// section 5.3, `associate_rtx_by_apt`, from the RFC 7160 work); it is never taken for a media
+/// stream.
 #[test]
 fn an_early_retransmission_stream_is_associated_with_the_sections_one_stream() {
     let mut rig = Rig::new();
@@ -418,13 +420,22 @@ fn an_early_retransmission_stream_is_associated_with_the_sections_one_stream() {
     rig.arrive(3000, VP8_RTX, 3, None);
     assert_eq!(rig.recorder.bound().len(), 2);
 
-    // No offer pending: an RTX packet on an unknown SSRC is associated with nothing.
+    // No offer pending: the single-stream receiver associates the RTX SSRC with its one
+    // original stream by the payload type's apt; the RTX SSRC is no media stream of its own.
     let mut rig = Rig::new();
     rig.receiver().set_codec_preferences(offered_formats());
     rig.arrive(1000, VP8, 1, None);
     rig.arrive(2000, VP8_RTX, 2, None);
-    assert!(rig.receiver().get_coding_parameters()[0].rtx.is_none());
-    assert_eq!(rig.recorder.bound().len(), 1);
+    let coding = rig.receiver().get_coding_parameters()[0].clone();
+    assert_eq!(coding.ssrc, Some(1000));
+    assert_eq!(coding.rtx.map(|rtx| rtx.ssrc), Some(2000));
+    assert!(
+        !rig.recorder
+            .bound()
+            .iter()
+            .any(|b| b.ssrc == 2000 && b.payload_type != VP8_RTX),
+        "the retransmission is not a media stream"
+    );
 }
 
 /// What early media can make an endpoint keep is bounded by what its offer lists: ten
