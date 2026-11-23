@@ -19,6 +19,15 @@
 //! would ask for the missing packets and the sender would retransmit them, so the packets would
 //! come back and the test would pass with the FEC decoder doing nothing at all. Retransmission is a
 //! perfectly good recovery mechanism; it is just not the one under test.
+//!
+//! # Why the amount of FEC is fixed
+//!
+//! Both encoders follow the loss the receiver reports by default (draft-03 and RFC 8627 section
+//! 8, `FecRate`): a receiver report that shows no loss turns the repair packets off until one
+//! shows some. The RTCP session runs in every connection (RFC 8834 section 4.1), so whether the
+//! first receiver report lands before the first drop decided whether the first protected block
+//! had a repair packet at all: the test failed most runs on the first loss. It is about recovery,
+//! so it sends one repair packet per block throughout (`with_adaptive_rate(false)`).
 
 use anyhow::Result;
 use bytes::BytesMut;
@@ -298,6 +307,7 @@ impl Fec {
                 FlexFec03SendBuilder::new()
                     .with_num_media_packets(NUM_MEDIA_PACKETS)
                     .with_num_fec_packets(NUM_FEC_PACKETS)
+                    .with_adaptive_rate(false)
                     .build(),
             ),
             // One row packet per ten: the same overhead and the same one loss per block.
@@ -307,6 +317,7 @@ impl Fec {
                     .with_protection(FlexFecProtection::Row {
                         l: NUM_MEDIA_PACKETS as u8,
                     })
+                    .with_adaptive_rate(false)
                     .build(),
             ),
         }
