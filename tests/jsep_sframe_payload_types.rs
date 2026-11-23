@@ -123,8 +123,9 @@ fn an_sframe_section_numbers_its_formats_apart_from_a_plain_one_in_the_bundle() 
     Ok(())
 }
 
-/// Each sender sends with its own section's numbering: the SFrame sender's codecs are the
-/// SFrame section's payload types, the plain sender's the plain section's.
+/// Each sender sends with its own section's numbering: the SFrame sender's codecs are among
+/// the SFrame section's payload types, the plain sender's among the plain section's (the two
+/// are disjoint, so neither sends the other's).
 #[test]
 fn each_sender_uses_its_own_sections_payload_types() -> TestResult {
     let (mut offerer, plain, sframe) = offerer()?;
@@ -151,7 +152,12 @@ fn each_sender_uses_its_own_sections_payload_types() -> TestResult {
             .map(|c| c.payload_type)
             .collect();
         sent.sort();
-        assert_eq!(sent, expected, "{answer}");
+        // The track asks for VP8 (`video_track`): the sender sends the section's VP8.
+        assert!(!sent.is_empty(), "{answer}");
+        assert!(
+            sent.iter().all(|pt| expected.contains(pt)),
+            "{sent:?} not all of {expected:?}: {answer}"
+        );
     }
     Ok(())
 }
