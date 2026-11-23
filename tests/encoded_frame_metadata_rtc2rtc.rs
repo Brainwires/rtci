@@ -1022,6 +1022,17 @@ fn the_corruption_detection_extension_makes_the_corruption_measurements_present(
     // B set, sequence index 3, std dev 128, Y err 2, UV err 1, three samples.
     let element = [0x80 | 3, 128, 0x21, 40, 50, 60];
     world.send(sender, 2, &[(id, &element)])?;
+    // The pacer may hold the packet past `send`'s own 20 ms: until it was read.
+    let deadline = world.now + Duration::from_secs(2);
+    while !world.peers[1]
+        .read_rtp
+        .iter()
+        .any(|p| p.header.sequence_number == 2)
+        && world.now < deadline
+    {
+        let next = world.now + Duration::from_millis(10);
+        world.run_until(next)?;
+    }
     assert_eq!(inbound(&mut world), Some((Some(0), Some(0.0), Some(0.0))));
 
     let frame = read_frame(&world, 2 * 960);
