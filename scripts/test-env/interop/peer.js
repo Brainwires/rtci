@@ -140,8 +140,14 @@
       held.push(e.candidate ? e.candidate.toJSON() : null);
       flushCandidates();
     };
-    ws.onmessage = async (ev) => {
-      const m = JSON.parse(ev.data);
+    // Messages are handled one at a time, in arrival order, as a signalling channel's are
+    // (perfect negotiation): an offer that follows an answer is looked at once the answer is
+    // applied, not while it still is, which would take it for a colliding one.
+    let inbox = Promise.resolve();
+    ws.onmessage = (ev) => {
+      inbox = inbox.then(() => handle(JSON.parse(ev.data)));
+    };
+    const handle = async (m) => {
       try {
         if (m.type === "answer") {
           await pc.setRemoteDescription({ type: "answer", sdp: s.mungeAnswer ? s.mungeAnswer(m.sdp) : m.sdp });
