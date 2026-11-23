@@ -543,6 +543,20 @@ pub enum RTCPeerConnectionEvent {
     /// Not a W3C event: a fork addition.
     OnSsrcCollision(crate::rtp_transceiver::SSRC),
 
+    /// RTP media of this SSRC arrived that no media section or track could take, and was
+    /// discarded: the first such packet of each SSRC (at most 64 SSRCs per connection are
+    /// reported).
+    ///
+    /// RFC 8830 section 3.1: media of a peer that signals no `a=msid` (or arrives before the
+    /// description that places it) may need buffering until it can be associated; "If the
+    /// implementation wishes to limit this buffering, it MUST signal to the user that media
+    /// has been discarded". The engine buffers none: a packet whose stream cannot be bound to
+    /// a receiver (RFC 9143 section 9.2: "Otherwise, drop the packet") is dropped at once and
+    /// this event says so. `RTCPeerConnection::discarded_rtp_packets` counts every one.
+    ///
+    /// Not a W3C event: a fork addition.
+    OnUnassociatedRtpDiscarded(crate::rtp_transceiver::SSRC),
+
     /// W3C `RTCIceTransport` `statechange`: the connection's ICE transport changed state.
     ///
     /// Comes before the `OnIceConnectionStateChangeEvent` and the
@@ -659,6 +673,17 @@ pub enum RTCPeerConnectionEvent {
         index: u64,
         /// A replay; otherwise an authentication failure.
         replay: bool,
+    },
+    /// The ECN validation of the outbound stream `ssrc` detected a failure (RFC 6679 sections
+    /// 7.2.1 and 7.4.2: an initiation that failed, or ECT packets lost after it). The stream
+    /// sends Not-ECT, initiates again later, or keeps ECN off, as `failure` says. The RFC asks
+    /// for such failures to be logged "to enable follow up": they are, and this hands them to
+    /// the application as well. Not a W3C event: a fork addition.
+    OnEcnFailure {
+        /// The outbound stream.
+        ssrc: u32,
+        /// What was detected.
+        failure: interceptor::EcnFailure,
     },
 }
 

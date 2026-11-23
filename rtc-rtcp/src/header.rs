@@ -84,6 +84,8 @@ pub const FORMAT_TCC: u8 = 15;
 pub const FORMAT_CCFB: u8 = 11;
 /// FMT value for the RTCP ECN Feedback packet (RFC 6679 section 5.1)
 pub const FORMAT_ECN: u8 = 8;
+/// FMT of the PAUSE-RESUME message (RTPFB, RFC 7728 section 7).
+pub const FORMAT_PAUSE_RESUME: u8 = 9;
 
 impl std::fmt::Display for PacketType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

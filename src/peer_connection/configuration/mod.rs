@@ -386,29 +386,83 @@ impl RTCConfiguration {
         ice_servers
     }
 
+    /// The constructor's checks (W3C webrtc-pc 4.4.1.1): the certificates have not expired,
+    /// then "set the configuration" with no configuration before it
+    /// ([`Self::set_the_configuration`]), the one validation `set_configuration` runs too.
     pub(crate) fn validate(&mut self) -> Result<()> {
-        // W3C constructor: "set the configuration", whose server checks are those of
-        // `set_configuration` (webrtc-pc 4.4.1.5). A STUN url with a query is refused there
-        // too ("parsedURL's scheme is stun or stuns, and parsedURL's query is non-null").
+        // <https://www.w3.org/TR/webrtc/#constructor> (step #3)
+        if !self.certificates.is_empty() {
+            let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
+            for cert in &self.certificates {
+                cert.expires
+                    .duration_since(now)
+                    .map_err(|_| Error::ErrCertificateExpired)?;
+            }
+        }
+        self.set_the_configuration(None, false)
+    }
+
+    /// W3C webrtc-pc 4.4.1.5 "set the configuration", the checks and normalisation the
+    /// constructor (`old` is `None`) and `set_configuration` (`old` is the connection's
+    /// `[[Configuration]]`) share; nothing is stored here, so a refused configuration changes
+    /// nothing.
+    ///
+    /// - With an `old` configuration, the members that cannot change: the certificates (the
+    ///   same ones in the same order), `bundlePolicy`, `rtcpMuxPolicy`, the webrtc-extensions
+    ///   10.2 / 13.2 policies, and `iceCandidatePoolSize` once a local description was set
+    ///   (`local_description_was_set`): W3C `InvalidModificationError`.
+    /// - `iceServers` truncated to [`MAX_ICE_SERVERS`], and each server run through
+    ///   "validate an ICE server URL" (`SyntaxError`, or `InvalidAccessError` for TURN
+    ///   credentials).
+    pub(crate) fn set_the_configuration(
+        &mut self,
+        old: Option<&RTCConfiguration>,
+        local_description_was_set: bool,
+    ) -> Result<()> {
+        if let Some(old) = old {
+            // "the ECMAScript object represented by the value ... at index is not the same":
+            // the same certificate and expiry.
+            if self.certificates.len() != old.certificates.len()
+                || self
+                    .certificates
+                    .iter()
+                    .zip(&old.certificates)
+                    .any(|(new, old)| new != old || new.expires != old.expires)
+            {
+                return Err(Error::ErrModifyingCertificates);
+            }
+            if self.bundle_policy != old.bundle_policy {
+                return Err(Error::ErrModifyingBundlePolicy);
+            }
+            if self.rtcp_mux_policy != old.rtcp_mux_policy {
+                return Err(Error::ErrModifyingRTCPMuxPolicy);
+            }
+            // webrtc-extensions 10.2 and 13.2: neither policy changes after construction.
+            if self.rtp_header_encryption_policy != old.rtp_header_encryption_policy
+                || self.always_negotiate_data_channels != old.always_negotiate_data_channels
+            {
+                return Err(Error::InvalidModificationError);
+            }
+            if self.ice_candidate_pool_size != old.ice_candidate_pool_size
+                && local_description_was_set
+            {
+                return Err(Error::ErrModifyingICECandidatePoolSize);
+            }
+        }
+
         self.ice_servers.truncate(MAX_ICE_SERVERS);
         for server in &self.ice_servers {
             server.validate()?;
         }
-        let sanitized_ice_servers = self.get_ice_servers();
 
         if self.ice_transport_policy == RTCIceTransportPolicy::Relay {
             let mut has_turn = false;
-            for server in &sanitized_ice_servers {
-                let urls = server.urls()?;
-                for url in urls {
-                    if url.scheme == ice::url::SchemeType::Turn
+            for server in &self.get_ice_servers() {
+                if server.urls()?.iter().any(|url| {
+                    url.scheme == ice::url::SchemeType::Turn
                         || url.scheme == ice::url::SchemeType::Turns
-                    {
-                        has_turn = true;
-                        break;
-                    }
-                }
-                if has_turn {
+                }) {
+                    has_turn = true;
                     break;
                 }
             }
@@ -420,16 +474,6 @@ impl RTCConfiguration {
                     "Relay-only ICE transport policy configured, but no TURN/TURNS servers are \
                      available; only relay candidates the application adds itself can be used"
                 );
-            }
-        }
-
-        // <https://www.w3.org/TR/webrtc/#constructor> (step #3)
-        if !self.certificates.is_empty() {
-            let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
-            for cert in &self.certificates {
-                cert.expires
-                    .duration_since(now)
-                    .map_err(|_| Error::ErrCertificateExpired)?;
             }
         }
 

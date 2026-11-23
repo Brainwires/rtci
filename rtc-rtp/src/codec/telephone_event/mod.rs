@@ -636,6 +636,82 @@ pub fn telephone_event_packets(
     Ok(packets)
 }
 
+/// A packet carrying several events (RFC 4733 section 2.5.1.5), as
+/// [`packed_telephone_event_packets`] makes it.
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct PackedEventPacket {
+    /// RTP marker bit.
+    pub marker: bool,
+    /// RTP timestamp: the beginning of the first event in the packet.
+    pub timestamp: u32,
+    /// The event reports, in the order the events occurred.
+    pub events: Vec<TelephoneEvent>,
+}
+
+impl PackedEventPacket {
+    /// The marshalled payload: four bytes per event.
+    ///
+    /// # Errors
+    ///
+    /// As [`marshal_telephone_events`].
+    pub fn payload(&self) -> Result<Bytes> {
+        marshal_telephone_events(&self.events)
+    }
+}
+
+/// Events that follow one another without overlap and without a pause, `(event, volume,
+/// duration)` each, the first beginning at `rtp_timestamp`, packed into one packet (RFC 4733
+/// section 2.5.1.5): "the RTP timestamp MUST identify the beginning of the first event", "the M
+/// bit MUST be set if the packet records the beginning of at least one event" (each event here
+/// begins in it), and each event's E bit and duration are those it would have alone (ended,
+/// its whole duration; a zero duration is reported as 1, section 2.3.5). The packet comes three
+/// times, identical, since it is every event's final report (section 2.5.1.4).
+///
+/// # Errors
+///
+/// Fails for no events, an event the receiver's [`EventSet`] does not allow (section 2.5.1.1),
+/// a volume above 63, and a duration above 0xFFFF (a long event is sent alone, in segments,
+/// with [`TelephoneEventSender`]).
+pub fn packed_telephone_event_packets(
+    allowed: &EventSet,
+    events: &[(u8, u8, u32)],
+    rtp_timestamp: u32,
+) -> Result<Vec<PackedEventPacket>> {
+    if events.is_empty() {
+        return Err(Error::Other("no telephone events to pack".to_owned()));
+    }
+    let mut reports = Vec::with_capacity(events.len());
+    for &(event, volume, duration) in events {
+        if !allowed.contains(event) {
+            return Err(Error::Other(format!(
+                "telephone-event {event} is not in the receiver's event list"
+            )));
+        }
+        if volume > 63 {
+            return Err(Error::Other(format!(
+                "telephone-event volume {volume} is above 63"
+            )));
+        }
+        let duration = u16::try_from(duration.max(1)).map_err(|_| {
+            Error::Other(format!(
+                "telephone-event duration {duration} needs segments: send it alone"
+            ))
+        })?;
+        reports.push(TelephoneEvent {
+            event,
+            end: true,
+            volume,
+            duration,
+        });
+    }
+    let packet = PackedEventPacket {
+        marker: true,
+        timestamp: rtp_timestamp,
+        events: reports,
+    };
+    Ok(vec![packet; TELEPHONE_EVENT_END_REPEATS])
+}
+
 /// What a [`TelephoneEventReceiver`] learned from a packet.
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 #[non_exhaustive]
@@ -694,7 +770,8 @@ impl ReceivedEvent {
 /// reports.
 ///
 /// * The three copies of a final report, and any later report for an event already ended,
-///   produce nothing (sections 2.5.1.4, 2.5.2.2).
+///   produce nothing (sections 2.5.1.4, 2.5.2.2), also when the final packet carried several
+///   events.
 /// * A report for the same event code whose timestamp is the previous segment's timestamp plus
 ///   its duration (or plus 0xFFFF, should the 0xFFFF report itself be lost) continues a long
 ///   event: durations add up across segments (section 2.5.2.3). A lone report with M set
@@ -756,8 +833,12 @@ impl TelephoneEventReceiver {
         if report.duration == 0 {
             return;
         }
+        // A report at or before the start of the last ended event's last segment is stale,
+        // whatever its code: events do not overlap (section 2.5.1.5), so it belongs to that
+        // event or to one before it. This covers the repeats of a final packet that carried
+        // several events (section 2.5.1.4).
         if let Some(ended) = self.last_ended
-            && ended.covers(report.event, timestamp, ended.segment_timestamp)
+            && ended.segment_timestamp.wrapping_sub(timestamp) < 0x8000_0000
         {
             return;
         }

@@ -172,6 +172,9 @@ pub struct NackResponderInterceptor {
     retransmissions_queued: usize,
     /// Inbound packets ready for the next interceptor.
     read_queue: VecDeque<TaggedPacket>,
+    /// The RTP session (transport) of each SSRC, from the peer connection's
+    /// [`RtpSessionAssignment`](crate::RtpSessionAssignment)s; empty while there is one.
+    sessions: HashMap<u32, usize>,
 }
 
 impl NackResponderInterceptor {
@@ -185,6 +188,7 @@ impl NackResponderInterceptor {
             rtx_sequence_numbers: HashMap::new(),
             write_queue: VecDeque::new(),
             retransmissions_queued: 0,
+            sessions: HashMap::new(),
         }
     }
 
@@ -203,10 +207,21 @@ impl NackResponderInterceptor {
     /// stream's repair flow. Without RTX negotiated nothing is added: padding under the media
     /// SSRC would take sequence numbers the application owns. Not charged to the NACK budget:
     /// it answers no NACK.
-    fn fill_probe(&mut self, now: Instant, request: &ProbeRequest) {
+    ///
+    /// With several RTP sessions (transports) a cluster is the session's that asked for it
+    /// (the request carries its [`RtpSession`](crate::RtpSession)): it is filled on a stream of
+    /// that session only, so the probe travels the path whose capacity it measures (RFC 8836
+    /// section 2: each path its own capacity).
+    fn fill_probe(&mut self, now: Instant, request: &ProbeRequest, session: Option<usize>) {
+        let sessions = &self.sessions;
         let Some(stream) = self
             .streams
-            .values_mut()
+            .iter_mut()
+            .filter(|(ssrc, _)| match session {
+                Some(session) if !sessions.is_empty() => sessions.get(ssrc) == Some(&session),
+                _ => true,
+            })
+            .map(|(_, stream)| stream)
             .filter(|stream| stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some())
             .filter(|stream| stream.last_sent.is_some())
             .max_by_key(|stream| stream.last_sent.map(|(_, at)| at))
@@ -424,7 +439,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
         // A probe cluster the congestion controller asks for: fill it.
         if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
-            self.fill_probe(msg.now, &request);
+            let session = crate::RtpSession::of(&msg.message);
+            self.fill_probe(msg.now, &request, session);
         }
 
         // Process NACK packets
@@ -449,6 +465,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Some(assignment) = msg.message.custom::<crate::RtpSessionAssignment>() {
+            for ssrc in &assignment.ssrcs {
+                self.sessions.insert(*ssrc, assignment.session);
+            }
+        }
         if let Some(super::NackControl::LocalRtxTime {
             payload_type_rtx,
             rtx_time,

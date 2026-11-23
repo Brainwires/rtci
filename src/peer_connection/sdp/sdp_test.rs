@@ -106,7 +106,12 @@ fn params(
         ls_groups: vec![],
         selected_destination: None,
         remote_candidates: vec![],
+        ecn: None,
         rid_pause_marks: false,
+        video_receive_limits: None,
+        codec_video_receive_limits: vec![],
+        w3c_simulcast_answer: false,
+        msid_appdata: false,
     }
 }
 

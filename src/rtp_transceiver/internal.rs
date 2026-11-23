@@ -39,6 +39,9 @@ pub(crate) struct RTCRtpTransceiverInternal {
     direction: RTCRtpTransceiverDirection,
     current_direction: RTCRtpTransceiverDirection,
     preferred_codecs: Vec<RTCRtpCodecParameters>,
+    /// The application set codec preferences (`setCodecPreferences` with a non-empty list),
+    /// as opposed to the list a remote description left in `preferred_codecs`.
+    application_codec_preferences: bool,
     /// W3C `[[Stopping]]`: `stop()` was called, or the transceiver is stopped. Its direction
     /// reads "stopped" and offers reject its m= section.
     stopping: bool,
@@ -67,6 +70,11 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// that tells the two kinds apart clears it with
     /// `RTCRtpTransceiver::set_associable_with_remote_offer`.
     associable_with_remote_offer: bool,
+    /// Where the application wants this transceiver's m= section in the next offer's BUNDLE
+    /// groups: `Some(false)` out of every group, with a transport of its own (RFC 9143 section
+    /// 7.5.2), `Some(true)` in the first group (section 7.5.1), `None` where the most recent
+    /// answer put it (RFC 9429 section 5.2.2).
+    bundle_request: Option<bool>,
     /// webrtc-extensions `[[HeaderExtensionsToNegotiate]]`. `None` until the application or
     /// an answer sets it: the media engine's extensions for the kind, each in the direction
     /// it was registered for (`header_extension_control::default_to_negotiate`).
@@ -84,9 +92,12 @@ pub(crate) struct RTCRtpTransceiverInternal {
     negotiated_header_extensions: Vec<RTCRtpHeaderExtensionToNegotiate>,
     /// Reduced-size RTCP (RFC 5506) as the last answer negotiated it for this media section.
     rtcp_reduced_size: bool,
-    /// The ECT codepoint the remote's `a=ecn-capable-rtp` asks this endpoint's packets to
-    /// carry (`ect=`, RFC 6679 section 6.1), set by the SDP layer.
-    remote_ect_preference: Option<interceptor::EctPreference>,
+    /// The rids of the simulcast streams this transceiver's offers ask to receive
+    /// (`RTCRtpTransceiver::set_receive_simulcast`, RFC 8853 section 5.3.1); empty for none.
+    receive_simulcast: Vec<String>,
+    /// The most this endpoint receives in this transceiver's section, in bits per second
+    /// (`RTCRtpTransceiver::set_receive_bandwidth`): its descriptions' `b=TIAS` / `b=AS`.
+    receive_bandwidth: Option<u64>,
     /// The `b=` lines of this transceiver's section of the remote description.
     remote_bandwidth: RTCRemoteBandwidth,
     /// The `xr-format`s of the remote description's `a=rtcp-xr` for this section (RFC 3611
@@ -136,6 +147,7 @@ impl RTCRtpTransceiverInternal {
             direction: init.direction,
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
+            application_codec_preferences: false,
             stopping: false,
             stopped: false,
             receptive: false,
@@ -143,13 +155,15 @@ impl RTCRtpTransceiverInternal {
             used_to_send: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
+            bundle_request: None,
             header_extensions_to_negotiate: None,
             use_sframe: None,
             remote_sframe: false,
             sframe_refused: false,
             negotiated_header_extensions: vec![],
             rtcp_reduced_size: false,
-            remote_ect_preference: None,
+            receive_simulcast: vec![],
+            receive_bandwidth: None,
             remote_bandwidth: RTCRemoteBandwidth::default(),
             remote_rtcp_xr: None,
             remote_packet_time: RTCPacketTime::default(),
@@ -193,6 +207,14 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_associable_with_remote_offer(&mut self, associable: bool) {
         self.associable_with_remote_offer = associable;
+    }
+
+    pub(crate) fn bundle_request(&self) -> Option<bool> {
+        self.bundle_request
+    }
+
+    pub(crate) fn set_bundle_request(&mut self, request: Option<bool>) {
+        self.bundle_request = request;
     }
 
     /// The URIs of `[[HeaderExtensionsToNegotiate]]` that are not "stopped", what the media
@@ -267,6 +289,26 @@ impl RTCRtpTransceiverInternal {
         if let Some(receiver) = self.receiver.as_mut() {
             receiver.invalidate_parameters();
         }
+    }
+
+    /// See [`Self::receive_simulcast`].
+    pub(crate) fn set_receive_simulcast(&mut self, rids: Vec<String>) {
+        self.receive_simulcast = rids;
+    }
+
+    /// The rids of the simulcast streams this transceiver's offers ask to receive.
+    pub(crate) fn receive_simulcast(&self) -> &[String] {
+        &self.receive_simulcast
+    }
+
+    /// The most this endpoint receives in this transceiver's section, in bits per second.
+    pub(crate) fn receive_bandwidth(&self) -> Option<u64> {
+        self.receive_bandwidth
+    }
+
+    /// See [`Self::receive_bandwidth`].
+    pub(crate) fn set_receive_bandwidth(&mut self, bitrate: Option<u64>) {
+        self.receive_bandwidth = bitrate;
     }
 
     /// Returns the media stream identification tag (mid) for this transceiver.
@@ -417,9 +459,9 @@ impl RTCRtpTransceiverInternal {
         media_engine: &MediaEngine,
     ) -> Result<()> {
         for codec in &codecs {
-            let media_engine_codecs = media_engine.get_codecs_by_kind(self.kind());
+            let media_engine_codecs = media_engine.registered_codecs_by_kind(self.kind());
             let (_, match_type) =
-                codec_parameters_fuzzy_search(&codec.rtp_codec, &media_engine_codecs);
+                codec_parameters_fuzzy_search(&codec.rtp_codec, media_engine_codecs);
             if match_type == CodecMatch::None {
                 return Err(Error::ErrRTPTransceiverCodecUnsupported);
             }
@@ -464,7 +506,9 @@ impl RTCRtpTransceiverInternal {
                 unique.push(codec);
             }
         }
-        let capabilities = media_engine.get_codecs_by_kind(self.kind());
+        // The capabilities are what the engine can send or receive (`getCapabilities`), not
+        // what a negotiation narrowed the kind to.
+        let capabilities = media_engine.registered_codecs_by_kind(self.kind());
         for codec in &unique {
             let is_rtx =
                 is_repair_codec(&codec.rtp_codec) && repair_family(&codec.rtp_codec) == "rtx";
@@ -498,14 +542,46 @@ impl RTCRtpTransceiverInternal {
         Ok(unique)
     }
 
+    /// W3C `setCodecPreferences`: the application's list (empty: none).
+    pub(crate) fn set_application_codec_preferences(
+        &mut self,
+        codecs: Vec<RTCRtpCodecParameters>,
+        media_engine: &MediaEngine,
+    ) -> Result<()> {
+        let set = !codecs.is_empty();
+        self.set_codec_preferences(codecs, media_engine)?;
+        self.application_codec_preferences = set;
+        Ok(())
+    }
+
+    /// Whether the application set codec preferences (RFC 9429 section 5.3.1: an answer then
+    /// lists them, "regardless of what was offered", and no other format).
+    pub(crate) fn has_application_codec_preferences(&self) -> bool {
+        self.application_codec_preferences
+    }
+
     pub(crate) fn get_codec_preferences(&self) -> &[RTCRtpCodecParameters] {
         &self.preferred_codecs
     }
 
     /// Codecs returns list of supported codecs
     pub(crate) fn get_codecs(&self, media_engine: &MediaEngine) -> Vec<RTCRtpCodecParameters> {
-        let codecs =
-            RTCRtpReceiverInternal::get_codecs(&self.preferred_codecs, self.kind(), media_engine);
+        self.codecs_in_numbering(media_engine, self.use_sframe == Some(true))
+    }
+
+    /// [`Self::get_codecs`] in the SFrame numbering (`sframe`) or the plain one
+    /// (draft-ietf-avtcore-rtp-sframe-03 section 6).
+    fn codecs_in_numbering(
+        &self,
+        media_engine: &MediaEngine,
+        sframe: bool,
+    ) -> Vec<RTCRtpCodecParameters> {
+        let codecs = RTCRtpReceiverInternal::get_codecs(
+            &self.preferred_codecs,
+            self.kind(),
+            media_engine,
+            sframe,
+        );
         // RFC 2198 section 5: the encodings a RED format names "MUST" also be formats of the
         // m= line (and of RED's clock rate, section 3): a RED format whose fmtp names one the
         // section does not list is left out of what this section offers and matches.
@@ -657,22 +733,6 @@ impl RTCRtpTransceiverInternal {
 
     /// Whether the last answer negotiated reduced-size RTCP (RFC 5506) for this transceiver's
     /// media section.
-    /// The hook for the SDP layer: the `ect=` of the remote description's
-    /// `a=ecn-capable-rtp` for this section (RFC 6679 section 6.1), parsed with
-    /// [`EctPreference::from_sdp`](interceptor::EctPreference::from_sdp); `None` when it has
-    /// none. Takes effect when the section's streams are bound next (an applied answer).
-    pub(crate) fn set_remote_ect_preference(
-        &mut self,
-        preference: Option<interceptor::EctPreference>,
-    ) {
-        self.remote_ect_preference = preference;
-    }
-
-    /// What [`set_remote_ect_preference`](Self::set_remote_ect_preference) recorded.
-    pub(crate) fn remote_ect_preference(&self) -> Option<interceptor::EctPreference> {
-        self.remote_ect_preference
-    }
-
     pub(crate) fn rtcp_reduced_size(&self) -> bool {
         self.rtcp_reduced_size
     }
@@ -757,15 +817,21 @@ impl RTCRtpTransceiverInternal {
         // replace them in the remote's order and with the engine's payload types. When nothing
         // the application preferred was offered, the whole engine is matched instead, as with no
         // preferences, rather than leaving the section with no codec at all.
+        // An SFrame section's formats are matched in the SFrame numbering, a plain one's in
+        // the plain numbering (draft-ietf-avtcore-rtp-sframe-03 section 6).
+        let sframe = media.has_attribute(crate::peer_connection::sdp::ATTR_KEY_SFRAME);
         let mut filtered_codecs = if self.preferred_codecs.is_empty() {
             vec![]
         } else {
-            Self::match_remote_codecs(remote_codecs.clone(), self.get_codecs(media_engine))
+            Self::match_remote_codecs(
+                remote_codecs.clone(),
+                self.codecs_in_numbering(media_engine, sframe),
+            )
         };
         if filtered_codecs.is_empty() {
             filtered_codecs = Self::match_remote_codecs(
                 remote_codecs,
-                media_engine.get_codecs_by_kind(self.kind),
+                media_engine.codecs_for_section(self.kind, sframe),
             );
         }
 

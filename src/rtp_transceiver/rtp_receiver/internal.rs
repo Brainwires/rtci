@@ -304,8 +304,12 @@ impl RTCRtpReceiverInternal {
             let mut rtp_parameters = media_engine
                 .get_rtp_parameters_by_kind(self.kind(), RTCRtpTransceiverDirection::Recvonly);
 
-            rtp_parameters.codecs =
-                RTCRtpReceiverInternal::get_codecs(&self.receive_codecs, self.kind(), media_engine);
+            rtp_parameters.codecs = RTCRtpReceiverInternal::get_codecs(
+                &self.receive_codecs,
+                self.kind(),
+                media_engine,
+                false,
+            );
             rtp_parameters.rtcp.reduced_size = self.rtcp_reduced_size;
 
             self.last_returned_parameters = Some(RTCRtpReceiveParameters { rtp_parameters });
@@ -539,8 +543,17 @@ impl RTCRtpReceiverInternal {
         codecs: &[RTCRtpCodecParameters],
         kind: RtpCodecKind,
         media_engine: &MediaEngine,
+        sframe: bool,
     ) -> Vec<RTCRtpCodecParameters> {
-        let media_engine_codecs = media_engine.get_codecs_by_kind(kind);
+        // The section's numbering, SFrame or plain (draft-ietf-avtcore-rtp-sframe-03 section
+        // 6): preferences that name an SFrame section's payload types are in its numbering.
+        let sframe = sframe
+            || codecs.iter().any(|codec| {
+                media_engine
+                    .sframe_payload_types
+                    .contains(&codec.payload_type)
+            });
+        let media_engine_codecs = media_engine.codecs_for_section(kind, sframe);
         if codecs.is_empty() {
             return media_engine_codecs;
         }

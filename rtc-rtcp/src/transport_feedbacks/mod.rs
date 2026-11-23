@@ -2,6 +2,8 @@
 pub mod cc_feedback_report;
 /// RFC 6679 ECN feedback: cumulative ECT, ECN-CE, not-ECT, loss and duplicate counters.
 pub mod ecn_feedback;
+/// RFC 7728 PAUSE-RESUME: PAUSE and RESUME requests, PAUSED and REFUSED answers.
+pub mod pause_resume;
 /// RRR: asks a sender to resynchronize as quickly as it can.
 pub mod rapid_resynchronization_request;
 /// TMMBR and TMMBN: a temporary bit rate limit, asked and announced.

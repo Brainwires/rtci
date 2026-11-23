@@ -247,8 +247,8 @@ fn setup_holdconn_is_refused() -> Result<()> {
 
 /// RFC 8122 section 5: a session-level fingerprint "applies to all TLS sessions for which no
 /// media-level fingerprint attribute is defined". Fingerprints given only at media level
-/// (`sdp_media_level_fingerprints`) and only at session level (the default) both establish
-/// the association.
+/// (`sdp_media_level_fingerprints`, the default) and only at session level both establish the
+/// association.
 #[test]
 fn fingerprints_are_read_at_session_and_at_media_level() -> Result<()> {
     for media_level in [false, true] {
