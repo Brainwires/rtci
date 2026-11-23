@@ -15,6 +15,8 @@
 //! - `{"type":"switch-codec","codec":"PCMU"|"PCMA"|"OPUS"}`: the streamed audio track goes on
 //!   with a 440 Hz tone in G.711 (8 kHz) or back to the Opus fixture (48 kHz), on the payload
 //!   type the answer gave that format: a codec of another clock rate mid-stream (RFC 7160).
+//!   Each SSRC's sequence numbers run on across the switches (RFC 3550 5.1), and the tone's
+//!   timestamps across a switch between the two G.711 laws.
 //!
 //! The WebSocket URL's query `?ssrc_per_clock_rate=0` builds the peer connection with
 //! `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` (one SSRC across clock rates).
@@ -31,7 +33,10 @@
 //! its own TCP candidates and drive their connections through the stream interface and the
 //! tokio reference driver (`examples/stream-driver`), trickled to the browser; with
 //! `"udp_blocked":true` this peer neither sends nor takes ICE UDP. `"cryptex":"negotiate"|"require"` sets the
-//! RTCRtpHeaderEncryptionPolicy (RFC 9335). Every data channel message is echoed on its channel.
+//! RTCRtpHeaderEncryptionPolicy (RFC 9335). `"audio_codecs":["OPUS","PCMU","PCMA"]` sets the
+//! codec preferences (W3C `setCodecPreferences`, in that order) of every audio track this peer
+//! sends: an audio track names Opus as its encoding's codec, which alone would narrow its
+//! section to Opus. Every data channel message is echoed on its channel.
 //!
 //! An offer that arrives while this side has an offer outstanding (glare) is handled as the
 //! polite peer of perfect negotiation: it rolls its own offer back, answers, then offers again.
@@ -67,10 +72,11 @@ use rtc::peer_connection::transport::{
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RtpCodecKind,
 };
+use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
 use rtc::sansio::Protocol;
 use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
@@ -329,6 +335,29 @@ struct Outgoing {
     tone: Option<ToneSource>,
     /// When the fixture was last sent from (its timestamps skip the time the tone took).
     paused_at: Option<Instant>,
+    /// The track's next sequence number: the fixture's and the tone's packetizers number on
+    /// their own, and with one SSRC across clock rates (`switch-codec`) both run on the same
+    /// stream, so the track numbers its packets itself (each new SSRC goes on from there).
+    next_sequence: Option<u16>,
+}
+
+/// The mime type of an audio codec name of `audio_codecs` / `switch-codec`.
+fn audio_mime(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "OPUS" => MIME_TYPE_OPUS,
+        "PCMU" => "audio/PCMU",
+        "PCMA" => "audio/PCMA",
+        "G722" => "audio/G722",
+        _ => return None,
+    })
+}
+
+/// `p`'s sequence number on the track's own run (`Outgoing::next_sequence`): the first packet
+/// keeps its own.
+fn renumber(next_sequence: &mut Option<u16>, p: &mut rtc::rtp::Packet) {
+    let next = next_sequence.get_or_insert(p.header.sequence_number);
+    p.header.sequence_number = *next;
+    *next = next.wrapping_add(1);
 }
 
 /// An accepted ICE-TCP connection: frames for it go to its writer task.
@@ -827,14 +856,21 @@ impl Session {
                     .iter_mut()
                     .find(|o| codec_kind(&o.codec) == RtpCodecKind::Audio)
                     .ok_or_else(|| anyhow!("no audio track to switch"))?;
+                // From one G.711 law to the other the tone goes on: its packetizer (timestamps)
+                // and its sample clock; only the payload type and the law change.
+                let previous = o.tone.take();
                 o.tone = match name.as_str() {
                     "OPUS" => None,
-                    "PCMU" | "PCMA" => Some(ToneSource {
-                        alaw: name == "PCMA",
-                        mime: format!("audio/{name}"),
-                        packetizer: None,
-                        sample: 0,
-                    }),
+                    "PCMU" | "PCMA" => {
+                        let (packetizer, sample) =
+                            previous.map_or((None, 0), |t| (t.packetizer, t.sample));
+                        Some(ToneSource {
+                            alaw: name == "PCMA",
+                            mime: format!("audio/{name}"),
+                            packetizer,
+                            sample,
+                        })
+                    }
                     other => return Err(anyhow!("switch-codec: unknown codec {other:?}")),
                 };
             }
@@ -1035,6 +1071,33 @@ impl Session {
                 ..Default::default()
             }],
         ))?;
+        if kind == RtpCodecKind::Audio
+            && let Some(names) = self.scenario["audio_codecs"].as_array()
+        {
+            let capabilities = self
+                .pc
+                .rtp_sender(sender)
+                .and_then(|s| s.get_capabilities(RtpCodecKind::Audio))
+                .map(|c| c.codecs)
+                .unwrap_or_default();
+            let mut preferences = vec![];
+            for name in names.iter().filter_map(Value::as_str) {
+                let mime = audio_mime(name).ok_or_else(|| anyhow!("audio_codecs: {name:?}"))?;
+                preferences.extend(
+                    capabilities
+                        .iter()
+                        .filter(|c| c.mime_type.eq_ignore_ascii_case(mime))
+                        .map(|rtp_codec| RTCRtpCodecParameters {
+                            rtp_codec: rtp_codec.clone(),
+                            payload_type: 0,
+                        }),
+                );
+            }
+            self.pc
+                .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+                .ok_or_else(|| anyhow!("no transceiver for the audio track"))?
+                .set_codec_preferences(preferences)?;
+        }
         let source = if with_source {
             let kind_key = if kind == RtpCodecKind::Audio {
                 "audio"
@@ -1066,6 +1129,7 @@ impl Session {
             sent_frames: 0,
             tone: None,
             paused_at: None,
+            next_sequence: None,
         });
         Ok(())
     }
@@ -1342,6 +1406,7 @@ impl Session {
                     if let Some(wire) = wire {
                         p.header.ssrc = wire;
                     }
+                    renumber(&mut o.next_sequence, &mut p);
                     let _ = s.write_rtp(now, p);
                 }
             }
@@ -1400,6 +1465,9 @@ impl Session {
         o.next = now + Duration::from_millis(20);
         for mut p in packets {
             p.header.ssrc = wire;
+            // The packetizer may be the other law's (`switch-codec`): this one's number.
+            p.header.payload_type = pt;
+            renumber(&mut o.next_sequence, &mut p);
             let _ = s.write_rtp(now, p);
         }
     }

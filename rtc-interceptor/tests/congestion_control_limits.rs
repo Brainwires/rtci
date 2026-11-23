@@ -378,6 +378,34 @@ fn the_tmmbr_overhead_is_charged_at_the_packet_rate_in_use() {
     assert_eq!(Some(262_144.0 - 50.0 * 40.0 * 8.0), told.max());
 }
 
+/// RFC 5104 section 3.5.4.2: "the packet rate used" is the one the sender uses now. A TMMBR
+/// that arrives during a burst (a probe cluster after the start) leaves nothing for RTP at that
+/// packet rate; once the sender is back at 50 packets per second, the same tuple leaves it
+/// 80 kbit/s less 50 * 60 bytes of overhead. The limit was once frozen at the rate of the
+/// moment the request came, which held the sender at nothing for as long as the tuple stood.
+#[test]
+fn the_tmmbr_limit_follows_the_packet_rate_the_sender_uses() {
+    let told = Told::default();
+    let mut harness = Harness::new(told.clone());
+
+    for index in 0..170u64 {
+        harness.send(ms(index * 5), 200);
+    }
+    // 80 000 bit/s (exponent 0), 60 bytes of overhead: 170 * 60 * 8 is more than that.
+    harness.receive(ms(1000), tmmbr(REMOTE, LOCAL, 0, 80_000, 60));
+    assert_eq!(Some(0.0), told.max(), "nothing is left at the burst's rate");
+
+    for index in 0..100u64 {
+        harness.send(ms(1000 + index * 20), 200);
+    }
+    harness.tick(ms(2990));
+    assert_eq!(Some(80_000.0 - 50.0 * 60.0 * 8.0), told.max());
+    assert_eq!(
+        Some(80_000.0 - 50.0 * 60.0 * 8.0),
+        harness.handle.tmmbr_limit()
+    );
+}
+
 /// A TMMBR entry is for the media sender its SSRC names: one for another sender limits nothing
 /// here and is not this endpoint's to acknowledge.
 #[test]

@@ -211,6 +211,60 @@ fn the_estimate_is_the_selected_pairs_available_outgoing_bitrate() {
     assert_eq!(snapshot(&stats).available_outgoing_bitrate, Some(640_000.0));
 }
 
+/// An estimate that came while the selected pair had no stats entry yet (the controller
+/// announces only changes, so it may not come again) is put on the entry once it is listed:
+/// `sync_outgoing_estimates`, whichever order the selection, the estimate and the entry came in.
+#[test]
+fn an_estimate_made_before_the_selected_pair_is_listed_reaches_it() {
+    let mut stats = RTCStatsAccumulator::new();
+    stats.on_selected_candidate_pair(Some("RTCIceCandidatePair_a_x".to_owned()));
+    stats.on_target_bitrate(0, 640_000.0, &std::collections::HashMap::new());
+    stats.sync_ice_candidate_pairs(&[agent_pair("a", "x", CandidatePairState::Succeeded)]);
+    let now = Instant::now();
+    let snapshot = |stats: &RTCStatsAccumulator| {
+        stats.ice_candidate_pairs["RTCIceCandidatePair_a_x"].snapshot(now, "p")
+    };
+    assert_eq!(
+        snapshot(&stats).available_outgoing_bitrate,
+        None,
+        "the entry is new"
+    );
+
+    stats.sync_outgoing_estimates();
+    assert_eq!(snapshot(&stats).available_outgoing_bitrate, Some(640_000.0));
+}
+
+/// The same through `get_stats` on a connection: the estimate came while the selected pair's
+/// entry did not carry it (it is made afresh, from the agent's pairs, when it is missing), and
+/// the report still has it on the pair in use.
+#[test]
+fn get_stats_puts_an_earlier_estimate_on_the_selected_pair() {
+    let (mut offerer, mut answerer) = new_pair().expect("pair");
+    offerer.create_data_channel("estimate", None).expect("dc");
+    signal_pair(&mut offerer, &mut answerer).expect("signal");
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect().expect("connect");
+    let now = pair.now;
+    let stats = &mut pair.offerer.pipeline_context.stats;
+    let selected = stats.transport.selected_candidate_pair_id.clone();
+    assert!(!selected.is_empty(), "a pair is selected");
+    stats.on_target_bitrate(0, 640_000.0, &std::collections::HashMap::new());
+    if let Some(entry) = stats.ice_candidate_pairs.get_mut(&selected) {
+        entry.available_outgoing_bitrate = 0.0;
+    }
+
+    let report = pair.offerer.get_stats(now, StatsSelector::None);
+    let estimates: Vec<_> = report
+        .candidate_pairs()
+        .filter_map(|p| p.available_outgoing_bitrate)
+        .collect();
+    assert_eq!(
+        estimates,
+        [640_000.0],
+        "on the selected pair, and on no other"
+    );
+}
+
 /// Through a real connection: `dtlsState` follows the DTLS transport, a data channel is
 /// reported from `connecting` (before it opens) on, every candidate pair the agent holds is
 /// in the report, and the certificates are base64 DER.

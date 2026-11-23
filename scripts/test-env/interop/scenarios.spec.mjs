@@ -843,37 +843,66 @@ test("getStats: RTP counters agree with the Rust side's", async ({ page }) => {
 
 // ---- a codec of another clock rate mid-stream (RFC 7160 4.1, RFC 8834 4.3) ----
 
-// Rust offers an Opus track and streams the fixture; then it goes on with a 440 Hz PCMU tone
-// (8 kHz) on the payload type the browser's answer gave PCMU, and then back to Opus. By
-// default (RFC 7160 section 4.1: "MUST use a different SSRC for each different clock rate")
-// each switch moves the stream to a new SSRC, and a return to 48 kHz takes yet another one
-// after a BYE; with `?ssrc_per_clock_rate=0` it stays on one SSRC. Either way the browser's
-// receiver must keep receiving and playing: what it counts on its track's inbound-rtp and
-// which SSRCs its getSynchronizationSources() saw (webrtc-pc 5.3).
-async function audioClockRateSwitch(page, url) {
-  return page.evaluate(async (ws) => {
-    const s = await Interop.open(ws, {});
-    s.pc.createDataChannel("first");
-    await s.negotiate();
-    await s.connected();
+// Rust sends an Opus track and streams the fixture; then it goes on with a 440 Hz tone in PCMU
+// (8 kHz) on the payload type the negotiation gave PCMU, then in PCMA (the same clock rate),
+// and then back to Opus. By default (RFC 7160 section 4.1: "MUST use a different SSRC for each
+// different clock rate") the switch to 8 kHz moves the stream to a new SSRC, PCMA stays on it,
+// and the return to 48 kHz takes yet another one after a BYE; with `?ssrc_per_clock_rate=0` it
+// stays on one SSRC. Either way the browser's receiver must keep receiving and playing: what
+// it counts on its track's inbound-rtp and which SSRCs its getSynchronizationSources() saw
+// (webrtc-pc 5.3).
+//
+// The section has to carry Opus, PCMU and PCMA: the scenario's `audio_codecs` sets them as
+// the Rust track's codec preferences (its encoding names Opus, which alone narrows the
+// section to Opus). With `rustOffers` Rust offers and the browser answers; otherwise the
+// browser offers (a recvonly audio transceiver) and Rust answers. Both descriptions' audio
+// formats are in every result, so a failure shows what was negotiated.
+const SWITCH_CODECS = ["OPUS", "PCMU", "PCMA"];
+
+async function audioClockRateSwitch(page, url, rustOffers) {
+  return page.evaluate(async ([ws, rustOffers, codecs]) => {
+    const audioFormats = (sdp) => {
+      const section = (sdp || "").split(/\r\n(?=m=)/).find((x) => x.startsWith("m=audio")) || "";
+      return [...section.matchAll(/^a=rtpmap:\d+ ([^/\r\n]+)\/(\d+)/gm)].map((x) => `${x[1]}/${x[2]}`);
+    };
+    const caps = (RTCRtpReceiver.getCapabilities("audio")?.codecs || []).map((c) => `${c.mimeType}/${c.clockRate}`);
+    const has = (mime) => caps.some((c) => c.toLowerCase().startsWith(`${mime.toLowerCase()}/`));
+    const scenario = rustOffers
+      ? { audio_codecs: codecs }
+      : { media: "send", audio: true, audio_codecs: codecs };
+    const s = await Interop.open(ws, scenario);
     let receiver = null;
     s.pc.ontrack = (e) => {
       receiver = e.receiver;
       Interop.sink(new MediaStream([e.track]));
     };
-    s.send({ type: "request-offer", tracks: ["OPUS"] });
-    await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable" && receiver, 15000, "Rust's offer");
-    const answer = s.pc.localDescription.sdp;
-    const pcmu = /^a=rtpmap:\d+ PCMU\/8000/im.test(answer);
-    if (!pcmu) {
+    if (rustOffers) {
+      s.pc.createDataChannel("first");
+      await s.negotiate();
+      await s.connected();
+      s.send({ type: "request-offer", tracks: ["OPUS"] });
+      await Interop.until(() => s.remoteOffers > 0 && s.pc.signalingState === "stable" && receiver, 15000, "Rust's offer");
+    } else {
+      s.pc.addTransceiver("audio", { direction: "recvonly" });
+      await s.negotiate();
+      await s.connected();
+      await Interop.until(() => receiver, 15000, "the browser's audio track");
+    }
+    const formats = {
+      offer: audioFormats((rustOffers ? s.pc.remoteDescription : s.pc.localDescription)?.sdp),
+      answer: audioFormats((rustOffers ? s.pc.localDescription : s.pc.remoteDescription)?.sdp),
+    };
+    const browser = { caps, pcmu: has("audio/PCMU"), pcma: has("audio/PCMA") };
+    const negotiated = ["PCMU/8000", "PCMA/8000"].every((f) => formats.answer.some((a) => a.toUpperCase() === f));
+    if (!browser.pcmu || !browser.pcma || !negotiated) {
       s.close();
-      return { pcmu, answer };
+      return { rustOffers, browser, formats, negotiated };
     }
     const snapshot = async () => {
       const stats = await receiver.getStats();
-      const codecs = {};
+      const mimes = {};
       stats.forEach((x) => {
-        if (x.type === "codec") codecs[x.id] = x.mimeType;
+        if (x.type === "codec") mimes[x.id] = x.mimeType;
       });
       const out = { packets: 0, samples: undefined, concealed: undefined, inbound: [] };
       stats.forEach((x) => {
@@ -881,7 +910,7 @@ async function audioClockRateSwitch(page, url) {
         out.packets += x.packetsReceived || 0;
         if (x.totalSamplesReceived !== undefined) out.samples = (out.samples || 0) + x.totalSamplesReceived;
         if (x.concealedSamples !== undefined) out.concealed = (out.concealed || 0) + x.concealedSamples;
-        out.inbound.push({ ssrc: x.ssrc, packetsReceived: x.packetsReceived, mime: codecs[x.codecId] });
+        out.inbound.push({ ssrc: x.ssrc, packetsReceived: x.packetsReceived, mime: mimes[x.codecId] });
       });
       out.sources = receiver.getSynchronizationSources().map((x) => x.source);
       return out;
@@ -914,17 +943,25 @@ async function audioClockRateSwitch(page, url) {
     };
     await Interop.until(async () => (await snapshot()).packets > 50, 15000, "50 Opus packets").catch(() => {});
     const opus = await phase(null, 3000);
-    const g711 = await phase("PCMU", 4000);
+    const pcmu = await phase("PCMU", 4000);
+    const pcma = await phase("PCMA", 4000);
     const back = await phase("OPUS", 4000);
     s.close();
-    return { pcmu, opus, g711, back, errors: back.errors.concat(s.errors) };
-  }, url);
+    return { rustOffers, browser, formats, negotiated, opus, pcmu, pcma, back, errors: back.errors.concat(s.errors) };
+  }, [url, rustOffers, SWITCH_CODECS]);
 }
 
 function expectAudioFollowsTheSwitch(r) {
-  naBrowser(!r.pcmu, "this browser's answer has no PCMU", `its answer to Rust's audio offer: ${r.answer}`);
-  expect(r.errors).toEqual([]);
-  for (const p of [r.opus, r.g711, r.back]) {
+  // RFC 7874 section 4 has every WebRTC endpoint support PCMA and PCMU: only a browser whose
+  // own capability API lacks one is n/a.
+  naBrowser(
+    !r.browser.pcmu || !r.browser.pcma,
+    "this browser cannot receive PCMU and PCMA",
+    `RTCRtpReceiver.getCapabilities("audio"): ${JSON.stringify(r.browser.caps)}`,
+  );
+  expect(r.negotiated, `the audio section did not negotiate PCMU and PCMA: ${JSON.stringify(r)}`).toBe(true);
+  expect(r.errors, JSON.stringify(r)).toEqual([]);
+  for (const p of [r.opus, r.pcmu, r.pcma, r.back]) {
     // 20 ms frames: about 50 packets a second, at least 100 in the four seconds measured.
     expect(p.packets, `${p.codec}: the browser's receiver stopped counting packets: ${JSON.stringify(r)}`)
       .toBeGreaterThan(p === r.opus ? 75 : 100);
@@ -935,17 +972,32 @@ function expectAudioFollowsTheSwitch(r) {
   }
 }
 
-test("a codec of another clock rate mid-stream: the browser follows Rust to each new SSRC", async ({ page }) => {
-  const r = await audioClockRateSwitch(page, WS);
+function expectAnSsrcPerClockRate(r) {
   expectAudioFollowsTheSwitch(r);
-  expect(r.g711.wire, "8 kHz after 48 kHz is another SSRC (RFC 7160 4.1)").not.toBe(r.opus.wire);
-  expect([r.opus.wire, r.g711.wire], "a return to 48 kHz takes a new SSRC (RFC 7160 4.1)").not.toContain(r.back.wire);
+  expect(r.pcmu.wire, `8 kHz after 48 kHz is another SSRC (RFC 7160 4.1): ${JSON.stringify(r)}`).not.toBe(r.opus.wire);
+  expect(r.pcma.wire, `PCMA after PCMU is the same clock rate, the same SSRC: ${JSON.stringify(r)}`).toBe(r.pcmu.wire);
+  expect([r.opus.wire, r.pcmu.wire], `a return to 48 kHz takes a new SSRC (RFC 7160 4.1): ${JSON.stringify(r)}`).not.toContain(r.back.wire);
+}
+
+function expectOneSsrc(r) {
+  expectAudioFollowsTheSwitch(r);
+  expect(new Set([r.opus.wire, r.pcmu.wire, r.pcma.wire, r.back.wire]).size, JSON.stringify(r)).toBe(1);
+}
+
+test("a codec of another clock rate mid-stream: the browser follows Rust to each new SSRC", async ({ page }) => {
+  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, WS, true));
 });
 
 test("a codec of another clock rate mid-stream, one SSRC (with_ssrc_per_clock_rate(false))", async ({ page }) => {
-  const r = await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=0`);
-  expectAudioFollowsTheSwitch(r);
-  expect(new Set([r.opus.wire, r.g711.wire, r.back.wire]).size, JSON.stringify(r)).toBe(1);
+  expectOneSsrc(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=0`, true));
+});
+
+test("a codec of another clock rate mid-stream, the browser offering: it follows Rust to each new SSRC", async ({ page }) => {
+  expectAnSsrcPerClockRate(await audioClockRateSwitch(page, WS, false));
+});
+
+test("a codec of another clock rate mid-stream, the browser offering, one SSRC (with_ssrc_per_clock_rate(false))", async ({ page }) => {
+  expectOneSsrc(await audioClockRateSwitch(page, `${WS}/?ssrc_per_clock_rate=0`, false));
 });
 
 // ---- the browser's SSRCs unsignalled: RTX found by its payload type (RFC 4588 5.3) ----
