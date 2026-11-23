@@ -359,7 +359,7 @@ async fn automatic_srtp_re_keying_carries_every_packet_onto_new_sockets() -> Res
 
 /// `with_dtls_new_association_on_previous_addresses(true)`: a new DTLS association keeps the
 /// candidates, no `OnLocalCandidatesNeeded` is fired, and the driver keeps its sockets; media
-/// flows on them over the new association.
+/// flows on them over the new association once it is up.
 #[tokio::test]
 async fn with_the_opt_out_the_driver_keeps_its_sockets() -> Result<()> {
     let settings =
@@ -381,6 +381,14 @@ async fn with_the_opt_out_the_driver_keeps_its_sockets() -> Result<()> {
     a.driver.pc_mut().renew_dtls_association();
     exchange(&mut a, &mut b)?;
     assert_ne!(tls_id(&a), first, "a new association");
+    // On the same 3-tuple the two associations' packets cannot be told apart (what RFC 8842
+    // section 5.1 avoids with a new one), so a packet sent across the switch may be lost: the
+    // media is sent once the new association is up.
+    run_for(&mut a, &mut b, Duration::from_secs(1)).await?;
+    assert!(
+        a.connected() && b.connected(),
+        "connected over the new association"
+    );
     b.rtp.clear();
     for seq in 1..=100u16 {
         write_audio(&mut a, audio, seq)?;
