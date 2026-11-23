@@ -1901,7 +1901,11 @@ impl RTCPeerConnection {
                     // pair. Without one no pair change is coming: the handshake starts now,
                     // on the pair ICE has (or with the first pair, if it has none yet).
                     if !ice_restart && self.ice_transport().agent.media_path().is_some() {
-                        self.pipeline_context.dtls_handler_context.connect_requested = Some(now);
+                        self.pipeline_context
+                            .transports
+                            .default_mut()
+                            .dtls_handler_context
+                            .connect_requested = Some(now);
                     }
                     self.update_connection_state(false);
                 }
@@ -2469,6 +2473,8 @@ impl RTCPeerConnection {
                 // section 8.2) once an offer that carried it is answered.
                 if self
                     .pipeline_context
+                    .transports
+                    .default()
                     .ice_handler_context
                     .lite_candidate_update
                     .is_some()
@@ -2477,6 +2483,8 @@ impl RTCPeerConnection {
                         .is_empty()
                 {
                     self.pipeline_context
+                        .transports
+                        .default_mut()
                         .ice_handler_context
                         .lite_candidate_update = None;
                 }
