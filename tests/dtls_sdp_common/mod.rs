@@ -43,6 +43,8 @@ pub struct Peer {
     pub written: Vec<Vec<u8>>,
     /// Every event it raised, as its `Debug` form.
     pub events: Vec<String>,
+    /// The RTP packets it received, as (payload type, SSRC), in order.
+    pub rtp: Vec<(u8, u32)>,
 }
 
 impl Peer {
@@ -71,6 +73,7 @@ impl Peer {
             received: Vec::new(),
             written: Vec::new(),
             events: Vec::new(),
+            rtp: Vec::new(),
         })
     }
 
@@ -241,8 +244,12 @@ impl World {
                     }
                 }
                 while let Some(message) = peer.pc.poll_read() {
-                    if let RTCMessage::DataChannelMessage(_, m) = message.message {
-                        peer.received.push(m.data.to_vec());
+                    match message.message {
+                        RTCMessage::DataChannelMessage(_, m) => peer.received.push(m.data.to_vec()),
+                        RTCMessage::RtpPacket(_, packet) => peer
+                            .rtp
+                            .push((packet.header.payload_type, packet.header.ssrc)),
+                        _ => {}
                     }
                 }
             }

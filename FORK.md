@@ -407,6 +407,11 @@ versions that support it. Raising it is a deliberate change of the manifest.
 
 ### Defaults the fork narrows on purpose
 
+- SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
+  ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops
+  multiplexing RTCP on a negotiated section is refused under every mux policy (RFC 9429
+  section 5.8.3).
+
 - SDP (jsep-43): a remote description whose bundled sections give one payload type two codec
   configurations is refused (RFC 9143 section 9.1.1; upstream applied it); a remote FlexFEC
   format without `repair-window`, or with one longer than the registered one, is not

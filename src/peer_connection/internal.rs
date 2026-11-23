@@ -1286,6 +1286,11 @@ impl RTCPeerConnection {
             // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
             // answer accepts.
             crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
+            // RFC 3264 section 6: "The 't=' line in the answer MUST be equal to the ones in
+            // the offer" (a WebRTC offer says `t=0 0`, which the answer has already).
+            if !offer.time_descriptions.is_empty() {
+                d.time_descriptions = offer.time_descriptions.clone();
+            }
         }
         self.write_transport_attributes(&mut d);
         Ok(d)

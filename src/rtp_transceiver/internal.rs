@@ -54,6 +54,10 @@ pub(crate) struct RTCRtpTransceiverInternal {
     /// W3C `[[FiredDirection]]`: the direction of the last remote description processed for
     /// remote tracks, `None` before the first.
     fired_direction: Option<RTCRtpTransceiverDirection>,
+    /// The `a=msid` values its section last carried: kept while the transceiver lives, so the
+    /// lines stay the same when it stops having a track and a sending direction (RFC 9429
+    /// sections 5.2.2, 5.3.2).
+    described_msid: Vec<String>,
     /// Whether `[[CurrentDirection]]` ever was sendrecv or sendonly: such a transceiver's
     /// sender "has been used to send" and `addTrack` does not take it (W3C webrtc 5.1).
     used_to_send: bool,
@@ -152,6 +156,7 @@ impl RTCRtpTransceiverInternal {
             stopped: false,
             receptive: false,
             fired_direction: None,
+            described_msid: vec![],
             used_to_send: false,
             created_by_remote_description: false,
             associable_with_remote_offer: true,
@@ -185,6 +190,15 @@ impl RTCRtpTransceiverInternal {
 
     pub(crate) fn set_receptive(&mut self, receptive: bool) {
         self.receptive = receptive;
+    }
+
+    /// The `a=msid` values its section last carried.
+    pub(crate) fn described_msid(&self) -> &[String] {
+        &self.described_msid
+    }
+
+    pub(crate) fn set_described_msid(&mut self, msid: Vec<String>) {
+        self.described_msid = msid;
     }
 
     pub(crate) fn fired_direction(&self) -> Option<RTCRtpTransceiverDirection> {

@@ -230,3 +230,38 @@ fn a_section_that_drops_its_msid_ends_the_track_only_when_asked() -> TestResult 
     }
     Ok(())
 }
+
+/// RFC 9429 sections 5.2.2 and 5.3.2: for a transceiver that is not stopped "the 'a=msid'
+/// lines MUST stay the same regardless of changes to the transceiver's direction or track".
+/// After `remove_track` (no track, the direction no longer sends) the next offer and the
+/// answer to the peer's next offer keep the section's `a=msid` lines.
+#[test]
+fn msid_lines_stay_when_the_track_is_removed() -> TestResult {
+    use jsep_common::{exchange, media_sections, video_track};
+    let msid = |sdp: &str| -> Vec<String> {
+        media_sections(sdp)[0]
+            .iter()
+            .filter(|l| l.starts_with("a=msid:"))
+            .cloned()
+            .collect()
+    };
+    let mut local = default_peer()?;
+    let mut peer = default_peer()?;
+    let sender = local.add_track(video_track("v", 0x5e13_0101))?;
+    let (offer, _) = exchange(&mut local, &mut peer)?;
+    let before = msid(&offer);
+    assert!(!before.is_empty(), "{offer}");
+
+    local.remove_track(sender)?;
+    let (offer, _) = exchange(&mut local, &mut peer)?;
+    assert!(
+        !media_sections(&offer)[0]
+            .iter()
+            .any(|l| l == "a=sendrecv" || l == "a=sendonly"),
+        "no longer sending: {offer}"
+    );
+    assert_eq!(msid(&offer), before, "{offer}");
+    let (_, answer) = exchange(&mut peer, &mut local)?;
+    assert_eq!(msid(&answer), before, "{answer}");
+    Ok(())
+}

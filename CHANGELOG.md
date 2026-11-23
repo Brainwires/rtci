@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: verification of the jsep-51 sweep (`conf/jsep-52-verify`, jsep13). Tests only, no
+  engine change: the RFC 9143 section 9.1 payload-type rewrite and the RFC 3264 section 8.3.2
+  switch to a new answer's formats are separate tests; an encoding that names a codec the new
+  answer drops is sent with a format the answer lists (W3C webrtc-pc 4.4.1.6 removes
+  `encoding.codec`; the jsep-51 finding came from its test, whose offer listed the named
+  codec only); a rejected stream sends neither RTP nor RTCP; recvonly and inactive endpoints
+  send RTCP; a simulcast layer the answer removed sends nothing; a section without any msid
+  gets its media; must-bundle rejects a section outside the first group. Audit verdicts
+  corrected where the code was right and a unit test already pinned it (the tls-id and
+  `a=group` parses, the session-level attributes, `create_offer` in have-remote-offer).
+- **jsep**: sweep of the JSEP MUST rows (`conf/jsep-50-rfc9429-sweep`, jsep12).
+  - A `rollback` description whose SDP is not empty is refused by `set_local_description`
+    and `set_remote_description` (RFC 9429 section 4.1.10: "The contents MUST be empty").
+    `SettingEngineBuilder::with_rollback_content_ignored(true)` is W3C's reading (the `sdp`
+    member "is unused" for a rollback).
+  - A later remote offer that drops `a=rtcp-mux` for a section the last answer accepted is
+    refused under every RTCP mux policy (RFC 9429 section 5.8.3; under "negotiate" it was
+    answered rejected).
+  - A transceiver that loses its track and sending direction keeps the `a=msid` lines its
+    section had (RFC 9429 sections 5.2.2, 5.3.2): offers and answers change on the wire.
+  - An answer's `t=` line is the offer's (RFC 3264 section 6; WebRTC offers say `t=0 0`,
+    which is unchanged).
+  - A remote `a=rtcp` line that does not parse (RFC 3605 section 2.1) refuses the
+    description (RFC 9429 section 5.8.2); its value is still not used.
+  - A remote `a=group` line (any semantics) naming a mid that no m= line has is ignored as a
+    whole (RFC 5888 section 6); it used to be kept with the unknown tags skipped.
+  - A test pins that an SFrame section keeps its own payload-type numbering under
+    `with_disable_media_engine_multiple_codecs(true)` (no failure was found there).
+  - New tests pin behaviour the audit had untested: candidates and `a=end-of-candidates` in
+    the tagged section only, the relay policy's suppressed related address, a description's
+    `a=end-of-candidates` reaching the ICE agent, `a=rtcp` parsed, mandatory values inherited
+    from the session level, later offers listing only the endpoint's own feedback, the
+    sender following its section's formats and a later answer (RFC 9143 section 9.1, RFC
+    3264 sections 8.3.2 and 8.3.4).
 - **jsep**: train fixes for the JSEP stack (`conf/jsep-44-train-fixes`, merged with tcp-10,
   mt-8 and sec-11).
   - `a=msid` lines carry the sender's track id again by default (`a=msid:<stream> <track>`,
