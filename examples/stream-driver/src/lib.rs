@@ -256,6 +256,21 @@ impl StreamDriver {
                     }
                 }
             }
+            StreamCommand::Resolve { query, host, port } => {
+                let tx = self.inputs_tx.clone();
+                tokio::spawn(async move {
+                    // Both families at once (RFC 8305 section 3): the system resolver asks for
+                    // AAAA and A together.
+                    let addresses = match tokio::net::lookup_host((host.as_str(), port)).await {
+                        Ok(found) => found.collect(),
+                        Err(_) => vec![],
+                    };
+                    let _ = tx.send(DriverInput::Event(StreamEvent::Resolved {
+                        query,
+                        addresses,
+                    }));
+                });
+            }
             _ => {}
         }
     }

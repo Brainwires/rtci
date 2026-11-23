@@ -610,6 +610,8 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }));
         // The DTMF senders' playout (W3C webrtc-pc section 7).
         self.run_dtmf(now)?;
+        // The engine's TURN-over-stream clients and connection races.
+        self.turn_handle_timeout(now);
         Ok(())
     }
 
@@ -622,6 +624,9 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         }));
         if let Some(dtmf) = self.dtmf_timeout() {
             eto = Some(eto.map_or(dtmf, |curr| curr.min(dtmf)));
+        }
+        if let Some(turn) = self.turn_poll_timeout() {
+            eto = Some(eto.map_or(turn, |curr| curr.min(turn)));
         }
         eto
     }

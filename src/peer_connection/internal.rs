@@ -124,6 +124,7 @@ impl RTCPeerConnection {
     ) -> Result<Self> {
         configuration.validate()?;
         let streams_settings = setting_engine.streams;
+        let turn_tls = setting_engine.turn_tls.clone();
 
         // Each media section negotiates its own codecs unless the application asked for one
         // codec set (RFC 9429 section 5.10 answers every m= section from its own formats).
@@ -163,6 +164,11 @@ impl RTCPeerConnection {
             }
         }
 
+        let engine_turn = super::turn_streams::EngineTurn::new(
+            &validated_servers,
+            streams_settings.turn,
+            turn_tls,
+        );
         let network_types = if setting_engine.candidates.ice_network_types.is_empty() {
             ice::network_type::supported_network_types()
         } else {
@@ -362,7 +368,7 @@ impl RTCPeerConnection {
             always_negotiate_data_channels: always_negotiate,
             announced: super::states_events::AnnouncedStates::new(),
             last_data_dscp: None,
-            streams: super::streams::EngineStreams::new(streams_settings),
+            streams: super::streams::EngineStreams::new(streams_settings, engine_turn),
         })
     }
 

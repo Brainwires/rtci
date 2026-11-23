@@ -145,6 +145,16 @@ pub enum StreamCommand {
         /// The connection's id.
         id: StreamId,
     },
+    /// Resolve `host` (a server's name, both IPv6 and IPv4 at once, RFC 8305 section 3) and
+    /// answer with [`StreamEvent::Resolved`], `port` on every address.
+    Resolve {
+        /// The query's id.
+        query: u64,
+        /// The name.
+        host: String,
+        /// The port the addresses get.
+        port: u16,
+    },
 }
 
 /// What the driver tells the engine about its sockets.
@@ -192,6 +202,14 @@ pub enum StreamEvent {
     Reset {
         /// The connection's id.
         id: StreamId,
+    },
+    /// A [`StreamCommand::Resolve`] is answered: the addresses, empty when the name did not
+    /// resolve.
+    Resolved {
+        /// The query's id.
+        query: u64,
+        /// The addresses, with the query's port.
+        addresses: Vec<SocketAddr>,
     },
 }
 
@@ -463,6 +481,13 @@ pub enum StreamNotice {
         /// Whether it broke rather than closed.
         reset: bool,
     },
+    /// A name the engine asked for was resolved.
+    Resolved {
+        /// The query.
+        query: u64,
+        /// The addresses (empty: the name did not resolve).
+        addresses: Vec<SocketAddr>,
+    },
 }
 
 struct Listener {
@@ -561,6 +586,7 @@ pub struct StreamTable {
     commands: VecDeque<StreamCommand>,
     notices: VecDeque<StreamNotice>,
     last_transmit: Option<StreamId>,
+    next_query: u64,
 }
 
 impl fmt::Debug for StreamTable {
@@ -591,6 +617,7 @@ impl StreamTable {
             commands: VecDeque::new(),
             notices: VecDeque::new(),
             last_transmit: None,
+            next_query: 1,
         }
     }
 
@@ -624,6 +651,16 @@ impl StreamTable {
             reuse_address,
         });
         listener
+    }
+
+    /// Asks the driver to resolve `host`; the answer comes as [`StreamNotice::Resolved`] with
+    /// the returned query id.
+    pub fn resolve(&mut self, host: String, port: u16) -> u64 {
+        let query = self.next_query;
+        self.next_query += 1;
+        self.commands
+            .push_back(StreamCommand::Resolve { query, host, port });
+        query
     }
 
     /// Asks the driver to close the listener. Unknown listeners are ignored.
@@ -917,6 +954,9 @@ impl StreamTable {
             }
             StreamEvent::Closed { id } => self.fail(id, false),
             StreamEvent::Reset { id } => self.fail(id, true),
+            StreamEvent::Resolved { query, addresses } => self
+                .notices
+                .push_back(StreamNotice::Resolved { query, addresses }),
         }
         Ok(())
     }
@@ -1053,6 +1093,9 @@ impl StreamTable {
             })
     }
 }
+
+/// Happy Eyeballs (RFC 8305): address order and staggered connection attempts.
+pub mod happy_eyeballs;
 
 #[cfg(test)]
 mod stream_test;

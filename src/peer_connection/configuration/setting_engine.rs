@@ -476,6 +476,9 @@ pub struct SettingEngine {
     /// The engine's own stream transports ([`SettingEngineBuilder::with_tcp_candidate_gathering`]
     /// and the methods after it).
     pub(crate) streams: crate::peer_connection::streams::StreamSettings,
+    /// How the engine's TURN-over-TLS connections verify their server
+    /// ([`SettingEngineBuilder::with_turn_tls`]).
+    pub(crate) turn_tls: crate::peer_connection::turn_tls::TurnTlsConfig,
 }
 
 impl SettingEngine {
@@ -2175,6 +2178,25 @@ impl SettingEngineBuilder {
     /// of connections. See [`StreamConfig`](shared::stream::StreamConfig).
     pub fn with_stream_limits(mut self, limits: shared::stream::StreamConfig) -> Self {
         self.0.streams.limits = limits;
+        self
+    }
+
+    /// Whether the engine runs the configuration's `turns:` and `turn:...?transport=tcp`
+    /// servers itself, over its stream interface (RFC 8656 section 3.1): it resolves the
+    /// name, connects (Happy Eyeballs, RFC 8305), runs TLS, allocates, announces the relayed
+    /// candidate with its `relayProtocol` and relays. On by default; a driver that does not
+    /// serve the stream interface sees nothing of it. `turn:` over UDP stays the
+    /// application's.
+    pub fn with_turn_over_streams(mut self, run: bool) -> Self {
+        self.0.streams.turn = run;
+        self
+    }
+
+    /// How the engine's TURN-over-TLS connections verify their server: roots, a verifier,
+    /// or (feature `turn-tls-webpki-roots`) the Mozilla roots. Without one no `turns:`
+    /// server is used.
+    pub fn with_turn_tls(mut self, tls: crate::peer_connection::turn_tls::TurnTlsConfig) -> Self {
+        self.0.turn_tls = tls;
         self
     }
 

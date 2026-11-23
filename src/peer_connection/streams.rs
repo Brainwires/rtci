@@ -35,6 +35,8 @@ use std::time::Instant;
 
 /// The stream-table tag of ICE-TCP connections and listeners.
 pub(crate) const ICE_TCP: u32 = 1;
+/// The stream-table tag of TURN-over-TCP / TLS connections.
+pub(crate) const TURN: u32 = 2;
 
 /// The port an active TCP candidate is signalled with (RFC 6544 section 4.5).
 const ACTIVE_PORT: u16 = 9;
@@ -55,6 +57,9 @@ pub struct StreamSettings {
     pub close_unused_connections: bool,
     /// The stream table's window, queue and connection limits.
     pub limits: StreamConfig,
+    /// Run the configuration's `turns:` and `turn:...?transport=tcp` servers (RFC 8656
+    /// section 3.1). On by default.
+    pub turn: bool,
 }
 
 impl Default for StreamSettings {
@@ -64,6 +69,7 @@ impl Default for StreamSettings {
             simultaneous_open: true,
             close_unused_connections: true,
             limits: StreamConfig::default(),
+            turn: true,
         }
     }
 }
@@ -109,11 +115,14 @@ pub(crate) struct EngineStreams {
     end_of_gathering_deferred: bool,
     /// Writes for an engine candidate that no connection could take.
     pub(crate) unroutable: u64,
+    /// The TURN-over-stream links.
+    pub(crate) turn: super::turn_streams::EngineTurn,
 }
 
 impl EngineStreams {
-    pub(crate) fn new(settings: StreamSettings) -> Self {
+    pub(crate) fn new(settings: StreamSettings, turn: super::turn_streams::EngineTurn) -> Self {
         Self {
+            turn,
             settings,
             table: StreamTable::new(settings.limits),
             driver_seen: false,
@@ -178,7 +187,7 @@ fn demultiplexable(first: u8) -> bool {
     matches!(first, 0..=3 | 20..=63 | 128..=191)
 }
 
-fn tcp_context(local: SocketAddr, peer: SocketAddr) -> TransportContext {
+pub(crate) fn tcp_context(local: SocketAddr, peer: SocketAddr) -> TransportContext {
     TransportContext {
         local_addr: local,
         peer_addr: peer,
@@ -194,6 +203,7 @@ impl RTCPeerConnection {
     /// of `streams` for who owns what.
     pub fn poll_stream_command(&mut self) -> Option<StreamCommand> {
         self.streams.driver_seen = true;
+        self.start_turn_links();
         self.route_stream_writes();
         self.close_unused_tcp_connections();
         self.streams.table.poll_command()
@@ -260,6 +270,11 @@ impl RTCPeerConnection {
                 return Err(err);
             }
         };
+        if info.tag == TURN {
+            self.turn_messages(now, id, messages);
+            self.process_stream_notices(now);
+            return Ok(());
+        }
         if info.tag != ICE_TCP {
             return Ok(());
         }
@@ -391,7 +406,9 @@ impl RTCPeerConnection {
     /// for a driver that serves them, so their candidates are not refused (RFC 8838 section
     /// 13); given at once otherwise.
     pub(crate) fn finish_local_gathering_after_streams(&mut self) {
-        if self.streams.driver_seen && self.streams.pending_listeners() {
+        if self.streams.driver_seen
+            && (self.streams.pending_listeners() || self.streams.turn.pending())
+        {
             self.streams.end_of_gathering_deferred = true;
         } else {
             self.finish_local_gathering();
@@ -527,10 +544,28 @@ impl RTCPeerConnection {
                         TransportError::ConnectionFailed,
                     );
                 }
+                StreamNotice::Connected {
+                    id,
+                    tag: TURN,
+                    local,
+                    remote,
+                } => self.turn_connected(now, id, local, remote),
+                StreamNotice::ConnectFailed { id, tag: TURN, .. }
+                | StreamNotice::Closed { id, tag: TURN, .. } => self.turn_connection_ended(now, id),
+                StreamNotice::Resolved { query, addresses } => self.turn_resolved(query, addresses),
                 _ => {}
             }
         }
-        if self.streams.end_of_gathering_deferred && !self.streams.pending_listeners() {
+        self.finish_deferred_gathering();
+    }
+
+    /// The end of gathering held back for the engine's listeners and TURN allocations, once
+    /// they are all settled.
+    pub(crate) fn finish_deferred_gathering(&mut self) {
+        if self.streams.end_of_gathering_deferred
+            && !self.streams.pending_listeners()
+            && !self.streams.turn.pending()
+        {
             self.streams.end_of_gathering_deferred = false;
             if self.ice_gathering_state() != RTCIceGatheringState::Complete {
                 self.finish_local_gathering();
@@ -540,7 +575,10 @@ impl RTCPeerConnection {
 
     /// Moves the queued datagrams for the engine's TCP candidates onto their connections.
     pub(crate) fn route_stream_writes(&mut self) {
-        if self.streams.active.is_empty() && self.streams.bound.is_empty() {
+        if self.streams.active.is_empty()
+            && self.streams.bound.is_empty()
+            && self.streams.turn.relays().is_empty()
+        {
             return;
         }
         self.flush_writes();
@@ -557,6 +595,13 @@ impl RTCPeerConnection {
     /// returns it for `poll_write`.
     pub(crate) fn route_stream_write(&mut self, msg: TaggedBytesMut) -> Option<TaggedBytesMut> {
         let local = msg.transport.local_addr;
+        if msg.transport.transport_protocol == TransportProtocol::UDP
+            && let Some(index) = self.streams.turn.link_of_relay(local)
+        {
+            // From a relayed candidate the engine allocated: through its TURN link.
+            self.send_via_turn(index, msg);
+            return None;
+        }
         if msg.transport.transport_protocol != TransportProtocol::TCP
             || !self.streams.manages(local)
         {

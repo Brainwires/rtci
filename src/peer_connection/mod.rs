@@ -256,6 +256,9 @@ mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
 pub(crate) mod streams;
+mod turn_streams;
+/// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
+pub mod turn_tls;
 // wpt100:hdrext
 mod always_negotiate;
 pub mod message;
