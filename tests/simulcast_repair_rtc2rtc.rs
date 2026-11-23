@@ -226,6 +226,14 @@ impl World {
 
     /// The offerer sends three simulcast layers; the answerer receives them.
     fn connected() -> Result<(Self, RTCRtpSenderId)> {
+        Self::connected_edited(|offer, _| offer.to_owned())
+    }
+
+    /// [`Self::connected`], the offer passed through `edit` (with each layer's rid, media SSRC
+    /// and RTX SSRC) on its way to the answerer.
+    fn connected_edited(
+        edit: impl Fn(&str, &[(String, u32, Option<u32>)]) -> String,
+    ) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World {
             peers: [Peer::new("10.0.0.1:5000")?, Peer::new("10.0.0.2:5000")?],
             now: Instant::now(),
@@ -259,6 +267,21 @@ impl World {
         world.peers[0]
             .pc
             .set_local_description(now, offer.clone())?;
+        // Each layer's rid, media SSRC (the encodings above) and an RTX SSRC for the edit to
+        // declare (the engine's simulcast offer names none; Pion's offer names its own).
+        let layers: Vec<(String, u32, Option<u32>)> = RIDS
+            .iter()
+            .enumerate()
+            .map(|(i, rid)| {
+                (
+                    (*rid).to_owned(),
+                    0x0515_0000 + i as u32,
+                    Some(0x0515_0100 + i as u32),
+                )
+            })
+            .collect();
+        let offer =
+            rtc::peer_connection::sdp::RTCSessionDescription::offer(edit(&offer.sdp, &layers))?;
         world.peers[1].pc.set_remote_description(now, offer)?;
         let answer = world.peers[1].pc.create_answer(None)?;
         world.peers[1]
@@ -399,6 +422,46 @@ fn every_simulcast_layer_is_repaired_over_its_rtx_stream() -> Result<()> {
         assert!(
             world.peers[1].read_rtp.contains(&(*ssrc, *seq)),
             "layer {rid}'s lost packet {seq} comes back on ssrc {ssrc}"
+        );
+    }
+    Ok(())
+}
+
+/// Pion (pion/webrtc v4.2.29, train 10's interop matrix) offers simulcast by RID and declares
+/// every layer's SSRCs too, libwebrtc's older way: per layer an `a=ssrc-group:FID <media>
+/// <rtx>` and `a=ssrc` lines with `cname`, `msid`, `mslabel` and `label`, and an `a=msid` line
+/// per layer, before the `a=rid` / `a=simulcast` lines (RFC 8853 section 5.3 lets SSRCs be
+/// signalled beside RIDs; RFC 5576 section 4.2 the FID group). The answerer still binds each
+/// layer by its RID and receives every layer.
+#[test]
+fn a_simulcast_offer_that_also_declares_its_layer_ssrcs_like_pion_is_received() -> Result<()> {
+    let (mut world, sender) = World::connected_edited(|offer, layers| {
+        let mut pion = String::new();
+        for (_, media, rtx) in layers {
+            let rtx = rtx.expect("each layer has an RTX SSRC");
+            pion += &format!("a=ssrc-group:FID {media} {rtx}\r\n");
+            for ssrc in [*media, rtx] {
+                pion += &format!(
+                    "a=ssrc:{ssrc} cname:pion\r\na=ssrc:{ssrc} msid:pion video\r\n\
+                     a=ssrc:{ssrc} mslabel:pion\r\na=ssrc:{ssrc} label:video\r\n"
+                );
+            }
+            pion += "a=msid:pion video\r\n";
+        }
+        let at = offer.find("a=rid:").expect("the offer has rids");
+        format!("{}{pion}{}", &offer[..at], &offer[at..])
+    })?;
+    let (layers, _) = world.layers(sender);
+    world.send_media(sender, FIRST_SEQ, 30)?;
+    for (rid, ssrc, _) in &layers {
+        assert!(
+            world.peers[1].read_rtp.contains(&(*ssrc, FIRST_SEQ + 20)),
+            "layer {rid} (ssrc {ssrc}) is received: {:?}",
+            world.peers[1]
+                .read_rtp
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<HashSet<_>>()
         );
     }
     Ok(())

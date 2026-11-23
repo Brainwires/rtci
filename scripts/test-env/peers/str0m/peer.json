@@ -1,0 +1,33 @@
+{
+  "name": "str0m",
+  "stack": "str0m (Rust, sans-I/O): its own ICE agent (is), DTLS (dimpl), SCTP (sctp-proto), SRTP and RTP",
+  "version": "str0m 0.26.0 with the rust-crypto backend (str0m-rust-crypto 0.7.0, dimpl 0.9.0, str0m-proto 0.8.0, is 0.12.1, sctp-proto 0.10.9; peers/str0m/Cargo.lock)",
+  "licence": "MIT OR Apache-2.0",
+  "upstream": "https://github.com/algesten/str0m",
+  "lacks": {
+    "turnUdp": {
+      "reason": "str0m has no TURN client: address discovery, STUN and TURN are left to the application",
+      "cite": "str0m 0.26.0 docs/ice.md, \"Address discovery, STUN and TURN out of scope\""
+    },
+    "turnTcp": {
+      "reason": "str0m has no TURN client: address discovery, STUN and TURN are left to the application",
+      "cite": "str0m 0.26.0 docs/ice.md, \"Address discovery, STUN and TURN out of scope\""
+    },
+    "turnTls": {
+      "reason": "str0m has no TURN client: address discovery, STUN and TURN are left to the application",
+      "cite": "str0m 0.26.0 docs/ice.md, \"Address discovery, STUN and TURN out of scope\""
+    },
+    "mdns": {
+      "reason": "str0m neither registers nor resolves mDNS (.local) candidate names: candidates are addresses the application gives it",
+      "cite": "str0m 0.26.0 docs/ice.md (address discovery is the application's) and is 0.12.1 src/candidate.rs (a candidate is a SocketAddr)"
+    },
+    "unbundled": {
+      "reason": "str0m runs one ICE transport per session: every m-line must be bundled",
+      "cite": "str0m 0.26.0 docs/SDP.md, \"BUNDLE and Bundle Policies\": \"str0m only supports a single ICE transport, meaning all m-lines must be bundled together\""
+    },
+    "simulcastWithoutRid": {
+      "reason": "str0m always writes the MID and RID header extensions on the layers it sends",
+      "cite": "str0m 0.26.0 src/streams/send.rs (header_ref.ext_vals.mid = Some(mid); header_ref.ext_vals.rid = rid)"
+    }
+  }
+}

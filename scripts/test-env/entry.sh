@@ -86,6 +86,14 @@ stage_unit() {
   local rc=$?
   echo "## unit: $(summarise "$A/unit.log") (exit $rc)" >> "$REPORT"
   grep -E '^test .* (FAILED|ignored, )' "$A/unit.log" | sed 's/^/    /' >> "$REPORT"
+  # The layer interop tests (scripts/test-env/peers/layers): rtc-dtls against dimpl, rtc-ice
+  # against librice's rice-proto, in a crate outside the workspace.
+  cargo test --locked --manifest-path "$HERE/peers/layers/Cargo.toml" --target-dir "${CARGO_TARGET_DIR:-/target}/peers" \
+    --no-fail-fast > "$A/layers.log" 2>&1
+  local lrc=$?
+  echo "## layers (dimpl, rice-proto): $(summarise "$A/layers.log") (exit $lrc)" >> "$REPORT"
+  grep -E '^test .* FAILED' "$A/layers.log" | sed 's/^/    /' >> "$REPORT"
+  [ $rc -eq 0 ] && rc=$lrc
   return $rc
 }
 
@@ -130,7 +138,7 @@ stage_env() {
 }
 
 stage_interop() {
-  log "stage interop: Chromium, Firefox, WebKit (Playwright) against the Rust peer"
+  log "stage interop: Chromium, Firefox, WebKit (Playwright) and the non-browser peers (scripts/test-env/peers) against the Rust peer"
   if [ ! -x "$HERE/interop/run.sh" ]; then echo "## interop: not present" >> "$REPORT"; return 1; fi
   "$HERE/interop/run.sh" > "$A/interop.log" 2>&1
   local rc=$?
