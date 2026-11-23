@@ -68,6 +68,9 @@ pub(crate) struct Chain {
     interceptors: Vec<Box<dyn Interceptor>>,
     read_outs: VecDeque<TaggedPacket>,
     write_outs: VecDeque<TaggedPacket>,
+    /// While packets the read leg made wait in `write_outs`: the earliest instant one of them
+    /// was made, which `poll_timeout` reports (see [`Chain::collect_read_writes`]).
+    read_made_due: Option<Instant>,
 }
 
 impl Chain {
@@ -149,6 +152,9 @@ impl Chain {
             |s, p| s.handle_write(p),
             |s| s.poll_write(),
         );
+        if let Some(made) = belt.iter().map(|packet| packet.now).min() {
+            self.read_made_due = Some(self.read_made_due.map_or(made, |due| due.min(made)));
+        }
         self.write_outs.extend(belt);
     }
 
@@ -208,7 +214,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
         if self.write_outs.is_empty() {
             self.drain_write();
         }
-        self.write_outs.pop_front()
+        let packet = self.write_outs.pop_front();
+        if self.write_outs.is_empty() {
+            self.read_made_due = None;
+        }
+        packet
     }
 
     fn handle_timeout(&mut self, now: Self::Time) -> Result<(), Self::Error> {
@@ -219,9 +229,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Chain {
     }
 
     /// The earliest deadline of the interceptors, and at once (the instant it was made) while
-    /// a packet waits in `write_outs` for `poll_write`.
+    /// a packet the read leg made waits in `write_outs` for `poll_write`. What `handle_write`
+    /// put there is not counted: a driver calls `poll_write` after writing.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        let waiting = self.write_outs.iter().map(|packet| packet.now).min();
+        let waiting = self.read_made_due;
         self.interceptors
             .iter_mut()
             .filter_map(|interceptor| interceptor.poll_timeout())
