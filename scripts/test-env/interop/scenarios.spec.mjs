@@ -1,7 +1,8 @@
 // Browser <-> webrtc-rs-rtc interop beyond plain media and data: Cryptex, loss recovery with a
 // browser sender, TURN relay, ICE-TCP, the browser as the answerer, transceiver stop and m-line
 // reuse, direction changes, rollback and glare, large messages, a wrong fingerprint either way,
-// simulcast with RTX, and the browser's getStats() against the Rust side's counters.
+// simulcast with RTX, the browser's getStats() against the Rust side's counters, and a
+// transport per section when the browser's offer is not bundled.
 //
 // Every skip goes through na.mjs with its kind and citation (gate.mjs fails an uncited one).
 import { test, expect } from "@playwright/test";
@@ -398,6 +399,58 @@ test("data channel 256 KiB message within both sides' max-message-size", async (
   if (r.effective !== undefined) expect(r.effective).toBe(Math.min(r.offered, r.answered));
   expect(r.answered, "the Rust side states less than 256 KiB").toBeGreaterThanOrEqual(256 * 1024);
   expect(r.echoed, JSON.stringify(r)).toEqual({ length: 256 * 1024, first: 0, fill: 0 });
+});
+
+// ---- several transports (RFC 9429 4.1.1, 5.3.1; RFC 9143 7; RFC 8835 4.2) ----
+
+// The browser offers under "max-compat" (a transport per m= section) and Rust receives the
+// offer without its BUNDLE group, as from a peer that does not bundle: Rust answers each
+// section on a transport of its own (its own ICE credentials, candidates and DTLS), and video
+// and data each travel over theirs.
+test("unbundled: max-compat without a BUNDLE group, a transport per section", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, { media: "reflect", video: "VP8" }, { rtc: { bundlePolicy: "max-compat" } });
+    const tr = s.pc.addTransceiver(Interop.canvasStream().getVideoTracks()[0], { direction: "sendrecv" });
+    Interop.prefer(tr, "video", "video/VP8");
+    s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
+    const dc = s.pc.createDataChannel("unbundled", { ordered: true });
+    await s.negotiate((sdp) => sdp.replace(/^a=group:BUNDLE[^\r\n]*\r?\n/m, ""));
+    await s.connected();
+    if (dc.readyState !== "open") await new Promise((res) => (dc.onopen = res));
+    const e = await Interop.echo(dc, 1, 1024);
+    await e.wait(1, 20000).catch(() => {});
+    const rtp = await Interop.until(async () => {
+      const v = await Interop.inbound(s.pc, "video");
+      return v && v.framesDecoded > 15 && v;
+    }, 25000, "15 decoded frames").catch(async (err) => ({ error: String(err), last: await Interop.inbound(s.pc, "video") }));
+    const answer = s.pc.remoteDescription.sdp;
+    const ufrags = new Set([...answer.matchAll(/^a=ice-ufrag:(\S+)/gm)].map((m) => m[1]));
+    const stats = await s.pc.getStats();
+    const transportStats = [...stats.values()].filter((x) => x.type === "transport");
+    const transports = transportStats.filter((x) => x.dtlsState === "connected").length;
+    const sameTransport = tr.sender.transport === s.pc.sctp?.transport;
+    const report = await s.report();
+    s.close();
+    return {
+      grouped: /^a=group:BUNDLE/m.test(answer),
+      ufrags: ufrags.size,
+      transports,
+      transportStats: transportStats.length,
+      sameTransport,
+      echoed: e.got.length,
+      rtp,
+      errors: report.errors,
+    };
+  }, WS);
+  expect(r.grouped, "Rust answers an offer without a BUNDLE group without one").toBe(false);
+  expect(r.ufrags, JSON.stringify(r)).toBe(2);
+  expect(r.sameTransport, "video and data are on two transports").toBe(false);
+  // A browser that reports no RTCTransportStats is checked by its sender's and SCTP's
+  // transport objects only.
+  if (r.transportStats > 0) expect(r.transports, JSON.stringify(r)).toBe(2);
+  expect(r.echoed, JSON.stringify(r)).toBe(1);
+  expect(r.rtp.error, JSON.stringify(r)).toBeUndefined();
+  expect(r.errors).toEqual([]);
 });
 
 // ---- a wrong DTLS fingerprint (RFC 5763 5, RFC 8122 5) ----
