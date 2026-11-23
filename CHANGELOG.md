@@ -2475,11 +2475,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its transports' packet counters. Pion is na-peer for unbundled transports and rollback;
   aiortc 1.16.0 refuses Rust's `a=extmap` extension attributes (RFC 8285 5, its parser
   takes two fields; https://github.com/aiortc/aiortc/issues/1492), so the test image overlays
-  the fixed `sdp.py` from the fork `Brainwires/aiortc` (commit 4982300, by SHA-256) until
-  upstream releases the fix; the aiortc peer counts media in its receiver (aiortc's getStats
+  the fixed `sdp.py` and `rtp.py` from the fork `Brainwires/aiortc` (commit 2245f90, by SHA-256;
+  the second fixes aiortc dropping compounds with a multi-chunk SDES, RFC 3550 6.5) until
+  upstream releases the fixes; the aiortc peer counts media in its receiver (aiortc's getStats
   hides all but one SSRC per receiver) and no longer awaits `replaceTrack`; the str0m peer
   sends PLI and FIR in turns and reports the path in use when its stats name none.
   `docs/interop.md` has the round's matrix, what each peer negotiates and the findings.
+  Round 3: aiortc's SDES parser (RFC 3550 6.5) is fixed in the same fork commit the image
+  overlays; aiortc is na-peer for answering an offer without BUNDLE (it adds a group, RFC 9143
+  7.3); `simulcast_repair_rtc2rtc.rs::a_simulcast_offer_that_also_declares_its_layer_ssrcs_like_pion_is_received`
+  pins that the engine binds RID layers of an offer that also declares their SSRCs, as Pion's
+  does; interop-peer reports the SSRCs it discarded as unassociated and the Pion peer the first
+  RTP header it writes per SSRC.
 
 - **interop** (branch `conf/peers-5-layers`): layer interop tests against independent
   implementations, in `scripts/test-env/peers/layers` (a crate outside the workspace, run in

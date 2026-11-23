@@ -674,7 +674,7 @@ test("simulcast: three RIDs from the peer reach Rust", async () => {
   expectOk(r);
   for (const rid of ["q", "h", "f"]) {
     const n = Object.entries(r.rust?.rtp || {}).filter(([k]) => k.startsWith(`video:${rid}:`)).reduce((a, [, c]) => a + c, 0);
-    expect(n, `no packets on rid ${rid}: ${ctx(r, { peerOutbound: r.outbound, rustTransports: r.rust?.stats?.transports })}`).toBeGreaterThan(20);
+    expect(n, `no packets on rid ${rid}: ${ctx(r, { peerOutbound: r.outbound, peerFirstHeaders: r.firstHeaders, rustDiscarded: r.rust?.discardedSsrcs, rustTransports: r.rust?.stats?.transports })}`).toBeGreaterThan(20);
   }
 });
 
@@ -710,7 +710,7 @@ test("balanced, answered without BUNDLE: a transport per media type", async () =
       { op: "await-rtp", kind: "audio", packets: 50, ms: 15000 },
       { op: "report" },
     ],
-  }, ["unbundled", "codec:vp8"]);
+  }, ["unbundled", "answerUnbundled", "codec:vp8"]);
   expectOk(r);
   expect(/^a=group:BUNDLE/m.test(lastDescription(r, "sent", "answer")), ctx(r)).toBe(false);
   expect(r.rust?.transportsConnected, ctx(r)).toBe(2);

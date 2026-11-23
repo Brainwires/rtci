@@ -408,6 +408,8 @@ struct Session {
     rtp_by_key: BTreeMap<String, u64>,
     /// RTCP packets received, by type (`sr`, `rr`, `nack`, `pli`, `fir`, `twcc`, ...).
     rtcp_by_type: BTreeMap<String, u64>,
+    /// The SSRCs whose RTP the engine discarded as unassociated (RFC 8830 3.1).
+    discarded_ssrcs: Vec<u32>,
     coverage: HashMap<u32, SeqCoverage>,
     dc_echoed: u64,
     rust_dc: Option<RTCDataChannelId>,
@@ -500,6 +502,7 @@ impl Session {
             rid_by_ssrc: HashMap::new(),
             rtp_by_key: BTreeMap::new(),
             rtcp_by_type: BTreeMap::new(),
+            discarded_ssrcs: vec![],
             coverage: HashMap::new(),
             dc_echoed: 0,
             rust_dc: None,
@@ -907,6 +910,7 @@ impl Session {
                     "stats": stats,
                     "transportsConnected": self.transports_connected.len(),
                     "rtcp": self.rtcp_by_type,
+                    "discardedSsrcs": self.discarded_ssrcs,
                     "sctp": sctp,
                     "errors": self.errors,
                 }));
@@ -1261,6 +1265,9 @@ impl Session {
                 {
                     self.transports_connected
                         .insert(event.ice_transport.to_string());
+                }
+                RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc) => {
+                    self.discarded_ssrcs.push(ssrc);
                 }
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(st) => {
                     self.connected =

@@ -1,7 +1,7 @@
 {
   "name": "aiortc",
   "stack": "aiortc (Python, asyncio): its own SDP, SCTP and RTP; ICE from aioice; DTLS through pyOpenSSL (OpenSSL); SRTP through pylibsrtp (libsrtp); codecs through PyAV (FFmpeg: libvpx VP8, H.264, libopus)",
-  "version": "aiortc 1.16.0 with aioice 0.13.0, pyOpenSSL 26.4.0, cryptography 50.0.2, pylibsrtp 1.0.0, av 19.0.2 (peers/aiortc/image/requirements.txt, by SHA-256), on the image's CPython 3.12; sdp.py from the fork Brainwires/aiortc commit 4982300 (branch fix/extmap-extension-attributes-1.16.0: the fix for https://github.com/aiortc/aiortc/issues/1492), to be dropped when upstream releases the fix",
+  "version": "aiortc 1.16.0 with aioice 0.13.0, pyOpenSSL 26.4.0, cryptography 50.0.2, pylibsrtp 1.0.0, av 19.0.2 (peers/aiortc/image/requirements.txt, by SHA-256), on the image's CPython 3.12; sdp.py and rtp.py from the fork Brainwires/aiortc commit 2245f90 (branch fix/extmap-extension-attributes-1.16.0: the fixes for https://github.com/aiortc/aiortc/issues/1492 and for RTCP SDES chunk alignment, RFC 3550 6.5), to be dropped when upstream releases them",
   "licence": "BSD-3-Clause (aiortc, aioice, pylibsrtp, PyAV; PyAV's wheel bundles FFmpeg under the LGPL; test image only)",
   "upstream": "https://github.com/aiortc/aiortc",
   "lacks": {
@@ -40,6 +40,10 @@
     "dtls13": {
       "reason": "aiortc's DTLS is OpenSSL's DTLS_METHOD, DTLS 1.2 at most",
       "cite": "aiortc 1.16.0 rtcdtlstransport.py create_ssl_context: SSL.Context(SSL.DTLS_METHOD); OpenSSL's DTLS goes to 1.2"
+    },
+    "answerUnbundled": {
+      "reason": "aiortc answers an offer without a BUNDLE group with one (a=group:BUNDLE 0 1), then still runs an ICE connection per section; the offerer bundles by that answer and aiortc's second connection never completes",
+      "cite": "RFC 9143 7.3: \"The answerer is only allowed to include a BUNDLE group in an initial BUNDLE answer if the offerer requested the BUNDLE group to be created in the corresponding initial BUNDLE offer\"; train 10 round 3, cell `balanced, answered without BUNDLE` [aiortc]: received offer with no group, sent answer `a=group:BUNDLE 0 1`, aioice Connection(1) never completed"
     }
   }
 }
