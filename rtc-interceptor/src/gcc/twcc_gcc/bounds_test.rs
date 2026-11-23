@@ -16,7 +16,7 @@ fn runs_are_cut_at_the_packet_status_count() {
         ..Default::default()
     };
     assert_eq!(packet_statuses(&fb).count(), 4);
-    assert_eq!(loss_fraction(&fb), 1.0);
+    assert_eq!(loss_fraction(&fb, |_| true), 1.0);
 }
 
 #[test]
@@ -32,5 +32,5 @@ fn a_zero_count_has_no_loss() {
         ..Default::default()
     };
     assert_eq!(packet_statuses(&fb).count(), 0);
-    assert_eq!(loss_fraction(&fb), 0.0);
+    assert_eq!(loss_fraction(&fb, |_| true), 0.0);
 }

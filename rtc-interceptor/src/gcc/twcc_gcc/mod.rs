@@ -74,6 +74,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use trendline::TrendlineFilter;
 
+/// A path: local address, remote address, transport protocol.
+type PathKey = (
+    std::net::SocketAddr,
+    std::net::SocketAddr,
+    shared::TransportProtocol,
+);
+
+/// How many packets in a row arrive between new addresses before the path counts as changed:
+/// one straggler on the old pair, or one early packet on a new one, is not a change.
+const PATH_CHANGE_PACKETS: u8 = 3;
+
 /// Shared state written by [`GccInterceptor`] and read by [`GccHandle`].
 pub struct GccShared {
     /// The target for the original media, in bits per second: the estimate less the NACK
@@ -191,6 +202,9 @@ impl<P> GccInterceptorBuilder<P> {
                 self.max_bitrate_bps as f64,
             ),
             min_bitrate_bps: self.min_bitrate_bps,
+            max_bitrate_bps: self.max_bitrate_bps,
+            path: None,
+            path_candidate: None,
             shared: self.shared,
         }
     }
@@ -226,8 +240,14 @@ pub struct GccInterceptor<P> {
 
     trendline: TrendlineFilter,
     rate_controller: AimdRateController,
-    /// The rate controller's floor.
+    /// The rate controller's floor and ceiling.
     min_bitrate_bps: u32,
+    max_bitrate_bps: u32,
+
+    /// The path inbound packets arrive on (local address, remote address, protocol), and a
+    /// new one seen on the packets since, with how many: see [`PATH_CHANGE_PACKETS`].
+    path: Option<PathKey>,
+    path_candidate: Option<(PathKey, u8)>,
 
     /// Shared state — written here, read via [`GccHandle`].
     shared: Arc<Mutex<GccShared>>,
@@ -273,6 +293,11 @@ impl<P: Interceptor> GccInterceptor<P> {
     /// Intercept incoming TWCC feedback RTCP and update the bandwidth estimate.
     #[overrides]
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        // A packet from the wire, not one of the chain's attribute carriers (an empty RTCP
+        // packet, which never had an address).
+        if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+            self.observe_path(&msg.transport);
+        }
         let mut processed = false;
         if let Packet::Rtcp(ref rtcp_pkts) = msg.message.packet {
             let now = msg.now;
@@ -327,6 +352,50 @@ impl<P: Interceptor> GccInterceptor<P> {
 }
 
 impl<P: Interceptor> GccInterceptor<P> {
+    /// Follows the addresses inbound packets arrive between. A new selected pair (an ICE
+    /// restart, a move to another network) is a new path: what was measured on the old one
+    /// says nothing about it (RFC 8836 section 2, requirement 1d), and the packets sent into
+    /// the old one before the move were lost there, not on the new path. As libwebrtc does on
+    /// a relevant route change (`RtpTransportControllerSend::OnNetworkRouteChanged`:
+    /// `restart_bwe`, and `transport_feedback_adapter_.SetNetworkRoute` so that only packets
+    /// sent on the new route are reported), the estimate starts over from its start rate and
+    /// the packets sent before the change no longer count, as received or lost.
+    fn observe_path(&mut self, transport: &shared::TransportContext) {
+        let key = (
+            transport.local_addr,
+            transport.peer_addr,
+            transport.transport_protocol,
+        );
+        let Some(current) = self.path else {
+            self.path = Some(key);
+            return;
+        };
+        if key == current {
+            self.path_candidate = None;
+            return;
+        }
+        let seen = match self.path_candidate {
+            Some((candidate, seen)) if candidate == key => seen + 1,
+            _ => 1,
+        };
+        if seen < PATH_CHANGE_PACKETS {
+            self.path_candidate = Some((key, seen));
+            return;
+        }
+        self.path = Some(key);
+        self.path_candidate = None;
+        self.send_times.clear();
+        self.trendline = TrendlineFilter::new();
+        self.rate_controller =
+            AimdRateController::new(self.min_bitrate_bps as f64, self.max_bitrate_bps as f64);
+        let start = self.rate_controller.estimate_bps();
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if shared.estimate_bps.is_some() {
+            shared.estimate_bps = Some(start as u32);
+            shared.update_target(self.min_bitrate_bps);
+        }
+    }
+
     /// Process one TWCC feedback packet: reconstruct timing pairs, update
     /// trendline + rate controller, publish new estimate to shared state.
     fn process_feedback(&mut self, fb: &TransportLayerCc, now: Instant) {
@@ -335,7 +404,10 @@ impl<P: Interceptor> GccInterceptor<P> {
             return;
         }
 
-        let loss = loss_fraction(fb);
+        // Only the packets this sender still knows it sent count: those sent into a path that
+        // was left behind are not this path's loss.
+        let send_times = &self.send_times;
+        let loss = loss_fraction(fb, |seq| send_times.contains_key(&seq));
 
         for (send_ms, recv_ms) in pairs {
             self.trendline.update(send_ms, recv_ms);
@@ -430,12 +502,19 @@ fn packet_statuses(fb: &TransportLayerCc) -> impl Iterator<Item = SymbolTypeTcc>
         .take(fb.packet_status_count as usize)
 }
 
-/// Compute the fraction of packets not received in a TWCC feedback packet.
-fn loss_fraction(fb: &TransportLayerCc) -> f64 {
+/// Compute the fraction of packets not received in a TWCC feedback packet, over the packets
+/// for which `counted` holds.
+fn loss_fraction(fb: &TransportLayerCc, counted: impl Fn(u16) -> bool) -> f64 {
     let mut total = 0u32;
     let mut received = 0u32;
 
+    let mut seq = fb.base_sequence_number;
     for status in packet_statuses(fb) {
+        let this = seq;
+        seq = seq.wrapping_add(1);
+        if !counted(this) {
+            continue;
+        }
         total += 1;
         if status != SymbolTypeTcc::PacketNotReceived {
             received += 1;
@@ -666,6 +745,107 @@ mod tests {
         assert_eq!(Some(estimate), handle.target_bitrate_bps(), "released");
     }
 
+    /// A new path (inbound packets between new addresses, three in a row: an ICE restart, a
+    /// move to another network) restarts the estimate from the start rate, and the packets
+    /// sent into the old path before it no longer count: twenty lost there and five received
+    /// on the new path are no loss of the new path's (counted, 80 % would cut the estimate to
+    /// 60 %).
+    #[test]
+    fn a_new_path_starts_over_and_the_old_paths_losses_do_not_count() {
+        use rtcp::transport_feedbacks::transport_layer_cc::RecvDelta;
+        let (mut chain, handle) = make_chain();
+        let ssrc = 1001u32;
+        chain.bind_local_stream(&stream_info_with_twcc(ssrc));
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        for i in 0..10u16 {
+            chain
+                .handle_write(make_rtp(ssrc, i, at(i as u64 * 20)))
+                .unwrap();
+        }
+        let recv_us: Vec<i64> = (0..10).map(|i: i64| i * 20_000 + 20_000).collect();
+        chain
+            .handle_read(make_twcc_feedback(0, &recv_us, at(250)))
+            .unwrap();
+        // Into the old path, which is gone.
+        for i in 10..30u16 {
+            chain
+                .handle_write(make_rtp(ssrc, i, at(300 + i as u64 * 20)))
+                .unwrap();
+        }
+        let new_path = TransportContext {
+            local_addr: "10.0.9.1:5000".parse().unwrap(),
+            peer_addr: "10.0.0.2:5000".parse().unwrap(),
+            ..Default::default()
+        };
+        for k in 0..3u64 {
+            chain
+                .handle_read(TaggedPacket {
+                    now: at(1_000 + k),
+                    transport: new_path,
+                    message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                        rtcp::receiver_report::ReceiverReport {
+                            ssrc: 42,
+                            ..Default::default()
+                        },
+                    )])),
+                })
+                .unwrap();
+        }
+        assert_eq!(Some(300_000), handle.estimate_bps(), "the start rate");
+        for i in 30..35u16 {
+            chain
+                .handle_write(make_rtp(ssrc, i, at(1_000 + i as u64 * 20)))
+                .unwrap();
+        }
+        while chain.poll_write().is_some() {}
+        while chain.poll_read().is_some() {}
+        // Feedback on the new path: 10..29 lost, 30..34 received 20 ms apart.
+        let reference_time = (1_600_000i64 / 64_000) as u32;
+        let mut recv = reference_time as i64 * 64_000;
+        let deltas = (0..5)
+            .map(|k| {
+                let t = 1_620_000 + k * 20_000;
+                let delta = t - recv;
+                recv = t;
+                RecvDelta {
+                    type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                    delta,
+                }
+            })
+            .collect();
+        let run = |symbol, run_length| {
+            PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                packet_status_symbol: symbol,
+                run_length,
+            })
+        };
+        let fb = TransportLayerCc {
+            base_sequence_number: 10,
+            packet_status_count: 25,
+            reference_time,
+            packet_chunks: vec![
+                run(SymbolTypeTcc::PacketNotReceived, 20),
+                run(SymbolTypeTcc::PacketReceivedSmallDelta, 5),
+            ],
+            recv_deltas: deltas,
+            ..Default::default()
+        };
+        chain
+            .handle_read(TaggedPacket {
+                now: at(1_800),
+                transport: new_path,
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(fb)])),
+            })
+            .unwrap();
+        let estimate = handle.estimate_bps().unwrap();
+        assert!(
+            estimate >= 300_000,
+            "cut to {estimate} for the old path's losses"
+        );
+    }
+
     /// The target rides with the controller's minimum (`MinimumTarget`), so the NACK
     /// responder knows where the original media cannot be lowered further.
     #[test]
@@ -785,7 +965,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        assert_eq!(loss_fraction(&fb), 0.0);
+        assert_eq!(loss_fraction(&fb, |_| true), 0.0);
     }
 
     #[test]
@@ -794,7 +974,7 @@ mod tests {
             packet_chunks: vec![],
             ..Default::default()
         };
-        assert_eq!(loss_fraction(&fb), 0.0);
+        assert_eq!(loss_fraction(&fb, |_| true), 0.0);
     }
 
     #[test]
@@ -831,7 +1011,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let loss = loss_fraction(&fb);
+        let loss = loss_fraction(&fb, |_| true);
         assert!((loss - 0.4).abs() < 1e-9, "expected 40% loss, got {loss}");
     }
 
@@ -869,7 +1049,7 @@ mod tests {
             packet_chunks: vec![chunk],
             ..Default::default()
         };
-        assert_eq!(loss_fraction(&fb), 1.0);
+        assert_eq!(loss_fraction(&fb, |_| true), 1.0);
     }
 
     /// Counts the inbound RTCP packets that reach its slot and passes everything on.

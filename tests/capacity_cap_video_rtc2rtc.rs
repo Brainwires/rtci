@@ -426,6 +426,13 @@ impl Peer {
                 &mut media_engine,
                 &options,
             )?;
+            // The application's bounds, as ParolNet gives its GCC.
+            handles
+                .congestion_control
+                .set_min_bitrate(Some(f64::from(MIN_BPS)));
+            handles
+                .congestion_control
+                .set_session_bitrate_limit(Some(f64::from(MAX_BPS)));
             return Self::with_chain(
                 addr,
                 provider,

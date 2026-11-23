@@ -896,6 +896,15 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         }
     }
 
+    /// The estimator's floor, to ride with an announced target ([`crate::MinimumTarget`]).
+    fn minimum_attribute(&self) -> Option<Attribute> {
+        self.estimator.min_bitrate().map(|bits_per_second| {
+            Attribute::Custom(std::sync::Arc::new(crate::MinimumTarget {
+                bits_per_second,
+            }))
+        })
+    }
+
     /// Publish the estimate, and return the attribute to announce when it moved.
     fn publish(&mut self) -> Option<Attribute> {
         let target = self.estimator.target_bitrate();
@@ -969,6 +978,9 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         // after this interceptor does and reads the attribute on its way past.
         if let Some(attribute) = self.publish() {
             msg.message.add(attribute);
+            if let Some(minimum) = self.minimum_attribute() {
+                msg.message.add(minimum);
+            }
         }
 
         self.read_queue.push_back(msg);
@@ -1059,10 +1071,14 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
 
         // No packet to ride on: the estimate leaves on the chain's attribute carrier.
         if let Some(attribute) = self.publish() {
+            let mut message = AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute);
+            if let Some(minimum) = self.minimum_attribute() {
+                message.add(minimum);
+            }
             self.read_queue.push_back(TaggedPacket {
                 now,
                 transport: shared::TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtcp(Vec::new())).with(attribute),
+                message,
             });
         }
         Ok(())

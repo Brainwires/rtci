@@ -423,6 +423,10 @@ impl BandwidthEstimator for Gcc {
         self.delay_control.set_round_trip_time(round_trip_time);
     }
 
+    fn min_bitrate(&self) -> Option<f64> {
+        Some(self.min)
+    }
+
     fn set_external_bounds(&mut self, min: Option<f64>, max: Option<f64>) {
         let (configured_min, configured_max) = self.configured;
         self.max = max.map_or(configured_max, |max| max.min(configured_max));

@@ -70,6 +70,14 @@ pub trait BandwidthEstimator: Send + Sync {
     /// estimator that honours them keeps its target at or below `max` whatever it measures.
     fn set_external_bounds(&mut self, _min: Option<f64>, _max: Option<f64>) {}
 
+    /// The floor the target never goes under, in bits per second, when the estimator has one.
+    /// It rides with the target as [`MinimumTarget`](crate::MinimumTarget), so the NACK
+    /// responder knows where the original media cannot be lowered for retransmissions
+    /// (RFC 4588 section 7).
+    fn min_bitrate(&self) -> Option<f64> {
+        None
+    }
+
     /// The fraction lost a receiver report gave for a stream this endpoint sends, handed over
     /// only while the receiver sends no per-packet feedback (no TWCC, no RFC 8888): the
     /// loss-based half of an estimator can still run on it
