@@ -47,6 +47,10 @@ pub(crate) enum RTPMessage {
     Raw(BytesMut),
     Packet(Packet),
     TrackPacket(TrackPacket),
+    /// RTCP an interceptor instance of RTP session (transport) `.0` wrote, on its way from the
+    /// interceptor chain to the transport it goes down; the transport's handlers only ever
+    /// see it as [`Self::Packet`].
+    SessionRtcp(usize, Vec<Box<dyn rtcp::Packet>>),
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +92,10 @@ impl RTCMessageInternal {
                     }
                     _ => 0, // Future Packet variants: size unknown; treat as 0 for accounting.
                 },
+                RTPMessage::SessionRtcp(_, rtcp_packets) => rtcp_packets
+                    .iter()
+                    .map(|rtcp_packet| rtcp_packet.marshal_size())
+                    .sum(),
                 RTPMessage::TrackPacket(tp) => match &tp.packet {
                     Packet::Rtp(rtp) => rtp.marshal_size(),
                     Packet::Rtcp(rtcp_packets) => {

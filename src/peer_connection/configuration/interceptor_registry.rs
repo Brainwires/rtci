@@ -1002,8 +1002,13 @@ impl interceptor::RtcpRandom for ProviderRtcpRandom {
 /// answer is applied.
 pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuilder) -> Registry {
     // An RTCP session per RTP session: one per transport when sections are not bundled
-    // (RFC 3550 section 6, RFC 8834 section 4.4).
-    registry.with_per_rtp_session(Slot::RtcpSession, session.build_per_rtp_session())
+    // (RFC 3550 section 6, RFC 8834 section 4.4). Each joins when the peer connection says
+    // its transport carries a negotiated RTP m= section and has SRTP keys, and leaves when the
+    // last such section goes: a data-channel-only connection sends no RTCP.
+    registry.with_per_rtp_session(
+        Slot::RtcpSession,
+        session.with_joins_on_start(true).build_per_rtp_session(),
+    )
 }
 
 /// Adds the RTCP XR report blocks a receiver writes about each source (RFC 3611 section 4:
@@ -1657,12 +1662,12 @@ pub(crate) fn create_stream_info(
             })
             .map(|c| (c.payload_type, c.rtp_codec.clock_rate))
             .collect(),
-        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
-        initially_paused: false,
         section_fmtp_lines: section_codecs
             .iter()
             .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line.clone()))
             .collect(),
+        // Set by the sender for a stream the description starts paused (RFC 8853 section 5.2).
+        initially_paused: false,
     }
 }
 
