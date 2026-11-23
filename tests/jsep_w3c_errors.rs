@@ -80,8 +80,10 @@ fn a_description_that_does_not_parse_is_an_sdp_syntax_error() -> TestResult {
 #[test]
 fn an_answer_without_an_offer_is_an_invalid_state_error() -> TestResult {
     let mut pc = default_peer()?;
+    // A well-formed answer (`a=setup:active`): only the state is wrong.
+    let transport = TRANSPORT.replace("a=setup:actpass", "a=setup:active");
     let answer =
-        RTCSessionDescription::answer(crlf(&format!("{SESSION}{}", video("0", TRANSPORT))))?;
+        RTCSessionDescription::answer(crlf(&format!("{SESSION}{}", video("0", &transport))))?;
     let refused = pc
         .set_remote_description(Instant::now(), answer)
         .expect_err("no offer");
