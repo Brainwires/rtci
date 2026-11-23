@@ -370,6 +370,32 @@ pub struct RTCCertificate {
     pub expires: SystemTime,
 }
 
+/// A handle to an [`RTCCertificate`]'s private key (W3C webrtc-pc 4.9.2 `[[Handle]]`): it
+/// refers to the key object the crypto provider holds and gives no access to the key's
+/// bytes. Two handles are equal when they refer to keys with the same public key.
+#[derive(Clone, PartialEq)]
+pub struct RTCCertificateKeyHandle(dtls::crypto::CryptoPrivateKey);
+
+impl std::fmt::Debug for RTCCertificateKeyHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RTCCertificateKeyHandle(..)")
+    }
+}
+
+/// The serialized form of an [`RTCCertificate`] (W3C webrtc-pc 4.9.2): what the
+/// serialization steps keep, a handle to the key instead of the key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RTCSerializedCertificate {
+    /// `[[Expires]]`.
+    pub expires: SystemTime,
+    /// `[[Certificate]]`: the DER certificate chain, end-entity certificate first.
+    pub certificate: Vec<Vec<u8>>,
+    /// `[[Origin]]`: the origin the certificate was serialized for.
+    pub origin: String,
+    /// `[[Handle]]`: the private key, by reference.
+    pub handle: RTCCertificateKeyHandle,
+}
+
 impl PartialEq for RTCCertificate {
     fn eq(&self, other: &Self) -> bool {
         self.dtls_certificate == other.dtls_certificate
@@ -613,6 +639,139 @@ impl RTCCertificate {
         Ok(RTCCertificate::from_existing(dtls_certificate, expires))
     }
 
+    /// Exports the certificate and its private key as PEM, so that a server can keep its DTLS
+    /// fingerprint across restarts (**not part of any W3C specification**: an `RTCCertificate`
+    /// is only structured-cloned there, see [`Self::serialize`]).
+    ///
+    /// The text holds an `EXPIRES` block (seconds since the Unix epoch, little-endian), the
+    /// PKCS#8 key as `PRIVATE KEY` and the chain as `CERTIFICATE` blocks, end-entity first:
+    /// the key and certificate blocks are the standard ones other tools read and write.
+    /// [`Self::import_pem`] reads it back. It contains the private key in the clear: store it
+    /// as a secret.
+    ///
+    /// # Errors
+    ///
+    /// When the key is not exportable (one an HSM or KMS holds has no PKCS#8 bytes).
+    pub fn export_pem(&self) -> Result<String> {
+        let private_key = self
+            .dtls_certificate
+            .private_key
+            .signing_key
+            .to_pkcs8_der()
+            .map_err(crypto_error)?
+            .ok_or_else(|| Error::Other("the certificate signing key is not exportable".into()))?;
+        let expires = self
+            .expires
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| Error::InvalidPEM("expires is before the Unix epoch".into()))?
+            .as_secs();
+        let mut blocks = vec![
+            pem::Pem::new("EXPIRES", expires.to_le_bytes().to_vec()),
+            pem::Pem::new("PRIVATE KEY", private_key.as_ref()),
+        ];
+        for der in &self.dtls_certificate.certificate {
+            blocks.push(pem::Pem::new("CERTIFICATE", der.as_ref()));
+        }
+        Ok(pem::encode_many(&blocks))
+    }
+
+    /// Imports a certificate and its private key from PEM (**not part of any W3C
+    /// specification**): what [`Self::export_pem`] wrote, or a PKCS#8 `PRIVATE KEY` and the
+    /// `CERTIFICATE` chain (end-entity first) from any other tool, in any order. This is how
+    /// an application brings an RSA certificate with the ring provider, which cannot generate
+    /// RSA keys, and how a server keeps its fingerprint across restarts.
+    ///
+    /// Checked before anything is returned:
+    /// - the key is the end-entity certificate's (its public key is the certificate's);
+    /// - the certificate is valid at `now` and has not expired: `expires` is the `EXPIRES`
+    ///   block when there is one, else the certificate's `notAfter` (W3C webrtc-pc 4.9.2: an
+    ///   expired certificate cannot be used);
+    /// - when `expected_fingerprints` is not empty, the certificate has one of them (the
+    ///   fingerprint the application has published, RFC 8122 section 5).
+    ///
+    /// # Errors
+    ///
+    /// `InvalidPEM` for text that is not such PEM or a key that does not belong to the
+    /// certificate, `ErrCertificateExpired`, `ErrFingerprintMismatch`, and the provider's
+    /// error for a key it cannot import.
+    pub fn import_pem(
+        pem_str: &str,
+        crypto: &dyn RTCCrypto,
+        now: SystemTime,
+        expected_fingerprints: &[RTCDtlsFingerprint],
+    ) -> Result<Self> {
+        use x509_parser::prelude::FromDer;
+        let blocks = pem::parse_many(pem_str).map_err(|e| Error::InvalidPEM(e.to_string()))?;
+        let mut expires_block = None;
+        let mut private_key = None;
+        let mut chain = vec![];
+        for block in blocks {
+            match block.tag() {
+                "EXPIRES" => {
+                    let bytes: [u8; 8] = block.contents().try_into().map_err(|_| {
+                        Error::InvalidPEM("the EXPIRES block is not 8 bytes".into())
+                    })?;
+                    expires_block = Some(
+                        SystemTime::UNIX_EPOCH
+                            .checked_add(Duration::from_secs(u64::from_le_bytes(bytes)))
+                            .ok_or_else(|| Error::InvalidPEM("EXPIRES out of range".into()))?,
+                    );
+                }
+                "PRIVATE KEY" | "PRIVATE_KEY" => private_key = Some(block.contents().to_vec()),
+                "CERTIFICATE" => chain.push(CertificateDer::from(block.contents().to_vec())),
+                other => {
+                    return Err(Error::InvalidPEM(format!("unexpected PEM block '{other}'")));
+                }
+            }
+        }
+        let private_key =
+            private_key.ok_or_else(|| Error::InvalidPEM("no PRIVATE KEY block".into()))?;
+        let end_entity = chain
+            .first()
+            .ok_or_else(|| Error::InvalidPEM("no CERTIFICATE block".into()))?;
+        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(end_entity.as_ref())
+            .map_err(|e| Error::InvalidPEM(format!("the certificate does not parse: {e}")))?;
+
+        let signing_key = [
+            SignatureScheme::EcdsaP256Sha256,
+            SignatureScheme::Ed25519,
+            SignatureScheme::RsaPkcs1Sha256,
+        ]
+        .into_iter()
+        .filter(|scheme| crypto.supports(crypto::CryptoAlgorithm::SigningKeyImport(*scheme)))
+        .find_map(|scheme| crypto.import_signing_key(scheme, &private_key).ok())
+        .ok_or_else(|| Error::InvalidPEM("the PKCS#8 key cannot be imported".into()))?;
+        if signing_key.public_key().bytes != parsed.public_key().subject_public_key.data.as_ref() {
+            return Err(Error::InvalidPEM(
+                "the private key does not belong to the certificate".into(),
+            ));
+        }
+
+        let not_before = SystemTime::UNIX_EPOCH
+            + Duration::from_secs(parsed.validity().not_before.timestamp().max(0) as u64);
+        let not_after = SystemTime::UNIX_EPOCH
+            + Duration::from_secs(parsed.validity().not_after.timestamp().max(0) as u64);
+        let expires = expires_block.unwrap_or(not_after);
+        if now < not_before || now >= not_after || now >= expires {
+            return Err(Error::ErrCertificateExpired);
+        }
+
+        let certificate = Self::from_signing_key(chain, signing_key, expires);
+        if !expected_fingerprints.is_empty() {
+            let matches = expected_fingerprints.iter().any(|expected| {
+                FINGERPRINT_HASHES
+                    .iter()
+                    .find(|(name, _, _)| name.eq_ignore_ascii_case(&expected.algorithm))
+                    .and_then(|&(_, algorithm, _)| certificate.fingerprint(crypto, algorithm).ok())
+                    .is_some_and(|actual| actual.value.eq_ignore_ascii_case(&expected.value))
+            });
+            if !matches {
+                return Err(Error::ErrFingerprintMismatch);
+            }
+        }
+        Ok(certificate)
+    }
+
     /// Creates an RTCCertificate from an existing DTLS certificate.
     ///
     /// Use this method when you have a pre-existing certificate (e.g., loaded from
@@ -655,6 +814,43 @@ impl RTCCertificate {
         Self {
             dtls_certificate,
             expires,
+        }
+    }
+
+    /// W3C webrtc-pc 4.9.2 serialization steps: the certificate's `expires`, its certificate
+    /// chain, `origin` (the origin it is serialized for) and a handle to its private key,
+    /// **not** the key itself. [`Self::deserialize`] makes the same certificate again from
+    /// it, with the same key: the handle is a shared reference to the provider's key object,
+    /// so a key an HSM or KMS holds stays there, and no key bytes are in the serialized form
+    /// (its `Debug` output names none either). For storage outside the process, where only
+    /// bytes can go, see [`Self::serialize_pem`], which does write the key out.
+    pub fn serialize(&self, origin: &str) -> RTCSerializedCertificate {
+        RTCSerializedCertificate {
+            expires: self.expires,
+            certificate: self
+                .dtls_certificate
+                .certificate
+                .iter()
+                .map(|der| der.as_ref().to_vec())
+                .collect(),
+            origin: origin.to_owned(),
+            handle: RTCCertificateKeyHandle(self.dtls_certificate.private_key.clone()),
+        }
+    }
+
+    /// W3C webrtc-pc 4.9.2 deserialization steps: the certificate `serialized` was made from,
+    /// with its `expires` and the key its handle refers to.
+    pub fn deserialize(serialized: &RTCSerializedCertificate) -> Self {
+        Self {
+            dtls_certificate: dtls::crypto::Certificate {
+                certificate: serialized
+                    .certificate
+                    .iter()
+                    .map(|der| rustls::pki_types::CertificateDer::from(der.clone()))
+                    .collect(),
+                private_key: serialized.handle.0.clone(),
+            },
+            expires: serialized.expires,
         }
     }
 
@@ -1158,6 +1354,159 @@ mod test {
 
         assert_eq!(loaded_cert, cert);
 
+        Ok(())
+    }
+
+    /// The non-standard PEM export and import: a re-imported certificate has the same
+    /// fingerprints and expiry; an expired certificate, a key of another certificate and a
+    /// fingerprint the certificate does not have are refused; an RSA key and certificate
+    /// (what an application brings to the ring provider) import too.
+    #[test]
+    fn exported_pem_imports_with_its_fingerprints_and_is_checked() -> Result<()> {
+        let provider = default_test_provider()?;
+        let crypto = provider.crypto();
+        let now = SystemTime::now();
+        let cert = RTCCertificate::generate_certificate(
+            crypto,
+            SignatureScheme::EcdsaP256Sha256,
+            None,
+            now,
+        )?;
+        let pem = cert.export_pem()?;
+        assert!(pem.contains("-----BEGIN PRIVATE KEY-----"), "{pem}");
+        let fingerprints = cert.get_fingerprints(crypto)?;
+        let back = RTCCertificate::import_pem(&pem, crypto, now, &fingerprints)?;
+        assert_eq!(back, cert);
+        assert_eq!(back.get_fingerprints(crypto)?, fingerprints);
+        let expires_secs = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_secs()
+        };
+        assert_eq!(expires_secs(back.expires), expires_secs(cert.expires));
+
+        // Expired by its EXPIRES block.
+        let later = cert.expires + Duration::from_secs(1);
+        assert!(matches!(
+            RTCCertificate::import_pem(&pem, crypto, later, &[]),
+            Err(Error::ErrCertificateExpired)
+        ));
+        // A fingerprint it does not have.
+        let wrong = RTCDtlsFingerprint {
+            algorithm: "sha-256".to_owned(),
+            value: ["00"; 32].join(":"),
+        };
+        assert!(matches!(
+            RTCCertificate::import_pem(&pem, crypto, now, &[wrong]),
+            Err(Error::ErrFingerprintMismatch)
+        ));
+        // The key of another certificate.
+        let other = RTCCertificate::generate_certificate(
+            crypto,
+            SignatureScheme::EcdsaP256Sha256,
+            None,
+            now,
+        )?
+        .export_pem()?;
+        let key_of = |pem: &str| {
+            pem::parse_many(pem)
+                .expect("pem")
+                .into_iter()
+                .filter(|b| b.tag() != "CERTIFICATE")
+                .collect::<Vec<_>>()
+        };
+        let certificate_of = |pem: &str| {
+            pem::parse_many(pem)
+                .expect("pem")
+                .into_iter()
+                .filter(|b| b.tag() == "CERTIFICATE")
+                .collect::<Vec<_>>()
+        };
+        let mixed = pem::encode_many(&[key_of(&other), certificate_of(&pem)].concat());
+        assert!(matches!(
+            RTCCertificate::import_pem(&mixed, crypto, now, &[]),
+            Err(Error::InvalidPEM(_))
+        ));
+
+        // An RSA key with a certificate made for it, without an EXPIRES block: the
+        // certificate's notAfter is the expiry.
+        let rsa_der = pem::parse(include_str!(
+            "../../../tests/testdata/rsa_2048_offerer_key.pem"
+        ))
+        .expect("pem")
+        .into_contents();
+        let rsa_key = crypto
+            .import_signing_key(SignatureScheme::RsaPkcs1Sha256, &rsa_der)
+            .map_err(crypto_error)?;
+        let mut params = CertificateParams::new(vec!["webrtc.rs".to_owned()])
+            .map_err(|e| Error::Other(e.to_string()))?;
+        params.not_before = (now - Duration::from_secs(60)).into();
+        params.not_after = (now + Duration::from_secs(3600)).into();
+        let rsa = RTCCertificate::generate_from_signing_key(
+            params,
+            SignatureScheme::RsaPkcs1Sha256,
+            rsa_key,
+        )?;
+        let plain = pem::encode_many(
+            &[
+                vec![pem::Pem::new("PRIVATE KEY", rsa_der.clone())],
+                certificate_of(&rsa.export_pem()?),
+            ]
+            .concat(),
+        );
+        let imported = RTCCertificate::import_pem(&plain, crypto, now, &[])?;
+        assert_eq!(
+            imported.get_fingerprints(crypto)?,
+            rsa.get_fingerprints(crypto)?
+        );
+        assert!(imported.expires <= now + Duration::from_secs(3600));
+        Ok(())
+    }
+
+    /// W3C webrtc-pc 4.9.2: serialization keeps expires, the certificate, the origin and a
+    /// handle to the key, not the key; deserialization gives the same certificate back, which
+    /// signs with the same key (the same fingerprints, the same public key).
+    #[test]
+    fn serialization_keeps_a_key_handle_and_not_the_key() -> Result<()> {
+        let crypto = default_test_provider()?;
+        let cert = RTCCertificate::generate_certificate(
+            crypto.crypto(),
+            SignatureScheme::EcdsaP256Sha256,
+            None,
+            SystemTime::now(),
+        )?;
+        let serialized = cert.serialize("https://example.org");
+        assert_eq!(serialized.expires, cert.expires);
+        assert_eq!(serialized.origin, "https://example.org");
+        assert_eq!(
+            serialized.certificate,
+            vec![cert.dtls_certificate.certificate[0].as_ref().to_vec()]
+        );
+        // No key bytes anywhere in it: the PKCS#8 form of the key is not in its debug output.
+        let pkcs8 = cert
+            .dtls_certificate
+            .private_key
+            .signing_key
+            .to_pkcs8_der()
+            .expect("an exportable test key");
+        let shown = format!("{serialized:?}");
+        assert!(
+            !shown.contains(&format!("{:?}", pkcs8.as_slice())),
+            "{shown}"
+        );
+        assert!(shown.contains("RTCCertificateKeyHandle(..)"));
+
+        let back = RTCCertificate::deserialize(&serialized);
+        assert_eq!(back, cert);
+        assert_eq!(back.expires, cert.expires);
+        assert_eq!(
+            back.get_fingerprints(crypto.crypto())?,
+            cert.get_fingerprints(crypto.crypto())?
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &back.dtls_certificate.private_key.signing_key,
+            &cert.dtls_certificate.private_key.signing_key
+        ));
         Ok(())
     }
 

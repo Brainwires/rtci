@@ -78,6 +78,9 @@ pub(crate) struct RTCRtpReceiverInternal {
     /// What the public `getParameters` returns while the negotiated direction does not
     /// receive: the parameters without codecs (W3C [[ReceiveCodecs]] is empty then).
     not_receiving_parameters: Option<RTCRtpReceiveParameters>,
+    /// The `a=fmtp` parameters of each format of the local description's section (W3C
+    /// webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from it).
+    local_fmtp: Vec<(PayloadType, String)>,
     /// The last absolute capture time each synchronization source sent (webrtc-extensions
     /// 8), what packets without one are interpolated from.
     capture_references: Vec<CaptureReference>,
@@ -120,6 +123,7 @@ impl RTCRtpReceiverInternal {
             rtcp_reduced_size: false,
             last_returned_parameters: None,
             not_receiving_parameters: None,
+            local_fmtp: Vec::new(),
             capture_references: vec![],
             remote_track_id: String::new(),
             remote_streams: vec![],
@@ -231,6 +235,11 @@ impl RTCRtpReceiverInternal {
         &self.track
     }
 
+    /// The local description's formats of this receiver's section, with their parameters.
+    pub(crate) fn set_local_fmtp(&mut self, local: Vec<(PayloadType, String)>) {
+        self.local_fmtp = local;
+    }
+
     /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
     /// negotiated state again.
     pub(crate) fn invalidate_parameters(&mut self) {
@@ -319,6 +328,15 @@ impl RTCRtpReceiverInternal {
             negotiated_header_extensions,
             false,
         );
+        for codec in &mut parameters.rtp_parameters.codecs {
+            if let Some((_, fmtp)) = self
+                .local_fmtp
+                .iter()
+                .find(|(payload_type, _)| *payload_type == codec.payload_type)
+            {
+                codec.rtp_codec.sdp_fmtp_line = fmtp.clone();
+            }
+        }
         self.not_receiving_parameters.insert(parameters)
     }
 

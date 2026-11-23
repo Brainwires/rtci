@@ -1195,6 +1195,12 @@ fn sender_fmtp_follows_the_remote_description_and_receiver_fmtp_the_local() -> T
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(now, offer.clone())?;
     answerer.set_remote_description(now, offer.clone())?;
+    // The answerer sends too, so that the offerer's receiver receives.
+    let answered = answerer.get_transceivers().next().expect("a transceiver");
+    answerer
+        .rtp_transceiver(answered)
+        .expect("transceiver")
+        .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
     let answer = answerer.create_answer(None)?;
     answerer.set_local_description(now, answer.clone())?;
     let opus_fmtp = answer
@@ -1213,7 +1219,7 @@ fn sender_fmtp_follows_the_remote_description_and_receiver_fmtp_the_local() -> T
             .iter()
             .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
             .map(|c| c.rtp_codec.sdp_fmtp_line.clone())
-            .expect("Opus")
+            .unwrap_or_else(|| panic!("no Opus in {codecs:?}"))
     };
     let sent = opus(
         &offerer

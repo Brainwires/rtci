@@ -576,3 +576,31 @@ fn a_data_channels_priority_defaults_to_low_and_reaches_the_peer() -> Result<()>
     assert_eq!(channel.priority_type(), RTCPriorityType::Medium);
     Ok(())
 }
+
+/// W3C 6.2.3 "announce the data channel instance": a channel the peer opened in-band gets a
+/// `datachannel` event, then `open`; the channel this side created gets `open` only.
+#[test]
+fn a_channel_the_peer_opened_is_announced_before_it_opens() -> Result<()> {
+    let (pair, first) = Pair::connected(RTCDtlsRole::Client, "first")?;
+    let remote = *pair.answerer.opened().first().expect("opened");
+    let position = |events: &[RTCDataChannelEvent], wanted: &RTCDataChannelEvent| {
+        events.iter().position(|e| e == wanted)
+    };
+    let announced = position(
+        &pair.answerer.events,
+        &RTCDataChannelEvent::OnDataChannel(remote),
+    )
+    .expect("the answerer announces the channel");
+    let opened = position(&pair.answerer.events, &RTCDataChannelEvent::OnOpen(remote))
+        .expect("and opens it");
+    assert!(announced < opened, "{:?}", pair.answerer.events);
+    assert!(
+        !pair
+            .offerer
+            .events
+            .contains(&RTCDataChannelEvent::OnDataChannel(first)),
+        "{:?}",
+        pair.offerer.events
+    );
+    Ok(())
+}

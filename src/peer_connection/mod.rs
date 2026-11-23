@@ -3432,8 +3432,22 @@ impl RTCPeerConnection {
         let dtls_role = self.dtls_transport().role();
         if matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server) {
             let max_channels = self.sctp_transport().max_channels();
-            self.data_channels
-                .assign_stream_ids(dtls_role, max_channels)?;
+            if let Err(err) = self
+                .data_channels
+                .assign_stream_ids(dtls_role, max_channels)
+            {
+                // W3C createDataChannel: "If there is no available ID, throw an
+                // OperationError", and the channel does not exist: it is not left in
+                // [[DataChannels]].
+                if self
+                    .data_channels
+                    .get(&id)
+                    .is_some_and(|dc| dc.stream_id.is_none())
+                {
+                    self.data_channels.remove(&id);
+                }
+                return Err(err);
+            }
         }
         // Only an association that is up. One still in its handshake (both sides initiate
         // when DTLS connects, so there is always such a moment) dials every waiting channel

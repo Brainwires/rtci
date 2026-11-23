@@ -116,6 +116,7 @@ pub mod rtp_receiver;
 pub mod rtp_sender;
 #[cfg(test)]
 mod rtp_transceiver_test;
+pub mod sframe_transform;
 
 /// SSRC (Synchronization Source) identifier.
 ///

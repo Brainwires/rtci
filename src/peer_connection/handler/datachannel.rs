@@ -371,7 +371,19 @@ impl<'a>
                     }
                 };
 
-                self.data_channels.insert(data_channel_internal);
+                let channel_id = self.data_channels.insert(data_channel_internal);
+                // W3C 6.2.3 "announce the data channel instance": fire `datachannel` with the
+                // channel, then announce it open.
+                self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport,
+                    message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                        ApplicationMessage {
+                            data_channel_id: channel_id,
+                            data_channel_event: DataChannelEvent::Announced,
+                        },
+                    )),
+                });
                 true
             };
 
@@ -1926,6 +1938,19 @@ mod tests {
             }
 
             read(&mut handler, open_message(0, peer_id));
+            // W3C 6.2.3: the channel is announced (`datachannel`), then opened.
+            assert!(
+                matches!(
+                    handler.poll_read().map(|m| m.message),
+                    Some(RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                        ApplicationMessage {
+                            data_channel_event: DataChannelEvent::Announced,
+                            ..
+                        }
+                    )))
+                ),
+                "{role}: the peer's OPEN on stream {peer_id} announces a channel"
+            );
             assert!(
                 matches!(
                     handler.poll_read().map(|m| m.message),

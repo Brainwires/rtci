@@ -60,6 +60,7 @@ fn a_dcep_open_after_close_announces_no_channel() -> Result<()> {
     assert!(!open.is_empty(), "the DCEP OPEN is written");
 
     channel_events(&mut pair.answerer);
+    let known = pair.answerer.pc.data_channel_ids();
     pair.answerer.pc.close()?;
     channel_events(&mut pair.answerer);
     hand(&mut pair.answerer, open, now);
@@ -71,7 +72,14 @@ fn a_dcep_open_after_close_announces_no_channel() -> Result<()> {
             .any(|e| matches!(e, RTCDataChannelEvent::OnOpen(_))),
         "{events:?}"
     );
-    assert!(pair.answerer.pc.data_channel_ids().is_empty());
+    assert!(
+        pair.answerer
+            .pc
+            .data_channel_ids()
+            .iter()
+            .all(|id| known.contains(id)),
+        "no channel joined [[DataChannels]]"
+    );
     Ok(())
 }
 

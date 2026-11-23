@@ -471,6 +471,31 @@ fn frames_above_max_bitrate_are_dropped_whole() -> Result<()> {
     Ok(())
 }
 
+/// W3C webrtc 5.2.5 `maxFramerate`: of a 30 frame/s source the sender lets 10 frames a
+/// second go with `maxFramerate` 10, each whole, every third one.
+#[test]
+fn frames_above_max_framerate_are_dropped_whole() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
+    {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let mut parameters = sender.get_parameters().clone();
+        parameters.encodings[0].max_framerate = Some(10.0);
+        sender.set_parameters(parameters, None)?;
+    }
+    let limited = send_video(&mut world, sender, 1)?;
+    assert!(
+        limited.iter().all(|&(_, packets)| packets == 2),
+        "frames are dropped whole: {limited:?}"
+    );
+    let timestamps: Vec<u32> = limited.iter().map(|&(ts, _)| ts).collect();
+    assert_eq!(
+        timestamps,
+        (0..10).map(|frame| frame * 9000).collect::<Vec<_>>(),
+        "every third frame"
+    );
+    Ok(())
+}
+
 /// W3C webrtc-priority 3.2 / webrtc 5.2.5 with the default interceptors: the congestion
 /// controller's target reaches the sender as its share (`target_bitrates`), at most its
 /// `maxBitrate`, and the outbound stream's `targetBitrate` statistic reports the same.

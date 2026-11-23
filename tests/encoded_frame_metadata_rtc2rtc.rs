@@ -756,12 +756,14 @@ fn a_key_frame_request_reaches_the_sender_as_a_fir_and_an_event() -> Result<()> 
     world.run_until(now + Duration::from_millis(50))?;
     let _ = key_frame_requests(&mut world.peers[0]);
 
+    // RFC 4585 section 3.5.2: after an early RTCP packet the next one waits for the regular
+    // RTCP interval, so each request is given time to go out.
     assert!(request_key_frame(&mut world)?);
     world.pump()?;
-    world.run_until(world.now + Duration::from_millis(50))?;
+    world.run_until(world.now + Duration::from_secs(3))?;
     assert!(request_key_frame(&mut world)?);
     world.pump()?;
-    world.run_until(world.now + Duration::from_millis(50))?;
+    world.run_until(world.now + Duration::from_secs(3))?;
     let firs: Vec<(u32, u8)> = world.peers[0]
         .read_fir
         .iter()

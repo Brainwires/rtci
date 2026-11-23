@@ -198,3 +198,64 @@ fn a_dtls_failure_this_side_ended_names_the_alert_it_sent() -> Result<()> {
     assert_eq!(client.received_alert, server.sent_alert, "{client:?}");
     Ok(())
 }
+
+/// The non-standard PEM export and import (a server that keeps its DTLS fingerprint across
+/// restarts): a certificate exported and imported again has the same fingerprints, the
+/// description carries them, and DTLS completes with it, the peer seeing that certificate.
+#[test]
+fn a_reimported_pem_certificate_keeps_its_fingerprint_and_completes_dtls() -> Result<()> {
+    let provider = rtc::crypto::default_provider()?;
+    let now = SystemTime::now();
+    let original = RTCCertificate::generate_certificate(
+        provider.crypto(),
+        SignatureScheme::EcdsaP256Sha256,
+        None,
+        now,
+    )?;
+    let pem = original.export_pem()?;
+    let fingerprints = original.get_fingerprints(provider.crypto())?;
+    let restarted = RTCCertificate::import_pem(&pem, provider.crypto(), now, &fingerprints)?;
+    assert_eq!(restarted.get_fingerprints(provider.crypto())?, fingerprints);
+
+    let start = Instant::now();
+    let offerer = Peer::with_configuration(
+        "127.0.0.1:52140".parse()?,
+        engine(RTCDtlsRole::Server),
+        RTCConfigurationBuilder::new()
+            .with_certificates(vec![restarted])
+            .build(),
+        start,
+    )?;
+    let answerer = Peer::new("127.0.0.1:52141".parse()?, RTCDtlsRole::Client, start)?;
+    let mut pair = Pair::of(offerer, answerer, start);
+    pair.offerer.pc.create_data_channel("data", None)?;
+    let (offer, _) = pair.negotiate()?;
+    let sha256 = fingerprints
+        .iter()
+        .find(|f| f.algorithm == "sha-256")
+        .expect("a SHA-256 fingerprint");
+    assert!(
+        offer.sdp.to_ascii_lowercase().contains(&format!(
+            "a=fingerprint:sha-256 {}",
+            sha256.value.to_ascii_lowercase()
+        )),
+        "{}",
+        offer.sdp
+    );
+    assert!(pair.run_until(|p| p.offerer.connected() && p.answerer.connected())?);
+    let presented = pair
+        .answerer
+        .pc
+        .sctp()
+        .expect("sctp")
+        .transport()
+        .get_remote_certificates()
+        .first()
+        .cloned()
+        .expect("a remote certificate");
+    assert_eq!(
+        presented,
+        original.dtls_certificate.certificate[0].as_ref().to_vec()
+    );
+    Ok(())
+}

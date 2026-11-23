@@ -288,3 +288,47 @@ fn a_local_relay_candidate_carries_its_relay_protocol_and_url() {
     );
     assert_eq!(host.url, None);
 }
+
+/// W3C webrtc-pc 4.2.3 `iceTransportPolicy` "relay": only the candidates the policy permits
+/// are surfaced (and used for checks). A host candidate the application gathers raises no
+/// `icecandidate` event; a relay one does.
+#[test]
+fn under_the_relay_policy_only_relay_candidates_are_surfaced() {
+    use rtc::peer_connection::configuration::RTCIceTransportPolicy;
+    use rtc::peer_connection::transport::RTCIceCandidateType;
+
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+                .build(),
+        )
+        .build(Instant::now())
+        .expect("a peer connection");
+    while pc.poll_event().is_some() {}
+    let surfaced = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+        std::iter::from_fn(|| pc.poll_event())
+            .filter_map(|event| match event {
+                RTCPeerConnectionEvent::OnIceCandidateEvent(e) => e.candidate.map(|c| c.typ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let _ = pc.add_local_candidate(RTCIceCandidateInit {
+        candidate: "candidate:1 1 udp 2130706431 192.168.1.100 54321 typ host".to_owned(),
+        ..Default::default()
+    });
+    assert!(
+        surfaced(&mut pc).is_empty(),
+        "the host candidate is not surfaced"
+    );
+    pc.add_local_candidate(RTCIceCandidateInit {
+        candidate:
+            "candidate:2 1 udp 16777215 198.51.100.7 41005 typ relay raddr 203.0.113.1 rport 40000"
+                .to_owned(),
+        url: Some("turn:turn.example.com:3478".to_owned()),
+        ..Default::default()
+    })
+    .expect("a relay candidate");
+    assert_eq!(surfaced(&mut pc), vec![RTCIceCandidateType::Relay]);
+}

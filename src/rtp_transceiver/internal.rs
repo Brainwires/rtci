@@ -652,6 +652,36 @@ impl RTCRtpTransceiverInternal {
         }
     }
 
+    /// W3C webrtc-pc 5.2.9: a sender's codecs take their `sdpFmtpLine` from the remote
+    /// description. `remote` is this transceiver's section of it: each send codec of the
+    /// same payload type there takes that format's parameters.
+    pub(crate) fn take_send_fmtp_from_remote(&mut self, remote: &MediaDescription) {
+        let Ok(remote_codecs) = crate::peer_connection::sdp::codecs_from_media_description(remote)
+        else {
+            return;
+        };
+        if let Some(sender) = self.sender.as_mut() {
+            sender.take_send_fmtp(&remote_codecs);
+        }
+    }
+
+    /// W3C webrtc-pc 5.2.9: a receiver's codecs take their `sdpFmtpLine` from the local
+    /// description; `local` is this transceiver's section of it.
+    pub(crate) fn take_receive_fmtp_from_local(&mut self, local: &MediaDescription) {
+        let Ok(local_codecs) = crate::peer_connection::sdp::codecs_from_media_description(local)
+        else {
+            return;
+        };
+        if let Some(receiver) = self.receiver.as_mut() {
+            receiver.set_local_fmtp(
+                local_codecs
+                    .into_iter()
+                    .map(|c| (c.payload_type, c.rtp_codec.sdp_fmtp_line))
+                    .collect(),
+            );
+        }
+    }
+
     pub(crate) fn set_rtcp_reduced_size(&mut self, reduced_size: bool) {
         self.rtcp_reduced_size = reduced_size;
         if let Some(sender) = self.sender.as_mut() {

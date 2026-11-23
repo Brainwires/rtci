@@ -1681,6 +1681,17 @@ impl RTCPeerConnection {
                 && has_bundle_attribute(offer, offered, ATTR_KEY_RTCPRSIZE)
                 && has_bundle_attribute(answer, answered, ATTR_KEY_RTCPRSIZE);
             self.rtp_transceivers[i].set_rtcp_reduced_size(reduced_size);
+            // W3C 5.2.9: the send codecs' parameters are the remote description's, the
+            // receive codecs' the local description's.
+            if !is_rejected_media(answered) {
+                let (local, remote) = if we_offered {
+                    (offered, answered)
+                } else {
+                    (answered, offered)
+                };
+                self.rtp_transceivers[i].take_send_fmtp_from_remote(remote);
+                self.rtp_transceivers[i].take_receive_fmtp_from_local(local);
+            }
             // RFC 8285 section 6: a stream mixes one- and two-byte header extensions only when
             // the offer and the answer both have `a=extmap-allow-mixed`.
             let mixed = !is_rejected_media(answered)

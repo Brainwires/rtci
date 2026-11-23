@@ -95,12 +95,20 @@ pub(crate) struct RTCRtpSenderInternal {
     allocated_bitrates: Vec<(SSRC, f64)>,
     /// The `maxBitrate` budget of each encoding that has one (`admit_under_max_bitrate`).
     max_bitrate_limiters: Vec<MaxBitrateLimiter>,
+    /// The `maxFramerate` state of each video encoding that has one
+    /// (`admit_under_max_framerate`): the RTP timestamp of the last frame admitted, and the
+    /// frame being sent with whether it was admitted.
+    max_framerate_limiters: Vec<MaxFramerateLimiter>,
     /// The SSRCs moved after a collision (RFC 3550 section 8.2, RFC 5576 section 5): each new
     /// SSRC with the ones it replaced, oldest first. Descriptions say `a=ssrc:<new>
     /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
     /// with an old SSRC goes out with the new one.
     previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
 }
+
+/// An encoding's `maxFramerate` state: its SSRC, the RTP timestamp of the last frame
+/// admitted, and the frame being sent with whether it was admitted.
+type MaxFramerateLimiter = (SSRC, u32, Option<(u32, bool)>);
 
 /// W3C webrtc 5.2.5 `maxBitrate` on the wire: "a frame will always be sent as fast as
 /// possible, but frames may be dropped until bitrate is low enough. Thus, even a bitrate of
@@ -178,6 +186,46 @@ impl RTCRtpSenderInternal {
             limiter.budget_bits -= bits;
         }
         admitted
+    }
+
+    /// W3C webrtc 5.2.5 `maxFramerate` on the wire: the engine has no encoder, so of the frames
+    /// the application writes (the packets of one RTP timestamp) the sender drops those that
+    /// would take the encoding above `max_framerate` frames per second. Frames are spaced by
+    /// their RTP timestamps (video's 90 kHz clock, RFC 3551 section 5): a frame goes when at
+    /// least `1 / max_framerate` (less 1 %, for timestamps rounded by the source) has passed
+    /// since the last frame that went, so a source at that rate or below is untouched.
+    pub(crate) fn admit_under_max_framerate(
+        &mut self,
+        ssrc: SSRC,
+        timestamp: u32,
+        max_framerate: Option<f64>,
+    ) -> bool {
+        const VIDEO_CLOCK_RATE: f64 = 90_000.0;
+        let Some(max_framerate) = max_framerate.filter(|rate| *rate > 0.0) else {
+            self.max_framerate_limiters.retain(|(s, _, _)| *s != ssrc);
+            return true;
+        };
+        let interval = (VIDEO_CLOCK_RATE / max_framerate * 0.99) as u32;
+        let Some(limiter) = self
+            .max_framerate_limiters
+            .iter_mut()
+            .find(|(s, _, _)| *s == ssrc)
+        else {
+            self.max_framerate_limiters
+                .push((ssrc, timestamp, Some((timestamp, true))));
+            return true;
+        };
+        match limiter.2 {
+            Some((frame, admitted)) if frame == timestamp => admitted,
+            _ => {
+                let admitted = timestamp.wrapping_sub(limiter.1) >= interval;
+                if admitted {
+                    limiter.1 = timestamp;
+                }
+                limiter.2 = Some((timestamp, admitted));
+                admitted
+            }
+        }
     }
 
     /// Creates a new RTP sender internal state.
@@ -287,6 +335,27 @@ impl RTCRtpSenderInternal {
     }
 
     /// Whether the sender has encodings with SSRCs to describe and send with.
+    /// Each send codec whose payload type `remote` (the remote description's codecs of the
+    /// section) has takes that codec's `sdp_fmtp_line` (W3C webrtc-pc 5.2.9).
+    pub(crate) fn take_send_fmtp(&mut self, remote: &[RTCRtpCodecParameters]) {
+        let mut changed = false;
+        for codec in &mut self.send_codecs {
+            if let Some(remote) = remote.iter().find(|r| {
+                r.payload_type == codec.payload_type
+                    && r.rtp_codec
+                        .mime_type
+                        .eq_ignore_ascii_case(&codec.rtp_codec.mime_type)
+            }) && remote.rtp_codec.sdp_fmtp_line != codec.rtp_codec.sdp_fmtp_line
+            {
+                codec.rtp_codec.sdp_fmtp_line = remote.rtp_codec.sdp_fmtp_line.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.last_returned_parameters = None;
+        }
+    }
+
     /// Drops what [`Self::get_parameters`] returned last, so that the next call reads the
     /// negotiated state again.
     pub(crate) fn invalidate_parameters(&mut self) {

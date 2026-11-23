@@ -146,3 +146,36 @@ fn a_channel_that_gets_no_id_is_closed_with_a_data_channel_failure() -> TestResu
     assert!(a.data_channel(late).is_none(), "the channel is closed");
     Ok(())
 }
+
+/// W3C createDataChannel: once the DTLS role is negotiated a new in-band channel is given its
+/// id at once; with every id of its parity taken there is none, which is an OperationError,
+/// and no channel is left in `[[DataChannels]]`.
+#[test]
+fn create_data_channel_without_an_available_id_is_refused_and_leaves_nothing() -> TestResult {
+    let mut a = peer()?;
+    let mut b = peer()?;
+    for id in 0..u16::MAX {
+        a.create_data_channel(
+            "pinned",
+            Some(RTCDataChannelInit {
+                negotiated: Some(id),
+                ..Default::default()
+            }),
+        )?;
+    }
+    let offer = a.create_offer(None)?;
+    a.set_local_description(Instant::now(), offer.clone())?;
+    b.set_remote_description(Instant::now(), offer)?;
+    let answer = b.create_answer(None)?;
+    b.set_local_description(Instant::now(), answer.clone())?;
+    a.set_remote_description(Instant::now(), answer)?;
+    let before = a.data_channel_ids().len();
+
+    let refused = a.create_data_channel("late", None).map(|dc| dc.id());
+    assert!(
+        matches!(refused, Err(rtc::shared::error::Error::ErrMaxDataChannelID)),
+        "{refused:?}"
+    );
+    assert_eq!(a.data_channel_ids().len(), before, "nothing was added");
+    Ok(())
+}

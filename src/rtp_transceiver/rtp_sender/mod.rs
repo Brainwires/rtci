@@ -653,6 +653,27 @@ impl RTCRtpSender<'_> {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
 
+        // W3C webrtc 5.2.5 maxFramerate (video): frames above the encoding's maximum rate are
+        // dropped whole.
+        if sender.kind() == RtpCodecKind::Video {
+            let max_framerate = sender
+                .send_encodings()
+                .iter()
+                .find(|e| e.rtp_coding_parameters.ssrc == Some(packet.header.ssrc))
+                .and_then(|e| e.max_framerate);
+            if !sender.admit_under_max_framerate(
+                packet.header.ssrc,
+                packet.header.timestamp,
+                max_framerate,
+            ) {
+                trace!(
+                    "rtp_sender {:?} drops RTP ssrc {} ts {}: above maxFramerate {:?}",
+                    self.id, packet.header.ssrc, packet.header.timestamp, max_framerate
+                );
+                return Ok(());
+            }
+        }
+
         // W3C webrtc 5.2.5 maxBitrate: the encoding's frames are dropped while they would
         // take it above its maximum (one frame always goes).
         let max_bitrate = sender
@@ -677,7 +698,6 @@ impl RTCRtpSender<'_> {
             );
             return Ok(());
         }
-
         // The payload types of comfort noise (13, and any the application registered) and of
         // telephone events: formats that ride an audio stream and are not media.
         let auxiliary_payload_types: Vec<u8> = std::iter::once(13)

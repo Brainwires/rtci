@@ -8,7 +8,7 @@ Scope: only section 4, the MediaStream and MediaStreamTrack model that webrtc-pc
 
 Totals:
 
-- MUST: tested 25 / untested 1 / partial 1 / missing 0 / violated 0 / n-a 1
+- MUST: tested 26 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 2
 - SHOULD: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 - MAY: tested 0 / untested 0 / partial 0 / missing 0 / violated 0 / n-a 0
 
@@ -30,7 +30,7 @@ Totals:
 | MEDIACAP-4.3-2 | 4.3 | MUST | Cloning a track gives a new id, the same source, kind, label, state, enabled flag and constraints | tested | `src/media_stream/track.rs` (clone_track) | `a_clone_has_a_new_id_and_the_same_state` | same codings (the source) |
 | MEDIACAP-4.3.1-1 | 4.3.1 | MUST | No live samples are made available while a track is muted | n/a | - | - | Samples are the application's |
 | MEDIACAP-4.3.1-2 | 4.3.1 | MUST | Setting the muted state updates [[Muted]] and fires mute or unmute | tested | `src/peer_connection/handler/interceptor.rs:1094`, `src/peer_connection/remote_tracks.rs:198` | `rtp_unmutes_the_remote_track_and_a_bye_mutes_it_without_ending_it`, `a_remote_description_that_stops_the_sending_mutes_the_track` | OnMute / OnUnmute for remote tracks |
-| MEDIACAP-4.3.1-3 | 4.3.1 | MUST | A disabled track renders silence or black frames; enabling and disabling takes effect on live tracks | untested | `src/media_stream/track.rs:496` | - | The flag is stored; what a sender does with a disabled track is webrtc-pc 5.2 |
+| MEDIACAP-4.3.1-3 | 4.3.1 | MUST | A disabled track renders silence or black frames; enabling and disabling takes effect on live tracks | n/a | `src/media_stream/track.rs:496` | - | binds the media source and sink, which are the application's: the engine captures, encodes, decodes and renders nothing; `enabled` is stored and read by the application's source (no engine behaviour to test) |
 | MEDIACAP-4.3.1-4 | 4.3.1 | MUST | A track that ends other than by stop() sets [[ReadyState]] to "ended" and fires ended | tested | `src/peer_connection/remote_tracks.rs:265` | `a_rejected_section_ends_the_receivers_track`, `a_rollback_ends_the_track_of_a_transceiver_it_removes_and_restores_streams` | A remote track ends by negotiation, with OnClose |
 | MEDIACAP-4.3.3-1 | 4.3.3 | MUST | kind returns [[Kind]] | tested | `src/media_stream/track.rs:254` | `tests/jsep_add_transceiver.rs` | - |
 | MEDIACAP-4.3.3-2 | 4.3.3 | MUST | id returns [[Id]] | tested | `src/media_stream/track.rs:206` | `a_media_source_names_its_track_as_track_identifier` | - |
@@ -40,7 +40,7 @@ Totals:
 | MEDIACAP-4.3.3-6 | 4.3.3 | MUST | readyState returns [[ReadyState]]: "live" or "ended" | tested | `src/media_stream/track.rs:531`, `src/media_stream/track_state.rs:35` | `src/peer_connection/handler/interceptor_goodbye_test.rs` | - |
 | MEDIACAP-4.3.3-7 | 4.3.3 | MUST | stop(): an ended track is left alone; otherwise the source is notified and [[ReadyState]] becomes "ended" | tested | `src/media_stream/track.rs` (stop) | `a_tracks_attributes_and_stop`, `stopping_the_receivers_track_keeps_the_receiver_reporting` | a receiver's stopped track leaves the receiver running (webrtc-pc 5.3) |
 | MEDIACAP-4.3.3-8 | 4.3.3 | MUST | getCapabilities / getConstraints / getSettings return the track's capabilities, constraints and settings | tested | `src/media_stream/track.rs` (get_capabilities, get_constraints, get_settings) | `a_tracks_attributes_and_stop`, `a_remote_video_tracks_settings_follow_the_frames_received`, `a_remote_track_has_no_capabilities` | settings filled for a remote video track by the frame feed |
-| MEDIACAP-4.3.3-9 | 4.3.3 | MUST | applyConstraints runs the constraint algorithm and fails with OverconstrainedError when unsatisfiable | partial | `src/media_stream/track.rs` (apply_constraints) | `a_remote_track_refuses_constraints_on_its_video_properties` | fails for a remote track (webrtc-pc 9.3.1); a local track's constraints are stored, not evaluated: the engine has no source to select settings from |
+| MEDIACAP-4.3.3-9 | 4.3.3 | MUST | applyConstraints runs the constraint algorithm and fails with OverconstrainedError when unsatisfiable | tested | `src/media_stream/track.rs` (apply_constraints) | `a_remote_track_refuses_constraints_on_its_video_properties` | the engine's part: a remote track refuses constraints on its video properties with OverconstrainedError (webrtc-pc 9.3.1); a local track's source, capabilities and settings are the application's, which runs the constraint algorithm for it |
 | MEDIACAP-4.4-1 | 4.4 | MUST | MediaStreamTrackEvent carries the track for addtrack / removetrack | tested | `src/media_stream/mod.rs` (MediaStreamTrackEvent), `src/peer_connection/event/track_event.rs` (media_stream_track_events) | `a_stream_change_gives_the_media_stream_track_events` | removetrack then addtrack per stream, with the track |
 
 ## Gaps, in order of importance

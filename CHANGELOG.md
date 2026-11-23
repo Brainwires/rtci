@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): `RTCIceCandidateInit` has a new public field,
+  `relay_protocol: Option<RTCIceServerTransportProtocol>` (`relayProtocol` of
+  RTCLocalIceCandidateInit); struct literals without `..Default::default()` add
+  `relay_protocol: None`.
+
 - **sframe**: the SFrame RTP payload format and `[[useSFrame]]` (pc-18), pinned to
   draft-ietf-avtcore-rtp-sframe-03 (21 October 2026).
   - `rtc::rtp::codec::sframe`: `SFramePayloader` (the S / E / T payload descriptor, origin
@@ -1183,6 +1188,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **rtp** (pc-24, W3C webrtc-pc 5.2, 5.3): `getParameters().rtp_parameters.header_extensions`
+  of a sender (receiver) lists only the extensions its transceiver's m= section negotiated in
+  a sending (receiving) direction (`[[NegotiatedHeaderExtensions]]`), and none before an answer
+  was applied; it listed every extension of the kind negotiated anywhere on the connection, or
+  every registered one before negotiation. Video senders drop whole frames above an
+  encoding's `max_framerate` (W3C 5.2.5), judged by RTP timestamp.
+- **data channels** (pc-24, W3C webrtc-pc 6.1, 6.1.2, 6.2.3): a channel the peer opens in-band
+  raises `RTCDataChannelEvent::OnDataChannel(id)` (the `datachannel` event) before its
+  `OnOpen`. `create_data_channel` with no id left (DTLS role known) fails with
+  `ErrMaxDataChannelID` and registers nothing; the channel used to stay registered. An answer
+  that closes the SCTP association fires `OnSctpTransportStateChange(Closed)`.
+- **ice** (pc-24, W3C webrtc-pc 4.8.1): a surfaced local relay candidate has
+  `relay_protocol` (from `RTCIceCandidateInit::relay_protocol`, else its TURN `url`) and `url`;
+  other candidates have neither.
+
 - **sctp / data channels** (pc-22, W3C webrtc-pc 4.4.1.6): `RTCPeerConnection::sctp()` is the
   transport from the first applied offer (local or remote) that describes an SCTP association,
   in state "connecting" until the association is up; it was `None` until the association
@@ -1590,6 +1610,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **pc** (pc-24): `RTCPeerConnection::data_channel_ids()` (W3C `[[DataChannels]]`);
+  `SettingEngineBuilder::with_sctp_max_streams` (the SCTP stream count asked for and accepted,
+  hence `maxChannels`); `RTCCertificate::{serialize, deserialize}` with
+  `RTCSerializedCertificate` and `RTCCertificateKeyHandle` (W3C webrtc-pc 4.9.2: expires, the
+  chain, the origin and a handle to the key, never the key's bytes);
+  `RTCCertificate::{export_pem, import_pem}` (not part of any W3C specification): the key and
+  certificate as standard `PRIVATE KEY` / `CERTIFICATE` PEM blocks with an `EXPIRES` block, so
+  a server keeps its DTLS fingerprint across restarts; the import checks that the key is the
+  certificate's, that the certificate is valid and not expired at the given time, and
+  optionally that it has an expected fingerprint. It also takes PEM from other tools, which is
+  how an RSA certificate is brought to the ring provider.
 
 - **encoded-transform** (pc-20): per-frame metadata of received frames (W3C
   webrtc-encoded-transform 4). `RTCRtpReceiver::encoded_frame_metadata(packets)` takes the RTP
