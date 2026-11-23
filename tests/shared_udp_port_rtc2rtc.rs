@@ -48,6 +48,8 @@ fn host(addr: SocketAddr) -> RTCIceCandidateInit {
             addr.ip(),
             addr.port()
         ),
+        sdp_mid: Some("0".to_owned()),
+        sdp_mline_index: Some(0),
         ..Default::default()
     }
 }
