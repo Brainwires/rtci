@@ -220,6 +220,66 @@ test("Rust offers media, the browser answers and decodes it", async ({ page }) =
   expect(r.audio?.packetsReceived || 0, JSON.stringify(r.audio)).toBeGreaterThan(100);
 });
 
+// ---- media that overtakes its answer (RFC 3264 5.1, RFC 9429 4.1.11 / 5.9) ----
+
+test("early media: the browser sends before Rust has its answer, and nothing is lost", async ({ page }) => {
+  const r = await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, {});
+    s.pc.createDataChannel("first");
+    await s.negotiate();
+    await s.connected();
+    // The track the browser sends in the section Rust offers to receive: a remote offer's
+    // section takes a transceiver addTrack() made (RFC 9429 5.10).
+    const stream = Interop.canvasStream();
+    s.pc.addTrack(stream.getVideoTracks()[0], stream);
+    const sentVideo = async () => {
+      let sent = 0;
+      (await s.pc.getStats()).forEach((x) => {
+        if (x.type === "outbound-rtp" && x.kind === "video") sent += x.packetsSent || 0;
+      });
+      return sent;
+    };
+    // The browser sends from the moment it has applied its answer; the answer itself is held
+    // back until at least ten packets have left and have had time to arrive.
+    let sentBeforeAnswer = 0;
+    s.beforeAnswer = async () => {
+      await Interop.until(async () => (await sentVideo()) >= 10, 15000, "ten video packets sent before the answer");
+      await Interop.sleep(500);
+      sentBeforeAnswer = await sentVideo();
+    };
+    s.send({ type: "request-offer", receive: ["video"] });
+    await Interop.until(() => s.answersSent > 0, 30000, "the held answer");
+    const video = (report) => (report.coverage || []).filter((c) => (c.key || "").startsWith("video:"));
+    let report;
+    await Interop.until(async () => {
+      report = await s.report();
+      return video(report).reduce((n, c) => n + c.received, 0) >= sentBeforeAnswer + 30;
+    }, 20000, "the video sent before and after the answer, at Rust").catch(() => {});
+    const offer = s.descriptions.filter(([dir, type]) => dir === "received" && type === "offer").pop();
+    s.close();
+    return {
+      sentBeforeAnswer,
+      rtpBeforeAnswer: report?.rtpBeforeAnswer,
+      discardedRtp: report?.discardedRtp,
+      coverage: video(report || {}),
+      rtp: report?.rtp,
+      offered: offer ? Interop.mlines(offer[2]) : [],
+      errors: s.errors,
+      rustErrors: report?.errors,
+    };
+  }, WS);
+  const diag = JSON.stringify(r);
+  expect(r.errors, diag).toEqual([]);
+  expect(r.offered.filter((m) => m.kind === "video").map((m) => m.dir), diag).toEqual(["recvonly"]);
+  expect(r.sentBeforeAnswer, diag).toBeGreaterThanOrEqual(10);
+  // Delivered while Rust's offer was still pending.
+  expect(r.rtpBeforeAnswer, diag).toBeGreaterThan(0);
+  // Every packet the browser had sent when it released the answer reached Rust's track, and
+  // the stream has no hole (the newest 50 sequence numbers are left out: still in flight).
+  expect(r.coverage.reduce((n, c) => n + c.received, 0), diag).toBeGreaterThanOrEqual(r.sentBeforeAnswer);
+  for (const c of r.coverage) expect(c.missing, diag).toBe(0);
+});
+
 // ---- transceiver stop() and m-line reuse (RFC 9429 5.2.2, W3C 5.4) ----
 
 test("transceiver stop, then a new transceiver reuses or keeps the m-line", async ({ page }) => {
