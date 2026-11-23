@@ -1953,7 +1953,7 @@ impl RTCPeerConnection {
         let negotiated_media_engine = match &remote_description.parsed {
             Some(parsed) => {
                 let mut media_engine = self.media_engine.clone();
-                media_engine.update_from_remote_description(parsed)?;
+                media_engine.update_from_remote_description_merging(parsed, answers)?;
                 Some(media_engine)
             }
             None => None,

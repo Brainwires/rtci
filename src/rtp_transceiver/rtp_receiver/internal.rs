@@ -553,7 +553,15 @@ impl RTCRtpReceiverInternal {
                     .sframe_payload_types
                     .contains(&codec.payload_type)
             });
-        let media_engine_codecs = media_engine.codecs_for_section(kind, sframe);
+        Self::preferred_among(codecs, media_engine.codecs_for_section(kind, sframe))
+    }
+
+    /// The formats of `media_engine_codecs` that the codec preferences `codecs` keep, in the
+    /// preferences' order (all of them without preferences).
+    pub(crate) fn preferred_among(
+        codecs: &[RTCRtpCodecParameters],
+        media_engine_codecs: Vec<RTCRtpCodecParameters>,
+    ) -> Vec<RTCRtpCodecParameters> {
         if codecs.is_empty() {
             return media_engine_codecs;
         }

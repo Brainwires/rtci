@@ -412,6 +412,12 @@ versions that support it. Raising it is a deliberate change of the manifest.
   (`tests/fixtures/browser-sdp/`: Firefox, webrtc-rs 0.17; Chromium, Firefox and WebKit as
   the interop harness records them) are run through these checks, and a form a real writer
   uses that the strict grammar refuses must be a listed tolerance.
+- SDP (jsep14): a later offer lists every available format (RFC 9429 section 5.2.2), not
+  the formats of the last answer only (upstream offered the negotiated list once a kind was
+  negotiated); the formats a remote answer accepts are negotiated without multi-codec
+  negotiation too.
+- RFC 7728 (jsep14): `set_parameters` turning an encoding off is a local pause (PAUSED sent)
+  when pause and resume is negotiated (RFC 8853 section 5.2).
 
 - SDP (jsep12): a rollback with SDP contents is refused (RFC 9429 section 4.1.10; upstream
   ignored them; `with_rollback_content_ignored(true)` restores that); a later offer that stops

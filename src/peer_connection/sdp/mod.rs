@@ -1348,7 +1348,13 @@ impl RTCPeerConnection {
             media = media.with_property_attribute(ATTR_KEY_SFRAME.to_owned());
         }
 
-        let codecs = transceiver.get_codecs(media_engine);
+        // RFC 9429 section 5.2.2: a later offer lists every available format, not only the
+        // negotiated ones.
+        let codecs = if is_offer {
+            transceiver.get_offer_codecs(media_engine)
+        } else {
+            transceiver.get_codecs(media_engine)
+        };
         // Which repair flows the section has a format for: a sender's RTX / FlexFEC SSRCs are
         // described only then (codec preferences may leave either out). The FEC flow is the
         // FlexFEC coder's: draft-03 (`video/flexfec-03`) or RFC 8627 (`video/flexfec`), each

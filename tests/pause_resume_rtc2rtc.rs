@@ -594,3 +594,40 @@ fn a_layer_the_answer_marks_paused_starts_paused() -> Result<()> {
     );
     Ok(())
 }
+
+/// Peer 0's one encoding made active or inactive with `set_parameters`.
+fn set_active(world: &mut World, active: bool) -> Result<()> {
+    let id = world.peers[0].pc.get_senders().next().expect("a sender");
+    let mut sender = world.peers[0].pc.rtp_sender(id).expect("the sender");
+    let mut parameters = sender.get_parameters().clone();
+    parameters.encodings[0].active = active;
+    sender.set_parameters(parameters, None)?;
+    Ok(())
+}
+
+/// RFC 8853 section 5.2: a stream that is not sent is treated as an RFC 7728 local pause
+/// (section 6.4). An encoding made inactive (W3C `active` false) pauses its stream and the
+/// receiver learns PAUSED; made active again it resumes and the receiver sees it play.
+#[test]
+fn an_encoding_made_inactive_is_a_local_pause_and_active_again_a_resume() -> Result<()> {
+    let mut world = World::connected(Pause::On, Pause::On)?;
+    world.send(5)?;
+    let ssrc = world.ssrc;
+    set_active(&mut world, false)?;
+    world.send(5)?;
+    assert_eq!(world.handle(0).state(ssrc), Some(PauseState::LocalPaused));
+    assert_eq!(
+        world.handle(1).remote_state(ssrc),
+        Some(RemotePauseState::Paused)
+    );
+    assert_eq!(world.on_the_wire.len(), 5);
+    set_active(&mut world, true)?;
+    world.send(5)?;
+    assert_eq!(world.on_the_wire.len(), 10);
+    assert_eq!(world.handle(0).state(ssrc), Some(PauseState::Playing));
+    assert_eq!(
+        world.handle(1).remote_state(ssrc),
+        Some(RemotePauseState::Playing)
+    );
+    Ok(())
+}

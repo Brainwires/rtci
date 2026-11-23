@@ -237,6 +237,36 @@ fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// What the peer connection tells the [`PauseResumeInterceptor`] while it runs: a local
+/// stream it sends made inactive or active again (W3C webrtc-pc `RTCRtpEncodingParameters`
+/// `active`), which RFC 8853 section 5.2 has treated as an RFC 7728 local pause (section 6.4,
+/// announced with PAUSED) and resume. A stream that did not negotiate pause and resume is
+/// not affected.
+///
+/// It travels as an [`Attribute::Custom`] on an empty RTCP packet written into the chain
+/// ([`PauseResumeControl::into_packet`]), which the interceptor hands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PauseResumeControl {
+    /// The local stream of this SSRC is paused by local decision.
+    LocalPause(u32),
+    /// The local stream of this SSRC, paused by local decision, plays again.
+    LocalResume(u32),
+}
+
+impl PauseResumeControl {
+    /// The packet that carries this to the pause-resume interceptor when written into the
+    /// chain at `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(self))),
+        }
+    }
+}
+
 /// The application's side of [`PauseResumeInterceptor`]: asks a remote stream to pause or
 /// resume, pauses its own streams by local decision, and reads where each stream is. A
 /// request takes effect at the interceptor's next timeout, which the interceptor asks for at
@@ -950,6 +980,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PauseResumeInterceptor {
 
     fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         self.now = Some(self.now.map_or(msg.now, |n| n.max(msg.now)));
+        if let Some(control) = msg.message.custom::<PauseResumeControl>() {
+            lock(&self.shared).commands.push(match *control {
+                PauseResumeControl::LocalPause(ssrc) => Command::LocalPause(ssrc),
+                PauseResumeControl::LocalResume(ssrc) => Command::LocalResume(ssrc),
+            });
+        }
         // A local pause asked for before this packet applies to it.
         self.run_commands(msg.now);
         if let Packet::Rtp(packet) = &mut msg.message.packet

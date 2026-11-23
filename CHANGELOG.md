@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep**: gaps of the JSEP rows (`conf/jsep-55-gaps`, jsep14).
+  - A later offer lists every available format, not only the negotiated ones (RFC 9429
+    section 5.2.2): the formats of the most recent answer first in its order, then every
+    other registered format the local preferences allow (the application's
+    `setCodecPreferences`, or the codec of the track a sender was made for). The answer's
+    format list no longer limits later offers. Negotiated payload types are kept; a format
+    that comes back keeps its registered payload type unless a negotiated format has it, and
+    then takes a free dynamic one (its RTX `apt` follows). The formats a remote answer
+    accepts are now negotiated also without `MediaEngine::set_multi_codec_negotiation`, so
+    a format that comes back is sent and received (RFC 3264 section 6.1).
+  - An encoding made inactive with `set_parameters` (W3C `active` false) is an RFC 7728
+    local pause of its stream when pause is negotiated: PAUSED is announced and the receiver
+    sees the stream paused; made active again it resumes (RFC 8853 section 5.2). New:
+    `rtc_interceptor::PauseResumeControl`.
 - **jsep**: train fixes for the sweep branches (`conf/jsep-54-train-fixes`, jsep14). No
   engine change.
   - Real descriptions through the remote-description checks: `tests/fixtures/browser-sdp/`

@@ -371,8 +371,8 @@ pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;
 pub use pause_resume::{
     PAUSE_DEFAULT_REPORT_INTERVAL, PAUSE_DEFAULT_ROUND_TRIP_TIME, PAUSED_REPETITIONS,
-    PauseCapability, PauseResumeBuilder, PauseResumeHandle, PauseResumeInterceptor, PauseState,
-    RTCP_FB_CCM_PAUSE, RemotePauseState, pause_config_answer,
+    PauseCapability, PauseResumeBuilder, PauseResumeControl, PauseResumeHandle,
+    PauseResumeInterceptor, PauseState, RTCP_FB_CCM_PAUSE, RemotePauseState, pause_config_answer,
 };
 pub use registry::{Registry, Slot};
 pub use report::receiver::{RTCP_FB_RRTR, ReceiverReportBuilder, ReceiverReportInterceptor};
