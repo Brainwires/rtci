@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **audit**: JSEP umbrella rows closed by their children (`conf/jsep-60-umbrellas`, jsep16).
+  No engine change. RFC8859-4.8-1, A-7, A-29, A-33, RFC9429-5.2.1-57, 5.3.1-11, 5.5-5, 5.2-1
+  and WEBRTC-4.4.2-43 are `tested` (every child row is); RFC9429-4.1.8-1 and 5.3-1 are
+  `setting` and 4.1.9-2 `conflict`, as their open children are.
+
 - **jsep / sdp**: small JSEP rows (`conf/jsep-59-small-rows`, jsep16).
   - W3C error names: `Error::dom_exception_name` (`InvalidAccessError` for the RFC 9429
     section 5.8.3 refusals, `OperationError` for a description that does not parse,
