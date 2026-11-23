@@ -16,6 +16,9 @@ pub mod opaque;
 pub mod opus;
 /// Redundant audio data, RED ([RFC 2198]).
 pub mod red;
+/// The SFrame RTP payload format (draft-ietf-avtcore-rtp-sframe-03): the descriptor, the
+/// payloader and the reassembly of section 5.2.
+pub mod sframe;
 /// SMPTE ST 336 (KLV) payload ([RFC 6597]).
 pub mod smpte336m;
 /// Scalable video coding: the scalability modes of W3C webrtc-svc and their layer structures.

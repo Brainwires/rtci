@@ -527,6 +527,11 @@ impl Conn13 {
         self.plaintext_send_sequence = sequence;
     }
 
+    /// The sequence number of the next plaintext (epoch 0) record this side sends.
+    pub(crate) fn plaintext_send_sequence(&self) -> u64 {
+        self.plaintext_send_sequence
+    }
+
     pub(crate) fn suite(&self) -> Result<Suite13> {
         self.suite.ok_or(Error::ErrCipherSuiteUnset)
     }

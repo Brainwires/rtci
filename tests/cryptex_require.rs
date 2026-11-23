@@ -15,11 +15,11 @@ use rtc::shared::error::Error;
 #[test]
 fn require_refuses_an_answer_without_cryptex() -> TestResult {
     let mut offerer = default_peer()?;
-    offerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require);
+    offerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
     offerer.add_track(video_track("video", 0x0c0c_0001))?;
     let mut answerer = default_peer()?;
     // The answerer doesn't do Cryptex, so its answer has no a=cryptex.
-    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Disable);
+    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Disable)?;
 
     let now = Instant::now();
     let offer = offerer.create_offer(None)?;
@@ -45,12 +45,14 @@ fn require_refuses_an_answer_without_cryptex() -> TestResult {
 #[test]
 fn require_refuses_an_offer_without_cryptex() -> TestResult {
     let mut offerer = default_peer()?;
+    // The default policy ("negotiate") offers Cryptex; this offerer does not do it.
+    offerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Disable)?;
     offerer.add_track(video_track("video", 0x0c0c_0002))?;
     let offer = offerer.create_offer(None)?;
     assert!(!offer.sdp.contains("a=cryptex"), "{}", offer.sdp);
 
     let mut answerer = default_peer()?;
-    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require);
+    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
     let err = answerer
         .set_remote_description(Instant::now(), offer)
         .expect_err("an offer without Cryptex under `Require`");
@@ -63,10 +65,10 @@ fn require_refuses_an_offer_without_cryptex() -> TestResult {
 #[test]
 fn require_accepts_cryptex_both_ways() -> TestResult {
     let mut offerer = default_peer()?;
-    offerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require);
+    offerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Require)?;
     offerer.add_track(video_track("video", 0x0c0c_0003))?;
     let mut answerer = default_peer()?;
-    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate);
+    answerer.set_rtp_header_encryption_policy(RTCRtpHeaderEncryptionPolicy::Negotiate)?;
 
     jsep_common::exchange(&mut offerer, &mut answerer)?;
     assert!(offerer.cryptex_negotiated());

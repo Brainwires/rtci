@@ -202,6 +202,7 @@
 //!
 //! // When receiving remote candidate from signaling channel
 //! let remote_candidate = RTCIceCandidateInit {
+//!     sdp_mline_index: Some(0),
 //!     candidate: "candidate:1 1 UDP 2130706431 192.168.1.100 54321 typ host".to_string(),
 //!     ..Default::default()
 //! };
@@ -251,6 +252,7 @@ pub mod identity;
 mod internal;
 mod object_model;
 pub mod priority;
+mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 mod states_events;
@@ -291,13 +293,14 @@ use crate::peer_connection::sdp::MediaDescriptionExt;
 use crate::peer_connection::sdp::section_multiplexes_rtcp;
 use crate::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::peer_connection::sdp::{
-    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, check_answer_against_offer,
-    check_extmap_ids, check_extmap_levels, codecs_from_media_description,
-    discard_stray_bundle_only, effective_direction, extract_fingerprints, extract_ice_details,
-    extract_tls_id, get_mid_value, get_peer_direction, has_ice_trickle_option, has_rtcp_mux,
-    has_rtp_media, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
-    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_application_media,
-    media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_ice_options,
+    ATTR_KEY_RTCP_MUX_ONLY, RemoteIceDetails, SctpNegotiation, candidate_line_ufrag,
+    check_answer_against_offer, check_extmap_ids, check_extmap_levels,
+    codecs_from_media_description, discard_stray_bundle_only, effective_direction,
+    extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value, get_peer_direction,
+    has_ice_trickle_option, has_rtcp_mux, has_rtp_media, inherit_session_extmap,
+    inherit_session_rtcp_xr, insert_media_line, is_lite_set, is_live_rtp_section,
+    is_rejected_media, is_sdp_token, is_unknown_application_media, media_ice_credentials,
+    negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates, remote_ice_options,
     remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin, validate_application_media_section,
     validate_dtls_attributes,
 };
@@ -817,6 +820,9 @@ pub struct RTCPeerConnection {
     /// descriptions `restart_ice` was called with. Offers restart ICE while the current local
     /// description still has one of them (`ice_restart_pending`).
     pub(crate) ice_credentials_to_replace: Vec<String>,
+    /// Whether `set_local_description` has succeeded once (a rollback included): from then
+    /// on `set_configuration` refuses another `iceCandidatePoolSize` (W3C 4.4.1.5).
+    pub(crate) local_description_was_set: bool,
     /// The last completed offer/answer rejected every m-section, which closes the transport
     /// (RFC 8843 §7.1.3, RFC 9429 §5.10): the next description that sets one up with new ICE
     /// credentials starts new ICE and DTLS associations.
@@ -1304,14 +1310,28 @@ impl RTCPeerConnection {
             return Err(Error::ErrConnectionClosed);
         }
 
-        // JSEP 5.4
+        // W3C 4.4.2 setLocalDescription: without a type, "offer" in stable, have-local-offer
+        // and have-remote-pranswer, "answer" otherwise (RTCLocalSessionDescriptionInit's type
+        // is optional).
+        if local_description.sdp_type == RTCSdpType::Unspecified {
+            local_description.sdp_type = match self.signaling_state {
+                RTCSignalingState::Stable
+                | RTCSignalingState::HaveLocalOffer
+                | RTCSignalingState::HaveRemotePranswer => RTCSdpType::Offer,
+                _ => RTCSdpType::Answer,
+            };
+        }
+        // Without an sdp, an offer or answer made now: W3C uses [[LastCreatedOffer]] /
+        // [[LastCreatedAnswer]] only while it still matches the connection's state, and a
+        // description created now always does. Creating it also records it as the last one,
+        // which the checks below expect (JSEP 5.4).
         if local_description.sdp.is_empty() {
             match local_description.sdp_type {
                 RTCSdpType::Answer | RTCSdpType::Pranswer => {
-                    local_description.sdp.clone_from(&self.last_answer);
+                    local_description.sdp = self.create_answer(None)?.sdp;
                 }
                 RTCSdpType::Offer => {
-                    local_description.sdp.clone_from(&self.last_offer);
+                    local_description.sdp = self.create_offer(None)?.sdp;
                 }
                 RTCSdpType::Rollback => {
                     // WebRTC spec: rollback SDP is ignored, empty is allowed
@@ -1344,6 +1364,7 @@ impl RTCPeerConnection {
         if applied.is_err() {
             self.restore_description_snapshot(snapshot);
         } else {
+            self.local_description_was_set = true;
             self.after_local_description(sdp_type);
         }
         applied
@@ -1403,6 +1424,17 @@ impl RTCPeerConnection {
             self.apply_remote_transport(now, &parsed, false, Some(pending.ice_restart))?;
         }
 
+        // W3C 4.4.1.4 (the transport's [[IceRole]], RFC 8445 rules): a local offer makes an
+        // undetermined role controlling; once determined it is not modified here.
+        if local_description.sdp_type == RTCSdpType::Offer && !self.ice_transport().role_determined
+        {
+            if self.ice_transport().role() != RTCIceRole::Controlling {
+                self.ice_transport_mut().set_role(RTCIceRole::Controlling);
+            }
+            self.pipeline_context.stats.transport.ice_role = RTCIceRole::Controlling;
+            self.ice_transport_mut().role_determined = true;
+        }
+
         let we_answer = local_description.sdp_type == RTCSdpType::Answer;
         if we_answer && let Some(parsed_local_description) = &local_description.parsed {
             // WebRTC Spec 1.0 https://www.w3.org/TR/webrtc/
@@ -1452,7 +1484,11 @@ impl RTCPeerConnection {
             if let Some(remote_description) = self.remote_description().cloned()
                 && let Some(parsed_remote_description) = remote_description.parsed.as_ref()
             {
-                self.apply_negotiated_rtcp(parsed_remote_description, parsed_local_description);
+                self.apply_negotiated_rtcp(
+                    parsed_remote_description,
+                    parsed_local_description,
+                    false,
+                );
                 self.apply_negotiated_simulcast(
                     parsed_remote_description,
                     parsed_local_description,
@@ -1856,6 +1892,7 @@ impl RTCPeerConnection {
                     self.ice_transport_mut().set_role(role);
                     self.pipeline_context.stats.transport.ice_role = role;
                 }
+                self.ice_transport_mut().role_determined = true;
 
                 // RFC 8842 section 3.1: the DTLS association goes on, across an ICE restart
                 // too, unless the description changes the roles, the fingerprints or the
@@ -1886,10 +1923,25 @@ impl RTCPeerConnection {
                 }
             }
 
-            // The description's candidate lines: candidates the application supplied, as
-            // much as those it trickles.
-            for candidate in candidates {
-                self.add_signalled_remote_candidate(candidate)?;
+            // Two lite agents, this one controlled: an offer with `a=remote-candidates` is the
+            // controlling agent's updated candidate exchange (RFC 8445 section 8.2, RFC 8839
+            // section 4.4.2.2): its candidates replace the remote ones, and the agent selects
+            // again among them.
+            let lite_update = !we_offer
+                && remote_is_lite
+                && self.setting_engine.candidates.ice_lite
+                && transports_started
+                && !remote_candidates(parsed_remote_description)?.is_empty();
+            if lite_update {
+                self.ice_transport_mut()
+                    .agent
+                    .replace_remote_candidates(now, candidates);
+            } else {
+                // The description's candidate lines: candidates the application supplied, as
+                // much as those it trickles.
+                for candidate in candidates {
+                    self.add_signalled_remote_candidate(candidate)?;
+                }
             }
             // `a=end-of-candidates` (RFC 8838 section 14): the candidates above were the
             // generation's last. The agent ignores later ones and can fail without
@@ -1917,6 +1969,7 @@ impl RTCPeerConnection {
                     remote_dtls_parameters,
                 )?;
                 self.dtls_transport_mut().remote_tls_id = remote_tls_id;
+                self.ice_transport_mut().role_determined = true;
             }
             // RFC 8445 section 14.2: "Both agents MUST use the higher out of the two
             // proposed values"; the peer's is its `a=ice-pacing` (RFC 8839 section 5.5),
@@ -1955,6 +2008,17 @@ impl RTCPeerConnection {
         let Some(RemoteIceDetails { ufrag, pwd, .. }) = extract_ice_details(parsed)? else {
             return Ok(());
         };
+        // W3C 4.4.1.4 ([[IceRole]], RFC 8445 rules): a remote offer sets an undetermined
+        // role now, though the transports start with the answer: controlled, or controlling
+        // when the offerer is lite and this side is not.
+        if !self.ice_transport().role_determined {
+            let role = self.local_ice_role(is_lite_set(parsed), false);
+            if role != self.ice_transport().role() {
+                self.ice_transport_mut().set_role(role);
+            }
+            self.pipeline_context.stats.transport.ice_role = role;
+            self.ice_transport_mut().role_determined = true;
+        }
         let transports_started = self.ice_transport().state() != RTCIceTransportState::New;
         let ice_restart = transports_started
             && (self.transport_closed
@@ -2128,6 +2192,8 @@ impl RTCPeerConnection {
         if extract_ice_details(parsed)?.is_some() {
             extract_fingerprints(parsed)?;
         }
+        // RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed".
+        remote_candidates(parsed)?;
         Ok(())
     }
 
@@ -2384,6 +2450,9 @@ impl RTCPeerConnection {
                 }
             }
 
+            // A remote description that describes one of this side's SSRCs (RFC 5576 5).
+            self.resolve_signalled_ssrc_collisions(parsed_remote_description);
+
             // What the remote side says about bandwidth, section by section.
             self.apply_remote_bandwidth(parsed_remote_description);
 
@@ -2402,12 +2471,31 @@ impl RTCPeerConnection {
                     .and_then(|desc| desc.parsed.clone())
                     .as_ref()
             {
-                self.apply_negotiated_rtcp(parsed_local_description, parsed_remote_description);
+                self.apply_negotiated_rtcp(
+                    parsed_local_description,
+                    parsed_remote_description,
+                    true,
+                );
                 self.apply_negotiated_simulcast(
                     parsed_local_description,
                     parsed_remote_description,
                     false,
                 );
+                // The updated candidate exchange of two lite agents is complete (RFC 8445
+                // section 8.2) once an offer that carried it is answered.
+                if self
+                    .pipeline_context
+                    .ice_handler_context
+                    .lite_candidate_update
+                    .is_some()
+                    && !remote_candidates(parsed_local_description)
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    self.pipeline_context
+                        .ice_handler_context
+                        .lite_candidate_update = None;
+                }
 
                 // we_offer: we create_offer() and set_local_description() first
                 // then, after call set_remote_description here,
@@ -2505,13 +2593,31 @@ impl RTCPeerConnection {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The candidate is not empty and has neither `sdp_mid` nor `sdp_mline_index`
+    ///   ([`Error::TypeError`])
     /// - No remote description has been set
     /// - The candidate string is invalid
+    ///
+    /// A candidate for a media description whose transceiver is stopped is ignored.
     ///
     /// # Specification
     ///
     /// See [addIceCandidate](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-addicecandidate!overload-1)
     pub fn add_remote_candidate(&mut self, remote_candidate: RTCIceCandidateInit) -> Result<()> {
+        // W3C addIceCandidate: a candidate (not end-of-candidates) that names neither a media
+        // description's mid nor its index is a TypeError, before anything else is looked at.
+        if !remote_candidate.candidate.is_empty()
+            && remote_candidate.sdp_mid.is_none()
+            && remote_candidate.sdp_mline_index.is_none()
+        {
+            return Err(Error::TypeError(
+                "a candidate needs sdpMid or sdpMLineIndex".to_owned(),
+            ));
+        }
+        // W3C 4.4.1.2: an operation chained on a closed connection is an InvalidStateError.
+        if self.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
         let Some(parsed) = self
             .remote_description()
             .and_then(|r| r.parsed.as_ref())
@@ -2557,6 +2663,31 @@ impl RTCPeerConnection {
             None
         };
 
+        // Without a usernameFragment, the line's own `ufrag` extension names its generation
+        // (RFC 8838 section 9: a candidate is tied to an ICE session): one of another
+        // generation is stale and is ignored.
+        if remote_candidate.username_fragment.is_none()
+            && let Some(line_ufrag) = candidate_line_ufrag(candidate_value)
+        {
+            let known = match section {
+                Some(i) => {
+                    media_ice_credentials(parsed, &parsed.media_descriptions[i]).0
+                        == Some(line_ufrag)
+                }
+                None => parsed
+                    .media_descriptions
+                    .iter()
+                    .any(|m| media_ice_credentials(parsed, m).0 == Some(line_ufrag)),
+            };
+            if !known {
+                unmarshal_candidate(candidate_value)?;
+                log::warn!(
+                    "ignoring remote candidate: its ufrag {line_ufrag} names another ICE generation"
+                );
+                return Ok(());
+            }
+        }
+
         // A usernameFragment must be one of the corresponding media description's (any media
         // description's when there is none): a candidate of another ICE generation is refused.
         if let Some(ufrag) = remote_candidate.username_fragment.as_deref() {
@@ -2572,6 +2703,18 @@ impl RTCPeerConnection {
             if !known {
                 return Err(Error::ErrIceCandidateUsernameFragmentMismatch);
             }
+        }
+
+        // W3C addIceCandidate, "add the ICE candidate": when the media description's
+        // transceiver is stopped, the operation resolves without doing anything.
+        if let Some(i) = section
+            && let Some(mid) = get_mid_value(&parsed.media_descriptions[i])
+            && self
+                .rtp_transceivers
+                .iter()
+                .any(|t| t.mid().as_deref() == Some(mid) && t.is_stopped())
+        {
+            return Ok(());
         }
 
         if candidate_value.is_empty() {
@@ -2673,6 +2816,69 @@ impl RTCPeerConnection {
         );
         self.trickled_remote_candidates += 1;
         Ok(())
+    }
+
+    /// W3C `RTCIceTransport.getRemoteCandidates()`: the candidates in the remote description
+    /// (the description's own and those `addIceCandidate` wrote into it since), once each,
+    /// with the `sdpMid`, `sdpMLineIndex` and `usernameFragment` of their media section. A
+    /// peer-reflexive candidate the ICE agent learned from a connectivity check is not in the
+    /// description and is not listed (webrtc-pc 5.6: "will not expose peer reflexive
+    /// candidates since they are not in the remote description").
+    pub(crate) fn remote_description_candidates(&self) -> Vec<transport::RTCIceCandidate> {
+        let Some(parsed) = self
+            .pending_remote_description
+            .as_ref()
+            .or(self.current_remote_description.as_ref())
+            .and_then(|d| d.parsed.as_ref())
+        else {
+            return vec![];
+        };
+        let mut seen: Vec<&str> = vec![];
+        let mut candidates = vec![];
+        for (index, media) in parsed.media_descriptions.iter().enumerate() {
+            for value in media
+                .attributes
+                .iter()
+                .filter(|a| a.key == ATTR_KEY_CANDIDATE)
+                .filter_map(|a| a.value.as_deref())
+            {
+                if seen.contains(&value) {
+                    continue;
+                }
+                seen.push(value);
+                let Ok(candidate) = unmarshal_candidate(value) else {
+                    continue;
+                };
+                let mut candidate = transport::RTCIceCandidate::from(&candidate);
+                candidate.sdp_mid = get_mid_value(media).map(ToOwned::to_owned);
+                candidate.sdp_mline_index = u16::try_from(index).ok();
+                candidate.username_fragment =
+                    media_ice_credentials(parsed, media).0.map(str::to_owned);
+                candidates.push(candidate);
+            }
+        }
+        candidates
+    }
+
+    /// W3C `RTCIceTransport.getLocalParameters()`: the ICE parameters of the local description
+    /// (pending, else current), `None` while there is none. Read from the description's first
+    /// media section, the section of the one (BUNDLE) transport.
+    pub(crate) fn local_description_ice_parameters(&self) -> Option<transport::RTCIceParameters> {
+        let parsed = self
+            .pending_local_description
+            .as_ref()
+            .or(self.current_local_description.as_ref())?
+            .parsed
+            .as_ref()?;
+        let (ufrag, pwd) = parsed
+            .media_descriptions
+            .first()
+            .map(|media| media_ice_credentials(parsed, media))?;
+        Some(transport::RTCIceParameters {
+            username_fragment: ufrag?.to_owned(),
+            password: pwd?.to_owned(),
+            ice_lite: false,
+        })
     }
 
     /// Adds `a=<key>[:<value>]` to the remote description's media section `index`, in the
@@ -2778,6 +2984,10 @@ impl RTCPeerConnection {
     /// [`RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent`]: crate::peer_connection::event::RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent
     /// [`RTCIceCandidate::end_of_candidates`]: crate::peer_connection::transport::RTCIceCandidate::end_of_candidates
     pub fn add_local_candidate(&mut self, local_candidate: RTCIceCandidateInit) -> Result<()> {
+        // A closed connection surfaces no candidate (W3C 4.4.2 close: no more events).
+        if self.is_closed() {
+            return Err(Error::ErrConnectionClosed);
+        }
         let candidate_value = match local_candidate.candidate.strip_prefix("candidate:") {
             Some(s) => s,
             None => local_candidate.candidate.as_str(),
@@ -2846,13 +3056,27 @@ impl RTCPeerConnection {
         now: Instant,
         pair: &crate::peer_connection::transport::RTCIceCandidatePair,
     ) -> Result<()> {
-        if self.is_closed() {
+        if self.is_closed() || self.ice_transport().agent.proposal_pending() {
             return Err(Error::InvalidStateError);
         }
         let (local, remote) = self.listed_candidate_pair(pair)?;
         self.ice_transport_mut()
             .agent
             .select_candidate_pair(now, &local, &remote)
+    }
+
+    /// webrtc-extensions 7: answers the `OnIceCandidatePairNominate` proposal (with
+    /// `SettingEngineBuilder::with_candidate_pair_proposals(true)`): `accept` has the agent
+    /// nominate the pair; `false` is a cancelled event, the agent does not nominate it and
+    /// keeps checking. `[[ProposalPending]]` (which `select_candidate_pair` and
+    /// `remove_candidate_pair` refuse with InvalidStateError) ends either way.
+    pub fn resolve_candidate_pair_nomination(&mut self, now: Instant, accept: bool) {
+        if self.is_closed() {
+            return;
+        }
+        self.ice_transport_mut()
+            .agent
+            .resolve_nomination_proposal(now, accept);
     }
 
     /// webrtc-extensions 7 `RTCIceTransport.removeCandidatePair(pair)`: the ICE agent stops
@@ -2868,7 +3092,7 @@ impl RTCPeerConnection {
         now: Instant,
         pair: &crate::peer_connection::transport::RTCIceCandidatePair,
     ) -> Result<()> {
-        if self.is_closed() {
+        if self.is_closed() || self.ice_transport().agent.proposal_pending() {
             return Err(Error::InvalidStateError);
         }
         let (local, remote) = self.listed_candidate_pair(pair)?;
@@ -2992,8 +3216,16 @@ impl RTCPeerConnection {
         if configuration.rtcp_mux_policy != self.configuration.rtcp_mux_policy {
             return Err(Error::ErrModifyingRTCPMuxPolicy);
         }
+        // webrtc-extensions 10.2 and 13.2: neither policy changes after construction.
+        if configuration.rtp_header_encryption_policy
+            != self.configuration.rtp_header_encryption_policy
+            || configuration.always_negotiate_data_channels
+                != self.configuration.always_negotiate_data_channels
+        {
+            return Err(Error::InvalidModificationError);
+        }
         if configuration.ice_candidate_pool_size != self.configuration.ice_candidate_pool_size
-            && self.local_description().is_some()
+            && self.local_description_was_set
         {
             return Err(Error::ErrModifyingICECandidatePoolSize);
         }
@@ -3333,6 +3565,27 @@ impl RTCPeerConnection {
         Ok(RTCRtpSenderId(self.add_rtp_transceiver(transceiver)))
     }
 
+    /// W3C `addTrack(track, ...streams)`: [`add_track`](Self::add_track), with the sender's
+    /// associated media streams set to exactly `streams` (deduplicated; empty signals no
+    /// stream, `a=msid:-`) instead of the track's own stream id, for a new sender and for a
+    /// reused one alike.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_track`](Self::add_track).
+    pub fn add_track_with_streams(
+        &mut self,
+        track: MediaStreamTrack,
+        streams: Vec<crate::media_stream::MediaStreamId>,
+    ) -> Result<RTCRtpSenderId> {
+        let sender = self.add_track(track)?;
+        if let Some(internal) = self.rtp_transceivers[sender.0].sender_mut() {
+            internal.set_streams(streams);
+        }
+        self.on_transceiver_stopped_or_streams_changed();
+        Ok(sender)
+    }
+
     /// Gives the sender of the transceiver `id`, which has no track, `track` to send, as W3C
     /// `addTrack` does for the transceiver it picks: the direction gains "send", and a
     /// transceiver a remote offer created now survives a rollback of that offer (RFC 9429,
@@ -3492,6 +3745,11 @@ impl RTCPeerConnection {
                 &implemented,
                 Error::ErrOperationError,
             )?;
+            crate::rtp_transceiver::rtp_sender::internal::validate_extension_members(
+                track.kind(),
+                &mut send_encodings,
+                Error::ErrOperationError,
+            )?;
             send_encodings
         };
         self.refuse_taken_ssrcs(&send_encodings, None)?;
@@ -3581,6 +3839,11 @@ impl RTCPeerConnection {
                 kind,
                 &mut init.send_encodings,
                 &implemented,
+                Error::ErrOperationError,
+            )?;
+            crate::rtp_transceiver::rtp_sender::internal::validate_extension_members(
+                kind,
+                &mut init.send_encodings,
                 Error::ErrOperationError,
             )?;
         }
@@ -4119,6 +4382,7 @@ mod tests {
 
             // Gather one host candidate so there is something to keep or drop.
             pc.add_local_candidate(RTCIceCandidateInit {
+                sdp_mline_index: Some(0),
                 candidate: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".to_owned(),
                 ..Default::default()
             })
@@ -4281,6 +4545,7 @@ mod tests {
         let offer = pc.create_offer(None).unwrap();
         pc.set_local_description(now, offer).unwrap();
         pc.add_local_candidate(RTCIceCandidateInit {
+            sdp_mline_index: Some(0),
             candidate: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".to_owned(),
             ..Default::default()
         })
@@ -4843,6 +5108,54 @@ a=rtcp-mux\r\n";
             username_fragment: ufrag.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    /// RFC 9429 section 5.8.2: "Any 'a=remote-candidates' attributes MUST be parsed as
+    /// specified in [RFC8839], Section 5.2, but their values are ignored".
+    #[test]
+    fn a_malformed_remote_candidates_line_refuses_the_description() {
+        let offer = audio_video_offer();
+        for (line, accepted) in [
+            (
+                "a=remote-candidates:1 192.0.2.3 45664 2 192.0.2.3 45665",
+                true,
+            ),
+            ("a=remote-candidates:1 192.0.2.3", false),
+            ("a=remote-candidates:1 192.0.2.3 port", false),
+        ] {
+            let sdp = offer
+                .sdp
+                .replacen("a=mid:", &format!("{line}\r\na=mid:"), 1);
+            let result = media_pc()
+                .set_remote_description(Instant::now(), RTCSessionDescription::offer(sdp).unwrap());
+            assert_eq!(result.is_ok(), accepted, "{line}: {result:?}");
+        }
+    }
+
+    /// RFC 8838 section 9: a trickled candidate without a usernameFragment whose line has a
+    /// `ufrag` extension naming another ICE generation is stale: ignored, not refused.
+    #[test]
+    fn a_candidate_line_whose_ufrag_names_another_generation_is_ignored() {
+        let mut pc = media_pc();
+        pc.set_remote_description(
+            Instant::now(),
+            remote(RTCSdpType::Offer, PER_SECTION_UFRAG_OFFER),
+        )
+        .unwrap();
+        let answer = pc.create_answer(None).unwrap();
+        pc.set_local_description(Instant::now(), answer).unwrap();
+
+        let line = "candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host";
+        pc.add_remote_candidate(candidate(&format!("{line} ufrag OLDG"), Some("a1"), None))
+            .expect("a stale candidate is ignored, not refused");
+        assert!(pc.ice_transport().get_remote_candidates().is_empty());
+        assert!(
+            !pc.remote_description().unwrap().sdp.contains("OLDG"),
+            "nor recorded"
+        );
+        pc.add_remote_candidate(candidate(&format!("{line} ufrag ETEn"), Some("a1"), None))
+            .unwrap();
+        assert_eq!(pc.ice_transport().get_remote_candidates().len(), 1);
     }
 
     #[test]

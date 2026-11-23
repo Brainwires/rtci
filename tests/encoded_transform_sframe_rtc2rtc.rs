@@ -314,3 +314,91 @@ fn sframe_encrypted_frames_survive_loss_through_nack_and_rtx() -> Result<()> {
     }
     Ok(())
 }
+
+/// draft-ietf-avtcore-rtp-sframe-03 sections 4, 5.1, 5.2 and 7 between two peer connections:
+/// each frame is SFrame-encrypted with the stream's per-SSRC key (derived from a shared base
+/// key on both sides), fragmented behind the SFrame payload descriptor (S, E, T = raw), sent;
+/// the receiver reassembles the packets in the order they arrive (retransmissions late
+/// included) with the section 5.2 algorithm and decrypts each frame.
+#[test]
+fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Result<()> {
+    use rtc::rtp::codec::sframe::{SFramePayloadOrigin, SFramePayloader, SFrameReassembler};
+    const FRAMES: u32 = 8;
+    let suite = CipherSuite::Aes128GcmSha256_128;
+    let (mut world, sender) = World::connected()?;
+    let (ssrc, pt) = {
+        let mut sender = world.peers[0].pc.rtp_sender(sender).expect("sender");
+        let parameters = sender.get_parameters();
+        (
+            parameters.encodings[0]
+                .rtp_coding_parameters
+                .ssrc
+                .expect("an SSRC"),
+            parameters.rtp_parameters.codecs[0].payload_type,
+        )
+    };
+    let base_key = [5u8; 16];
+    let mut encryptor = SFrameContext::with_default_provider(suite)?;
+    let ssrc_key =
+        rtc::sframe::derive_ssrc_key(encryptor.provider().crypto(), suite, &base_key, ssrc)?;
+    encryptor.add_send_key(1, ssrc_key.as_ref())?;
+    let mut decryptor = SFrameContext::with_default_provider(suite)?;
+    let receiver_key =
+        rtc::sframe::derive_ssrc_key(decryptor.provider().crypto(), suite, &base_key, ssrc)?;
+    decryptor.add_recv_key(1, receiver_key.as_ref())?;
+    world.lose = vec![(ssrc, 2004), (ssrc, 2011)];
+
+    let frame = |n: u32| -> Vec<u8> { (0..2200u32).map(|i| ((i * 3 + n) % 253) as u8).collect() };
+    let mut payloader = SFramePayloader::new(SFramePayloadOrigin::Raw);
+    let mut seq: u16 = 2000;
+    for n in 0..FRAMES {
+        let ciphertext: Bytes = encryptor.encrypt(1, b"", &frame(n))?.into();
+        let payloads = payloader.payload(1000, &ciphertext)?;
+        let count = payloads.len();
+        for (i, payload) in payloads.into_iter().enumerate() {
+            let now = world.now;
+            world.peers[0]
+                .pc
+                .rtp_sender(sender)
+                .expect("sender")
+                .write_rtp(
+                    now,
+                    rtc::rtp::Packet {
+                        header: Header {
+                            version: 2,
+                            payload_type: pt,
+                            sequence_number: seq,
+                            timestamp: 3000 * n,
+                            ssrc,
+                            marker: i + 1 == count,
+                            ..Default::default()
+                        },
+                        payload,
+                    },
+                )?;
+            seq = seq.wrapping_add(1);
+        }
+        world.pump()?;
+        let next = world.now + Duration::from_millis(33);
+        world.run_until(next)?;
+    }
+    let next = world.now + Duration::from_secs(2);
+    world.run_until(next)?;
+    assert_eq!(world.lost.len(), 2);
+
+    let mut reassembler = SFrameReassembler::default();
+    let mut frames = vec![];
+    for packet in world.peers[1].read.iter().filter(|p| p.header.ssrc == ssrc) {
+        if let Some(sframe) = reassembler.push(packet) {
+            assert_eq!(sframe.origin, SFramePayloadOrigin::Raw);
+            assert!(sframe.marker);
+            frames.push((sframe.timestamp, decryptor.decrypt(b"", &sframe.payload)?));
+        }
+    }
+    frames.sort_by_key(|(timestamp, _)| *timestamp);
+    assert_eq!(frames.len(), FRAMES as usize, "every frame completes");
+    for (n, (_, decrypted)) in frames.iter().enumerate() {
+        assert_eq!(*decrypted, frame(n as u32), "frame {n}");
+    }
+    Ok(())
+}

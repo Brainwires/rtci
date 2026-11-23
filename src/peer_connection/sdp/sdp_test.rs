@@ -104,6 +104,8 @@ fn params(
         write_ssrc_attributes_for_simulcast: false,
         ice_pacing: None,
         ls_groups: vec![],
+        selected_destination: None,
+        remote_candidates: vec![],
         rid_pause_marks: false,
     }
 }
