@@ -2024,6 +2024,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport) the new generation asks each server again, over a kept connection when there is
   one, instead of announcing the address the previous generation learned.
 
+- **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always
+  makes progress. With sec-12 every SACK that kept a_rwnd at 0 re-armed the one-RTO wait
+  before the next probe, also when it acknowledged the probe just sent, so a message larger
+  than the receiver's buffer (webrtc-rs/webrtc#822, `tests/sctp_receive_buffer_deadlock.rs`)
+  arrived at one fragment per RTO (64 KiB through 16 KiB: about a minute). A SACK that
+  acknowledges the outstanding zero window probe is now progress and the next probe goes at
+  once; only a probe the receiver drops waits, for T3-rtx and its doubling interval. The
+  receiver acknowledges a chunk it takes through its closed window at once instead of after
+  the SACK delay (the test's message arrives in 1.6 s, 9.4 s on master). With I-DATA the
+  probes finish a part-sent message before another is started, so several interleaved
+  messages that together fill the buffer still complete one at a time.
 - **sctp** (sec-12, RFC 9260 6.1 A): after a SACK with a_rwnd 0 the first zero window probe
   waits one RTO (it went at once); a SACK that keeps the window closed resets the T3-rtx
   expiry count and the path error count, so probes the receiver keeps answering never end the

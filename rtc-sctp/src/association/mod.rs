@@ -527,6 +527,12 @@ pub struct Association {
     /// RFC 9260 6.1 A: when the peer's SACK closed its window (a_rwnd 0), the first zero
     /// window probe waits one RTO from then.
     zero_window_probe_at: Option<Instant>,
+    /// The TSN of the zero window probe outstanding (RFC 9260 6.1 A): new DATA sent with
+    /// nothing in flight although rwnd did not have room for it. A SACK that acknowledges it
+    /// shows the receiver taking DATA through its closed window (the chunk that completes a
+    /// message its full buffer holds the start of), which is progress: the next probe goes
+    /// at once instead of one RTO later.
+    zero_window_probe_tsn: Option<u32>,
     /// The TSNs the last SACK showed the peer reneged on: they got their one miss indication
     /// there (RFC 9260 6.2.1 D iii), not another from the same SACK's Fast Retransmit count.
     reneged_in_last_sack: Vec<u32>,
@@ -710,6 +716,7 @@ impl Default for Association {
             t3_single_packet: false,
             fast_retransmit_marked: vec![],
             zero_window_probe_at: None,
+            zero_window_probe_tsn: None,
             reneged_in_last_sack: vec![],
             acknowledging_by_shutdown: false,
             last_advertised_window: 0,
@@ -3407,12 +3414,19 @@ impl Association {
         let can_push = self.payload_queue.can_push(d, self.peer_last_tsn);
         let mut stream_handle_data = false;
         let mut dropped_for_window = false;
+        // RFC 9260 6.1 A: after a SACK advertised a_rwnd 0, the sender sends one chunk at a
+        // time (a zero window probe) and the next only when that one is acknowledged. A
+        // delayed SACK (6.2) would hold each of them for up to the SACK delay; what this side
+        // takes then is acknowledged at once.
+        let window_was_closed = self.last_advertised_window == 0;
+        let mut taken_through_closed_window = false;
         if can_push {
             if self.get_or_create_stream(d.stream_identifier).is_some() {
                 if self.get_my_receiver_window_credit() > 0 {
                     // Pass the new chunk to stream level as soon as it arrives
                     self.payload_queue.push(d.clone(), self.peer_last_tsn);
                     stream_handle_data = true;
+                    taken_through_closed_window = window_was_closed;
                 } else {
                     // Receive buffer is full. Two kinds of chunk are still worth taking,
                     // because refusing them is not something the application can relieve by
@@ -3470,6 +3484,7 @@ impl Association {
                         );
                         self.payload_queue.push(d.clone(), self.peer_last_tsn);
                         stream_handle_data = true;
+                        taken_through_closed_window = window_was_closed;
                     } else {
                         debug!(
                             "[{}] receive buffer full. dropping DATA with tsn={} ssn={}",
@@ -3500,7 +3515,8 @@ impl Association {
             || !can_push
             || first
             || self.sack_packet_immediately
-            || dropped_for_window;
+            || dropped_for_window
+            || taken_through_closed_window;
         if self.state() == AssociationState::ShutdownSent {
             immediate_sack = true;
             self.will_send_shutdown = true;
@@ -3644,8 +3660,23 @@ impl Association {
         // RFC 9260 6.1 A: the receiver closed its window. The first zero window probe goes one
         // RTO from now, and the probes sent while SACKs keep coming do not count as errors: the
         // receiver may keep its window closed for as long as it likes.
+        //
+        // A SACK that acknowledges the outstanding probe is not the window closing again: the
+        // receiver took that DATA although it advertised no room (it completes a message its
+        // full buffer holds the start of). Waiting one RTO before each such chunk delivered a
+        // message larger than the receive buffer at one fragment per RTO, which is a stall.
+        // The next probe goes at once; one that is dropped stays outstanding and is
+        // retransmitted by T3-rtx, whose interval doubles.
+        let probe_acknowledged = self
+            .zero_window_probe_tsn
+            .is_some_and(|tsn| sna32gte(d.cumulative_tsn_ack, tsn));
+        if probe_acknowledged {
+            self.zero_window_probe_tsn = None;
+        }
         if d.advertised_receiver_window_credit == 0 {
-            if self.zero_window_probe_at.is_none() {
+            if probe_acknowledged {
+                self.zero_window_probe_at = None;
+            } else if self.zero_window_probe_at.is_none() {
                 self.zero_window_probe_at =
                     Some(now + Duration::from_millis(self.rto_mgr.get_rto()));
             }
@@ -5531,22 +5562,41 @@ impl Association {
                 // Its time is cleared by `handle_timeout` once it has come.
                 && self.zero_window_probe_at.is_none()
             {
-                // Send zero window probe
-                if let Some(c) = self.pending_queue.peek() {
-                    let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
-
-                    if let Some(chunk) = self.move_pending_data_chunk_to_inflight_queue(
+                // Send zero window probe.
+                //
+                // With I-DATA (RFC 8260) several messages may be part sent, and together they
+                // can fill the receiver's buffer without one of them being complete. What
+                // reopens a closed window is a message completed and read, so while probing,
+                // a message that is part sent goes on before another is started: the probes
+                // finish one message at a time, which the receiver can always take (it keeps
+                // room for one message beyond its buffer while nothing is readable).
+                let finish_first = self.pending_queue.is_mid_message();
+                self.pending_queue
+                    .set_only_part_sent(suspended || finish_first);
+                let probe = self
+                    .pending_queue
+                    .peek()
+                    .map(|c| (c.beginning_fragment, c.unordered));
+                let moved = probe.map(|(beginning_fragment, unordered)| {
+                    self.move_pending_data_chunk_to_inflight_queue(
                         beginning_fragment,
                         unordered,
                         now,
-                    ) {
+                    )
+                });
+                self.pending_queue.set_only_part_sent(suspended);
+                match moved {
+                    Some(Some(chunk)) => {
+                        self.zero_window_probe_tsn = Some(chunk.tsn);
                         chunks.push(chunk);
-                    } else {
+                    }
+                    Some(None) => {
                         self.fail_message_queue(Error::OtherSctpErr(
                             "failed to pop pending DATA".into(),
                         ));
                         return (vec![], vec![]);
                     }
+                    None => {}
                 }
             }
         }
