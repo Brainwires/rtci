@@ -34,9 +34,12 @@ use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod tcp_relay;
+
+/// ALTERNATE-SERVER redirects followed per resolution.
+const MAX_REDIRECTS: u8 = 3;
 
 /// Datagrams held per peer address while their permission is being created.
 const MAX_HELD_PER_PEER: usize = 32;
@@ -120,6 +123,12 @@ pub(crate) struct TurnLink {
     /// The NAPTR / SRV discovery of a server whose URI gives no port.
     discovery: Option<crate::peer_connection::dns_discovery::Discovery>,
     held: HashMap<IpAddr, Vec<(SocketAddr, Vec<u8>)>>,
+    /// The ICE generation (local ufrag) the link last started for: a failed or released link
+    /// starts over, from the resolution, for a new one (RFC 5928 section 3).
+    generation: Option<String>,
+    /// ALTERNATE-SERVER redirects followed in this resolution (RFC 8489 section 10: at most
+    /// a few, against loops).
+    redirects: u8,
 }
 
 impl TurnLink {
@@ -188,6 +197,10 @@ pub(crate) struct EngineTurn {
     /// The addresses of the remote TCP candidates signalled per transport (for the
     /// permissions of the TCP allocations).
     remote_tcp_ips: Vec<(TransportId, IpAddr)>,
+    /// Server addresses not to be used before an instant: an Allocate answered 486 or 508
+    /// (one minute) or 437 (two minutes), RFC 8656 section 7.4 with RFC 5928 section 3 ("MUST
+    /// NOT be used for the specified duration, even if returned by a subsequent resolution").
+    held_back: Vec<(SocketAddr, Instant)>,
 }
 
 impl EngineTurn {
@@ -215,7 +228,15 @@ impl EngineTurn {
             tls_config,
             tcp_relay: true,
             remote_tcp_ips: vec![],
+            held_back: vec![],
         }
+    }
+
+    /// Whether `server` is held back at `now`.
+    fn is_held_back(&self, server: SocketAddr, now: Instant) -> bool {
+        self.held_back
+            .iter()
+            .any(|(a, until)| *a == server && now < *until)
     }
 
     /// The links of `transport`, one per server, unless it has had them.
@@ -257,6 +278,8 @@ impl EngineTurn {
                     query: None,
                     discovery: None,
                     held: HashMap::new(),
+                    generation: None,
+                    redirects: 0,
                 });
             }
         }
@@ -369,7 +392,15 @@ impl RTCPeerConnection {
             {
                 continue;
             }
+            let generation = self
+                .ice_transport_of(self.streams.turn.links[index].transport)
+                .agent
+                .get_local_credentials()
+                .ufrag
+                .clone();
             let link = &mut self.streams.turn.links[index];
+            link.generation = Some(generation);
+            link.redirects = 0;
             match link.url.host.parse::<IpAddr>() {
                 Ok(ip) => {
                     let addr = SocketAddr::new(ip, link.url.port);
@@ -409,7 +440,7 @@ impl RTCPeerConnection {
         // A link released once ICE had completed allocates again for a new ICE generation.
         for i in 0..self.streams.turn.links.len() {
             let l = &self.streams.turn.links[i];
-            if l.state != LinkState::Released {
+            if !matches!(l.state, LinkState::Released | LinkState::Failed) {
                 continue;
             }
             let ufrag = self
@@ -418,7 +449,15 @@ impl RTCPeerConnection {
                 .get_local_credentials()
                 .ufrag
                 .clone();
-            if l.announced_ufrag.as_ref() != Some(&ufrag) {
+            // RFC 5928 section 3: "After an allocation succeeds or all the allocations fail,
+            // the resolution context MUST be discarded, and the resolution algorithm MUST be
+            // restarted from the beginning for any subsequent allocation."
+            let last = if l.state == LinkState::Released {
+                l.announced_ufrag.as_ref()
+            } else {
+                l.generation.as_ref()
+            };
+            if last.is_some_and(|g| *g != ufrag) {
                 let l = &mut self.streams.turn.links[i];
                 l.state = LinkState::Pending;
                 l.race = None;
@@ -460,6 +499,13 @@ impl RTCPeerConnection {
                 .as_mut()
                 .and_then(|r| r.next_attempt(now))
             {
+                if self.streams.turn.is_held_back(addr, now) {
+                    debug!("TURN server {addr} is held back: not used");
+                    if let Some(r) = self.streams.turn.links[index].race.as_mut() {
+                        r.failed();
+                    }
+                    continue;
+                }
                 if self.streams.turn.links[index].carrier == Carrier::Dtls {
                     if !self.start_dtls_attempt(now, index, addr)
                         && let Some(r) = self.streams.turn.links[index].race.as_mut()
@@ -771,6 +817,78 @@ impl RTCPeerConnection {
         let _ = now;
     }
 
+    /// An Allocate of link `index` was refused (RFC 8656 section 7.4). A 300 (Try Alternate)
+    /// is followed: the ALTERNATE-SERVER is tried before any other (7.4-3). A 486 or 508 holds
+    /// the server back for a minute, a 437 for two (RFC 5928 section 3: also against later
+    /// resolutions). Any refusal is the failure of that server: the resolution goes on with
+    /// its next SRV target, and when there is none the link has failed until a new ICE
+    /// generation restarts the resolution.
+    fn turn_allocate_refused(
+        &mut self,
+        now: Instant,
+        index: usize,
+        err: turn::client::RequestError,
+    ) {
+        use stun::error_code::ErrorCode;
+        let link = &mut self.streams.turn.links[index];
+        let server = link.server;
+        let code = err.code();
+        // The connection (or association) to the refusing server is of no further use.
+        if let LinkState::Open(id) = link.state {
+            self.streams.table.close(id);
+        }
+        let link = &mut self.streams.turn.links[index];
+        if let Some(mut dtls) = link.dtls.take() {
+            let r = dtls.remote;
+            let _ = dtls.endpoint.stop(now, r);
+            dtls.flush(&mut self.pipeline_context.write_outs);
+        }
+        let link = &mut self.streams.turn.links[index];
+        link.client = None;
+        link.attempts.clear();
+        for conn in std::mem::take(&mut link.data) {
+            if let Some(id) = conn.stream() {
+                self.streams.table.close(id);
+            }
+        }
+        let hold = match code {
+            Some(ErrorCode(486)) | Some(ErrorCode(508)) => Some(Duration::from_secs(60)),
+            Some(ErrorCode(437)) => Some(Duration::from_secs(120)),
+            _ => None,
+        };
+        if let (Some(hold), Some(server)) = (hold, server) {
+            debug!("TURN server {server} held back for {hold:?}");
+            self.streams
+                .turn
+                .held_back
+                .retain(|(a, until)| *a != server && now < *until);
+            self.streams.turn.held_back.push((server, now + hold));
+        }
+        let link = &mut self.streams.turn.links[index];
+        if code == Some(ErrorCode(300))
+            && link.redirects < MAX_REDIRECTS
+            && let turn::client::RequestError::Rejected(response) = &err
+            && let Some(alternate) = response.alternate_server
+        {
+            debug!("{}: trying the alternate server {alternate}", link.url);
+            link.redirects += 1;
+            link.race = Some(HappyEyeballs::new(
+                vec![alternate],
+                CONNECTION_ATTEMPT_DELAY,
+            ));
+            link.state = LinkState::Connecting;
+            self.drive_turn_races(now);
+            return;
+        }
+        if let Some(next) = link.discovery.as_mut().map(|d| d.next_target()) {
+            link.state = LinkState::Connecting;
+            self.turn_discovery_next(index, next, now);
+            self.drive_turn_races(now);
+        } else {
+            link.state = LinkState::Failed;
+        }
+    }
+
     /// Whether the selected pair of the link's transport has its relayed candidate as the
     /// local one.
     fn relay_in_use(&self, index: usize) -> bool {
@@ -855,6 +973,7 @@ impl RTCPeerConnection {
         let mut announce = vec![];
         let mut peers_ready = vec![];
         let mut failed_peers = vec![];
+        let mut refused = vec![];
         for index in 0..self.streams.turn.links.len() {
             let link = &mut self.streams.turn.links[index];
             let id = match link.state {
@@ -874,7 +993,7 @@ impl RTCPeerConnection {
                     }
                     turn::client::Event::AllocateError(_, err) => {
                         debug!("TURN allocation on {} refused: {err:?}", link.url);
-                        link.state = LinkState::Failed;
+                        refused.push((index, err));
                     }
                     turn::client::Event::AllocationLost(_, err) => {
                         debug!("TURN allocation on {} lost: {err:?}", link.url);
@@ -940,6 +1059,9 @@ impl RTCPeerConnection {
         }
         for (index, peer) in failed_peers {
             self.turn_tcp_connect_failed(now, index, peer);
+        }
+        for (index, err) in refused {
+            self.turn_allocate_refused(now, index, err);
         }
         for index in 0..self.streams.turn.links.len() {
             self.pump_turn_data(now, index);

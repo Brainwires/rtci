@@ -262,6 +262,8 @@ pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
 mod transport_layout;
+/// TURN server auto-discovery (RFC 8155): an opt-in helper for the configuration's URLs.
+pub mod turn_discovery;
 mod turn_streams;
 /// TLS for the engine's TURN-over-TLS connections: [`turn_tls::TurnTlsConfig`].
 pub mod turn_tls;
