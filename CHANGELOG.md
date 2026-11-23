@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     RFC7941-6-2 `tested` (a changed Cryptex extension block fails authentication, both AES-CM
     and AES-GCM), RFC7941-6-1 `conflict`: the `require` header encryption policy is RFC 7941
     section 6's form, `negotiate` stays the default as W3C webrtc-extensions 10.2 requires.
+- **jsep**: audio RED by default (`conf/jsep-63-red-default`, jsep17).
+  - `register_default_codecs` adds `audio/red` 48000/2 (payload type 63, `a=fmtp:63 111/111`,
+    after Opus), as Chromium and WebKit offer it (RFC 2198, RFC 8854 section 4.2). Default
+    offers and answers to them now list it.
+  - New `RedAudioInterceptor` / `RedAudioBuilder` (`rtc-interceptor`), `Slot::Redundancy`
+    (10_450) and `configure_audio_redundancy`; the peer connection installs it in any chain
+    that does not fill the slot. A local Opus stream whose section negotiated RED is sent as
+    RED with a copy of the previous packet; received RED is taken apart into Opus packets, a
+    lost one recovered from the next packet's copy. A RED stream is bound with its primary
+    codec.
+  - `StreamInfo` has a new field, `section_mime_types` (struct literals need it or
+    `..Default::default()`).
+  - Video `red` + `ulpfec` stay out of the defaults (FORK.md: the opt-in ULPFEC interceptors
+    take fixed payload types, and no browser cell exercises ULPFEC in RED).
 
 - **jsep**: receive-side JSEP rows (`conf/jsep-61-receive-rows`, jsep16).
   - An `a=rid` line whose `max-width`, `max-height` or `max-fs` no `a=imageattr` set of its
