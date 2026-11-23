@@ -2593,6 +2593,59 @@ impl Error {
         Error::Std(StdError(Box::new(error)))
     }
 
+    /// The name of the W3C error a JavaScript API over this engine raises for this error, as
+    /// webrtc-pc names them, where the engine knows it: `"InvalidAccessError"`,
+    /// `"InvalidStateError"`, `"InvalidModificationError"`, `"NotFoundError"`, `"OperationError"` (an `RTCError`,
+    /// see [`rtc_error_detail`](Self::rtc_error_detail)), `"RangeError"`, `"TypeError"`,
+    /// `"OverconstrainedError"`. `None` for the others.
+    ///
+    /// W3C webrtc-pc section 4.4.1.5 ("set the session description"): a description that does
+    /// not parse (RFC 9429 sections 5.8.1 and 5.8.2) rejects with an `RTCError` whose
+    /// `errorDetail` is `"sdp-syntax-error"` ([`Error::SdpSyntaxError`], with its line, and the
+    /// attribute grammar errors); one that fails the semantic checks of RFC 9429 section 5.8.3
+    /// (credentials, fingerprints, mids, rtcp-mux, the answer against its offer, ...) rejects
+    /// with an `InvalidAccessError`; one invalid for the signaling state with an
+    /// `InvalidStateError`.
+    pub fn dom_exception_name(&self) -> Option<&'static str> {
+        match self {
+            Error::SdpSyntaxError { .. } | Error::SdpInvalidSyntax(_) => Some("OperationError"),
+            Error::InvalidAccessError
+            | Error::SdpInvalidValue(_)
+            | Error::ErrPeerConnRemoteDescriptionWithoutMidValue
+            | Error::ErrSessionDescriptionInvalidIceCredentials
+            | Error::ErrSessionDescriptionNoFingerprint
+            | Error::ErrSessionDescriptionInvalidFingerprint
+            | Error::ErrSessionDescriptionConflictingFingerprints
+            | Error::ErrSessionDescriptionInvalidSetup
+            | Error::ErrSessionDescriptionInvalidTlsId
+            | Error::ErrSessionDescriptionMissingIceUfrag
+            | Error::ErrSessionDescriptionMissingIcePwd
+            | Error::ErrSessionDescriptionConflictingIceUfrag
+            | Error::ErrSessionDescriptionConflictingIcePwd
+            | Error::ErrSessionDescriptionMissingCryptex => Some("InvalidAccessError"),
+            Error::InvalidStateError
+            | Error::ErrConnectionClosed
+            | Error::ErrIncorrectSignalingState
+            | Error::ErrSignalingStateCannotRollback
+            | Error::ErrSignalingStateProposedTransitionInvalid(_) => Some("InvalidStateError"),
+            Error::InvalidModificationError => Some("InvalidModificationError"),
+            Error::NotFoundError => Some("NotFoundError"),
+            Error::RangeError(_) => Some("RangeError"),
+            Error::TypeError(_) => Some("TypeError"),
+            Error::OverconstrainedError(_) => Some("OverconstrainedError"),
+            _ => None,
+        }
+    }
+
+    /// The `errorDetail` of the W3C `RTCError` (webrtc-pc section 11.1) this error is, when it
+    /// is one: `"sdp-syntax-error"` for a description that does not parse.
+    pub fn rtc_error_detail(&self) -> Option<&'static str> {
+        match self {
+            Error::SdpSyntaxError { .. } | Error::SdpInvalidSyntax(_) => Some("sdp-syntax-error"),
+            _ => None,
+        }
+    }
+
     /// Attempts to downcast an [`Error::Std`] variant to a concrete error type.
     ///
     /// Returns `None` if this error is not `Error::Std` or if the inner error

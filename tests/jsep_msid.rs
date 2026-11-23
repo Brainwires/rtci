@@ -389,3 +389,86 @@ fn msid_ids_and_appdata_are_one_to_sixty_four_token_characters() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 8830 section 2: "Multiple media descriptions with the same value for 'msid-id' and
+/// 'msid-appdata' are not permitted". W3C webrtc-pc lets one track be sent by two
+/// transceivers in one stream (`addTransceiver(track)` twice); the second section's appdata
+/// is made unique (`<track id>-1`, its source-level msid too), and a later offer keeps the
+/// lines. Without appdata (`with_msid_appdata(false)`, the RFC 9429 form) the two sections
+/// carry the stream alone, as RFC 9429's examples do.
+#[test]
+fn two_sections_never_carry_the_same_msid_pair() -> TestResult {
+    use jsep_common::{media_sections, video_track};
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+    use rtc::peer_connection::configuration::media_engine::MediaEngine;
+    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    let init = || RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Sendonly,
+        streams: vec!["shared".to_owned()],
+        send_encodings: vec![],
+    };
+    let msid_lines = |sdp: &str| -> Vec<Vec<String>> {
+        media_sections(sdp)
+            .iter()
+            .map(|section| {
+                section
+                    .iter()
+                    .filter(|l| l.starts_with("a=msid:") || l.contains(" msid:"))
+                    .cloned()
+                    .collect()
+            })
+            .collect()
+    };
+    let mut pc = jsep_common::default_peer()?;
+    pc.add_transceiver_from_track(video_track("same", 0x0101_0101), Some(init()))?;
+    pc.add_transceiver_from_track(video_track("same", 0x0202_0202), Some(init()))?;
+    let offer = pc.create_offer(None)?;
+    let lines = msid_lines(&offer.sdp);
+    assert_eq!(lines.len(), 2, "{}", offer.sdp);
+    assert!(
+        lines[0].contains(&"a=msid:shared same".to_owned()),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        lines[1].contains(&"a=msid:shared same-1".to_owned()),
+        "{}",
+        offer.sdp
+    );
+    assert!(
+        lines[1]
+            .iter()
+            .filter(|l| l.contains(" msid:"))
+            .all(|l| l.ends_with("msid:shared same-1")),
+        "{}",
+        offer.sdp
+    );
+    pc.set_local_description(Instant::now(), offer.clone())?;
+    let later = pc.create_offer(None)?;
+    assert_eq!(
+        msid_lines(&later.sdp),
+        lines,
+        "a later offer keeps the lines"
+    );
+
+    let mut pc = RTCPeerConnectionBuilder::new()
+        .with_media_engine({
+            let mut media_engine = MediaEngine::default();
+            media_engine.register_default_codecs()?;
+            media_engine
+        })
+        .with_setting_engine(SettingEngineBuilder::new().with_msid_appdata(false).build())
+        .build(Instant::now())?;
+    pc.add_transceiver_from_track(video_track("same", 0x0101_0101), Some(init()))?;
+    pc.add_transceiver_from_track(video_track("same", 0x0202_0202), Some(init()))?;
+    let offer = pc.create_offer(None)?;
+    for section in msid_lines(&offer.sdp) {
+        assert!(
+            section.contains(&"a=msid:shared".to_owned()),
+            "{}",
+            offer.sdp
+        );
+    }
+    Ok(())
+}

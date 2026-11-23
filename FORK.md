@@ -444,6 +444,9 @@ versions that support it. Raising it is a deliberate change of the manifest.
   track whose SSRCs all said BYE or timed out (RFC 8830 section 3); the default stays W3C
   webrtc-pc 9.3's muting. Upstream neither mutes nor ends.
 
+- rtc-sdp reads descriptions in another character set named by `a=charset` (RFC 8866 section
+  6.10) and relative `u=` references (section 9); upstream refused both.
+
 ### Defaults the fork narrows on purpose
 
 - SDP (jsep15): remote descriptions without `c=` for a section, with an `a=imageattr` set
@@ -537,6 +540,9 @@ versions that support it. Raising it is a deliberate change of the manifest.
   section speaks for the group. No browser description recorded by the interop harness breaks
   the rule. An offer whose bundled sections list different ECN methods used to be answered
   with the tagged section's; no switch.
+- Codecs: an encoding's codec is matched with the W3C codec dictionary match (webrtc-pc
+  5.4): no mime-type-only fallback (upstream's `codec_parameters_fuzzy_search` partial
+  match), and setCodecPreferences / setParameters compare every format parameter.
 - SCTP: a peer connection's association schedules its streams by weighted fair queueing
   (RFC 8831 section 6.4) and announces user message interleaving (RFC 8260), the zero checksum
   (RFC 9653) and a State Cookie with a MAC, each of which upstream leaves off or lacks;

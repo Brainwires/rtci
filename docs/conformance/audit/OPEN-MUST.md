@@ -8,24 +8,24 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5745; `n/a` (the clause does not bind this engine): 658; rows that
   apply: 5087.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 4964 of 5087 (97.6 %).
-- Tested as the default (`tested`): 4948 of 5087 (97.3 %); `setting`: 12; `conflict` (two specifications conflict, the governing one's form is the default): 4.
-- Open (not tested in any form): 123: 21 untested, 78 partial, 23 missing, 1 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 4969 of 5087 (97.7 %).
+- Tested as the default (`tested`): 4953 of 5087 (97.4 %); `setting`: 12; `conflict` (two specifications conflict, the governing one's form is the default): 4.
+- Open (not tested in any form): 118: 20 untested, 75 partial, 22 missing, 1 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer | 12 | 11 |
 | B | implemented, lacking a test that fails without it | 10 | 0 |
-| C | partly implemented | 73 | 52 |
-| D | not implemented | 23 | 19 |
-| E | cannot be met or observed inside this engine | 15 | 9 |
+| C | partly implemented | 68 | 47 |
+| D | not implemented | 22 | 18 |
+| E | cannot be met or observed inside this engine | 16 | 10 |
 | F | stale note: already tested on this tree | 6 | 0 |
-| all | | 139 | 91 |
+| all | | 134 | 86 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 112 rows, 64 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 7 rows.
+- Work in code and tests (classes B, C, D, F): 106 rows, 58 of size S, 38 of size M, 10 of size L. They are listed below by owner and size.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 8 rows.
 - Never testable inside this engine (class E, reason stated): 4 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC5246-4.7-1 (`rfc5246.md`): Never testable here: neither provider (ring, AWS-LC) verifies a DigestInfo without NULL parameters nor gives a raw RSA public operation; the `rsa` crate is out (RUSTSEC-2023-0071)
@@ -42,7 +42,7 @@ become `setting` only if such a cell is named, or close when the default changes
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 2 | 6 | 1 | 3 | 2 | 14 | 8 | 6 | 0 |
 | ice | 2 | 1 | 0 | 1 | 0 | 4 | 4 | 0 | 0 |
-| jsep (running) | 0 | 39 | 2 | 1 | 0 | 42 | 23 | 17 | 2 |
+| jsep (running) | 0 | 34 | 1 | 2 | 0 | 37 | 18 | 17 | 2 |
 | media (running) | 0 | 12 | 16 | 4 | 0 | 32 | 16 | 9 | 7 |
 | payload | 0 | 2 | 0 | 0 | 1 | 3 | 3 | 0 | 0 |
 | rtp | 1 | 1 | 0 | 0 | 2 | 4 | 4 | 0 | 0 |
@@ -91,23 +91,18 @@ Sorted by class, then owner, size and ID.
 | RFC7728-6.2-2 | `rfc7728.md` | The hold-off period is 2 * RTT + T_dither_max, RTT the longest known | partial | C | Use the measured round trip | S | jsep (running) |
 | RFC7728-6.4-2 | `rfc7728.md` | The local-pause PAUSED is repeated a sufficient number of times | partial | C | Tune the repetitions to the observed loss | S | jsep (running) |
 | RFC7941-4.2.6-1 | `rfc7941.md` | An item from an RTP packet with the same or a lower extended sequence ... | partial | C | Apply a later MID item by extended sequence number (RFC9143-9.2-5) | S | jsep (running) |
-| RFC8830-2-4 | `rfc8830.md` | No two media descriptions share the same msid-id and appdata | untested | C | Check msid-id / appdata uniqueness | S | jsep (running) |
 | RFC8839-4.4.2.2-1 | `rfc8839.md` | Lite: remote-candidates in the offer forms the pair and completes the ... | partial | C | Pin the local side of the pair from `a=remote-candidates` (rtc-ice call) | S | jsep (running) |
-| RFC8851-6.3-6 | `rfc8851.md` | A recv rid the answerer cannot satisfy is discarded | partial | C | Ask the encoder whether it can meet the restrictions | S | jsep (running) |
 | RFC8859-4.8-1 | `rfc8859.md` | SPECIAL attributes follow their defining specification | partial | C | Umbrella of A-13, A-22, A-23 | S | jsep (running) |
 | RFC8859-A-29 | `rfc8859.md` | bundle-only: NORMAL (RFC 9143) | partial | C | See rfc9143.md 6-1 | S | jsep (running) |
 | RFC8859-A-33 | `rfc8859.md` | c= line of a bundled section (RFC 9143 7.1.1) and the legacy a=sctpmap | partial | C | c= of a bundled section per RFC 9143 7.1.1 | S | jsep (running) |
 | RFC8859-A-7 | `rfc8859.md` | group: NORMAL (session level) | partial | C | Other group semantics (see rfc5888.md) | S | jsep (running) |
 | RFC9143-9.2-5 | `rfc9143.md` | Step: a packet with a MID extension naming a known m= section ... | partial | C | Move a declared SSRC or a layer on a later MID | S | jsep (running) |
 | RFC9429-5.2.1-57 | `rfc9429.md` | Additional attributes follow RFC 8859 under BUNDLE | partial | C | Umbrella of rfc8859.md | S | jsep (running) |
-| RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | Relative `u=`, 64-bit o= ids and times, non-UTF-8 text | S | jsep (running) |
+| RFC9429-5.2.1-58 | `rfc9429.md` | Compliant SDP is accepted even when it does not follow these ... | partial | C | o= ids and versions beyond 64 bits (a public type change of `Origin`) | S | jsep (running) |
 | RFC9429-5.3.1-11 | `rfc9429.md` | Otherwise the section is generated per RFC 3264 6.1 | partial | C | Umbrella of rfc3264.md | S | jsep (running) |
 | RFC9429-5.5-5 | `rfc9429.md` | The parsed description is applied (5.9); otherwise an error | partial | C | Umbrella of the 5.9 rows | S | jsep (running) |
 | RFC9429-5.8-1 | `rfc9429.md` | Any line that is not well formed rejects the description, even when ... | partial | C | The remaining grammar exceptions | S | jsep (running) |
 | RFC9429-6-1 | `rfc9429.md` | Received RTP / RTCP is routed to an m= section by the RFC 9143 9.2 ... | partial | C | The payload-type step of RFC 9143 9.2 | S | jsep (running) |
-| WEBRTC-4.4.1.4-11 | `w3c-webrtc-pc.md` | A description failing RFC 9429 5.8.3 semantic validation rejects with ... | partial | C | W3C error names (InvalidAccessError) for the 5.8.3 refusals (4.5.1-1); the checks themselves exist and are tested | S | jsep (running) |
-| WEBRTC-5.4-31 | `w3c-webrtc-pc.md` | codec dictionary match: sdpFmtpLine present on one side only is no ... | partial | C | Strict codec dictionary match in the media engine | S | jsep (running) |
-| WEBRTC-5.4-32 | `w3c-webrtc-pc.md` | codec dictionary match: symmetrical parameters must be equal; ... | partial | C | Symmetric / asymmetric fmtp parameter rules beyond H.264 | S | jsep (running) |
 | RFC3264-5.1-8 | `rfc3264.md` | The offerer sends with the payload type numbers of the answer when ... | partial | C | Follow an answer that renumbers a codec when sending | M | jsep (running) |
 | RFC7728-6.3-3 | `rfc7728.md` | PAUSED is repeated in the next two regular RTCP reports while paused | partial | C | Carry PAUSED inside the regular compound packets | M | jsep (running) |
 | RFC7728-8.2-4 | `rfc7728.md` | PAUSED is also in the next two regular RTCP reports | partial | C | As RFC7728-6.3-3 | M | jsep (running) |
@@ -154,7 +149,6 @@ Sorted by class, then owner, size and ID.
 | WEBRTC-4.4.1.4-82 | `w3c-webrtc-pc.md` | Stable: close DTLS and ICE transports no non-stopped transceiver ... | partial | C | With one transport, a description rejecting every section closes it and fires the closed events | S | w3c |
 | WEBRTC-4.4.1.4-91 | `w3c-webrtc-pc.md` | Events fire in order: signalingstatechange, channel errors, mute, ... | partial | C | Queue the data channel errors of a description in the spec order | M | w3c |
 | RFC8835-3.5-6 | `rfc8835.md` | Protocol identification in the DTLS handshake (ALPN webrtc / ... | missing | D | ALPN `webrtc` / `c-webrtc` in the DTLS handshake (RFC 8833) | M | dtls-srtp |
-| RFC8866-6.10-1 | `rfc8866.md` | a=charset names an IANA character set, compared case-insensitively | missing | D | `a=charset` | S | jsep (running) |
 | RFC7728-6.2-4 | `rfc7728.md` | A sender with hold-off 0 that learns of several receivers uses the ... | missing | D | Detect several receivers (RFC7728-6.2-5) | M | jsep (running) |
 | FLEXFEC03-4.2-17 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Mask bit j set means the packet SN base + j + 1 is protected (literal ... | partial | D | A `flexfec-03` mode with the literal mask reading (SN base + j + 1); every libwebrtc sender uses SN base + j, which RFC 8627 later wrote down. Owner decision whether to offer it | S | media (running) |
 | RFC6464-4-2 | `rfc6464.md` | Signalled with vad=on, the V bit is in use and set by senders | missing | D | Write and read `vad=on` / `vad=off`; set the V bit | S | media (running) |
@@ -183,6 +177,7 @@ Sorted by class, then owner, size and ID.
 | RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8839-4.4.1.2.2-2 | `rfc8839.md` | After nomination, list candidates other than the nominated pair's ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
+| RFC8851-6.3-6 | `rfc8851.md` | A recv rid the answerer cannot satisfy is discarded | partial | E | The engine has no encoder: whether one can meet a recv rid's restrictions is the application's, which reads them from `RTCRtpCodingParameters::rid_restrictions`; the engine's part (a rid without an encoding or formats is not answered) is tested. Proposal: n/a (the application encodes) | S | jsep (running) |
 | RFC9429-3.6.2-2 | `rfc9429.md` | No transmit when no imageattr can be satisfied; SHOULD raise an error | partial | E | Not a specification conflict (no W3C text on imageattr): the engine never sees a frame's size, so it cannot tell a frame that no a=imageattr set permits; its guarantee, `send_resolution` failing with ErrImageAttrUnsatisfiable, is tested. Proposal: n/a (the encoder is the application's), as RFC9429-3.6.2-1 | S | jsep (running) |
 | RFC9429-5.3.1-6 | `rfc9429.md` | Reject (port 0) when the associated transceiver is stopped | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | FLEXFEC03-5.1-5 | `draft-ietf-payload-flexible-fec-scheme-03.md` | Media subtype name is flexfec | partial | E | `flexfec` is registered to the RFC 8627 coder (IANA); the draft-03 coder cannot also take the name. Proposed n/a: superseded by RFC 8627 | S | media (running) |

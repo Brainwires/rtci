@@ -3062,6 +3062,7 @@ impl RTCPeerConnection {
             d = d
                 .with_value_attribute(ATTR_KEY_GROUP.to_owned(), format!("LS {}", group.join(" ")));
         }
+        make_msid_pairs_unique(&mut d);
 
         Ok(d)
     }
@@ -3302,6 +3303,68 @@ fn fingerprints_in_force(
     }
 
     Ok(in_force.swap_remove(0))
+}
+
+/// RFC 8830 section 2: "Multiple media descriptions with the same value for 'msid-id' and
+/// 'msid-appdata' are not permitted". W3C webrtc-pc lets one track be sent by several
+/// transceivers (`addTransceiver(track)` twice), and the appdata this endpoint writes is the
+/// track id (`with_msid_appdata`), so two sections would carry the same pair. Both allow
+/// distinct appdata: a section whose `a=msid` repeats an earlier section's pair has its
+/// appdata (and its source-level `msid`) made unique with a suffix, `<track id>-<n>`, kept
+/// within the 64 token characters. The same sections give the same result every time, so a
+/// later offer keeps the lines (RFC 9429 section 5.2.2). A line without appdata (the RFC 9429
+/// form) is not a pair: the RFC 9429 section 5.2.1 examples have one stream in two sections.
+fn make_msid_pairs_unique(desc: &mut SessionDescription) {
+    let mut used: HashSet<(String, String)> = HashSet::new();
+    for media in &mut desc.media_descriptions {
+        let pairs: Vec<(String, String)> = media
+            .attributes
+            .iter()
+            .filter(|a| a.key == "msid")
+            .filter_map(|a| {
+                let (id, appdata) = a.value.as_deref()?.split_once(' ')?;
+                Some((id.to_owned(), appdata.to_owned()))
+            })
+            .collect();
+        let Some(appdata) = pairs.first().map(|(_, appdata)| appdata.clone()) else {
+            continue;
+        };
+        let clashes = |appdata: &str, used: &HashSet<(String, String)>| {
+            pairs
+                .iter()
+                .any(|(id, _)| used.contains(&(id.clone(), appdata.to_owned())))
+        };
+        let mut unique = appdata.clone();
+        let mut n = 1u32;
+        while clashes(&unique, &used) {
+            let suffix = format!("-{n}");
+            let keep = appdata.len().min(64 - suffix.len());
+            unique = format!("{}{suffix}", &appdata[..keep]);
+            n += 1;
+        }
+        for (id, _) in &pairs {
+            used.insert((id.clone(), unique.clone()));
+        }
+        if unique == appdata {
+            continue;
+        }
+        for a in media.attributes.iter_mut() {
+            let Some(value) = a.value.as_mut() else {
+                continue;
+            };
+            if a.key == "msid" {
+                if let Some((id, _)) = value.split_once(' ') {
+                    *value = format!("{id} {unique}");
+                }
+            } else if a.key == ATTR_KEY_SSRC
+                && let Some((ssrc, source)) = value.split_once(' ')
+                && let Some(msid) = source.strip_prefix("msid:")
+                && let Some((id, _)) = msid.split_once(' ')
+            {
+                *value = format!("{ssrc} msid:{id} {unique}");
+            }
+        }
+    }
 }
 
 /// Inserts `a=<key>[:<value>]` at the end of m-section `index` of an SDP text, keeping every

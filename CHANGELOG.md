@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **jsep / sdp**: small JSEP rows (`conf/jsep-59-small-rows`, jsep16).
+  - W3C error names: `Error::dom_exception_name` (`InvalidAccessError` for the RFC 9429
+    section 5.8.3 refusals, `OperationError` for a description that does not parse,
+    `InvalidStateError`, ...) and `Error::rtc_error_detail` (`sdp-syntax-error`), so an API
+    over the engine raises what webrtc-pc 4.4.1.5 names.
+  - The W3C codec dictionary match (webrtc-pc 5.4) is strict everywhere the W3C algorithms
+    use it: an encoding's codec matches a negotiated one with `ignoreAsymmetricalParameters`
+    (no mime-type-only fallback any more), setCodecPreferences and setParameters compare
+    every parameter of the media format (defaults inferred: H.264 `packetization-mode=0`,
+    ...). Breaking: an encoding whose codec names only a MIME type that the negotiated codec
+    has with an fmtp line no longer matches it, and loses its codec after negotiation.
+  - `a=msid`: a section that would repeat an earlier section's msid-id and appdata (one
+    track sent by two transceivers, which W3C allows) gets its appdata suffixed `-<n>`
+    (RFC 8830 section 2).
+  - rtc-sdp: `a=charset` is read by `SessionDescription::unmarshal` (ISO-8859-1, US-ASCII,
+    UTF-8; an unsupported set's text kept as octets) and `SessionDescription::charset`
+    names it (RFC 8866 section 6.10). A relative `u=` reference is accepted (RFC 8866
+    section 9). Breaking: `SessionDescription::uri` is an `Option<String>` (was
+    `Option<url::Url>`).
+
 - **audit / jsep**: specification conflicts get a verdict of their own
   (`conf/jsep-58-spec-conflicts`, jsep16).
   - New verdict `conflict` (`docs/conformance/audit/RULES.md`): two specifications conflict
