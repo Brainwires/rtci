@@ -2196,10 +2196,15 @@ against Chromium, Firefox and WebKit and, new in this release, against Pion, str
   while a message is still incomplete; the application still gets whole messages (W3C). The
   zero window overcommit is no longer set when the advertised `max-message-size` is larger
   than the receive buffer. A message larger than the advertised maximum is dropped as
-  before. The bytes of incomplete messages held for an association are bounded by the
-  larger of its receive buffer and that maximum (1 MiB by default); a part that would go
-  over fails its data channel (an error event) and resets its stream once the rest of the
-  message has been read and dropped. The receive window a peer sees is the same as before
+  before. A conforming peer has at most one message in progress per stream (RFC 8260
+  2.2.2), each at most that maximum, and the handler holds at most one per stream; over
+  that product the bytes of incomplete messages held for an association have a ceiling,
+  new `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` (64 MiB by default, never
+  below the advertised `max-message-size`; worst case per association: the receive buffer
+  plus the ceiling, 65 MiB with the defaults). A part that would go over fails only its
+  data channel (`OnError`, `data-channel-failure`, the message naming the limit) and resets
+  its stream once the rest of the message has been read and dropped. 16 and 64 concurrent
+  64 KiB messages over I-DATA all arrive under the default. The receive window a peer sees is the same as before
   for messages that fit half the buffer; a message larger, or interleaved messages that fill
   it, keep it open instead of closing it.
 - **sctp** (sctp-14, RFC 9260 6.1 A, 6.2; travels with sec-12): a closed receive window always

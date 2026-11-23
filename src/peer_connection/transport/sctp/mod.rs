@@ -34,6 +34,10 @@ pub(crate) const MAX_MESSAGE_SIZE_WITHOUT_INTERLEAVING: u32 = 16 * 1024;
 /// (`bufferedAmountLowThreshold`) behaves the same against both.
 pub(crate) const DEFAULT_SEND_BUFFER_SIZE: u32 = 16 * 1024 * 1024;
 
+/// The default ceiling on the bytes of incomplete inbound messages held above an association
+/// (`SettingEngineBuilder::with_sctp_inbound_reassembly_limit`): 64 MiB.
+pub(crate) const DEFAULT_INBOUND_REASSEMBLY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// The SCTP port this side advertises (`a=sctp-port`) for its first association: the value
 /// every browser uses.
 pub(crate) const DEFAULT_SCTP_PORT: u16 = 5000;
@@ -230,9 +234,13 @@ pub(crate) struct SctpTransport {
     pub(crate) receive_message_limit: usize,
 
     /// The most bytes of incomplete messages the SCTP handler holds above an association, put
-    /// together from the parts SCTP delivers (RFC 9260 6.9): the larger of the receive buffer
-    /// and `receive_message_limit`. 0 before `start()`.
+    /// together from the parts SCTP delivers (RFC 9260 6.9): the configured ceiling
+    /// (`inbound_reassembly_limit`, 64 MiB by default), at least `receive_message_limit`. 0
+    /// before `start()`.
     pub(crate) partial_message_limit: usize,
+
+    /// `SettingEngineBuilder::with_sctp_inbound_reassembly_limit`; `None` for the default.
+    pub(crate) inbound_reassembly_limit: Option<usize>,
 
     /// The SCTP port this side advertises in `a=sctp-port` and uses as source port: the one
     /// of the current association, or of the next one before any was negotiated.
@@ -300,6 +308,7 @@ impl SctpTransport {
             max_path_mtu: None,
             receive_message_limit: 0,
             partial_message_limit: 0,
+            inbound_reassembly_limit: None,
             local_port: DEFAULT_SCTP_PORT,
             negotiated_ports: None,
             staged: None,
@@ -482,6 +491,13 @@ impl SctpTransport {
 
     /// The stream count the association `start()` builds asks for and accepts in each
     /// direction; `None` keeps the default.
+    /// The ceiling on incomplete inbound messages held above the association; `None` keeps
+    /// the default (`DEFAULT_INBOUND_REASSEMBLY_LIMIT`).
+    pub(crate) fn with_inbound_reassembly_limit(mut self, bytes: Option<usize>) -> Self {
+        self.inbound_reassembly_limit = bytes;
+        self
+    }
+
     pub(crate) fn with_max_streams(mut self, streams: Option<u16>) -> Self {
         self.max_streams = streams;
         self
@@ -822,10 +838,12 @@ impl SctpTransport {
         // reads in parts (RFC 9260 6.9) and puts messages together above the association, so
         // a message larger than the receive buffer, or interleaved messages that fill it
         // together, open the window again as they arrive: no overcommit is needed. What is
-        // held above it is bounded per association by the larger of the buffer and the
-        // largest message accepted.
-        let receive_buffer = sctp_transport_config.max_receive_buffer_size();
-        self.partial_message_limit = (receive_buffer as usize).max(can_send_size as usize);
+        // held above it is at most one message per stream, each at most `can_send_size`
+        // (RFC 8260 2.2.2, RFC 8841 6.1), under a ceiling that always fits one message.
+        self.partial_message_limit = self
+            .inbound_reassembly_limit
+            .unwrap_or(DEFAULT_INBOUND_REASSEMBLY_LIMIT)
+            .max(can_send_size as usize);
 
         // One association per DTLS transport: once this side has initiated its own, or has
         // taken the peer's INIT, the endpoint starts no other.
@@ -916,6 +934,44 @@ mod tests {
             )
             .expect("start");
         transport
+    }
+
+    /// `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` reaches the transport: unset
+    /// it is 64 MiB; set, it is the value given, but never below the `max-message-size` this
+    /// side advertised, so one message that size always fits.
+    #[test]
+    fn the_inbound_reassembly_limit_is_the_setting_and_holds_one_message() {
+        let started = |limit: Option<usize>| {
+            let mut transport = SctpTransport::new(
+                SctpMaxMessageSize::default(),
+                None,
+                None,
+                test_transport_id(TransportKind::Sctp),
+                test_transport_id(TransportKind::Dtls),
+            )
+            .with_inbound_reassembly_limit(limit);
+            transport
+                .start(
+                    SCTPTransportCapabilities {
+                        max_message_size: 65536,
+                    },
+                    5000,
+                    5000,
+                )
+                .expect("start");
+            transport.partial_message_limit
+        };
+        assert_eq!(started(None), DEFAULT_INBOUND_REASSEMBLY_LIMIT);
+        assert_eq!(started(Some(128 << 20)), 128 << 20);
+        assert_eq!(
+            started(Some(10)),
+            SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize
+        );
+        let engine =
+            crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                .with_sctp_inbound_reassembly_limit(3 << 20)
+                .build();
+        assert_eq!(engine.sctp_inbound_reassembly_limit, Some(3 << 20));
     }
 
     // `maxMessageSize` is the *negotiated* value, not the configured ceiling. Configure 64 KiB

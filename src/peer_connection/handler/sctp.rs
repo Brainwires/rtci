@@ -520,7 +520,11 @@ impl<'a> SctpHandler<'a> {
                     );
                     event_outs.push_back(TaggedRTCEventInternal {
                         now,
-                        event: RTCEventInternal::SCTPStreamFailed(ch.0, id),
+                        event: RTCEventInternal::SCTPInboundReassemblyLimit(
+                            ch.0,
+                            id,
+                            limits.partial,
+                        ),
                     });
                     if ended {
                         let _ = stream.close(now);
@@ -2313,8 +2317,9 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
-        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
-        transport.partial_message_limit = 1024 * 1024;
+        // As `SctpTransport::start` sets it by default.
+        transport.partial_message_limit =
+            crate::peer_connection::transport::sctp::DEFAULT_INBOUND_REASSEMBLY_LIMIT;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -2998,8 +3003,9 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
-        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
-        transport.partial_message_limit = 1024 * 1024;
+        // As `SctpTransport::start` sets it by default.
+        transport.partial_message_limit =
+            crate::peer_connection::transport::sctp::DEFAULT_INBOUND_REASSEMBLY_LIMIT;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -3068,8 +3074,9 @@ mod tests {
             test_transport_id(TransportKind::Dtls),
         );
         transport.receive_message_limit = SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE as usize;
-        // As `SctpTransport::start` sets it for the default 1 MiB receive buffer.
-        transport.partial_message_limit = 1024 * 1024;
+        // As `SctpTransport::start` sets it by default.
+        transport.partial_message_limit =
+            crate::peer_connection::transport::sctp::DEFAULT_INBOUND_REASSEMBLY_LIMIT;
         transport.negotiated_max_message_size = Some(SctpMaxMessageSize::DEFAULT_MESSAGE_SIZE);
         // An association made by hand from `TransportConfig::default()` does not interleave;
         // this test is not about the 16 KB limit that follows from that (see
@@ -6102,11 +6109,12 @@ mod tests {
     }
 
     /// RFC 8260 with RFC 9260 6.9: the bytes of incomplete messages held above an association
-    /// are bounded, by the larger of its receive buffer and the largest message it accepts
-    /// (here 64 KiB). Three interleaved 28 KiB messages (84 KiB in all) to a receiver with a
-    /// 16 KiB buffer: what is held never exceeds the bound, the message whose part would take
-    /// it past is dropped and its data channel fails (RFC 8831 6.6: "the receiver SHOULD
-    /// close the corresponding data channel"), and the other two messages arrive whole.
+    /// are bounded by the inbound reassembly limit (here set to 64 KiB, the advertised
+    /// `max-message-size`). Three interleaved 28 KiB messages (84 KiB in all) to a receiver
+    /// with a 16 KiB buffer: what is held never exceeds the limit, the message whose part
+    /// would take it past is dropped and only its data channel fails, with an event naming
+    /// the limit (RFC 8831 6.6: "the receiver SHOULD close the corresponding data channel"),
+    /// and the other two messages arrive whole.
     #[test]
     fn incomplete_messages_held_above_an_association_are_bounded() {
         const LIMIT: usize = 64 * 1024;
@@ -6154,7 +6162,11 @@ mod tests {
             .event_outs
             .iter()
             .filter_map(|e| match e.event {
-                RTCEventInternal::SCTPStreamFailed(_, id) => Some(id),
+                RTCEventInternal::SCTPInboundReassemblyLimit(_, id, limit) => {
+                    assert_eq!(limit, LIMIT, "the event names the limit");
+                    Some(id)
+                }
+                RTCEventInternal::SCTPStreamFailed(_, id) => panic!("stream {id} failed"),
                 _ => None,
             })
             .collect();
@@ -6169,5 +6181,74 @@ mod tests {
             .collect();
         assert_eq!(got, want, "the other two arrive whole");
         assert_eq!(ctx.reassembly.held(e.client_ch), 0);
+    }
+
+    /// `n` interleaved 64 KiB messages, one per stream, to a receiver with the default 1 MiB
+    /// buffer, `max-message-size` and inbound reassembly limit: whether all arrive whole,
+    /// whether a channel failed, and the most bytes held above the association at once.
+    fn concurrent_interleaved_messages(n: u16) -> (bool, bool, usize) {
+        const SIZE: usize = 64 * 1024;
+        let now = Instant::now();
+        let e = establish_with_both(
+            TransportConfig::default().with_message_interleaving(true),
+            TransportConfig::default()
+                .with_message_interleaving(true)
+                .with_stream_scheduler(sctp::StreamScheduler::WeightedFairQueueing),
+        );
+        let (mut server_ep, mut server_conn) = (e.server_ep, e.server_conn);
+        let streams: Vec<u16> = (0..n).map(|i| 2 * i + 1).collect();
+        let payloads: Vec<Bytes> = (0..n).map(|i| pattern(i as u8, SIZE)).collect();
+        for (&id, payload) in streams.iter().zip(&payloads) {
+            server_conn
+                .open_stream(id, PayloadProtocolIdentifier::Binary)
+                .expect("open")
+                .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)
+                .expect("write");
+        }
+        while server_conn.poll().is_some() {}
+        let dgrams = drain_transmits(&mut server_conn, now);
+        let mut ctx = client_ctx(now, e.client_ep, e.client_ch, e.client_conn);
+        let held = exchange_with_server(
+            &mut ctx,
+            &mut server_ep,
+            &mut server_conn,
+            dgrams,
+            now,
+            20_000,
+            |ctx| delivered(ctx).len() == usize::from(n),
+        );
+        let failed = ctx.event_outs.iter().any(|e| {
+            matches!(
+                e.event,
+                RTCEventInternal::SCTPInboundReassemblyLimit(..)
+                    | RTCEventInternal::SCTPStreamFailed(..)
+            )
+        });
+        let mut got = delivered(&ctx);
+        got.sort();
+        let want: Vec<(u16, Vec<u8>)> = streams
+            .iter()
+            .zip(&payloads)
+            .map(|(id, p)| (*id, p.to_vec()))
+            .collect();
+        (got == want, failed, held)
+    }
+
+    /// RFC 8260 2.2.2 and RFC 8841 6.1: a conforming peer has at most one message in progress
+    /// per stream, each at most the advertised `max-message-size`. 16 and 64 concurrent
+    /// 64 KiB messages over I-DATA (1 and 4 MiB in progress) all arrive whole under the
+    /// default inbound reassembly limit, and no channel fails. With 64 more than 2 MiB is held
+    /// above the association at once, which the first bound of sctp-15 (the larger of the
+    /// receive buffer and `max-message-size` added to the buffer) refused.
+    #[test]
+    fn concurrent_messages_a_conforming_peer_may_send_all_arrive_under_the_default_limit() {
+        for n in [16u16, 64] {
+            let (all, failed, held) = concurrent_interleaved_messages(n);
+            assert!(all, "{n} messages: not all arrived whole");
+            assert!(!failed, "{n} messages: a channel failed");
+            if n == 64 {
+                assert!(held > 2 * 1024 * 1024, "{held} bytes held at most");
+            }
+        }
     }
 }
