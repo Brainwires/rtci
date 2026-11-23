@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection**: by default a sender's stream moves to a new SSRC when the application
+  writes a packet with a negotiated codec of another clock rate (RFC 7160 section 4.1): Opus at
+  48 kHz, then PCMU at 8 kHz, on one audio sender is two SSRCs, and the encoding's SSRC
+  (`get_parameters`) is the new one from then on. An application that put the old SSRC in its
+  packets may go on doing so (they go out under the new one).
+  `SettingEngineBuilder::with_ssrc_per_clock_rate(false)` keeps one SSRC as before. A receiver
+  of a single-stream section now follows its source to a new SSRC (the track carries on; it was
+  dropped), and an RTX packet from an SSRC nothing associates is no longer taken for a media
+  stream.
+
 - **peer connection**: `DefaultInterceptorHandles` has a new public field, `transports`
   (`TransportHandles`): a struct literal must name it. The default chain's circuit breaker is
   now one per transport (`Slot::CircuitBreaker` holds a `PerRtpSession`).
@@ -2392,6 +2402,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new realm re-keys the allocation it is about, not every allocation of the client.
 
 ### Features
+
+- **media conformance**: several clock rates on one sender, and RTX re-association (media-18).
+  - RFC 7160 section 4.1: a packet written with a negotiated codec of another clock rate moves
+    its encoding to a new SSRC (its RTX SSRC too); the stream it left stays in the RTCP session
+    and sends its sender reports; a return to a rate used before says BYE for the SSRC that used
+    it and takes another new one. Comfort noise and telephone events ride the stream as they
+    are. `SettingEngineBuilder::with_ssrc_per_clock_rate`.
+  - `RtcpSessionControl::ClockRateSwitch`: the next compound packet leads with the current
+    clock rate's SR, the SRs of the other rates' SSRCs that sent lately right behind it.
+  - RFC 8834 section 4.3 / RFC 4588 section 5.3: original packets from a new SSRC take over the
+    stream of a single-stream receiver (the track carries on); an RTX stream from an SSRC
+    nothing associates is associated, by its payload type and section, with that original, in
+    place of the RTX SSRC before; RTX before any original is dropped.
 
 - **media conformance**: several transports, the per-transport parts the multi-transport work
   left open.

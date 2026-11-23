@@ -107,6 +107,32 @@ pub(crate) struct RTCRtpSenderInternal {
     /// previous-ssrc:<old> ...` (RFC 5576 section 6.2), and what the application still writes
     /// with an old SSRC goes out with the new one.
     previous_ssrcs: Vec<(SSRC, Vec<SSRC>)>,
+    /// RFC 7160 section 4.1, by the SSRC each stream is sent with now: the clock rates the
+    /// stream was sent with, the streams of the other rates (still in the session), and the
+    /// codec the current SSRC is sent with when the application switched to one other than
+    /// the negotiated choice.
+    clock_rates: std::collections::HashMap<SSRC, ClockRateStreams>,
+}
+
+/// What a sender keeps of one encoding's clock rates (RFC 7160 section 4.1: an SSRC per
+/// clock rate, a BYE and a new SSRC on a return to a rate already used).
+#[derive(Default, Debug, Clone)]
+pub(crate) struct ClockRateStreams {
+    history: rtp::clock_rate::ClockRateHistory,
+    /// The streams of the other clock rates the encoding was sent with: they stay bound (their
+    /// sender reports go on, RFC 7160 section 4.1) until the encoding returns to their rate.
+    parked: Vec<StreamInfo>,
+    /// The codec the current SSRC is sent with, when not the one negotiation picked.
+    codec: Option<RTCRtpCodecParameters>,
+}
+
+/// What a packet of another clock rate asks of its stream (RFC 7160 section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClockRateStep {
+    /// The packet's clock rate is the stream's: the SSRC stays.
+    Keep,
+    /// The stream moves to a new SSRC for the packet's clock rate.
+    Move,
 }
 
 /// An encoding's `maxFramerate` state: its SSRC, the RTP timestamp of the last frame
@@ -943,6 +969,9 @@ impl RTCRtpSenderInternal {
             .unwrap_or_default();
         replaced.push(old);
         self.previous_ssrcs.push((new, replaced));
+        if let Some(streams) = self.clock_rates.remove(&old) {
+            self.clock_rates.insert(new, streams);
+        }
         self.last_returned_parameters = None;
         self.sync_tracks();
         primary
@@ -992,9 +1021,28 @@ impl RTCRtpSenderInternal {
             // An encoding without a codec of its own is sent with the codec negotiation picked,
             // and its stream is bound like any other: without it the interceptors never see the
             // stream (no sender reports, no NACK responder, no TWCC).
+            // A stream moved to another clock rate (RFC 7160 section 4.1) is sent with the
+            // codec the application switched to, while that is still negotiated.
+            let switched = |ssrc: SSRC| {
+                self.clock_rates
+                    .get(&ssrc)
+                    .and_then(|streams| streams.codec.as_ref())
+                    .and_then(|chosen| {
+                        codecs.iter().find(|codec| {
+                            codec.payload_type == chosen.payload_type
+                                && codec
+                                    .rtp_codec
+                                    .mime_type
+                                    .eq_ignore_ascii_case(&chosen.rtp_codec.mime_type)
+                                && codec.rtp_codec.clock_rate == chosen.rtp_codec.clock_rate
+                        })
+                    })
+            };
             if let Some(&ssrc) = coding.rtp_coding_parameters.ssrc.as_ref()
                 && !self.is_removed_ssrc(ssrc)
-                && let Some(codec) = encoding_send_codec(&coding.codec, codecs)
+                && let Some(codec) = switched(ssrc)
+                    .cloned()
+                    .or_else(|| encoding_send_codec(&coding.codec, codecs))
             {
                 let payload_type_rtx = find_rtx_payload_type(codec.payload_type, codecs);
                 let fec_format = find_fec_format(codecs);
@@ -1106,6 +1154,98 @@ impl RTCRtpSenderInternal {
         for info in std::mem::take(&mut self.bound_streams) {
             interceptor.unbind_local_stream(&info);
         }
+        // The streams of the other clock rates leave with it (RFC 3550 6.6: each says BYE).
+        for streams in std::mem::take(&mut self.clock_rates).into_values() {
+            for info in streams.parked {
+                interceptor.unbind_local_stream(&info);
+            }
+        }
+    }
+
+    /// RFC 7160 section 4.1: what a packet of the stream `ssrc` sent with a codec of
+    /// `clock_rate` asks of it. The stream's first clock rate is the one it was bound with;
+    /// another one moves it to a new SSRC ([`move_to_clock_rate`](Self::move_to_clock_rate)),
+    /// as does a return to one it used before (after a BYE for the SSRC that used it). A stream
+    /// that is not bound is left alone.
+    pub(crate) fn clock_rate_step(&mut self, ssrc: SSRC, clock_rate: u32) -> ClockRateStep {
+        let Some(bound) = self
+            .bound_streams
+            .iter()
+            .find(|info| info.ssrc == ssrc)
+            .map(|info| info.clock_rate)
+        else {
+            return ClockRateStep::Keep;
+        };
+        let streams = self.clock_rates.entry(ssrc).or_insert_with(|| {
+            let mut streams = ClockRateStreams::default();
+            streams.history.switch_to(bound);
+            streams
+        });
+        match streams.history.switch_to(clock_rate) {
+            rtp::clock_rate::SsrcForClockRate::Keep => ClockRateStep::Keep,
+            rtp::clock_rate::SsrcForClockRate::New
+            | rtp::clock_rate::SsrcForClockRate::NewAfterBye => ClockRateStep::Move,
+        }
+    }
+
+    /// RFC 7160 section 4.1: the stream `old` is sent with `codec`, of another clock rate,
+    /// from now on, as SSRC `new` (its RTX stream as `new_rtx`). The stream it leaves stays in
+    /// the session (its sender reports go on); the stream of `codec`'s clock rate it used
+    /// before, if any, leaves it (BYE). Returns the new stream's information and the SSRCs of
+    /// the other clock rates still in the session.
+    pub(crate) fn move_to_clock_rate(
+        &mut self,
+        old: SSRC,
+        new: SSRC,
+        new_rtx: Option<SSRC>,
+        codec: &RTCRtpCodecParameters,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> (Option<StreamInfo>, Vec<SSRC>) {
+        let mut streams = self.clock_rates.remove(&old).unwrap_or_default();
+        // A rate used before: the SSRC that used it says BYE, and a new one takes its place.
+        if let Some(index) = streams
+            .parked
+            .iter()
+            .position(|info| info.clock_rate == codec.rtp_codec.clock_rate)
+        {
+            let gone = streams.parked.remove(index);
+            interceptor.unbind_local_stream(&gone);
+        }
+        let old_rtx = self
+            .bound_streams
+            .iter()
+            .find(|info| info.ssrc == old)
+            .and_then(|info| info.ssrc_rtx);
+        if let Some(index) = self.bound_streams.iter().position(|info| info.ssrc == old) {
+            streams.parked.push(self.bound_streams.remove(index));
+        }
+        self.replace_ssrc(old, new);
+        if let (Some(old_rtx), Some(new_rtx)) = (old_rtx, new_rtx) {
+            self.replace_ssrc(old_rtx, new_rtx);
+        }
+        streams.codec = Some(codec.clone());
+        let parked: Vec<SSRC> = streams.parked.iter().map(|info| info.ssrc).collect();
+        self.clock_rates.insert(new, streams);
+        let info = self
+            .local_stream_infos(media_engine)
+            .into_iter()
+            .find(|info| info.ssrc == new);
+        if let Some(info) = &info {
+            interceptor.bind_local_stream(info);
+            self.bound_streams.push(info.clone());
+        }
+        (info, parked)
+    }
+
+    /// The SSRCs of the streams of other clock rates this sender keeps in the session.
+    pub(crate) fn parked_ssrcs(&self) -> impl Iterator<Item = SSRC> + '_ {
+        self.clock_rates.values().flat_map(|streams| {
+            streams
+                .parked
+                .iter()
+                .flat_map(|info| std::iter::once(info.ssrc).chain(info.ssrc_rtx))
+        })
     }
 }
 

@@ -769,16 +769,17 @@ impl RTCRtpSender<'_> {
             .peer_connection
             .setting_engine
             .unnegotiated_header_extensions;
+        let one_ssrc_across_clock_rates = self
+            .peer_connection
+            .setting_engine
+            .one_ssrc_across_clock_rates;
         let negotiated_header_extensions = self.peer_connection.rtp_transceivers[self.id.0]
             .negotiated_header_extensions()
             .to_vec();
-        let (sender, media_engine) = (
-            self.peer_connection.rtp_transceivers[self.id.0]
-                .sender_mut()
-                .as_mut()
-                .expect("every transceiver has a sender"),
-            &mut self.peer_connection.media_engine,
-        );
+        let sender = self.peer_connection.rtp_transceivers[self.id.0]
+            .sender_mut()
+            .as_mut()
+            .expect("every transceiver has a sender");
 
         if sender.track_removed() {
             return Err(Error::ErrRTPSenderTrackRemoved);
@@ -804,6 +805,48 @@ impl RTCRtpSender<'_> {
         {
             return Err(Error::ErrSenderWithNoSSRCs);
         }
+
+        // RFC 7160 section 4.1: "An RTP Sender with RTCP turned on MUST use a different SSRC
+        // for each different clock rate". A packet written with a negotiated codec of another
+        // clock rate than its stream's moves the stream to a new SSRC (a BYE first for the
+        // SSRC of a rate it returns to). Comfort noise and telephone events ride the stream
+        // as they are (RFC 4733 section 2.5.1.2 puts the events in the stream's numbering); a
+        // payload type that is not negotiated is sent as the encoding's codec, below.
+        // `with_ssrc_per_clock_rate(false)` keeps one SSRC.
+        if from_application && !one_ssrc_across_clock_rates {
+            let stream_ssrc = packet.header.ssrc;
+            let chosen = sender
+                .get_send_codecs()
+                .iter()
+                .find(|codec| {
+                    codec.payload_type == packet.header.payload_type
+                        && !crate::peer_connection::handler::endpoint::is_auxiliary_mime_type(
+                            &codec.rtp_codec.mime_type,
+                        )
+                })
+                .cloned()
+                .filter(|codec| {
+                    sender.clock_rate_step(stream_ssrc, codec.rtp_codec.clock_rate)
+                        == internal::ClockRateStep::Move
+                });
+            if let Some(codec) = chosen
+                && let Some(new) = self.peer_connection.move_sender_to_clock_rate(
+                    self.id.0,
+                    stream_ssrc,
+                    &codec,
+                    now,
+                )
+            {
+                packet.header.ssrc = new;
+            }
+        }
+        let (sender, media_engine) = (
+            self.peer_connection.rtp_transceivers[self.id.0]
+                .sender_mut()
+                .as_mut()
+                .expect("every transceiver has a sender"),
+            &mut self.peer_connection.media_engine,
+        );
 
         // W3C webrtc 5.2.5 maxFramerate (video): frames above the encoding's maximum rate are
         // dropped whole.

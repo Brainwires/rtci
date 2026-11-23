@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
+use rtc::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
@@ -15,19 +15,92 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtc::rtcp::goodbye::Goodbye;
+use rtc::rtcp::sender_report::SenderReport;
 use rtc::rtp::header::Header;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
 use rtc::shared::marshal::Unmarshal;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 
+/// What a tap at the network end of the chain saw: each RTCP compound packet written, with
+/// when, and the local streams bound and unbound.
+#[derive(Default)]
+struct Tapped {
+    rtcp: Vec<(Instant, Vec<Box<dyn rtc::rtcp::Packet>>)>,
+    bound: Vec<(u32, u32)>,
+    unbound: Vec<u32>,
+}
+
+type Tap = Arc<Mutex<Tapped>>;
+
+/// An interceptor below the RTCP session (written packets pass it after the session): it
+/// records and passes everything on.
+struct TapInterceptor {
+    tap: Tap,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for TapInterceptor {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+        if let Packet::Rtcp(packets) = &msg.message.packet
+            && !packets.is_empty()
+        {
+            self.tap
+                .lock()
+                .expect("tap")
+                .rtcp
+                .push((msg.now, packets.clone()));
+        }
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+}
+
+impl Interceptor for TapInterceptor {
+    fn bind_local_stream(&mut self, info: &StreamInfo) {
+        let mut tap = self.tap.lock().expect("tap");
+        tap.bound.push((info.ssrc, info.clock_rate));
+    }
+    fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.tap.lock().expect("tap").unbound.push(info.ssrc);
+    }
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
 struct Peer {
     pc: RTCPeerConnection,
+    /// What the network end of its interceptor chain saw.
+    tap: Tap,
     addr: SocketAddr,
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
@@ -39,7 +112,15 @@ impl Peer {
     fn new(addr: &str) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+        let tap = Tap::default();
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?.with(
+            Slot::Custom(250),
+            TapInterceptor {
+                tap: tap.clone(),
+                read_queue: VecDeque::new(),
+                write_queue: VecDeque::new(),
+            },
+        );
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(media_engine)
@@ -47,6 +128,7 @@ impl Peer {
             .build(Instant::now())?;
         Ok(Self {
             pc,
+            tap,
             addr: addr.parse()?,
             connected: false,
             states: Vec::new(),
@@ -302,8 +384,9 @@ fn comfort_noise_is_sent_only_when_negotiated() -> Result<()> {
 
 /// RFC 8834 section 4.3: an endpoint "MUST be prepared to accept data in any of the payload
 /// formats that were signalled ... at any time". The sender switches between Opus, PCMU and
-/// PCMA on its one SSRC; every packet reaches the receiving application with the format it
-/// was sent in, in order.
+/// PCMA (each clock rate on an SSRC of its own, RFC 7160 section 4.1, which the receiver's
+/// track follows); every packet reaches the receiving application with the format it was sent
+/// in, in order.
 #[test]
 fn every_negotiated_format_is_received_at_any_time() -> Result<()> {
     let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
@@ -317,5 +400,124 @@ fn every_negotiated_format_is_received_at_any_time() -> Result<()> {
         .map(|h| h.payload_type)
         .collect();
     assert_eq!(received, sent, "every format, at any time");
+    Ok(())
+}
+
+/// The RTP SSRC of each packet the first peer put on the wire, in order.
+fn wire_ssrcs(world: &World) -> Vec<u32> {
+    world.wire.iter().map(|header| header.ssrc).collect()
+}
+
+/// RFC 7160 section 4.1: "An RTP Sender with RTCP turned on MUST use a different SSRC for each
+/// different clock rate. An RTCP BYE MUST be sent and a new SSRC MUST be used if the clock rate
+/// switches back to a value already seen in the RTP stream." Opus (48 kHz), PCMU and PCMA
+/// (8 kHz), Opus and PCMU again on one audio sender: four SSRCs, PCMA on PCMU's; each return
+/// to a rate says BYE for the SSRC that used it before; the receiving application gets every
+/// packet, in order, on its one track.
+#[test]
+fn each_clock_rate_is_sent_with_an_ssrc_of_its_own() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    let sent = [111u8, 111, 0, 8, 111, 0];
+    for (seq, pt) in sent.iter().enumerate() {
+        world.send(sender, seq as u16 + 1, *pt)?;
+    }
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+    let ssrcs = wire_ssrcs(&world);
+    assert_eq!(ssrcs.len(), sent.len(), "{ssrcs:?}");
+    assert_eq!(ssrcs[0], ssrcs[1], "one clock rate, one SSRC");
+    assert_ne!(ssrcs[1], ssrcs[2], "8 kHz after 48 kHz: another SSRC");
+    assert_eq!(ssrcs[2], ssrcs[3], "PCMA has PCMU's clock rate");
+    let distinct: HashSet<u32> = ssrcs.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        4,
+        "a return to a rate takes a new SSRC: {ssrcs:?}"
+    );
+
+    let tap = world.peers[0].tap.lock().expect("tap");
+    let goodbyes: HashSet<u32> = tap
+        .rtcp
+        .iter()
+        .flat_map(|(_, packets)| packets)
+        .filter_map(|packet| packet.as_any().downcast_ref::<Goodbye>())
+        .flat_map(|goodbye| goodbye.sources.iter().copied())
+        .collect();
+    assert!(
+        goodbyes.contains(&ssrcs[0]) && goodbyes.contains(&ssrcs[2]),
+        "BYE for the SSRC of each rate returned to: {goodbyes:?} of {ssrcs:?}"
+    );
+    assert!(
+        !goodbyes.contains(&ssrcs[4]) && !goodbyes.contains(&ssrcs[5]),
+        "the SSRCs in use say no BYE: {goodbyes:?}"
+    );
+    drop(tap);
+
+    let received: Vec<u8> = world.peers[1]
+        .read_rtp
+        .iter()
+        .map(|h| h.payload_type)
+        .collect();
+    assert_eq!(
+        received, sent,
+        "the receiver follows the stream to each SSRC"
+    );
+    let current = world.peers[0]
+        .pc
+        .rtp_sender(sender)
+        .expect("sender")
+        .get_parameters()
+        .encodings[0]
+        .rtp_coding_parameters
+        .ssrc;
+    assert_eq!(
+        current,
+        Some(ssrcs[5]),
+        "the encoding is sent with the SSRC of its current clock rate"
+    );
+    Ok(())
+}
+
+/// RFC 7160 section 4.1: "the next compound RTCP packet sent by the RTP sender MUST contain
+/// multiple SR packets, the first one containing the mapping for the current clock rate and
+/// the subsequent SR packet(s) containing the mapping for the other clock rates seen during the
+/// last period". After a switch from Opus to PCMU the first compound packet leads with the
+/// PCMU SSRC's sender report, and the Opus SSRC's follows it.
+#[test]
+fn after_a_clock_rate_switch_the_sender_reports_lead_with_the_current_rate() -> Result<()> {
+    let (mut world, sender) = World::connected(RtpCodecKind::Audio, |sdp| sdp)?;
+    for seq in 1..=5 {
+        world.send(sender, seq, 111)?;
+    }
+    let switched_at = world.now;
+    world.send(sender, 6, 0)?;
+    let until = world.now + Duration::from_secs(3);
+    world.run_until(until)?;
+    let ssrcs = wire_ssrcs(&world);
+    let (opus, pcmu) = (ssrcs[0], ssrcs[5]);
+    assert_ne!(opus, pcmu);
+    let tap = world.peers[0].tap.lock().expect("tap");
+    let next = tap
+        .rtcp
+        .iter()
+        .filter(|(at, _)| *at >= switched_at)
+        .find(|(_, packets)| {
+            packets
+                .first()
+                .is_some_and(|first| first.as_any().is::<SenderReport>())
+        })
+        .map(|(_, packets)| {
+            packets
+                .iter()
+                .filter_map(|packet| packet.as_any().downcast_ref::<SenderReport>())
+                .map(|sr| sr.ssrc)
+                .collect::<Vec<u32>>()
+        })
+        .expect("a compound packet after the switch");
+    assert_eq!(
+        next,
+        vec![pcmu, opus],
+        "the current clock rate's sender report first, the other one's behind it"
+    );
     Ok(())
 }

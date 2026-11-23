@@ -818,12 +818,47 @@ impl<'a> InterceptorHandler<'a> {
             }
         };
 
+        // A retransmission stream of a single-stream receiver, named by its payload type.
+        if let Some(bound) = self.associate_rtx_by_apt(index, ssrc, payload_type) {
+            return bound;
+        }
+
+        // A receiver that already has a stream: a simulcast one (its codings have rids) is the
+        // rid path's. One of a single stream takes the new SSRC over when the packet is media
+        // of its section: the remote source moved to another SSRC (RFC 7160 section 4.1: an
+        // SSRC per clock rate; RFC 3550 section 8.2: a collision), and RFC 8834 section 4.3
+        // wants every negotiated format accepted at any time. The track carries on under the
+        // new SSRC; the old stream is unbound.
+        let mut takeover = false;
         if let Some(transceiver) = self.rtp_transceivers.get(index)
             && let Some(receiver) = transceiver.receiver()
             && !receiver.track().codings().is_empty()
         {
-            // it is rid-based (or already bound), let's use the rid path
-            return false;
+            let codings = receiver.track().codings();
+            let single = codings.len() == 1
+                && codings[0].rtp_coding_parameters.rid.is_empty()
+                && codings[0].rtp_coding_parameters.ssrc != Some(ssrc);
+            let media = receiver.get_codec_preferences().iter().any(|codec| {
+                codec.payload_type == payload_type
+                    && !is_auxiliary_mime_type(&codec.rtp_codec.mime_type)
+                    && !is_repair_mime_type(&codec.rtp_codec.mime_type)
+            });
+            if !(single && media) {
+                // it is rid-based (or already bound), let's use the rid path
+                return false;
+            }
+            let old = codings[0].rtp_coding_parameters.ssrc;
+            debug!("ssrc {ssrc} takes over the stream of ssrc {old:?} in transceiver {index}");
+            if let Some(receiver) = self.rtp_transceivers[index].receiver_mut() {
+                receiver.interceptor_remote_streams_op(self.media_engine, self.interceptor, false);
+                receiver.set_coding_parameters(vec![]);
+                receiver.track_mut().set_codings(vec![]);
+            }
+            if let Some(old) = old {
+                self.ctx.ssrc_owners.remove(old);
+                self.ctx.placed_ssrcs.remove(&old);
+            }
+            takeover = true;
         }
 
         let Some(transceiver) = self.rtp_transceivers.get_mut(index) else {
@@ -900,8 +935,97 @@ impl<'a> InterceptorHandler<'a> {
             .get_or_create_inbound_rtp_streams(ssrc, kind, &track_id, &mid, None, None, index);
         self.stats.set_inbound_ccfb(ssrc, ccfb);
 
-        self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        // The track the new SSRC took over is open already.
+        if !takeover {
+            self.emit_on_open(now, index, track_id, stream_id, ssrc, None);
+        }
         true
+    }
+
+    /// RFC 4588 section 5.3: "Upon reception of original RTP packets with a new SSRC, the
+    /// receiver MUST perform the SSRC association again". An RTX packet from an SSRC no
+    /// description or header extension associates, whose payload type is an RTX format of
+    /// transceiver `index`'s section (its `apt` a media format there), belongs to the one
+    /// original stream of that section's single-stream receiver (the MID, or the section's
+    /// payload types, named the section; SSRC multiplexing, one original per section, so the
+    /// association is not ambiguous): it becomes that stream's RTX SSRC, in place of the one
+    /// before (the sender moved both, RFC 7160 section 4.1, or restarted its RTX stream).
+    ///
+    /// `None` when the packet is not RTX of such a receiver; `Some(false)` when it is RTX but
+    /// there is no original stream to associate it with yet (it is dropped).
+    fn associate_rtx_by_apt(
+        &mut self,
+        index: usize,
+        ssrc: SSRC,
+        payload_type: PayloadType,
+    ) -> Option<bool> {
+        let receiver = self
+            .rtp_transceivers
+            .get_mut(index)?
+            .receiver_mut()
+            .as_mut()?;
+        let codec = receiver
+            .get_codec_preferences()
+            .iter()
+            .find(|codec| {
+                codec.payload_type == payload_type
+                    && codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+                        crate::peer_connection::configuration::media_engine::MIME_TYPE_RTX,
+                    )
+            })
+            .cloned()?;
+        let apt = crate::rtp_transceiver::rtp_sender::rtp_codec::parse_rtx_apt(
+            &codec.rtp_codec.sdp_fmtp_line,
+        )?;
+        if !receiver
+            .get_codec_preferences()
+            .iter()
+            .any(|media| media.payload_type == apt)
+        {
+            return None;
+        }
+        // Before its original stream there is nothing to associate it with: a retransmission
+        // is never a stream of its own.
+        if receiver.get_coding_parameters().is_empty() {
+            return Some(false);
+        }
+        let single = receiver.get_coding_parameters().len() == 1
+            && receiver.get_coding_parameters()[0].rid.is_empty();
+        if !single {
+            return None;
+        }
+        let coding = receiver.get_coding_parameter_mut_by_rid("")?;
+        let Some(primary) = coding.ssrc.filter(|primary| *primary != ssrc) else {
+            return Some(false);
+        };
+        let replaced = coding.rtx.as_ref().map(|rtx| rtx.ssrc);
+        coding.rtx = Some(RTCRtpRtxParameters { ssrc });
+        debug!("rtx ssrc {ssrc} associated with ssrc {primary} by its payload type (RFC 4588 5.3)");
+        let parameters = receiver.get_parameters(self.media_engine);
+        let flow = repair_flow_codec(&codec.rtp_codec);
+        for (bind, repair) in [(false, replaced.filter(|r| *r != 0)), (true, Some(ssrc))] {
+            let Some(repair) = repair else {
+                continue;
+            };
+            RTCRtpReceiverInternal::interceptor_remote_stream_op(
+                self.interceptor,
+                bind,
+                repair,
+                None,
+                None,
+                codec.payload_type,
+                None,
+                None,
+                &flow,
+                &parameters.rtp_parameters.header_extensions,
+                &[],
+            );
+        }
+        if let Some(replaced) = replaced {
+            self.ctx.ssrc_owners.remove(replaced);
+        }
+        self.stats.update_inbound_rtx_ssrc(primary, ssrc);
+        Some(true)
     }
 
     /// A repair (RTX) stream announced only by the `repaired-rtp-stream-id` header extension

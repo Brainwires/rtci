@@ -182,6 +182,19 @@ pub enum RtcpSessionControl {
         /// The RepairedRtpStreamId (the rid of the stream a redundancy stream repairs).
         repaired_rid: Option<String>,
     },
+    /// RFC 7160 section 4.1: the local stream `current` took over from the streams `previous`
+    /// because the sender switched to another clock rate (each clock rate has an SSRC of its
+    /// own). The next compound packet "MUST contain multiple SR packets, the first one
+    /// containing the mapping for the current clock rate and the subsequent SR packet(s)
+    /// containing the mapping for the other clock rates seen during the last period": it
+    /// leads with `current`'s report, followed by those of the `previous` streams that sent
+    /// lately.
+    ClockRateSwitch {
+        /// The SSRC of the clock rate now in use.
+        current: u32,
+        /// The SSRCs of the other clock rates the stream was sent with, still in the session.
+        previous: Vec<u32>,
+    },
 }
 
 impl RtcpSessionControl {
@@ -456,6 +469,7 @@ impl RtcpSessionBuilder {
             outside_budget: false,
             pending: Vec::new(),
             early_at: None,
+            clock_rate_switch: None,
             compound_sent: false,
             reference_times: HashMap::new(),
             dlrr_limits: HashMap::new(),
@@ -712,6 +726,9 @@ pub struct RtcpSessionInterceptor {
     pending: Vec<Box<dyn rtcp::Packet>>,
     /// RFC 4585 3.5.2: when the scheduled Early packet goes.
     early_at: Option<Instant>,
+    /// RFC 7160 section 4.1: the clock rate switch the next compound packet reports
+    /// ([`RtcpSessionControl::ClockRateSwitch`]): the current SSRC, then the previous ones.
+    clock_rate_switch: Option<(u32, Vec<u32>)>,
     /// Whether a compound packet has been sent (RFC 5506 4: none reduced-size before).
     compound_sent: bool,
     /// The receiver reference times received and not yet answered, by sender SSRC.
@@ -1891,6 +1908,30 @@ impl RtcpSessionInterceptor {
     /// indices of those that reported; `Shape::Minimal` carries the leading report alone.
     fn send_compound(&mut self, now: Instant, first: usize, shape: Shape) -> Vec<usize> {
         let mut budget = self.mtu;
+        // RFC 7160 section 4.1: after a clock rate switch the packet leads with the report of
+        // the SSRC now in use, and the SRs of the other clock rates' SSRCs follow it. The SSRC
+        // whose timer brought the packet is in it as well.
+        let switch = self
+            .clock_rate_switch
+            .take()
+            .and_then(|(current, previous)| {
+                let lead = self.local_index(current)?;
+                let previous: Vec<usize> = previous
+                    .iter()
+                    .filter_map(|ssrc| self.local_index(*ssrc))
+                    .filter(|&index| index != lead && self.we_sent(index, now))
+                    .collect();
+                Some((lead, previous))
+            });
+        let (first, switched): (usize, Vec<usize>) = match switch {
+            Some((lead, mut previous)) => {
+                if first != lead && !previous.contains(&first) {
+                    previous.push(first);
+                }
+                (lead, previous)
+            }
+            None => (first, vec![]),
+        };
         let mut included = vec![first];
         let mut reports: Vec<Box<dyn rtcp::Packet>> = vec![];
 
@@ -1935,13 +1976,26 @@ impl RtcpSessionInterceptor {
         let report = self.report(first, now, first_blocks);
         budget = budget.saturating_sub(report.marshal_size() + 4 + chunk);
         reports.push(report);
+        // The other clock rates' reports (and the SSRC whose timer this is) right behind the
+        // leader, whatever the shape.
+        for &index in &switched {
+            let own_blocks = if carries_blocks(index) {
+                blocks.clone()
+            } else {
+                vec![]
+            };
+            let report = self.report(index, now, own_blocks);
+            budget = budget.saturating_sub(report.marshal_size() + chunk);
+            reports.push(report);
+            included.push(index);
+        }
 
         if shape == Shape::Full {
             // RFC 8108 5.3.2: the other SSRCs, in the order their timers would expire, as
             // long as their reports fit.
             let mut others: Vec<usize> = (0..self.locals.len())
                 .filter(|&index| {
-                    index != first
+                    !included.contains(&index)
                         && self.locals[index].participates()
                         && self.locals[index].timing.is_some()
                 })
@@ -2398,6 +2452,9 @@ impl RtcpSessionInterceptor {
                 } else {
                     self.identifiers.insert(*ssrc, items);
                 }
+            }
+            RtcpSessionControl::ClockRateSwitch { current, previous } => {
+                self.clock_rate_switch = Some((*current, previous.clone()));
             }
             RtcpSessionControl::Leave => {
                 // RFC 3550 6.6: every SSRC of an endpoint that leaves says BYE.
