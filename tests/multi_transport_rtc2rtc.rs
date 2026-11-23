@@ -1659,3 +1659,96 @@ fn each_transport_has_a_circuit_breaker_of_its_own() -> Result<()> {
     }
     Ok(())
 }
+
+/// Sends a packet on each sender every 20 ms for `duration` of virtual time, delivering what
+/// is in flight and running both peers' timers (RTCP reports, congestion feedback) as it goes.
+fn send_media_for(world: &mut World, senders: &[RTCRtpSenderId], duration: Duration) -> Result<()> {
+    let end = world.now + duration;
+    let mut next_send = world.now;
+    let mut seq = 1u16;
+    while world.now < end {
+        if world.now >= next_send {
+            for sender in senders {
+                world.send_rtp(*sender, seq)?;
+            }
+            seq = seq.wrapping_add(1);
+            next_send += Duration::from_millis(20);
+        }
+        while world.step()? {}
+        let next = world
+            .peers
+            .iter_mut()
+            .filter_map(|p| p.pc.poll_timeout())
+            .min()
+            .map_or(next_send, |at| at.min(next_send));
+        world.now = next.max(world.now + Duration::from_millis(1));
+        let now = world.now;
+        for peer in world.peers.iter_mut() {
+            peer.pc.handle_timeout(now)?;
+        }
+    }
+    Ok(())
+}
+
+/// webrtc-stats 8.20 `availableOutgoingBitrate`: the bitrate the congestion control estimates
+/// for the outgoing RTP streams on the pair. With audio and video on transports of their own,
+/// each transport has a congestion controller of its own (RFC 8836 section 2: each path has
+/// its own capacity), and each transport's selected pair reports that transport's estimate,
+/// not another's and not the sum.
+#[test]
+fn each_transport_s_selected_pair_reports_its_own_estimate() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    // Long enough for the receiver's congestion feedback to reach the sender on each
+    // transport.
+    send_media_for(&mut world, &senders, Duration::from_secs(3))?;
+    let sessions: Vec<usize> = senders.iter().map(|s| session_of(&mut world, *s)).collect();
+    assert_ne!(
+        sessions[0], sessions[1],
+        "audio and video in two RTP sessions"
+    );
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    let now = world.now;
+    let report = world.peers[0].pc.get_stats(now, StatsSelector::None);
+    let handles = world.peers[0].handles.transports.clone();
+    let mut pairs = HashSet::new();
+    for (ssrc, session) in ssrcs.iter().zip(&sessions) {
+        let transport_id = report
+            .outbound_rtp_streams()
+            .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == *ssrc)
+            .map(|s| {
+                s.sent_rtp_stream_stats
+                    .rtp_stream_stats
+                    .transport_id
+                    .clone()
+            })
+            .expect("an outbound stream per sender");
+        let transport = report
+            .iter()
+            .find_map(|e| match e {
+                RTCStatsReportEntry::Transport(t) if t.stats.id == transport_id => Some(t),
+                _ => None,
+            })
+            .expect("the stream's transport is in the report");
+        let pair = report
+            .candidate_pairs()
+            .find(|p| p.stats.id == transport.selected_candidate_pair_id)
+            .expect("the transport's selected pair is in the report");
+        let own = handles
+            .congestion_control(*session)
+            .expect("a congestion controller per transport")
+            .target_bitrate();
+        let reported = pair
+            .available_outgoing_bitrate
+            .unwrap_or_else(|| panic!("transport {transport_id} has no estimate: {pair:?}"));
+        assert_eq!(
+            reported, own,
+            "the pair of {ssrc:#x}'s transport reports its own controller's estimate"
+        );
+        pairs.insert(pair.stats.id.clone());
+    }
+    assert_eq!(pairs.len(), 2, "two transports, two selected pairs");
+    Ok(())
+}
