@@ -2506,3 +2506,42 @@ pub(crate) fn red_encodings_negotiated(
         })
     })
 }
+
+#[cfg(test)]
+mod payload_type_numbering_test {
+    use super::*;
+
+    /// RFC 3551 section 3 and RFC 5761 section 4: where more than the 32 dynamic payload
+    /// types are needed, the unassigned numbers below 64 are used next and 64 to 95 never
+    /// (they would collide with RTCP packet types under rtcp-mux). The engine's own numbering
+    /// (an SFrame section's formats): 34 formats registered on 0 to 33 take 96 to 127, then
+    /// 35 and 36.
+    #[test]
+    fn numbering_past_the_dynamic_range_uses_35_to_63_and_never_64_to_95() {
+        let mut media_engine = MediaEngine::default();
+        for i in 0..34u8 {
+            media_engine
+                .register_codec(
+                    RTCRtpCodecParameters {
+                        rtp_codec: RTCRtpCodec {
+                            mime_type: format!("video/X{i}"),
+                            clock_rate: 90000,
+                            channels: 0,
+                            sdp_fmtp_line: String::new(),
+                            rtcp_feedback: vec![],
+                        },
+                        payload_type: i,
+                    },
+                    RtpCodecKind::Video,
+                )
+                .expect("registered");
+        }
+        let numbered: Vec<PayloadType> = media_engine
+            .sframe_numbering(RtpCodecKind::Video)
+            .iter()
+            .map(|codec| codec.payload_type)
+            .collect();
+        let expected: Vec<PayloadType> = (96..=127).chain([35, 36]).collect();
+        assert_eq!(numbered, expected);
+    }
+}

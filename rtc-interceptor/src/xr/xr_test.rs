@@ -335,3 +335,25 @@ fn a_signalled_size_thins_the_block_until_it_fits() {
         "the even numbers all arrived"
     );
 }
+
+/// RFC 3611 section 4.3: receipt times are in the stream's RTP timestamp clock and "the first
+/// receipt time value SHOULD also be chosen at random". Receivers fed the same packets at the
+/// same instants report first receipt times that differ, and keep 160 ticks (20 ms at 8 kHz)
+/// between consecutive packets.
+#[test]
+fn the_first_receipt_time_is_random() {
+    let base = Instant::now();
+    let firsts: Vec<u32> = (0..64)
+        .map(|_| {
+            let mut xr = interceptor(&["pkt-rcpt-times"]);
+            feed(&mut xr, base, &[(10, 0), (11, 20)], 10);
+            let report = report(&mut xr, base + ms(1_000)).expect("an XR");
+            let blocks = block::<PacketReceiptTimesReportBlock>(&report);
+            let times = &blocks[0].receipt_time;
+            assert_eq!(160, times[1].wrapping_sub(times[0]));
+            times[0]
+        })
+        .collect();
+    let distinct: std::collections::HashSet<u32> = firsts.iter().copied().collect();
+    assert_eq!(distinct.len(), firsts.len(), "{firsts:?}");
+}

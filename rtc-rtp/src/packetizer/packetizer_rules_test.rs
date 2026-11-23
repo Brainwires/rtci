@@ -233,3 +233,75 @@ fn a_comfort_noise_packet_never_carries_the_marker() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 3550 section 5.1: "The initial value of the timestamp SHOULD be random, as for the
+/// sequence number." Packetizers made one after another stamp their first packet with
+/// timestamps spread over the whole 32-bit space.
+#[test]
+fn the_initial_timestamp_is_random() {
+    let now = Instant::now();
+    let firsts: Vec<u32> = (0..256)
+        .map(|_| {
+            let mut packetizer = packetizer(1200, Box::new(OpusPayloader), 48_000);
+            packetizer
+                .packetize(now, &Bytes::from_static(&[1, 2, 3]), 960)
+                .expect("a packet")[0]
+                .header
+                .timestamp
+        })
+        .collect();
+    let distinct: std::collections::HashSet<u32> = firsts.iter().copied().collect();
+    assert_eq!(distinct.len(), 256, "no repeats among 256 draws of 2^32");
+    let (any, all) = firsts
+        .iter()
+        .fold((0u32, u32::MAX), |(any, all), t| (any | t, all & t));
+    assert_eq!((any, all), (u32::MAX, 0), "every bit varies");
+}
+
+/// RFC 7741 section 4.1: "the RTP timestamp ... MUST/RECOMMENDED be the 90 kHz sampling instant
+/// of the frame", and every packet of one frame carries the same timestamp. A VP8 frame too
+/// large for one packet goes out in several, all with one timestamp; the next frame, 1/30 s
+/// later, is 3000 ticks of the 90 kHz clock on.
+#[test]
+fn every_packet_of_a_vp8_frame_has_the_frames_timestamp() {
+    let now = Instant::now();
+    let mut packetizer = packetizer(
+        200,
+        Box::new(crate::codec::vp8::Vp8Payloader::default()),
+        90_000,
+    );
+    let frame = Bytes::from(vec![0x9du8; 1000]);
+    let first = packetizer.packetize(now, &frame, 3000).expect("packets");
+    let second = packetizer.packetize(now, &frame, 3000).expect("packets");
+    assert!(first.len() > 1, "the frame needs several packets");
+    let stamps: std::collections::HashSet<u32> =
+        first.iter().map(|packet| packet.header.timestamp).collect();
+    assert_eq!(stamps.len(), 1, "one timestamp per frame");
+    assert!(
+        second
+            .iter()
+            .all(|packet| packet.header.timestamp == first[0].header.timestamp.wrapping_add(3000))
+    );
+}
+
+/// RFC 9628 section 4.1: a frame that is not shown (`show_frame` 0) "MAY" carry the timestamp
+/// of the shown frame that follows it. Packetized with no samples, it does: the next frame
+/// goes out with the same timestamp, and the one after that 3000 ticks later.
+#[test]
+fn a_frame_packetized_with_no_samples_shares_the_next_frames_timestamp() {
+    let now = Instant::now();
+    let mut packetizer = packetizer(
+        1200,
+        Box::new(crate::codec::vp9::Vp9Payloader::default()),
+        90_000,
+    );
+    let frame = Bytes::from(vec![0x82u8; 100]);
+    let hidden = packetizer.packetize(now, &frame, 0).expect("packets");
+    let shown = packetizer.packetize(now, &frame, 3000).expect("packets");
+    let next = packetizer.packetize(now, &frame, 3000).expect("packets");
+    assert_eq!(hidden[0].header.timestamp, shown[0].header.timestamp);
+    assert_eq!(
+        next[0].header.timestamp,
+        shown[0].header.timestamp.wrapping_add(3000)
+    );
+}

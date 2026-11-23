@@ -2411,37 +2411,11 @@ impl RTCPeerConnection {
                 continue;
             }
             for encoding in sender.send_encodings() {
-                let coding = &encoding.rtp_coding_parameters;
-                let Some(ssrc) = coding.ssrc else {
-                    continue;
-                };
-                let rid = (!coding.rid.is_empty()).then(|| coding.rid.clone());
-                let repair = coding
-                    .rtx
-                    .as_ref()
-                    .map(|rtx| rtx.ssrc)
-                    .into_iter()
-                    .chain(coding.fec.as_ref().map(|fec| fec.ssrc));
-                controls.push(
-                    RtcpSessionControl::StreamIdentifiers {
-                        ssrc,
-                        mid: Some(mid.clone()),
-                        rid: rid.clone(),
-                        repaired_rid: None,
-                    }
-                    .into_packet(now),
+                controls.extend(
+                    stream_identifiers(mid, &encoding.rtp_coding_parameters)
+                        .into_iter()
+                        .map(|control| control.into_packet(now)),
                 );
-                for repair_ssrc in repair {
-                    controls.push(
-                        RtcpSessionControl::StreamIdentifiers {
-                            ssrc: repair_ssrc,
-                            mid: Some(mid.clone()),
-                            rid: None,
-                            repaired_rid: rid.clone(),
-                        }
-                        .into_packet(now),
-                    );
-                }
             }
         }
         for control in controls {
@@ -5195,4 +5169,82 @@ fn describes_sctp_association(sd: &RTCSessionDescription) -> (bool, bool) {
         .any(|a| a.key == "sctp-port" && a.value.as_deref().map(str::trim) == Some("0"));
     let closed = section.media_name.port.value == 0 || zero_port;
     (!closed, closed)
+}
+
+/// The SDES identifiers of an encoding's SSRCs (RFC 9143 section 15.1, RFC 8852 sections 3.1
+/// and 3.2): the media SSRC's MID and RtpStreamId, its RTX SSRC's MID and RepairedRtpStreamId.
+/// A FlexFEC SSRC has the MID only: RFC 8627 section 7.2, the RtpStreamId and
+/// RepairedRtpStreamId items "SHOULD NOT be used" for FlexFEC streams (one FEC stream may
+/// protect several).
+pub(crate) fn stream_identifiers(
+    mid: &str,
+    coding: &crate::rtp_transceiver::rtp_sender::RTCRtpCodingParameters,
+) -> Vec<interceptor::RtcpSessionControl> {
+    let Some(ssrc) = coding.ssrc else {
+        return vec![];
+    };
+    let rid = (!coding.rid.is_empty()).then(|| coding.rid.clone());
+    let mut identifiers = vec![interceptor::RtcpSessionControl::StreamIdentifiers {
+        ssrc,
+        mid: Some(mid.to_owned()),
+        rid: rid.clone(),
+        repaired_rid: None,
+    }];
+    if let Some(rtx) = &coding.rtx {
+        identifiers.push(interceptor::RtcpSessionControl::StreamIdentifiers {
+            ssrc: rtx.ssrc,
+            mid: Some(mid.to_owned()),
+            rid: None,
+            repaired_rid: rid,
+        });
+    }
+    if let Some(fec) = &coding.fec {
+        identifiers.push(interceptor::RtcpSessionControl::StreamIdentifiers {
+            ssrc: fec.ssrc,
+            mid: Some(mid.to_owned()),
+            rid: None,
+            repaired_rid: None,
+        });
+    }
+    identifiers
+}
+
+#[cfg(test)]
+mod stream_identifiers_test {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::{
+        RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
+    };
+    use interceptor::RtcpSessionControl;
+
+    /// RFC 8852 sections 3.1 and 3.2 and RFC 9143 section 15.1: a simulcast layer's media SSRC
+    /// carries its MID and RtpStreamId, its RTX SSRC the MID and the layer's RID as
+    /// RepairedRtpStreamId. RFC 8627 section 7.2: "the RtpStreamId and RepairedRtpStreamId
+    /// SDES items SHOULD NOT be used" for a FlexFEC stream: its SSRC carries the MID only.
+    #[test]
+    fn a_flexfec_ssrc_is_identified_by_its_mid_only() {
+        let coding = RTCRtpCodingParameters {
+            rid: "h".to_owned(),
+            ssrc: Some(1),
+            rtx: Some(RTCRtpRtxParameters { ssrc: 2 }),
+            fec: Some(RTCRtpFecParameters { ssrc: 3 }),
+            ..Default::default()
+        };
+        let items = |rid: Option<&str>, repaired: Option<&str>, ssrc: u32| {
+            RtcpSessionControl::StreamIdentifiers {
+                ssrc,
+                mid: Some("1".to_owned()),
+                rid: rid.map(str::to_owned),
+                repaired_rid: repaired.map(str::to_owned),
+            }
+        };
+        assert_eq!(
+            stream_identifiers("1", &coding),
+            vec![
+                items(Some("h"), None, 1),
+                items(None, Some("h"), 2),
+                items(None, None, 3)
+            ]
+        );
+    }
 }

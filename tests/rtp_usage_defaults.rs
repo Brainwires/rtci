@@ -182,3 +182,36 @@ fn the_default_offer_has_the_mandatory_payload_formats() -> TestResult {
     }
     Ok(())
 }
+
+/// RFC 3550 section 5.1: the SSRC identifier "SHOULD be chosen randomly"; section 8.1: by a
+/// routine that keeps two sources (or one source after a restart) from picking the same
+/// value. Peer connections made one after another (each a restart of the application, as far
+/// as the identifiers go) give their senders SSRCs that do not repeat and vary in every bit.
+#[test]
+fn sender_ssrcs_are_random_across_peer_connections() -> TestResult {
+    let mut ssrcs = vec![];
+    for _ in 0..64 {
+        let mut pc = default_peer()?;
+        let transceiver = pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
+        let sender = pc
+            .rtp_transceiver(transceiver)
+            .and_then(|t| t.sender())
+            .ok_or("a sender")?;
+        let ssrc = pc
+            .rtp_sender(sender)
+            .ok_or("sender")?
+            .get_parameters()
+            .encodings[0]
+            .rtp_coding_parameters
+            .ssrc
+            .ok_or("an SSRC")?;
+        ssrcs.push(ssrc);
+    }
+    let distinct: std::collections::HashSet<u32> = ssrcs.iter().copied().collect();
+    assert_eq!(distinct.len(), ssrcs.len(), "no repeats: {ssrcs:?}");
+    let (any, all) = ssrcs
+        .iter()
+        .fold((0u32, u32::MAX), |(any, all), s| (any | s, all & s));
+    assert_eq!((any, all), (u32::MAX, 0), "every bit varies");
+    Ok(())
+}

@@ -2403,6 +2403,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media conformance**: SHOULD and MAY rows of the media audit (media-19).
+  - A FlexFEC SSRC's SDES chunk carries the MID only: it carried the protected simulcast
+    layer's rid as RepairedRtpStreamId, which RFC 8627 section 7.2 says "SHOULD NOT" be used
+    for FlexFEC (`stream_identifiers`).
+  - Tests for what held untested: random initial sequence numbers, timestamps, SSRCs and XR
+    receipt-time offsets (RFC 3550 5.1, 8.1, A.6; RFC 3611 4.3); sender counts restart under a
+    new SSRC (RFC 3550 6.4.1); RTX, RED and RED-carried ULPFEC leave SRTP-protected like the
+    media (RFC 4588 12, RFC 2198 6, RFC 5109 11); XR only where signalled (RFC 8834 8); one
+    timestamp per VP8 frame (RFC 7741 4.1) and a hidden VP9 frame on the next frame's (RFC 9628
+    4.1); the engine's payload type numbering past 32 formats (RFC 3551 3, RFC 5761 4); an
+    answer without FEC drops the FEC formats and their RED (RFC 5109 14.3, RFC 8627 5.2.1).
+
 - **media conformance**: several clock rates on one sender, and RTX re-association (media-18).
   - RFC 7160 section 4.1: a packet written with a negotiated codec of another clock rate moves
     its encoding to a new SSRC (its RTX SSRC too); the stream it left stays in the RTCP session

@@ -1247,3 +1247,44 @@ fn after_a_clock_rate_switch_the_current_rates_sender_report_leads() {
         "the current clock rate's SR first, the previous one's behind it"
     );
 }
+
+/// RFC 3550 section 6.4.1: the sender's packet and octet counts "SHOULD be reset if the
+/// sender changes its SSRC identifier". A stream that moved from SSRC 100 (three packets sent)
+/// to SSRC 200 (one packet) reports one packet under 200.
+#[test]
+fn a_sender_that_changes_its_ssrc_counts_from_zero() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_local_stream(&audio(100));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    for seq in 1..=3 {
+        chain.handle_write(rtp(base, 100, seq, 960)).unwrap();
+    }
+    chain.unbind_local_stream(&audio(100));
+    chain.bind_local_stream(&audio(200));
+    chain.handle_write(rtp(base, 200, 1, 960)).unwrap();
+    let sent = run(&mut chain, base + secs(3.0));
+    let counts: Vec<(u32, u32)> = sent
+        .iter()
+        .flat_map(|sent| sent.get::<SenderReport>())
+        .filter(|sr| sr.ssrc == 200)
+        .map(|sr| (sr.packet_count, sr.octet_count))
+        .collect();
+    assert_eq!(counts.first(), Some(&(1, 100)), "{counts:?}");
+}
+
+/// RFC 8834 section 8: the use of XR "SHOULD be signalled". The receiver reference time goes
+/// out only for a stream that negotiated it (`rtcp-fb rrtr`, as libwebrtc signals RFC 3611
+/// 4.4): without, the regular report carries no XR.
+#[test]
+fn no_reference_time_without_its_signalling() {
+    let mut chain = chain(builder());
+    let base = Instant::now();
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    chain.handle_read(rtp(base, 200, 1, 0)).unwrap();
+    read(&mut chain);
+    let sent = run(&mut chain, base + secs(3.0));
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|sent| !sent.has::<ExtendedReport>()));
+}

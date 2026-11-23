@@ -19,7 +19,7 @@ Totals:
 
 - MUST: tested 34 / untested 1 / partial 2 / missing 0 / violated 0 / n-a 2 (total 39)
 - SHOULD: tested 5 / untested 0 / partial 0 / missing 2 / violated 0 / n-a 3 (total 10)
-- MAY: tested 0 / untested 1 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
+- MAY: tested 1 / untested 0 / partial 0 / missing 6 / violated 0 / n-a 0 (total 7)
 
 Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/flexfec/`, `it/` abbreviates
 `rtc-interceptor/tests/`.
@@ -56,7 +56,7 @@ Paths are relative to the repo root; `fec/` abbreviates `rtc-interceptor/src/fle
 | FLEXFEC03-5.2.1-1 | 5.2.1 | SHOULD | Receiver offered several L/D combinations chooses one with sufficient interleaving | missing | none | none | L and D are not understood |
 | FLEXFEC03-5.2.1-2 | 5.2.1 | MUST | Receiver takes the offered repair-window into account for its buffering when accepting | tested | `draft03/receiver.rs` (`bind_remote_stream`), `draft03/decoder.rs` (`decode_at`) | `the_negotiated_repair_window_bounds_recovery`, `the_repair_window_bounds_what_is_held_for_recovery` | The remote description's `repair-window` sets the time bound of the decoder's buffers for the stream |
 | FLEXFEC03-5.2.1-3 | 5.2.1 | MUST | Unknown fmtp options in the offer are ignored and deleted from the answer | tested | `configuration/media_engine.rs` (`local_fmtp_line`: a FlexFEC answer states this endpoint's fmtp) | `a_flexfec_03_answer_drops_unknown_options` | Was violated: the answer repeated the offer's line; fixed |
-| FLEXFEC03-5.2.1-4 | 5.2.1 | MAY | Receiver removes FEC from the answer when not desired | untested | `media_engine.rs:886-960, 1178-1218` (a codec that is not registered is not answered) | none | |
+| FLEXFEC03-5.2.1-4 | 5.2.1 | MAY | Receiver removes FEC from the answer when not desired | tested | `media_engine.rs:886-960, 1178-1218` (a codec that is not registered is not answered) | `an_answer_without_fec_drops_the_fec_formats_and_their_red` | Default behaviour: `flexfec-03` offered is not answered |
 | FLEXFEC03-5.2.2-1 | 5.2.2 | MUST | Declarative SDP: use the configuration provided | n/a | none | none | Offer/answer only |
 | FLEXFEC03-6.2-1 | 6.2 | MUST | FEC bit string: P, X, CC, M, PT recovery are the XOR of the source headers; first two bits skipped | tested | `fec/draft03/encoder.rs:200-203` | `encoder.rs::recovery_fields_are_the_xor_of_the_protected_packets` | |
 | FLEXFEC03-6.2-2 | 6.2 | MUST | Length recovery is the XOR of (packet length - 12): CSRC list, extension, payload and padding included | tested | `fec/draft03/encoder.rs:205-207` | `encoder.rs::recovery_fields_are_the_xor_of_the_protected_packets` | Tested only with packets that have no CSRC, extension or padding |
