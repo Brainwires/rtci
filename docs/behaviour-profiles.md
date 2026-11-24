@@ -156,7 +156,7 @@ or no RFC-permitted setting changes it:
   (`rtcp.congestion-feedback-in-budget`) is the default, and its cadence is derived from
   that budget (`cc.feedback-share` 3.75% of the session bandwidth, the receivers' three
   quarters of the 5%, no fixed ceiling): at 24 kbit/s of audio the connection's RTCP is
-  101.7% of a 3.2 kbit/s budget with the lower layers (the 64 kbit/s session floor;
+  99 to 103% of a 3.2 kbit/s budget with the lower layers (the 64 kbit/s session floor;
   within RFC 3550 6.3.1's compensation), against 197% before; 64% at 100 kbit/s and 77%
   at 300 kbit/s of video (135% and 140% before). `Performance` takes 69% of its own
   budget (16 kbit/s floor).

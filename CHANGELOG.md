@@ -70,9 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     for both; real minimal compound packets are 36 to 100).
   - Measured (`tests/rtcp_rate_trace_rtc2rtc.rs::measure_feedback_cadence_at_rates`, hosted,
     one way, `a=rtcp-rsize`; all RTCP of both sides with lower layers against 5% of the
-    session bandwidth with lower layers, the 64 kbit/s floor): 24 kbit/s audio 101.7% of the
-    budget (inside RFC 3550 6.3.1's compensation, the trace test's 3%; was 197%), feedback
-    2.9/s (was 4); 100 kbit/s audio and video 64% (was 135%), feedback 5.9/s (was 11.5);
+    session bandwidth with lower layers, the 64 kbit/s floor): 24 kbit/s audio 98.7 to 102.8%
+    of the budget over the runs (the regular reports' timing; inside the trace test's 3%, RFC
+    3550 6.3.1's compensation; was 197%), feedback 2.9/s (was 4); 100 kbit/s audio and video 64% (was 135%), feedback 5.9/s (was 11.5);
     300 kbit/s 77% (was 140%), 16/s (was 20); 1 Mbit/s 72% (was 99%) and 2.5 Mbit/s 66% (was
     84%), 20/s either way. With video in both directions, or video coming back while the
     received video pauses, the feedback stays at 50 ms. The first pass of this change
