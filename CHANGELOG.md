@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
+  6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
+  4.1 asks ("attempt to approximate this information"), where it had no header extension
+  before; other extensions of the RED packet are still left out.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
