@@ -10,17 +10,6 @@ impl sansio::Protocol<TaggedBytesMut, (), ()> for Agent {
 
     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<()> {
         self.clock = self.clock.max(msg.now);
-        // The embedder's address policy: a datagram from a source it refuses is dropped before
-        // anything reads it, as a firewall would drop it: no response, no peer-reflexive
-        // candidate, no consent, no pair (`AgentConfig::address_policy`).
-        if !self.remote_policy.allows_source(msg.transport.peer_addr) {
-            debug!(
-                "[{}]: dropped a datagram from {}: the address policy refuses the source",
-                self.get_name(),
-                msg.transport.peer_addr
-            );
-            return Ok(());
-        }
         // mDNS arrives on the host's mDNS socket, the one bound to MDNS_PORT that this
         // agent's queries leave from. A source port says nothing: anyone can send from 5353 to
         // an ICE socket, and an answer taken from there could point a `.local` candidate at an

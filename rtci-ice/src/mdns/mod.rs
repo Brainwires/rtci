@@ -1,3 +1,6 @@
+pub mod exposure;
+#[cfg(test)]
+mod mdns_exposure_test;
 #[cfg(test)]
 mod mdns_local_name_test;
 #[cfg(test)]
@@ -5,6 +8,7 @@ mod mdns_name_test;
 #[cfg(test)]
 mod mdns_test;
 
+pub use exposure::is_global_unicast;
 use mdns::Mdns;
 use mdns::MdnsConfig;
 /// The limit on mDNS messages one or several agents share (`AgentConfig::multicast_dns_rate_limit`).

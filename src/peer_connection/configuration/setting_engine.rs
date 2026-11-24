@@ -112,7 +112,7 @@ use crypto::RTCCryptoProvider;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 //TODO: use ice::agent::agent_config::{InterfaceFilterFn, IpFilterFn};
-use ice::agent::remote_policy::{IceAddressPolicy, RemoteAddressFilter};
+use ice::agent::remote_policy::RemoteAddressFilter;
 use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
@@ -208,6 +208,10 @@ pub struct MulticastDNS {
     pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
     /// See [`SettingEngineBuilder::with_multicast_dns_fail_closed`].
     pub fail_closed: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses`].
+    pub expose_known_public_addresses: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses`].
+    pub expose_temporary_ipv6_addresses: bool,
 }
 
 impl Default for MulticastDNS {
@@ -229,6 +233,8 @@ impl Default for MulticastDNS {
             unicast_response: false,
             rate_limit: None,
             fail_closed: false,
+            expose_known_public_addresses: false,
+            expose_temporary_ipv6_addresses: false,
         }
     }
 }
@@ -281,8 +287,6 @@ pub struct Candidates {
     pub allow_link_local_remote_candidates: bool,
     /// See `SettingEngineBuilder::with_remote_address_filter`.
     pub remote_address_filter: Option<RemoteAddressFilter>,
-    /// See `SettingEngineBuilder::with_ice_address_policy`. The default allows everything.
-    pub address_policy: IceAddressPolicy,
 }
 
 /// Where the ICE agent follows RFC 8445 / RFC 8489 by default and a browser (libwebrtc)
@@ -1740,6 +1744,65 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// With mDNS `QueryAndGather`: leave unwrapped a host address that the gathering before
+    /// the current ICE generation showed to be public. Off by default, in every behaviour
+    /// profile; in the other mDNS modes it changes nothing.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2: "If the STUN response returns
+    /// the same value as the local IP address, this indicates the address is in fact public
+    /// [...] once an address has been identified as public, the ICE agent MAY cache this
+    /// information and skip mDNS protection for that address in future ICE gathering phases.
+    /// Note that if the set of STUN servers changes, any cached information SHOULD be
+    /// discarded". The address is shown public when a server-reflexive candidate (the
+    /// engine's or the application's) has its base's address, that base is a host candidate
+    /// of the transport (an interface address: a STUN server cannot name another), and the
+    /// address is a global unicast one (`ice::mdns::is_global_unicast`: never a private,
+    /// loopback, link-local, unique-local or CGNAT address, whatever the server said). The
+    /// gathering that shows it is not changed (its `.local` candidate went out first, the
+    /// server-reflexive candidate follows with raddr `0.0.0.0` / `::` rport 9); from the next
+    /// ICE restart, host candidates on the address carry it, as long as each restart's
+    /// gathering shows it again. Per transport, never shared between connections; a change of
+    /// the ICE servers (`set_configuration`) forgets it.
+    ///
+    /// What it exposes, and to whom: an address the remote peer and the application (a web
+    /// page, in a browser) already received as the server-reflexive candidate; the later host
+    /// candidates add that it is the host's own interface address. Chrome's own form (it
+    /// writes host addresses for a page with media permission) is a browser consent policy,
+    /// not the engine's: the `Chrome` behaviour profile leaves this off.
+    pub fn with_multicast_dns_expose_known_public_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_known_public_addresses = expose;
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: leave unwrapped the host addresses the application marked
+    /// as RFC 4941 temporary IPv6 addresses (`RTCPeerConnection::set_temporary_ipv6_addresses`;
+    /// `rtci-stream-driver`'s `PeerDriver` marks them from the operating system's interface
+    /// list where it reports the flag). Off by default, in every behaviour profile; in the
+    /// other mDNS modes it changes nothing.
+    ///
+    /// Through `PeerDriver` it has an effect on Linux / Android (`IFA_F_TEMPORARY`, shown on
+    /// a runner) and macOS / iOS (`IN6_IFF_TEMPORARY`; the kernel request is shown to work, a
+    /// temporary address was not observed on a runner). **On Windows it has no effect**: no
+    /// address flag there has been shown to tell a temporary address from the stable one, so
+    /// the driver marks nothing and every address stays hidden.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3: "the [RFC4941] IPv6 addresses
+    /// recommended for WebRTC have inherent privacy protections, namely a short lifetime and
+    /// the lack of any stateful information. Accordingly, implementations MAY choose to not
+    /// conceal [RFC4941] addresses with mDNS names as a tradeoff for improved peer-to-peer
+    /// connectivity." The engine cannot tell a temporary address by its bits: an address not
+    /// marked stays hidden, and a marked one is unwrapped only if it is a global unicast
+    /// address (`ice::mdns::is_global_unicast`).
+    ///
+    /// What it exposes, and to whom: the temporary address, to the remote peer and the
+    /// application (a web page, in a browser), for the address's lifetime; not the stable
+    /// IPv6 address, nor any IPv4 one. The `Chrome` behaviour profile leaves this off (a
+    /// browser's choice of what to write is its consent policy, not the engine's).
+    pub fn with_multicast_dns_expose_temporary_ipv6_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_temporary_ipv6_addresses = expose;
+        self
+    }
+
     /// Fixes the ICE tiebreaker (RFC 8445 section 5.2), which is random otherwise. It decides
     /// who keeps the controlling role when both agents claim it (section 7.3.1.1): the larger
     /// one. For reproducible sessions and tests.
@@ -1948,50 +2011,6 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_remote_address_filter(mut self, filter: RemoteAddressFilter) -> Self {
         self.0.candidates.remote_address_filter = Some(filter);
-        self
-    }
-
-    /// Sets the embedder's address policy for ICE, one predicate over a socket address, the
-    /// direction it would be used in and the purpose ([`ice::AddressPurpose`]), asked at every
-    /// point where an address enters the ICE agent or the peer connection:
-    ///
-    /// - the source of every datagram, of ICE-TCP stream data and of an ICE-TCP connection
-    ///   (inbound): what comes from a refused source is dropped before the ICE agent, DTLS or
-    ///   the media see it (no STUN response, no peer-reflexive candidate, no consent, no pair,
-    ///   no DTLS record or packet taken); a connection the driver accepted from it is refused;
-    /// - remote candidates, signalled or resolved from mDNS (outbound): one on a refused
-    ///   address is never held or paired; `add_remote_candidate` treats it as W3C webrtc-pc
-    ///   4.4.2 "administratively prohibited" (it succeeds, nothing is sent there);
-    /// - peer-reflexive sources (inbound): a refused one is not learned and not answered;
-    /// - STUN and TURN server addresses after resolution (outbound): a refused one is skipped,
-    ///   as if it had failed, and is sent nothing.
-    ///
-    /// The default allows everything and changes nothing. It composes with
-    /// [`Self::with_remote_address_filter`] (outbound remote candidates only, kept as it was)
-    /// and with the "relay" ICE transport policy: under "relay" plus a policy that refuses
-    /// private or host addresses, no datagram leaves from or goes to such an address.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rtci::ice::{AddressPurpose, IceAddressPolicy};
-    /// use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    /// use std::net::IpAddr;
-    ///
-    /// // Nothing to or from private, loopback or link-local addresses; servers anywhere.
-    /// let policy = IceAddressPolicy::new(|addr, _direction, purpose| {
-    ///     let private = match addr.ip() {
-    ///         IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
-    ///         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local(),
-    ///     };
-    ///     purpose == AddressPurpose::StunTurnServer || !private
-    /// });
-    /// let _setting_engine = SettingEngineBuilder::new()
-    ///     .with_ice_address_policy(policy)
-    ///     .build();
-    /// ```
-    pub fn with_ice_address_policy(mut self, policy: IceAddressPolicy) -> Self {
-        self.0.candidates.address_policy = policy;
         self
     }
 
