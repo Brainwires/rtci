@@ -2338,14 +2338,17 @@ pub(crate) struct RepairFlows {
 /// Rejects a section of an answer that was written in full: port zero, and no `a=candidate`
 /// lines (RFC 8839 section 4.2.1.6: with the port set to zero "the agent SHOULD NOT include
 /// ICE-related SDP "candidate" attributes in that "m=" section"), nor `a=end-of-candidates`.
-fn reject_written_section(media: &mut MediaDescription) {
+/// Whether it took candidates out: the next section written takes them then.
+fn reject_written_section(media: &mut MediaDescription) -> bool {
     media.media_name.port = RangedPort {
         value: 0,
         range: None,
     };
+    let before = media.attributes.len();
     media
         .attributes
         .retain(|a| a.key != "candidate" && a.key != "end-of-candidates");
+    media.attributes.len() != before
 }
 
 /// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
@@ -3016,8 +3019,10 @@ impl RTCPeerConnection {
                     BundleMode::Answer(offered) if !offered.is_empty() => {
                         // Outside the offered group under `must-bundle`: no transport but the
                         // BUNDLE one (RFC 9429 section 4.1.1).
-                        if let Some(desc) = d.media_descriptions.last_mut() {
-                            reject_written_section(desc);
+                        if let Some(desc) = d.media_descriptions.last_mut()
+                            && reject_written_section(desc)
+                        {
+                            candidates_added = false;
                         }
                     }
                     // No BUNDLE group offered: every accepted section is a transport of its
@@ -3026,8 +3031,10 @@ impl RTCPeerConnection {
                     // type", must-bundle "any 'm=' sections other than the first").
                     BundleMode::Answer(_) => {
                         if without_transport {
-                            if let Some(desc) = d.media_descriptions.last_mut() {
-                                reject_written_section(desc);
+                            if let Some(desc) = d.media_descriptions.last_mut()
+                                && reject_written_section(desc)
+                            {
+                                candidates_added = false;
                             }
                         } else {
                             with_transport.push(media_type);

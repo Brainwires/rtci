@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
 - **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
   under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
-  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6)
-  (`conf/jsep-77-small-rows`). Test:
+  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6); the
+  next section written takes them, and the local description puts the candidates in the first
+  section that is not rejected (it used to be the first section) (`conf/jsep-77-small-rows`). Test:
   `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
 - **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
   (RFC 9143 section 15,

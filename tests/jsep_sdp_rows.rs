@@ -66,43 +66,69 @@ fn bandwidth_lines_use_registered_modifiers_only() -> TestResult {
 
 /// RFC 8839 section 4.2.1.6: "If the port value associated with an "m=" section is set to zero
 /// ... the agent SHOULD NOT include ICE-related SDP "candidate" attributes in that "m="
-/// section". An offer without BUNDLE of two video sections is answered under the balanced
-/// policy with the second rejected (RFC 9429 section 4.1.1): after gathering, the accepted
-/// section has the candidates and the rejected one none.
+/// section". An answerer under `must-bundle` rejects the offered section outside the BUNDLE
+/// group (RFC 9429 section 4.1.1), here the first one; after gathering, the candidates are in
+/// the accepted (tagged) section, in the answer and in the local description, and the rejected
+/// one has none. Likewise for an offer without BUNDLE under balanced, whose second video
+/// section is rejected.
 #[test]
 fn a_section_answered_with_port_zero_has_no_candidates() -> TestResult {
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::{RTCBundlePolicy, RTCConfigurationBuilder};
     let video = |mid: &str| {
         format!(
             "m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:{mid}\na=sendrecv\na=rtcp-mux\n\
              a=rtpmap:96 VP8/90000\n"
         )
     };
-    let remote = crlf(&format!("{SESSION}{}{}", video("0"), video("1")));
-    let mut pc = default_peer()?;
-    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(remote)?)?;
-    pc.add_local_candidate(RTCIceCandidateInit {
-        candidate: "candidate:1 1 udp 2130706431 10.0.0.2 4000 typ host".to_owned(),
-        ..Default::default()
-    })?;
-    pc.add_local_candidate(RTCIceCandidateInit::default())?;
-    let answer = pc.create_answer(None)?;
-    let sections = media_sections(&answer.sdp);
-    assert_eq!(sections.len(), 2, "{}", answer.sdp);
-    assert_ne!(port_of(&sections[0]), 0, "{}", answer.sdp);
-    assert!(
-        sections[0].iter().any(|l| l.starts_with("a=candidate:")),
-        "{}",
-        answer.sdp
-    );
-    assert_eq!(port_of(&sections[1]), 0, "{}", answer.sdp);
-    assert!(
-        !sections[1]
+    let has_candidates = |section: &[String]| {
+        section
             .iter()
-            .any(|l| l.starts_with("a=candidate:") || l == "a=end-of-candidates"),
-        "{}",
-        answer.sdp
-    );
-    pc.set_local_description(Instant::now(), answer)?;
+            .any(|l| l.starts_with("a=candidate:") || l == "a=end-of-candidates")
+    };
+    for (group, policy, rejected) in [
+        (
+            "a=group:BUNDLE 1\n",
+            Some(RTCBundlePolicy::MustBundle),
+            0usize,
+        ),
+        ("", None, 1usize),
+    ] {
+        let remote = crlf(&format!("{SESSION}{group}{}{}", video("0"), video("1")));
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()?;
+        let mut configuration = RTCConfigurationBuilder::new();
+        if let Some(policy) = policy {
+            configuration = configuration.with_bundle_policy(policy);
+        }
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_configuration(configuration.build())
+            .build(Instant::now())?;
+        pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(remote)?)?;
+        pc.add_local_candidate(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 10.0.0.2 4000 typ host".to_owned(),
+            ..Default::default()
+        })?;
+        pc.add_local_candidate(RTCIceCandidateInit::default())?;
+        let answer = pc.create_answer(None)?;
+        pc.set_local_description(Instant::now(), answer.clone())?;
+        let local = pc
+            .local_description()
+            .expect("the local description")
+            .sdp
+            .clone();
+        for sdp in [&answer.sdp, &local] {
+            let sections = media_sections(sdp);
+            assert_eq!(sections.len(), 2, "{sdp}");
+            let accepted = 1 - rejected;
+            assert_ne!(port_of(&sections[accepted]), 0, "{sdp}");
+            assert!(has_candidates(&sections[accepted]), "{sdp}");
+            assert_eq!(port_of(&sections[rejected]), 0, "{sdp}");
+            assert!(!has_candidates(&sections[rejected]), "{sdp}");
+        }
+    }
     Ok(())
 }
 
