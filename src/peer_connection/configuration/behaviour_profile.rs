@@ -966,6 +966,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.video_red_ulpfec,
     },
     {
+        id: "fec.video-flexfec",
+        setting: "DefaultInterceptorOptions::video_flexfec",
+        clause: "RFC 8854 5.2 (SHOULD), RFC 8627 1.1.7",
+        rfc: false => "false",
+        chrome: false => "false",
+        strict_rfc: true => "true",
+        chrome_source: "libwebrtc media/engine/webrtc_video_engine.cc::GetDefaultSupportedFormats @ a222406d: flexfec-03 (the draft, not RFC 8627's flexfec) is pushed only with the WebRTC-FlexFEC-03-Advertised field trial; the Chromium fixtures carry no FlexFEC format",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.video_flexfec = v,
+        read: |o: &DefaultInterceptorOptions| o.video_flexfec,
+    },
+    {
         id: "gcc.threshold-time-base",
         setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
         clause: "draft-ietf-rmcat-gcc-02 5.4",
