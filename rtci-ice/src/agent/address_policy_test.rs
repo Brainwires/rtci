@@ -279,6 +279,49 @@ fn test_a_denied_peer_reflexive_source_is_not_learned_or_answered() {
     a.close().unwrap();
 }
 
+/// RFC 8445 Section 7.3 has a request that arrives before the peer's credentials answered at
+/// once and processed when they come. The source of such a request is a peer-reflexive
+/// candidate in waiting: one the policy refuses as such gets no answer in that window either
+/// (the answer would carry its reflexive address before the policy was asked), and is not
+/// learned when the credentials arrive. Another source is answered at once.
+#[test]
+fn test_a_denied_peer_reflexive_source_is_not_answered_before_the_remote_credentials() {
+    let (policy, asked) = refusing(&["172.17.0.66"], AddressPurpose::PeerReflexiveSource);
+    let mut a = Agent::new(Instant::now(), Arc::new(config(policy)), provider()).unwrap();
+    a.add_local_candidate(host(LOCAL)).unwrap();
+    assert!(a.ufrag_pwd.remote_credentials.is_none());
+
+    let request = peer_request(&a);
+    let written = read_from(&mut a, "172.17.0.66:999", request);
+    assert!(
+        written.is_empty(),
+        "no answer to a refused peer-reflexive source: {written:?}"
+    );
+    assert!(asked.lock().unwrap().contains(&(
+        addr("172.17.0.66:999"),
+        AddressDirection::Inbound,
+        AddressPurpose::PeerReflexiveSource
+    )));
+
+    let request = peer_request(&a);
+    let written = read_from(&mut a, "172.17.0.67:999", request);
+    assert_eq!(
+        written,
+        vec![addr("172.17.0.67:999")],
+        "an allowed source is answered before the credentials"
+    );
+
+    a.set_remote_credentials("remoteufrag".to_owned(), "remotepwd".to_owned())
+        .unwrap();
+    a.process_early_requests(Instant::now());
+    assert!(a.find_remote_candidate(addr("172.17.0.66:999")).is_none());
+    assert!(
+        a.find_remote_candidate(addr("172.17.0.67:999")).is_some(),
+        "the allowed source is learned once the credentials are here"
+    );
+    a.close().unwrap();
+}
+
 /// A policy that comes to refuse the peer of a connected pair cuts it off at once: its data is
 /// no longer accepted (`accepts_data`), its consent requests get no answer, and the responses
 /// to the agent's own consent checks no longer refresh consent, so the agent leaves the

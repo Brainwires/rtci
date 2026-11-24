@@ -3831,8 +3831,18 @@ impl Agent {
             // initiating agent will receive a Binding request prior to receiving the candidates
             // from its peer. If this happens, the agent MUST immediately generate a response
             // [...] Once the answer is received, it MUST proceed with the remaining steps."
-            // A source the destination policy refuses is not answered, now or later.
-            if !self.remote_policy.allows_candidate(remote_addr) {
+            // A source the destination policy refuses is not answered, now or later. Nor is
+            // one the embedder's address policy would refuse as a peer-reflexive candidate
+            // (what the source of a request from no known candidate becomes, Section 7.3.1.3,
+            // once the credentials are here): answered now, it would have its answer, and its
+            // reflexive address in it, before the policy was ever asked about it.
+            if !self.remote_policy.allows_candidate(remote_addr)
+                || (self.find_remote_candidate(remote_addr).is_none()
+                    && !self
+                        .remote_policy
+                        .address
+                        .allows(remote_addr, AddressPurpose::PeerReflexiveSource))
+            {
                 return Err(Error::ErrUnhandledStunpacket);
             }
             self.send_binding_success(now, m, local_index, remote_addr);
