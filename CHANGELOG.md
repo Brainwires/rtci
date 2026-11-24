@@ -1162,6 +1162,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
+- **Release preparation** (`conf/publish-3-release-prep`): `docs/releasing.md` has the order of
+  operations for 0.1.0 (merged and green, rename commit, release commit, tag, dry runs,
+  publish, repository rename, detach from the fork network), what each workflow does on a tag
+  (`release.yml` alone runs; it makes the GitHub release and publishes nothing), the
+  brainwires.6 known issues with their state on `master` for the release notes, and an
+  "after publishing" checklist (docs.rs builds, yanking, announcing the rename). The tag now
+  comes before publishing. The README's status follows `COUNTS.md` (111 specifications; MUST
+  99.7 % RFC behaviour tested, 16 MUST rows open) and its crate table says what is not
+  published.
 
 ### Notes for integrators
 

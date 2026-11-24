@@ -35,6 +35,9 @@ manifest, so they must resolve on crates.io too).
 19. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
     dev-dependency on it has no version, so `cargo publish` drops it)
 
+The rename commit gives every crate its `rtci` name (`docs/rename.md`) and keeps this order.
+`scripts/rename-to-rtci.py` prints it and writes it into release.yml.
+
 Not published (`publish = false`): `rtc-signal` (the examples' signalling helper; the root
 crate's dev-dependency on it has no version, so `cargo publish` drops it), the fuzz crates
 (`fuzz/`, `rtc-*/fuzz/`), the benchmark (`benchmarks/aead-gcm`) and the test environment's
@@ -46,6 +49,33 @@ The order is what `cargo metadata` gives (`python3 scripts/rename-to-rtci.py --d
 prints it). When a crate gains or loses a dependency on another crate of the workspace,
 regenerate the list and update this file and release.yml.
 
+## 0.1.0: order of operations
+
+The first crates.io release is also the rename of every crate to its `rtci` name and the reset
+of the version line to `0.1.0` (`docs/rename.md`, which arrives with the rename script). In
+this order:
+
+1. **Every release-gating branch is merged into `master`, and `master`'s CI is green** (cargo,
+   fuzz, test environment, audit).
+2. **The rename commit**: `python3 scripts/rename-to-rtci.py`, then `--check` exits 0,
+   `cargo check --workspace --all-targets`, `cargo fmt --all --check` and every
+   `scripts/check-*.py` gate pass; one commit, which is the release's last content commit. CI
+   green on it.
+3. **The release commit**: `CHANGELOG.md`'s `## [Unreleased]` becomes `## [0.1.0] - <date>`
+   with a new empty `## [Unreleased]` above it; `SECURITY.md` names the 0.1 line (see "Before").
+   The rename already set every version to `0.1.0`.
+4. **The tag** `v0.1.0` on the release commit (see "Tag and release notes" for what it starts).
+5. **The dry runs** of "Dry runs" from a clean checkout of the tag, under the new names.
+6. **Publish** in the order above, from a machine with a crates.io login (`cargo login` with a
+   token that has `publish-new` and `publish-update`). Never from CI until publishing moves
+   there; never with a token in the repository.
+7. **The repository rename** to `Brainwires/rtci` on GitHub (GitHub redirects the old URLs; the
+   manifests' `repository` already names the new one).
+8. **Detach from the fork network** (GitHub support request "detach fork"), so the repository
+   stands on its own and its default pull request base is no longer upstream's.
+
+A fix needed after step 4 is a new commit and a patch release (`0.1.1`), never a moved tag.
+
 ## Before
 
 1. The release commit is on `master` and its CI is green (cargo, fuzz, test environment).
@@ -56,6 +86,49 @@ regenerate the list and update this file and release.yml.
 4. A crates.io API token with the `publish-new` and `publish-update` scopes, given to cargo
    with `cargo login` (it stays in `~/.cargo/credentials.toml`; never commit it or put it in
    the repository's secrets until publishing moves to CI).
+
+## Tag and release notes
+
+On the release commit, before publishing (the crates are then packaged from the tag):
+
+```sh
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The tag starts `.github/workflows/release.yml`: git-cliff (`cliff.toml`) writes the release
+body from the conventional commits since the previous tag (breaking changes first, then one
+section per kind, each capped with a link to `CHANGELOG.md`), and the GitHub release is
+created. Read the generated release, and edit its text on GitHub where a summary of the
+release's main changes at the top helps; `CHANGELOG.md` stays the full record.
+
+What a tag starts:
+
+| Workflow | On a `v*` tag | What it does |
+|---|---|---|
+| `release.yml` | yes (`v[0-9]*.[0-9]*.[0-9]*`, so `v0.1.0`) | git-cliff release notes, then the GitHub release with them. Its crates.io publish step is commented out: it publishes nothing. |
+| `cargo.yml`, `audit.yml`, `grcov.yml`, `semver.yml`, `test-env.yml`, `bench.yml`, `fuzz.yml`, `agent-test.yml` | no | Branch pushes, pull requests or dispatch only. |
+
+No workflow builds or uploads binaries. `semver.yml` compares later changes with the latest
+tag (`cargo semver-checks --baseline-rev`).
+
+### Known issues to carry into the 0.1.0 release notes
+
+The known issues of `v0.22.0+brainwires.6`'s release page, and where each stands on `master`
+(the CHANGELOG's `[Unreleased]` section as of 2026-11-23). Carry the open ones into the 0.1.0
+release text; list the fixed ones under its summary as fixed since brainwires.6.
+
+| Known issue (brainwires.6) | State | Where |
+|---|---|---|
+| Pacer: no time bound on its queue; at 4096 packets it refused numbered packets, seen as loss | fixed | `conf/pacer-1-queue-time` (queue time bounded at 2 s), `conf/pacer-2-combined` (media over the target is dropped by default, `QueueOverflow::Drop`; libwebrtc's `Drain` is a setting) |
+| RTP circuit breaker: with RTCP reports more frequent than media frames, no verdict for video flows | open | no `[Unreleased]` entry; `conf/cb-1-false-trip` and `conf/cb-2-breaker-packet-size` fixed the false trips on reordering and speech, not this |
+| Congestion control: on a reordering, lossless path the estimate settles well below capacity | partly fixed | the loss-based half (`conf/pacer-1-queue-time`: a packet only overtaken is not a loss); the delay-based grouping is a proposal in `docs/gcc-reordering.md`, not changed |
+| Simulcast receive: SSRCs declared in a section with `a=rid`, packets without RID or MID, discarded | fixed | `conf/demux-1-declared-ssrc-in-rid-section` (RFC9143-9.2-7) |
+| Call quality after a capacity drop (regression from brainwires.5): video freezes for seconds | fixed | `conf/gcc-1-cap-recovery` (the NACK generator no longer gives up after ten requests or 2 s), and the NACK responder's retransmissions held to the congestion controller's target; `tests/capacity_cap_video_rtc2rtc.rs` |
+| STUN SOFTWARE: no peer-connection setting to stop it | fixed | `SettingEngineBuilder::with_ice_software` |
+| Clock-rate switch on one SSRC: sender reports used the previous rate | fixed | `conf/media-25-payload-rows` (per-payload-type rates, RFC 7160 3.2 and 4.2) |
+
+Add to the 0.1.0 text the rename: the migration table of `docs/rename.md` ("For dependents").
 
 ## Dry runs
 
@@ -124,23 +197,19 @@ Nothing is rolled back: the crates already published stay published.
   `CHANGELOG.md`.
 - Never re-tag or move a tag to describe a different commit.
 
-## Tag and release notes
+## After publishing
 
-Once every crate is published:
-
-```sh
-git tag -a vX.Y.Z -m "vX.Y.Z"      # on the commit the crates were published from
-git push origin vX.Y.Z
-```
-
-The tag starts `.github/workflows/release.yml`: git-cliff (`cliff.toml`) writes the release
-body from the conventional commits since the previous tag (breaking changes first, then one
-section per kind, each capped with a link to `CHANGELOG.md`), and the GitHub release is
-created. Read the generated release, and edit its text on GitHub where a summary of the
-release's main changes at the top helps; `CHANGELOG.md` stays the full record.
-
-After the tag:
-
-- docs.rs builds each crate's documentation by itself, with the features its
-  `[package.metadata.docs.rs]` names; check that every build passed.
-- `semver.yml` compares later changes with this tag (`cargo semver-checks --baseline-rev`).
+- **docs.rs**: every crate's build at `https://docs.rs/crate/<name>/<version>/builds` passed,
+  with the features its `[package.metadata.docs.rs]` names. A failed build is retried from the
+  docs.rs page once the cause is fixed in a new patch release.
+- **Yanking**: a version published broken is yanked, `cargo yank --version <v> -p <name>`
+  (undo: `--undo`), and replaced by a patch release; see "When a publish fails midway". A
+  yank never deletes: existing lock files keep resolving it. Record it in `CHANGELOG.md`.
+- **The rename, for dependents**: announce the `rtci` crates with the migration table of
+  `docs/rename.md` ("For dependents": crate names and versions, `use` paths, feature
+  references, `RUST_LOG` targets, or a `package =` rename on the dependent's side) in the
+  GitHub release text and to the known dependents (ParolNet, the Denext binding). Their git
+  dependencies on the old repository URL keep working through GitHub's redirect, but should
+  move to the crates.io release.
+- **The repository**: the rename and the detach of steps 7 and 8 are done; check that the
+  README's links and `SECURITY.md` name the new repository.
