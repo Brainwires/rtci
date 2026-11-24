@@ -337,7 +337,7 @@ impl RateController {
                     Some(measured) if received < measured => {
                         measured.min(self.target) * self.decrease_factor
                     }
-                    Some(_) => (received * self.decrease_factor).min(self.target),
+                    Some(measured) => measured.max(received).min(self.target) * self.decrease_factor,
                     None => received * self.decrease_factor,
                 };
                 self.target = decreased.clamp(self.min, self.max);
