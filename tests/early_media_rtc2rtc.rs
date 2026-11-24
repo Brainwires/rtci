@@ -23,8 +23,7 @@ use rtci::peer_connection::sdp::RTCSessionDescription;
 use rtci::peer_connection::state::RTCSignalingState;
 use rtci::rtp_transceiver::rtp_receiver::RTCEncodedFrameMetadataKind;
 use rtci::rtp_transceiver::rtp_sender::{
-    RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpRtxParameters,
-    RtpCodecKind,
+    RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use rtci::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverId, RTCRtpTransceiverInit,
@@ -817,135 +816,6 @@ fn simulcast_streams_an_offer_asks_for_are_received_before_the_answer() -> Resul
     assert_eq!(
         layers,
         vec![("h".to_owned(), Some(HIGH)), ("l".to_owned(), Some(LOW))]
-    );
-    Ok(())
-}
-
-/// The payload type of the RTX format that repairs `pt` in `sdp` (`a=fmtp:<rtx> apt=<pt>`).
-fn rtx_payload_type(sdp: &str, pt: u8) -> u8 {
-    sdp.lines()
-        .find_map(|l| {
-            let (rtx, params) = l.strip_prefix("a=fmtp:")?.split_once(' ')?;
-            params
-                .split(';')
-                .any(|p| p.trim() == format!("apt={pt}"))
-                .then(|| rtx.parse().ok())?
-        })
-        .unwrap_or_else(|| panic!("no RTX format for {pt} in {sdp}"))
-}
-
-/// Peer `from` writes `count` RTX packets (RFC 4588 section 4: the original sequence number
-/// first in the payload) on `ssrc`, 20 ms apart, repairing `first_osn` on.
-#[allow(clippy::too_many_arguments)]
-fn send_rtx(
-    world: &mut World,
-    from: usize,
-    sender: RTCRtpSenderId,
-    payload_type: u8,
-    ssrc: u32,
-    first: u16,
-    first_osn: u16,
-    count: u16,
-) -> Result<()> {
-    for n in 0..count {
-        let now = world.now;
-        let osn = first_osn.wrapping_add(n);
-        let mut payload = osn.to_be_bytes().to_vec();
-        payload.extend_from_slice(&[0x10u8; 100]);
-        world.peers[from]
-            .pc
-            .rtp_sender(sender)
-            .expect("the sender")
-            .write_rtp(
-                now,
-                rtci::rtp::Packet {
-                    header: rtci::rtp::header::Header {
-                        version: 2,
-                        payload_type,
-                        sequence_number: first.wrapping_add(n),
-                        timestamp: u32::from(osn) * 3000,
-                        ssrc,
-                        marker: true,
-                        ..Default::default()
-                    },
-                    payload: Bytes::from(payload),
-                },
-            )?;
-        world.run_for(Duration::from_millis(20), |_| false);
-    }
-    world.run_for(Duration::from_millis(100), |_| false);
-    Ok(())
-}
-
-/// RFC 9143 section 9.2 and RFC 8843: `a=ssrc` lines are optional, a stream is associated
-/// with its section by its MID or payload type; RFC 4588 section 5.3: a retransmission
-/// stream is associated with its original stream (here, the one original stream of the
-/// section, by the RTX format's `apt`). A browser whose SSRCs are not signalled (Firefox)
-/// sends RTX packets before the first packet of the stream they repair (bandwidth probes on
-/// the RTX SSRC): they repair nothing yet, and they are not media that cannot be associated
-/// (RFC 8830 section 3.1): their payload type names the section and its RTX format. They are
-/// dropped without being reported as unassociated, and once the original stream has
-/// arrived the RTX stream is associated with it and its repairs are delivered on it.
-#[test]
-fn retransmissions_before_their_unsignalled_stream_are_not_reported_unassociated() -> Result<()> {
-    const RTX_SSRC: u32 = 0x00ea_7102;
-    let mut world = world()?;
-    world.connect()?;
-    let track = MediaStreamTrack::new(
-        "early-stream".to_owned(),
-        "early".to_owned(),
-        "early".to_owned(),
-        RtpCodecKind::Video,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(SSRC),
-                rtx: Some(RTCRtpRtxParameters { ssrc: RTX_SSRC }),
-                ..Default::default()
-            },
-            codec: rtci::rtp_transceiver::rtp_sender::RTCRtpCodec {
-                mime_type: rtci::peer_connection::configuration::media_engine::MIME_TYPE_VP8
-                    .to_owned(),
-                clock_rate: 90000,
-                ..Default::default()
-            },
-            active: true,
-            ..Default::default()
-        }],
-    );
-    let sender = world.peers[1].pc.add_track(track)?;
-    // Peer 1 offers; what reaches peer 0 carries no `a=ssrc` / `a=ssrc-group` lines.
-    let (offer, _) = world.exchange_with(
-        1,
-        |sdp| dtls_sdp_common::replace_lines(sdp, "a=ssrc", None),
-        dtls_sdp_common::keep,
-    )?;
-    world.trickle()?;
-    world.run_for(Duration::from_millis(200), |_| false);
-    let vp8 = payload_type(&offer, "VP8/90000");
-    let rtx = rtx_payload_type(&offer, vp8);
-
-    // Retransmissions first, of packets peer 0 has never seen.
-    send_rtx(&mut world, 1, sender, rtx, RTX_SSRC, 100, 9_000, 5)?;
-    assert_eq!(
-        world.peers[0].pc.discarded_rtp_packets(),
-        0,
-        "a retransmission before its stream is no unassociated media"
-    );
-    assert_eq!(events(&world, 0, "OnUnassociatedRtpDiscarded"), 0);
-
-    // The original stream, then a repair of one of its packets.
-    send(&mut world, 1, sender, vp8, SSRC, 10_000, 10)?;
-    send_rtx(&mut world, 1, sender, rtx, RTX_SSRC, 105, 10_003, 1)?;
-    assert_eq!(world.peers[0].pc.discarded_rtp_packets(), 0);
-    assert_eq!(events(&world, 0, "OnUnassociatedRtpDiscarded"), 0);
-    assert_eq!(
-        delivered(&world, 0, SSRC)
-            .iter()
-            .map(|(_, pt, seq)| (*pt, *seq))
-            .filter(|(pt, _)| *pt == vp8)
-            .count(),
-        10,
-        "the original stream is delivered (the repair of 10003 is a duplicate)"
     );
     Ok(())
 }

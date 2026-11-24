@@ -1196,6 +1196,37 @@ mod rtx_test {
         );
     }
 
+    /// RFC 9143 section 9.2: a section's streams need no `a=ssrc` lines. A browser that
+    /// signals none (Firefox) sends packets on its RTX SSRC (bandwidth probes) before the
+    /// first packet of the stream they repair; until that stream has arrived the RTX SSRC
+    /// cannot be associated with it (RFC 4588 section 5.3) and there is nothing to repair.
+    /// The packet is a repair format of the section, not media that cannot be associated
+    /// (RFC 8830 section 3.1): dropped, neither counted nor reported. Media of the section
+    /// that nothing took still is.
+    #[test]
+    fn a_repair_packet_before_an_unsignalled_stream_is_not_reported_as_unassociated() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        // Nothing signalled, nothing arrived yet: the receiver has no stream.
+        transceivers[0]
+            .receiver_mut()
+            .as_mut()
+            .unwrap()
+            .set_coding_parameters(vec![]);
+        let mut ctx = EndpointHandlerContext::default();
+        for _ in 0..3 {
+            assert!(dispatch(&mut ctx, &mut transceivers, 2000, 97, &[0, 7, 0xDE]).is_none());
+        }
+        assert_eq!(ctx.discarded_rtp_packets, 0);
+        assert!(!ctx.event_outs.iter().any(|e| matches!(
+            e.event,
+            RTCEventInternal::RTCPeerConnectionEvent(
+                RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(_)
+            )
+        )));
+        assert!(dispatch(&mut ctx, &mut transceivers, 3000, 96, &[0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 1, "media no stream took is");
+    }
+
     #[test]
     fn handle_rtp_message_drops_rtx_probe_packet() {
         let (primary_ssrc, rtx_ssrc, primary_pt, rtx_pt) = (1000u32, 2000u32, 96u8, 97u8);
