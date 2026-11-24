@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **RFC 7941 section 4.2.3: MID and RtpStreamId are sent until delivered, not on every
+  packet.** A sender stamped the MID and RtpStreamId header extensions on every RTP packet.
+  It now stamps them until a reception report block about the stream shows the receiver got
+  a packet from the first one that carried them (section 4.2.3: "only send header extensions
+  when needed", with "the normal RTCP report blocks" as the indicator of delivery), and again
+  for a new SSRC or a changed value (sections 4.2.4.1, 4.2.4.3). libwebrtc stops the same
+  way, on the first report about the SSRC. Engine behaviour change (RTP header extensions on
+  the wire). Rows: RFC7941-4.2.3-1, 4.2.4-1, 4.2.4-2 (`missing` -> `tested`).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
