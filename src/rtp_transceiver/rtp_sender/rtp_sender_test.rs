@@ -994,6 +994,87 @@ fn the_sender_stamps_the_mid_of_its_transceiver() -> Result<()> {
     pair.close()
 }
 
+/// RFC 7941 section 4.2.3: "only send header extensions when needed", with "the normal RTCP
+/// report blocks" as "an indicator of successful delivery" (section 4.2.4.1: a new SSRC sends
+/// them until delivered). The first packets of a stream carry the MID; once the receiver's
+/// reception report covers them, the packets the sender writes carry it no more.
+#[test]
+fn the_mid_is_stamped_until_a_reception_report_shows_it_delivered() -> Result<()> {
+    let (mut offerer, mut answerer) = new_pair_with(
+        media_engine_with_stream_ids()?,
+        media_engine_with_stream_ids()?,
+    )?;
+    let ssrc = 0x0d0d_0001;
+    let sender_id = offerer.add_track(track(MIME_TYPE_VP8, "", Some(ssrc)))?;
+    signal_pair(&mut offerer, &mut answerer)?;
+    let mut pair = Pair::new(offerer, answerer);
+    pair.connect()?;
+    let (payload_type, mid_id) = {
+        let mut sender = pair.offerer.rtp_sender(sender_id).expect("sender");
+        (
+            negotiated_payload_type(&mut sender, MIME_TYPE_VP8),
+            negotiated_extension_id(&mut sender, ::sdp::extmap::SDES_MID_URI),
+        )
+    };
+    let mut sequence_number = 700;
+    let first = send_until_seen(
+        &mut pair,
+        sender_id,
+        ssrc,
+        payload_type,
+        0xd1,
+        &mut sequence_number,
+    );
+    assert!(
+        first.header.get_extension(mid_id).is_some(),
+        "the first packet"
+    );
+    // A few report intervals: the receiver reports on the stream.
+    pair.run_until(std::time::Duration::from_secs(4), |_| false)?;
+    let later = send_until_seen(
+        &mut pair,
+        sender_id,
+        ssrc,
+        payload_type,
+        0xd2,
+        &mut sequence_number,
+    );
+    assert!(
+        later.header.get_extension(mid_id).is_none(),
+        "delivered: the MID is not sent again"
+    );
+    pair.close()
+}
+
+/// RFC 7941 sections 4.2.4.1 and 4.2.4.3: a report block shows delivery only from the first
+/// packet that carried the values on; a changed value, or an SSRC that has sent none, is not
+/// delivered.
+#[test]
+fn header_extension_delivery_follows_the_report_blocks() {
+    let mut sender = internal::RTCRtpSenderInternal::default();
+    let delivered = |sender: &internal::RTCRtpSenderInternal, ssrc: SSRC, values: &str| {
+        sender
+            .sdes_delivery(ssrc)
+            .is_some_and(|delivery| delivery.delivered(values))
+    };
+    assert!(!delivered(&sender, 1, "0\0"));
+    sender.sdes_sent(1, "0\0", 65_530);
+    sender.on_report_block(1, 65_529);
+    assert!(
+        !delivered(&sender, 1, "0\0"),
+        "a report from before the first stamped packet"
+    );
+    // The extended highest sequence number wrapped past it.
+    sender.on_report_block(1, 65_536 + 2);
+    assert!(delivered(&sender, 1, "0\0"));
+    assert!(!delivered(&sender, 1, "1\0"), "a changed value");
+    assert!(!delivered(&sender, 2, "0\0"), "another SSRC");
+    sender.sdes_sent(1, "1\0", 10);
+    assert!(!delivered(&sender, 1, "1\0"));
+    sender.on_report_block(1, 65_536 * 2 + 10);
+    assert!(delivered(&sender, 1, "1\0"));
+}
+
 /// RFC 8852 section 3.3 and RFC 8853 section 5.5: each simulcast stream carries the rid of its
 /// encoding in the RtpStreamId header extension (and the MID). The description names no SSRC
 /// for a simulcast stream, so the receiver can only place the packet by what the sender

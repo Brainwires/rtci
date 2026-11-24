@@ -224,6 +224,25 @@ impl<'a> InterceptorHandler<'a> {
         now: Instant,
     ) {
         self.stats.on_rtcp_received(rtcp_packets, now);
+        // RFC 7941 section 4.2.3: a reception report about a local stream tells its sender
+        // whether the receiver got the packets that carried its MID and RtpStreamId.
+        for packet in rtcp_packets {
+            let any = packet.as_any();
+            let blocks = if let Some(sr) = any.downcast_ref::<SenderReport>() {
+                &sr.reports[..]
+            } else if let Some(rr) = any.downcast_ref::<ReceiverReport>() {
+                &rr.reports[..]
+            } else {
+                continue;
+            };
+            for block in blocks {
+                for transceiver in self.rtp_transceivers.iter_mut() {
+                    if let Some(sender) = transceiver.sender_mut() {
+                        sender.on_report_block(block.ssrc, block.last_sequence_number);
+                    }
+                }
+            }
+        }
         // RFC 6679 sections 7.2.1 and 7.4.2: what the ECN validations detected goes to the
         // application, as well as to the log, "to enable follow up".
         for (ssrc, failure) in self.stats.take_ecn_failures() {
