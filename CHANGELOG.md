@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     connections on it exchange data-channel messages). New public helpers for such runtimes:
     `runtime::{std_udp, std_multicast, std_tcp_listener, std_tcp_bound, std_tcp_connect_start,
     set_and_read_traffic_class, reset_on_close, TrafficClassMarker}`.
+  - (runtime-5) `runtime-mock` gives `MockRuntime`: a virtual clock (`MockClock::advance`, and
+    `MockRuntime::run` moves it to the next timer whenever nothing can run, panicking on a
+    deadlock instead of hanging) and an in-memory network (`MockNet`: UDP, multicast and TCP
+    between mock sockets; per-direction `LinkConfig` delay, seeded loss and blocking; a datagram
+    filter; a log with each datagram's traffic class and fate; a host table). Two
+    `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
+    data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
+    a lost DTLS ClientHello retransmitted after its timer).
 
 ### Behaviour changes
 

@@ -58,7 +58,7 @@ jobs:
           cargo test --package rtci-stream-driver --test dependency_tree --verbose
       # The built-in runtimes other than tokio (off by default): their tests need the features.
       - name: Stream driver on every built-in runtime
-        run: cargo test --package rtci-stream-driver --features runtime-smol --verbose
+        run: cargo test --package rtci-stream-driver --features runtime-smol,runtime-mock --verbose
       # Bring your own runtime: examples/custom-runtime implements `Runtime` over async-executor
       # and async-io and depends on the driver with `default-features = false`. Its tree must
       # hold no tokio (nor smol), and two peer connections on it must connect and exchange a

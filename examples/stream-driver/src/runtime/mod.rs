@@ -16,7 +16,8 @@
 //!
 //! There is no global or default runtime in the library, and none can be set: each driver is
 //! given its own. Cargo features only decide which built-in runtime *types* exist
-//! (`runtime-tokio`, on by default: `TokioRuntime`; `runtime-smol`: `SmolRuntime`); they never
+//! (`runtime-tokio`, on by default: `TokioRuntime`; `runtime-smol`: `SmolRuntime`;
+//! `runtime-mock`: `MockRuntime`, virtual time and an in-memory network); they never
 //! decide what the driver uses, and several can be on at once.
 //! With `default-features = false` and no built-in runtime the crate builds without any of them,
 //! and an application implements [`Runtime`] for its own executor (the `custom-runtime`
@@ -27,10 +28,14 @@
 //! because the driver stamps every engine input with a time and a virtual clock must be the
 //! one both the engine and the timers see.
 
+#[cfg(feature = "runtime-mock")]
+pub mod mock;
 #[cfg(feature = "runtime-smol")]
 mod smol_runtime;
 #[cfg(feature = "runtime-tokio")]
 mod tokio_runtime;
+#[cfg(feature = "runtime-mock")]
+pub use mock::{MockClock, MockNet, MockRuntime};
 #[cfg(feature = "runtime-smol")]
 pub use smol_runtime::SmolRuntime;
 #[cfg(feature = "runtime-tokio")]

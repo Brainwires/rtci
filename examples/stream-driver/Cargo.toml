@@ -35,6 +35,8 @@ peer = ["dep:rtci", "dep:bytes"]
 # the crate builds without any async runtime, for an application's own (`custom-runtime`).
 runtime-tokio = ["dep:tokio"]
 runtime-smol = ["dep:smol"]
+# `MockRuntime`: a virtual clock and an in-memory network, for tests on virtual time.
+runtime-mock = ["dep:async-task"]
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["ifaces"] }
@@ -42,6 +44,7 @@ tokio = { workspace = true, optional = true }
 socket2.workspace = true
 async-channel = "2.5"
 smol = { version = "2.0", optional = true }
+async-task = { version = "4.7", optional = true }
 hickory-resolver = { version = "0.26.2", optional = true, default-features = false, features = ["tokio", "system-config"] }
 rtci = { version = "0.2.0-dev", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
@@ -67,6 +70,10 @@ required-features = ["peer", "runtime-tokio"]
 [[test]]
 name = "runtimes"
 required-features = ["peer", "runtime-tokio", "runtime-smol"]
+
+[[test]]
+name = "virtual_time"
+required-features = ["peer", "runtime-mock"]
 
 [[test]]
 name = "loopback"
