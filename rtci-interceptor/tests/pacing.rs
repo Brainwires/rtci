@@ -10,9 +10,9 @@
 //! instant the application enqueued.
 
 use rtci_interceptor::{
-    Attribute, AttributedPacket, CircuitBreakerNotice, CircuitBreakerReason, Interceptor,
-    PacerBuilder, PacerDiscard, PacerPause, PacerQueueOverflow as QueueOverflow, Packet, Registry,
-    RetransmissionsLeft, Slot, StreamInfo, TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerDiscard, PacerPause,
+    PacerQueueOverflow as QueueOverflow, Packet, Registry, RetransmissionsLeft, Slot, StreamInfo,
+    TaggedPacket,
 };
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -1519,68 +1519,4 @@ fn pacing_meters_the_wire_size() {
         packet.marshal_size() * 8,
         "the fixture is the size the schedule assumes"
     );
-}
-
-/// A flow the circuit breaker ceased (RFC 8083 section 4.5) is dropped below the pacer: its
-/// packets are not charged to the budget, so what the application keeps writing into it
-/// takes nothing from the other streams. (Charged, a ceased voice at 76 kbit/s left the
-/// video 24 of a 100 kbit/s target on the path of `tests/capacity_cap_video_rtc2rtc.rs`.)
-/// After the restart the flow is metered again.
-#[test]
-fn a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget() {
-    let notice = |harness: &mut Harness, ceased: Option<CircuitBreakerReason>| {
-        let msg = TaggedPacket {
-            now: harness.epoch,
-            transport: TransportContext::default(),
-            message: AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(
-                CircuitBreakerNotice {
-                    ssrc: 7,
-                    ceased,
-                    restart_after: Duration::ZERO,
-                },
-            ))),
-        };
-        harness.chain.handle_read(msg).expect("handle_read");
-        while harness.chain.poll_read().is_some() {}
-    };
-    let media_left_at = |ceased: bool| {
-        let mut harness = Harness::new();
-        if ceased {
-            notice(&mut harness, Some(CircuitBreakerReason::MediaTimeout));
-        }
-        // Ten full packets of the flow, 120 000 bits: 100 ms of the 1.2 Mb/s budget.
-        for sequence_number in 100..110 {
-            harness.send_of(ms(0), 7, sequence_number, 0);
-        }
-        harness.send(ms(0), 1);
-        harness.advance_to(ms(300));
-        harness
-            .schedule()
-            .into_iter()
-            .find(|(sequence_number, _)| *sequence_number == 1)
-            .map(|(_, at)| at)
-            .expect("the media packet left")
-    };
-    assert!(
-        media_left_at(false) >= ms(80),
-        "behind ten packets of a flow that sends: {:?}",
-        media_left_at(false)
-    );
-    assert_eq!(ms(0), media_left_at(true), "the ceased flow costs nothing");
-
-    // Restarted: metered again.
-    let mut harness = Harness::new();
-    notice(&mut harness, Some(CircuitBreakerReason::MediaTimeout));
-    notice(&mut harness, None);
-    for sequence_number in 100..110 {
-        harness.send_of(ms(0), 7, sequence_number, 0);
-    }
-    harness.send(ms(0), 1);
-    harness.advance_to(ms(300));
-    let (_, at) = harness
-        .schedule()
-        .into_iter()
-        .find(|(sequence_number, _)| *sequence_number == 1)
-        .expect("the media packet left");
-    assert!(at >= ms(80), "{at:?}");
 }

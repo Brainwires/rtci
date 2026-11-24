@@ -600,12 +600,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again" of the capacity review (both directions capped; a 1000 ms queue). Now the breaker
   sends `CircuitBreakerNotice` application-ward when a flow ceases and when a restart takes
   effect, and the peer connection raises `RTCPeerConnectionEvent::OnCircuitBreaker` (sender,
-  RID, SSRC, the breaker that tripped, how long until a restart is accepted). The pacer reads
-  the notice too and no longer charges a ceased flow's packets to its budget: a voice the
-  application kept writing took 76 of a 100 kbit/s target for packets that never left, and
-  the estimate, bound by one and a half times what arrives, could not climb.
-  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`,
-  `pacing.rs::a_flow_the_circuit_breaker_ceased_is_not_charged_to_the_budget`.
+  RID, SSRC, the breaker that tripped, how long until a restart is accepted).
+  `circuit_breaker.rs::a_ceased_flow_and_its_restart_are_announced_application_ward`.
 
 - **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
   checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length

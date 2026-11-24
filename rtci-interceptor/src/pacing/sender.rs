@@ -339,9 +339,6 @@ pub struct PacerInterceptor {
     queue_overflow: QueueOverflow,
     /// The SSRCs of the audio streams: their packets are not queued behind others.
     audio: HashSet<u32>,
-    /// The flows the circuit breaker has ceased ([`CircuitBreakerNotice`]): their packets do
-    /// not leave, and are not charged to the budget.
-    ceased: HashSet<u32>,
     /// Whether a packet inside the budget leaves at once when nothing is queued ahead of it.
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
@@ -394,7 +391,6 @@ impl PacerInterceptor {
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
             queue_overflow: QueueOverflow::default(),
             audio: HashSet::new(),
-            ceased: HashSet::new(),
             immediate_release: true,
             probe: None,
             forced: 0,
@@ -974,15 +970,6 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             self.tag_target(&mut msg.message);
         }
 
-        // A flow the circuit breaker ceased or restarted (it sits wire-ward of here).
-        if let Some(notice) = msg.message.custom::<crate::CircuitBreakerNotice>() {
-            if notice.ceased.is_some() {
-                self.ceased.insert(notice.ssrc);
-            } else {
-                self.ceased.remove(&notice.ssrc);
-            }
-        }
-
         // A probe cluster the congestion controller asks for: the next packets leave at its
         // rate, on top of the target's budget, and carry its mark. Observed, not consumed:
         // the NACK responder above reads the same request and fills the cluster.
@@ -1047,17 +1034,6 @@ impl PacerInterceptor {
         // fresh — so it is not paced.
         if matches!(msg.message.packet, Packet::Rtcp(_)) {
             self.write_queue.push_back(msg);
-            return Ok(());
-        }
-
-        // A flow the circuit breaker ceased (RFC 8083 section 4.5): its packets are dropped
-        // at the breaker, below. They pass here unmetered: charged to the budget, a voice the
-        // application keeps writing took 76 of a 100 kbit/s target that the video then
-        // could not use (`tests/capacity_cap_video_rtc2rtc.rs`'s path), for packets that
-        // never left.
-        if matches!(&msg.message.packet, Packet::Rtp(rtp) if self.ceased.contains(&rtp.header.ssrc))
-        {
-            self.released.push_back(msg);
             return Ok(());
         }
 
@@ -1278,7 +1254,6 @@ impl Interceptor for PacerInterceptor {
         for ssrc in crate::twcc::flow_ssrcs(info) {
             self.audio.remove(&ssrc);
             self.discarded_frame.remove(&ssrc);
-            self.ceased.remove(&ssrc);
         }
         for ssrc in info.ssrc_rtx.into_iter().chain(info.ssrc_fec) {
             self.repair_flows.remove(&ssrc);
