@@ -34,10 +34,8 @@ pub const MAX_ESTIMATE_TO_RECEIVED_RATIO: f64 = 1.5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReceivedRateBound {
     /// The bound limits the increase: an estimate at or above it is not increased, and is
-    /// left where it is unless the feedback shows congestion: over-use sets it to
-    /// `beta * R_hat`, which is within the bound, and while more than 10% of the packets are
-    /// lost (the threshold of section 6) it is brought within the bound
-    /// ([`RateController::on_heavy_loss`]). The default.
+    /// left where it is until over-use sets it to `beta * R_hat` (which is within the
+    /// bound). The default.
     ///
     /// The same section lowers the estimate for one reason, "As soon as over-use has been
     /// detected", holds it "constant" in the Hold state and has it "increased" on "every
@@ -380,19 +378,6 @@ impl RateController {
         self.target
     }
 
-    /// The path is losing heavily (more than a tenth of what is sent: the loss-based
-    /// controller's threshold, section 6) while `received` arrives: the estimate is brought
-    /// within the bound of section 5.5, whatever the state. A received rate that is low
-    /// because the path drops what is sent is what the path delivers, not what the sender
-    /// chose to send, and an estimate left far above it (held, or waiting for the next
-    /// over-use) keeps the sender filling a queue that is already dropping.
-    pub fn on_heavy_loss(&mut self, received: Option<f64>) -> f64 {
-        if let Some(bound) = self.bound(received) {
-            self.target = self.target.min(bound).clamp(self.min, self.max);
-        }
-        self.target
-    }
-
     /// The bound of section 5.5 for a received rate: one and a half times it, or what a probe
     /// measured when that is more. `None` while the received rate is unknown.
     fn bound(&self, received: Option<f64>) -> Option<f64> {
@@ -604,31 +589,6 @@ mod tests {
         assert!(
             target > 1_000_000.0 && target < 1_010_000.0,
             "one step of 100 ms at 8% a second from the held estimate, got {target}"
-        );
-    }
-
-    /// And heavy loss: a path that drops what is sent delivers the received rate, and an
-    /// estimate held above one and a half times it comes down to the bound at once.
-    #[test]
-    fn heavy_loss_brings_a_held_estimate_within_the_bound() {
-        let epoch = Instant::now();
-        let mut controller = RateController::new(1_400_000.0, MIN, MAX);
-        let at = epoch + Duration::from_millis(100);
-        assert_eq!(
-            1_400_000.0,
-            controller.update(at, Usage::Normal, Some(300_000.0))
-        );
-
-        let target = controller.on_heavy_loss(Some(300_000.0));
-
-        assert!(
-            (target - 450_000.0).abs() < 1.0,
-            "1.5 x 300 kbit/s, got {target}"
-        );
-        assert_eq!(
-            450_000.0,
-            controller.on_heavy_loss(None),
-            "no rate, no change"
         );
     }
 
