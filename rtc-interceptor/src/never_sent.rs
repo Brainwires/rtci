@@ -143,7 +143,12 @@ impl NeverSent {
         if end < start {
             return None;
         }
-        let never_sent = self.skipped.range(start + 1..=end).count() as i64;
+        // A report that names no number past the previous one covers nothing.
+        let never_sent = if end > start {
+            self.skipped.range(start + 1..=end).count() as i64
+        } else {
+            0
+        };
         let cumulative_lost = i64::from(cumulative_lost);
         self.previous = Some((end, cumulative_lost));
         self.skipped = self.skipped.split_off(&(end + 1));
@@ -213,6 +218,20 @@ mod tests {
         assert_eq!(76, interval.expected);
         assert_eq!(4, interval.never_sent());
         assert_eq!(0, interval.net_lost());
+    }
+
+    #[test]
+    fn a_report_that_names_no_new_number_covers_nothing() {
+        let mut never_sent = NeverSent::default();
+        send(&mut never_sent, (0..10).chain(12..20));
+        never_sent.on_report(19, 2);
+        let interval = never_sent.on_report(19, 2).expect("interval");
+        assert_eq!(
+            (0, 0, 0),
+            (interval.expected, interval.lost, interval.never_sent())
+        );
+        // And one behind the previous one is stale.
+        assert_eq!(None, never_sent.on_report(15, 2));
     }
 
     #[test]
