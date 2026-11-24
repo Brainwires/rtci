@@ -33,6 +33,11 @@ API is the default and tested too (`RULES.md`).
 | MAY | 446 | 0 | 0 | 20 | 34 | 103 | 0 | 175 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
 | all | 6412 | 25 | 7 | 29 | 99 | 151 | 4 | 1168 | 7895 |
+| MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
+| SHOULD | 863 | 0 | 0 | 7 | 52 | 42 | 4 | 326 | 1294 |
+| MAY | 446 | 0 | 0 | 20 | 34 | 107 | 0 | 171 | 778 |
+| PROC | 71 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 77 |
+| all | 6413 | 25 | 7 | 29 | 98 | 155 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -53,6 +58,9 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | SHOULD | 968 | 864 | 89.3 | 864 | 89.3 |
 | MAY | 603 | 446 | 74.0 | 446 | 74.0 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
+| SHOULD | 968 | 863 | 89.2 | 863 | 89.2 |
+| MAY | 607 | 446 | 73.5 | 446 | 73.5 |
+| PROC | 76 | 71 | 93.4 | 71 | 93.4 |
 
 ## Per file
 
@@ -70,7 +78,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 0 | 0 | 1 | 0 | 2 | 0 | 1 | 5 |
-| `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 8 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 10 |
+| `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 6 | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |

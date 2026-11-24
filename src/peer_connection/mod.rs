@@ -314,8 +314,8 @@ use crate::peer_connection::sdp::{
     check_repair_primaries, codecs_from_media_description, discard_stray_bundle_only,
     effective_direction, extract_fingerprints, extract_ice_details, extract_tls_id, get_mid_value,
     get_peer_direction, has_ice_trickle_option, has_rtcp_mux, has_rtp_media,
-    inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line, is_lite_set,
-    is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_media_protocol,
+    ignored_candidate_line, inherit_session_extmap, inherit_session_rtcp_xr, insert_media_line,
+    is_lite_set, is_live_rtp_section, is_rejected_media, is_sdp_token, is_unknown_media_protocol,
     media_ice_credentials, negotiated_sctp, remap_answerer_assigned_extmaps, remote_candidates,
     remote_ice_options, remote_ice_pacing, sdp_type::RTCSdpType, update_sdp_origin,
     validate_application_media_section, validate_dtls_attributes,
@@ -3581,6 +3581,19 @@ impl RTCPeerConnection {
         if after_end_of_candidates {
             unmarshal_candidate(candidate_value)?;
             log::warn!("ignoring remote candidate: it follows end-of-candidates");
+            return Ok(());
+        }
+
+        // RFC 8839 section 5.1: "An agent processing remote candidates MUST ignore "candidate"
+        // lines that include candidates with FQDNs". draft-ietf-mmusic-mdns-ice-candidates
+        // section 3.2.1 step 1 sends an address that does not end with ".local", or has more
+        // than one ".", to that processing, and section 4 leaves other FQDNs ignored: the
+        // line is well formed, so the operation resolves (W3C addIceCandidate; RFC 9429
+        // section 4.1.19 refuses invalid values only) and the candidate reaches neither the
+        // agent nor the statistics, as such a line of a description does. A host `.local` name
+        // goes on to mDNS resolution.
+        if let Some(reason) = ignored_candidate_line(candidate_value) {
+            log::debug!("ignoring remote candidate {candidate_value:?}: {reason}");
             return Ok(());
         }
 
