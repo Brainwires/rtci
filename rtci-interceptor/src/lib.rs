@@ -271,7 +271,8 @@ pub use cc::fec_rate::{FecRate, MIN_LOSS as FEC_MIN_LOSS};
 pub use cc::feedback::{CongestionFeedbackFormat, negotiated_congestion_feedback};
 pub use cc::interceptor::{
     CongestionControlBuilder, CongestionControlHandle, CongestionControlInterceptor,
-    DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON, REMB_TIMEOUT,
+    CongestionWindowState, DEFAULT_PRUNE_HORIZON as CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON,
+    REMB_TIMEOUT,
 };
 pub use cc::probe::{
     PROBE_AFTER_DROP_TIMEOUT, PROBE_APPLICATION_LIMITED_INTERVAL, PROBE_MAX_OCTETS,

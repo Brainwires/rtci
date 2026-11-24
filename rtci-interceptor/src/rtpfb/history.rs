@@ -32,6 +32,12 @@ pub struct History {
     pending_losses: Vec<u64>,
     /// Packets reported as not received and then as received by a later feedback.
     recovered: u64,
+    /// The octets in flight: of the packets counted in flight
+    /// ([`add_outgoing_in_flight`](Self::add_outgoing_in_flight)), those sent after the latest
+    /// packet any feedback named (as received or not).
+    in_flight: usize,
+    /// The latest packet (by id) a feedback named.
+    highest_named: Option<u64>,
 }
 
 /// A sent packet and whether any feedback has described it yet.
@@ -42,6 +48,8 @@ struct Sent {
     /// feedback named has no verdict: the report that would have carried it was lost, or the
     /// receiver does not report on its stream at all.
     covered: bool,
+    /// Counted in [`History::in_flight_bytes`] until a feedback names it or a later packet.
+    in_flight: bool,
 }
 
 impl History {
@@ -108,10 +116,67 @@ impl History {
                     ecn: Ecn::NotEct,
                 },
                 covered: false,
+                in_flight: false,
             },
         );
 
         id
+    }
+
+    /// [`add_outgoing`](Self::add_outgoing), the packet counted in flight
+    /// ([`in_flight_bytes`](Self::in_flight_bytes)): one per-packet feedback will report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_outgoing_in_flight(
+        &mut self,
+        ssrc: u32,
+        rtp_sequence_number: u16,
+        is_twcc: bool,
+        twcc_sequence_number: u16,
+        size: usize,
+        departure: Instant,
+    ) -> u64 {
+        let id = self.add_outgoing(
+            ssrc,
+            rtp_sequence_number,
+            is_twcc,
+            twcc_sequence_number,
+            size,
+            departure,
+        );
+        if let Some(sent) = self.packets.get_mut(&id) {
+            sent.in_flight = true;
+            self.in_flight += size;
+        }
+        id
+    }
+
+    /// The octets sent and not yet acknowledged nor declared lost: of the packets counted in
+    /// flight, those sent after the latest one any feedback named, as libwebrtc's
+    /// `TransportFeedbackAdapter` counts its outstanding data (a feedback that names a packet
+    /// takes it and every packet sent before it out of flight).
+    pub fn in_flight_bytes(&self) -> usize {
+        self.in_flight
+    }
+
+    /// A feedback named the packet `id`: it and every packet sent before it leave flight.
+    fn named(&mut self, id: u64) {
+        if self.highest_named.is_some_and(|h| h >= id) {
+            return;
+        }
+        let from = self.highest_named.map_or(0, |h| h + 1);
+        for earlier in from..=id {
+            self.out_of_flight(earlier);
+        }
+        self.highest_named = Some(id);
+    }
+
+    /// Takes the packet `id` out of the octets in flight, if it was counted.
+    fn out_of_flight(&mut self, id: u64) {
+        if let Some(sent) = self.packets.get_mut(&id)
+            && std::mem::take(&mut sent.in_flight)
+        {
+            self.in_flight = self.in_flight.saturating_sub(sent.report.size);
+        }
     }
 
     /// Apply TWCC feedback, returning the round trip time it implies.
@@ -185,6 +250,7 @@ impl History {
         id: u64,
         acknowledgement: Acknowledgement,
     ) -> Option<Duration> {
+        self.named(id);
         let sent = self.packets.get_mut(&id)?;
         sent.covered = true;
         let packet = &mut sent.report;
@@ -308,6 +374,7 @@ impl History {
 
     /// Take a packet out of the history and its indexes.
     fn release(&mut self, id: u64) -> Option<Sent> {
+        self.out_of_flight(id);
         let sent = self.packets.remove(&id)?;
         let packet = &sent.report;
         if packet.is_twcc && self.twcc_index.get(&packet.twcc_sequence_number) == Some(&id) {
@@ -337,6 +404,8 @@ impl History {
         self.pending_losses.clear();
         self.highest_acknowledged = None;
         self.next_to_report = self.next_id;
+        self.in_flight = 0;
+        self.highest_named = self.next_id.checked_sub(1);
     }
 
     /// Packets reported as not received that a later feedback reported as received.
@@ -357,6 +426,7 @@ impl History {
             .collect();
 
         for id in stale {
+            self.out_of_flight(id);
             if let Some(sent) = self.packets.remove(&id) {
                 let packet = sent.report;
                 // Only a TWCC packet has an entry under its transport-wide sequence number. A
@@ -520,6 +590,50 @@ mod tests {
         assert!(reports.iter().all(|report| report.arrived), "{reports:?}");
         assert_eq!(None, reports[0].arrival, "0 is out of send order now");
         assert_eq!(1, history.recovered());
+    }
+
+    /// The octets in flight are those sent after the latest packet any feedback named, as
+    /// received or not (libwebrtc's `TransportFeedbackAdapter`): three packets of 1200 octets,
+    /// a feedback naming the second takes the first two out of flight, one naming the third
+    /// as not received the third; a packet not counted in flight never is.
+    #[test]
+    fn a_feedback_takes_what_it_names_and_what_went_before_out_of_flight() {
+        let now = Instant::now();
+        let mut history = History::new();
+        for sequence_number in 0..3u16 {
+            history.add_outgoing_in_flight(
+                1,
+                100 + sequence_number,
+                true,
+                sequence_number,
+                1200,
+                now,
+            );
+        }
+        history.add_outgoing(2, 7, false, 0, 500, now);
+        assert_eq!(3600, history.in_flight_bytes());
+        history.on_twcc_feedback(now, Acknowledgement::received(1, None, Ecn::NotEct));
+        assert_eq!(1200, history.in_flight_bytes());
+        history.on_twcc_feedback(now, Acknowledgement::lost(2));
+        assert_eq!(0, history.in_flight_bytes());
+        history.add_outgoing_in_flight(1, 103, true, 3, 1000, now);
+        assert_eq!(1000, history.in_flight_bytes());
+        history.forget_sent();
+        assert_eq!(
+            0,
+            history.in_flight_bytes(),
+            "a new path has nothing in flight"
+        );
+    }
+
+    /// A packet written off at the prune horizon leaves flight with it.
+    #[test]
+    fn a_pruned_packet_leaves_flight() {
+        let now = Instant::now();
+        let mut history = History::new();
+        history.add_outgoing_in_flight(1, 100, true, 0, 1200, now);
+        history.prune_before(now + Duration::from_secs(1));
+        assert_eq!(0, history.in_flight_bytes());
     }
 
     /// The feedback packet count is how a lost feedback packet is told from a quiet receiver

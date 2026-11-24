@@ -555,6 +555,10 @@ impl Peer {
             let mut options = DefaultInterceptorOptions::default();
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
+            // A measurement knob: libwebrtc's congestion window (`Some(350 ms)` in its form).
+            if let Ok(ms) = std::env::var("RTC_CAP_CWND") {
+                options.cc_congestion_window = Some(Duration::from_millis(ms.parse()?));
+            }
             if let Some(rate_limit) = rate_limit {
                 options.nack_retransmission_rate_limit = rate_limit;
             }
@@ -878,6 +882,10 @@ struct World {
     trace: Vec<String>,
     /// Nothing sent either way arrives (both hosts' network is gone).
     blackhole: bool,
+    /// When the outage began, and the caller's datagrams (not STUN) that went into the dead
+    /// path since: time after its start, octets.
+    dead_since: Option<Instant>,
+    dead: Vec<(Duration, usize)>,
     /// Only STUN arrives until the caller's application is told of a newly selected pair: the
     /// path the media went on is gone, and the new one carries the restart's checks first.
     stun_only: bool,
@@ -911,6 +919,12 @@ impl World {
                     if self.blackhole
                         || (self.stun_only && !stun && self.peers[0].pair_changes.is_empty())
                     {
+                        if i == 0
+                            && !stun
+                            && let Some(since) = self.dead_since
+                        {
+                            self.dead.push((self.now - since, msg.message.len()));
+                        }
                         continue;
                     }
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
@@ -1313,6 +1327,8 @@ impl World {
             video_on: setup.video,
             trace: Vec::new(),
             blackhole: false,
+            dead_since: None,
+            dead: Vec::new(),
             stun_only: false,
             sampling: false,
             samples: Vec::new(),
@@ -2156,6 +2172,10 @@ struct PathChangeOutcome {
     freeze_after_at: Duration,
     /// Retransmissions the caller sent from the switch on.
     rtx_after: u64,
+    /// The octets the caller sent into the dead path (not STUN), from the outage's start to
+    /// the switch, and those of the first 1.3 s.
+    dead_octets: usize,
+    dead_octets_early: usize,
 }
 
 /// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
@@ -2174,6 +2194,7 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
         peer.pair_changes.clear();
     }
     world.blackhole = true;
+    world.dead_since = Some(world.now);
     let t = world.now + Duration::from_secs(4);
     world.advance(t)?;
     world.blackhole = false;
@@ -2210,6 +2231,13 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
         world.elapsed(),
     );
     Ok(PathChangeOutcome {
+        dead_octets: world.dead.iter().map(|(_, octets)| octets).sum(),
+        dead_octets_early: world
+            .dead
+            .iter()
+            .filter(|(at, _)| *at <= Duration::from_millis(1300))
+            .map(|(_, octets)| octets)
+            .sum(),
         freeze_after,
         freeze_after_at,
         rtx_after: world.uplinks[0].rtx_sent - rtx_at_switch,
@@ -2260,13 +2288,15 @@ fn measure_the_ice_restart() -> Result<()> {
                 .anchor(ANCHORS[0]);
             match path_change_run(&setup) {
                 Ok(o) => println!(
-                    "RESTART chain {chain} seed {seed} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | rtx after {} | lowest after {} | estimate after {:?}",
+                    "RESTART chain {chain} seed {seed} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | rtx after {} | lowest after {} | estimate after {:?} | dead {} kB first 1.3 s {} kB",
                     o.switched_at.as_secs_f64(),
                     o.freeze_after.as_secs_f64(),
                     o.freeze_after_at.as_secs_f64(),
                     o.rtx_after,
                     o.lowest_after / 1000,
                     o.estimate_after.map(|bps| bps / 1000),
+                    o.dead_octets / 1000,
+                    o.dead_octets_early / 1000,
                 ),
                 Err(error) => println!("RESTART chain {chain} seed {seed} | failed: {error}"),
             }

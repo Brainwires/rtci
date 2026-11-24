@@ -966,6 +966,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.gcc_threshold_time_base,
     },
     {
+        id: "cc.congestion-window",
+        setting: "DefaultInterceptorOptions::cc_congestion_window",
+        clause: "RFC 8836 2 (10)",
+        rfc: None => "None",
+        chrome: Some(Duration::from_millis(350)) => "Some(350ms)",
+        strict_rfc: None => "None",
+        chrome_source: "libwebrtc rtc_base/experiments/rate_control_settings.cc @ a222406d: kCongestionWindowDefaultFieldTrialString \"QueueSize:350,MinBitrate:30000,DropFrame:true\" when WebRTC-CongestionWindow is unset; goog_cc_network_control.cc::UpdateCongestionWindowSize: data_window = last_loss_based_target_rate_ * (min feedback max RTT + 350 ms), averaged with the last, at least kMinCwnd 2 * 1500 bytes; rtp_transport_controller_send.cc::GetCongestedStateUpdate: congested while GetOutstandingData() >= congestion_window_size_; pacing_controller.cc: 'Don't send anything if congested', a keep-alive every kCongestedPacketInterval 500 ms. Not here: the DropFrame pushback of the encoder (congestion_window_pushback_controller.cc)",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.cc_congestion_window = v,
+        read: |o: &DefaultInterceptorOptions| o.cc_congestion_window,
+    },
+    {
         id: "gcc.one-decrease-per-round-trip",
         setting: "DefaultInterceptorOptions::gcc_one_decrease_per_round_trip",
         clause: "draft-ietf-rmcat-gcc-02 5.5",

@@ -116,6 +116,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    congestion_window: Option<Duration>,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -127,7 +128,28 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            congestion_window: None,
         }
+    }
+
+    /// A congestion window over the octets in flight (sent and not yet named by any per-packet
+    /// feedback, [`History::in_flight_bytes`]), libwebrtc's form: the window is the target
+    /// times the round trip (the least of the recent feedbacks' longest round trips) plus
+    /// `additional` (libwebrtc's `QueueSize`, 350 ms), averaged with the window before, at least
+    /// two 1500-octet packets; while the octets in flight reach it the pacer holds what waits
+    /// in it, but for one packet every 500 ms ([`CongestionWindowState`]). `None`, the
+    /// default, has no window: none of draft-ietf-rmcat-gcc-02, RFC 8836 or RFC 8888 bounds
+    /// the data in flight (RFC 8836 requirement 10 asks for a reaction to missing feedback,
+    /// which the estimator's feedback timeout gives).
+    ///
+    /// libwebrtc (`goog_cc_network_control.cc` `UpdateCongestionWindowSize`,
+    /// `rtp_transport_controller_send.cc` `GetCongestedStateUpdate`,
+    /// `pacing_controller.cc`: "Don't send anything if congested", a keep-alive every 500 ms;
+    /// `rate_control_settings.cc`: `QueueSize:350,MinBitrate:30000,DropFrame:true` by
+    /// default, at a222406d).
+    pub fn with_congestion_window(mut self, additional: Option<Duration>) -> Self {
+        self.congestion_window = additional;
+        self
     }
 
     /// How long an unacknowledged packet is kept before it is written off.
@@ -217,6 +239,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
                 probe_clusters: HashMap::new(),
                 sent: VecDeque::new(),
                 last_target: None,
+                window: self.congestion_window.map(CongestionWindow::new),
                 estimator: self.estimator,
                 prune_horizon: self.prune_horizon,
                 history: History::new(),
@@ -409,11 +432,106 @@ pub struct CongestionControlInterceptor<E: BandwidthEstimator> {
     /// `None` until the first one has been announced: the pacer has to learn the estimator's
     /// starting rate too, not only its changes.
     last_target: Option<f64>,
+    /// The congestion window, when there is one.
+    window: Option<CongestionWindow>,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
 
+/// libwebrtc's congestion window ([`CongestionControlBuilder::with_congestion_window`]).
+struct CongestionWindow {
+    additional: Duration,
+    /// The longest round trip of each recent feedback, the latest last.
+    feedback_max_rtts: VecDeque<Duration>,
+    /// The window in octets, once a feedback has set it.
+    octets: Option<f64>,
+    congested: bool,
+}
+
+/// How many feedbacks' longest round trips the window takes the least of (libwebrtc's
+/// `kMaxFeedbackRttWindow`).
+const FEEDBACK_RTT_WINDOW: usize = 32;
+
+/// The least window: two full-sized packets (libwebrtc's `kMinCwnd`).
+const MIN_WINDOW_OCTETS: f64 = 3000.0;
+
+impl CongestionWindow {
+    fn new(additional: Duration) -> Self {
+        Self {
+            additional,
+            feedback_max_rtts: VecDeque::new(),
+            octets: None,
+            congested: false,
+        }
+    }
+
+    /// After a feedback whose longest round trip was `max_rtt`, at the target `target`.
+    fn on_feedback(&mut self, max_rtt: Duration, target: f64) {
+        self.feedback_max_rtts.push_back(max_rtt);
+        if self.feedback_max_rtts.len() > FEEDBACK_RTT_WINDOW {
+            self.feedback_max_rtts.pop_front();
+        }
+        let least = self
+            .feedback_max_rtts
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or_default();
+        let window = target / 8.0 * (least + self.additional).as_secs_f64();
+        self.octets = Some(match self.octets {
+            Some(previous) => MIN_WINDOW_OCTETS.max((window + previous) / 2.0),
+            None => MIN_WINDOW_OCTETS.max(window),
+        });
+    }
+}
+
+/// The congestion window's state, handed application-ward on an empty RTCP carrier when it
+/// changes ([`CongestionControlBuilder::with_congestion_window`]): while `congested`, the
+/// octets in flight reach the window and the pacer holds the packets waiting in it, but for
+/// one every 500 ms (a keep-alive, so that feedback can come back). Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CongestionWindowState {
+    /// Whether the octets in flight reach the window.
+    pub congested: bool,
+    /// The octets in flight.
+    pub in_flight: usize,
+    /// The window, octets.
+    pub window: f64,
+}
+
 impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
+    /// The octets in flight: sent and not yet named by any per-packet feedback.
+    pub fn in_flight_bytes(&self) -> usize {
+        self.history.in_flight_bytes()
+    }
+
+    /// Hands the congestion window's state application-ward when it changed.
+    fn update_congestion_window(&mut self, now: Instant) {
+        let in_flight = self.history.in_flight_bytes();
+        let Some(window) = self.window.as_mut() else {
+            return;
+        };
+        let Some(octets) = window.octets else {
+            return;
+        };
+        let congested = in_flight as f64 >= octets;
+        if congested == window.congested {
+            return;
+        }
+        window.congested = congested;
+        self.read_queue.push_back(TaggedPacket {
+            now,
+            transport: shared::TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(Vec::new())).with(Attribute::Custom(
+                Arc::new(CongestionWindowState {
+                    congested,
+                    in_flight,
+                    window: octets,
+                }),
+            )),
+        });
+    }
     /// RFC 6679 sections 5 and 7.3.3: the CE marks an RTCP ECN Feedback packet or an XR ECN
     /// Summary Report counts for a local stream since the last such report reach the
     /// estimator as congestion, as losses would. A stream reported in RFC 8888, whose
@@ -496,6 +614,15 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             self.departures.pop_front();
         }
         self.departures.len() as f64
+    }
+
+    /// A per-packet feedback whose longest round trip was `longest` resizes the congestion
+    /// window at the target in force.
+    fn feedback_window(&mut self, longest: Option<Duration>) {
+        let target = self.estimator.target_bitrate();
+        if let (Some(window), Some(rtt)) = (self.window.as_mut(), longest) {
+            window.on_feedback(rtt, target);
+        }
     }
 
     fn note_round_trip_time(&mut self, now: Instant, sample: Duration) {
@@ -584,16 +711,19 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         ) {
             self.history.on_twcc_feedback_count(feedback.fb_pkt_count);
             let mut round_trip: Option<Duration> = None;
+            let mut longest: Option<Duration> = None;
             for acknowledgement in self.timeline.convert_twcc(feedback) {
                 if let Some(rtt) = self.history.on_twcc_feedback(now, acknowledgement)
                     && acknowledgement.arrived
                 {
                     round_trip = Some(round_trip.map_or(rtt, |best| best.min(rtt)));
+                    longest = Some(longest.map_or(rtt, |most| most.max(rtt)));
                 }
             }
             if let Some(rtt) = round_trip {
                 self.note_round_trip_time(now, rtt);
             }
+            self.feedback_window(longest);
             self.tmmbr.on_owner_seen(now, feedback.sender_ssrc);
             return true;
         }
@@ -603,6 +733,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         ) {
             let (report_delay, per_stream) = self.timeline.convert_ccfb(feedback);
             let mut round_trip: Option<Duration> = None;
+            let mut longest: Option<Duration> = None;
             for (ssrc, acknowledgements) in per_stream {
                 // A stream that runs on transport-wide feedback is not also read from RFC 8888
                 // reports: the estimator would count each of its packets twice.
@@ -616,6 +747,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                         && acknowledgement.arrived
                     {
                         round_trip = Some(round_trip.map_or(rtt, |best| best.min(rtt)));
+                        longest = Some(longest.map_or(rtt, |most| most.max(rtt)));
                     }
                 }
             }
@@ -623,6 +755,7 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
                 // The receiver held the report for `report_delay` after the newest arrival.
                 self.note_round_trip_time(now, rtt.saturating_sub(report_delay));
             }
+            self.feedback_window(longest.map(|rtt| rtt.saturating_sub(report_delay)));
             self.tmmbr.on_owner_seen(now, feedback.sender_ssrc);
             return true;
         }
@@ -1020,6 +1153,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             self.collect_probe_reports(msg.now, &reports);
         }
         self.apply_bounds(msg.now);
+        self.update_congestion_window(msg.now);
 
         // Announced on a change, and once at the start on whatever inbound packet comes first:
         // a pacer that only ever heard about changes would run at its own default until the
@@ -1056,7 +1190,17 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
             // space the remote will report against.
             if self.streams.contains_key(&rtp_packet.header.ssrc) {
                 let size = rtp_packet.marshal_size();
-                self.history.add_outgoing(
+                let reported = self
+                    .streams
+                    .get(&rtp_packet.header.ssrc)
+                    .is_some_and(|stream| stream.feedback.is_some());
+                let add = if reported {
+                    History::add_outgoing_in_flight
+                } else {
+                    History::add_outgoing
+                };
+                add(
+                    &mut self.history,
                     rtp_packet.header.ssrc,
                     rtp_packet.header.sequence_number,
                     twcc_sequence_number.is_some(),
@@ -1112,6 +1256,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
         }
         if matches!(msg.message.packet, Packet::Rtp(_)) {
             self.poll_probe(msg.now);
+            self.update_congestion_window(msg.now);
         }
 
         self.write_queue.push_back(msg);
@@ -1125,6 +1270,7 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
         self.history
             .prune_before(now.checked_sub(self.prune_horizon).unwrap_or(now));
+        self.update_congestion_window(now);
 
         let packet_rate = self.packet_rate(now);
         let round_trip_time = self.round_trip_time.unwrap_or_default();

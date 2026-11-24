@@ -342,6 +342,13 @@ pub struct PacerInterceptor {
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
     probe: Option<ActiveProbe>,
+    /// Whether the congestion controller's window is full ([`CongestionWindowState`]): what
+    /// waits is held, but for one packet every [`CONGESTED_KEEPALIVE`].
+    ///
+    /// [`CongestionWindowState`]: crate::CongestionWindowState
+    congested: bool,
+    /// When the last packet left.
+    last_release: Option<Instant>,
     /// Packets released over the budget ([`QueueOverflow::Drain`]).
     forced: u64,
     /// Media packets dropped for want of room in the target ([`QueueOverflow::Drop`]).
@@ -392,6 +399,8 @@ impl PacerInterceptor {
             audio: HashSet::new(),
             immediate_release: true,
             probe: None,
+            congested: false,
+            last_release: None,
             forced: 0,
             dropped: 0,
             discarded_frames: 0,
@@ -558,10 +567,22 @@ impl PacerInterceptor {
     /// padding while no media waits (padding has no queue time bound to wake for).
     fn next_release(&self) -> Option<Instant> {
         let Some(head) = self.queue.front() else {
+            if self.congested {
+                return None;
+            }
             let head = self.padding.front()?;
             return self.bucket().releasable_at(Self::bits_of(head));
         };
-        let by_budget = self.bucket().releasable_at(Self::bits_of(head)).map(|at| {
+        let by_budget = if self.congested {
+            // Held by the window: the keep-alive.
+            Some(
+                self.last_release
+                    .map_or(head.now, |at| at + CONGESTED_KEEPALIVE),
+            )
+        } else {
+            self.bucket().releasable_at(Self::bits_of(head))
+        };
+        let by_budget = by_budget.map(|at| {
             // While the rate is raised it moves with every call, and the instant computed at
             // one rate can come out a hair short of the budget at the next: a microsecond
             // later it is not, and the deadline advances (webrtc#862).
@@ -617,6 +638,7 @@ impl PacerInterceptor {
 
     /// A packet leaves at `now`: marked as part of the probe cluster while one is being sent.
     fn release(&mut self, mut packet: TaggedPacket, bits: f64) {
+        self.last_release = Some(packet.now);
         if packet.message.has(&Attribute::Retransmission)
             && !Self::is_padding(&packet)
             && let Some(key) = self.retransmission_key(&packet)
@@ -922,6 +944,11 @@ pub struct RetransmissionsLeft {
     pub dropped: Vec<(u32, u16)>,
 }
 
+/// While the congestion window is full, one packet leaves this often (libwebrtc's
+/// `kCongestedPacketInterval`): it carries a transport-wide sequence number, so feedback comes
+/// back and the window can open again.
+const CONGESTED_KEEPALIVE: Duration = Duration::from_millis(500);
+
 /// How long a probe cluster is held open for packets to fill it. A cluster that takes longer
 /// than this to leave is not a burst any more and measures nothing.
 const PROBE_CLUSTER_TIMEOUT: Duration = Duration::from_millis(250);
@@ -967,6 +994,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             // end, and the application reads it on this packet.
             self.update_pause(msg.now);
             self.tag_target(&mut msg.message);
+        }
+
+        // The congestion window: held while it is full (see `CongestionWindowState`).
+        if let Some(state) = msg.message.custom::<crate::CongestionWindowState>() {
+            self.congested = state.congested;
         }
 
         // A probe cluster the congestion controller asks for: the next packets leave at its
@@ -1066,7 +1098,10 @@ impl PacerInterceptor {
         // Inside the budget and first in line: it leaves now. The budget is the bound on what
         // may enter the path at once, so nothing is gained by holding the packet for a timer.
         // Queued padding is not in line ahead of media.
-        if self.immediate_release && self.queue.is_empty() && (!padding || self.padding.is_empty())
+        if self.immediate_release
+            && !self.congested
+            && self.queue.is_empty()
+            && (!padding || self.padding.is_empty())
         {
             let bits = Self::bits_of(&msg);
             if self.try_spend(bits) {
@@ -1206,6 +1241,16 @@ impl PacerInterceptor {
                 }
                 self.pacer.consume(bits);
                 self.forced += 1;
+            } else if self.congested {
+                // The window is full: one packet every `CONGESTED_KEEPALIVE`, so that feedback
+                // can come back, charged to the budget.
+                let due = self
+                    .last_release
+                    .is_none_or(|at| now >= at + CONGESTED_KEEPALIVE);
+                if !due {
+                    break;
+                }
+                self.pacer.consume(bits);
             } else if !self.try_spend(bits) {
                 break;
             }
@@ -1222,8 +1267,9 @@ impl PacerInterceptor {
         }
         if self.queue.is_empty() {
             self.queued_bits = 0.0;
-            // No media waits: padding leaves from what the budget has left, never over it.
-            while let Some(head) = self.padding.front() {
+            // No media waits: padding leaves from what the budget has left, never over it,
+            // and not while the window is full.
+            while let Some(head) = self.padding.front().filter(|_| !self.congested) {
                 let bits = Self::bits_of(head);
                 if !self.try_spend(bits) {
                     break;

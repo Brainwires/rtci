@@ -521,6 +521,44 @@ fn retransmissions_of_a_stream_leave_oldest_packet_first() {
     assert_eq!(vec![1, 500, 10, 20, 30, 501, 65_535, 0, 2], order);
 }
 
+/// The congestion window ([`rtci_interceptor::CongestionWindowState`]): while it is full the
+/// pacer holds what waits, but for one packet every 500 ms (libwebrtc's keep-alive), and lets
+/// the rest go at the rate once it opens. Ten packets at 0 ms at one every 10 ms: 1 leaves at
+/// once, 2 at 10 ms; the window fills at 15 ms, so 3 leaves at 510 ms (500 ms after 2) and
+/// nothing else until it opens at 600 ms, from when the rest leave at the rate.
+#[test]
+fn a_full_congestion_window_holds_the_queue_but_for_a_keepalive() {
+    let window = |harness: &mut Harness, congested: bool| {
+        let mut msg = TaggedPacket {
+            now: harness.epoch,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![])),
+        };
+        msg.message.add(Attribute::Custom(Arc::new(
+            rtci_interceptor::CongestionWindowState {
+                congested,
+                in_flight: 0,
+                window: 0.0,
+            },
+        )));
+        harness.chain.handle_read(msg).expect("handle_read");
+        while harness.chain.poll_read().is_some() {}
+    };
+    let mut harness = Harness::new();
+    for sequence_number in 1..=10 {
+        harness.send(ms(0), sequence_number);
+    }
+    harness.advance_to(ms(15));
+    window(&mut harness, true);
+    harness.advance_to(ms(600));
+    let schedule = harness.schedule();
+    assert_eq!(vec![(1, ms(0)), (2, ms(10)), (3, ms(510))], schedule);
+    window(&mut harness, false);
+    harness.advance_to(ms(700));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!((1..=10).collect::<Vec<_>>(), order, "all once it opens");
+}
+
 // ---------------------------------------------------------------------------------------
 // The chain contract
 // ---------------------------------------------------------------------------------------
