@@ -27,6 +27,7 @@ use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
+use rtci::sctp::AssociationStats;
 use rtci::statistics::StatsSelector;
 use std::collections::HashSet;
 use std::process::Command;
@@ -129,6 +130,9 @@ fn dc_messages(p: &EnvPeer) -> Vec<u32> {
 struct Delivery {
     got: Vec<u32>,
     drained_after: Option<Duration>,
+    /// The sender's association counters when its queue drained, and when the run ended.
+    sender_at_drain: Option<AssociationStats>,
+    sender_at_end: Option<AssociationStats>,
 }
 
 /// Sends `count` numbered 1 KiB messages from a to b over a channel made with `init`.
@@ -147,6 +151,7 @@ fn send_numbered(
     let mut last_send = Instant::now();
     let started = Instant::now();
     let mut drained_at: Option<Instant> = None;
+    let mut sender_at_drain = None;
     pump(&mut [&mut a, &mut b], timeout, |p| {
         if let Some(id) = dc_open_id(p[0])
             && next < count
@@ -174,6 +179,7 @@ fn send_numbered(
                 .map_or(0, |dc| dc.bytes_dequeued());
             if next >= count && dequeued >= count as u64 * 1024 && drained_at.is_none() {
                 drained_at = Some(Instant::now());
+                sender_at_drain = p[0].pc.sctp().and_then(|t| t.association_stats());
             }
             drained_at.is_some_and(|t| t.elapsed() > Duration::from_secs(2))
         }
@@ -212,9 +218,12 @@ fn send_numbered(
         b.sent_direct,
         b.recv_direct
     );
+    let sender_at_end = a.pc.sctp().and_then(|t| t.association_stats());
     Delivery {
         got: dc_messages(&b),
         drained_after: drained_at.map(|t| t - started),
+        sender_at_drain,
+        sender_at_end,
     }
 }
 
@@ -265,20 +274,45 @@ fn reliable_unordered_channel_delivers_everything() {
 fn unreliable_channel_loses_without_retransmitting() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let _netem = Netem::set("delay 20ms loss 10%");
-    let Delivery { got, drained_after } = send_numbered(
+    let Delivery {
+        got,
+        drained_after,
+        sender_at_drain,
+        sender_at_end,
+    } = send_numbered(
         RTCDataChannelInit {
             ordered: false,
             max_retransmits: Some(0),
             ..Default::default()
         },
         1000,
-        Duration::from_secs(120),
+        Duration::from_secs(150),
         false,
     );
     let unique: HashSet<u32> = got.iter().copied().collect();
+    let drained_after = drained_after.expect("the send queue never drained");
+    let mut at_drain = sender_at_drain.expect("no live association when the queue drained");
+    let mut at_end = sender_at_end.expect("no live association at the end");
+    let t3 = at_drain.get_num_t3timeouts();
+    let t3_wait = at_drain.get_t3_wait();
+    // The part of the drain the retransmission timer does not account for: sending, round
+    // trips, and the host. Split this way, a drift of the figure reads as "more timer events"
+    // (the protocol or the link: more T3-rtx expiries, or more of them backed off) or as
+    // "slower per event" (the host: the rest grows).
+    let rest = drained_after.saturating_sub(t3_wait);
     eprintln!(
-        "unreliable: {} of 1000 delivered over a 10%-loss link (each way), queue drained after {drained_after:?}",
-        unique.len()
+        "unreliable: {} of 1000 delivered over a 10%-loss link (each way), queue drained after \
+         {drained_after:?}: {t3} T3-rtx expiries waiting {t3_wait:?} (mean {:?}), rest {rest:?}; \
+         fast retransmits {}, retransmissions {}, abandoned messages {} (end {}), FORWARD TSNs {} \
+         (end {})",
+        unique.len(),
+        t3_wait.checked_div(t3 as u32).unwrap_or_default(),
+        at_drain.get_num_fast_retrans(),
+        at_drain.get_num_retransmissions(),
+        at_drain.get_num_abandoned_messages(),
+        at_end.get_num_abandoned_messages(),
+        at_drain.get_num_forward_tsns(),
+        at_end.get_num_forward_tsns(),
     );
     assert_eq!(unique.len(), got.len(), "no duplicates");
     // A link that drops 10% of packets each way delivers about 90% of single-packet messages
@@ -290,19 +324,56 @@ fn unreliable_channel_loses_without_retransmitting() {
         "{} of 1000 delivered over a 10%-loss link; expected 800 to 960",
         unique.len()
     );
-    // The queue must not hold messages back without end (a stall the delivery count alone
-    // could hide). It is paced by the congestion window, not by the 2 ms between sends: with
-    // 10% loss each way the window stays near four packets, too few for three miss indications,
-    // so most losses can only be found by the T3-rtx timer, at RFC 9260's RTO.Min of 1 s (section 16)
-    // each, and the window restarts from one MTU (section 7.2.3). About a hundred loss events
-    // put the drain near a minute (59 s in the first environment run); 90 s still catches a
-    // stalled queue, which never drains.
-    let drained_after = drained_after.expect("the send queue never drained");
+    // "Without retransmitting", counted: no DATA chunk went twice (max_retransmits 0, RFC 7496
+    // 3.1), by T3-rtx or by Fast Retransmit.
+    assert_eq!(0, at_end.get_num_retransmissions(), "DATA was sent again");
+    assert_eq!(
+        0,
+        at_end.get_num_fast_retrans(),
+        "DATA was fast retransmitted"
+    );
+    // Every message that did not arrive was given up by the sender and skipped with FORWARD
+    // TSN (RFC 3758 3.5 A2, C3): what is lost is abandoned, not left outstanding. A message
+    // can be abandoned and still arrive (its SACK was lost), so the count is a lower bound.
+    let lost = 1000 - unique.len() as u64;
     assert!(
-        drained_after < Duration::from_secs(90),
+        at_end.get_num_abandoned_messages() >= lost,
+        "{lost} messages lost, {} abandoned",
+        at_end.get_num_abandoned_messages()
+    );
+    assert!(
+        at_end.get_num_forward_tsns() >= 1,
+        "messages were abandoned and no FORWARD TSN was sent"
+    );
+    // The drain is paced by the congestion window, not by the 2 ms between sends: with 10%
+    // loss each way the window stays near four packets, too few for three miss indications on
+    // many losses, which can then only be found by the T3-rtx timer, at RFC 9260's RTO.Min of
+    // 1 s (section 16), doubled for each expiry in a row (6.3.3 E2), with the window back to
+    // one packet (7.2.3). The figure is mostly a sum of those waits, which is noisy (22 to 77 s
+    // in CI). What the timer does not account for is bounded on its own: a stalled queue, or a
+    // sender that waits on something other than its timer, grows it.
+    assert!(
+        rest < Duration::from_secs(REST_LIMIT_S),
+        "the drain took {drained_after:?}, {rest:?} of it not waiting for T3-rtx ({t3} expiries, \
+         {t3_wait:?})"
+    );
+    // Each expiry waits one RTO, at least RTO.Min, and the expiries are what the figure is
+    // made of: about one per 10 to 20 messages lost here. Far more means losses that Fast
+    // Retransmit should find went to the timer, or the RTO stayed backed off.
+    assert!(
+        t3 <= T3_LIMIT,
+        "{t3} T3-rtx expiries for {lost} lost messages"
+    );
+    // A generous ceiling on the wall time only, for a stall the counters do not show.
+    assert!(
+        drained_after < Duration::from_secs(120),
         "the send queue took {drained_after:?} to drain"
     );
 }
+
+/// Calibrated on GitHub-hosted runners (see `unreliable_channel_loses_without_retransmitting`).
+const REST_LIMIT_S: u64 = 60;
+const T3_LIMIT: u64 = 1000;
 
 const VP8_PT: u8 = 96;
 

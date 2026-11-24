@@ -3152,6 +3152,7 @@ impl Association {
             {
                 c.retransmit = false;
                 c.nsent += 1;
+                self.stats.inc_retransmissions();
                 chunks.push(c.clone());
             }
         }
@@ -5208,6 +5209,7 @@ impl Association {
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
                     chunk.nsent = c.nsent;
+                    self.stats.inc_retransmissions();
                     // RFC 9260 6.2.1 B, for a Fast Retransmit too.
                     self.rwnd = self
                         .rwnd
@@ -5258,12 +5260,14 @@ impl Association {
                 let first_data_packet = self.first_data_packet;
                 let raw = if self.use_interleaving {
                     let fwd_tsn = self.create_i_forward_tsn();
+                    self.stats.inc_forward_tsns();
                     if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
                         return raw_packets;
                     }
                     self.marshal_control_chunk(&fwd_tsn)
                 } else {
                     let fwd_tsn = self.create_forward_tsn();
+                    self.stats.inc_forward_tsns();
                     if self.bundle_with_data(&fwd_tsn, &mut raw_packets, first_data_packet) {
                         return raw_packets;
                     }
@@ -5452,6 +5456,7 @@ impl Association {
                 c.retransmit = false;
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
+                self.stats.inc_retransmissions();
                 // RFC 9260 6.2.1 B: a retransmitted chunk takes its size from rwnd again.
                 self.rwnd = self
                     .rwnd
@@ -5705,6 +5710,9 @@ impl Association {
             }
         }
         self.release_stream_buffers(&released_per_stream);
+        if changed {
+            self.stats.inc_abandoned_messages();
+        }
         if changed && let Some(id) = stream {
             // RFC 3758 4.1 TR3: the upper layer is told.
             self.events
@@ -6377,6 +6385,7 @@ impl Association {
 
             Timer::T3RTX => {
                 self.stats.inc_t3timeouts();
+                self.stats.add_t3_wait(self.rto_mgr.get_rto());
                 self.rto_mgr.backoff();
                 self.note_path_error();
                 // Refresh before C2 or mark_all_to_retrasmit reads abandoned().

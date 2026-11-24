@@ -409,3 +409,35 @@ fn a_peer_that_rejects_the_parameter_gets_no_partial_reliability() {
     assert!(!a.partial_reliability());
     assert!(!a.is_ended(), "the association goes on");
 }
+
+/// The counters that explain how long a partially reliable transfer over a lossy path takes
+/// (`AssociationStats`): a T3-rtx expiry and the RTO it waited, the message it abandoned instead
+/// of sending again (RFC 3758 3.5 A2, A5), the FORWARD TSN that skips it (C3), and no
+/// retransmission. For a reliable message the same expiry is one retransmission.
+#[test]
+fn a_t3_expiry_is_counted_with_what_it_abandoned_or_sent_again() -> Result<()> {
+    for reliable in [false, true] {
+        let mut a = timed_test_association();
+        let now = Instant::now();
+        {
+            let mut s = a.open_stream(1, PPI)?;
+            if !reliable {
+                s.set_reliability_params(true, ReliabilityType::Rexmit, 0)?;
+            }
+            s.write_sctp(now, &Bytes::from_static(b"lost"), PPI)?;
+        }
+        assert_eq!(1, transmitted_data(&a.gather_outbound(now).0).len());
+        let at = a.timers.get(Timer::T3RTX).unwrap();
+        a.handle_timeout(at);
+        let _ = a.gather_outbound(at);
+
+        let mut stats = a.stats();
+        assert_eq!(1, stats.get_num_t3timeouts(), "reliable: {reliable}");
+        assert_eq!(Duration::from_millis(1000), stats.get_t3_wait());
+        assert_eq!(u64::from(reliable), stats.get_num_retransmissions());
+        assert_eq!(u64::from(!reliable), stats.get_num_abandoned_messages());
+        assert_eq!(u64::from(!reliable), stats.get_num_forward_tsns());
+        assert_eq!(0, stats.get_num_fast_retrans());
+    }
+    Ok(())
+}
