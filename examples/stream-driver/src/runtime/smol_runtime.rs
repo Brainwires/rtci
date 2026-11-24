@@ -2,7 +2,7 @@
 
 use super::{
     AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, BoxFuture, JoinHandle, MulticastConfig,
-    RecvMeta, Runtime, TrafficClassMarker, Transmit,
+    MulticastInterfaceSelector, RecvMeta, Runtime, TrafficClassMarker, Transmit,
 };
 use smol::Async;
 use socket2::SockRef;
@@ -135,6 +135,7 @@ struct SmolUdp {
     socket: Async<UdpSocket>,
     ipv6: bool,
     marker: TrafficClassMarker,
+    interface: MulticastInterfaceSelector,
 }
 
 impl SmolUdp {
@@ -144,12 +145,20 @@ impl SmolUdp {
             socket: Async::new(socket)?,
             ipv6,
             marker: TrafficClassMarker::default(),
+            interface: MulticastInterfaceSelector::default(),
         }))
     }
 }
 
 impl AsyncUdpSocket for SmolUdp {
     fn poll_send(&self, cx: &mut Context<'_>, transmit: &Transmit<'_>) -> Poll<io::Result<usize>> {
+        // A multicast datagram leaves by the interface of its source (RFC 6762 section 14).
+        if let Err(e) = self
+            .interface
+            .apply(SockRef::from(self.socket.get_ref()), transmit)
+        {
+            return Poll::Ready(Err(e));
+        }
         self.marker.apply(
             SockRef::from(self.socket.get_ref()),
             self.ipv6,
