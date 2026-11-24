@@ -595,8 +595,14 @@ fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
 async fn the_driver_marks_each_datagram_with_its_flows_codepoint() -> Result<()> {
     use rtci::peer_connection::priority::{RTCDscpMarking, RTCPriorityType};
     for marking in [RTCDscpMarking::Rfc8837, RTCDscpMarking::Off] {
-        let mut a = Side::new(SettingEngineBuilder::new().with_dscp_marking(marking))?;
-        let mut b = Side::new(SettingEngineBuilder::new())?;
+        // UDP only: on loopback the engine's ICE-TCP pair would otherwise carry the call (its
+        // connections are marked by `StreamDriver`, `loopback.rs`).
+        let mut a = Side::new(
+            SettingEngineBuilder::new()
+                .with_dscp_marking(marking)
+                .with_tcp_candidate_gathering(false),
+        )?;
+        let mut b = Side::new(SettingEngineBuilder::new().with_tcp_candidate_gathering(false))?;
         let audio = connected(&mut a, &mut b).await?;
         {
             let pc = a.driver.pc_mut();
