@@ -17,6 +17,9 @@
 //! - as the DTLS server, the keys its tickets are sealed under, so that a ticket one
 //!   transport's handshake issued is accepted (once) by another.
 //!
+//! Both are wiped when the connection closes ([`DtlsSessionGroup::close`]), not only when it
+//! is dropped: the store is emptied and the ticket keys are zeroized.
+//!
 //! What takes part:
 //!
 //! - DTLS 1.3 only, with `psk_dhe_ke` (the PSK is combined with a fresh (EC)DHE exchange). No
@@ -51,7 +54,16 @@
 //! given at most one flight interval. A transport never waits more than
 //! [`LEADER_WAIT_FLIGHTS`] of its own initial flight intervals for a leader whose handshake does
 //! not complete, nor at all once the leader failed, was closed or could not start: it then runs
-//! a full handshake.
+//! a full handshake. The wait is never longer than [`LEADER_WAIT_MAX`], whatever round trip
+//! time ICE measured.
+//!
+//! What it costs (measured, `tests/multi_transport_rtc2rtc.rs`, three unbundled transports,
+//! virtual time): the other transports' handshakes run after the leader's instead of beside
+//! it, so the connection's last transport is up about 2.5 round trips later against a peer
+//! that issues tickets and about 3 round trips later against one that issues none (every
+//! browser), and a datagram lost on the leader's handshake delays every transport, not one.
+//! What it saves is one signature and one verification per other transport. That is why it
+//! is an opt-in and not the default.
 
 use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
@@ -78,12 +90,31 @@ pub(crate) const SESSION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// that started no later than the waiter completes a DTLS 1.3 handshake with a cookie
 /// exchange in about 2.5 round trips.
 pub(crate) const LEADER_WAIT_FLIGHTS: u32 = 3;
+/// The longest a client transport waits for the leader's handshake, whatever its flight
+/// interval: the round trip time ICE measured is one sample, which a peer that answers
+/// connectivity checks slowly makes as large as it likes (4.5 times it would be the wait).
+/// Three seconds holds a leader's handshake of 2.5 round trips up to a round trip time of
+/// 1.2 s; on a slower path the others stop waiting and run full handshakes.
+pub(crate) const LEADER_WAIT_MAX: Duration = Duration::from_secs(3);
+
+/// How long a client transport whose initial flight interval is `flight_interval` waits for
+/// the leader's handshake at most: [`LEADER_WAIT_FLIGHTS`] intervals, and never more than
+/// [`LEADER_WAIT_MAX`].
+pub(crate) fn leader_wait_bound(flight_interval: Duration) -> Duration {
+    (LEADER_WAIT_FLIGHTS * flight_interval).min(LEADER_WAIT_MAX)
+}
 
 /// The client side's session store: the DTLS 1.3 tickets the peer issued to this connection.
 /// It keeps no ticket without the peer certificates of the handshake that made it (so that
 /// every resumption has certificates for the transport's fingerprint check to run on), keeps
 /// none longer than [`SESSION_LIFETIME`], and no DTLS 1.2 session at all. Once
 /// [emptied](Self::empty) it holds and takes nothing more.
+///
+/// The filter on certificates is defence in depth: no handshake of the peer connection makes
+/// a ticket without them (a certificate handshake always has the server's chain, and the
+/// peer connection configures no external PSK, the one handshake `rtci-dtls` runs without
+/// certificates), and behind it `rtci-dtls` fails a client's resumption that carries none
+/// when a check is configured.
 #[derive(Default)]
 pub(crate) struct GroupSessionStore {
     /// `None` once emptied.
@@ -246,6 +277,23 @@ impl DtlsSessionGroup {
     /// The client side's store (for tests and the wait).
     pub(crate) fn store(&self) -> &GroupSessionStore {
         &self.store
+    }
+
+    /// The connection closes: what the session holds is wiped now, not when the last
+    /// reference to the group goes (a configuration of an association, a clone held by a
+    /// transport). The client side's store drops every ticket and keeps none from now on
+    /// (their PSKs are zeroized as they are dropped); the server side's ticket keys are
+    /// zeroized, so no ticket is issued or accepted any more. Admission is closed.
+    pub(crate) fn close(&self) {
+        self.lock().admission_open = false;
+        self.store.empty();
+        self.tickets.retire();
+    }
+
+    /// Whether the server side's ticket keys were wiped.
+    #[cfg(test)]
+    pub(crate) fn ticket_keys_wiped(&self) -> bool {
+        self.tickets.is_retired()
     }
 
     /// Whether the first association of the transport `token` in `role`, for a section
@@ -990,6 +1038,156 @@ mod tests {
         );
         assert!(handshake(client, server).0);
         plain.take("peer").expect("a ticket")
+    }
+
+    /// A ticket for the name "peer" that carries no certificate: the one handshake
+    /// `rtci-dtls` runs without certificates is an external-PSK handshake (RFC 8446 section
+    /// 2.2), and a server that issues tickets issues them after it too. The peer connection
+    /// configures no external PSK; this is `rtci-dtls` alone.
+    fn ticket_without_certificates() -> Tls13Session {
+        use dtls::config::ConfigBuilder;
+        use dtls::session::ExternalPsk;
+        let provider = provider();
+        let psk = ExternalPsk::new(b"shared".to_vec(), vec![0x42; 32]);
+        let plain = Arc::new(MemorySessionStore::new());
+        let client = Arc::new(
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_insecure_skip_verify(true)
+                .with_server_name("peer".to_owned())
+                .with_external_psks(vec![psk.clone()])
+                .with_session_store(Some(plain.clone() as Arc<dyn SessionStore>))
+                .build(true, None)
+                .expect("a client"),
+        );
+        let server = Arc::new(
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_certificates(vec![
+                    dtls::crypto::Certificate::generate_self_signed(
+                        vec!["peer".to_owned()],
+                        provider.crypto(),
+                    )
+                    .expect("a certificate"),
+                ])
+                .with_external_psks(vec![psk])
+                .with_session_tickets(1)
+                .build(false, None)
+                .expect("a server"),
+        );
+        assert_eq!(
+            handshake(client, server),
+            (true, true),
+            "an external-PSK handshake"
+        );
+        let ticket = plain.take("peer").expect("a ticket");
+        assert!(
+            ticket.peer_certificates().is_empty(),
+            "made by a handshake without certificates"
+        );
+        ticket
+    }
+
+    /// Review 2, R6: the client side's store keeps no ticket that carries no peer
+    /// certificate, and gives none out (defence in depth: every resumption the peer
+    /// connection makes has certificates for the section's fingerprint check to run on).
+    /// Tickets with certificates around it are kept and given as before.
+    #[test]
+    fn the_store_keeps_and_gives_no_ticket_without_certificates() {
+        // Kept: nothing.
+        let store = GroupSessionStore::new();
+        store.put("peer", ticket_without_certificates());
+        assert_eq!(store.stored(), 0, "not counted as a ticket of the session");
+        assert!(
+            store
+                .lock()
+                .as_ref()
+                .expect("not emptied")
+                .take("peer")
+                .is_none(),
+            "not kept"
+        );
+        assert!(store.take("peer").is_none());
+
+        // Given: nothing, even if one is in the store underneath; the ticket with
+        // certificates beside it is.
+        let store = GroupSessionStore::new();
+        store.put("peer", plain_ticket(Duration::from_secs(60)));
+        assert_eq!(store.stored(), 1);
+        store
+            .lock()
+            .as_ref()
+            .expect("not emptied")
+            .put("peer", ticket_without_certificates());
+        let given = store.take("peer").expect("the ticket with certificates");
+        assert!(!given.peer_certificates().is_empty());
+        assert!(store.take("peer").is_none(), "nothing else is given");
+        assert!(
+            store
+                .lock()
+                .as_ref()
+                .expect("not emptied")
+                .take("peer")
+                .is_none(),
+            "the one without certificates was dropped on the way"
+        );
+
+        // Alone underneath: not given either.
+        let store = GroupSessionStore::new();
+        store
+            .lock()
+            .as_ref()
+            .expect("not emptied")
+            .put("peer", ticket_without_certificates());
+        assert!(store.take("peer").is_none());
+    }
+
+    /// Review 2, R8: closing the connection wipes what its session holds, at once and not
+    /// only when the last reference goes: the client side's store drops its tickets and
+    /// keeps none after; the server side's ticket keys are gone, so a ticket issued before
+    /// is not accepted (a full handshake) and no ticket is issued after, by configurations
+    /// made before the close as by ones made after.
+    #[test]
+    fn closing_the_group_wipes_the_store_and_the_ticket_keys() {
+        let (ours, theirs) = (certificate(), certificate());
+        let (clients, servers) = (group(), group());
+        let server_before = server(&theirs, &servers, &ours);
+        assert_eq!(
+            handshake(client(&ours, &clients, &theirs), server_before.clone()),
+            (true, false)
+        );
+        let issued = clients.store().stored();
+        assert!(issued > 0, "tickets came");
+        assert!(!servers.ticket_keys_wiped() && !clients.store().is_emptied());
+
+        // The server side closes: the tickets it issued no longer resume, on a
+        // configuration that was made before the close, and none is issued.
+        servers.close();
+        assert!(servers.ticket_keys_wiped());
+        assert_eq!(
+            handshake(client(&ours, &clients, &theirs), server_before),
+            (true, false),
+            "a ticket of the closed connection gets a full handshake"
+        );
+        assert_eq!(
+            clients.store().stored(),
+            issued,
+            "and the closed connection issues no ticket"
+        );
+
+        // The client side closes: its tickets are dropped, and none is kept after.
+        clients.close();
+        assert!(clients.store().is_emptied());
+        assert!(clients.store().take("peer").is_none());
+        clients
+            .store()
+            .put("peer", plain_ticket(Duration::from_secs(60)));
+        assert_eq!(clients.store().stored(), issued, "nothing kept after");
+        // Closing wipes both sides of one group.
+        assert!(clients.ticket_keys_wiped() && servers.store().is_emptied());
+        // No transport is admitted to a closed group.
+        let fingerprints = params(RTCDtlsRole::Server, &theirs).fingerprints;
+        assert!(!clients.admit(&Arc::new(()), RTCDtlsRole::Client, &fingerprints));
     }
 
     /// A ticket the client side keeps lives at most [`SESSION_LIFETIME`], whatever lifetime

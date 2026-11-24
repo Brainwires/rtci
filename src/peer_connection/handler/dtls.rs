@@ -3,7 +3,7 @@ use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::dtls::resumption::{LEADER_WAIT_FLIGHTS, StartGate};
+use crate::peer_connection::transport::dtls::resumption::{StartGate, leader_wait_bound};
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::dtls::{DTLS_SRTP_FLIGHT_INTERVAL, DtlsTransport};
@@ -48,8 +48,8 @@ pub(crate) struct DtlsHandlerContext {
     /// establishing the connection's DTLS session (RFC 5764 section 3): it starts, offering
     /// a ticket of that session if one came, once the other is done
     /// (`DtlsSessionGroup::ready_at`), and with a full handshake at the latest at the second
-    /// instant ([`LEADER_WAIT_FLIGHTS`] of its initial flight intervals after the first, the
-    /// instant it was due at).
+    /// instant (`leader_wait_bound`: `LEADER_WAIT_FLIGHTS` of its initial flight intervals
+    /// after the first, the instant it was due at, and at most `LEADER_WAIT_MAX`).
     pub(crate) waiting_for_session: Option<(Instant, Instant)>,
 }
 
@@ -127,7 +127,7 @@ impl<'a> DtlsHandler<'a> {
             && group.start_gate(&self.ctx.dtls_transport.resumption_token, now) == StartGate::Wait
         {
             if self.ctx.waiting_for_session.is_none() {
-                let bound = LEADER_WAIT_FLIGHTS * self.initial_flight_interval();
+                let bound = leader_wait_bound(self.initial_flight_interval());
                 debug!("dtls handshake waits for the connection's session, at most {bound:?}");
                 self.ctx.waiting_for_session = Some((now, now + bound));
             }
@@ -1631,16 +1631,17 @@ mod tests {
         Ok(())
     }
 
-    /// Review F1: a client transport waits for the leader's handshake at most
-    /// `LEADER_WAIT_FLIGHTS` of its initial flight intervals; then it starts a full
-    /// handshake, whatever the leader does.
-    #[test]
-    fn a_waiting_transport_starts_after_the_bound_whatever_the_leader_does() -> Result<()> {
+    /// Two client transports of one connection taking part in its DTLS session, as handler
+    /// contexts: the one that will lead, and another.
+    fn two_session_clients() -> Result<(
+        Arc<crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup>,
+        DtlsHandlerContext,
+        DtlsHandlerContext,
+    )> {
         use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
         use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
         use crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup;
         use crate::peer_connection::transport::ice::role::RTCIceRole;
-        use sansio::Protocol;
 
         let provider = crypto::default_provider().expect("a built-in crypto provider");
         let group = Arc::new(DtlsSessionGroup::new(provider.as_ref())?);
@@ -1676,8 +1677,20 @@ mod tests {
         for transport in &mut contexts {
             transport.engage_session()?;
         }
-        let mut leader = DtlsHandlerContext::new(contexts.remove(0));
-        let mut other = DtlsHandlerContext::new(contexts.remove(0));
+        let leader = DtlsHandlerContext::new(contexts.remove(0));
+        let other = DtlsHandlerContext::new(contexts.remove(0));
+        Ok((group, leader, other))
+    }
+
+    /// Review F1: a client transport waits for the leader's handshake at most
+    /// `LEADER_WAIT_FLIGHTS` of its initial flight intervals; then it starts a full
+    /// handshake, whatever the leader does.
+    #[test]
+    fn a_waiting_transport_starts_after_the_bound_whatever_the_leader_does() -> Result<()> {
+        use crate::peer_connection::transport::dtls::resumption::LEADER_WAIT_FLIGHTS;
+        use sansio::Protocol;
+
+        let (group, mut leader, mut other) = two_session_clients()?;
         let now = Instant::now();
         let mut stats = RTCStatsAccumulator::default();
         let pair_selected = || TaggedRTCEventInternal {
@@ -1711,6 +1724,87 @@ mod tests {
         );
         assert!(handler.poll_write().is_some(), "its ClientHello goes out");
         assert_eq!(group.ready_at(), None, "the leader is still not done");
+        Ok(())
+    }
+
+    /// Review 2, R5: where ICE measured the round trip time of the waiting transport's pair,
+    /// the bound is three flight intervals of 1.5 times it (4.5 round trips), and never more
+    /// than `LEADER_WAIT_MAX` (3 s): one slow sample, which the peer controls, does not
+    /// stretch the wait. With the libwebrtc flight rule (twice the round trip, up to 3 s a
+    /// flight) the same cap holds. At the cap the transport starts a full handshake.
+    #[test]
+    fn the_wait_for_the_leader_is_capped_whatever_round_trip_ice_measured() -> Result<()> {
+        use crate::peer_connection::configuration::setting_engine::DtlsFlightInterval;
+        use crate::peer_connection::transport::dtls::resumption::LEADER_WAIT_MAX;
+        use sansio::Protocol;
+        use std::time::Duration;
+
+        assert_eq!(
+            LEADER_WAIT_MAX,
+            Duration::from_secs(3),
+            "the stated maximum"
+        );
+        for (rule, round_trip_time, expected) in [
+            // 3 x 1.5 x 200 ms.
+            (DtlsFlightInterval::Rfc9147, 0.2, Duration::from_millis(900)),
+            // 3 x 1.5 x 600 ms = 2.7 s: under the cap.
+            (
+                DtlsFlightInterval::Rfc9147,
+                0.6,
+                Duration::from_millis(2700),
+            ),
+            // 3 x 1.5 x 2 s = 9 s uncapped.
+            (DtlsFlightInterval::Rfc9147, 2.0, LEADER_WAIT_MAX),
+            // 3 x 1.5 x 60 s = 4.5 minutes uncapped.
+            (DtlsFlightInterval::Rfc9147, 60.0, LEADER_WAIT_MAX),
+            // 3 x 3 s (the rule's own ceiling for a flight) = 9 s uncapped.
+            (DtlsFlightInterval::Libwebrtc, 2.0, LEADER_WAIT_MAX),
+        ] {
+            let (group, mut leader, mut other) = two_session_clients()?;
+            other.dtls_transport.flight_interval_rule = rule;
+            let now = Instant::now();
+            let mut stats = RTCStatsAccumulator::default();
+            stats.transport.selected_candidate_pair_id = "pair".to_owned();
+            stats.ice_candidate_pairs.insert(
+                "pair".to_owned(),
+                crate::statistics::accumulator::IceCandidatePairAccumulator {
+                    current_round_trip_time: round_trip_time,
+                    ..Default::default()
+                },
+            );
+            let pair_selected = || TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::ICESelectedCandidatePairChange,
+            };
+            DtlsHandler::new(&mut leader, &mut stats).handle_event(pair_selected())?;
+            let mut handler = DtlsHandler::new(&mut other, &mut stats);
+            handler.handle_event(pair_selected())?;
+            assert_eq!(
+                handler.ctx.waiting_for_session,
+                Some((now, now + expected)),
+                "{rule:?}, round trip {round_trip_time} s"
+            );
+            assert!(
+                handler
+                    .poll_timeout()
+                    .is_some_and(|at| at <= now + expected),
+                "{rule:?} {round_trip_time}: a timer for the bound"
+            );
+            handler.handle_timeout(now + expected - Duration::from_millis(1))?;
+            while handler.poll_write().is_some() {}
+            assert!(
+                handler.ctx.waiting_for_session.is_some(),
+                "{rule:?} {round_trip_time}: still waiting"
+            );
+            handler.handle_timeout(now + expected)?;
+            assert!(
+                handler.ctx.waiting_for_session.is_none()
+                    && handler.ctx.dtls_transport.dtls_handshake_config.is_none(),
+                "{rule:?} {round_trip_time}: it started its handshake at the bound"
+            );
+            assert!(handler.poll_write().is_some(), "its ClientHello goes out");
+            assert_eq!(group.ready_at(), None, "the leader is still not done");
+        }
         Ok(())
     }
 

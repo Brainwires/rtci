@@ -988,9 +988,18 @@ impl DtlsTransport {
 
     /// The negotiation that set up the transports is over (RFC 5764 section 3): an admitted
     /// first association whose role has another transport admitted takes part in the
-    /// connection's session. Its handshake config is made again with the session (the
-    /// handshake has not started: a client's config waits for its selected pair, a server's
-    /// endpoint has read nothing), and the group counts it. Any other stays out of it.
+    /// connection's session. Its handshake config is made again with the session, and the
+    /// group counts it. Any other stays out of it.
+    ///
+    /// A client's handshake has not started by then: its config waits for the selected
+    /// pair, which only a handler event brings. Nothing enforces the same for a server: a
+    /// ClientHello held from before the answer is released when the transport starts
+    /// (`release_early_dtls`, inside `start_transports`), which is before this call. It is
+    /// released only onto an ICE path that carries media, which a transport started in the
+    /// same call does not have yet; and if one were read, that handshake would run on the
+    /// config made without the session (a full handshake with the section's certificate
+    /// check, no ticket issued or accepted), because `set_server_config` here changes the
+    /// config of associations made after it only. Safe either way.
     pub(crate) fn engage_session(&mut self) -> Result<()> {
         if !std::mem::take(&mut self.resumption_candidate)
             || self.state != RTCDtlsTransportState::Connecting

@@ -1441,6 +1441,12 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
                 close_errs.push(e);
             }
         }), [get_demuxer_handler]);
+        // The connection's DTLS session (RFC 5764 section 3), if it has one: the tickets its
+        // client side holds and the keys its server side seals tickets under are wiped now,
+        // not when the connection is dropped.
+        if let Some(group) = self.dtls_transport().resumption.as_ref() {
+            group.close();
+        }
 
         // W3C WebRTC §close shutdown work is implemented in individual handler close() methods:
         //   InterceptorHandler::close() → interceptor.close()
