@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **RFC 8888 feedback leaves early rather than split (RFC 8888 3.1: the interval SHOULD keep
+  a report inside the path MTU).** The generator sends its report as soon as the packets
+  waiting would fill `Rfc8888Builder::with_max_report_size` (1200 octets, about 590 packets),
+  and the interval starts again from there; before, a burst was reported at the interval in
+  several reports split to fit. Only above about 10,000 packets a second at a 50 ms interval.
+  New: `CcFeedbackRecorder::pending_report_size`. Audit: RFC8888-3.1-19 `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

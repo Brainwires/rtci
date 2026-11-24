@@ -196,6 +196,16 @@ impl StreamLog {
     }
 
     /// Whether nothing is waiting to be reported.
+    /// How many sequence numbers the next report starts with: from the next one to report up
+    /// to the highest received, arrived or not.
+    pub(crate) fn pending(&self) -> u64 {
+        if self.is_empty() {
+            0
+        } else {
+            self.highest_received - self.next_to_report + 1
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         !self.initialised || self.next_to_report > self.highest_received
     }

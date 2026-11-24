@@ -299,6 +299,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Rfc8888Interceptor {
                 self.recorder
                     .add_packet(msg.now, ssrc, sequence_number, ecn_of(msg.transport.ecn));
                 self.arm(msg.now);
+                // RFC 8888 section 3.1: the reporting interval SHOULD keep a report inside
+                // the path MTU. Once what waits fills one, the report is due now rather than
+                // at the interval, where it would have to be split.
+                if self.recorder.pending_report_size() >= self.max_report_size
+                    && !self.cadence.is_off()
+                {
+                    self.next_timeout = Some(msg.now);
+                }
             }
         }
         self.read_queue.push_back(msg);

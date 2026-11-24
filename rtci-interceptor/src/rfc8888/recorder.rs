@@ -38,6 +38,22 @@ impl CcFeedbackRecorder {
             .add(arrival, sequence_number, ecn);
     }
 
+    /// The size of one report that would describe everything not reported yet, octets (its
+    /// header, a block for each stream with something to say, two octets a packet and the
+    /// padding of each block to 32 bits).
+    pub fn pending_report_size(&self) -> usize {
+        REPORT_OVERHEAD
+            + self
+                .streams
+                .values()
+                .map(StreamLog::pending)
+                .filter(|pending| *pending > 0)
+                .map(|pending| {
+                    BLOCK_OVERHEAD + (METRIC_BLOCK_SIZE * pending as usize).div_ceil(4) * 4
+                })
+                .sum::<usize>()
+    }
+
     /// Whether anything is waiting to be reported.
     pub fn is_empty(&self) -> bool {
         self.streams.values().all(StreamLog::is_empty)

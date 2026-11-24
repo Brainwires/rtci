@@ -731,3 +731,47 @@ fn a_retransmission_is_reported_under_the_rtx_ssrc_and_sequence_number() {
         "11 stays lost on the media stream; the RTX stream's 900 arrived"
     );
 }
+
+/// RFC 8888 section 3.1: "The RTCP reporting interval SHOULD be chosen such that feedback
+/// packets are sent often enough that they are small enough to fit within the path MTU." A
+/// burst of 2000 packets inside 20 ms (100 ms interval, 1200-octet reports: one holds about
+/// 590 packets) is reported as it fills reports, one report at a time, each within the
+/// budget, instead of four reports split at the interval. Every packet is reported.
+#[test]
+fn a_report_is_sent_early_when_waiting_would_exceed_the_path_mtu() {
+    let mut harness = Harness::new();
+    harness.bind(SSRC);
+    let mut sent_at: Vec<Duration> = Vec::new();
+    let mut reported = 0usize;
+    let mut drain = |harness: &mut Harness, at: Duration| {
+        for report in harness.drain_reports() {
+            assert!(report.marshal_size() <= 1200, "{}", report.marshal_size());
+            reported += report.report_blocks[0].metric_blocks.len();
+            sent_at.push(at);
+        }
+    };
+    for n in 0..2000u16 {
+        let at = Duration::from_micros(10 * u64::from(n));
+        harness.arrive(at, SSRC, n);
+        if harness.next_timeout().is_some_and(|due| due <= at) {
+            harness.tick(at);
+            drain(&mut harness, at);
+        }
+    }
+    // The rest at the interval after the last early report.
+    let due = harness.next_timeout().expect("armed");
+    assert!(due <= ms(120), "{due:?}");
+    harness.tick(due);
+    drain(&mut harness, due);
+    println!("reports at {sent_at:?}");
+    assert!(sent_at.len() >= 4, "{sent_at:?}");
+    assert!(
+        sent_at.windows(2).all(|pair| pair[0] < pair[1]),
+        "no report was split: {sent_at:?}"
+    );
+    assert!(
+        sent_at[0] < ms(20),
+        "the first left during the burst: {sent_at:?}"
+    );
+    assert_eq!(2000, reported);
+}
