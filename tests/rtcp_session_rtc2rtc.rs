@@ -1066,11 +1066,12 @@ fn a_receiver_stops_asking_for_packets_behind_its_nack_horizon() -> Result<()> {
         .expect("receiver")
         .set_nack_horizon(now, ssrc, Some(lost + 1))?;
     world.pump()?;
-    // A cycle that was due may still go out; after it, nothing.
-    let until = world.now + Duration::from_millis(300);
+    // A NACK made before the horizon may still wait for its RTCP slot (RFC 4585 3.5: early
+    // feedback is rate-limited) and leave after it; after that, nothing.
+    let until = world.now + Duration::from_secs(1);
     world.run_until(until)?;
     let at_horizon = nacks(&mut world.peers[1].pc, world.now, ssrc);
-    let until = world.now + Duration::from_secs(2);
+    let until = world.now + Duration::from_secs(3);
     world.run_until(until)?;
     assert_eq!(
         nacks(&mut world.peers[1].pc, world.now, ssrc),

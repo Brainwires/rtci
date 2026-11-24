@@ -22,8 +22,9 @@ use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder,
-    PassThroughInterceptor, Registry, RtcpRandom, RtcpSessionBuilder, Slot,
+    GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, Packet,
+    PassThroughInterceptor, Registry, RtcpRandom, RtcpSessionBuilder, Slot, StreamInfo,
+    TaggedPacket,
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
@@ -116,8 +117,6 @@ const FPS: u32 = 30;
 const FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 const MEDIA_SSRC: u32 = 1001;
 const RTX_SSRC: u32 = 1002;
-/// The longest one-way delay of the downlink (receiver to sender) in any scenario here.
-const MAX_DOWNLINK_DELAY: Duration = Duration::from_millis(30);
 
 /// The SSRC and sequence number of an SRTP packet (its header is in the clear).
 fn rtp_header(data: &[u8]) -> Option<(u32, u16)> {
@@ -134,6 +133,129 @@ fn before(a: u16, b: u16) -> bool {
     (1..0x8000).contains(&b.wrapping_sub(a))
 }
 
+/// Where a tap sits in an interceptor chain, which says what it records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TapPoint {
+    /// The receiver, right after its NACK generator (`Slot::Custom(10_550)`): NACKs as they are
+    /// generated.
+    ReceiverGenerator,
+    /// The receiver, at the wire (`Slot::Custom(100)`, below the RTCP session): NACKs as they
+    /// leave.
+    ReceiverWire,
+    /// The sender, at the wire: NACKs as they arrive (read leg), and RTX packets as they leave,
+    /// by the original sequence number they carry (RFC 4588 4: the payload's first two bytes;
+    /// still in the clear here, SRTP is applied after the chain).
+    SenderWire,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TapEvent {
+    NackGenerated,
+    NackLeft,
+    NackArrived,
+    RtxLeft,
+}
+
+type TapLog = Arc<Mutex<Vec<(Instant, TapEvent, Vec<u16>)>>>;
+
+struct Tap {
+    point: TapPoint,
+    log: TapLog,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl Tap {
+    fn new(point: TapPoint, log: TapLog) -> Self {
+        Self {
+            point,
+            log,
+            read_queue: VecDeque::new(),
+            write_queue: VecDeque::new(),
+        }
+    }
+
+    fn nacks(packet: &Packet) -> Vec<u16> {
+        let Packet::Rtcp(packets) = packet else {
+            return Vec::new();
+        };
+        packets
+            .iter()
+            .filter_map(|p| p.as_any().downcast_ref::<TransportLayerNack>())
+            .filter(|n| n.media_ssrc == MEDIA_SSRC)
+            .flat_map(|n| n.nacks.iter().flat_map(|pair| pair.packet_list()))
+            .collect()
+    }
+
+    fn record(&self, at: Instant, event: TapEvent, seqs: Vec<u16>) {
+        if !seqs.is_empty() {
+            self.log.lock().expect("tap").push((at, event, seqs));
+        }
+    }
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for Tap {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if self.point == TapPoint::SenderWire {
+            self.record(
+                msg.now,
+                TapEvent::NackArrived,
+                Self::nacks(&msg.message.packet),
+            );
+        }
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        match self.point {
+            TapPoint::ReceiverGenerator => {
+                self.record(
+                    msg.now,
+                    TapEvent::NackGenerated,
+                    Self::nacks(&msg.message.packet),
+                );
+            }
+            TapPoint::ReceiverWire => {
+                self.record(
+                    msg.now,
+                    TapEvent::NackLeft,
+                    Self::nacks(&msg.message.packet),
+                );
+            }
+            TapPoint::SenderWire => {
+                if let Packet::Rtp(p) = &msg.message.packet
+                    && p.header.ssrc == RTX_SSRC
+                    && p.payload.len() >= 2
+                {
+                    let osn = u16::from_be_bytes([p.payload[0], p.payload[1]]);
+                    self.record(msg.now, TapEvent::RtxLeft, vec![osn]);
+                }
+            }
+        }
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+}
+
+impl rtc::interceptor::Interceptor for Tap {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
 /// What happened to one media packet the uplink lost, for the repair-latency trace.
 #[derive(Debug, Default, Clone)]
 struct Repair {
@@ -141,11 +263,7 @@ struct Repair {
     dropped: Option<Instant>,
     /// When the first packet after it reached the receiver (the gap became visible).
     gap_seen: Option<Instant>,
-    /// When the first NACK asking for it reached the sender, and how many did.
-    first_nack_arrived: Option<Instant>,
-    nacks: u32,
-    /// The retransmission that repaired it: when the sender sent it and when it arrived.
-    rtx_sent: Option<Instant>,
+    /// When its retransmission reached the receiving application.
     rtx_arrived: Option<Instant>,
 }
 
@@ -153,21 +271,19 @@ struct Repair {
 #[derive(Debug, Default)]
 struct RepairTrace {
     lost: BTreeMap<u16, Repair>,
-    /// When each RTX packet (by its own sequence number) left the sender.
-    rtx_sent: HashMap<u16, Instant>,
-    /// The send times of the RTX packets delivered in the current step, in delivery order.
-    rtx_delivered: VecDeque<Instant>,
-    /// The highest media sequence number the receiver got.
-    highest: Option<u16>,
     /// The receiver's NACK horizon over time.
     horizons: Vec<(Instant, u16)>,
-    /// Sequence numbers NACKs asked for (as the sender received them), all together.
-    nacked: u64,
-    /// Of those, the ones behind the horizon the receiver had set before the NACK could have
-    /// left it.
-    nacked_behind_horizon: u64,
-    /// Retransmissions that reached the receiver for packets behind its horizon.
-    repaired_behind_horizon: u64,
+    /// Both peers' taps.
+    log: TapLog,
+}
+
+/// What the taps saw, summed.
+#[derive(Debug, Default)]
+struct NackCounts {
+    /// Sequence numbers the receiver's NACK generator asked for.
+    asked: u64,
+    /// Of those, the ones behind the horizon the pipeline had given before the NACK was made.
+    behind_horizon: u64,
 }
 
 impl RepairTrace {
@@ -179,30 +295,79 @@ impl RepairTrace {
             .map(|(_, h)| *h)
     }
 
-    fn print(&self, name: &str, start: Instant, downlink_delay: Duration) {
+    fn first(&self, event: TapEvent, seq: u16) -> Option<Instant> {
+        self.log
+            .lock()
+            .expect("tap")
+            .iter()
+            .find(|(_, e, seqs)| *e == event && seqs.contains(&seq))
+            .map(|(t, _, _)| *t)
+    }
+
+    fn count(&self, event: TapEvent, seq: u16) -> usize {
+        self.log
+            .lock()
+            .expect("tap")
+            .iter()
+            .filter(|(_, e, seqs)| *e == event && seqs.contains(&seq))
+            .count()
+    }
+
+    /// The last RTX packet carrying `seq` that left before `arrived`: the one that repaired it.
+    fn rtx_left(&self, seq: u16, arrived: Option<Instant>) -> Option<Instant> {
+        let arrived = arrived?;
+        self.log
+            .lock()
+            .expect("tap")
+            .iter()
+            .filter(|(t, e, seqs)| *e == TapEvent::RtxLeft && *t <= arrived && seqs.contains(&seq))
+            .map(|(t, _, _)| *t)
+            .next_back()
+    }
+
+    fn nack_counts(&self) -> NackCounts {
+        let mut c = NackCounts::default();
+        for (t, e, seqs) in self.log.lock().expect("tap").iter() {
+            if *e != TapEvent::NackGenerated {
+                continue;
+            }
+            // The pipeline moves the horizon after the engine's timers of a millisecond, so a
+            // NACK made at `t` was made with the horizon of the millisecond before at the latest.
+            let horizon = t
+                .checked_sub(Duration::from_millis(1))
+                .and_then(|at| self.horizon_at(at));
+            for &seq in seqs {
+                c.asked += 1;
+                if horizon.is_some_and(|h| before(seq, h)) {
+                    c.behind_horizon += 1;
+                }
+            }
+        }
+        c
+    }
+
+    fn print(&self, name: &str, start: Instant) {
         let ms = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
-            (Some(a), Some(b)) => format!(
-                "{:.0}",
-                b.saturating_duration_since(a).as_secs_f64() * 1000.0
-            ),
+            (Some(a), Some(b)) if b >= a => format!("{:.0}", (b - a).as_secs_f64() * 1000.0),
+            (Some(a), Some(b)) => format!("-{:.0}", (a - b).as_secs_f64() * 1000.0),
             _ => "-".to_owned(),
         };
         println!(
-            "MEASURE TRACE {name}: seq, dropped at (ms into the call); then ms after the gap was \
-             seen: first NACK sent (arrival - {} ms), first NACK arrived, RTX sent, RTX arrived; \
-             NACKs that asked for it",
-            downlink_delay.as_millis()
+            "MEASURE TRACE {name}: seq | dropped at (ms into the call) | then ms after the gap \
+             was seen: first NACK generated, first NACK left, first NACK arrived, RTX left (the \
+             one that repaired), RTX arrived | NACKs generated for it, RTX packets sent"
         );
-        for (seq, r) in &self.lost {
-            let first_sent = r.first_nack_arrived.map(|t| t - downlink_delay);
+        for (&seq, r) in &self.lost {
             println!(
-                "MEASURE TRACE {name}: {seq} {} {} {} {} {} {}",
+                "MEASURE TRACE {name}: {seq} | {} | {} {} {} {} {} | {} {}",
                 ms(Some(start), r.dropped),
-                ms(r.gap_seen, first_sent),
-                ms(r.gap_seen, r.first_nack_arrived),
-                ms(r.gap_seen, r.rtx_sent),
+                ms(r.gap_seen, self.first(TapEvent::NackGenerated, seq)),
+                ms(r.gap_seen, self.first(TapEvent::NackLeft, seq)),
+                ms(r.gap_seen, self.first(TapEvent::NackArrived, seq)),
+                ms(r.gap_seen, self.rtx_left(seq, r.rtx_arrived)),
                 ms(r.gap_seen, r.rtx_arrived),
-                r.nacks,
+                self.count(TapEvent::NackGenerated, seq),
+                self.count(TapEvent::RtxLeft, seq),
             );
         }
     }
@@ -311,6 +476,7 @@ fn build_pc(
     seed: u64,
     send: bool,
     nack_interval: Option<Duration>,
+    log: TapLog,
 ) -> Result<(RTCPeerConnection, GccHandle, Option<RTCRtpSenderId>)> {
     let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
         inner: default_provider()?,
@@ -361,6 +527,19 @@ fn build_pc(
                 .build(),
         ),
     );
+    let registry = if send {
+        registry.with(Slot::Custom(100), Tap::new(TapPoint::SenderWire, log))
+    } else {
+        registry
+            .with(
+                Slot::Custom(100),
+                Tap::new(TapPoint::ReceiverWire, log.clone()),
+            )
+            .with(
+                Slot::Custom(10_550),
+                Tap::new(TapPoint::ReceiverGenerator, log),
+            )
+    };
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())
         .with_setting_engine(
@@ -441,8 +620,9 @@ impl Call {
         fixed_bitrate: Option<u32>,
         nack_interval: Option<Duration>,
     ) -> Result<Self> {
-        let (spc, gcc, track) = build_pc(seed, true, None)?;
-        let (rpc, _, _) = build_pc(seed ^ 0xabcd, false, nack_interval)?;
+        let trace = RepairTrace::default();
+        let (spc, gcc, track) = build_pc(seed, true, None, trace.log.clone())?;
+        let (rpc, _, _) = build_pc(seed ^ 0xabcd, false, nack_interval, trace.log.clone())?;
         let now = Instant::now();
         let mut call = Self {
             now,
@@ -479,7 +659,7 @@ impl Call {
             fixed_bitrate,
             next_frame: now,
             connected: [false; 2],
-            trace: RepairTrace::default(),
+            trace,
         };
         let offer = call.sender.pc.create_offer(None)?;
         call.sender.pc.set_local_description(now, offer.clone())?;
@@ -594,16 +774,11 @@ impl Call {
             } else {
                 Some(now + self.link.delay)
             };
-            if self.impaired {
-                match header {
-                    Some((MEDIA_SSRC, seq)) if at.is_none() => {
-                        self.trace.lost.entry(seq).or_default().dropped = Some(now);
-                    }
-                    Some((RTX_SSRC, seq)) => {
-                        self.trace.rtx_sent.insert(seq, now);
-                    }
-                    _ => {}
-                }
+            if self.impaired
+                && let Some((MEDIA_SSRC, seq)) = header
+                && at.is_none()
+            {
+                self.trace.lost.entry(seq).or_default().dropped = Some(now);
             }
             if let Some(at) = at {
                 self.in_flight.push((at, true, msg.message));
@@ -615,29 +790,15 @@ impl Call {
         }
         self.in_flight.sort_by_key(|d| d.0);
         let due = self.in_flight.iter().take_while(|d| d.0 <= now).count();
-        self.trace.rtx_delivered.clear();
         for (_, to_receiver, data) in self.in_flight.drain(..due).collect::<Vec<_>>() {
-            if to_receiver {
-                match rtp_header(&data) {
-                    Some((MEDIA_SSRC, seq)) => {
-                        if self.trace.highest.is_none_or(|h| before(h, seq)) {
-                            self.trace.highest = Some(seq);
-                        }
-                        for (_, r) in self
-                            .trace
-                            .lost
-                            .iter_mut()
-                            .filter(|(lost, r)| r.gap_seen.is_none() && before(**lost, seq))
-                        {
-                            r.gap_seen = Some(now);
-                        }
-                    }
-                    Some((RTX_SSRC, seq)) => {
-                        if let Some(sent) = self.trace.rtx_sent.remove(&seq) {
-                            self.trace.rtx_delivered.push_back(sent);
-                        }
-                    }
-                    _ => {}
+            if to_receiver && let Some((MEDIA_SSRC, seq)) = rtp_header(&data) {
+                for (_, r) in self
+                    .trace
+                    .lost
+                    .iter_mut()
+                    .filter(|(lost, r)| r.gap_seen.is_none() && before(**lost, seq))
+                {
+                    r.gap_seen = Some(now);
                 }
             }
             let (pc, from, to) = if to_receiver {
@@ -688,30 +849,7 @@ impl Call {
             v.set_rtt(2 * self.link.delay + self.link.jitter / 2);
             self.receiver.video = Some(v);
         }
-        // The NACKs as the sender receives them: a NACK that arrives now left the receiver at
-        // most MAX_DOWNLINK_DELAY ago, after any horizon set before that.
-        let horizon = self
-            .trace
-            .horizon_at(now - MAX_DOWNLINK_DELAY - Duration::from_millis(1));
-        while let Some(message) = self.sender.pc.poll_read() {
-            if let RTCMessage::RtcpPacket(_, packets) = message.message {
-                for packet in packets {
-                    let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() else {
-                        continue;
-                    };
-                    for seq in nack.nacks.iter().flat_map(|p| p.packet_list()) {
-                        self.trace.nacked += 1;
-                        if horizon.is_some_and(|h| before(seq, h)) {
-                            self.trace.nacked_behind_horizon += 1;
-                        }
-                        if let Some(r) = self.trace.lost.get_mut(&seq) {
-                            r.first_nack_arrived.get_or_insert(now);
-                            r.nacks += 1;
-                        }
-                    }
-                }
-            }
-        }
+        while self.sender.pc.poll_read().is_some() {}
         while let Some(message) = self.receiver.pc.poll_read() {
             if let RTCMessage::RtpPacket(_, packet) = message.message
                 && let Some(v) = &mut self.receiver.video
@@ -721,13 +859,8 @@ impl Call {
                     && let Some(r) = self.trace.lost.get_mut(&seq)
                     && r.rtx_arrived.is_none()
                 {
-                    // The original was dropped: this is its retransmission, paired with the
-                    // RTX packets delivered in this step in their order.
+                    // The original was dropped: this is its retransmission.
                     r.rtx_arrived = Some(now);
-                    r.rtx_sent = self.trace.rtx_delivered.pop_front();
-                    if v.nack_horizon(MEDIA_SSRC).is_some_and(|h| before(seq, h)) {
-                        self.trace.repaired_behind_horizon += 1;
-                    }
                 }
                 v.handle_rtp(now, &packet);
             }
@@ -872,10 +1005,16 @@ fn two_percent_loss_with_reordering_waits_only_for_repairs() -> Result<()> {
     let mut call = Call::new(Link::lossy(0.02, 40), 11, Some(500_000))?;
     call.run_for(Duration::from_secs(30))?;
     let s = report("2% loss, 25 ms + 0..40 ms, 500 kbit/s, 30 s", &mut call);
-    call.trace.print("2% loss", call.start, call.link.delay);
-    assert!(
-        call.trace.nacked > 0,
-        "the trace sees the NACKs at the sender"
+    call.trace.print("2% loss", call.start);
+    let nacks = call.trace.nack_counts();
+    println!(
+        "MEASURE horizon, 2% loss: sequence numbers asked for {}, behind the horizon {}",
+        nacks.asked, nacks.behind_horizon
+    );
+    assert!(nacks.asked > 0, "the taps see the NACKs");
+    assert_eq!(
+        nacks.behind_horizon, 0,
+        "NACKs for packets behind the horizon"
     );
     assert_eq!(call.receiver.corrupt, 0, "every picture decoded as sent");
     assert_eq!(
@@ -918,23 +1057,20 @@ fn a_capacity_drop_and_recovery_leaves_no_long_freeze() -> Result<()> {
     call.busy_until = None;
     call.run_for(Duration::from_secs(20))?;
     let s = report("300 kbit/s for 20 s, then open", &mut call);
+    let nacks = call.trace.nack_counts();
     println!(
         "MEASURE horizon, capacity: sequence numbers asked for {}, behind the horizon {}, \
-         retransmissions arriving behind the horizon {}, horizon moves {}",
-        call.trace.nacked,
-        call.trace.nacked_behind_horizon,
-        call.trace.repaired_behind_horizon,
+         horizon moves {}",
+        nacks.asked,
+        nacks.behind_horizon,
         call.trace.horizons.len()
     );
     // Phase 1b acceptance (docs/video-pipeline.md): the receiver's NACK generator asks for no
     // packet of a picture the pipeline already released or gave up.
-    assert!(
-        call.trace.nacked > 0,
-        "the trace sees the NACKs at the sender"
-    );
+    assert!(nacks.asked > 0, "the taps see the NACKs");
     assert!(!call.trace.horizons.is_empty(), "the horizon moves");
     assert_eq!(
-        call.trace.nacked_behind_horizon, 0,
+        nacks.behind_horizon, 0,
         "NACKs for packets behind the horizon"
     );
     assert_eq!(call.receiver.corrupt, 0);
