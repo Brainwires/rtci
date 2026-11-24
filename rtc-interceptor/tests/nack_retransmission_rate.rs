@@ -189,15 +189,108 @@ fn up_to_target() -> NackResponderBuilder {
     NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::UpToTarget)
 }
 
+/// Drives the chain as the documented loop does (take what is written, sleep until
+/// `poll_timeout`, `handle_timeout`), nothing else waking it, from `from` until the next
+/// deadline is `until` or later: each retransmission that leaves, as (offset from `from`,
+/// sequence number it repairs). What waits written at `from` counts at offset zero.
+fn drive(chain: &mut impl Interceptor, from: Instant, until: Instant) -> Vec<(Duration, u16)> {
+    let mut left = Vec::new();
+    let mut now = from;
+    loop {
+        while chain.poll_read().is_some() {}
+        while let Some(tagged) = chain.poll_write() {
+            if let Packet::Rtp(packet) = &tagged.message.packet {
+                assert_eq!(RTX_SSRC, packet.header.ssrc);
+                left.push((
+                    now - from,
+                    u16::from_be_bytes([packet.payload[0], packet.payload[1]]),
+                ));
+            }
+        }
+        match chain.poll_timeout() {
+            Some(due) if due < until => {
+                assert!(due >= now, "a deadline in the past: a spin");
+                now = due;
+                chain.handle_timeout(now).unwrap();
+            }
+            _ => return left,
+        }
+    }
+}
+
+/// When the `k`-th retransmission (from 1) leaves under a constant `limit` (octets a window):
+/// the smoothing bucket holds a tenth of the window's allowance (at least 1500 octets) at
+/// first and fills at the allowance's rate, each retransmission taking its size.
+fn smoothed_offset(k: usize, limit: f64) -> Duration {
+    let depth = (limit / 10.0).max(1500.0);
+    Duration::from_secs_f64(((k * RETRANSMISSION) as f64 - depth).max(0.0) / limit)
+}
+
+/// The retransmissions released by `until` (see [`drive`]) after a NACK for `lost` at `at`.
+fn released(
+    chain: &mut impl Interceptor,
+    at: Instant,
+    lost: &[u16],
+    target_bps: Option<f64>,
+    until: Instant,
+) -> Vec<(Duration, u16)> {
+    read_nack(chain, at, lost, target_bps, None);
+    drive(chain, at, until)
+}
+
 /// libwebrtc's rule, a setting: the retransmissions alone stay under the target over the last
 /// second, whatever the originals took. At 80 kbit/s, 10 000 octets a second: nine
-/// retransmissions of 1014 octets, although the originals already took three times that.
+/// retransmissions of 1014 octets in a window, although the originals already took three times
+/// that. They leave spread over the window at its rate (one at once, from the bucket's 1500
+/// octets, then one every 101.4 ms), never more than nine in any second: the tenth waits until
+/// the first leaves the window, a second after it.
 #[test]
 fn retransmissions_alone_stay_under_the_target() {
     let target = 80_000.0;
-    let allowed = (target / 8.0) as usize / RETRANSMISSION;
+    let limit = target / 8.0;
+    let allowed = limit as usize / RETRANSMISSION;
     assert_eq!(9, allowed);
-    assert_eq!(allowed, scenario(up_to_target(), Some(target)));
+    let base = Instant::now();
+    let mut chain = responder(up_to_target());
+    send(&mut chain, base, 30);
+    let at = base + Duration::from_millis(300);
+    let lost: Vec<u16> = (0..20).collect();
+    let left = released(
+        &mut chain,
+        at,
+        &lost,
+        Some(target),
+        at + Duration::from_secs(3),
+    );
+    let in_first_window = left
+        .iter()
+        .filter(|(offset, _)| *offset < Duration::from_secs(1))
+        .count();
+    assert_eq!(allowed, in_first_window);
+    for (k, (offset, _)) in left.iter().take(allowed).enumerate() {
+        let expected = smoothed_offset(k + 1, limit);
+        assert!(
+            offset.abs_diff(expected) < Duration::from_millis(1),
+            "retransmission {} at {offset:?}, expected {expected:?}",
+            k + 1
+        );
+    }
+    assert_eq!(
+        Duration::from_secs(1),
+        left[allowed].0,
+        "the tenth: when the first left"
+    );
+    // The total over any window: never more than the nine.
+    for (start, _) in &left {
+        let in_window = left
+            .iter()
+            .filter(|(offset, _)| *offset >= *start && *offset < *start + Duration::from_secs(1))
+            .count();
+        assert!(
+            in_window <= allowed,
+            "{in_window} within a second from {start:?}"
+        );
+    }
 }
 
 /// RFC 4588 section 7, the default: the retransmissions take what the original packets leave of
@@ -207,17 +300,46 @@ fn retransmissions_alone_stay_under_the_target() {
 /// 160 kbit/s (20 000 octets a second), more than the 9 640 the 30 originals (30 360 octets)
 /// leave of 40 000: nineteen leave. At 240 kbit/s the originals leave nothing; the reserve is
 /// 120 kbit/s, 15 000 octets: fourteen.
+///
+/// They leave spread over the window: one at once (the bucket holds a tenth of the
+/// allowance, at least 1500 octets), the rest at the allowance's rate. Counted until the first
+/// original leaves the window (700 ms after the NACK), never more than those figures, and more
+/// with the reserve than with the originals' share alone.
 #[test]
 fn retransmissions_take_what_the_originals_leave_or_the_reserve() {
     assert_eq!(9640 / RETRANSMISSION, 9);
-    assert_eq!(19, scenario(NackResponderBuilder::new(), Some(320_000.0)));
-    assert_eq!(14, scenario(NackResponderBuilder::new(), Some(240_000.0)));
+    let window = |builder: NackResponderBuilder, target: f64| -> (usize, usize) {
+        let base = Instant::now();
+        let mut chain = responder(builder);
+        send(&mut chain, base, 30);
+        let at = base + Duration::from_millis(300);
+        let lost: Vec<u16> = (0..20).collect();
+        let left = released(
+            &mut chain,
+            at,
+            &lost,
+            Some(target),
+            base + Duration::from_secs(1),
+        );
+        let at_once = left.iter().filter(|(offset, _)| offset.is_zero()).count();
+        (at_once, left.len())
+    };
+    let (at_once, with_reserve_320) = window(NackResponderBuilder::new(), 320_000.0);
+    assert_eq!(1, at_once);
+    assert!((2..=19).contains(&with_reserve_320), "{with_reserve_320}");
+    let (at_once, with_reserve_240) = window(NackResponderBuilder::new(), 240_000.0);
+    assert_eq!(1, at_once);
+    assert!((2..=14).contains(&with_reserve_240), "{with_reserve_240}");
+    assert!(with_reserve_320 > with_reserve_240);
     let rfc = || NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::WithinTarget);
-    assert_eq!(19, scenario(rfc(), Some(320_000.0)));
-    // Without a reserve (at most 0 % of the target) the originals' share alone: nine, none.
+    assert_eq!((1, with_reserve_320), window(rfc(), 320_000.0));
+    // Without a reserve (at most 0 % of the target) the originals' share alone: at most nine,
+    // fewer than with the reserve; none at 240 kbit/s.
     let no_reserve = || NackResponderBuilder::new().with_max_reserve_fraction(0.0);
-    assert_eq!(9, scenario(no_reserve(), Some(320_000.0)));
-    assert_eq!(0, scenario(no_reserve(), Some(240_000.0)));
+    let (at_once, share_320) = window(no_reserve(), 320_000.0);
+    assert_eq!(1, at_once);
+    assert!((1..=9).contains(&share_320) && share_320 < with_reserve_320);
+    assert_eq!((0, 0), window(no_reserve(), 240_000.0));
 }
 
 /// Without a target (no congestion controller in the chain) and with the limit off, every
@@ -234,29 +356,31 @@ fn without_a_target_retransmissions_are_not_held_back() {
     );
 }
 
-/// A retransmission the limit holds back waits and leaves by itself when the window has room:
-/// the responder's deadline is that instant, a second after the retransmission whose leaving
-/// the window makes the room, and not earlier (a driver woken at once would spin).
+/// A retransmission the limit holds back waits and leaves by itself when the limit has room:
+/// the responder's deadline is that instant and not earlier (a driver woken at once would
+/// spin). At 80 kbit/s under libwebrtc's rule the window allows 10 000 octets: the first leaves
+/// at once, the second when the bucket has filled again by 528 octets (52.8 ms), and so on; a
+/// request asked for again keeps its place and changes no deadline; the tenth waits for the
+/// window, a second after the first.
 #[test]
 fn a_held_back_retransmission_is_due_when_the_window_has_room() {
+    let limit = 10_000.0;
     let base = Instant::now();
     let mut chain = responder(up_to_target());
     send(&mut chain, base, 30);
     let lost: Vec<u16> = (0..20).collect();
     let at = base + Duration::from_millis(300);
-    assert_eq!(9, nack(&mut chain, at, &lost, Some(80_000.0)));
-    // The nine took the window at `at`: the tenth fits when the first of them has left it.
-    let due = chain.poll_timeout().expect("eleven wait");
-    assert_eq!(at + Duration::from_secs(1), due);
+    assert_eq!(1, nack(&mut chain, at, &lost, Some(80_000.0)));
+    let due = chain.poll_timeout().expect("nineteen wait");
+    assert!(
+        due.duration_since(at).abs_diff(smoothed_offset(2, limit)) < Duration::from_millis(1),
+        "due {:?} after the NACK",
+        due - at
+    );
     // The receiver asks again meanwhile: the requests keep their place.
     assert_eq!(
         0,
-        nack(
-            &mut chain,
-            at + Duration::from_millis(500),
-            &lost[9..],
-            None
-        )
+        nack(&mut chain, at + Duration::from_millis(10), &lost[1..], None)
     );
     assert_eq!(Some(due), chain.poll_timeout());
     chain
@@ -264,21 +388,30 @@ fn a_held_back_retransmission_is_due_when_the_window_has_room() {
         .unwrap();
     assert_eq!(0, drain(&mut chain).retransmitted, "not before");
     chain.handle_timeout(due).unwrap();
-    assert_eq!(9, drain(&mut chain).retransmitted, "the next nine at once");
-    assert_eq!(0, nack(&mut chain, due, &lost[18..], None));
     assert_eq!(
-        Some(due + Duration::from_secs(1)),
-        chain.poll_timeout(),
-        "the last two wait for the next second"
+        1,
+        drain(&mut chain).retransmitted,
+        "the second when it is due"
+    );
+    let rest = drive(&mut chain, due, at + Duration::from_millis(1_001));
+    assert_eq!(
+        8,
+        rest.len(),
+        "seven more in the first second, and the tenth at its end"
+    );
+    assert_eq!(
+        at + Duration::from_secs(1),
+        due + rest[7].0,
+        "the tenth when the first has left the window"
     );
 }
 
 /// Requests waiting for the rate limit are answered a stream's oldest packet first, whenever
 /// each was asked for: a receiver that plays in order waits for its oldest gap, and a packet
 /// asked for again because its repair was lost would otherwise wait behind every newer one. At
-/// 80 kbit/s with libwebrtc's rule nine retransmissions of 1014 octets fit a second: a NACK
-/// for 0 to 8 at 400 ms takes the window, a NACK for 30 at 500 ms and one for 10 at 600 ms
-/// wait, and at 1.4 s, when the nine have left the window, both leave: 10 first.
+/// 80 kbit/s with libwebrtc's rule one retransmission of 1014 octets leaves every 101.4 ms
+/// after the first: a NACK for 0 to 8 at 400 ms, one for 30 at 410 ms and one for 10 at
+/// 420 ms, while 1 to 8 still wait: 10 leaves before 30.
 #[test]
 fn waiting_requests_are_answered_oldest_packet_first() {
     let base = Instant::now();
@@ -286,27 +419,24 @@ fn waiting_requests_are_answered_oldest_packet_first() {
     send(&mut chain, base, 40);
     let at = base + Duration::from_millis(400);
     let first: Vec<u16> = (0..9).collect();
-    assert_eq!(9, nack(&mut chain, at, &first, Some(80_000.0)));
+    assert_eq!(1, nack(&mut chain, at, &first, Some(80_000.0)));
     assert_eq!(
         0,
-        nack(&mut chain, at + Duration::from_millis(100), &[30], None)
+        nack(&mut chain, at + Duration::from_millis(10), &[30], None)
     );
     assert_eq!(
         0,
-        nack(&mut chain, at + Duration::from_millis(200), &[10], None)
+        nack(&mut chain, at + Duration::from_millis(20), &[10], None)
     );
-    let due = chain.poll_timeout().expect("two wait");
-    assert_eq!(at + Duration::from_secs(1), due);
-    chain.handle_timeout(due).unwrap();
-    while chain.poll_read().is_some() {}
-    let mut order = Vec::new();
-    while let Some(tagged) = chain.poll_write() {
-        if let Packet::Rtp(packet) = &tagged.message.packet {
-            assert_eq!(RTX_SSRC, packet.header.ssrc);
-            order.push(u16::from_be_bytes([packet.payload[0], packet.payload[1]]));
-        }
-    }
-    assert_eq!(vec![10, 30], order);
+    let order: Vec<u16> = drive(
+        &mut chain,
+        at + Duration::from_millis(20),
+        at + Duration::from_secs(3),
+    )
+    .into_iter()
+    .map(|(_, seq)| seq)
+    .collect();
+    assert_eq!(vec![1, 2, 3, 4, 5, 6, 7, 8, 10, 30], order);
 }
 
 /// A request the receiver stops making is dropped after `PENDING_REQUEST_LIFETIME` (the
@@ -346,8 +476,8 @@ fn a_request_no_longer_made_is_dropped() {
 /// reported to the application is the controller's less a reserve, at most half of it, and the
 /// reserve goes down the write leg to the congestion controller, before the retransmissions
 /// use it. Ten packets of 1014 octets waiting with no round trip measured (a second) need
-/// 81 kbit/s: at 240 kbit/s the reserve is that (10 140 octets: all ten leave), at 150 kbit/s
-/// it is half the target (9 375 octets: nine leave). Both targets are under what the 30
+/// 81 kbit/s: at 240 kbit/s the reserve is that (10 140 octets: all ten over the window), at
+/// 150 kbit/s it is half the target (9 375 octets: nine). Both targets are under what the 30
 /// originals took: without the reserve nothing would leave.
 #[test]
 fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions() {
@@ -367,9 +497,22 @@ fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions
             None,
         );
         let seen = drain(&mut chain);
-        assert_eq!(leave, seen.retransmitted, "at {target}");
+        // The bucket's tenth of the allowance (at least 1500 octets) leaves at once: one.
+        assert_eq!(1, seen.retransmitted, "at {target}");
         assert_eq!(vec![reserve], seen.reserves, "at {target}");
         assert_eq!(vec![target - reserve], seen.targets, "at {target}");
+        // And the rest of what the reserve allows as the bucket fills, before the first
+        // original leaves the window (700 ms on): never more than it allows over the window.
+        let rest = drive(
+            &mut chain,
+            base + Duration::from_millis(300),
+            base + Duration::from_secs(1),
+        );
+        assert!(
+            !rest.is_empty() && 1 + rest.len() <= leave,
+            "at {target}: {} in all",
+            1 + rest.len()
+        );
     }
 }
 
@@ -381,25 +524,41 @@ fn the_reserve_is_released_when_nothing_waits() {
     let mut chain = responder(NackResponderBuilder::new());
     send(&mut chain, base, 30);
     let at = base + Duration::from_millis(300);
-    // 500 kbit/s: 62 500 octets, the originals took 30 360, the five fit.
+    // 500 kbit/s: 62 500 octets, the originals took 30 360, the five fit the window; the
+    // bucket's tenth of the 32 140 they leave (3214 octets) lets three leave at once.
     read_nack(&mut chain, at, &[0, 1, 2, 3, 4], Some(500_000.0), None);
     let seen = drain(&mut chain);
-    assert_eq!(5, seen.retransmitted);
-    let in_use = 5.0 * RETRANSMISSION as f64 * 8.0;
+    assert_eq!(3, seen.retransmitted);
+    let needed = 5.0 * RETRANSMISSION as f64 * 8.0;
     assert_eq!(
-        vec![in_use],
+        vec![needed],
         seen.reserves,
-        "their rate is reserved while in the window"
+        "their rate is reserved before they leave"
     );
-    assert_eq!(vec![500_000.0 - in_use], seen.targets);
-    let due = chain
-        .poll_timeout()
-        .expect("the reserve falls back to zero");
-    assert_eq!(at + Duration::from_secs(1), due);
-    chain.handle_timeout(due).unwrap();
-    let seen = drain(&mut chain);
-    assert_eq!(vec![0.0], seen.reserves);
-    assert_eq!(vec![500_000.0], seen.targets);
+    assert_eq!(vec![500_000.0 - needed], seen.targets);
+    // The other two as the bucket fills; then, with nothing waiting, the reserve falls back to
+    // zero a window after the last of them.
+    let mut last = at;
+    let mut left = 0;
+    let mut reserves = Vec::new();
+    let mut targets = Vec::new();
+    while let Some(due) = chain.poll_timeout() {
+        assert!(due > last, "a spin at {due:?}");
+        last = due;
+        chain.handle_timeout(due).unwrap();
+        let seen = drain(&mut chain);
+        left += seen.retransmitted;
+        reserves.extend(seen.reserves);
+        targets.extend(seen.targets);
+    }
+    assert_eq!(2, left);
+    assert_eq!(Some(&0.0), reserves.last());
+    assert_eq!(Some(&500_000.0), targets.last());
+    assert!(
+        last >= at + Duration::from_secs(1),
+        "released {:?} after",
+        last - at
+    );
     assert_eq!(None, chain.poll_timeout());
 }
 
@@ -426,15 +585,18 @@ fn up_to_the_target_the_original_media_is_not_lowered() {
 /// lowered by the reserve: the retransmissions of the packets asked for take the window's room
 /// first, whatever the originals took. At 100 kbit/s the 30 originals (30 360 octets) took more
 /// than the window's 12 500 octets; the reserve is half the target, 50 kbit/s. With a minimum
-/// of 100 kbit/s, 100 − 50 is under it: twelve retransmissions of 1014 octets fill the 12 500.
-/// With a minimum of 40 kbit/s, or none announced, the reserve's 6 250 octets: six. The
-/// original media is told the target less the reserve, never less than the minimum.
+/// of 100 kbit/s, 100 − 50 is under it: the retransmissions have the window's 12 500 octets a
+/// second. With a minimum of 40 kbit/s, or none announced, the reserve's 6 250. The original
+/// media is told the target less the reserve, never less than the minimum. The
+/// retransmissions leave at that rate (the k-th at (k × 1014 − 1500) / rate s): by the time the
+/// first original leaves the window (700 ms on) ten at the window's rate, five at the
+/// reserve's.
 #[test]
 fn near_the_floor_retransmissions_take_the_room_first() {
-    for (minimum, expected, media_target) in [
-        (None, 6250 / RETRANSMISSION, 50_000.0),
-        (Some(40_000.0), 6250 / RETRANSMISSION, 50_000.0),
-        (Some(100_000.0), 12_500 / RETRANSMISSION, 100_000.0),
+    for (minimum, limit, media_target) in [
+        (None, 6_250.0, 50_000.0),
+        (Some(40_000.0), 6_250.0, 50_000.0),
+        (Some(100_000.0), 12_500.0, 100_000.0),
     ] {
         let base = Instant::now();
         let mut chain = responder(NackResponderBuilder::new());
@@ -444,16 +606,21 @@ fn near_the_floor_retransmissions_take_the_room_first() {
         read_nack(&mut chain, at, &lost, Some(100_000.0), minimum);
         let seen = drain(&mut chain);
         assert_eq!(vec![media_target], seen.targets, "minimum {minimum:?}");
-        let mut retransmitted = seen.retransmitted;
-        chain.handle_timeout(at).unwrap();
-        retransmitted += drain(&mut chain).retransmitted;
-        assert_eq!(expected, retransmitted, "minimum {minimum:?}");
-        if minimum.is_some_and(|minimum| minimum > 50_000.0) {
-            let due = chain.poll_timeout().expect("the rest wait");
-            assert_eq!(
-                at + Duration::from_secs(1),
-                due,
-                "until the twelve leave the window"
+        let mut left = vec![Duration::ZERO; seen.retransmitted];
+        left.extend(
+            drive(&mut chain, at, base + Duration::from_secs(1))
+                .into_iter()
+                .map(|(offset, _)| offset),
+        );
+        let expected = (1..)
+            .take_while(|k| smoothed_offset(*k, limit) < Duration::from_millis(700))
+            .count();
+        assert_eq!(expected, left.len(), "minimum {minimum:?}: {left:?}");
+        for (k, offset) in left.iter().enumerate() {
+            assert!(
+                offset.abs_diff(smoothed_offset(k + 1, limit)) < Duration::from_millis(1),
+                "minimum {minimum:?}: retransmission {} at {offset:?}",
+                k + 1
             );
         }
     }
@@ -463,9 +630,9 @@ fn near_the_floor_retransmissions_take_the_room_first() {
 /// `poll_timeout`, then `handle_timeout`) with nothing else waking it: the retransmissions the
 /// limit holds back leave at their own due times, and the driver never spins (each deadline is
 /// later than the instant it was handed last). Under the default rule at 240 kbit/s the 30
-/// originals took the window: of twenty requests the 120 kbit/s reserve lets fourteen leave at
-/// once, the rest as the window empties, until the requests run out a second after they were
-/// made.
+/// originals took the window: of twenty requests the 120 kbit/s reserve lets one leave at once
+/// (the bucket's tenth of its 15 000 octets, at least 1500), the rest as the bucket fills and
+/// the window empties, until the requests run out a second after they were made.
 #[test]
 fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
     let base = Instant::now();
@@ -475,9 +642,9 @@ fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
     let at = base + Duration::from_millis(300);
     read_nack(&mut chain, at, &lost, Some(240_000.0), None);
     assert_eq!(
-        14,
+        1,
         drain(&mut chain).retransmitted,
-        "the reserve's share at once"
+        "the bucket's share at once"
     );
 
     let mut now = at;
