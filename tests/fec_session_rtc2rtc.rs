@@ -64,6 +64,8 @@ struct Peer {
     /// The RTP packets the application was given.
     rtp: Vec<rtci::rtp::Packet>,
     tracks: usize,
+    /// The SSRCs of `OnUnassociatedRtpDiscarded` events (RFC 8830 section 3.1).
+    unassociated: Vec<u32>,
 }
 
 /// The ULPFEC interceptors of a peer's chain.
@@ -119,6 +121,7 @@ impl Peer {
             connected: false,
             rtp: vec![],
             tracks: 0,
+            unassociated: vec![],
         })
     }
 
@@ -277,6 +280,9 @@ impl World {
                         peer.connected = state == RTCPeerConnectionState::Connected;
                     }
                     RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(_)) => peer.tracks += 1,
+                    RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(ssrc) => {
+                        peer.unassociated.push(ssrc);
+                    }
                     _ => {}
                 }
             }
@@ -371,17 +377,28 @@ impl World {
 
     /// `negotiate`, the answer going through `edit` before peer 0 sees it.
     fn negotiate_with(&mut self, edit: impl Fn(String) -> String) -> Result<(String, String)> {
+        self.negotiate_editing(|offer| offer, edit)
+    }
+
+    /// `negotiate`, the offer going through `edit_offer` before peer 1 sees it and the answer
+    /// through `edit_answer` before peer 0 sees it. Returns what each peer sent.
+    fn negotiate_editing(
+        &mut self,
+        edit_offer: impl Fn(String) -> String,
+        edit_answer: impl Fn(String) -> String,
+    ) -> Result<(String, String)> {
         let now = self.now;
         let offer = self.peers[0].pc.create_offer(None)?;
         self.peers[0].pc.set_local_description(now, offer.clone())?;
-        self.peers[1]
-            .pc
-            .set_remote_description(now, RTCSessionDescription::offer(offer.sdp.clone())?)?;
+        self.peers[1].pc.set_remote_description(
+            now,
+            RTCSessionDescription::offer(edit_offer(offer.sdp.clone()))?,
+        )?;
         let answer = self.peers[1].pc.create_answer(None)?;
         self.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
-        let answer = RTCSessionDescription::answer(edit(answer.sdp))?;
+        let answer = RTCSessionDescription::answer(edit_answer(answer.sdp))?;
         self.peers[0]
             .pc
             .set_remote_description(now, answer.clone())?;
@@ -1177,5 +1194,241 @@ fn a_fec_session_added_to_an_established_call_gets_a_transport_of_its_own() -> R
         .find(|packet| packet.header.sequence_number == 7)
         .context("the lost packet was not rebuilt")?;
     assert_eq!(rebuilt.payload, video_payload(7));
+    Ok(())
+}
+
+/// `sdp` with every line `rewrite` maps to `Some` replaced, and those it maps to `None` left
+/// out; lines it returns unchanged are kept.
+fn rewrite_lines(sdp: &str, rewrite: impl Fn(&str) -> Option<String>) -> String {
+    sdp.lines()
+        .filter_map(|line| rewrite(line).map(|line| format!("{line}\r\n")))
+        .collect()
+}
+
+/// FEC that names an SSRC the protected receiver does not hold is discarded, silently.
+///
+/// The offerer sends two videos and a FEC session for the first. The answerer is told (its
+/// copy of the offer is edited) that the session protects the second video, so every FEC
+/// packet that arrives in the session names an SSRC (the first video's) that the receiver the
+/// session protects does not hold. Such a packet repairs nothing and counts for nothing: it
+/// is not FEC for the first video, which loses what the network lost, nor for the second
+/// (webrtc-stats 7.1 counts a FEC stream's packets on "the relevant" inbound stream, and here
+/// there is none), and it is not unassociated media either (RFC 8830 section 3.1: its
+/// transport and payload type name the FEC section; `discarded_rtp_packets` and
+/// `OnUnassociatedRtpDiscarded` are for media no stream took).
+#[test]
+fn fec_naming_an_ssrc_the_protected_receiver_does_not_hold_is_discarded_silently() -> Result<()> {
+    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (first, first_video) = world.add_video()?;
+    let (second, _) = world.add_video()?;
+    world.peers[0]
+        .pc
+        .add_fec_session(first_video, RTCFecGroupSemantics::FecFr)?;
+    let offer = world.peers[0].pc.create_offer(None)?.sdp;
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    assert_eq!(mids.len(), 3, "{offer}");
+    let as_sent = format!("a=group:FEC-FR {} {}", mids[0], mids[2]);
+    let as_seen = format!("a=group:FEC-FR {} {}", mids[1], mids[2]);
+    let (offer, answer) = world.negotiate_editing(
+        |offer| rewrite_lines(&offer, |line| Some(line.replace(&as_sent, &as_seen))),
+        |answer| rewrite_lines(&answer, |line| Some(line.replace(&as_seen, &as_sent))),
+    )?;
+    assert!(offer.contains(&as_sent), "{offer}");
+    assert!(answer.contains(&as_sent), "{answer}");
+    assert_eq!(world.peers[0].pc.fec_session_protects(2), Some(0));
+    assert_eq!(
+        world.peers[1].pc.fec_session_protects(2),
+        Some(1),
+        "the answerer protects the second video"
+    );
+
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    let media_from = world.peers[0].addr_of(&mids[0])?;
+    let fec_from = world.peers[0].addr_of(&mids[2])?;
+    let first_ssrc = world.sender_ssrc(first);
+    let second_ssrc = world.sender_ssrc(second);
+    let media_payload_type = world.media_payload_type(first);
+    world.lose.insert((media_from, 8));
+    world.only_first_transmissions = Some((media_from, media_payload_type));
+    for sequence_number in 0..20u16 {
+        let frame = u32::from(sequence_number / 5);
+        let last = sequence_number % 5 == 4;
+        world.send_video(first, sequence_number, frame, last)?;
+        world.send_video(second, sequence_number.wrapping_add(1000), frame, last)?;
+        world.advance(Duration::from_millis(2))?;
+    }
+    world.advance(Duration::from_millis(300))?;
+
+    let fec: Vec<&OnTheWire> = world
+        .srtp
+        .iter()
+        .filter(|packet| packet.from == fec_from && !packet.lost)
+        .collect();
+    assert_eq!(fec.len(), 4, "one FEC packet per frame: {:?}", world.srtp);
+    assert!(fec.iter().all(|packet| packet.ssrc == first_ssrc));
+
+    let received = &world.peers[1].rtp;
+    assert!(
+        !received
+            .iter()
+            .any(|p| p.header.ssrc == first_ssrc && p.header.sequence_number == 8),
+        "nothing was rebuilt from FEC for a stream the session does not protect"
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|p| p.header.ssrc == first_ssrc)
+            .count(),
+        19
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|p| p.header.ssrc == second_ssrc)
+            .count(),
+        20
+    );
+    assert!(received.iter().all(|p| p.header.payload_type != 127));
+    assert_eq!(world.peers[1].tracks, 2, "no track for the FEC");
+    assert_eq!(world.peers[1].pc.discarded_rtp_packets(), 0);
+    assert!(
+        world.peers[1].unassociated.is_empty(),
+        "{:?}",
+        world.peers[1].unassociated
+    );
+
+    let now = world.now;
+    let report = world.peers[1].pc.get_stats(now, StatsSelector::None);
+    for ssrc in [first_ssrc, second_ssrc] {
+        let inbound = report
+            .inbound_rtp_streams()
+            .find(|stream| stream.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+            .context("an inbound-rtp for each video")?;
+        assert_eq!(inbound.fec_packets_received, 0, "SSRC {ssrc}");
+        assert_eq!(
+            inbound.received_rtp_stream_stats.packets_received,
+            if ssrc == first_ssrc { 19 } else { 20 },
+            "SSRC {ssrc}: the media alone"
+        );
+    }
+    let fec_stats = world.peers[1].pc.fec_stats().received;
+    assert!(
+        fec_stats
+            .iter()
+            .all(|stream| stream.fec_packets_received == 0 && stream.packets_recovered == 0),
+        "{fec_stats:?}"
+    );
+    Ok(())
+}
+
+/// FEC that arrives before the first media packet of a stream whose SSRC the offer does not
+/// declare (RFC 8843 section 9.2: the stream is found by its `mid` when its first packet
+/// comes) is dropped as `conf/srtp-2-unsignalled-rtx` drops RTX that comes early: there is
+/// nothing to repair yet, and it is not unassociated media (RFC 8830 section 3.1). The first
+/// frame's media is lost whole, so its FEC packet reaches the answerer before any media of
+/// the stream; once the media arrives and the stream is bound, the FEC of the frames after it
+/// rebuilds what they lose and counts for the stream.
+#[test]
+fn fec_before_the_first_media_packet_of_an_undeclared_stream_is_dropped_silently() -> Result<()> {
+    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (sender, _, _) = world.add_video_with_fec_session(RTCFecGroupSemantics::FecFr)?;
+    // The answerer's copy of the offer declares no SSRC.
+    let (offer, _) = world.negotiate_editing(
+        |offer| {
+            rewrite_lines(&offer, |line| {
+                (!line.starts_with("a=ssrc:") && !line.starts_with("a=ssrc-group:"))
+                    .then(|| line.to_owned())
+            })
+        },
+        |answer| answer,
+    )?;
+    assert!(offer.contains("a=ssrc:"), "{offer}");
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    let media_from = world.peers[0].addr_of(&mids[0])?;
+    let fec_from = world.peers[0].addr_of(&mids[1])?;
+    let ssrc = world.sender_ssrc(sender);
+    let media_payload_type = world.media_payload_type(sender);
+    // The first frame is lost whole; then one packet of each of the next two frames.
+    for sequence_number in [0u16, 1, 2, 3, 4, 8, 14] {
+        world.lose.insert((media_from, sequence_number));
+    }
+    world.only_first_transmissions = Some((media_from, media_payload_type));
+    for sequence_number in 0..20u16 {
+        world.send_video(
+            sender,
+            sequence_number,
+            u32::from(sequence_number / 5),
+            sequence_number % 5 == 4,
+        )?;
+        world.advance(Duration::from_millis(2))?;
+    }
+    world.advance(Duration::from_millis(300))?;
+
+    // The first FEC packet left before any media packet that arrived.
+    let first_fec = world
+        .srtp
+        .iter()
+        .position(|packet| packet.from == fec_from)
+        .context("FEC was sent")?;
+    let first_media = world
+        .srtp
+        .iter()
+        .position(|packet| packet.from == media_from && packet.ssrc == ssrc && !packet.lost)
+        .context("media arrived")?;
+    assert!(first_fec < first_media, "{:?}", world.srtp);
+    assert_eq!(
+        world
+            .srtp
+            .iter()
+            .filter(|packet| packet.from == fec_from && !packet.lost)
+            .count(),
+        4,
+        "{:?}",
+        world.srtp
+    );
+
+    // Dropped silently.
+    assert_eq!(world.peers[1].pc.discarded_rtp_packets(), 0);
+    assert!(
+        world.peers[1].unassociated.is_empty(),
+        "{:?}",
+        world.peers[1].unassociated
+    );
+    // The stream that came afterwards is repaired: every packet from 5 on, 8 and 14 rebuilt.
+    let received = &world.peers[1].rtp;
+    for sequence_number in 5..20u16 {
+        let packet = received
+            .iter()
+            .find(|packet| packet.header.sequence_number == sequence_number)
+            .with_context(|| format!("packet {sequence_number} was not delivered"))?;
+        assert_eq!(packet.header.ssrc, ssrc);
+        assert_eq!(packet.payload, video_payload(sequence_number));
+    }
+    assert!(
+        received.iter().all(|p| p.header.sequence_number >= 5),
+        "nothing of the first frame"
+    );
+    assert_eq!(world.peers[1].tracks, 1);
+    // Only the FEC that came after the stream counts for it.
+    let now = world.now;
+    let report = world.peers[1].pc.get_stats(now, StatsSelector::None);
+    let inbound = report
+        .inbound_rtp_streams()
+        .find(|stream| stream.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
+        .context("an inbound-rtp for the media stream")?;
+    assert_eq!(inbound.fec_packets_received, 3);
+    let fec_stats = world.peers[1].pc.fec_stats().received;
+    assert_eq!(fec_stats.len(), 1, "{fec_stats:?}");
+    assert_eq!(fec_stats[0].fec_packets_received, 3);
+    assert_eq!(fec_stats[0].packets_recovered, 2);
     Ok(())
 }
