@@ -627,7 +627,9 @@ impl Agent {
         let mut agent = Self {
             crypto_provider,
             tie_breaker,
-            new_tie_breaker_on_restart: config.new_tie_breaker_on_restart,
+            // Set once the first `restart` below has initialised the agent: that one is not
+            // an ICE restart, and the configured tiebreaker must survive it.
+            new_tie_breaker_on_restart: false,
             is_controlling: config.is_controlling,
             lite: config.lite,
 
@@ -799,6 +801,7 @@ impl Agent {
             let _ = agent.close();
             return Err(err);
         }
+        agent.new_tie_breaker_on_restart = config.new_tie_breaker_on_restart;
 
         Ok(agent)
     }
