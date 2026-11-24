@@ -24,6 +24,7 @@ API is the default and tested too (`RULES.md`).
 | SHOULD | 854 | 0 | 0 | 13 | 55 | 42 | 4 | 326 | 1294 |
 | MAY | 445 | 0 | 0 | 20 | 34 | 108 | 0 | 171 | 778 |
 | PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
+| PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
 | all | 6399 | 25 | 7 | 36 | 104 | 156 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
@@ -37,7 +38,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | SHOULD | 968 | 856 | 88.4 | 856 | 88.4 |
 | SHOULD | 968 | 854 | 88.2 | 854 | 88.2 |
 | MAY | 607 | 445 | 73.3 | 445 | 73.3 |
-| PROC | 76 | 68 | 89.5 | 68 | 89.5 |
+| PROC | 76 | 69 | 90.8 | 69 | 90.8 |
 
 ## Per file
 
@@ -55,7 +56,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 0 | 0 | 1 | 0 | 2 | 0 | 1 | 5 |
-| `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 7 | 0 | 0 | 1 | 2 | 0 | 0 | 0 | 10 |
+| `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 8 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MUST | 35 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 39 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | SHOULD | 5 | 0 | 0 | 0 | 0 | 2 | 0 | 3 | 10 |
 | `draft-ietf-payload-flexible-fec-scheme-03.md` | MAY | 1 | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 7 |

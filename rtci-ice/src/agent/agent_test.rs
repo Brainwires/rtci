@@ -2316,6 +2316,45 @@ fn test_mdns_answer_is_taken_only_from_the_mdns_socket() -> Result<()> {
     Ok(())
 }
 
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.2.1 step 5: a `.local` candidate whose
+/// name does not resolve is ignored. The query of an agent with no timeout configured ends
+/// after `rtci-mdns`'s 30 s; the name then leaves nothing behind: no remote candidate, no
+/// pending query, and an answer that comes after it resolves nothing.
+#[test]
+fn test_an_mdns_name_that_does_not_resolve_in_time_leaves_no_candidate() -> Result<()> {
+    let base = Instant::now();
+    let (mut agent, late_answer) = agent_with_answered_mdns_query(base)?;
+    assert_eq!(agent.mdns_queries.len(), 1);
+    let until = base + Duration::from_secs(31);
+    let mut now = base;
+    while now < until {
+        now = agent
+            .poll_timeout()
+            .filter(|t| *t > now && *t <= until)
+            .unwrap_or(until);
+        agent.handle_timeout(now)?;
+        while agent.poll_write().is_some() {}
+    }
+    assert!(agent.mdns_queries.is_empty(), "the query ended");
+    assert!(agent.remote_candidates.is_empty(), "no candidate");
+
+    let _ = agent.handle_read(TaggedBytesMut {
+        now,
+        transport: TransportContext {
+            local_addr: "0.0.0.0:5353".parse().unwrap(),
+            peer_addr: "10.0.0.9:5353".parse().unwrap(),
+            transport_protocol: TransportProtocol::UDP,
+            ecn: None,
+        },
+        message: late_answer.message,
+    });
+    assert!(
+        agent.remote_candidates.is_empty(),
+        "an answer after the query ended resolved a candidate"
+    );
+    Ok(())
+}
+
 /// mDNS-resolved candidates count against `MAX_REMOTE_CANDIDATES` like any other: they used to
 /// be added past it.
 #[test]
