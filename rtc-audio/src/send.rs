@@ -279,12 +279,27 @@ impl SendPipeline {
         &self.level
     }
 
-    /// Sets the bitrate available to this stream, all overhead included (bits per second).
-    pub fn set_target_bitrate(&mut self, allocated_bps: f64) {
+    /// The packets' own overhead (RTP, SRTP, UDP, IP, extensions:
+    /// [`SendConfig::overhead_bytes`] a packet), bits per second.
+    fn overhead_bps(&self) -> f64 {
         let packets_per_second = f64::from(self.encoder.rtp_clock_rate())
             / f64::from(self.encoder.frame_rtp_duration().max(1));
-        let overhead = f64::from(self.config.overhead_bytes) * 8.0 * packets_per_second;
-        let payload = (allocated_bps - overhead).max(0.0) as u32;
+        f64::from(self.config.overhead_bytes) * 8.0 * packets_per_second
+    }
+
+    /// The most this stream can use, overhead included, bits per second: the encoder's
+    /// ceiling ([`AudioEncoder::max_bitrate`]) and its packets' overhead. More of the
+    /// congestion controller's target would go unused: `engine::AudioSender` tells the engine
+    /// (`RTCRtpSender::set_encoder_max_bitrate`), which gives the rest to the other senders.
+    pub fn max_allocation_bps(&self) -> f64 {
+        f64::from(self.encoder.max_bitrate()) + self.overhead_bps()
+    }
+
+    /// Sets the bitrate available to this stream, all overhead included (bits per second). It
+    /// is an upper bound, never a target: the encoder takes what is left after the overhead,
+    /// clamped to its ceiling ([`AudioEncoder::max_bitrate`]).
+    pub fn set_target_bitrate(&mut self, allocated_bps: f64) {
+        let payload = (allocated_bps - self.overhead_bps()).max(0.0) as u32;
         self.encoder.set_target_bitrate(payload);
         self.stats.target_bitrate = self.encoder.target_bitrate();
     }

@@ -132,6 +132,10 @@ impl AudioEncoder for OpusEncoder {
         Some(self.config.bitrate)
     }
 
+    fn max_bitrate(&self) -> u32 {
+        self.config.max_bitrate.max(6000)
+    }
+
     fn set_packet_loss(&mut self, fraction: f32) {
         let pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
         self.config.packet_loss_percent = pct;

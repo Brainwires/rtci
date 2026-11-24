@@ -126,11 +126,21 @@ fn is_rtp(data: &[u8]) -> bool {
 
 impl World {
     pub fn new(link: Link, seed: u64) -> Result<Self> {
+        Self::with_congestion_control(link, seed, false)
+    }
+
+    /// [`World::new`], the peers' default interceptors with (`true`) or without the
+    /// congestion controller and the RTP circuit breaker.
+    pub fn with_congestion_control(
+        link: Link,
+        seed: u64,
+        congestion_control: bool,
+    ) -> Result<Self> {
         let now = Instant::now();
         Ok(Self {
             peers: [
-                Peer::new("10.0.0.1:5000", now, false)?,
-                Peer::new("10.0.0.2:5000", now, false)?,
+                Peer::new("10.0.0.1:5000", now, congestion_control)?,
+                Peer::new("10.0.0.2:5000", now, congestion_control)?,
             ],
             now,
             link,
@@ -244,8 +254,28 @@ impl World {
     /// transceiver; impairment starts once both are connected.
     pub fn connected_audio(link: Link, seed: u64) -> Result<(Self, RTCRtpSenderId)> {
         let mut world = World::new(link, seed)?;
-        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
-            RtpCodecKind::Audio,
+        let sender_id = world.add_sender(RtpCodecKind::Audio)?;
+        world.connect()?;
+        Ok((world, sender_id))
+    }
+
+    /// Two peers with the congestion controller, connected over host candidates, the first
+    /// with a sendonly audio and a sendonly video transceiver: (world, audio sender, video
+    /// sender).
+    pub fn connected_audio_video(
+        link: Link,
+        seed: u64,
+    ) -> Result<(Self, RTCRtpSenderId, RTCRtpSenderId)> {
+        let mut world = World::with_congestion_control(link, seed, true)?;
+        let audio = world.add_sender(RtpCodecKind::Audio)?;
+        let video = world.add_sender(RtpCodecKind::Video)?;
+        world.connect()?;
+        Ok((world, audio, video))
+    }
+
+    fn add_sender(&mut self, kind: RtpCodecKind) -> Result<RTCRtpSenderId> {
+        let transceiver = self.peers[0].pc.add_transceiver_from_kind(
+            kind,
             Some(RTCRtpTransceiverInit {
                 direction: RTCRtpTransceiverDirection::Sendonly,
                 streams: vec![],
@@ -255,11 +285,15 @@ impl World {
                 }],
             }),
         )?;
-        let sender_id = world.peers[0]
+        Ok(self.peers[0]
             .pc
             .rtp_transceiver(transceiver)
             .and_then(|t| t.sender())
-            .expect("a sendonly transceiver has a sender");
+            .expect("a sendonly transceiver has a sender"))
+    }
+
+    fn connect(&mut self) -> Result<()> {
+        let world = self;
         let now = world.now;
         let offer = world.peers[0].pc.create_offer(None)?;
         world.peers[0]
@@ -285,6 +319,6 @@ impl World {
             world.advance(t)?;
         }
         world.impaired = true;
-        Ok((world, sender_id))
+        Ok(())
     }
 }

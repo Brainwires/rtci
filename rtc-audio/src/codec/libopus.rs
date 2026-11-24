@@ -149,6 +149,10 @@ impl AudioEncoder for LibOpusEncoder {
         Some(self.config.bitrate)
     }
 
+    fn max_bitrate(&self) -> u32 {
+        self.config.max_bitrate.max(6000)
+    }
+
     fn set_packet_loss(&mut self, fraction: f32) {
         let pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
         self.config.packet_loss_percent = pct;
@@ -432,22 +436,28 @@ mod opus_interop {
         }
     }
 
-    /// The interop peer's sender in train 13 round 5: the receiver's fmtp as Chromium offers
-    /// it, processing off, and the congestion controller's share for one audio stream (Chromium
-    /// counted 858-byte payloads). libopus, Chromium's decoder, hears the tone.
+    /// The interop peer's sender in train 13 round 5, before the RFC 7587 ceiling: the
+    /// receiver's fmtp as Chromium offers it, processing off, and the congestion controller's
+    /// share for one audio stream (Chromium counted 858-byte payloads). libopus, Chromium's
+    /// decoder, hears the tone. With RFC 7587 section 6.1's default ceiling the same share
+    /// gives 40 kbit/s; the round-5 rate needs a receiver's `maxaveragebitrate=510000`.
     #[test]
     fn the_send_pipeline_at_a_high_congestion_target_decodes_with_energy_in_libopus() {
-        let mut p = SendPipeline::new(SendConfig {
-            codec: SendCodec::Opus(OpusEncoderConfig::for_remote(
-                &OpusFmtp::parse("minptime=10;useinbandfec=1"),
-                None,
-                None,
-                1,
-            )),
-            processing: ProcessingConfig::OFF,
-            ..Default::default()
-        })
-        .unwrap();
+        let chromium = OpusFmtp::parse("minptime=10;useinbandfec=1");
+        let pipeline = |fmtp: &OpusFmtp| {
+            SendPipeline::new(SendConfig {
+                codec: SendCodec::Opus(OpusEncoderConfig::for_remote(fmtp, None, None, 1)),
+                processing: ProcessingConfig::OFF,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let mut default_ceiling = pipeline(&chromium);
+        default_ceiling.set_target_bitrate(366_400.0);
+        assert_eq!(default_ceiling.stats().target_bitrate, Some(40_000));
+        let mut p = pipeline(&OpusFmtp::parse(
+            "minptime=10;useinbandfec=1;maxaveragebitrate=510000",
+        ));
         p.set_target_bitrate(366_400.0);
         assert_eq!(p.stats().target_bitrate, Some(343_200));
         let mut tone = Tone::new(48_000, 440.0, 0.25);

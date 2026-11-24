@@ -228,3 +228,79 @@ fn audio_plays_through_the_pipeline_at_every_loss_rate() -> Result<()> {
     assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }
+
+/// The congestion controller's target is an upper bound for audio, never a target: in a call
+/// with an audio and a video sender, the audio encoding's share stops at what its encoder can
+/// use (RFC 7587 section 6.1's default ceiling for full-band speech, 40 kbit/s, and its
+/// packets' overhead), and the video encoding gets the rest of the target (libwebrtc clamps an
+/// audio stream's allocation to its encoder's range the same way).
+#[test]
+fn audio_takes_its_ceiling_of_the_target_and_video_the_rest() -> Result<()> {
+    let link = Link {
+        loss: 0.0,
+        delay: Duration::from_millis(25),
+        jitter: Duration::ZERO,
+    };
+    let (mut world, audio_id, video_id) = World::connected_audio_video(link, 5)?;
+    let t0 = world.now;
+    let mut sender = AudioSender::new(
+        &mut world.peers[0].pc,
+        audio_id,
+        t0,
+        AudioSenderOptions {
+            processing: ProcessingConfig::OFF,
+            ..Default::default()
+        },
+    )?;
+    // 40 kbit/s of Opus and 58 bytes of overhead on each of 50 packets a second.
+    let cap = sender.pipeline().max_allocation_bps();
+    assert_eq!(cap, 40_000.0 + 58.0 * 8.0 * 50.0);
+    let mut tone = rtc_audio::signal::Tone::new(48_000, 440.0, 0.25);
+    let mut frame = vec![0.0f32; 480];
+    for tick in 0..300u64 {
+        let t = t0 + Duration::from_millis(tick * 10);
+        world.advance(t)?;
+        tone.fill(&mut frame);
+        sender.push_capture(
+            &mut world.peers[0].pc,
+            t,
+            &AudioFrame {
+                samples: frame.clone(),
+                sample_rate: 48_000,
+                channels: 1,
+            },
+        )?;
+        if tick % 50 == 0 {
+            sender.update_network(&mut world.peers[0].pc, t);
+        }
+        world.rtcp_in.clear();
+        world.rtp_in.clear();
+    }
+    let share = |world: &mut World, id| -> f64 {
+        world.peers[0]
+            .pc
+            .rtp_sender(id)
+            .map(|s| s.target_bitrates().iter().map(|&(_, bps)| bps).sum())
+            .unwrap_or_default()
+    };
+    let (audio, video) = (share(&mut world, audio_id), share(&mut world, video_id));
+    let total = world.peers[0]
+        .pc
+        .get_stats(world.now, StatsSelector::None)
+        .candidate_pairs()
+        .find_map(|p| p.available_outgoing_bitrate)
+        .expect("the congestion controller set a target");
+    println!("MEASURE two-stream allocation: total {total:.0}, audio {audio:.0}, video {video:.0}");
+    assert!(
+        total > 2.0 * cap,
+        "a target audio cannot use half of: {total}"
+    );
+    assert_eq!(audio, cap, "audio stops at its ceiling");
+    assert!(
+        (audio + video - total).abs() < 1.0,
+        "video gets the rest: {video} of {total}"
+    );
+    // The encoder runs at its ceiling, not at its share.
+    assert_eq!(sender.pipeline().stats().target_bitrate, Some(40_000));
+    Ok(())
+}

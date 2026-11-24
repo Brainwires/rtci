@@ -559,6 +559,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **audio** (`conf/ffi-mp-5`): the Opus sender's ceiling, without a `maxaveragebitrate`
+  from the receiver, is RFC 7587 section 6.1's default, the top of section 3.1.1's range for
+  the mode (`rtc_audio::codec::fmtp::default_max_average_bitrate`: 12 kbit/s narrowband, 20
+  wideband, 40 full-band speech, 64 mono music, 128 stereo music), not the codec's 510
+  kbit/s; a stated `maxaveragebitrate` stays the limit (section 7.1, a MUST). In train 13
+  round 5 the interop peer sent one voice stream at 343 kbit/s, the congestion controller's
+  whole share. `OpusEncoderConfig::for_remote_content` and `AudioSenderOptions::content`
+  choose speech or music, `AudioSenderOptions::max_bitrate` replaces the default (never above
+  the receiver's `maxaveragebitrate`), `AudioEncoder::max_bitrate` and
+  `SendPipeline::max_allocation_bps` report the ceiling. Tests:
+  `without_maxaveragebitrate_the_ceiling_is_rfc_7587s_default_for_the_mode`,
+  `audio_takes_its_ceiling_of_the_target_and_video_the_rest`.
+- **rtc** (`conf/ffi-mp-5`): `RTCRtpSender::set_encoder_max_bitrate(ssrc, bps)`: an encoder's
+  own ceiling, which caps its encoding's share of the congestion controller's target beside
+  `maxBitrate` (the lower applies) and gives the rest to the other encodings, without
+  appearing in `getParameters()` (libwebrtc's encoder-defined bitrate range of an audio
+  stream). `rtc_audio::engine::AudioSender` sets it, so audio takes what its encoder can use
+  and video the rest. Test:
+  `an_encoders_ceiling_caps_its_share_and_leaves_the_rest_to_the_others`.
 - **peer connection, interceptors**: behaviour profiles after the train-12 and train-13
   (sctp-15, mt-9) merges (`conf/profile-3-on-master`). Each setting master added is classified, its libwebrtc value
   read at `a222406d` (file and lines in `docs/behaviour-profiles.md`):

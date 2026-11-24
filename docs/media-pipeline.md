@@ -107,7 +107,12 @@ encoder from what the *receiver* stated, both ways:
   default is `minptime=10;useinbandfec=1`, `OpusFmtp::webrtc_default()`);
 - what this side sends follows the remote line, which the engine's negotiated codec carries
   after the answer: stereo only when the receiver said `stereo=1` and the capture is stereo,
-  no wider than its `maxplaybackrate`, no more than its `maxaveragebitrate`, CBR, FEC and DTX
+  no wider than its `maxplaybackrate`, no more than its `maxaveragebitrate` (RFC 7587
+  section 7.1, a MUST) or, when it states none, than section 6.1's default, the top of
+  section 3.1.1's range for the mode (`default_max_average_bitrate`: 12 kbit/s narrowband,
+  20 wideband, 40 full-band speech, 64 mono music, 128 stereo music;
+  `OpusEncoderConfig::for_remote_content` and `AudioSenderOptions::content` choose speech
+  or music, `AudioSenderOptions::max_bitrate` replaces the default), CBR, FEC and DTX
   as it asked, and its `a=ptime` (rounded down to a duration Opus codes, at most its
   `a=maxptime`; the engine exposes them as `RTCRtpTransceiver::remote_packet_time`).
 
@@ -196,7 +201,14 @@ skips the time and the next packet starts a talkspurt).
 - **Bitrate**: `set_target_bitrate(allocated)` takes the sender's share of the congestion
   controller's target (`RTCRtpSender::target_bitrates`), subtracts the packets' own overhead
   (58 bytes a packet by default: RTP, SRTP tag, UDP, IPv4, extensions) and clamps to 6 kbit/s
-  .. `maxaveragebitrate`.
+  .. the ceiling (`maxaveragebitrate` or RFC 7587's default above). The share is an upper
+  bound, never a target: `AudioSender` tells the engine its ceiling with the overhead
+  (`max_allocation_bps`, `RTCRtpSender::set_encoder_max_bitrate`), so the allocator caps the
+  audio encoding's share there and gives the rest to the other senders, as libwebrtc clamps
+  an audio stream's allocation to its encoder's range
+  (`audio/audio_send_stream.cc::OnBitrateUpdated` at a222406d). Measured in a call with an
+  audio and a video sender (`audio_takes_its_ceiling_of_the_target_and_video_the_rest`):
+  audio's share stops at 40 kbit/s plus 23.2 kbit/s of overhead, video gets the rest.
 - **FEC**: `on_packet_loss(fraction)` (RTCP reception reports, smoothed) turns Opus in-band
   FEC on above 1 % and off below 0.5 %, only when the receiver said `useinbandfec=1`, and tells
   the encoder the loss rate.

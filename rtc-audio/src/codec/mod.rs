@@ -102,6 +102,12 @@ pub trait AudioEncoder: Send {
     fn target_bitrate(&self) -> Option<u32> {
         None
     }
+    /// The most the encoder sends, payload bits per second: the ceiling a target is clamped
+    /// to (Opus: `maxaveragebitrate` or RFC 7587's default for the mode). The default is the
+    /// 64 kbit/s G.711 and G.722 code.
+    fn max_bitrate(&self) -> u32 {
+        64_000
+    }
     /// Tells the encoder the packet loss the receiver reports (0 to 1).
     fn set_packet_loss(&mut self, _fraction: f32) {}
     /// Turns in-band FEC on or off (where the codec has it).

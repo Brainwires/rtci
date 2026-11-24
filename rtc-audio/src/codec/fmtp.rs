@@ -145,6 +145,37 @@ impl MaxBandwidth {
     }
 }
 
+/// What an Opus stream carries, for the bitrates RFC 7587 section 3.1.1 recommends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpusContent {
+    /// Speech (calls): 8-12 kbit/s narrowband, 16-20 wideband, 28-40 full band.
+    #[default]
+    Speech,
+    /// Music: 48-64 kbit/s full-band mono, 64-128 full-band stereo.
+    Music,
+}
+
+/// RFC 7587 section 6.1, `maxaveragebitrate`: "If no value is specified, the maximum value
+/// specified in Section 3.1.1 for the corresponding mode of Opus and corresponding
+/// maxplaybackrate is the default." Section 3.1.1's tops: 12 kbit/s narrowband speech, 20
+/// wideband, 40 full band, 64 full-band mono music, 128 full-band stereo music. The section
+/// names no medium-band rate (taken as wideband's), no super-wideband one (taken as full
+/// band's), no stereo speech (twice mono's, as libwebrtc doubles its rates for stereo) and no
+/// music below full band (taken as speech's).
+pub fn default_max_average_bitrate(
+    content: OpusContent,
+    bandwidth: MaxBandwidth,
+    channels: u16,
+) -> u32 {
+    let channels = u32::from(channels.clamp(1, 2));
+    match (content, bandwidth) {
+        (_, MaxBandwidth::Narrowband) => 12_000 * channels,
+        (_, MaxBandwidth::Mediumband | MaxBandwidth::Wideband) => 20_000 * channels,
+        (OpusContent::Speech, _) => 40_000 * channels,
+        (OpusContent::Music, _) => 64_000 * channels,
+    }
+}
+
 /// How an Opus encoder is set up.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpusEncoderConfig {
@@ -154,7 +185,10 @@ pub struct OpusEncoderConfig {
     pub frame_ms: u32,
     /// The starting bitrate, bits per second.
     pub bitrate: u32,
-    /// The ceiling any later target is clamped to (`maxaveragebitrate`).
+    /// The ceiling any later target is clamped to: the receiver's `maxaveragebitrate`, or
+    /// RFC 7587's default for the mode ([`default_max_average_bitrate`]) when the config
+    /// comes from [`OpusEncoderConfig::for_remote`]; the codec's whole range (510000) in
+    /// `Default`.
     pub max_bitrate: u32,
     /// The widest audio bandwidth coded (`maxplaybackrate`).
     pub max_bandwidth: MaxBandwidth,
@@ -198,8 +232,12 @@ impl OpusEncoderConfig {
     /// - stereo only when the receiver asked for it (`stereo=1`) and the capture is stereo
     ///   (RFC 7587 section 6.1: "a sender MUST NOT send stereo ... when stereo is 0");
     /// - bandwidth no wider than `maxplaybackrate` allows;
-    /// - bitrate no higher than `maxaveragebitrate`, starting where libwebrtc starts (32
-    ///   kbit/s per channel for full band, 20 for wideband, 12 for narrowband);
+    /// - bitrate no higher than `maxaveragebitrate` (section 7.1: the sender "MUST NOT send
+    ///   with an average bitrate higher"), or without one no higher than section 6.1's
+    ///   default, the top of section 3.1.1's range for speech
+    ///   ([`default_max_average_bitrate`]; [`for_remote_content`](Self::for_remote_content)
+    ///   for music), starting where libwebrtc starts (32 kbit/s per channel for full band, 20
+    ///   for wideband, 12 for narrowband);
     /// - `cbr`, in-band FEC and DTX as the receiver asked;
     /// - the receiver's `ptime` (or 20 ms) as the packet time, no longer than its `maxptime`,
     ///   rounded down to a duration Opus codes.
@@ -208,6 +246,25 @@ impl OpusEncoderConfig {
         remote_ptime: Option<u32>,
         remote_maxptime: Option<u32>,
         capture_channels: u16,
+    ) -> Self {
+        Self::for_remote_content(
+            remote,
+            remote_ptime,
+            remote_maxptime,
+            capture_channels,
+            OpusContent::Speech,
+        )
+    }
+
+    /// [`for_remote`](Self::for_remote) for `content`: without a `maxaveragebitrate` the
+    /// ceiling is RFC 7587's default for that content, and music starts at the bottom of its
+    /// range (48 kbit/s mono, 64 stereo) rather than at a speech rate.
+    pub fn for_remote_content(
+        remote: &OpusFmtp,
+        remote_ptime: Option<u32>,
+        remote_maxptime: Option<u32>,
+        capture_channels: u16,
+        content: OpusContent,
     ) -> Self {
         let channels = if remote.stereo && capture_channels >= 2 {
             2
@@ -218,13 +275,17 @@ impl OpusEncoderConfig {
             .max_playback_rate
             .map(MaxBandwidth::for_playback_rate)
             .unwrap_or(MaxBandwidth::Fullband);
-        let per_channel = match max_bandwidth {
-            MaxBandwidth::Narrowband | MaxBandwidth::Mediumband => 12_000,
-            MaxBandwidth::Wideband => 20_000,
-            _ => 32_000,
-        };
-        let max_bitrate = remote.max_average_bitrate.unwrap_or(510_000);
-        let bitrate = (per_channel * u32::from(channels)).min(max_bitrate);
+        let start = match (content, max_bandwidth) {
+            (_, MaxBandwidth::Narrowband | MaxBandwidth::Mediumband) => 12_000,
+            (_, MaxBandwidth::Wideband) => 20_000,
+            (OpusContent::Speech, _) => 32_000,
+            (OpusContent::Music, _) if channels == 2 => 32_000,
+            (OpusContent::Music, _) => 48_000,
+        } * u32::from(channels);
+        let max_bitrate = remote
+            .max_average_bitrate
+            .unwrap_or_else(|| default_max_average_bitrate(content, max_bandwidth, channels));
+        let bitrate = start.min(max_bitrate);
         let max_ptime = remote_maxptime.or(remote.max_ptime).unwrap_or(120);
         let want = remote_ptime.or(remote.ptime).unwrap_or(20).min(max_ptime);
         let frame_ms = Self::FRAME_MS
@@ -295,6 +356,8 @@ mod tests {
         let browser = OpusFmtp::parse("minptime=10;useinbandfec=1");
         let c = OpusEncoderConfig::for_remote(&browser, None, None, 2);
         assert_eq!((c.channels, c.frame_ms, c.bitrate), (1, 20, 32_000));
+        // No maxaveragebitrate: RFC 7587 section 6.1's default, 40 kbit/s for full-band speech.
+        assert_eq!(c.max_bitrate, 40_000);
         assert!(c.fec && !c.dtx && !c.cbr);
         assert_eq!(c.max_bandwidth, MaxBandwidth::Fullband);
 
@@ -317,5 +380,32 @@ mod tests {
             OpusEncoderConfig::for_remote(&browser, Some(30), None, 1).frame_ms,
             20
         );
+    }
+
+    #[test]
+    fn without_maxaveragebitrate_the_ceiling_is_rfc_7587s_default_for_the_mode() {
+        let none = OpusFmtp::parse("minptime=10;useinbandfec=1");
+        let stereo = OpusFmtp::parse("stereo=1");
+        let ceiling = |f: &OpusFmtp, channels, content| {
+            let c = OpusEncoderConfig::for_remote_content(f, None, None, channels, content);
+            (c.channels, c.bitrate, c.max_bitrate)
+        };
+        // Section 3.1.1's tops: full-band speech 40, mono music 64, stereo music 128 kbit/s.
+        assert_eq!(ceiling(&none, 1, OpusContent::Speech), (1, 32_000, 40_000));
+        assert_eq!(ceiling(&none, 1, OpusContent::Music), (1, 48_000, 64_000));
+        assert_eq!(
+            ceiling(&stereo, 2, OpusContent::Music),
+            (2, 64_000, 128_000)
+        );
+        // By maxplaybackrate: narrowband 12, wideband 20 kbit/s.
+        let nb = OpusFmtp::parse("maxplaybackrate=8000");
+        let wb = OpusFmtp::parse("maxplaybackrate=16000");
+        assert_eq!(ceiling(&nb, 1, OpusContent::Speech), (1, 12_000, 12_000));
+        assert_eq!(ceiling(&wb, 1, OpusContent::Speech), (1, 20_000, 20_000));
+        // A stated maxaveragebitrate is the ceiling, above or below the default.
+        let high = OpusFmtp::parse("maxaveragebitrate=96000");
+        assert_eq!(ceiling(&high, 1, OpusContent::Speech).2, 96_000);
+        let low = OpusFmtp::parse("maxaveragebitrate=16000");
+        assert_eq!(ceiling(&low, 1, OpusContent::Music), (1, 16_000, 16_000));
     }
 }

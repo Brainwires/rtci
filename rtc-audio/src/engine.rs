@@ -33,7 +33,7 @@ use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverId};
 use rtc::statistics::{AudioReceiverStatsUpdate, AudioSourceStatsUpdate, EncoderStatsUpdate};
 
-use crate::codec::fmtp::{OpusEncoderConfig, OpusFmtp};
+use crate::codec::fmtp::{OpusContent, OpusEncoderConfig, OpusFmtp};
 use crate::codec::g711::{G711Decoder, Law};
 use crate::codec::g722::G722Decoder;
 use crate::frame::AudioFrame;
@@ -64,6 +64,14 @@ pub struct AudioSenderOptions {
     pub red: bool,
     /// Use libopus for Opus (feature `libopus`).
     pub prefer_libopus: bool,
+    /// What the stream carries, for the Opus ceiling when the receiver states no
+    /// `maxaveragebitrate` (RFC 7587 section 6.1's default: 40 kbit/s for full-band speech,
+    /// 64 for mono music, 128 for stereo music).
+    pub content: OpusContent,
+    /// An Opus ceiling of the application's (bits per second) in place of that default. It
+    /// never raises the receiver's `maxaveragebitrate` (RFC 7587 section 7.1: the sender
+    /// "MUST NOT send with an average bitrate higher").
+    pub max_bitrate: Option<u32>,
 }
 
 impl Default for AudioSenderOptions {
@@ -74,6 +82,8 @@ impl Default for AudioSenderOptions {
             processing: ProcessingConfig::CALL,
             red: false,
             prefer_libopus: false,
+            content: OpusContent::Speech,
+            max_bitrate: None,
         }
     }
 }
@@ -159,13 +169,23 @@ impl AudioSender {
         let remote = OpusFmtp::parse(&codec.rtp_codec.sdp_fmtp_line);
         let (send_codec, payloader): (SendCodec, Box<dyn rtc::rtp::packetizer::Payloader>) =
             if mime == MIME_TYPE_OPUS.to_ascii_lowercase() {
+                let mut config = OpusEncoderConfig::for_remote_content(
+                    &remote,
+                    packet_time.ptime,
+                    packet_time.maxptime,
+                    options.capture_channels,
+                    options.content,
+                );
+                if let Some(ceiling) = options.max_bitrate {
+                    let ceiling = remote
+                        .max_average_bitrate
+                        .map_or(ceiling, |stated| stated.min(ceiling))
+                        .clamp(6000, 510_000);
+                    config.max_bitrate = ceiling;
+                    config.bitrate = config.bitrate.min(ceiling);
+                }
                 (
-                    SendCodec::Opus(OpusEncoderConfig::for_remote(
-                        &remote,
-                        packet_time.ptime,
-                        packet_time.maxptime,
-                        options.capture_channels,
-                    )),
+                    SendCodec::Opus(config),
                     Box::new(rtc::rtp::codec::opus::OpusPayloader),
                 )
             } else if mime == MIME_TYPE_PCMU.to_ascii_lowercase() {
@@ -206,6 +226,12 @@ impl AudioSender {
             prefer_libopus: options.prefer_libopus,
             ..Default::default()
         })?;
+        // The congestion controller's share is an upper bound for audio, never a target: what
+        // the encoder cannot use goes to the other senders (libwebrtc clamps an audio stream's
+        // allocation to its encoder's range, `AudioSendStream::OnBitrateUpdated`).
+        pc.rtp_sender(sender)
+            .ok_or_else(|| engine("no such sender"))?
+            .set_encoder_max_bitrate(ssrc, Some(pipeline.max_allocation_bps()));
         let packetizer = new_packetizer(
             now,
             MTU,
