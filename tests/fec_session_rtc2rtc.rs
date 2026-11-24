@@ -187,12 +187,13 @@ impl World {
         })
     }
 
-    /// Every transport of each peer gathers a host candidate on a port of its own and
-    /// trickles it, with its section, to the other peer.
+    /// Every transport of each peer that has not gathered yet gathers a host candidate on a
+    /// port of its own and trickles it, with its section, to the other peer.
     fn gather(&mut self) -> Result<()> {
         for i in 0..2 {
             let sections = self.peers[i].pc.ice_transport_sections();
-            for (k, (mid, index)) in sections.into_iter().enumerate() {
+            let known = self.peers[i].addrs.len();
+            for (k, (mid, index)) in sections.into_iter().enumerate().skip(known) {
                 let addr = SocketAddr::new(self.peers[i].ip, 5000 + k as u16);
                 self.peers[i].addrs.push(addr);
                 self.peers[i].mids.push(mid.clone());
@@ -336,6 +337,13 @@ impl World {
         &mut self,
         semantics: RTCFecGroupSemantics,
     ) -> Result<(RTCRtpSenderId, RTCRtpTransceiverId, RTCRtpTransceiverId)> {
+        let (sender, video) = self.add_video()?;
+        let session = self.peers[0].pc.add_fec_session(video, semantics)?;
+        Ok((sender, video, session))
+    }
+
+    /// The offerer adds a video sender.
+    fn add_video(&mut self) -> Result<(RTCRtpSenderId, RTCRtpTransceiverId)> {
         let pc = &mut self.peers[0].pc;
         let video = pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
@@ -352,8 +360,7 @@ impl World {
             .rtp_transceiver(video)
             .and_then(|t| t.sender())
             .context("a sendonly transceiver has a sender")?;
-        let session = pc.add_fec_session(video, semantics)?;
-        Ok((sender, video, session))
+        Ok((sender, video))
     }
 
     /// One offer from peer 0 and its answer; returns both.
@@ -976,5 +983,102 @@ fn fec_of_a_session_never_reaches_the_application_as_media() -> Result<()> {
         "nothing rebuilt the lost packet"
     );
     assert_eq!(world.peers[1].tracks, 1);
+    Ok(())
+}
+
+/// A FEC session added to a call that is already up (RFC 9143 section 7.5.2 for its section:
+/// a new section outside the BUNDLE group): the next offer gives it a transport of its own,
+/// which the application gathers for, and the stream that was already being sent is
+/// protected there from then on.
+#[test]
+fn a_fec_session_added_to_an_established_call_gets_a_transport_of_its_own() -> Result<()> {
+    let mut world = World::with_chains(true, FecChain::FixedAmount, FecChain::FixedAmount)?;
+    let (sender, video) = world.add_video()?;
+    world.negotiate()?;
+    world.gather()?;
+    world.run("connect", |p| p[0].connected && p[1].connected)?;
+    for sequence_number in 0..5u16 {
+        world.send_video(sender, sequence_number, 0, sequence_number == 4)?;
+    }
+    world.advance(Duration::from_millis(200))?;
+    assert_eq!(world.peers[1].rtp.len(), 5);
+    assert_eq!(world.peers[0].pc.ice_transport_sections().len(), 1);
+
+    world.peers[0]
+        .pc
+        .add_fec_session(video, RTCFecGroupSemantics::FecFr)?;
+    let (offer, answer) = world.negotiate()?;
+    for sdp in [&offer, &answer] {
+        let media = sections(sdp);
+        assert_eq!(media.len(), 2, "{sdp}");
+        let (video_mid, fec_mid) = (
+            value(&media[0], "mid").context("mid")?,
+            value(&media[1], "mid").context("mid")?,
+        );
+        let session = session_lines(sdp);
+        assert!(
+            session.contains(&format!("a=group:FEC-FR {video_mid} {fec_mid}").as_str()),
+            "{sdp}"
+        );
+        assert!(
+            session.contains(&format!("a=group:BUNDLE {video_mid}").as_str()),
+            "{sdp}"
+        );
+        assert!(media[1][0].starts_with("m=video 9 "), "{sdp}");
+        assert!(value(&media[1], "ice-ufrag").is_some(), "{sdp}");
+    }
+    assert_eq!(
+        world.peers[0].pc.ice_transport_sections().len(),
+        2,
+        "the FEC section has a transport of its own"
+    );
+    assert_eq!(world.peers[1].pc.ice_transport_sections().len(), 2);
+    world.gather()?;
+    world.advance(Duration::from_secs(3))?;
+    assert!(world.peers[0].connected && world.peers[1].connected);
+
+    let mids: Vec<String> = sections(&offer)
+        .iter()
+        .filter_map(|section| value(section, "mid").map(str::to_owned))
+        .collect();
+    let media_from = world.peers[0].addr_of(&mids[0])?;
+    let fec_from = world.peers[0].addr_of(&mids[1])?;
+    assert_ne!(media_from, fec_from);
+    let ssrc = world.sender_ssrc(sender);
+    let media_payload_type = world.media_payload_type(sender);
+    world.lose.insert((media_from, 7));
+    world.only_first_transmissions = Some((media_from, media_payload_type));
+    for sequence_number in 5..15u16 {
+        world.send_video(
+            sender,
+            sequence_number,
+            u32::from(sequence_number / 5),
+            sequence_number % 5 == 4,
+        )?;
+        world.advance(Duration::from_millis(2))?;
+    }
+    world.advance(Duration::from_millis(300))?;
+
+    let fec: Vec<&OnTheWire> = world
+        .srtp
+        .iter()
+        .filter(|packet| packet.from == fec_from)
+        .collect();
+    assert_eq!(
+        fec.len(),
+        2,
+        "one FEC packet for each frame: {:?}",
+        world.srtp
+    );
+    assert!(
+        fec.iter()
+            .all(|packet| packet.ssrc == ssrc && packet.payload_type == 127)
+    );
+    let rebuilt = world.peers[1]
+        .rtp
+        .iter()
+        .find(|packet| packet.header.sequence_number == 7)
+        .context("the lost packet was not rebuilt")?;
+    assert_eq!(rebuilt.payload, video_payload(7));
     Ok(())
 }

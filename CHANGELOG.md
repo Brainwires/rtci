@@ -22,6 +22,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSRC XOR one key, in both directions, with no table. A packet the FEC of another transport
   rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
   has a new public field (`..Default::default()` in a struct literal covers it).
+- **ULPFEC as a separate stream: a FEC session of its own (RFC 5109 sections 7.2, 14.1,
+  14.3).** `RTCPeerConnection::add_fec_session(transceiver, semantics)` offers, for the media
+  of one transceiver, a second m= section that lists only `ulpfec` (one dynamic payload type,
+  the media's rate), outside the BUNDLE group and so on a transport of its own (its own
+  candidates, DTLS association and SRTP keys), grouped with the media section by
+  `a=group:FEC-FR <media> <fec>` (RFC 5956 section 4.1, the default) or `a=group:FEC ...`
+  (RFC 4756, the semantics RFC 5109 names; `RTCFecGroupSemantics`). The returned transceiver is
+  the session: it has a mid, a direction, can be stopped, and never has a track
+  (`fec_session_of`, `fec_session_protects`). Once the answer keeps the section and repeats
+  the grouping, the ULPFEC of the protected sender's streams travels there, each FEC stream
+  with the SSRC of the media stream it protects, marker 0, sequence numbers of its own and
+  RTCP of its own; what arrives there repairs the protected receiver's streams and is never
+  delivered as media. `SettingEngineBuilder::with_separate_fec_sessions(true)` accepts an
+  offered FEC session (same grouping and payload type in the answer, the direction of the
+  transceiver it protects). `configure_ulpfec_sessions` adds the interceptors (encoder with
+  its wire tap, decoder); the amount of FEC follows the reported loss and comes out of the
+  target the application encodes at. In the interceptor crate: `FecSessionPacket` marks what
+  was read in a FEC session for the decoder, and `UlpfecReceiveBuilder::sessions()` keeps a
+  decoder for each bound stream.
+  **Defaults are unchanged**: nothing offers a FEC session by itself, and an offered one is
+  refused (port 0, the group left out), as RFC 8854 section 5.2 asks of a WebRTC endpoint
+  ("SHOULD NOT be offered"; "Answerers SHOULD reject any FEC-only "m=" lines, unless they
+  specifically know how to handle such a thing"). No browser accepts one.
+  **Known limits**: the FEC section negotiates no header extension, so the FEC session's
+  congestion controller has no per-packet feedback and stays at its start estimate; FEC for a
+  stream whose SSRC the description does not declare is used from that stream's first media
+  packet on.
+
+### Changed
+
+- A new m= section that an offer keeps outside every BUNDLE group although the offer has
+  groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
+  answer did not have) gets a transport of its own, as the method's documentation says; it
+  was put on the BUNDLE transport. A section a description leaves outside every group is
+  never written `a=bundle-only`.
+- Codec negotiation skips a remote m= section that lists nothing but `ulpfec` (a FEC
+  session's): it no longer counts as the kind's first section, which decides the kind's
+  formats.
 
 ## [0.1.0] - 2026-11-24
 

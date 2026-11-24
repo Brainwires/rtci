@@ -44,3 +44,37 @@ fn a_separate_fec_session_is_refused_with_its_group() -> TestResult {
     }
     Ok(())
 }
+
+/// A section that lists nothing but `ulpfec` is a FEC session's (RFC 5109 section 14.1), not a
+/// negotiation of the video formats: listed ahead of the media section, it does not decide
+/// what "video" is for the session, and the media section is answered with its codec.
+#[test]
+fn a_fec_section_ahead_of_its_media_section_leaves_the_video_formats_alone() -> TestResult {
+    let offer = crlf(&format!(
+        "{SESSION}a=group:BUNDLE 0\na=group:FEC-FR 0 1\n\
+         m=video 9 UDP/TLS/RTP/SAVPF 100\n{TRANSPORT}a=mid:1\na=recvonly\n\
+         a=rtpmap:100 ulpfec/90000\n\
+         m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=sendrecv\n\
+         a=rtpmap:96 VP8/90000\n"
+    ));
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    let answer = pc.create_answer(None)?.sdp;
+    let sections = media_sections(&answer);
+    assert_eq!(sections.len(), 2, "{answer}");
+    assert_eq!(mid_of(&sections[0]), Some("1"));
+    assert_eq!(
+        port_of(&sections[0]),
+        0,
+        "the FEC session is refused: {answer}"
+    );
+    assert_eq!(mid_of(&sections[1]), Some("0"));
+    assert_ne!(port_of(&sections[1]), 0, "the media is accepted: {answer}");
+    assert!(
+        sections[1]
+            .iter()
+            .any(|line| line == "a=rtpmap:96 VP8/90000"),
+        "{answer}"
+    );
+    Ok(())
+}

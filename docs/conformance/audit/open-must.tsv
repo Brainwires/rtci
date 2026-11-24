@@ -22,10 +22,6 @@ RFC3550-6.1-13	A	S	media (running)	`setting`: strict RTCP validity
 RFC3550-A.2-1	A	S	media (running)	`setting`: strict RTCP validity
 RFC4585-3.5.2-5	A	S	media (running)	`setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs`
 RFC4585-4.2-7	E	S	media (running)	Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
-RFC5109-7.2-2	D	L	media (running)	A separate FEC RTP session (own m= line and transport) so the FEC stream can use the media SSRC; RFC5109-14.1-5
-RFC5109-14.1-2	D	L	media (running)	As RFC5109-7.2-2
-RFC5109-14.1-5	D	L	media (running)	Separate FEC m= line with `a=group:FEC`, on a transport of its own
-RFC5109-14.3-1	D	L	media (running)	Offering a separate FEC stream (RFC 3388 / 4756 grouping); needs RFC5109-14.1-5
 RFC5124-2-1	B	S	dtls-srtp	A test that the first packet of every RTCP datagram the engine sends is a report (no RFC 3550 encryption prefix)
 RFC5124-3.1-1	F	S	dtls-srtp	Offers say `UDP/TLS/RTP/SAVPF` (`tests/jsep_answer_sections.rs::an_answer_repeats_the_offered_profile`); mutation-check and cite
 RFC5124-3.3.1-6	E	S	dtls-srtp	RFC 9429 5.1.2 requires a JSEP endpoint to accept the eight RTP profiles and to judge DTLS-SRTP by `a=fingerprint`; every other profile is rejected (`an_audio_section_of_another_profile_is_rejected_as_offered`). n/a for a JSEP answerer
