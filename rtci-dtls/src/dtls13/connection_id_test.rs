@@ -242,6 +242,79 @@ fn connection_ids_are_renewed_and_requested() -> Result<()> {
     Ok(())
 }
 
+/// RFC 9147 section 9: "Implementations which receive more spare CIDs than they wish to
+/// maintain MAY simply discard any extra CIDs." Eight are kept, the first eight in the order
+/// they were given, and the rest of the message is dropped; the association goes on.
+#[test]
+fn spare_connection_ids_beyond_eight_are_discarded() -> Result<()> {
+    let mut pair = pair(Some(4), Some(4))?;
+    pair.client
+        .new_connection_ids(pair.now, server_addr(), 12, false)?;
+    pair.run();
+    assert_eq!(
+        pair.client_conn().unacknowledged_post_handshake_messages(),
+        0,
+        "the NewConnectionId was taken and acknowledged"
+    );
+    let handed_out = pair.client_conn().accepted_connection_ids_for_test();
+    assert_eq!(
+        handed_out.len(),
+        13,
+        "the handshake's id and the twelve new ones"
+    );
+
+    let server = pair.server_conn();
+    let mut kept = vec![];
+    while server.use_next_connection_id() {
+        kept.push(server.remote_connection_id.clone());
+    }
+    assert_eq!(kept.len(), 8, "eight spare ids are kept");
+    assert_eq!(kept[..], handed_out[1..9], "the first eight, in order");
+    assert_eq!(
+        pair.server_sends(b"under the last spare id kept"),
+        vec![b"under the last spare id kept".to_vec()]
+    );
+    Ok(())
+}
+
+/// RFC 9147 section 9: "An endpoint MAY handle requests which it considers excessive by
+/// responding with a NewConnectionId message containing fewer than num_cids CIDs". A
+/// RequestConnectionId for more than eight is answered with eight, and that answer fulfils
+/// the request: the requester may ask again.
+#[test]
+fn a_request_for_more_than_eight_connection_ids_is_answered_with_eight() -> Result<()> {
+    let mut pair = pair(Some(4), Some(4))?;
+    assert!(
+        pair.server_conn()
+            .accepted_connection_ids_for_test()
+            .is_empty()
+    );
+    pair.client
+        .request_connection_ids(pair.now, server_addr(), 20)?;
+    pair.run();
+    let handed_out = pair.server_conn().accepted_connection_ids_for_test();
+    assert_eq!(
+        handed_out.len(),
+        1 + 8,
+        "the handshake's id and the eight of the answer"
+    );
+
+    let client = pair.client_conn();
+    let mut received = vec![];
+    while client.use_next_connection_id() {
+        received.push(client.remote_connection_id.clone());
+    }
+    assert_eq!(received[..], handed_out[1..], "the client has the eight");
+    assert_eq!(
+        pair.client_sends(b"under a requested id"),
+        vec![b"under a requested id".to_vec()]
+    );
+    // The answer fulfilled the request, so another may be made.
+    pair.client
+        .request_connection_ids(pair.now, server_addr(), 1)?;
+    Ok(())
+}
+
 /// RFC 9146 section 6: the address an association sends to changes only for a record that is
 /// authentic and newer than any received before, and only where the application has said it
 /// can tell that the new address receives.

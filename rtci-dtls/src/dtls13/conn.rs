@@ -772,6 +772,14 @@ impl Conn13 {
         self.next_receive_seq
     }
 
+    /// The connection ids this side takes records under, in the order they were handed out:
+    /// the handshake's first, then those of its NewConnectionId messages (empty until the
+    /// first NewConnectionId).
+    #[cfg(test)]
+    pub(crate) fn accepted_connection_ids_for_test(&self) -> Vec<Vec<u8>> {
+        self.accepted_connection_ids.iter().cloned().collect()
+    }
+
     /// The records an ACK of this side's would list now (RFC 9147 section 7).
     #[cfg(test)]
     pub(crate) fn acknowledgeable_records(&self) -> &[RecordNumber] {
