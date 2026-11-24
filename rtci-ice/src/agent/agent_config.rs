@@ -464,6 +464,47 @@ pub struct AgentConfig {
     /// not learns whether mDNS works on the host, which is what the draft's form avoids.
     pub multicast_dns_fail_closed: bool,
 
+    /// `QueryAndGather`: leave unwrapped a host address that the gathering before the current
+    /// ICE generation showed to be public (draft-ietf-mmusic-mdns-ice-candidates Section
+    /// 3.1.2.2: "once an address has been identified as public, the ICE agent MAY cache this
+    /// information and skip mDNS protection for that address in future ICE gathering
+    /// phases"). Off by default, in every behaviour profile; no effect in the other modes.
+    ///
+    /// An address is shown public when the application adds a server-reflexive candidate
+    /// whose address is its base's ("If the STUN response returns the same value as the local
+    /// IP address, this indicates the address is in fact public") and that base is the
+    /// address of a host candidate this agent holds: a STUN server cannot make the agent
+    /// unwrap an address it does not have. It is never one [`crate::mdns::is_global_unicast`]
+    /// refuses. The gathering that shows it is not changed: its mDNS candidate has been
+    /// provided already, and the server-reflexive candidate on the same address follows it
+    /// as Section 3.1.2.2 describes (raddr `0.0.0.0` / `::`, rport 9). From the next ICE
+    /// restart on, host candidates on that address go out with the address itself, while
+    /// each restart's own gathering shows it again; the knowledge is the agent's alone (no
+    /// process-wide cache) and is dropped by [`crate::Agent::set_ice_servers`] when the set
+    /// of STUN / TURN servers changes.
+    ///
+    /// What it exposes, and to whom: the address is already the server-reflexive candidate's,
+    /// which the remote peer and the application (a web page, in a browser) received in the
+    /// earlier generation; what the later host candidates add is that the address is the
+    /// host's own interface (type `host`, no NAT), the same thing an equal port already
+    /// suggested.
+    pub multicast_dns_expose_known_public_addresses: bool,
+
+    /// `QueryAndGather`: leave unwrapped a host address the application marked as an RFC 4941
+    /// temporary IPv6 address ([`crate::Agent::set_temporary_ipv6_addresses`])
+    /// (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.3: "implementations MAY choose to
+    /// not conceal [RFC4941] addresses with mDNS names as a tradeoff for improved
+    /// peer-to-peer connectivity"). Off by default, in every behaviour profile; no effect in
+    /// the other modes. The engine cannot tell a temporary address from a stable one by its
+    /// bits: only an address the application marked is unwrapped, and never one
+    /// [`crate::mdns::is_global_unicast`] refuses. An address not marked stays hidden.
+    ///
+    /// What it exposes, and to whom: the temporary address itself, to the remote peer and to
+    /// the application (a web page, in a browser), for as long as the operating system keeps
+    /// it (a day of preferred lifetime by default on most systems); not the host's stable
+    /// address, nor the private IPv4 ones.
+    pub multicast_dns_expose_temporary_ipv6_addresses: bool,
+
     /// Whether the application can send mDNS for each address family (both by default); see
     /// [`MulticastDnsPublishing`] and [`Agent::set_multicast_dns_publishing`](crate::Agent::set_multicast_dns_publishing).
     pub multicast_dns_publishing: MulticastDnsPublishing,

@@ -777,3 +777,68 @@ fn a_mapped_address_answer_of_an_old_server_is_taken() -> Result<()> {
     assert!(srflx[0].candidate.contains("203.0.113.5 61000 typ srflx"));
     Ok(())
 }
+
+/// W3C webrtc-pc "set the configuration": "Set the ICE Agent's ICE servers list to
+/// iceServers. As defined in [RFC9429], if a new list of servers replaces the ICE Agent's
+/// existing ICE servers list, no action will be taken until the next gathering phase." The
+/// engine's STUN gathering takes the new server from the next ICE generation on: a host
+/// candidate added in the current generation still asks the old server, the restart's
+/// generation asks the new one and no longer the old one.
+#[test]
+fn servers_set_by_set_configuration_are_asked_from_the_next_gathering_phase() -> Result<()> {
+    let old = a("192.0.2.10:3478");
+    let new = a("192.0.2.11:3478");
+    let mut h = Harness::new(&["stun:192.0.2.10:3478"], SettingEngine::default())?;
+    h.add_host(HOST)?;
+    let request = h.requests_to(old)[0].2.clone();
+    h.answer(&request, old, a(HOST), MAPPED);
+
+    h.pc.set_configuration(
+        RTCConfigurationBuilder::new()
+            .with_ice_servers(vec![RTCIceServer {
+                urls: vec!["stun:192.0.2.11:3478".to_owned()],
+                ..Default::default()
+            }])
+            .build(),
+    )?;
+    // The current gathering phase keeps its list.
+    h.add_host("10.0.0.2:4002")?;
+    h.advance_to(h.now + Duration::from_millis(100));
+    assert!(
+        h.requests_to(new).is_empty(),
+        "no action before the next phase"
+    );
+    assert_eq!(
+        h.requests_to(old)
+            .iter()
+            .filter(|(_, from, _)| *from == a("10.0.0.2:4002"))
+            .count(),
+        1,
+        "the current phase still asks the old server"
+    );
+
+    h.pc.restart_ice();
+    let offer = h.pc.create_offer(None)?;
+    h.pc.set_local_description(h.now, offer)?;
+    h.pump();
+    let old_before = h.requests_to(old).len();
+    h.add_host(HOST)?;
+    h.advance_to(h.now + Duration::from_millis(100));
+    let asked = h.requests_to(new);
+    assert_eq!(asked.len(), 1, "the new phase asks the new server");
+    assert_eq!(asked[0].1, a(HOST));
+    assert_eq!(
+        h.requests_to(old).len(),
+        old_before,
+        "and no longer the old one"
+    );
+    h.answer(&asked[0].2.clone(), new, a(HOST), "203.0.113.5:61003");
+    assert!(
+        h.srflx()
+            .iter()
+            .any(|c| c.candidate.contains("203.0.113.5 61003 typ srflx")),
+        "{:?}",
+        h.srflx()
+    );
+    Ok(())
+}
