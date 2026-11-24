@@ -5,7 +5,7 @@
 //!
 //! `cargo run --release -p rtci-stream-driver --example udp_receive_bench`
 //!
-//! `SENDERS` threads write `DATAGRAMS` datagrams of 1200 bytes between them over loopback as
+//! `BENCH_SENDERS` threads (4 by default) write `DATAGRAMS` datagrams of 1200 bytes between them over loopback as
 //! fast as they can, more than one receiver keeps up with, so that the receive side is what is
 //! measured; the receiver hands each datagram to a channel, as the driver does. Each line is one
 //! trial: what arrived (loopback drops what the receiver's buffer cannot hold) and the receive
@@ -19,7 +19,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const DATAGRAMS: usize = 400_000;
-const SENDERS: usize = 4;
+
+/// Sender threads: `BENCH_SENDERS` (default 4).
+fn senders() -> usize {
+    std::env::var("BENCH_SENDERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4)
+}
 const SIZE: usize = 1200;
 const TRIALS: usize = 5;
 
@@ -59,12 +66,13 @@ async fn trial(runtime: Arc<dyn Runtime>, batch: usize) -> (usize, f64) {
             .await;
         }))
     };
-    let senders: Vec<_> = (0..SENDERS)
+    let count_senders = senders();
+    let senders: Vec<_> = (0..count_senders)
         .map(|_| {
             std::thread::spawn(move || {
                 let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
                 let payload = [7u8; SIZE];
-                for _ in 0..DATAGRAMS / SENDERS {
+                for _ in 0..DATAGRAMS / count_senders {
                     let _ = socket.send_to(&payload, to);
                 }
             })
@@ -105,8 +113,8 @@ fn main() {
     println!(
         "{} datagrams of {} bytes per trial from {} sender threads, {} trials; the socket takes up to {} per receive",
         DATAGRAMS,
-        SENDERS,
         SIZE,
+        senders(),
         TRIALS,
         socket.max_receive_batch()
     );
