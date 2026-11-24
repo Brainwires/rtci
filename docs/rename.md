@@ -179,7 +179,8 @@ or its header, so a local variable called `rtc_pc` elsewhere stays.
 
 `cargo publish` order for the new names, dependencies first (normal and build dependencies, and
 versioned dev-dependencies), generated from `cargo metadata` and written into release.yml's
-commented publish step:
+commented publish step. `docs/releasing.md` ("What is published") is the reference; 0.1.0 is
+published in this order:
 
 1. `rtci-crypto`
 2. `rtci-interceptor-derive`
@@ -194,29 +195,27 @@ commented publish step:
 11. `rtci-sctp`
 12. `rtci-datachannel`
 13. `rtci-sdp`
-14. `rtci-signal`
-15. `rtci-srtp`
-16. `rtci-stun`
-17. `rtci-ice`
-18. `rtci-turn`
-19. `rtci`
+14. `rtci-srtp`
+15. `rtci-stun`
+16. `rtci-ice`
+17. `rtci-turn`
+18. `rtci`
+19. `rtci-stream-driver` (its default feature `peer` depends on `rtci`)
 
-`rtci` has a versioned dev-dependency on `rtci-stream-driver`, which is `publish = false`: cargo
-keeps versioned dev-dependencies in the published manifest, so publishing `rtci` needs that
-dependency's `version` dropped or the driver published. `rtci-signal` (the examples' signalling
-helper) is publishable today because nothing says otherwise.
+The root crate's dev-dependencies on `rtci-stream-driver` and `rtci-signal` carry no version, so
+`cargo publish` drops them from `rtci`'s published manifest. `rtci-signal` (the examples'
+signalling helper) is `publish = false`, as are the fuzz crates, the benchmark and the test
+environment's peers.
 
-crates.io fields (`--manifest-report`): every publishable crate has a description, a licence and
-`repository = "https://github.com/Brainwires/rtci"`; `rtci-interceptor`, `rtci-interceptor-derive`,
-`rtci-mdns`, `rtci-media` and `rtci-signal` have no README. `homepage` is still upstream's
-`https://webrtc.rs` and `license = "MIT/Apache-2.0"` uses the old `/` form (SPDX:
-`MIT OR Apache-2.0`); the rename changes neither.
+crates.io fields (`--manifest-report`): every publishable crate has a description, a README, the
+licence `MIT OR Apache-2.0` and `repository = "https://github.com/Brainwires/rtci"`, all
+inherited from `[workspace.package]` where they are shared; none sets `homepage`.
 
 ## For dependents
 
 | Before | After |
 |---|---|
-| `rtc = "0.22"` (or a git dependency on `Brainwires/webrtc-rs-rtc`) | `rtci = "0.1"` (git: `Brainwires/rtci`, tag `v0.1.0`) |
+| `rtc = "0.22"` (or a git dependency on `Brainwires/webrtc-rs-rtc`) | `rtci = "0.1"` from crates.io |
 | `rtc-<x> = "..."` | `rtci-<x> = "0.1"` |
 | `use rtc::...` | `use rtci::...` |
 | `use rtc_<x>::...` | `use rtci_<x>::...` |
@@ -228,3 +227,7 @@ crates.io fields (`--manifest-report`): every publishable crate has a descriptio
 
 A dependent that keeps its code unchanged can rename on its side instead:
 `rtc = { package = "rtci", version = "0.1" }`.
+
+A git dependency on the old repository URL keeps resolving through GitHub's redirect (at the old
+tags the crates are still `rtc`; from `v0.1.0` on there is no crate `rtc` to find). Move it to the
+crates.io release rather than to a git dependency on `Brainwires/rtci`.
