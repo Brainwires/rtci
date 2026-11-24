@@ -253,7 +253,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_audio_redundancy` | WhenPreferred in every profile: a local audio stream is sent in RED (RFC 2198) only when the remote description lists RED ahead of the primary (RFC 3264 5.1, 6.1). libwebrtc the same: media/engine/webrtc_voice_engine.cc::WebRtcVoiceSendChannel::SetSendCodecs @ a222406d (lines 1507-1641) looks for RED only among the codecs before the send codec (lines 1610-1622: "RED codec needs to be negotiated before the actual codec they reference", for (i = 0; i < send_codec_position; ++i)) |
 | `SettingEngineBuilder::with_own_payload_types_in_answers` | off: an answer uses the offer's payload type numbers (RFC 3264 6.1 SHOULD). libwebrtc the same: pc/codec_vendor.cc::NegotiateCodecs @ a222406d (lines 801-...) "Use their ID, if available" (lines 846-848: negotiated.id = theirs->id), apt values remapped after (lines 853-) |
 
-## Application input: no default to choose (33)
+## Application input: no default to choose (34)
 
 | Setting | Note |
 |---|---|
@@ -276,6 +276,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_ice_credentials` | fixed credentials for tests |
 | `SettingEngineBuilder::with_ice_tie_breaker` | a fixed tiebreaker for tests |
 | `SettingEngineBuilder::with_remote_address_filter` | the host's network policy |
+| `SettingEngineBuilder::with_ice_address_policy` | the embedder's network policy, both directions |
 | `SettingEngineBuilder::with_dtls_replay_protection_window` | replay window |
 | `SettingEngineBuilder::with_srtp_replay_protection_window` | replay window |
 | `SettingEngineBuilder::with_srtcp_replay_protection_window` | replay window |

@@ -199,6 +199,7 @@ pub(crate) fn ice_agent_config(
             .candidates
             .allow_link_local_remote_candidates,
         remote_address_filter: setting_engine.candidates.remote_address_filter.clone(),
+        address_policy: setting_engine.candidates.address_policy.clone(),
         tie_breaker: setting_engine.ice.tie_breaker,
         new_tie_breaker_on_restart: setting_engine.ice.new_tie_breaker_on_restart,
         nomination_acceptance: setting_engine.ice.nomination_acceptance,
@@ -4210,10 +4211,17 @@ impl RTCPeerConnection {
         let is_mdns = candidate.address().ends_with(".local");
         // W3C 4.4.2: an administratively prohibited candidate behaves exactly as if it were
         // added, its statistics included, but the agent never checks connectivity to it.
-        if super::prohibited::is_administratively_prohibited(
-            &candidate,
-            self.configuration.ice_transport_policy,
-        ) {
+        // So is one on an address the embedder's address policy refuses
+        // (`SettingEngineBuilder::with_ice_address_policy`): that is the user agent's choice
+        // "not to allow connection attempts to this address" of 4.4.2.
+        let refused_by_policy = candidate.address().parse::<std::net::IpAddr>().is_ok()
+            && !self.address_allowed(candidate.addr(), ice::AddressPurpose::RemoteCandidate);
+        if refused_by_policy
+            || super::prohibited::is_administratively_prohibited(
+                &candidate,
+                self.configuration.ice_transport_policy,
+            )
+        {
             self.stats_mut()
                 .register_remote_candidate(candidate_id, accumulator);
             return Ok(());

@@ -1430,6 +1430,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "the host's network policy",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_ice_address_policy",
+        class: NotGovernedClass::Input,
+        note: "the embedder's network policy, both directions",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_replay_protection_window",
         class: NotGovernedClass::Input,
         note: "replay window",

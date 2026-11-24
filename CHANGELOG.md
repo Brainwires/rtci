@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interceptor** (fec-1): `StreamInfo` has a new public field, `fec_session` (ULPFEC in an RTP
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
+- **ice / peer connection** (`conf/ice-24-address-policy`): `AgentConfig` and the setting
+  engine's `Candidates` have a new public field, `address_policy` (an `IceAddressPolicy`, see
+  "Added"). A struct literal of either adds `..Default::default()` or
+  `address_policy: IceAddressPolicy::default()` (which allows every address, as before).
 
 - **ice / jsep** (mdns-5): new public fields `AgentConfig::multicast_dns_expose_known_public_addresses` and `AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`, `MulticastDNS::expose_known_public_addresses` and `MulticastDNS::expose_temporary_ipv6_addresses` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or the fields set to `false`).
 
@@ -520,6 +524,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiebreaker stays for the agent's life, as before and as in libwebrtc. Test: `rtci-ice`
   `agent_rfc8445_test.rs::test_ice_restart_draws_a_new_tie_breaker_only_when_configured`.
   RFC8445-16.1-4 is `tested`.
+- **An embedder address policy for ICE, both directions** (`conf/ice-24-address-policy`):
+  `SettingEngineBuilder::with_ice_address_policy(IceAddressPolicy)` (and
+  `AgentConfig::address_policy` for the agent alone). One predicate over a `SocketAddr`, an
+  `AddressDirection` (inbound / outbound) and an `AddressPurpose` (`RemoteCandidate`,
+  `PeerReflexiveSource`, `StunTurnServer`, `InboundDatagramSource`), asked wherever an address
+  enters the ICE agent or the peer connection: a datagram (direct, relayed by the engine's TURN
+  allocation, or ICE-TCP stream data) from a refused source is dropped before the agent, DTLS
+  or the media read it (no STUN response, no peer-reflexive candidate, no consent, no pair, no
+  data accepted: agent `handle_read`, `data_path`, `is_valid_non_stun_traffic`; peer connection
+  `read_on_transport`); an ICE-TCP connection from it is refused (`handle_stream_accepted`) and
+  one that turns refused is reset (`handle_stream_read`); a TURN TCP peer connection from it is
+  not bound; a refused remote candidate (signalled, or an mDNS name's address) is never held or
+  paired, and `add_remote_candidate` treats it as W3C webrtc-pc 4.4.2 "administratively
+  prohibited"; a refused peer-reflexive source is not learned (RFC 8445 7.3.1.3) and so not
+  answered; a STUN or TURN server address the policy refuses, after its name resolved, is never
+  sent anything (skipped as a failed address). The predicate sees IPv4-mapped IPv6 addresses
+  as IPv4. With the "relay" ICE transport policy and a policy refusing private peers, no
+  datagram leaves from or goes to a host address and none is signalled. The default allows
+  everything and asks nothing: engine behaviour is unchanged without it.
+  `with_remote_address_filter` is kept as it was (it refuses remote candidates and
+  peer-reflexive sources only) and composes with the policy. Tests:
+  `rtci-ice` `address_policy_test.rs` (five), `tests/ice_address_policy.rs` (six). Audit:
+  RFC8828-5.2-P5 is a new `tested` control row; notes on WEBRTC-4.4.1.4-4 and RFC8445-7.3.1.3-1.
 - **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
   `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
   mDNS socket for its address family, or the agent holds the most names it can, 64) goes out,
