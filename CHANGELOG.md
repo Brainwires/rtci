@@ -1118,6 +1118,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rand`, are fixed or masked); with the process-wide anchor 473 of the sender's 482 packets
   differ.
 
+- **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
+  6.5; built on `conf/gcc-5-app-limited`, merged in, for the pacer's pause and discards):
+  - `rtc_video::send::SendPipeline`: pictures in, RTP packets out (the negotiated codec's
+    payloader, timestamps from the capture time). The target (`RTCRtpSender::target_bitrates`,
+    the estimate less the retransmission reserve) sets the encoder's rate, never below the
+    encoder's minimum (pictures dropped in the ratio target / minimum instead); a target of 0
+    (the pacer's pause) stops the encoder, and the first picture after it is a key frame;
+    PLI, FIR and the pacer's discards ask for a key frame, not served within two round trips
+    of the last one (RFC 5104 3.5.1; 500 ms until a round trip is known, RFC 7728 8.1);
+    resolution and frame-rate steps when the target falls under what the format needs, in the
+    order of the W3C `degradationPreference` (default `balanced`), with a 5 s hold before a
+    step back up. `SendConfig::chrome()`: libwebrtc's choices (no key frame on resume, one
+    request served per 300 ms, `maintain-framerate`).
+  - `rtc_video::engine::VideoSender`: the glue to an `RTCRtpSender` (target, events, round
+    trip, `update_encoder_stats` with `qualityLimitation*`).
+  - `VideoEncoder::set_rates` and `min_bitrate_bps` (both with defaults), `EncoderFactory`,
+    `picture::scale_into`.
+  - Breaking for an exhaustive `match` (`rtc-video` is not published): `engine::Error` has a
+    new variant `Encode`.
+  - Measured with the VP8 backend in a two-peer call on the default interceptors (640x360,
+    30 fps): open link, encoded rate within 0.1 % of the target over 10 s windows; the capacity
+    test's 300 kbit/s cap on six seeds, longest freeze 1.19 to 1.71 s, 0 frames discarded by
+    the pacer, 0 pictures encoded in a pause, a key frame after each, 1186 to 1385 kbit/s 20 s
+    after the cap; known cost: the oldest picture shown is 10.2 to 11.7 s old after the cap
+    (the pacer's backlog of the 2.5 Mbit/s before the estimate fell); 2 % loss repaired by
+    NACK with no wait beyond the slowest repair. Each reaction mutation-checked.
+  - Not built yet: simulcast, temporal layers and SVC, the rate allocators, the encoder bitrate
+    adjuster, the zero-hertz cadence adapter.
+
 - **video pipeline: codec safety** (`conf/vp-6-codec-safety`, `docs/video-pipeline.md` 4.7,
   4.8, 6.4):
   - Breaking: `rtc-video`'s `vp8` feature is opt-in again (default features: `engine`). The

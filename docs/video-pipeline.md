@@ -1057,6 +1057,80 @@ the signalled resolutions; capacity scenario with the real encoder meets phase 1
 figure. Browser cells: simulcast to the browser's receiver (layers switched by the app),
 resolution and frame-rate adaptation observed in the browser's inbound stats.
 
+#### 6.5 Phase 3: what was built and measured (`conf/vp-7-send`)
+
+Base: `conf/vp-6-codec-safety` (1624f763) with `conf/gcc-5-app-limited` (c56eeb26) merged in:
+the pacer's pause (target 0 through `PacerPause`), the pacer in the default chain and
+`OnPacerDiscard` are on that line, not on master yet. The merge had one conflict
+(`CHANGELOG.md`, two independent "Breaking changes" bullets: both kept). Merged tree proved on
+a hosted ubuntu runner: `cargo test -p rtc` 251 binaries, 2344 passed, 0 failed, 67 ignored
+(run 45341081324); `cargo test -p rtc-video`, default then `--features vp8`, 50 and 54 passed
+(run 45341077903).
+
+**Built** (`rtc-video/src/send.rs`, `engine_send.rs`): `SendPipeline` (picture in, RTP packets
+out) and `engine::VideoSender` (the glue to an `RTCRtpSender`: its SSRC, the negotiated
+codec's payload type and payloader, `target_bitrates()`, `OnKeyFrameRequest`,
+`OnPacerDiscard`, the nominated pair's round trip, `update_encoder_stats`). The encoder runs
+synchronously inside `send_frame`; the pipeline is `Send`, so an application that wants it off
+its network thread runs the whole pipeline on a worker (the single-slot mailbox of 5.4 is the
+application's: it decides which picture to hand in). `VideoEncoder` gained `set_rates(bitrate,
+framerate)` and `min_bitrate_bps()` (VP8: 30 kbit/s, libwebrtc's VP8 floor), and
+`EncoderFactory` makes a new encoder on a resolution change. `picture::scale_into` is a box
+filter. RTP timestamps come from the capture time on the 90 kHz clock (the application gives
+the first sequence number and timestamp: RFC 3550 5.1 wants them random, and the crate draws no
+randomness).
+
+**Not built from the phase-3 list**: simulcast (one encoder per RID), temporal layers and SVC
+with the Dependency Descriptor writer, the simulcast / SVC rate allocators, the encoder bitrate
+adjuster, the zero-hertz cadence adapter, `abs-capture-time` stamping, CPU-overuse adaptation.
+`VideoSender` drives the sender's first encoding only.
+
+**The reactions, and the rule behind each** (default = the specification; `SendConfig::chrome()`
+= libwebrtc where it differs; `rtc-video` is outside the engine's generated profile table,
+`docs/behaviour-profiles.md`, so these rows live here as the receive side's
+`ReceiveConfig::chrome()` does):
+
+| Signal | Default | Chrome | Source |
+|---|---|---|---|
+| target (`target_bitrates()`, the estimate less the retransmission reserve) | encoder rate = target, never below the encoder's minimum; under it the encoder stays at the minimum and pictures are dropped in the ratio target / minimum | same | RFC 8834 7: "Endpoints have to be designed so they do not transmit significantly more data than the network path can support"; minimum: `video/config/simulcast.cc` kSimulcastFormatsVP8, "The min bitrate is still limited at 30 kbps" @ a222406d |
+| pause (target 0) | nothing encoded until the next nonzero target; the first picture after it a key frame | no key frame on resume | the coordinator's brief; libwebrtc encodes the held picture as it comes (`video/video_stream_encoder.cc` 2544-2558); the engine's own note on `target_bitrates` says a key frame is not needed (nothing encoded was lost) |
+| PLI, FIR, `OnPacerDiscard` | key frame on the next picture, not served within two round trips of the last key frame sent (500 ms until a round trip is known); requests while one is due coalesce | at most one request served per 300 ms, whenever the last key frame was | RFC 5104 3.5.1: "A receiver that receives a request closely after sending a decoder refresh point -- within 2 times the longest round trip time (RTT) known, plus any AVPF-induced RTCP packet sending delays -- should await a second request message", and "If it receives repetitions of the FIR more than 2*RTT after it has sent a decoder refresh point, it shall send a new decoder refresh point"; RFC 4585 6.3.1.1 (the sender "MAY react to a PLI by transmitting an intra-picture", "MUST consider congestion control"); RFC 8834 5.1.1 / 5.1.2 (MUST react to FIR and PLI); default round trip RFC 7728 8.1 ("SHOULD use 500 ms as the default value"); Chrome: `video/encoder_rtcp_feedback.cc` kMinKeyframeSendIntervalMs = 300, lines 32, 66-70 |
+| target under what the format needs | W3C `degradationPreference` `balanced`: alternate resolution steps (3/5 of the pixels, down to 320x180) and frame-rate steps (2/3, down to 2 fps); down at once, up only with a quarter's margin and 5 s after the last change | `maintain-framerate` | webrtc-pc CR 2018-09-27 5.2.2: "degradationPreference of type RTCDegradationPreference, defaulting to "balanced""; enum text "Degrade a balance of framerate and resolution" (mst-content-hint now holds the enum: "motion" -> maintain-framerate, "detail" / "text" -> maintain-resolution); Chrome: `media/engine/webrtc_video_engine.cc` 2041-2062 ("Keep MAINTAIN_FRAMERATE by default until BALANCED has been tuned"); steps and floors: `call/adaptation/video_stream_adapter.cc` 40, 45-47, 150-158 and `api/video_codecs/video_encoder.h` 39; what a format needs: kSimulcastFormatsVP8 `min_bitrate` ("The minimum bitrate needed for encoding stream at widthxheight") interpolated in pixels, times fps / 30; hold: `quality_scaler.cc` 34-35 (2 s x 2.5 once scaled down) |
+
+The pause row's default departs from libwebrtc and from the engine's own note; it is the brief's
+decision. Measured, it makes no difference in the capacity call: the receiver asks for a key
+frame during every long pause (17 to 23 requests coalesced per run), so a key frame is due at
+the resume in both configurations (`measure_the_pause_with_the_chrome_configuration`: the same
+figures on seed 3). An owner decision is listed below.
+
+**Measured** (`rtc-video/tests/send_rtc2rtc.rs`, the VP8 backend, 640x360 at 30 fps from
+`TestSource`, both peers on the engine's default interceptors, GCC bounded to 100 kbit/s -
+2.5 Mbit/s as the capacity test does; hosted ubuntu runs 45344063951 and 45344738955 at
+f9aa85bd, the second with the 5 s hold):
+
+| Scenario | Figures |
+|---|---|
+| open link, 30 s | target 1 Mbit/s at 0.4 s (probes), 2.5 Mbit/s cap reached; encoded / target per 10 s window 0.999, 1.000, 0.999; longest gap 35 ms; oldest picture 0.68 s; PSNR mean 40.5 dB, worst 34.6 dB; 0 decode errors |
+| capacity cap (20 s open, 20 s at 300 kbit/s / 30 ms / 300 ms queue, 20 s open), six seeds | longest freeze 1.19 to 1.71 s; oldest picture from the cap on 10.17 to 11.67 s; median target under the cap 191 to 260 kbit/s; target 20 s after 1186 to 1385 kbit/s; 0 frames discarded by the pacer; 101 to 111 packets dropped at the link's queue (the half second before the estimate falls); encoded / target in the 10 s after the cap's pause 1.01 to 1.10 (without the 5 s hold 1.01 to 1.21, 4 to 8 resolution changes in 2 s of limitation; with it 0 to 4 changes, 0 to 10 s degraded); other windows 0.98 to 1.02 |
+| pacer pause (same call) | every run pauses when the cap arrives: the pacer holds what the 2.5 Mbit/s source wrote and the target reads 0 for 10.0 to 11.5 s while it drains at the capped estimate; then 0 to 2 short pauses (0.3 to 1 s); 0 pictures encoded while the target read 0; every resume's first picture a key frame; first picture rendered 4 to 180 ms after each pause ended |
+| 2 % loss, 25 ms + 0 to 40 ms jitter, 30 s | 146 packets retransmitted (RTX), repair mean 224 ms, max 345 ms; longest gap between rendered pictures 292 ms (bound: slowest repair + 100 ms); 886 decoded, 0 errors; PSNR worst 34.3 dB |
+
+The oldest picture (10 to 11.7 s) is the engine's pacer backlog, not the pipeline: when the cap
+arrives the source has written at 2.5 Mbit/s for the half second it takes the estimate to
+fall, the pacer sends that at 100 to 250 kbit/s while the target reads 0, and the receiver
+plays it late rather than skip it. The capacity test's model source measured 5.59 to 9.84 s on
+the same chain. What shortens it is the stale-backlog drop planned on the congestion line.
+Guards (each about a tenth beyond the worst measured, or the capacity test's own bound): freeze
+2 s, oldest picture 13 s, under the cap 180 kbit/s, recovery 800 kbit/s, encoded / target under
+the cap 1.15, open-link windows 0.85 to 1.15, loss: longest gap within the slowest repair plus
+100 ms.
+
+**Mutations** (each a throwaway branch, deleted; every one fails a test): target ignored, the
+encoder's minimum ignored, the pause ignored, no key frame on resume, no key-frame rate limit,
+key-frame request ignored, the glue dropping `OnPacerDiscard`, degradation off, the frame-rate
+step ignored (run 45343509144, `mut/vp-7-send-1`); the 5 s upgrade hold removed (run
+45344729086, `mut/vp-7-send-2`).
+
 ### Phase 4: adaptation and A/V sync (`conf/vp-6-adapt`)
 
 Quality scaler, degradation preference, CPU overuse, FEC budget, `qualityLimitation*`;
@@ -1081,3 +1155,4 @@ flash / beep source in both directions.
 | 4. Capture: where and how much | A new crate `rtc-video-devices` (camera via `nokhwa`; screen per platform), opt-in features, never run in CI | synthetic sources only |
 | 5. Screen capture in scope | Yes, after camera; with the zero-hertz cadence and screen-content encoder modes it needs | the cadence adapter and screen-content mode are designed in phase 3 |
 | 6. MSRV | Keep 1.89; it excludes `shiguredo_nvcodec` and newer pure-Rust codecs (`oxideav-*` 1.95, `gamut-av1` 1.92) | none of these needed now |
+| 7. Key frame when a pacer pause ends (6.5) | The default makes one (the brief's decision); libwebrtc and the engine's note on `target_bitrates` do not. Measured: no difference in the capacity call (the receiver's PLIs make one due anyway). Recommendation: keep the default, revisit with the stale-backlog drop | `SendConfig::key_frame_on_resume` |
