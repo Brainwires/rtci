@@ -286,6 +286,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
   5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
   `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
+### Behaviour changes
+
+- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
+  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
+  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
+  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
+  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
+  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
+  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
 
 ## [0.1.0] - 2026-11-24
 

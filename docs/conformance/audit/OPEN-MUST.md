@@ -11,6 +11,9 @@ Verdicts and classes are defined in `RULES.md`.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5067 of 5080 (99.7 %).
 - Tested as the default (`tested`): 5034 of 5080 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 13: 1 untested, 7 partial, 5 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5066 of 5080 (99.7 %).
+- Tested as the default (`tested`): 5033 of 5080 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 14: 1 untested, 8 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -25,6 +28,14 @@ Verdicts and classes are defined in `RULES.md`.
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 10 rows, 3 of size S, 2 of size M, 5 of size L. They are listed below by owner and size.
+| D | not implemented | 7 | 5 |
+| E | cannot be met or observed inside this engine | 10 | 8 |
+| F | stale note: already tested on this tree | 0 | 0 |
+| all | | 47 | 34 |
+
+## What 100 % takes
+
+- Work in code and tests (classes B, C, D, F): 11 rows, 3 of size S, 2 of size M, 6 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 2 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -42,6 +53,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | ice | 0 | 0 | 1 | 1 | 0 | 2 | 1 | 1 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (running) | 0 | 2 | 4 | 1 | 0 | 7 | 2 | 1 | 4 |
+| media (running) | 0 | 2 | 5 | 1 | 0 | 8 | 2 | 1 | 5 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 
 ## Rows
@@ -79,6 +91,12 @@ Sorted by class, then owner, size and ID.
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
 | RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | partial | C | The RFC form (s over the last 4 * G frames) is a setting (`CircuitBreakerPacketSize::LastFrames`), not the default: s over the CB_INTERVAL window the rate is measured over, because the literal form ceased a talking call at 1 to 5 % loss (measured, cb-2 sweep); no interop failure. Owner decision on the default | S | media (running) |
 | RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | partial | C | Tdr from the RFC 3550 6.2 algorithm instead of the report spacing | M | media (running) |
+| RFC8083-3-3 | `rfc8083.md` | s is the average packet size over the packets of the last 4 * G frames | setting | A | `setting` (measured): `CircuitBreakerBuilder::with_packet_size(PacketSize::LastFrames)`, RFC test both forms; section 3's s ceased a talking call in 14 of 24 sweep cells (5 % loss: after 3.8 to 5.0 s), the default in none (`circuit_breaker_reordering_rtc2rtc.rs`) | S | media (running) |
+| RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
+| RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
+| RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
+| RFC4585-3.5.4-2 | `rfc4585.md` | avg_rtcp_size is updated for every RTCP packet sent or received, ... | partial | C | Count the congestion control feedback sent at once in `avg_rtcp_size` as the received is, or decide with RFC4585-3.5.2-5 (now `setting`) | S | media (running) |
+| RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | partial | C | Stays partial (audit-5): report blocks on the co-located SSRCs are not sent even with `with_report_from_every_ssrc(true)`, and the default (blocks once, browser behaviour) has no failing cell or measurement. Add the co-located blocks and make the setting the default, or measure | M | media (running) |
 | RFC9605-X-6 | `rfc9605.md` | A forwarder can route frames without reading the payload (dependency ... | missing | C | Stale in part: the Dependency Descriptor is offered by default (`tests/svc_encoded_transform.rs::the_dependency_descriptor_is_offered_for_video`) and an extension the application sets is carried; the engine does not write it itself (it has no encoder) | S | sframe |
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC5109-14.1-2 | `rfc5109.md` | SSRC of a separate FEC stream equals the protected stream's SSRC | partial | D | As RFC5109-7.2-2 | L | media (running) |
@@ -99,7 +117,7 @@ Sorted by class, then owner, size and ID.
 
 ## Closed since classified
 
-42 rows: 10 of class B, 15 of class C, 3 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
+43 rows: 10 of class B, 16 of class C, 3 of class D, 7 of class E, 7 of class F. The note of each row says how it was closed.
 
 | ID | File | Clause | Class | Verdict now |
 |---|---|---|---|---|
@@ -121,6 +139,7 @@ Sorted by class, then owner, size and ID.
 | RFC7742-6.2-6 | `rfc7742.md` | profile-level-id is included in the SDP generated | C | tested |
 | RFC7742-6.2-7 | `rfc7742.md` | profile-level-id is interpreted when received | C | tested |
 | RFC7941-4.2.6-1 | `rfc7941.md` | An item from an RTP packet with the same or a lower extended sequence ... | C | tested |
+| RFC8083-3-6 | `rfc8083.md` | Tdr is the sender's estimate of the receiver's deterministic ... | C | tested |
 | RFC8122-6.2-5 | `rfc8122.md` | Server ends with bad_certificate when the client sends none or a ... | C | tested |
 | RFC8122-6.2-6 | `rfc8122.md` | An offerer with passive or actpass listens as soon as it sends the ... | C | tested |
 | RFC8842-5.1-1 | `rfc8842.md` | New association over UDP: at least one endpoint allocates a new ... | C | tested |
