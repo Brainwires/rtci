@@ -1086,6 +1086,16 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
                 {
                     self.estimator.on_packet_sent(msg.now, size);
                 } else {
+                    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n % 500 == 0 {
+                        eprintln!(
+                            "GCCUNREPORTED n {n} ssrc {} pt {} size {size} known {}",
+                            rtp_packet.header.ssrc,
+                            rtp_packet.header.payload_type,
+                            self.streams.contains_key(&rtp_packet.header.ssrc)
+                        );
+                    }
                     self.estimator.on_unreported_packet_sent(msg.now, size);
                 }
 
