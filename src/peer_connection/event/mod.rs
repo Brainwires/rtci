@@ -611,6 +611,29 @@ pub enum RTCPeerConnectionEvent {
         rid: Option<String>,
     },
 
+    /// The engine's pacer discarded media of this sender for want of room in the congestion
+    /// controller's target (the default chain's `PacerQueueOverflow::Drop`): whole frames of
+    /// one stream that waited the pacer's queue time bound (2 s by default), or the oldest of a
+    /// full queue. **The source is above the target**: what the application writes has to come
+    /// down to the target it is given (`RTCRtpSender::target_bitrates`). The stream also needs a
+    /// key frame: a Picture Loss Indication for it (sender SSRC 0) is delivered with this
+    /// (`RTCMessage::RtcpPacket`, `OnKeyFrameRequest`), and the NACK responder does not resend
+    /// the discarded packets. See `rtc_interceptor::PacerDiscard`.
+    OnPacerDiscard {
+        /// The sender whose stream lost the frames.
+        sender: crate::rtp_transceiver::RTCRtpSenderId,
+        /// The RID of the layer, `None` when the sender's encoding has none.
+        rid: Option<String>,
+        /// How many frames were discarded (0 for the rest of a frame already discarded).
+        frames: u32,
+        /// How many packets were discarded.
+        packets: usize,
+        /// Their octets (RTP header and payload).
+        octets: usize,
+        /// The pacer's target at the discard, bits per second.
+        target_bitrate: f64,
+    },
+
     /// W3C `RTCDtlsTransport` `statechange`. Comes before the `OnConnectionStateChangeEvent` it
     /// causes, and after the `OnDtlsTransportError` of a failure. Not fired by `close()`.
     OnDtlsTransportStateChange(RTCDtlsTransportState),
@@ -780,6 +803,11 @@ pub(crate) enum RTCEventInternal {
     /// An SRTP master key reached its lifetime (RFC 3711 section 9.2): nothing more is
     /// protected or accepted with it, and the DTLS transport that keyed it fails.
     SRTPKeyExhausted,
+
+    /// A thirty-second of an SRTP master key's lifetime is left: the DTLS server's threshold
+    /// for asking for a new association by itself
+    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`).
+    SrtpRekeyingDue,
 
     /// The application bytes that left a stream's send queue, reported once as the stream is
     /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before

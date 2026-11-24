@@ -385,6 +385,11 @@ pub struct Association {
     /// reset is in flight: it belongs to the stream as it is after the reset (RFC 6525 5.2.2
     /// E2). Its bytes count against the receive window.
     held_reset_data: Vec<ChunkPayloadData>,
+    /// DATA fragments dropped because they could never be part of a complete message
+    /// (`ReassemblyQueue::discard_orphans`).
+    pub(crate) orphans_dropped: usize,
+    /// The TSN of the last of them, so a run of them is reported once.
+    last_orphan_tsn: Option<u32>,
     /// This side asked for an SSN/TSN reset that is not answered yet: no new DATA is sent
     /// (RFC 6525 5.1.4 C2).
     tsn_reset_requested: bool,
@@ -651,6 +656,8 @@ impl Default for Association {
             peer_supports_reconfig: true,
             incoming_resets_waiting: HashMap::default(),
             held_reset_data: vec![],
+            orphans_dropped: 0,
+            last_orphan_tsn: None,
             tsn_reset_requested: false,
             deferred_tsn_reset: None,
             last_tsn_reset_request: None,
@@ -3680,18 +3687,142 @@ impl Association {
 
     /// Hands a DATA chunk that was accepted to its stream.
     fn deliver_to_stream(&mut self, d: &ChunkPayloadData) {
+        let cumulative_tsn = self.peer_last_tsn;
+        // A fragment that does not begin a message, for a stream that holds nothing, when the
+        // TSN before it has been received: the start of its message went to a stream that is
+        // gone (see `ReassemblyQueue::discard_orphans`). It makes no stream.
+        if !self.streams.contains_key(&d.stream_identifier)
+            && !d.beginning_fragment
+            && sna32lte(d.tsn.wrapping_sub(1), cumulative_tsn)
+        {
+            self.note_orphan(d);
+            return;
+        }
         if self.get_or_create_stream(d.stream_identifier).is_none() {
             return;
         }
         if let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+            if s.reads_stopped {
+                // The application closed the stream: nothing will read this. Its TSN stays
+                // acknowledged.
+                trace!(
+                    "[{}] dropping DATA tsn={} of stream {}, which is no longer read",
+                    self.side, d.tsn, d.stream_identifier
+                );
+                return;
+            }
             self.events.push_back(Event::DatagramReceived);
             let bytes_before = s.get_num_bytes_in_reassembly_queue();
-            if s.handle_data(d) && s.reassembly_queue.is_readable() {
+            let orphans_before = s.reassembly_queue.orphans_dropped;
+            if s.handle_received(d, cumulative_tsn) && s.reassembly_queue.is_readable() {
                 self.events.push_back(Event::Stream(StreamEvent::Readable {
                     id: s.stream_identifier,
                 }));
             }
+            let dropped = s.reassembly_queue.orphans_dropped - orphans_before;
             self.reindex_stream(d.stream_identifier, bytes_before);
+            if dropped == 0 {
+                // Nothing dropped.
+            } else if !d.beginning_fragment {
+                // The chunk itself: the rest of a message whose start went elsewhere.
+                self.note_orphan(d);
+            } else {
+                // Held fragments the message this chunk begins supersedes.
+                self.orphans_dropped += dropped;
+                self.last_orphan_tsn = None;
+                warn!(
+                    "[{}] dropped {dropped} DATA fragments of stream {} held ahead of the \
+                     message starting at tsn={}: sent before it with later numbers, they are \
+                     from before a reset of the stream (a peer that sent data queued on the \
+                     stream after its Sender's Last Assigned TSN, RFC 6525 5.1.2 A3)",
+                    self.side, d.stream_identifier, d.tsn
+                );
+            }
+        }
+    }
+
+    /// What this side has acknowledged and not delivered: a description of every stream whose
+    /// reassembly queue holds a fragment or a message, and of DATA held for a reset. `None`
+    /// when there is nothing. Once the link is quiet (the peer has nothing outstanding) and the
+    /// application has read everything it was told was readable, a reliable association holds
+    /// nothing: whatever it holds then is stuck, acknowledged and never to be delivered.
+    #[cfg(test)]
+    pub(crate) fn undelivered(&self) -> Option<String> {
+        let mut held: Vec<String> = self
+            .streams
+            .iter()
+            .filter(|(_, s)| !s.reassembly_queue.is_empty())
+            .map(|(id, s)| {
+                let q = &s.reassembly_queue;
+                format!(
+                    "stream {id}: {} bytes, ordered sets {:?} (next ssn {} mid {}), {} unordered \
+                     messages, {} unordered fragments, in partial delivery: {}",
+                    q.get_num_bytes(),
+                    q.ordered
+                        .iter()
+                        .map(|c| (c.ssn, c.mid, c.chunks.len(), c.is_complete()))
+                        .collect::<Vec<_>>(),
+                    q.next_ssn,
+                    q.next_mid,
+                    q.unordered.len(),
+                    q.unordered_chunks.len(),
+                    q.in_partial_delivery(),
+                )
+            })
+            .collect();
+        held.sort();
+        if !self.held_reset_data.is_empty() {
+            held.push(format!(
+                "{} DATA chunks held for a reset",
+                self.held_reset_data.len()
+            ));
+        }
+        (!held.is_empty()).then(|| held.join("; "))
+    }
+
+    /// DATA chunk `d` was dropped as a fragment that can never be part of a complete message.
+    /// Its TSN stays acknowledged.
+    fn note_orphan(&mut self, d: &ChunkPayloadData) {
+        self.orphans_dropped += 1;
+        if self.last_orphan_tsn != Some(d.tsn.wrapping_sub(1)) {
+            warn!(
+                "[{}] dropping DATA of stream {} at tsn={} (ssn={} mid={}): it can never be \
+                 delivered in its place, being the rest of a message from before a reset of the \
+                 stream (a peer that sent data queued on the stream after its Sender's Last \
+                 Assigned TSN, RFC 6525 5.1.2 A3)",
+                self.side, d.stream_identifier, d.tsn, d.stream_sequence_number, d.mid
+            );
+        }
+        self.last_orphan_tsn = Some(d.tsn);
+    }
+
+    /// Drops, on every stream, the fragments that can never be part of a complete message
+    /// now that the cumulative TSN has passed TSNs that were missing
+    /// (`ReassemblyQueue::discard_orphans`).
+    fn discard_orphaned_fragments(&mut self) {
+        let cumulative_tsn = self.peer_last_tsn;
+        let ids: Vec<StreamId> = self.streams_with_data.iter().copied().collect();
+        for id in ids {
+            let Some(s) = self.streams.get_mut(&id) else {
+                continue;
+            };
+            let bytes_before = s.get_num_bytes_in_reassembly_queue();
+            let dropped = s.reassembly_queue.discard_orphans(cumulative_tsn);
+            if dropped == 0 {
+                continue;
+            }
+            let readable = s.reassembly_queue.is_readable();
+            self.orphans_dropped += dropped;
+            warn!(
+                "[{}] dropped {dropped} DATA fragments of stream {id} that can never be \
+                 completed: the start of their message went to another stream",
+                self.side
+            );
+            self.reindex_stream(id, bytes_before);
+            if readable {
+                self.events
+                    .push_back(Event::Stream(StreamEvent::Readable { id }));
+            }
         }
     }
 
@@ -4080,6 +4211,14 @@ impl Association {
         {
             self.peer_last_tsn = self.peer_last_tsn.wrapping_add(1);
             //debug!("[{}] peer_last_tsn = {}", self.side, self.peer_last_tsn);
+        }
+        // The cumulative TSN passed a TSN that came late and the ones held after it: a
+        // fragment held from before may only now be known to have lost the start of its
+        // message (the check made as each fragment arrives saw the TSN before it missing).
+        if self.peer_last_tsn.wrapping_sub(prev_peer_last_tsn) >= 2
+            && sna32gt(self.peer_last_tsn, prev_peer_last_tsn)
+        {
+            self.discard_orphaned_fragments();
         }
 
         // Perform the stored reset requests the cumulative TSN has just reached, each once.

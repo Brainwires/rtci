@@ -44,8 +44,11 @@ pub struct NackGeneratorBuilder {
     round_trip_time: Option<Duration>,
 }
 
-/// A limit for [`NackGeneratorBuilder::with_max_nacks_per_packet`]: libwebrtc's
-/// `kMaxNackRetries`. Not the default (see the method).
+/// A limit for [`NackGeneratorBuilder::with_max_nacks_per_packet`]: ten requests, the
+/// generator's default from v0.22.0+brainwires.6 until requests became unlimited. Not
+/// libwebrtc's: its `kMaxNackRetries` is 100 (`modules/video_coding/nack_requester.cc` at
+/// a222406d, line 39), the limit of the `Chrome` behaviour profile. Not the default (see the
+/// method).
 pub const SUGGESTED_MAX_NACKS_PER_PACKET: u16 = 10;
 /// A limit for [`NackGeneratorBuilder::with_max_packet_age`], for a receiver that plays a
 /// packet out within two seconds of its loss. Not the default (see the method).
@@ -174,7 +177,11 @@ impl NackGeneratorBuilder {
     /// packet up as well: in `tests/capacity_cap_video_rtc2rtc.rs`, with retransmissions not held
     /// to the target, ten requests (and no age limit) left the picture frozen for 4.8 to 5.4 s on
     /// every seed, against 1.0 to 1.6 s without a limit. [`SUGGESTED_MAX_NACKS_PER_PACKET`] is
-    /// libwebrtc's.
+    /// those ten; libwebrtc gives a packet up after 100 requests (`kMaxNackRetries`,
+    /// `modules/video_coding/nack_requester.cc` at a222406d, line 39), a request at most every
+    /// round trip, and counts its other limits in packets: a packet more than 10,000 sequence
+    /// numbers behind the newest is not asked for (`kMaxPacketAge`), and a NACK list that would
+    /// pass 1000 entries is cleared and a key frame requested instead (`kMaxNackPackets`).
     pub fn with_max_nacks_per_packet(mut self, max: u16) -> Self {
         self.max_nacks_per_packet = max;
         self

@@ -31,8 +31,9 @@ use crate::peer_connection::message::{
 };
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
-use crate::peer_connection::transport::RTCDtlsTransportState;
+use crate::peer_connection::transport::dtls::SrtpRekeying;
 use crate::peer_connection::transport::sctp::SctpPath;
+use crate::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use ::interceptor::Packet;
 use log::{debug, warn};
@@ -142,6 +143,24 @@ impl RTCPeerConnection {
     /// An event leaves for the application. A local candidate's `OnIceCandidateEvent` is the
     /// application's to trickle: from here on the candidate counts as conveyed and the agent
     /// pairs it (RFC 8838 section 10).
+    /// W3C webrtc-pc "Updating the Negotiation-Needed flag": the event is fired by a queued
+    /// task, which checks again when it runs: "If connection.[[IsClosed]] is true, abort these
+    /// steps", "If connection.[[SignalingState]] is not "stable", abort these steps", and "If
+    /// the result of checking if negotiation is needed is false, clear the negotiation-needed
+    /// flag ... and abort these steps". The engine queues the event when the flag is set; the
+    /// application reading it is when the task runs. One whose reason went in between (a
+    /// rollback brought the connection back to stable with a renewal still wanted, and the
+    /// answer to the peer's colliding offer gave the renewal before the application looked) is
+    /// not handed out: an offer made for it would be a needless exchange. The flag
+    /// (`is_negotiation_ongoing`) is cleared when the check finds nothing to negotiate, and set
+    /// again, with a new event, when the connection is next stable with something to.
+    fn negotiation_needed_withdrawn(&self, evt: &RTCPeerConnectionEvent) -> bool {
+        matches!(evt, RTCPeerConnectionEvent::OnNegotiationNeededEvent)
+            && (!self.is_negotiation_ongoing
+                || self.signaling_state != RTCSignalingState::Stable
+                || self.peer_connection_state == RTCPeerConnectionState::Closed)
+    }
+
     fn hand_out_event(&mut self, evt: RTCPeerConnectionEvent) -> RTCPeerConnectionEvent {
         if let RTCPeerConnectionEvent::OnIceCandidateEvent(RTCPeerConnectionIceEvent {
             candidate: Some(candidate),
@@ -734,21 +753,80 @@ impl RTCPeerConnection {
     }
 
     /// RFC 5764 section 4.4: "Once the key lifetime has been reached, a new DTLS session SHOULD
-    /// be established". A key of the active transport has a sixteenth of its lifetime left:
-    /// unless the application turned it off, a new association is asked for as
-    /// `renew_dtls_association` does (new `tls-id`, ICE restart, negotiation-needed), once per
-    /// association, and only while the one in use is connected (a renewal under way, or a
-    /// transport that failed or closed, is left alone).
-    fn renew_before_the_key_lifetime_ends(&mut self) {
+    /// be established". A key of the active transport has a sixteenth of its lifetime left
+    /// (`due` false) or a thirty-second (`due` true): unless the application turned it off, a
+    /// new association is wanted, and asked for as `renew_dtls_association` does (new
+    /// `tls-id`, ICE restart, negotiation-needed).
+    ///
+    /// At the sixteenth the DTLS server of the association waits
+    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`): the client asks, and two
+    /// peers with the same lifetime do not both offer. At the thirty-second either side asks.
+    fn renew_before_the_key_lifetime_ends(&mut self, due: bool) {
         if self.setting_engine.srtp_automatic_rekeying_off || self.is_closed() {
             return;
         }
-        let dtls = self.dtls_transport();
-        if dtls.renewal_requested || dtls.state() != RTCDtlsTransportState::Connected {
+        let client_first = !self.setting_engine.srtp_rekeying_both_at_warning;
+        let dtls = self.dtls_transport_mut();
+        dtls.srtp_rekeying = match dtls.srtp_rekeying {
+            SrtpRekeying::Wanted => SrtpRekeying::Wanted,
+            _ if due => SrtpRekeying::Wanted,
+            _ if client_first && dtls.dtls_role == RTCDtlsRole::Server => SrtpRekeying::Deferred,
+            _ => SrtpRekeying::Wanted,
+        };
+        self.request_wanted_srtp_rekeying();
+    }
+
+    /// Asks for the new association the SRTP re-keying of a transport wants
+    /// ([`SrtpRekeying::Wanted`]), unless one is already being negotiated or established, by
+    /// either side, or the transport is not connected: one renewal at a time. What waits is
+    /// asked for when the connection is back in the stable state with no new association
+    /// under way (`commit_description`); a new association that comes meanwhile (the peer's
+    /// renewal) brings new keys and nothing is asked for.
+    pub(crate) fn request_wanted_srtp_rekeying(&mut self) {
+        if self.setting_engine.srtp_automatic_rekeying_off || self.is_closed() {
+            return;
+        }
+        let wanted = self
+            .pipeline_context
+            .transports
+            .ids()
+            .into_iter()
+            .any(|id| {
+                let dtls = self.dtls_transport_of(id);
+                dtls.srtp_rekeying == SrtpRekeying::Wanted
+                    && dtls.state() == RTCDtlsTransportState::Connected
+            });
+        if !wanted || self.dtls_renewal_under_way() {
             return;
         }
         log::debug!("an SRTP master key is near its lifetime: asking for a new DTLS association");
         self.request_dtls_renewal(true);
+    }
+
+    /// Whether a new DTLS association of some transport is asked for, being negotiated (an
+    /// offer or the answer to the peer's offer carries a new `tls-id`, or the pending remote
+    /// offer asks for one) or being established (its handshake has not completed).
+    pub(crate) fn dtls_renewal_under_way(&self) -> bool {
+        let pending_remote = self
+            .pending_remote_transport
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.new_dtls_role.is_some()
+                    || pending.staged_tls_id
+                    || pending.other_restarts.iter().any(|(_, _, staged)| *staged)
+            });
+        pending_remote
+            || self
+                .pipeline_context
+                .transports
+                .ids()
+                .into_iter()
+                .any(|id| {
+                    let dtls = self.dtls_transport_of(id);
+                    dtls.renewal_requested
+                        || dtls.staged_local_tls_id.is_some()
+                        || (dtls.is_started() && dtls.state() == RTCDtlsTransportState::Connecting)
+                })
     }
 
     /// Whether the active transport is the one the SCTP association runs over.
@@ -780,6 +858,8 @@ impl RTCPeerConnection {
         if raised {
             self.sync_rtcp_sessions(self.pipeline_context.now);
         }
+        // A pair selected since: a comparison per transport, not work, when none was.
+        self.tell_chain_of_path_changes(self.pipeline_context.now);
         // The SCTP transport's state follows its association, which any event may have moved;
         // the selected pair is the agent's, whose change event the DTLS handler consumes.
         self.announce_transport_states();
@@ -788,6 +868,40 @@ impl RTCPeerConnection {
         }
 
         raised
+    }
+
+    /// Tells the interceptor chain of each transport whose ICE agent selected another candidate
+    /// pair after its first ([`::interceptor::PathChanged`], on the read leg, so the congestion
+    /// controllers, which sit wire-most, see it first): a new path, on which the bandwidth
+    /// estimate starts over and the packets sent into the old one are not counted as lost
+    /// (RFC 8836 section 2, requirement 1; libwebrtc's
+    /// `RtpTransportControllerSend::OnNetworkRouteChanged`, which leaves the first connection
+    /// alone: "No need to reset BWE if this is the first time the network connects"). The
+    /// controllers also follow the addresses inbound packets arrive between, but those do not
+    /// change when a TURN relay keeps them or the application hands every datagram over with
+    /// one placeholder pair. With several transports the carrier names the RTP session of the
+    /// transport whose pair changed.
+    fn tell_chain_of_path_changes(&mut self, now: Instant) {
+        let several = self.pipeline_context.transports.len() > 1;
+        let mut changed = Vec::new();
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            let ice = &mut bundle.ice_handler_context;
+            if ice.selected_pair_changes != ice.selected_pair_changes_told_chain {
+                ice.selected_pair_changes_told_chain = ice.selected_pair_changes;
+                if ice.selected_pair_changes > 1 {
+                    changed.push(bundle.id.0);
+                }
+            }
+        }
+        use sansio::Protocol;
+        for session in changed {
+            let carrier = ::interceptor::PathChanged.into_packet(now, several.then_some(session));
+            if let Err(err) = self.interceptor.handle_read(carrier) {
+                warn!(
+                    "the path change of transport {session} did not reach the interceptors: {err}"
+                );
+            }
+        }
     }
 
     fn pump_events_on_active(&mut self) -> bool {
@@ -863,6 +977,9 @@ impl RTCPeerConnection {
                     self.announce_transport_states();
                     self.update_connection_state(false);
                 }
+                RTCEventInternal::SrtpRekeyingDue => {
+                    self.renew_before_the_key_lifetime_ends(true);
+                }
                 RTCEventInternal::SRTPKeyExhausted => {
                     // RFC 3711 section 9.2: re-key or end the session. A new DTLS association
                     // is not something a browser peer takes on a transport that has one, so
@@ -904,7 +1021,7 @@ impl RTCPeerConnection {
                     );
                     self.pipeline_context.event_outs.push_back(evt);
                     if expiring {
-                        self.renew_before_the_key_lifetime_ends();
+                        self.renew_before_the_key_lifetime_ends(false);
                     }
                 }
                 _ => {}
@@ -1038,7 +1155,10 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         self.announce_lite_candidate_update();
         // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
         // behind it anyway, and the sweep runs once the backlog is empty.
-        if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
+        while let Some(evt) = self.pipeline_context.event_outs.pop_front() {
+            if self.negotiation_needed_withdrawn(&evt) {
+                continue;
+            }
             return Some(self.hand_out_event(evt));
         }
 
@@ -1050,8 +1170,13 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             self.pump_events();
         }
 
-        let evt = self.pipeline_context.event_outs.pop_front()?;
-        Some(self.hand_out_event(evt))
+        while let Some(evt) = self.pipeline_context.event_outs.pop_front() {
+            if self.negotiation_needed_withdrawn(&evt) {
+                continue;
+            }
+            return Some(self.hand_out_event(evt));
+        }
+        None
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {

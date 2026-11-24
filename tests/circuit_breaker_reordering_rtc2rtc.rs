@@ -10,14 +10,133 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{CircuitBreakerPacketSize, PassThroughInterceptor, Slot};
-use std::cell::Cell;
+use rtc::interceptor::{
+    CircuitBreakerPacketSize, Interceptor, Packet, PassThroughInterceptor, Slot, StreamInfo,
+    TaggedPacket,
+};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 
 thread_local! {
     /// Whether the next `World`'s peers run without the pacer.
     static WITHOUT_PACER: Cell<bool> = const { Cell::new(false) };
     /// Whether the next `World`'s pacer drains above the target (`PacerQueueOverflow::Drain`).
     static DRAIN: Cell<bool> = const { Cell::new(false) };
+    /// When set, the next `World`'s sender sends from fixed SSRCs and each peer records what
+    /// its interceptor chain hands to SRTP (the first peer's into the first).
+    static RECORD: RefCell<Option<[Wire; 2]>> = const { RefCell::new(None) };
+}
+
+/// The packets a peer's interceptor chain handed to SRTP, marshalled, in order.
+type Wire = Arc<Mutex<Vec<Vec<u8>>>>;
+
+/// The media and RTX SSRCs of the sender of a recorded run: drawn by the engine from `rand`
+/// otherwise, which no seed reaches.
+const RECORDED_SSRC: u32 = 0x1234_5678;
+const RECORDED_RTX_SSRC: u32 = 0x1234_5679;
+
+/// At the wire end of the chain (below the RTCP session): records every RTCP compound packet
+/// and every RTP packet of the media stream as it goes to SRTP. SRTP itself is keyed from the
+/// DTLS handshake, whose ephemeral keys no seed reaches, so the datagrams' bytes differ from
+/// run to run whatever the chain wrote; this is what the chain wrote. Retransmissions and
+/// probe padding on the RTX stream are left out: the NACK responder draws the RTX stream's
+/// first sequence number from `rand` (`normalised` masks what of it the receiver reports, and
+/// the CNAME, which the peer connection draws from `rand` too).
+struct WireTap {
+    wire: Wire,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        let bytes = match &msg.message.packet {
+            Packet::Rtp(packet) if packet.header.ssrc != RECORDED_RTX_SSRC => {
+                Some(rtc::shared::marshal::Marshal::marshal(packet)?.to_vec())
+            }
+            Packet::Rtcp(packets) if !packets.is_empty() => {
+                let packets: Vec<Box<dyn rtc::rtcp::Packet>> = packets
+                    .iter()
+                    .map(|packet| normalised(packet.as_ref()))
+                    .collect();
+                Some(rtc::rtcp::packet::marshal(&packets)?.to_vec())
+            }
+            _ => None,
+        };
+        if let Some(bytes) = bytes {
+            self.wire.lock().expect("wire").push(bytes);
+        }
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+}
+
+/// `packet` without what the peer connection draws from `rand`, which no seed reaches: the
+/// text of an SDES CNAME item is replaced by a fixed one of the same length, and the sequence
+/// numbers of the RTX stream (whose first one the NACK responder draws) reported in a
+/// reception report block or an RFC 8888 report block are zeroed.
+fn normalised(packet: &dyn rtc::rtcp::Packet) -> Box<dyn rtc::rtcp::Packet> {
+    use rtc::rtcp::receiver_report::ReceiverReport;
+    use rtc::rtcp::source_description::{SdesType, SourceDescription};
+    use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+    let any = packet.as_any();
+    if let Some(sdes) = any.downcast_ref::<SourceDescription>() {
+        let mut sdes = sdes.clone();
+        for item in sdes
+            .chunks
+            .iter_mut()
+            .flat_map(|chunk| chunk.items.iter_mut())
+        {
+            if item.sdes_type == SdesType::SdesCname {
+                item.text = Bytes::from(vec![b'c'; item.text.len()]);
+            }
+        }
+        Box::new(sdes)
+    } else if let Some(rr) = any.downcast_ref::<ReceiverReport>() {
+        let mut rr = rr.clone();
+        for block in rr.reports.iter_mut() {
+            if block.ssrc == RECORDED_RTX_SSRC {
+                block.last_sequence_number = 0;
+            }
+        }
+        Box::new(rr)
+    } else if let Some(ccfb) = any.downcast_ref::<CcFeedbackReport>() {
+        let mut ccfb = ccfb.clone();
+        for block in ccfb.report_blocks.iter_mut() {
+            if block.media_ssrc == RECORDED_RTX_SSRC {
+                block.begin_sequence = 0;
+            }
+        }
+        Box::new(ccfb)
+    } else {
+        packet.cloned()
+    }
+}
+
+impl Interceptor for WireTap {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtc::interceptor::Registry;
@@ -35,9 +154,12 @@ use rtc::peer_connection::transport::{
 };
 use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
+};
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
+use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::statistics::StatsSelector;
 use std::net::SocketAddr;
@@ -136,7 +258,10 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str, seed: u64) -> Result<Self> {
+    /// `start`: the instant the run starts at, which the peer's NTP times are anchored to, so
+    /// two runs of one seed in one process write the same NTP times (the process-wide anchor
+    /// would put them as far apart as the real time between the runs).
+    fn new(addr: &str, seed: u64, start: Instant, wire: Option<Wire>) -> Result<Self> {
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
             rng: Mutex::new(Rng(seed)),
@@ -146,6 +271,7 @@ impl Peer {
         // The sweep's `RTC_CB_PACKET_SIZE=last-frames` runs RFC 8083 section 3's s.
         let mut options = DefaultInterceptorOptions::default();
         options.rtcp_random = Some(provider.clone());
+        options.wall_clock = Some(SystemInstant::at(start, Duration::from_secs(1_700_000_000)));
         if DRAIN.with(|d| d.get()) {
             options.pacer_queue_overflow = rtc::interceptor::PacerQueueOverflow::Drain;
         }
@@ -161,6 +287,16 @@ impl Peer {
             // A sender whose packets are not held to the congestion controller's target.
             registry = registry.with(Slot::Pacer, PassThroughInterceptor::new());
         }
+        if let Some(wire) = wire {
+            registry = registry.with(
+                Slot::Custom(250),
+                WireTap {
+                    wire,
+                    read_queue: VecDeque::new(),
+                    write_queue: VecDeque::new(),
+                },
+            );
+        }
         let pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_setting_engine(
@@ -170,7 +306,7 @@ impl Peer {
             )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build(Instant::now())?;
+            .build(start)?;
         Ok(Self {
             pc,
             addr: addr.parse()?,
@@ -328,12 +464,18 @@ impl World {
     /// Two peers over host candidates, the first with a sendonly `kind` transceiver; the
     /// link's impairment starts once both are connected.
     fn connected(kind: RtpCodecKind, link: Link, seed: u64) -> Result<(Self, RTCRtpSenderId)> {
+        let start = Instant::now();
+        let record = RECORD.with(|r| r.borrow().clone());
+        let [first_wire, second_wire] = match &record {
+            Some([first, second]) => [Some(first.clone()), Some(second.clone())],
+            None => [None, None],
+        };
         let mut world = World {
             peers: [
-                Peer::new("10.0.0.1:5000", seed ^ 0x1111)?,
-                Peer::new("10.0.0.2:5000", seed ^ 0x2222)?,
+                Peer::new("10.0.0.1:5000", seed ^ 0x1111, start, first_wire)?,
+                Peer::new("10.0.0.2:5000", seed ^ 0x2222, start, second_wire)?,
             ],
-            now: Instant::now(),
+            now: start,
             link,
             impaired: false,
             rng: Rng(seed),
@@ -351,6 +493,17 @@ impl World {
                 streams: vec![],
                 send_encodings: vec![RTCRtpEncodingParameters {
                     active: true,
+                    rtp_coding_parameters: if record.is_some() {
+                        RTCRtpCodingParameters {
+                            ssrc: Some(RECORDED_SSRC),
+                            rtx: Some(RTCRtpRtxParameters {
+                                ssrc: RECORDED_RTX_SSRC,
+                            }),
+                            ..Default::default()
+                        }
+                    } else {
+                        RTCRtpCodingParameters::default()
+                    },
                     ..Default::default()
                 }],
             }),
@@ -717,6 +870,54 @@ fn the_same_seed_gives_the_same_run() -> Result<()> {
     };
     let (first, second) = (once()?, once()?);
     assert_eq!(first, second);
+    Ok(())
+}
+
+/// The NTP times the peers write (sender reports, XR receiver reference times and the DLRR
+/// blocks that echo them, RFC 8888 report timestamps, the RFC 6051 NTP header extension) are
+/// anchored per peer connection (`DefaultInterceptorOptions::wall_clock`) to the instant the
+/// run starts at: a run repeated in the same process after a pause of real time writes the
+/// same packets, byte for byte. With the process-wide anchor
+/// (`SystemInstant::shared`) the second run's NTP times were later by the pause, and their
+/// fractions of a second differed, which made two runs of one seed in one process differ.
+#[test]
+fn the_same_seed_gives_the_same_bytes_after_a_pause() -> Result<()> {
+    let once = || -> Result<[Vec<Vec<u8>>; 2]> {
+        let wires: [Wire; 2] = Default::default();
+        RECORD.with(|r| *r.borrow_mut() = Some(wires.clone()));
+        let outcome = run(
+            RtpCodecKind::Video,
+            Shape::Constant(500),
+            Link::jittered(40, 0.02),
+            4,
+            3,
+        );
+        RECORD.with(|r| *r.borrow_mut() = None);
+        outcome?;
+        Ok(wires.map(|wire| std::mem::take(&mut *wire.lock().expect("wire"))))
+    };
+    let first = once()?;
+    std::thread::sleep(Duration::from_millis(1_500));
+    let second = once()?;
+    // The sender wrote sender reports (RTCP packet type 200 first in a compound packet).
+    assert!(first[0].iter().any(|packet| packet.get(1) == Some(&200)));
+    for (peer, (first, second)) in first.iter().zip(&second).enumerate() {
+        let differing: Vec<(usize, &Vec<u8>, &Vec<u8>)> = first
+            .iter()
+            .zip(second)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(index, (a, b))| (index, a, b))
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "peer {peer}: {} of {} packets differ, the first: {:?}",
+            differing.len(),
+            first.len(),
+            &differing[..differing.len().min(3)]
+        );
+        assert_eq!(first.len(), second.len(), "peer {peer}: packets written");
+    }
     Ok(())
 }
 

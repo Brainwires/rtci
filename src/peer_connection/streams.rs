@@ -990,12 +990,20 @@ impl RTCPeerConnection {
     /// RFC 6544 section 8: once ICE has completed, the connections that do not carry the
     /// selected pair are closed, for each transport on its own. A connection whose transport
     /// is not known yet (accepted, nothing read) is closed once every transport has completed.
+    ///
+    /// The connection of the path an ICE restart replaced stays open while the agent still
+    /// takes data on it (`Agent::retired_media_path`, a few seconds after the new pair was
+    /// selected): the peer selects on its own and goes on sending on that path until it does
+    /// (RFC 8445 section 12.2: be "prepared to receive data on any of the candidates provided
+    /// in the most recent candidate exchange"). Closed at once, what it had sent and the
+    /// packets it sends meanwhile are lost (seen as one RTP packet lost per SRTP re-keying
+    /// when the call ran over ICE-TCP).
     fn close_unused_tcp_connections(&mut self) {
         if !self.streams.settings.close_unused_connections || self.is_closed() {
             return;
         }
         let ids = self.pipeline_context.transports.ids();
-        let mut completed: Vec<(TransportId, Option<StreamId>)> = vec![];
+        let mut completed: Vec<(TransportId, Vec<StreamId>)> = vec![];
         for t in &ids {
             let agent = &self.ice_transport_of(*t).agent;
             // Completed: a pair is selected (RFC 8445 section 6.1.2.1), and the agent has not
@@ -1008,7 +1016,8 @@ impl RTCPeerConnection {
             let Some(path) = agent.media_path() else {
                 continue;
             };
-            let keep = if path.transport_protocol == TransportProtocol::TCP {
+            let mut keep = vec![];
+            if path.transport_protocol == TransportProtocol::TCP {
                 // The selected pair's connection is gone: the peer may be reopening it (RFC
                 // 6544 section 11.1), on a connection this side has not tied to the pair yet.
                 // Nothing of this transport is closed until the pair has one again.
@@ -1016,12 +1025,19 @@ impl RTCPeerConnection {
                     .streams
                     .connection_for(path.local_addr, path.peer_addr, *t, false)
                 {
-                    Some(id) => Some(id),
+                    Some(id) => keep.push(id),
                     None => continue,
                 }
-            } else {
-                None
-            };
+            }
+            if let Some(retired) = agent
+                .retired_media_path()
+                .filter(|retired| retired.transport_protocol == TransportProtocol::TCP)
+                && let Some(id) =
+                    self.streams
+                        .connection_for(retired.local_addr, retired.peer_addr, *t, false)
+            {
+                keep.push(id);
+            }
             completed.push((*t, keep));
         }
         if completed.is_empty() {
@@ -1036,8 +1052,8 @@ impl RTCPeerConnection {
             .filter(|c| match self.streams.connection_transport.get(&c.id) {
                 Some(t) => completed
                     .iter()
-                    .any(|(done, keep)| done == t && *keep != Some(c.id)),
-                None => all && !completed.iter().any(|(_, keep)| *keep == Some(c.id)),
+                    .any(|(done, keep)| done == t && !keep.contains(&c.id)),
+                None => all && !completed.iter().any(|(_, keep)| keep.contains(&c.id)),
             })
             .map(|c| c.id)
             .collect();
