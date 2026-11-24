@@ -7,30 +7,30 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
 use bytes::{Bytes, BytesMut};
-use rtc::crypto::providers::{AwsLcRsProvider, RingProvider};
-use rtc::crypto::{
+use rtci::crypto::providers::{AwsLcRsProvider, RingProvider};
+use rtci::crypto::{
     ActiveKeyExchange, AeadAlgorithm, AeadCipher, BlockCipherAlgorithm, CbcAlgorithm, CbcCipher,
     CryptoAlgorithm, CryptoError, HashAlgorithm, HmacAlgorithm, KeyExchangeAlgorithm, PublicKey,
     RTCCrypto, RTCCryptoProvider, RTCRandom, SignatureScheme, SigningKey, StreamCipher,
     StreamCipherAlgorithm,
 };
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use rtc::rtp;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtp;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use tokio::net::UdpSocket;
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -90,11 +90,11 @@ impl RTCRandom for RecordingProvider {
 /// now happens per `sign`/`verify` rather than per one-shot `hmac` call, since keyed MACs are
 /// created once per context.
 struct CountingMac {
-    inner: Box<dyn rtc::crypto::Mac>,
+    inner: Box<dyn rtci::crypto::Mac>,
     calls: Arc<Calls>,
 }
 
-impl rtc::crypto::Mac for CountingMac {
+impl rtci::crypto::Mac for CountingMac {
     fn output_len(&self) -> usize {
         self.inner.output_len()
     }
@@ -124,7 +124,7 @@ impl RTCCrypto for RecordingProvider {
         &self,
         algorithm: HmacAlgorithm,
         key: &[u8],
-    ) -> Result<Box<dyn rtc::crypto::Mac>, CryptoError> {
+    ) -> Result<Box<dyn rtci::crypto::Mac>, CryptoError> {
         Ok(Box::new(CountingMac {
             inner: self.inner.crypto().new_hmac(algorithm, key)?,
             calls: Arc::clone(&self.calls),
@@ -260,7 +260,7 @@ impl Peer {
                 mime_type: MIME_TYPE_VP8.to_owned(),
                 clock_rate: 90_000,
                 // The PLI the test writes is negotiated (RFC 4585 section 4.2).
-                rtcp_feedback: vec![rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                rtcp_feedback: vec![rtci::rtp_transceiver::rtp_sender::RTCPFeedback {
                     typ: "nack".to_owned(),
                     parameter: "pli".to_owned(),
                 }],

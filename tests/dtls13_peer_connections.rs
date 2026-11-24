@@ -16,10 +16,10 @@ mod dtls_sdp_common;
 use anyhow::Result;
 use dtls::cipher_suite::CipherSuiteId;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::statistics::StatsSelector;
 use std::time::Instant;
 
 fn peer(

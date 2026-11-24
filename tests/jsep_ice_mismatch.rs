@@ -8,9 +8,9 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCSignalingState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCSignalingState};
 
 #[test]
 fn an_answer_with_ice_mismatch_ends_ice_and_sends_nothing() -> Result<()> {

@@ -16,19 +16,19 @@ mod common;
 mod testenv;
 
 use bytes::Bytes;
-use rtc::media::io::Writer;
-use rtc::media::io::h26x_reader::H26xSampleReader;
-use rtc::media::io::h26x_writer::H26xWriter;
-use rtc::media::io::ogg_reader::OggReader;
-use rtc::media::io::ogg_writer::OggWriter;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::media::io::Writer;
+use rtci::media::io::h26x_reader::H26xSampleReader;
+use rtci::media::io::h26x_writer::H26xWriter;
+use rtci::media::io::ogg_reader::OggReader;
+use rtci::media::io::ogg_writer::OggWriter;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_H264, MIME_TYPE_OPUS, MediaEngine,
 };
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
@@ -94,7 +94,7 @@ fn send_track(
     kind: RtpCodecKind,
     pt: u8,
     units: &[Unit],
-) -> Vec<rtc::rtp::Packet> {
+) -> Vec<rtci::rtp::Packet> {
     common::install_crypto_provider();
     let env = Env::get();
     let mut a =
@@ -138,13 +138,13 @@ fn send_track(
                 })
                 .unwrap_or(pt);
             let pk = packetizer.get_or_insert_with(|| {
-                rtc::rtp::packetizer::new_packetizer(
+                rtci::rtp::packetizer::new_packetizer(
                     Instant::now(),
                     1200,
                     negotiated_pt,
                     ssrc,
                     codec.payloader().unwrap(),
-                    Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                    Box::new(rtci::rtp::sequence::new_random_sequencer()),
                     codec.clock_rate,
                 )
             });
@@ -266,7 +266,7 @@ fn multi_packet_ogg_pages_arrive_packet_by_packet() {
 }
 
 /// The first packet's sequence number, as the base of the wrap-around sort.
-fn received_first_seq(packets: &[rtc::rtp::Packet]) -> u16 {
+fn received_first_seq(packets: &[rtci::rtp::Packet]) -> u16 {
     packets.first().map_or(0, |p| p.header.sequence_number)
 }
 
@@ -315,7 +315,7 @@ fn multi_slice_h264_arrives_as_whole_access_units() {
     let received = send_track(h264_codec(), RtpCodecKind::Video, 102, &units);
 
     // RFC 6184 5.1: the marker is set on the last packet of an access unit, and only there.
-    let mut by_ts: BTreeMap<u32, Vec<&rtc::rtp::Packet>> = BTreeMap::new();
+    let mut by_ts: BTreeMap<u32, Vec<&rtci::rtp::Packet>> = BTreeMap::new();
     for p in &received {
         by_ts.entry(p.header.timestamp).or_default().push(p);
     }

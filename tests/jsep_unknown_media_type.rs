@@ -8,7 +8,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, port_of};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 #[test]
 fn an_unknown_media_type_is_answered_rejected_in_its_place() -> TestResult {

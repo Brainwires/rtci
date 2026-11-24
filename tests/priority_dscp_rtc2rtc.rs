@@ -6,24 +6,24 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::priority::RTCPriorityType;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::priority::RTCPriorityType;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -53,7 +53,7 @@ struct Peer {
     addr: SocketAddr,
     inbox: Vec<TaggedBytesMut>,
     events: Vec<(Instant, RTCPeerConnectionEvent)>,
-    rtp: Vec<(Instant, rtc::rtp::Packet)>,
+    rtp: Vec<(Instant, rtci::rtp::Packet)>,
     /// What this peer wrote: (first byte, the RTP SSRC if any, the DSCP to mark it with).
     marked: Vec<Mark>,
 }
@@ -151,9 +151,9 @@ fn track(
     )
 }
 
-fn rtp(ssrc: u32, payload_type: u8, seq: u16) -> rtc::rtp::Packet {
-    rtc::rtp::Packet {
-        header: rtc::rtp::header::Header {
+fn rtp(ssrc: u32, payload_type: u8, seq: u16) -> rtci::rtp::Packet {
+    rtci::rtp::Packet {
+        header: rtci::rtp::header::Header {
             version: 2,
             payload_type,
             sequence_number: seq,

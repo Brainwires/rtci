@@ -10,9 +10,9 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, mid_of, port_of,
     video_track,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn line<'a>(sdp: &'a str, prefix: &str) -> &'a str {
     sdp.lines()

@@ -7,29 +7,29 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::codec::telephone_event::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::codec::telephone_event::{
     TelephoneEvent, TelephoneEventReceiver, TelephoneEventReport, dtmf_char_from_event,
 };
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,7 @@ struct Peer {
     addr: SocketAddr,
     inbox: Vec<TaggedBytesMut>,
     events: Vec<(Instant, RTCPeerConnectionEvent)>,
-    rtp: Vec<(Instant, rtc::rtp::Packet)>,
+    rtp: Vec<(Instant, rtci::rtp::Packet)>,
 }
 
 impl Peer {
@@ -220,7 +220,7 @@ impl Call {
         tones: &str,
         duration: Option<Duration>,
         gap: Option<Duration>,
-    ) -> rtc::shared::error::Result<()> {
+    ) -> rtci::shared::error::Result<()> {
         let now = self.now;
         let mut sender = self.caller.pc.rtp_sender(self.sender).expect("sender");
         sender
@@ -239,8 +239,8 @@ impl Call {
         let mut sender = self.caller.pc.rtp_sender(self.sender).expect("sender");
         sender.write_rtp(
             now,
-            rtc::rtp::Packet {
-                header: rtc::rtp::header::Header {
+            rtci::rtp::Packet {
+                header: rtci::rtp::header::Header {
                     version: 2,
                     payload_type: 111,
                     sequence_number: seq,
@@ -286,7 +286,7 @@ impl Call {
     }
 
     /// The telephone-event packets the callee received: (arrival, packet, report).
-    fn events_received(&self) -> Vec<(Instant, rtc::rtp::Packet, TelephoneEvent)> {
+    fn events_received(&self) -> Vec<(Instant, rtci::rtp::Packet, TelephoneEvent)> {
         self.callee
             .rtp
             .iter()
@@ -338,7 +338,7 @@ fn tones_play_out_as_telephone_events_with_tone_changes() -> Result<()> {
     assert_eq!(call.tone_buffer(), "");
 
     let received = call.events_received();
-    let of = |event: u8| -> Vec<&(Instant, rtc::rtp::Packet, TelephoneEvent)> {
+    let of = |event: u8| -> Vec<&(Instant, rtci::rtp::Packet, TelephoneEvent)> {
         received
             .iter()
             .filter(|(_, _, r)| r.event == event)

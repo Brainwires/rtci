@@ -1,4 +1,4 @@
-//! RFC 9147 sections 9 and 11 between two `rtc` peer connections that use DTLS connection
+//! RFC 9147 sections 9 and 11 between two `rtci` peer connections that use DTLS connection
 //! ids (`with_dtls_connection_id`): "Implementations SHOULD use a new CID whenever sending on
 //! a new path and SHOULD request new CIDs for this purpose if path changes are anticipated"
 //! (section 9), and "SHOULD attempt to use fresh CIDs whenever they change local addresses or
@@ -9,16 +9,16 @@
 //! The peers exchange datagrams in memory, on a virtual clock.
 
 use anyhow::Result;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidatePair,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -70,7 +70,7 @@ impl World {
             Ok(Peer {
                 pc: RTCPeerConnectionBuilder::new()
                     .with_setting_engine(
-                        rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
+                        rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder::new()
                             .with_candidate_pair_proposals(proposals)
                             .with_dtls_connection_id(Some(CID_LENGTH))
                             .build(),

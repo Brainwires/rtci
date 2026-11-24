@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the G3 crypto boundary: `rtc-crypto` is the only crate that names a crypto
+"""Enforce the G3 crypto boundary: `rtci-crypto` is the only crate that names a crypto
 implementation.
 
 Checks each crate's `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]` and
@@ -8,7 +8,7 @@ Checks each crate's `[dependencies]` / `[dev-dependencies]` / `[build-dependenci
 * `[features]` entries such as `ring = ["crypto/ring"]`, which are provider-feature forwarding
   and are how a standalone crate exposes backend selection.
 * `[workspace.dependencies]` in the root manifest, which declares versions on behalf of
-  `rtc-crypto`.
+  `rtci-crypto`.
 * `rand`. It is an entropy source, not a crypto implementation, appears in no public signature,
   and is a documented exception (see `docs/crypto-provider-decisions.md`).
 
@@ -75,25 +75,25 @@ def dependencies_of(manifest: Path) -> set[str]:
 
 def main() -> int:
     offenders: list[str] = []
-    for manifest_path in sorted(glob.glob("rtc-*/Cargo.toml")) + ["Cargo.toml"]:
+    for manifest_path in sorted(glob.glob("rtci-*/Cargo.toml")) + ["Cargo.toml"]:
         manifest = Path(manifest_path)
-        crate = manifest.parent.name if manifest.parent.name else "rtc"
-        if crate == "rtc-crypto":
+        crate = manifest.parent.name if manifest.parent.name else "rtci"
+        if crate == "rtci-crypto":
             continue
         found = dependencies_of(manifest) & CRYPTO_IMPLEMENTATIONS
         for dependency in sorted(found):
             offenders.append(f"{manifest_path}: {dependency}")
 
     if offenders:
-        print("Crypto implementation dependencies found outside rtc-crypto:")
+        print("Crypto implementation dependencies found outside rtci-crypto:")
         for offender in offenders:
             print(f"  {offender}")
         print()
-        print("Route the operation through rtc-crypto's provider traits instead.")
+        print("Route the operation through rtci-crypto's provider traits instead.")
         print(f"Certificate-format crates remain allowed: {sorted(CERTIFICATE_FORMAT_ALLOWED)}")
         return 1
 
-    print("Crypto boundary holds: no crypto implementation outside rtc-crypto.")
+    print("Crypto boundary holds: no crypto implementation outside rtci-crypto.")
     return 0
 
 

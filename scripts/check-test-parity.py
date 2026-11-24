@@ -108,6 +108,10 @@ def crate_of(file: str, mapping: dict[str, str] | None) -> str:
     first = file.split("/", 1)[0]
     if mapping is not None:
         return mapping.get(first, ".")
+    if first.startswith("rtci-"):
+        # The fork's crate directories since the rename to rtci (docs/rename.md); the lists
+        # and the parity table key crates by upstream's names.
+        first = "rtc-" + first[len("rtci-"):]
     return first if first.startswith("rtc-") else "."
 
 

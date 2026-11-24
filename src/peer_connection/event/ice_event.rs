@@ -26,8 +26,8 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
-/// use rtc::peer_connection::transport::RTCIceCandidateType;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::transport::RTCIceCandidateType;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {

@@ -1,0 +1,40 @@
+[package]
+name = "rtci-datachannel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+sansio = "1"
+
+[dependencies.rtci-datachannel]
+path = ".."
+
+[dependencies.rtci-sctp]
+path = "../../rtci-sctp"
+
+[dependencies.rtci-shared]
+path = "../../rtci-shared"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "message_unmarshal"
+path = "fuzz_targets/message_unmarshal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "data_channel_handle_read"
+path = "fuzz_targets/data_channel_handle_read.rs"
+test = false
+doc = false
+bench = false

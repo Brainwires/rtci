@@ -18,9 +18,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::media_stream::MediaStreamTrack;
-//! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::media_stream::MediaStreamTrack;
+//! # use rtci::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
 //! # fn example(audio_track: MediaStreamTrack) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -42,9 +42,9 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-//! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+//! # use rtci::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -66,8 +66,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -85,8 +85,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! # use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! # use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+//! # use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! # use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 //! # fn example(preferred_codecs: Vec<RTCRtpCodecParameters>) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
@@ -250,8 +250,8 @@ impl RTCRtpTransceiverInit {
     /// # Examples
     ///
     /// ```
-    /// use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-    /// use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+    /// use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+    /// use rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
     ///
     /// let init = RTCRtpTransceiverInit::default()
     ///     .with_simulcast_layers(vec![RTCRtpEncodingParameters::default(); 3]);
@@ -427,7 +427,7 @@ impl RTCRtpTransceiver<'_> {
     /// is described: by a remote description, whether its section has `a=sframe`; by a local
     /// one, false. When true the media section carries `a=sframe` (draft-ietf-avtcore-rtp-
     /// sframe-03 section 6) and the application sends and receives SFrame with
-    /// `rtc::rtp::codec::sframe` and `rtc::sframe`.
+    /// `rtci::rtp::codec::sframe` and `rtci::sframe`.
     pub fn use_sframe(&self) -> Option<bool> {
         self.peer_connection.rtp_transceivers[self.id].use_sframe()
     }

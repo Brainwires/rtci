@@ -156,26 +156,26 @@ Found by reading; none was run. Each has a reproduction idea in its file.
 Most serious:
 
 - An ICE-CONTROLLED / ICE-CONTROLLING attribute appended after MESSAGE-INTEGRITY flips the
-  agent's role (`rtc-ice/src/agent/mod.rs:1572-1663`, `rtc-stun/src/integrity.rs:146-156`).
+  agent's role (`rtci-ice/src/agent/mod.rs:1572-1663`, `rtci-stun/src/integrity.rs:146-156`).
 - Role conflict answers one request with both a 487 and a success response
-  (`rtc-ice/src/agent/mod.rs:1600`, `:1760`); a 487 from the peer is ignored (`:1674`).
+  (`rtci-ice/src/agent/mod.rs:1600`, `:1760`); a 487 from the peer is ignored (`:1674`).
 - Binding requests are dropped until the remote description is applied
-  (`rtc-ice/src/agent/mod.rs:1690`).
+  (`rtci-ice/src/agent/mod.rs:1690`).
 - The nominated pair is never given up: the agent fails instead of using another Succeeded
-  pair (`rtc-ice/src/agent/agent_selector.rs:269`).
+  pair (`rtci-ice/src/agent/agent_selector.rs:269`).
 - An ICE restart with `SettingEngine::set_ice_credentials` reuses the old credentials, so
   only one side restarts (`src/peer_connection/internal.rs:1682`).
 - Data flows without consent checks during an ICE restart
-  (`rtc-ice/src/agent/mod.rs:973-997`); consent checks run every 2 s without jitter.
-- TURN: ChannelData length wraps at 64 KiB (`rtc-turn/src/proto/chandata.rs:91`); a 437 to a
-  Refresh is swallowed (`rtc-turn/src/client/relay.rs:533`); a lost release revives the
+  (`rtci-ice/src/agent/mod.rs:973-997`); consent checks run every 2 s without jitter.
+- TURN: ChannelData length wraps at 64 KiB (`rtci-turn/src/proto/chandata.rs:91`); a 437 to a
+  Refresh is swallowed (`rtci-turn/src/client/relay.rs:533`); a lost release revives the
   allocation (`relay.rs:307`); channel bindings outlive their allocation
-  (`rtc-turn/src/client/mod.rs:186`); the first Allocate response is treated as a 401
+  (`rtci-turn/src/client/mod.rs:186`); the first Allocate response is treated as a 401
   whatever it is (`mod.rs:748`).
 - mDNS: a non-address record hides every record after it in a response
-  (`rtc-mdns/src/proto/mod.rs:723`); only four answers are read (`:722`); query retries
+  (`rtci-mdns/src/proto/mod.rs:723`); only four answers are read (`:722`); query retries
   never back off and, without a timeout, never end (`:1064`).
-- `rtc-stun::Client` truncates responses over 120 bytes (`rtc-stun/src/client.rs:203`,
+- `rtci-stun::Client` truncates responses over 120 bytes (`rtci-stun/src/client.rs:203`,
   `message.rs:432`) and accepts any message with a known transaction id as the response.
 - One unparsable remote `a=candidate` fails `set_remote_description`
   (`src/peer_connection/sdp/mod.rs:1899`); remote candidates are accepted after

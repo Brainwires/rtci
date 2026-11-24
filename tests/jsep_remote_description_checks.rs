@@ -4,7 +4,7 @@
 mod jsep_common;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 use std::time::Instant;
 
 /// A remote offer with one video section whose formats are `formats` and whose format
@@ -12,7 +12,7 @@ use std::time::Instant;
 fn video_offer(
     formats: &str,
     lines: &str,
-) -> Result<RTCSessionDescription, rtc::shared::error::Error> {
+) -> Result<RTCSessionDescription, rtci::shared::error::Error> {
     RTCSessionDescription::offer(crlf(&format!(
         "{SESSION}a=group:BUNDLE 0\n\
          m=video 9 UDP/TLS/RTP/SAVPF {formats}\n{TRANSPORT}a=mid:0\na=sendrecv\n{lines}"
@@ -80,7 +80,7 @@ fn candidate_lines_with_a_domain_name_or_unknown_tokens_are_ignored() -> TestRes
 /// group are not.
 #[test]
 fn a_mid_in_two_bundle_groups_refuses_the_description() -> TestResult {
-    let offer = |groups: &str| -> Result<RTCSessionDescription, rtc::shared::error::Error> {
+    let offer = |groups: &str| -> Result<RTCSessionDescription, rtci::shared::error::Error> {
         RTCSessionDescription::offer(crlf(&format!(
             "{SESSION}{groups}\
              m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}a=mid:0\na=sendrecv\na=rtpmap:96 VP8/90000\n\
@@ -141,7 +141,7 @@ fn a_subsequent_offer_without_a_restart_keeps_the_ice_attributes() -> TestResult
 fn two_bundled_video_sections(
     first: (&str, &str),
     second: (&str, &str),
-) -> Result<RTCSessionDescription, rtc::shared::error::Error> {
+) -> Result<RTCSessionDescription, rtci::shared::error::Error> {
     RTCSessionDescription::offer(crlf(&format!(
         "{SESSION}a=group:BUNDLE 0 1\n\
          m=video 9 UDP/TLS/RTP/SAVPF {}\n{TRANSPORT}a=mid:0\na=sendrecv\n{}\

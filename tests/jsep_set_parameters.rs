@@ -5,15 +5,15 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, video_track, vp8};
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::rtp_transceiver::RTCRtpTransceiverId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::rtp_transceiver::RTCRtpTransceiverId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::shared::error::Error;
+use rtci::shared::error::Error;
 use std::time::Instant;
 
 #[test]

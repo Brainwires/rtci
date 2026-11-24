@@ -23,18 +23,18 @@ mod common;
 mod testenv;
 
 use bytes::BytesMut;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     RTCIceCandidateInit, RTCIceCandidateType, RTCIceServer, RTCIceServerTransportProtocol,
 };
-use rtc::peer_connection::turn_tls::TurnTlsConfig;
-use rtc::sansio::Protocol;
+use rtci::peer_connection::turn_tls::TurnTlsConfig;
+use rtci::sansio::Protocol;
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -124,7 +124,8 @@ fn peer(
             ..Default::default()
         });
         if kind == PeerKind::RelayTcpOnly {
-            settings = settings.with_network_types(vec![rtc::ice::network_type::NetworkType::Tcp4]);
+            settings =
+                settings.with_network_types(vec![rtci::ice::network_type::NetworkType::Tcp4]);
         }
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(configuration)
@@ -140,7 +141,7 @@ fn peer(
                 .unwrap();
             let _ = tx.send(Signal::Description(serde_json::to_string(&offer).unwrap()));
         }
-        let add_host = |pc: &mut rtc::peer_connection::RTCPeerConnection| {
+        let add_host = |pc: &mut rtci::peer_connection::RTCPeerConnection| {
             if let Some(local) = socket.as_ref().and_then(|s| s.local_addr().ok()) {
                 pc.add_local_candidate(RTCIceCandidateInit {
                     candidate: format!(
@@ -208,12 +209,12 @@ fn peer(
                         out.only_relay = false;
                     }
                     let local = s.local_addr()?;
-                    let _ = pc.handle_read(rtc::shared::TaggedBytesMut {
+                    let _ = pc.handle_read(rtci::shared::TaggedBytesMut {
                         now: Instant::now(),
-                        transport: rtc::shared::TransportContext {
+                        transport: rtci::shared::TransportContext {
                             local_addr: local,
                             peer_addr: from,
-                            transport_protocol: rtc::shared::TransportProtocol::UDP,
+                            transport_protocol: rtci::shared::TransportProtocol::UDP,
                             ecn: None,
                         },
                         message: BytesMut::from(&buf[..n]),

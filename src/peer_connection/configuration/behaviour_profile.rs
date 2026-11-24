@@ -30,11 +30,11 @@
 //! # One entry point
 //!
 //! ```
-//! use rtc::interceptor::Registry;
-//! use rtc::peer_connection::configuration::BehaviourProfile;
-//! use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::interceptor::Registry;
+//! use rtci::peer_connection::configuration::BehaviourProfile;
+//! use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let profile = BehaviourProfile::Chrome;
@@ -57,7 +57,7 @@
 //! With the feature on, [`BehaviourProfile::default()`] is [`BehaviourProfile::Chrome`], and so
 //! is every `Default` / `new()` of the three objects above. Cargo unifies features across a
 //! dependency graph: **one crate in a build that turns the feature on changes the defaults of
-//! every user of `rtc` in that build**, including libraries that never asked for it. Prefer the
+//! every user of `rtci` in that build**, including libraries that never asked for it. Prefer the
 //! explicit [`SettingEngineBuilder::with_behaviour_profile`] call; read
 //! [`BehaviourProfile::compiled_default`] to see which default a build has.
 //!
@@ -112,7 +112,7 @@ impl BehaviourProfile {
         [Self::Rfc, Self::Chrome, Self::StrictRfc, Self::Performance];
 
     /// The profile `Default` gives in this build: [`BehaviourProfile::Chrome`] when the
-    /// `chrome-defaults` cargo feature of `rtc` is on anywhere in the build's dependency graph,
+    /// `chrome-defaults` cargo feature of `rtci` is on anywhere in the build's dependency graph,
     /// [`BehaviourProfile::Performance`] when `performance-defaults` is (and `chrome-defaults`
     /// is not), [`BehaviourProfile::Rfc`] otherwise.
     ///
@@ -153,7 +153,7 @@ impl BehaviourProfile {
 /// compiler say so.
 #[cfg(all(feature = "chrome-defaults", feature = "performance-defaults"))]
 #[deprecated(
-    note = "both the `chrome-defaults` and the `performance-defaults` features of `rtc` are on: \
+    note = "both the `chrome-defaults` and the `performance-defaults` features of `rtci` are on: \
             the default behaviour profile is `Chrome`, `performance-defaults` has no effect"
 )]
 const BOTH_DEFAULT_PROFILE_FEATURES: () = ();
@@ -289,7 +289,7 @@ fn srtp_profiles_shown(profiles: &[SrtpProtectionProfile]) -> Shown {
 /// The SOFTWARE text of the ICE agent's and the TURN clients' STUN messages.
 fn ice_software_shown(software: &Option<Option<String>>) -> Shown {
     Shown(match software {
-        None => "rtc-ice / rtc-turn and version".to_owned(),
+        None => "rtci-ice / rtci-turn and version".to_owned(),
         Some(None) => "none".to_owned(),
         Some(Some(text)) if text.is_empty() => "none".to_owned(),
         Some(Some(text)) => format!("{text:?}"),
@@ -455,9 +455,9 @@ governed_behaviours! {
         id: "ice.software-attribute",
         setting: "SettingEngineBuilder::with_ice_software",
         clause: "RFC 8489 6.1, 6.3.1.1, 16.1.2",
-        rfc: None => "rtc-ice / rtc-turn and version",
+        rfc: None => "rtci-ice / rtci-turn and version",
         chrome: Some(None) => "none",
-        strict_rfc: None => "rtc-ice / rtc-turn and version",
+        strict_rfc: None => "rtci-ice / rtci-turn and version",
         chrome_source: "libwebrtc @ a222406d: no SOFTWARE attribute in any STUN message: p2p/base/connection.cc Connection::BuildPingRequest (1122-1199: USERNAME, GOOG-NETWORK-INFO, ICE-CONTROLLING / -CONTROLLED, USE-CANDIDATE or NOMINATION, PRIORITY, MESSAGE-INTEGRITY, FINGERPRINT) and Connection::SendStunBindingResponse (771-847); p2p/base/turn_port.cc TurnAllocateRequest (1513-1532), TurnRefreshRequest (1709-1725), TurnCreatePermissionRequest (1793-1816), TurnChannelBindRequest (1864-1889) and TurnPort::AddRequestAuthInfo (1237-1261); grep for SOFTWARE in p2p/ finds none. Covers the ICE checks and responses and the TURN requests; the engine's server-reflexive Binding requests carry none in every profile (p2p/base/stun_port.cc StunBindingRequest, 63-75, none either)",
         evidence: Source,
         apply_setting: |b: SettingEngineBuilder, v| b.ice_software_choice(v),
@@ -859,7 +859,7 @@ governed_behaviours! {
         chrome: 64_000 => "64000",
         strict_rfc: 64_000 => "64000",
         performance: 16_000 => "16000",
-        performance_note: "RFC 3550 6.2 takes the session bandwidth as what the session expects; the media measured both ways is used down to 16 kbit/s instead of 64 kbit/s, so a 24 kbit/s call's RTCP is 5% of 24 kbit/s, not of 64. Alone (rtc-interceptor tests/rtcp_session_timing.rs::the_minimum_session_bandwidth_lets_rtcp_follow_low_media): a 27 kbit/s sender sends 0.3 to 0.6 times the default's regular reports. In the profile it sizes the budget of rtcp.congestion-feedback-in-budget",
+        performance_note: "RFC 3550 6.2 takes the session bandwidth as what the session expects; the media measured both ways is used down to 16 kbit/s instead of 64 kbit/s, so a 24 kbit/s call's RTCP is 5% of 24 kbit/s, not of 64. Alone (rtci-interceptor tests/rtcp_session_timing.rs::the_minimum_session_bandwidth_lets_rtcp_follow_low_media): a 27 kbit/s sender sends 0.3 to 0.6 times the default's regular reports. In the profile it sizes the budget of rtcp.congestion-feedback-in-budget",
         chrome_source: "libwebrtc modules/rtp_rtcp/source/rtcp_sender.cc::RTCPSender::ComputeTimeUntilNextReport @ a222406d: the report interval is fixed (1 s video, 5 s audio, min(360 s / kbit/s, 1 s) above 72 kbit/s), no RTCP bandwidth is computed, so there is no floor to differ: the engine's value stands",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.rtcp_minimum_session_bandwidth = v,
@@ -873,7 +873,7 @@ governed_behaviours! {
         chrome: 0.05 => "0.05",
         strict_rfc: 0.05 => "0.05",
         performance: 0.025 => "0.025",
-        performance_note: "RFC 8888 4 leaves the interval to \"the acceptable feedback overhead\"; half of the 5% goes to the feedback, the rest to the reports. Measured: 100 kbit/s audio and video 12.2 -> 4.3 feedback packets/s (longest gap 137 -> 399 ms); 24 kbit/s audio 4.0 -> 2.0/s (250 -> 500 ms); 1 Mbit/s unchanged (20/s, the 50 ms floor). Cost (rtc-interceptor tests/gcc_feedback_rate.rs, 500 ms against 250 ms): Gcc settles in 0.5 s either way on a 150 kbit/s path, 6.0 s against 5.5 s on a 500 kbit/s one; a Gcc sender with probing fed by a Performance receiver reaches 2 Mbit/s from 300 kbit/s in 0.62 s (default 0.49 s; tests/congestion_feedback_rate.rs::a_gcc_sender_fed_by_a_performance_receiver_ramps_within_a_second)",
+        performance_note: "RFC 8888 4 leaves the interval to \"the acceptable feedback overhead\"; half of the 5% goes to the feedback, the rest to the reports. Measured: 100 kbit/s audio and video 12.2 -> 4.3 feedback packets/s (longest gap 137 -> 399 ms); 24 kbit/s audio 4.0 -> 2.0/s (250 -> 500 ms); 1 Mbit/s unchanged (20/s, the 50 ms floor). Cost (rtci-interceptor tests/gcc_feedback_rate.rs, 500 ms against 250 ms): Gcc settles in 0.5 s either way on a 150 kbit/s path, 6.0 s against 5.5 s on a 500 kbit/s one; a Gcc sender with probing fed by a Performance receiver reaches 2 Mbit/s from 300 kbit/s in 0.62 s (default 0.49 s; tests/congestion_feedback_rate.rs::a_gcc_sender_fed_by_a_performance_receiver_ramps_within_a_second)",
         chrome_source: "libwebrtc modules/remote_bitrate_estimator/transport_sequence_number_feedback_generator.cc::OnSendBandwidthEstimateChanged @ a222406d: \"Let TWCC reports occupy 5% of total bandwidth\", twcc_bitrate = 0.05 * estimate",
         evidence: Source,
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.congestion_feedback_share = v,
@@ -1560,7 +1560,7 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
     NotExpressible {
         behaviour: "ICE connectivity check retransmission",
         chrome: "no retransmission: each check is sent once and given kConnectionResponseTimeout 60 s (p2p/base/connection.cc::ConnectionRequest::OnSent / resend_delay @ a222406d); the channel sends a new check every kWeakPingInterval 48 ms while no pair is writable, a pair with no answer being unreliable after 5 checks and 5 s (Connection::UpdateState). Only requests to STUN / TURN servers retransmit: STUN_INITIAL_RTO 250 ms doubling to STUN_MAX_RTO 8 s, 9 sends (p2p/base/stun_request.cc)",
-        needed: "a check scheduler in rtc-ice that replaces transactions by new checks; the engine's checks are RFC 8489 transactions with RTO at least 500 ms (RFC 8445 14.3, a MUST: \"RTO = MAX (500ms, ...)\")",
+        needed: "a check scheduler in rtci-ice that replaces transactions by new checks; the engine's checks are RFC 8489 transactions with RTO at least 500 ms (RFC 8445 14.3, a MUST: \"RTO = MAX (500ms, ...)\")",
     },
     NotExpressible {
         behaviour: "Consent / keepalive pings on the selected pair",
@@ -1570,7 +1570,7 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
     NotExpressible {
         behaviour: "Candidate type preferences",
         chrome: "host 126, prflx 110, srflx 100, host TCP 90, prflx TCP 80, relayed UDP 3 / TCP 1 / TLS 0 (p2p/base/p2p_constants.h IcePriorityValue @ a222406d)",
-        needed: "a candidate-priority policy in rtc-ice; the engine takes RFC 8445 5.1.2.2's (host 126, prflx 110, srflx 100, relayed 0) and for TCP the UDP preference less one (RFC 6544 4.2)",
+        needed: "a candidate-priority policy in rtci-ice; the engine takes RFC 8445 5.1.2.2's (host 126, prflx 110, srflx 100, relayed 0) and for TCP the UDP preference less one (RFC 6544 4.2)",
     },
     NotExpressible {
         behaviour: "Payload type numbering and codec order",
@@ -1605,7 +1605,7 @@ pub(crate) static NOT_EXPRESSIBLE: &[NotExpressible] = &[
     NotExpressible {
         behaviour: "Delay-based estimator filter",
         chrome: "a trendline filter: window 20, smoothing 0.9, threshold gain 4, adaptive threshold gains k_up 0.0087 (outside) / k_down 0.039 (inside) (modules/congestion_controller/goog_cc/trendline_estimator.cc / .h @ a222406d)",
-        needed: "a trendline estimator in rtc-interceptor; the engine's adaptive threshold takes draft-ietf-rmcat-gcc-02 5.4's gains, K_u 0.01 / K_d 0.00018",
+        needed: "a trendline estimator in rtci-interceptor; the engine's adaptive threshold takes draft-ietf-rmcat-gcc-02 5.4's gains, K_u 0.01 / K_d 0.00018",
     },
     NotExpressible {
         behaviour: "SCTP INIT retransmissions",

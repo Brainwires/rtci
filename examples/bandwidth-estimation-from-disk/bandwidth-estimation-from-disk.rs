@@ -23,32 +23,32 @@ use bytes::BytesMut;
 use clap::Parser;
 use env_logger::Target;
 use log::{error, trace};
-use rtc::interceptor::{BandwidthEstimator, EstimatorStats, Gcc, PacketReport, Registry};
-use rtc::media::io::ivf_reader::IVFReader;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::{BandwidthEstimator, EstimatorStats, Gcc, PacketReport, Registry};
+use rtci::media::io::ivf_reader::IVFReader;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp;
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp;
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, SSRC};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp_transceiver::{RTCRtpSenderId, SSRC};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
@@ -648,7 +648,7 @@ async fn stream_video(
 }
 
 /// A reset closure for [`IVFReader::reset_reader`], opening `file_name` past its header.
-fn reset_to(video_dir: &str, file_name: &str) -> rtc::media::io::ResetFn<BufReader<File>> {
+fn reset_to(video_dir: &str, file_name: &str) -> rtci::media::io::ResetFn<BufReader<File>> {
     let video_dir = video_dir.to_owned();
     let file_name = file_name.to_owned();
     Box::new(move |_bytes_read| open_rendition(&video_dir, &file_name).expect("reopen rendition"))
@@ -666,7 +666,7 @@ fn switch_quality_level(
     current_quality: usize,
     new_quality: usize,
     current_timestamp: u64,
-) -> Option<(BytesMut, rtc::media::io::ivf_reader::IVFFrameHeader)> {
+) -> Option<(BytesMut, rtci::media::io::ivf_reader::IVFFrameHeader)> {
     println!(
         "Switching from {} to {}",
         QUALITY_LEVELS[current_quality].0, QUALITY_LEVELS[new_quality].0

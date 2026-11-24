@@ -10,8 +10,8 @@
 mod common;
 mod testenv;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use std::time::{Duration, Instant};
 use testenv::{Env, EnvPeer, Gather, negotiate_with, pump, with_wrong_fingerprint};
 
@@ -51,7 +51,7 @@ fn wrong_fingerprint_fails(tamper_offer: bool) {
             matches!(
                 e,
                 RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
-                    rtc::peer_connection::state::RTCPeerConnectionState::Connected
+                    rtci::peer_connection::state::RTCPeerConnectionState::Connected
                 )
             )
         })

@@ -1,13 +1,13 @@
-//! Two peer connections over loopback TCP, through the reference driver (`rtc-stream-driver`),
+//! Two peer connections over loopback TCP, through the reference driver (`rtci-stream-driver`),
 //! with a data channel: the smallest complete program that runs the engine's stream half.
 //!
 //! What is the engine's and what is the driver's:
 //!
-//! - **Engine** (`rtc`): decides everything. It gathers the ICE-TCP candidates (RFC 6544) for
+//! - **Engine** (`rtci`): decides everything. It gathers the ICE-TCP candidates (RFC 6544) for
 //!   the UDP host address the application gives it, asks for listeners and connections by id
 //!   (`poll_stream_command`), frames every packet with RFC 4571 (`poll_stream_transmit`),
 //!   runs ICE, DTLS, SCTP and the data channel over them and closes what ICE no longer needs.
-//! - **Driver** (`rtc_stream_driver::StreamDriver`, tokio): owns the sockets and nothing else.
+//! - **Driver** (`rtci_stream_driver::StreamDriver`, tokio): owns the sockets and nothing else.
 //!   It binds, connects, accepts, reads and writes when told and reports what happened
 //!   (`DriverInput`), which the loop hands back to the engine.
 //! - **Application** (this file): signalling (here, passing descriptions and candidates
@@ -18,12 +18,12 @@
 //! exits 0 once 50 messages crossed the data channel in order, 1 after 30 s without.
 
 use bytes::BytesMut;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
 use std::time::{Duration, Instant};
 use stream_driver::{DriverInput, StreamDriver};
 
@@ -36,7 +36,7 @@ struct Peer {
     /// Candidates to trickle to the other side.
     outbox: Vec<RTCIceCandidateInit>,
     received: Vec<Vec<u8>>,
-    open: Option<rtc::data_channel::RTCDataChannelId>,
+    open: Option<rtci::data_channel::RTCDataChannelId>,
 }
 
 impl Peer {

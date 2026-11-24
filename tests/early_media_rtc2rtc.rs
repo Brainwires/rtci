@@ -1,5 +1,5 @@
 //! Media that arrives before the answer (RFC 3264 section 5.1; RFC 9429 sections 4.1.11, 5.9
-//! and 5.11), between two `rtc` peers on an in-memory network and a virtual clock.
+//! and 5.11), between two `rtci` peers on an in-memory network and a virtual clock.
 //!
 //! The offerer "MUST be prepared to receive media for any recvonly streams described by that
 //! offer" and for sendrecv ones "Once the offerer has sent the offer": the answerer sends as
@@ -14,22 +14,22 @@ mod dtls_sdp_common;
 use anyhow::Result;
 use bytes::Bytes;
 use dtls_sdp_common::{Peer, World};
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCSignalingState;
-use rtc::rtp_transceiver::rtp_receiver::RTCEncodedFrameMetadataKind;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCSignalingState;
+use rtci::rtp_transceiver::rtp_receiver::RTCEncodedFrameMetadataKind;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use std::time::{Duration, Instant};
 
 const SSRC: u32 = 0x00ea_7101;
@@ -153,8 +153,8 @@ fn send(
             .expect("the sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type,
                         sequence_number,
@@ -487,7 +487,7 @@ fn a_format_a_later_offer_adds_is_received_as_that_format_before_the_answer() ->
         .pc
         .rtp_receiver(RTCRtpReceiverId::from(id))
         .expect("the receiver")
-        .encoded_frame_metadata(&[rtc::rtp::Packet {
+        .encoded_frame_metadata(&[rtci::rtp::Packet {
             header,
             payload: Bytes::from(vec![0x10u8; 100]),
         }])?;

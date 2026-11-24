@@ -1,4 +1,4 @@
-# The webrtc-rs-rtc test environment: Rust, real network tooling (network namespaces, iptables
+# The rtci test environment: Rust, real network tooling (network namespaces, iptables
 # NAT, ipset, netem), a TURN/STUN server (coturn), synthetic media (GStreamer), headless
 # Chromium, Firefox and WebKit (Playwright), and what the non-browser interop peers
 # (peers/) build from. Built and run by scripts/test-env/run.sh.

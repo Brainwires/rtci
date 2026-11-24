@@ -24,19 +24,19 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry as RtcRegistry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors as webrtc_register_default_interceptors;
@@ -178,7 +178,7 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
 
     // Set remote description (offer) on RTC - use offer without candidates (trickle ICE)
     let offer_sdp = offer.sdp.clone();
-    let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp)?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp)?;
     rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
     log::info!("RTC set remote description (offer with video)");
 
@@ -236,7 +236,7 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
                 && line.contains(" udp ")
             {
                 let candidate_str = line.strip_prefix("a=").unwrap_or(line);
-                let remote_candidate = rtc::peer_connection::transport::RTCIceCandidateInit {
+                let remote_candidate = rtci::peer_connection::transport::RTCIceCandidateInit {
                     candidate: candidate_str.to_string(),
                     sdp_mid: Some("0".to_string()),
                     sdp_mline_index: Some(0),
@@ -467,7 +467,8 @@ a=ssrc:22222 cname:test
     let mut rtc_pc = create_rtc_peer_config_video_only()?;
 
     // Set remote description (offer with video + audio)
-    let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp.to_string())?;
+    let rtc_offer =
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp.to_string())?;
     rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
 
     // Add a dummy local candidate
@@ -579,7 +580,8 @@ a=mid:2
     let mut rtc_pc = create_rtc_peer_config_video_only()?;
 
     // Set remote description (offer with pre-rejected audio and application m-lines)
-    let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp.to_string())?;
+    let rtc_offer =
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp.to_string())?;
     rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
 
     // Add a dummy local candidate

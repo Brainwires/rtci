@@ -11,19 +11,19 @@ mod common;
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AttributedPacket, Interceptor, Packet, RTCPFeedback, RTPHeaderExtension, Registry, StreamInfo,
     TaggedPacket,
 };
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_twcc, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtp::header::Header;
-use rtc::sansio::Protocol;
-use rtc::sdp::extmap::TRANSPORT_CC_URI;
-use rtc::shared::TransportContext;
-use rtc::shared::marshal::Unmarshal;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtp::header::Header;
+use rtci::sansio::Protocol;
+use rtci::sdp::extmap::TRANSPORT_CC_URI;
+use rtci::shared::TransportContext;
+use rtci::shared::marshal::Unmarshal;
 use std::time::{Duration, Instant};
 
 const LOCAL_SSRC: u32 = 0x1111_1111;
@@ -130,13 +130,13 @@ fuzz_target!(|data: &[u8]| {
         match op % 6 {
             // Inbound RTCP, as parsed from what the peer sent.
             0 | 1 => {
-                if let Ok(packets) = rtc::rtcp::packet::unmarshal(&mut &arg[..]) {
+                if let Ok(packets) = rtci::rtcp::packet::unmarshal(&mut &arg[..]) {
                     let _ = chain.handle_read(tagged(now, Packet::Rtcp(packets)));
                 }
             }
             // Inbound RTP: parsed from the input, on the remote stream unless the op says not.
             2 => {
-                if let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
+                if let Ok(mut packet) = rtci::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
                     if op & 0x80 == 0 {
                         packet.header.ssrc = REMOTE_SSRC;
                     }
@@ -146,7 +146,7 @@ fuzz_target!(|data: &[u8]| {
             // Outbound RTP on the local stream, so the send history has something in it.
             3 => {
                 local_seq = local_seq.wrapping_add(1 + u16::from(byte(arg, 0) & 0x03));
-                let packet = rtc::rtp::packet::Packet {
+                let packet = rtci::rtp::packet::Packet {
                     header: Header {
                         version: 2,
                         marker: byte(arg, 1) & 0x01 != 0,

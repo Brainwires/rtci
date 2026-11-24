@@ -5,12 +5,12 @@
 /// The interop tests drive the published `webrtc` crate alongside this one, and its `dtls 0.13`
 /// dependency asks rustls to infer the provider from crate features. That inference only works
 /// when exactly one of rustls' `ring`/`aws-lc-rs` features is enabled — but in a test build both
-/// are: `dtls 0.13` turns on `rustls/ring` while `rtc` turns on whichever its own feature selects.
+/// are: `dtls 0.13` turns on `rustls/ring` while `rtci` turns on whichever its own feature selects.
 /// Cargo unifies the two, rustls finds an ambiguity, and the old crate panics.
 ///
-/// Naming a provider here resolves it for that crate. `rtc` itself no longer consults this
-/// default — it passes its provider explicitly (see `rtc_dtls::config`) — so which one we install
-/// only has to satisfy the old code. `ring` is always available in a test build: either `rtc`
+/// Naming a provider here resolves it for that crate. `rtci` itself no longer consults this
+/// default — it passes its provider explicitly (see `rtci_dtls::config`) — so which one we install
+/// only has to satisfy the old code. `ring` is always available in a test build: either `rtci`
 /// selected it, or `dtls 0.13` pulled it in.
 ///
 /// Idempotent, and safe to call from every test: `install_default` returns `Err` once a provider
@@ -20,11 +20,11 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// The `webrtc` crate's `SettingEngine` for an upstream peer that talks to an `rtc` peer whose
+/// The `webrtc` crate's `SettingEngine` for an upstream peer that talks to an `rtci` peer whose
 /// only host candidate is on `127.0.0.1`.
 ///
 /// Upstream leaves loopback addresses out of gathering by default, so its host candidates are the
-/// machine's LAN addresses only. Whether the loopback-bound `rtc` socket can reach those depends
+/// machine's LAN addresses only. Whether the loopback-bound `rtci` socket can reach those depends
 /// on the OS: Linux routes `127.0.0.1` → own LAN address locally, macOS refuses it
 /// (`EADDRNOTAVAIL`) and Windows refuses it (`WSAENETUNREACH`, os error 10051). Where it is refused
 /// the connection hangs on whether the upstream peer's checks to `127.0.0.1` arrive first and

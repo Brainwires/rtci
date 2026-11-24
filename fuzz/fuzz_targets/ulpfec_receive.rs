@@ -8,13 +8,13 @@
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{
+use rtci::interceptor::{
     Attribute, AttributedPacket, Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket,
     ULPFEC_MAX_HELD_FEC, ULPFEC_MEDIA_WINDOW, UlpfecDecoder, UlpfecReceiveBuilder, UlpfecRepair,
 };
-use rtc::rtp::header::Header;
-use rtc::shared::TransportContext;
-use rtc::shared::marshal::Unmarshal;
+use rtci::rtp::header::Header;
+use rtci::shared::TransportContext;
+use rtci::shared::marshal::Unmarshal;
 use std::time::Instant;
 
 const MEDIA_SSRC: u32 = 0x1111_1111;
@@ -52,7 +52,7 @@ fn info(separate: bool) -> StreamInfo {
 fn feed(
     chain: &mut impl Interceptor,
     now: Instant,
-    packet: &rtc::rtp::packet::Packet,
+    packet: &rtci::rtp::packet::Packet,
     binds_fec_stream: bool,
 ) {
     let foreign = packet.header.ssrc != MEDIA_SSRC && !binds_fec_stream;
@@ -129,7 +129,7 @@ fuzz_target!(|data: &[u8]| {
         } else {
             sequence_number.wrapping_add(u16::from(step & 0x07))
         };
-        let mut packet = rtc::rtp::packet::Packet {
+        let mut packet = rtci::rtp::packet::Packet {
             header: Header {
                 version: 2,
                 marker: op & 0x40 != 0,
@@ -162,7 +162,7 @@ fuzz_target!(|data: &[u8]| {
             }
             // A whole RTP packet from the input, on the media stream.
             _ => {
-                if let Ok(mut parsed) = rtc::rtp::packet::Packet::unmarshal(&mut &payload[..]) {
+                if let Ok(mut parsed) = rtci::rtp::packet::Packet::unmarshal(&mut &payload[..]) {
                     parsed.header.ssrc = MEDIA_SSRC;
                     packet = parsed;
                 }

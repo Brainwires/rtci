@@ -7,30 +7,30 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::codec::dependency_descriptor::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::codec::dependency_descriptor::{
     DEPENDENCY_DESCRIPTOR_URI, DecodeTargetIndication, DependencyDescriptorWriter,
     FrameDependencyStructure, FrameDependencyTemplate, RenderResolution,
 };
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_receiver::{RTCEncodedFrameMetadataKind, RTCEncodedVideoFrameType};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_receiver::{RTCEncodedFrameMetadataKind, RTCEncodedVideoFrameType};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,7 @@ struct Peer {
     connected: bool,
     states: Vec<RTCPeerConnectionState>,
     /// The RTP packets `poll_read` yielded.
-    read_rtp: Vec<rtc::rtp::Packet>,
+    read_rtp: Vec<rtci::rtp::Packet>,
     /// The FIR entries (SSRC, sequence number) of the RTCP packets `poll_read` yielded.
     read_fir: Vec<(u32, u8)>,
     /// The events other than connection state changes.
@@ -56,15 +56,15 @@ impl Peer {
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
         media_engine.register_header_extension(
-            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
-                uri: rtc::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+            rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtci::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
             },
             RtpCodecKind::Video,
             None,
         )?;
         media_engine.register_header_extension(
-            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
-                uri: rtc::rtp::extension::CORRUPTION_DETECTION_URI.to_owned(),
+            rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtci::rtp::extension::CORRUPTION_DETECTION_URI.to_owned(),
             },
             RtpCodecKind::Video,
             None,
@@ -175,7 +175,7 @@ impl World {
                     RTCMessage::RtcpPacket(_, packets) => {
                         for packet in packets {
                             if let Some(fir) = packet.as_any().downcast_ref::<
-                                rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
+                                rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
                             >() {
                                 peer.read_fir
                                     .extend(fir.fir.iter().map(|e| (e.ssrc, e.sequence_number)));
@@ -259,7 +259,7 @@ impl World {
             // asks for Cryptex (whose default policy, "negotiate", would encrypt them).
             peer.pc
                 .set_rtp_header_encryption_policy(
-                    rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
+                    rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
                 )
                 .expect("before any description");
             prepare(&mut peer.pc);
@@ -349,7 +349,7 @@ impl World {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header,
                     payload: Bytes::from(vec![0x10u8; 100]),
                 },
@@ -382,7 +382,7 @@ fn sender_stream(world: &mut World, sender: RTCRtpSenderId, uri: &str) -> (u32, 
 
 fn receiver_metadata(
     world: &mut World,
-    packets: &[rtc::rtp::Packet],
+    packets: &[rtci::rtp::Packet],
 ) -> Result<RTCEncodedFrameMetadataKind, Error> {
     let receiver = world.peers[1]
         .pc
@@ -397,7 +397,7 @@ fn receiver_metadata(
 }
 
 /// The packets the second peer read with RTP timestamp `timestamp`.
-fn read_frame(world: &World, timestamp: u32) -> Vec<rtc::rtp::Packet> {
+fn read_frame(world: &World, timestamp: u32) -> Vec<rtci::rtp::Packet> {
     world.peers[1]
         .read_rtp
         .iter()
@@ -481,7 +481,7 @@ fn received_video_frames_carry_their_metadata() -> Result<()> {
         header
             .set_extension_upgrading(dd_id, dd)
             .expect("an element");
-        rtc::rtp::Packet { header, payload }
+        rtci::rtp::Packet { header, payload }
     };
 
     let sent_at = world.now;
@@ -613,7 +613,7 @@ fn received_audio_frames_carry_their_sequence_number_and_level() -> Result<()> {
                 .set_extension_upgrading(level_id, Bytes::from(vec![0x80 | level]))
                 .expect("an element");
         }
-        rtc::rtp::Packet {
+        rtci::rtp::Packet {
             header,
             payload: Bytes::from(vec![0x10u8; 80]),
         }
@@ -746,7 +746,7 @@ fn a_key_frame_request_reaches_the_sender_as_a_fir_and_an_event() -> Result<()> 
         .expect("sender")
         .write_rtp(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header: Header {
                     version: 2,
                     payload_type: pt,
@@ -808,8 +808,8 @@ fn an_audio_receiver_cannot_request_a_key_frame() -> Result<()> {
 /// one RTP timestamp for the picture.
 #[test]
 fn each_spatial_layer_of_an_svc_picture_is_its_own_frame() -> Result<()> {
-    use rtc::rtp::codec::vp9::{Vp9FrameInfo, Vp9Packet, Vp9Payloader, Vp9ScalabilityStructure};
-    use rtc::rtp::packetizer::Depacketizer;
+    use rtci::rtp::codec::vp9::{Vp9FrameInfo, Vp9Packet, Vp9Payloader, Vp9ScalabilityStructure};
+    use rtci::rtp::packetizer::Depacketizer;
     let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
     let (ssrc, _, _) = sender_stream(&mut world, sender, DEPENDENCY_DESCRIPTOR_URI);
     let vp9_pt = {
@@ -853,7 +853,7 @@ fn each_spatial_layer_of_an_svc_picture_is_its_own_frame() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: vp9_pt,
@@ -872,7 +872,7 @@ fn each_spatial_layer_of_an_svc_picture_is_its_own_frame() -> Result<()> {
 
     let picture = read_frame(&world, 45_000);
     assert_eq!(picture.len(), count, "the picture's packets were read");
-    let layer_of = |packet: &rtc::rtp::Packet| {
+    let layer_of = |packet: &rtci::rtp::Packet| {
         let mut descriptor = Vp9Packet::default();
         descriptor
             .depacketize(&packet.payload)
@@ -917,7 +917,7 @@ fn each_spatial_layer_of_an_svc_picture_is_its_own_frame() -> Result<()> {
 #[test]
 fn a_frames_remote_capture_time_is_on_the_receivers_clock() -> Result<()> {
     let (mut world, sender) = World::connected(RtpCodecKind::Video, |sdp| sdp)?;
-    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtc::rtp::extension::SDES_MID_URI);
+    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtci::rtp::extension::SDES_MID_URI);
     let start = world.now;
     let base = 90_000u32;
     let mut written = vec![];
@@ -931,7 +931,7 @@ fn a_frames_remote_capture_time_is_on_the_receivers_clock() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: pt,
@@ -994,13 +994,13 @@ fn the_corruption_detection_extension_makes_the_corruption_measurements_present(
     let (ssrc, _, id) = sender_stream(
         &mut world,
         sender,
-        rtc::rtp::extension::CORRUPTION_DETECTION_URI,
+        rtci::rtp::extension::CORRUPTION_DETECTION_URI,
     );
     let inbound = |world: &mut World| {
         let now = world.now;
         world.peers[1]
             .pc
-            .get_stats(now, rtc::statistics::StatsSelector::None)
+            .get_stats(now, rtci::statistics::StatsSelector::None)
             .inbound_rtp_streams()
             .find(|s| s.received_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
             .map(|s| {
@@ -1052,7 +1052,7 @@ fn the_corruption_detection_extension_makes_the_corruption_measurements_present(
 
     assert!(world.peers[1].pc.update_decoder_stats(
         ssrc,
-        rtc::statistics::DecoderStatsUpdate {
+        rtci::statistics::DecoderStatsUpdate {
             corruption_measurements: Some(1),
             total_corruption_probability: Some(0.25),
             total_squared_corruption_probability: Some(0.0625),
@@ -1132,7 +1132,7 @@ fn send_vp8_frame(
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: pt,
@@ -1198,7 +1198,7 @@ fn frames_above_the_receivers_max_fr_are_not_sent() -> Result<()> {
 /// connection is up: (`Some` and its error against the instant it was written) or `None`.
 fn first_frame_capture_time(edit: impl Fn(String) -> String) -> Result<Option<Duration>> {
     let (mut world, sender) = World::connected(RtpCodecKind::Video, edit)?;
-    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtc::rtp::extension::SDES_MID_URI);
+    let (ssrc, pt, _) = sender_stream(&mut world, sender, rtci::rtp::extension::SDES_MID_URI);
     let now = world.now;
     world.peers[0]
         .pc
@@ -1206,7 +1206,7 @@ fn first_frame_capture_time(edit: impl Fn(String) -> String) -> Result<Option<Du
         .expect("sender")
         .write_rtp(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header: Header {
                     version: 2,
                     payload_type: pt,
@@ -1245,7 +1245,7 @@ fn the_first_frame_is_placed_by_its_in_band_ntp_timestamp_before_any_sender_repo
     assert!(error < Duration::from_millis(5), "{error:?} off");
     let without = first_frame_capture_time(|sdp| {
         sdp.lines()
-            .filter(|line| !line.contains(rtc::rtp::extension::NTP_64_URI))
+            .filter(|line| !line.contains(rtci::rtp::extension::NTP_64_URI))
             .map(|line| format!("{line}\r\n"))
             .collect()
     })?;
@@ -1309,7 +1309,7 @@ fn vp9_frames_larger_than_the_receivers_max_fs_are_not_sent() -> Result<()> {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: pt,
@@ -1398,7 +1398,7 @@ fn the_remote_capture_time_holds_across_clock_rate_changes_on_one_ssrc() -> Resu
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: pt,

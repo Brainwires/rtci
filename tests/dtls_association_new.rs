@@ -27,19 +27,19 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines};
-use rtc::peer_connection::certificate::{CertificateParams, RTCCertificate};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCIceRole};
+use rtci::peer_connection::certificate::{CertificateParams, RTCCertificate};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCIceRole};
 
 const A: &str = "10.0.0.1:5000";
 const B: &str = "10.0.0.2:5000";
 
 fn certificate() -> Result<RTCCertificate> {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     Ok(RTCCertificate::generate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         CertificateParams::new(vec!["dtls-association".to_owned()])?,
     )?)
 }

@@ -87,7 +87,7 @@ check [Pion Examples](https://github.com/pion/webrtc/tree/master/examples#readme
 
 - 🚧 [Quick Switch](TODO): quick-switch demonstrates how to quickly switch between multiple videos using WebRTC. Similiar
   to how sites like TikTok quickly swipe between videos.
-- 🚧 [SCTP Interleaving Inspector](TODO): example uses rtc-ice, rtc-dtls, rtc-sctp, and rtc-datachannel directly so
+- 🚧 [SCTP Interleaving Inspector](TODO): example uses rtci-ice, rtci-dtls, rtci-sctp, and rtci-datachannel directly so
   it can intercept raw SCTP messages and parses them.
 
 ### Not Applicable

@@ -1,6 +1,6 @@
-# rtc-stream-driver
+# rtci-stream-driver
 
-The reference driver for the stream half of the `rtc` engine's sans-I/O interface: it owns
+The reference driver for the stream half of the `rtci` engine's sans-I/O interface: it owns
 the TCP sockets on tokio and carries out what the engine asks (listen, connect, close, reset,
 resolve a name or SRV / NAPTR records), and reports back what happened. The engine decides
 everything else: which ICE-TCP candidates exist (RFC 6544), RFC 4571 framing, TURN over TCP
@@ -32,7 +32,7 @@ without it, records are answered as none and names through the system resolver.
 
 ## A whole peer connection
 
-`peer::PeerDriver` (feature `peer`, on by default, which depends on `rtc`) drives an `rtc`
+`peer::PeerDriver` (feature `peer`, on by default, which depends on `rtci`) drives an `rtci`
 peer connection over sockets it owns, its UDP host sockets included: it gathers when a
 transport begins gathering, and again by itself when the engine says a transport needs new
 local candidates (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple,
@@ -49,7 +49,7 @@ engine's stream interface. The engine itself still never touches a socket or a c
 Licensed under either of the [MIT licence](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
 
-This crate is part of the [`rtc`](../README.md) workspace, which descends from
+This crate is part of the [`rtci`](../README.md) workspace, which descends from
 [webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) and is developed independently;
 [FORK.md](../FORK.md) lists what it carries over upstream. Upstream's licence and copyright
 notices are retained.

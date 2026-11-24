@@ -2,17 +2,17 @@
 //! candidates, and every pairing of RFC 4787 NAT types, with and without a TURN server.
 //!
 //! These need `scripts/test-env/run.sh` (network namespaces, iptables NAT routers, coturn) and
-//! are ignored elsewhere. They replace `rtc-ice/src/candidate/candidate_relay_test.rs` and
+//! are ignored elsewhere. They replace `rtci-ice/src/candidate/candidate_relay_test.rs` and
 //! `candidate_server_reflexive_test.rs`, which were written for the old async stack's in-process
-//! TURN server (`turn::server`) that `rtc-turn` does not have; coturn plays that part here.
+//! TURN server (`turn::server`) that `rtci-turn` does not have; coturn plays that part here.
 
 mod common;
 mod testenv;
 
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use std::time::{Duration, Instant};
 use testenv::{Env, EnvPeer, Gather, TurnTransport, negotiate, pump};
 

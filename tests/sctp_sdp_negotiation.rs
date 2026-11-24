@@ -5,15 +5,15 @@
 mod jsep_common;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, port_of};
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelState};
-use rtc::peer_connection::configuration::setting_engine::{
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelState};
+use rtci::peer_connection::configuration::setting_engine::{
     SctpMaxMessageSize, SettingEngineBuilder,
 };
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 use std::time::Instant;
 
 /// A remote offer with one data channel section: `m_line`, the transport lines, then
@@ -168,7 +168,7 @@ fn a_data_section_without_a_valid_sctp_port_is_refused() -> TestResult {
     // is still connecting.
     assert_eq!(
         offerer.sctp().map(|sctp| sctp.state()),
-        Some(rtc::peer_connection::transport::RTCSctpTransportState::Connecting)
+        Some(rtci::peer_connection::transport::RTCSctpTransportState::Connecting)
     );
     Ok(())
 }
@@ -611,8 +611,8 @@ fn the_data_section_carries_a_tls_id() -> TestResult {
 
 /// A host candidate of `pc` over `network` (`udp` or `tcp`), added to it.
 fn add_host_candidate(pc: &mut RTCPeerConnection, network: &str, port: u16) -> TestResult {
-    use rtc::ice::tcp_type::TcpType;
-    use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+    use rtci::ice::tcp_type::TcpType;
+    use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
@@ -643,7 +643,7 @@ fn add_host_candidate(pc: &mut RTCPeerConnection, network: &str, port: u16) -> T
 /// The offer used to say `UDP/DTLS/SCTP` whatever its candidates.
 #[test]
 fn the_offers_proto_matches_the_default_candidate() -> TestResult {
-    use rtc::ice::network_type::NetworkType;
+    use rtci::ice::network_type::NetworkType;
 
     let proto = |pc: &mut RTCPeerConnection| -> Result<String, Box<dyn std::error::Error>> {
         let offer = pc.create_offer(None)?.sdp;

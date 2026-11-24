@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use jsep_common::{default_peer, media_sections};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 
 /// The recorded offers: (file name, SDP).
 fn offers() -> Vec<(String, String)> {

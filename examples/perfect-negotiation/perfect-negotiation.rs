@@ -22,21 +22,21 @@ use futures_util::{SinkExt, StreamExt};
 use hyper::service::service_fn;
 use hyper::{Method, Response, StatusCode};
 use log::{error, info, trace, warn};
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
-use rtc::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::event::RTCPeerConnectionIceEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
+use rtci::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use serde::{Deserialize, Serialize};
 use signal::http::Body;
 use std::net::SocketAddr;

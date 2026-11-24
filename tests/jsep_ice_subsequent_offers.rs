@@ -1,5 +1,5 @@
 //! RFC 8839 sections 4.4.1.3 and 4.4.3 (subsequent offers and the answers to them, full and
-//! lite agents) and RFC 9429 section 5.1.1 (peers of RFC 5245 ICE), between two `rtc` peers on
+//! lite agents) and RFC 9429 section 5.1.1 (peers of RFC 5245 ICE), between two `rtci` peers on
 //! an in-memory network in virtual time.
 
 mod dtls_sdp_common;
@@ -9,19 +9,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values, keep, replace_lines};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCIceCandidatePair, RTCIceTransportState};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCIceCandidatePair, RTCIceTransportState};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
 
 const A: &str = "10.0.0.1:5000";
 const B: &str = "10.0.0.2:5000";
 
-fn full() -> rtc::peer_connection::configuration::setting_engine::SettingEngine {
+fn full() -> rtci::peer_connection::configuration::setting_engine::SettingEngine {
     SettingEngineBuilder::new().build()
 }
 
-fn lite() -> rtc::peer_connection::configuration::setting_engine::SettingEngine {
+fn lite() -> rtci::peer_connection::configuration::setting_engine::SettingEngine {
     SettingEngineBuilder::new().with_lite(true).build()
 }
 
@@ -329,7 +329,7 @@ fn a_restart_changes_pinned_credentials_on_both_sides() -> Result<()> {
 /// arrives the connection completes.
 #[test]
 fn an_offerer_answers_checks_that_arrive_before_the_answer() -> Result<()> {
-    use rtc::peer_connection::sdp::RTCSessionDescription;
+    use rtci::peer_connection::sdp::RTCSessionDescription;
     let mut world = World::new(Peer::new(A, full())?, Peer::new(B, full())?);
     world.peers[0].pc.create_data_channel("data", None)?;
     let now = world.now;

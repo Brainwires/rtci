@@ -7,15 +7,15 @@
 //! and checks that all three come out as distinct m-lines rather than the SMPTE336M
 //! section being misread as (or clobbering) the data channel.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_SMPTE336M, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use std::time::Instant;
 
 fn application_codec() -> RTCRtpCodecParameters {

@@ -1,5 +1,5 @@
 //! The default interceptor chain (congestion control, the RTP circuit breaker of RFC 8083,
-//! NACK, the RTCP reports) between two `rtc` peer connections over a link that reorders: a
+//! NACK, the RTCP reports) between two `rtci` peer connections over a link that reorders: a
 //! random share of the media datagrams (SRTP and SRTCP) is held back by up to a given time, so
 //! later packets overtake them, with or without loss. Virtual time.
 //!
@@ -10,7 +10,7 @@
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{
+use rtci::interceptor::{
     CircuitBreakerPacketSize, Interceptor, Packet, PassThroughInterceptor, Slot, StreamInfo,
     TaggedPacket,
 };
@@ -52,7 +52,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
     type Rout = TaggedPacket;
     type Wout = TaggedPacket;
     type Eout = ();
-    type Error = rtc::shared::error::Error;
+    type Error = rtci::shared::error::Error;
     type Time = Instant;
 
     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
@@ -67,14 +67,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
         let bytes = match &msg.message.packet {
             Packet::Rtp(packet) if packet.header.ssrc != RECORDED_RTX_SSRC => {
-                Some(rtc::shared::marshal::Marshal::marshal(packet)?.to_vec())
+                Some(rtci::shared::marshal::Marshal::marshal(packet)?.to_vec())
             }
             Packet::Rtcp(packets) if !packets.is_empty() => {
-                let packets: Vec<Box<dyn rtc::rtcp::Packet>> = packets
+                let packets: Vec<Box<dyn rtci::rtcp::Packet>> = packets
                     .iter()
                     .map(|packet| normalised(packet.as_ref()))
                     .collect();
-                Some(rtc::rtcp::packet::marshal(&packets)?.to_vec())
+                Some(rtci::rtcp::packet::marshal(&packets)?.to_vec())
             }
             _ => None,
         };
@@ -94,10 +94,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for WireTap {
 /// text of an SDES CNAME item is replaced by a fixed one of the same length, and the sequence
 /// numbers of the RTX stream (whose first one the NACK responder draws) reported in a
 /// reception report block or an RFC 8888 report block are zeroed.
-fn normalised(packet: &dyn rtc::rtcp::Packet) -> Box<dyn rtc::rtcp::Packet> {
-    use rtc::rtcp::receiver_report::ReceiverReport;
-    use rtc::rtcp::source_description::{SdesType, SourceDescription};
-    use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+fn normalised(packet: &dyn rtci::rtcp::Packet) -> Box<dyn rtci::rtcp::Packet> {
+    use rtci::rtcp::receiver_report::ReceiverReport;
+    use rtci::rtcp::source_description::{SdesType, SourceDescription};
+    use rtci::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
     let any = packet.as_any();
     if let Some(sdes) = any.downcast_ref::<SourceDescription>() {
         let mut sdes = sdes.clone();
@@ -138,30 +138,30 @@ impl Interceptor for WireTap {
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
     fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
-use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorHandles, DefaultInterceptorOptions,
     register_default_interceptors_with_options,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCRtpRtxParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::time::SystemInstant;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::time::SystemInstant;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -273,7 +273,7 @@ impl Peer {
         options.rtcp_random = Some(provider.clone());
         options.wall_clock = Some(SystemInstant::at(start, Duration::from_secs(1_700_000_000)));
         if DRAIN.with(|d| d.get()) {
-            options.pacer_queue_overflow = rtc::interceptor::PacerQueueOverflow::Drain;
+            options.pacer_queue_overflow = rtci::interceptor::PacerQueueOverflow::Drain;
         }
         if std::env::var("RTC_CB_PACKET_SIZE").as_deref() == Ok("last-frames") {
             options.circuit_breaker_packet_size = CircuitBreakerPacketSize::LastFrames;
@@ -636,7 +636,7 @@ fn run(kind: RtpCodecKind, shape: Shape, link: Link, seconds: u64, seed: u64) ->
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header,
                         payload: Bytes::from(vec![0x5au8; size]),
                     },

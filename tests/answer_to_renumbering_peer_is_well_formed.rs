@@ -28,12 +28,12 @@
 //! letting the engine accumulate numberings emitted FlexFEC twice under two numbers. This test
 //! fails on both while passing on the current, stale-but-valid behaviour.
 
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MIME_TYPE_VP9, MediaEngine,
 };
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -169,7 +169,7 @@ fn test_answer_to_renumbering_peer_is_well_formed() -> Result<(), Box<dyn std::e
         .build(Instant::now())?;
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let first_answer = VideoSection::parse(&exchange(&mut offerer, &mut answerer)?);
@@ -185,7 +185,7 @@ fn test_answer_to_renumbering_peer_is_well_formed() -> Result<(), Box<dyn std::e
         .build(Instant::now())?;
     offerer2.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let offer2 = offerer2.create_offer(None)?;

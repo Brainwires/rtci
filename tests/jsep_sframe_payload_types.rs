@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use jsep_common::{TestResult, crlf, default_peer, exchange, media_sections, video_track};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverId};
 
 /// A section's formats: payload type -> (`a=rtpmap` encoding, `a=fmtp` parameters).
 fn formats(section: &[String]) -> HashMap<u8, (String, String)> {
@@ -230,9 +230,9 @@ fn a_remote_offer_reusing_a_payload_type_across_sframe_and_plain_sections_is_ref
 /// the SFrame section's payload types of the answer, not the plain section's.
 #[test]
 fn the_sframe_numbering_survives_single_section_negotiation() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     let peer = || -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;

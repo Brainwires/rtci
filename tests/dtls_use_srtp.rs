@@ -17,9 +17,9 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, attribute_values};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 const GCM: &str = "SRTP_AEAD_AES_256_GCM";
 
@@ -75,7 +75,7 @@ fn a_media_session_negotiates_use_srtp() -> Result<()> {
         let mut world = world([false, false], answering_role)?;
         world.peers[0].pc.add_transceiver_from_kind(
             RtpCodecKind::Audio,
-            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
         )?;
         world.connect()?;
         world.ping_pong("a media session")?;
@@ -139,7 +139,7 @@ fn media_added_to_a_data_channel_session_gets_an_association_with_use_srtp() -> 
 
             world.peers[offering].pc.add_transceiver_from_kind(
                 RtpCodecKind::Audio,
-                Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+                Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
             )?;
             let (offer, answer) = world.exchange(offering)?;
             // RFC 8842 section 5.1: the new association runs on new 3-tuples.
@@ -193,7 +193,7 @@ fn media_added_keeps_an_association_that_has_use_srtp() -> Result<()> {
     let written = world.peers[1].written.len();
     world.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     let (offer, _) = world.exchange(0)?;
     assert_eq!(

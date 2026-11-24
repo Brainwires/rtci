@@ -1,5 +1,5 @@
 //! Several transports in one peer connection (RFC 9429 sections 4.1.1, 5.2.1, 5.3.1; RFC 9143
-//! section 7), between two `rtc` peers on a simulated UDP network in virtual time.
+//! section 7), between two `rtci` peers on a simulated UDP network in virtual time.
 //!
 //! The offerer uses the `max-compat` bundle policy, so each m= section of its offer has a
 //! transport of its own: its own ICE credentials, candidates, DTLS association and SRTP keys.
@@ -9,39 +9,39 @@
 
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::data_channel::RTCDataChannelId;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCBundlePolicy;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCBundlePolicy;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, DefaultInterceptorHandles, DefaultInterceptorOptions,
     register_default_interceptors_with_options,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{
     RTCDataChannelEvent, RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason,
     RTCPeerConnectionEvent, RTCTransportEventKind,
 };
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::{
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::{
     RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState, RTCSignalingState,
 };
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit, RTCIceCandidateType, RTCIceTransportState, RTCTransportId,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
-use rtc::statistics::stats::transport::RTCTransportStats;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
+use rtci::statistics::stats::transport::RTCTransportStats;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -150,7 +150,7 @@ struct World {
     /// direction).
     held_to: Option<SocketAddr>,
     /// What arrives on peer 0's shared address goes through the reference driver's mux for a
-    /// shared port first (`rtc-stream-driver`'s `UfragMux`), as a server routes it.
+    /// shared port first (`rtci-stream-driver`'s `UfragMux`), as a server routes it.
     mux: Option<(SocketAddr, UfragMux<usize>)>,
     /// Datagrams the mux had no connection for.
     misrouted: usize,
@@ -740,7 +740,7 @@ impl World {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header,
                     payload: Bytes::from(vec![0x10u8; 100]),
                 },
@@ -1858,7 +1858,7 @@ fn three_transports_share_one_socket_with_unique_credentials() -> Result<()> {
 
 /// Several transports on one shared port with the DEFAULT credentials (shared by every
 /// transport, on both sides), through the reference driver's shared-port path
-/// (`rtc-stream-driver`'s `UfragMux`): the ICE username names peer 0's connection but not a
+/// (`rtci-stream-driver`'s `UfragMux`): the ICE username names peer 0's connection but not a
 /// transport, so the engine routes by the rest of the USERNAME, the 5-tuple a transport used,
 /// the remote candidates and the remote agent's tie-breaker (`TransportSet::route`). Peer 1's
 /// candidates reach peer 0 late, so its first checks name no transport of peer 0 and are
@@ -2467,7 +2467,7 @@ fn a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbund
 fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<()> {
     const PACKETS: u16 = 900;
     let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
-    let lifetime = Some(rtc::srtp::keying::KeyLifetime {
+    let lifetime = Some(rtci::srtp::keying::KeyLifetime {
         srtp_packets: 320,
         srtcp_packets: 1 << 31,
     });
@@ -2695,7 +2695,7 @@ fn each_transport_numbers_its_packets_for_congestion_feedback_on_its_own() -> Re
             .rtp_parameters
             .header_extensions
             .iter()
-            .find(|extension| extension.uri == rtc::sdp::extmap::TRANSPORT_CC_URI)
+            .find(|extension| extension.uri == rtci::sdp::extmap::TRANSPORT_CC_URI)
             .map(|extension| extension.id as u8)
             .expect("transport-cc negotiated")
     };
@@ -3298,13 +3298,13 @@ fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_
         .set_remote_description(now, offer.clone())?;
     let sender = world.peers[1]
         .pc
-        .add_track(rtc::media_stream::MediaStreamTrack::new(
+        .add_track(rtci::media_stream::MediaStreamTrack::new(
             "early-stream".to_owned(),
             "early".to_owned(),
             "early".to_owned(),
             RtpCodecKind::Video,
             vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                rtp_coding_parameters: rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
                     ssrc: Some(VIDEO_SSRC),
                     ..Default::default()
                 },
@@ -3339,7 +3339,7 @@ fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type,
@@ -3391,7 +3391,7 @@ fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_
 /// a few seconds after the new pair is selected. Here the response is held back while peer 0
 /// (controlling) sends a packet: peer 1 reads it at once. (Before, it was dropped as data on
 /// an address the transport no longer has a candidate on: one packet lost at each renewal,
-/// seen through `rtc-stream-driver` on real sockets.)
+/// seen through `rtci-stream-driver` on real sockets.)
 #[test]
 fn data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received() -> Result<()> {
     let mut world = World::new(RTCBundlePolicy::Balanced)?;

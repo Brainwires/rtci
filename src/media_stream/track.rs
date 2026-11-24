@@ -41,9 +41,9 @@ pub type MediaStreamTrackId = String;
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::MediaStreamTrack;
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+/// use rtci::media_stream::MediaStreamTrack;
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let track = MediaStreamTrack::new(
@@ -72,7 +72,7 @@ pub type MediaStreamTrackId = String;
 /// ## Controlling track state
 ///
 /// ```
-/// use rtc::media_stream::MediaStreamTrack;
+/// use rtci::media_stream::MediaStreamTrack;
 ///
 /// # fn example(mut track: MediaStreamTrack) {
 /// // Disable the track temporarily
@@ -130,10 +130,10 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// use rtc::media_stream::MediaStreamTrack;
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
-    /// use rtc::peer_connection::configuration::media_engine::MIME_TYPE_OPUS;
+    /// use rtci::media_stream::MediaStreamTrack;
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// use rtci::peer_connection::configuration::media_engine::MIME_TYPE_OPUS;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let codec = RTCRtpCodec {
@@ -255,8 +255,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// println!("Track label: {}", track.label());
     /// # }
@@ -277,8 +277,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// match track.kind() {
     ///     RtpCodecKind::Audio => println!("This is an audio track"),
@@ -315,9 +315,9 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// use rtc::media_stream::MediaStreamTrack;
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// use rtci::media_stream::MediaStreamTrack;
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let track = MediaStreamTrack::new(
@@ -374,10 +374,10 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// use rtc::media_stream::MediaStreamTrack;
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
-    /// use rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
+    /// use rtci::media_stream::MediaStreamTrack;
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// use rtci::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let codec = RTCRtpCodec {
@@ -443,9 +443,9 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// use rtc::media_stream::MediaStreamTrack;
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
-    /// use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+    /// use rtci::media_stream::MediaStreamTrack;
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let track = MediaStreamTrack::new(
@@ -489,8 +489,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// if track.enabled() {
     ///     println!("Track is producing media");
@@ -519,8 +519,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(mut track: MediaStreamTrack) {
     /// // Temporarily disable the track
     /// track.set_enabled(false);
@@ -546,8 +546,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// if track.muted() {
     ///     println!("Track is muted by the system");
@@ -581,8 +581,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(mut track: MediaStreamTrack) {
     /// // Stop the track when done
     /// track.stop();
@@ -607,8 +607,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// let capabilities = track.get_capabilities();
     /// // Inspect supported capabilities
@@ -630,8 +630,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// let constraints = track.get_constraints();
     /// // Examine current constraints
@@ -654,8 +654,8 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(track: MediaStreamTrack) {
     /// let settings = track.get_settings();
     /// // Check actual track settings
@@ -685,9 +685,9 @@ impl MediaStreamTrack {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::media_stream::MediaStreamTrack;
-    /// # use rtc::media_stream::MediaTrackConstraints;
-    /// # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+    /// # use rtci::media_stream::MediaStreamTrack;
+    /// # use rtci::media_stream::MediaTrackConstraints;
+    /// # use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
     /// # fn example(mut track: MediaStreamTrack) {
     /// // Apply new constraints
     /// let constraints = MediaTrackConstraints::default();

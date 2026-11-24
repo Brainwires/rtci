@@ -8,10 +8,10 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, media_sections, video_track};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::RTCRtpTransceiverId;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::RTCRtpTransceiverId;
 
 const ANSWER_SSRC: u32 = 0x0a0b_0c0d;
 
