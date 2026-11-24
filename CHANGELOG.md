@@ -122,6 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **sctp** (up-333): `ChunkForwardTsn::unmarshal` reads within the chunk's own length. It
+  checked the buffer's length and read from the chunk's value, so a FORWARD TSN chunk of length
+  4 followed by other bytes read a New Cumulative TSN it does not hold and panicked. Not
+  reachable from a peer: `Packet::unmarshal` slices each chunk to its length first; a direct
+  caller and the `chunk_chunk_forward_tsn_unmarshal` fuzz target could reach it. A value whose
+  length is not 4 plus a multiple of 4 is an error, as for I-FORWARD-TSN. Found while checking
+  the siblings of webrtc-rs/rtc#333 by @mitsuhiko (error-cause length and DCEP threshold
+  panics), whose two sites the fork had fixed in 3866ed31. Test:
+  `chunk_test::test_chunk_forward_tsn_is_read_within_its_own_length`.
+
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
   performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
