@@ -102,6 +102,14 @@ impl RTCLocalCandidatesNeededReason {
 /// (`SelectedCandidatePairChange`), or the transport closes: close them then (a few seconds
 /// after a new selection: the peer selects on its own and may still send to them), not before.
 ///
+/// A local offer that fired the event and is then rolled back takes it back (RFC 9429 section
+/// 5.7): the transport has its previous candidates again, their addresses are no longer
+/// refused, and the candidates added for the abandoned generation are dropped. The
+/// application keeps the previous sockets as they were (not retired), closes or keeps aside
+/// the ones it bound for the event, and gathers again on the next event (the answer to the
+/// peer's colliding offer fires one when it sets up a new association). See the crate's
+/// "Gathering" section.
+///
 /// [`RTCPeerConnection::add_local_candidate`]: crate::peer_connection::RTCPeerConnection::add_local_candidate
 #[derive(Clone, Debug)]
 pub struct RTCLocalCandidatesNeededEvent {

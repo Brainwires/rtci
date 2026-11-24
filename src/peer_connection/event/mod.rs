@@ -781,6 +781,11 @@ pub(crate) enum RTCEventInternal {
     /// protected or accepted with it, and the DTLS transport that keyed it fails.
     SRTPKeyExhausted,
 
+    /// A thirty-second of an SRTP master key's lifetime is left: the DTLS server's threshold
+    /// for asking for a new association by itself
+    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`).
+    SrtpRekeyingDue,
+
     /// The application bytes that left a stream's send queue, reported once as the stream is
     /// closed or lost (just before its `SCTPStreamFailed` / `SCTPStreamClosed`, or before
     /// signalling closes the association), so the channel's final `bufferedAmount` stays

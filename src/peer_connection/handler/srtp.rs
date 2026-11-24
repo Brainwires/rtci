@@ -55,6 +55,8 @@ pub(crate) struct SrtpHandlerContext {
     /// Reduced-size RTCP was negotiated (RFC 5506): under the strict form a datagram need
     /// not start with an SR or RR.
     pub(crate) rtcp_reduced_size: bool,
+    /// [`RTCEventInternal::SrtpRekeyingDue`] was raised for the current keys.
+    pub(crate) rekeying_due_reported: bool,
 }
 
 /// Parses a decrypted RTCP datagram for the chain.
@@ -234,6 +236,26 @@ impl<'a> SrtpHandler<'a> {
                 });
             }
         }
+        // The DTLS server's re-keying threshold: a thirty-second of a key's lifetime left
+        // (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`), once per key set.
+        if !self.ctx.rekeying_due_reported
+            && [
+                self.ctx.local_srtp_context.as_ref(),
+                self.ctx.remote_srtp_context.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|context| {
+                let usage = context.key_usage();
+                let near =
+                    |used: u64, limit: u64| limit.saturating_sub(used) <= (limit / 32).max(1);
+                near(usage.srtp_packets, usage.lifetime.srtp_packets)
+                    || near(usage.srtcp_packets, usage.lifetime.srtcp_packets)
+            })
+        {
+            self.ctx.rekeying_due_reported = true;
+            events.push(RTCEventInternal::SrtpRekeyingDue);
+        }
         for event in events {
             self.ctx
                 .event_outs
@@ -396,6 +418,20 @@ impl<'a>
             &mut evt.event
         {
             debug!("srtp recv dtls handshake complete");
+            // What the contexts being replaced still have to say is read first: a discarded
+            // packet is reported, a lifetime warning of a key that is now retired is not
+            // (it would ask for a renewal the handshake just gave).
+            self.drain_context_events();
+            self.ctx.event_outs.retain(|queued| {
+                !matches!(
+                    queued.event,
+                    RTCEventInternal::SrtpRekeyingDue
+                        | RTCEventInternal::RTCPeerConnectionEvent(
+                            RTCPeerConnectionEvent::OnSrtpKeyLifetimeExpiring { .. }
+                        )
+                )
+            });
+            self.ctx.rekeying_due_reported = false;
 
             self.ctx.local_srtp_context = local_srtp_context.take();
             let previous = std::mem::replace(

@@ -135,12 +135,22 @@ pub(crate) struct DtlsTransport {
     /// The `tls-id` an offer that asks for a new association carries (`create_offer` has no
     /// side effects): it becomes `local_tls_id` when the answer starts that association.
     pub(crate) staged_local_tls_id: Option<String>,
+    /// `staged_local_tls_id` was staged by an offer of this side (`offer_tls_id`), not by the
+    /// answer to a remote offer (`stage_answer_tls_id`).
+    pub(crate) staged_tls_id_offered: bool,
+    /// The `tls-id` an offer of this side had staged (created, not applied) when a remote
+    /// offer staged its answer's in its place (`stage_answer_tls_id`): back in place if that
+    /// remote offer is rolled back (`restore_offer_tls_id`), gone once it is answered.
+    pub(crate) replaced_offer_tls_id: Option<String>,
     /// The application asked for a new association (`RTCPeerConnection::renew_dtls_association`):
     /// the next offer carries a new `tls-id` (RFC 8842 section 5.5).
     pub(crate) renewal_requested: bool,
     /// The renewal was asked for by the connection itself, for SRTP re-keying (an SRTP master
     /// key neared its lifetime): what `OnLocalCandidatesNeeded` reports as its reason.
     pub(crate) renewal_for_srtp_rekeying: bool,
+    /// Where the automatic SRTP re-keying of the current association stands
+    /// (`RTCPeerConnection::renew_before_the_key_lifetime_ends`).
+    pub(crate) srtp_rekeying: SrtpRekeying,
 
     /// Whether the session has an RTP media section, which needs SRTP keys from the
     /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
@@ -218,6 +228,22 @@ pub(crate) struct DtlsRemoteUpdate {
 
 /// A new `tls-id` value (RFC 8842 section 4): 128 bits from the provider's random source as
 /// 32 hex digits, within the attribute's `20*255(ALPHA / DIGIT / "+" / "/" / "-" / "_")`.
+/// The automatic SRTP re-keying of an association (RFC 5764 section 4.4): a new association is
+/// asked for once one of its keys nears its lifetime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SrtpRekeying {
+    /// No key of the association is near its lifetime.
+    #[default]
+    Idle,
+    /// The lifetime warning came and this side is the DTLS server: it waits for the client's
+    /// re-keying offer until a thirty-second of the lifetime is left
+    /// (`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`).
+    Deferred,
+    /// A new association is wanted: asked for as soon as none is being negotiated or
+    /// established.
+    Wanted,
+}
+
 fn generate_tls_id(crypto_provider: &Arc<dyn RTCCryptoProvider>) -> Result<String> {
     let mut random = [0u8; 16];
     crypto_provider
@@ -290,8 +316,11 @@ impl DtlsTransport {
             remote_tls_id: None,
             local_tls_id: generate_tls_id(&crypto_provider)?,
             staged_local_tls_id: None,
+            staged_tls_id_offered: false,
+            replaced_offer_tls_id: None,
             renewal_requested: false,
             renewal_for_srtp_rekeying: false,
+            srtp_rekeying: SrtpRekeying::Idle,
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
@@ -677,6 +706,8 @@ impl DtlsTransport {
         if let Some(local_tls_id) = local_tls_id {
             self.local_tls_id = local_tls_id;
         }
+        self.staged_tls_id_offered = false;
+        self.replaced_offer_tls_id = None;
 
         self.state_change(RTCDtlsTransportState::Connecting);
         self.install_endpoint(dtls_handshake_config);
@@ -687,6 +718,8 @@ impl DtlsTransport {
         self.srtp_configured = self.offers_use_srtp();
         self.renewal_requested = false;
         self.renewal_for_srtp_rekeying = false;
+        // The new association brings new keys.
+        self.srtp_rekeying = SrtpRekeying::Idle;
         Ok(DtlsAssociationUpdate::New)
     }
 
@@ -761,12 +794,43 @@ impl DtlsTransport {
     /// Stages the `tls-id` the answer to an offer that asks for a new association carries
     /// (RFC 8842 section 5.3), the one [`Self::update_remote`] then takes. `false` when one was
     /// already staged (it is kept).
+    ///
+    /// A value an offer of this side staged is not the answer's: RFC 8842 section 5.3 has the
+    /// answerer insert "a new unique attribute value", and an offer this side created (and
+    /// perhaps sent, then rolled back) is another transaction's (RFC 9429 section 5.7). It is
+    /// put aside (`replaced_offer_tls_id`) and a new one staged.
     pub(crate) fn stage_answer_tls_id(&mut self) -> Result<bool> {
-        if self.staged_local_tls_id.is_some() {
+        if self.staged_local_tls_id.is_some() && !self.staged_tls_id_offered {
             return Ok(false);
         }
-        self.staged_local_tls_id = Some(generate_tls_id(&self.crypto_provider)?);
+        let fresh = generate_tls_id(&self.crypto_provider)?;
+        if self.staged_tls_id_offered {
+            self.replaced_offer_tls_id = self.staged_local_tls_id.take();
+            self.staged_tls_id_offered = false;
+        }
+        self.staged_local_tls_id = Some(fresh);
         Ok(true)
+    }
+
+    /// The remote offer whose answer `tls-id` was staged is abandoned (rolled back, refused,
+    /// replaced): the staged value goes, and the one of this side's own offer it replaced, if
+    /// any, is back in place.
+    pub(crate) fn drop_answer_tls_id(&mut self) {
+        self.staged_local_tls_id = self.replaced_offer_tls_id.take();
+        self.staged_tls_id_offered = self.staged_local_tls_id.is_some();
+    }
+
+    /// This side's offer is rolled back (RFC 9429 section 5.7: "Any resources or candidates
+    /// that were allocated by the abandoned local description are discarded"): the `tls-id` it
+    /// staged for a new association goes, so that neither the answer to the peer's offer nor
+    /// a later offer of this side reuses a value that was signalled for an abandoned
+    /// transaction (RFC 8842 section 4: a new association has a new value). The renewal it
+    /// was made for stays asked for (`renewal_requested`): the next offer stages a new one.
+    pub(crate) fn discard_offer_tls_id(&mut self) {
+        if self.staged_tls_id_offered {
+            self.staged_local_tls_id = None;
+            self.staged_tls_id_offered = false;
+        }
     }
 
     /// The `tls-id` an offer carries (RFC 8842 section 5.5): the association's, or, when the
@@ -780,6 +844,7 @@ impl DtlsTransport {
         }
         if self.staged_local_tls_id.is_none() {
             self.staged_local_tls_id = Some(generate_tls_id(&self.crypto_provider)?);
+            self.staged_tls_id_offered = true;
         }
         Ok(self.staged_local_tls_id.clone().unwrap_or_default())
     }
@@ -1721,6 +1786,49 @@ mod tests {
             DtlsAssociationUpdate::New
         );
         assert_eq!(t.local_tls_id, staged);
+    }
+
+    /// RFC 9429 section 5.7 ("any resources or candidates that were allocated by the
+    /// abandoned local description are discarded") with RFC 8842 section 5.3 (the answer to an
+    /// offer that asks for a new association carries "a new unique attribute value"): a
+    /// rolled-back offer's `tls-id` is unstaged, and neither the answer to the peer's offer
+    /// nor the next offer of this side carries it; a remote offer's answer `tls-id` is never
+    /// an offer's, and the offer's comes back if that remote offer is rolled back.
+    #[test]
+    fn a_rolled_back_offer_takes_its_tls_id_back() {
+        let mut t = connected_as(RTCDtlsRole::Server);
+        let current = t.local_tls_id.clone();
+        t.renewal_requested = true;
+        let rolled_back = t.offer_tls_id(false).unwrap();
+        assert_ne!(rolled_back, current);
+
+        // The offer is rolled back: nothing of it stays staged.
+        t.discard_offer_tls_id();
+        assert_eq!(t.staged_local_tls_id, None);
+        assert_eq!(t.local_tls_id, current, "the association's value is kept");
+
+        // The peer's offer asks for a new association: its answer has a value of its own.
+        assert!(t.stage_answer_tls_id().unwrap());
+        let answered = t.staged_local_tls_id.clone().unwrap();
+        assert_ne!(answered, rolled_back);
+        assert_ne!(answered, current);
+        t.drop_answer_tls_id();
+        assert_eq!(t.staged_local_tls_id, None);
+
+        // The renewal is still wanted: the next offer has a new value too.
+        let next = t.offer_tls_id(false).unwrap();
+        assert!(
+            ![rolled_back.as_str(), answered.as_str(), current.as_str()].contains(&next.as_str())
+        );
+
+        // An offer created and not applied when the peer's offer arrives: the answer does not
+        // take its value, and it is back once the peer's offer is rolled back.
+        assert!(t.stage_answer_tls_id().unwrap());
+        let answered = t.staged_local_tls_id.clone().unwrap();
+        assert_ne!(answered, next);
+        t.drop_answer_tls_id();
+        assert_eq!(t.staged_local_tls_id.as_deref(), Some(next.as_str()));
+        assert_eq!(t.offer_tls_id(false).unwrap(), next);
     }
 
     /// RFC 5764 section 4.1: `use_srtp` only when the association carries RTP. A client offers

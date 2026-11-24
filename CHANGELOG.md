@@ -559,6 +559,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **peer connection**: automatic SRTP re-keying has a tie-break (`conf/rekey-1-glare`). Two
+  peers with the same key lifetime reached the lifetime warning on the same packet and both
+  offered a new DTLS association, so their offers always crossed. Now the DTLS client of the
+  association asks at the warning (a sixteenth of the lifetime left) and the DTLS server only
+  once a thirty-second is left (`RTCEventInternal::SrtpRekeyingDue`), if no new association has
+  come by then; the client's offer gives the server new keys first. One renewal at a time: no
+  re-keying is asked for while a new association of any transport is asked for, being
+  negotiated or being established, and one that waited is asked for when the connection is
+  back in stable without a new association. New setting
+  `SettingEngineBuilder::with_srtp_rekeying_dtls_client_first(bool)` (default `true`; `false`
+  is the previous behaviour, both at the warning). A server whose peer does not re-key by
+  itself now asks with half the margin it had.
+- **peer connection**: `poll_event` no longer hands out a `negotiationneeded` whose reason
+  went before the application read it (W3C webrtc-pc "Updating the Negotiation-Needed flag":
+  the queued task checks again, "If connection.[[SignalingState]] is not "stable", abort", and
+  clears the flag when nothing is to be negotiated). Before, the event queued when a rollback
+  brought the connection back to stable with a renewal still wanted was handed out after the
+  answer to the peer's offer had given the renewal, and the application made a needless offer;
+  likewise the event queued before a first exchange that the application made without reading
+  events (`tests/rtcp_session_rtc2rtc.rs::a_sender_moves_to_a_new_ssrc_after_a_collision` now
+  counts one event, the new SSRC's).
 - **peer connection, interceptors**: behaviour profiles after the train-12 and train-13
   (sctp-15, mt-9) merges (`conf/profile-3-on-master`). Each setting master added is classified, its libwebrtc value
   read at `a222406d` (file and lines in `docs/behaviour-profiles.md`):
@@ -905,6 +926,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server on loopback, the first test of the feature. `audit.yml` passes `--workspace` to all
   three cargo-deny checks, the library advisory check included: they read every member's
   graph, not the root package's alone.
+- **peer connection**: SRTP re-keying offers that cross (both peers re-key at once, glare)
+  ended with no new DTLS association, and the call failed when the old keys ran out
+  (`conf/rekey-1-glare`, reported from ParolNet's `m1::srtp_re_keying_keeps_the_call`). Two
+  causes, both in the polite peer's rollback followed by its answer to the other offer
+  (W3C perfect negotiation):
+  - `Agent::revert_restart` announces the selected pair it goes back to. That announcement
+    was read only after the answer had restarted ICE and installed the new association, so
+    the DTLS client started the new handshake on the previous generation's path, where the
+    peer's previous association answered: the client went "connected" at once, the peer's new
+    endpoint (installed when it applied the answer) waited in "connecting", and the next key
+    expiry failed the transport. The ICE handler now ignores a selected-pair announcement that
+    is no longer the agent's selection (RFC 8842 section 5.1: a new association runs on a new
+    3-tuple).
+  - A rolled-back local offer kept the `a=tls-id` it had staged for its new association, and
+    the answer to the peer's offer carried it. RFC 9429 section 5.7 ("Any resources or
+    candidates that were allocated by the abandoned local description are discarded") and RFC
+    8842 section 5.3 (the answer carries "a new unique attribute value"): the rollback
+    unstages it, and an answer never takes a value an offer of this side staged (one created
+    and not applied is put aside and back if the peer's offer is rolled back).
+  Tests: `tests/srtp_rekeying_glare_rtc2rtc.rs` (explicit and implicit rollback, either side
+  polite, staggered offers, several transports, the tie-break),
+  `transport/dtls/mod.rs::a_rolled_back_offer_takes_its_tls_id_back`, and through the driver's
+  real sockets `examples/stream-driver/tests/peer.rs::crossing_re_keying_offers_are_rolled_back_and_carry_every_packet`.
+- **peer connection**: the SRTP handler reads the events of the contexts a new handshake
+  replaces before replacing them (a discarded packet is still reported), and drops a lifetime
+  warning of a key that is now retired, which would have asked for a renewal the handshake had
+  just given.
+- **rtc-stream-driver**: `PeerDriver` handles a rolled-back local offer. The offer's
+  `OnLocalCandidatesNeeded` had retired the previous sockets and bound new ones; the rollback
+  takes the restart back, but the driver kept the previous sockets marked retired (to be
+  closed after the next selection, although they carry the media again) and the new ones open
+  for good. Back in the stable state the driver now matches its sockets to the candidates the
+  transports hold: a retired socket the transport holds again is not retired, a socket whose
+  candidate the transport dropped is closed.
 - **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
   dropped the local candidates (a new DTLS association on new ports), the side that selected
   the new pair first dropped the packets the peer still sent on the previous pair before its
@@ -1143,6 +1198,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes for integrators
 
+- **A rolled-back offer after `OnLocalCandidatesNeeded`** (`conf/rekey-1-glare`): a local
+  offer that is rolled back takes back its ICE restart and the event it fired (RFC 9429
+  section 5.7). Keep the previous sockets (no longer retired), close or keep aside the ones
+  bound for the event, and gather on the next event (the answer to the peer's colliding offer
+  fires one when it sets up a new association). The crate's "Gathering" section says how;
+  `rtc-stream-driver`'s `PeerDriver` does it.
 - **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
   section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
   automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
