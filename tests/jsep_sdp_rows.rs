@@ -32,11 +32,14 @@ fn bandwidth_lines_use_registered_modifiers_only() -> TestResult {
     let offer = pc.create_offer(None)?;
     assert_eq!(bandwidth_types(&offer.sdp), ["TIAS", "AS"], "{}", offer.sdp);
 
+    // Section 5: b= lines come after c=, at session level before t=.
+    let session = SESSION.replace("t=0 0", "b=X-YZ:128\nt=0 0");
+    let transport = TRANSPORT.replacen("c=IN IP4 0.0.0.0\n", "c=IN IP4 0.0.0.0\nb=X-YZ:64\n", 1);
     let remote = crlf(&format!(
-        "{SESSION}b=X-YZ:128\n\
-         m=video 9 UDP/TLS/RTP/SAVPF 96\n{TRANSPORT}b=X-YZ:64\na=mid:0\na=sendonly\na=msid:s t\n\
+        "{session}m=video 9 UDP/TLS/RTP/SAVPF 96\n{transport}a=mid:0\na=sendonly\na=msid:s t\n\
          a=rtpmap:96 VP8/90000\n"
     ));
+    assert!(remote.contains("b=X-YZ:64\r\na=ice-ufrag"), "{remote}");
     let mut pc = default_peer()?;
     pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(remote)?)?;
     let id = pc
