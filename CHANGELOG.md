@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **ICE-TCP between two lite agents (RFC 6544 section 6.1).** The controlling lite agent opens
+  the TCP connection of the active-to-passive pair it selects as soon as it selects it (in
+  parallel with its updated offer, section 6.1's MAY); the answerer carries that pair on the
+  connection it accepted from the pair's remote IP on the pair's passive candidate, keeps it
+  when the updated offer names that pair, and closes it and restarts ICE when it does not
+  (section 6.1 MUST); a controlled agent waiting for the updated offer closes no connection.
+  What made it work at all: a lite agent now takes one candidate per address for each of UDP,
+  passive TCP and active TCP (section 4.4; before, the UDP candidate shut out every TCP one on
+  its address), no simultaneous-open one; two lite agents keep each other's active TCP
+  candidates (a full agent still drops them); an active TCP candidate's placeholder port 9 is
+  no longer an administratively prohibited (W3C bad-port) candidate, since it is never
+  connected to; and between two lite agents a first non-STUN message on a connection the agent
+  opened does not reset it (no connectivity check is ever sent there). New
+  `Agent::is_remote_lite`, `Agent::awaits_lite_update`. Conformance rows RFC6544-6.1-1,
+  RFC6544-6.1-2, RFC6544-6.1-3 and RFC6544-4.4-1 are `tested`.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
