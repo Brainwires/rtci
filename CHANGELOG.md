@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4.1 asks ("attempt to approximate this information"), where it had no header extension
   before; other extensions of the RED packet are still left out.
 
+- **fec** (fec-12): a FEC session's m= section (RFC 5109 section 14.1, `add_fec_session`)
+  states the per-packet congestion feedback the media sections state for the kind: the
+  transport-wide sequence number extension (`a=extmap:1`, its own id in a section of its own)
+  with `a=rtcp-fb:<pt> transport-cc`, and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888), and an
+  answerer keeps one of them (RFC 8888 section 6), RFC 8888 when both sides state it as for
+  the media, the extension under the offer's id. The FEC session's packets then
+  carry the transport-wide sequence number of their own transport and are reported on, so that
+  transport's congestion controller (each transport is a path, RFC 8836 section 2) has the
+  feedback it ran without before. A section without these lines (an earlier peer) is taken as
+  before: no extension, no feedback.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
