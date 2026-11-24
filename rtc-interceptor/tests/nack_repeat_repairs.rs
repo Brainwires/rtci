@@ -72,12 +72,16 @@ fn stream_info(twcc: bool) -> StreamInfo {
 /// them; `twcc` whether the stream negotiated transport-wide feedback. No rate limit, so what
 /// is answered leaves at once.
 fn chain(twcc: bool) -> impl Interceptor {
+    chain_with(twcc, RetransmissionRateLimit::Unlimited)
+}
+
+fn chain_with(twcc: bool, rate_limit: RetransmissionRateLimit) -> impl Interceptor {
     let mut chain = Registry::new()
         .with(Slot::TwccSender, TwccSenderBuilder::new().build())
         .with(
             Slot::NackResponder,
             NackResponderBuilder::new()
-                .with_rate_limit(RetransmissionRateLimit::Unlimited)
+                .with_rate_limit(rate_limit)
                 .build(),
         )
         .build();
@@ -468,4 +472,27 @@ fn rfc_8888_feedback_on_the_rtx_stream_counts_as_the_report() {
             .collect::<Vec<_>>(),
         "reported lost: repaired at once"
     );
+}
+
+/// Under a rate limit, with a target: the held request's deadline is the end of its wait, not
+/// the end of its lifetime (1 s after it was last asked for), so it is answered then.
+#[test]
+fn a_held_request_under_a_rate_limit_is_due_when_its_wait_ends() {
+    let base = Instant::now();
+    let mut chain = chain_with(true, RetransmissionRateLimit::UpToTarget);
+    read(
+        &mut chain,
+        base,
+        AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
+            bits_per_second: 10_000_000.0,
+        }),
+    );
+    send_originals(&mut chain, base);
+    let first = nack(&mut chain, ms(base, 200), &[1]);
+    feedback(&mut chain, ms(base, 250), first[0].number.unwrap(), true);
+    assert_eq!(1, nack(&mut chain, ms(base, 300), &[3]).len());
+    assert!(nack(&mut chain, ms(base, 360), &[3]).is_empty());
+    assert_eq!(Some(ms(base, 1_300)), chain.poll_timeout());
+    chain.handle_timeout(ms(base, 1_300)).unwrap();
+    assert_eq!(1, drain(&mut chain).len(), "answered when the wait ended");
 }
