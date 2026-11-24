@@ -54,6 +54,12 @@ pub(crate) fn compact_ntp(ntp_time: u64) -> u32 {
 /// reports about the stream, plus whatever the application supplied about encoding.
 #[derive(Debug, Default)]
 pub struct OutboundRtpStreamAccumulator {
+    /// FEC sent for the stream (`interceptor::FecSent` marks on what left the chain): packets
+    /// (or RED blocks) and their payload octets. No webrtc-stats member; see
+    /// [`FecSentStats`](crate::statistics::FecSentStats).
+    pub fec_packets_sent: u64,
+    /// See `fec_packets_sent`.
+    pub fec_bytes_sent: u64,
     // Base identification
     /// The SSRC identifier for this stream.
     pub ssrc: SSRC,

@@ -470,7 +470,7 @@ async fn gather_srflx_candidate(
         TransportProtocol::UDP,
     )?;
     let mut msg = rtci::stun::message::Message::new();
-    msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
+    msg.build(&[Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)])?;
     client.handle_write(TaggedMessage {
         now: Instant::now(),
         message: msg,

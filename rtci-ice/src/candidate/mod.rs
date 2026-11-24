@@ -194,6 +194,20 @@ pub struct CandidateConfig {
     pub foundation: String,
 }
 
+/// The type preference of a UDP-tunnelled TCP candidate (RFC 6544 Section 4.2: "the
+/// RECOMMENDED type preferences for the new candidate types defined in this document ... are
+/// 105 for NAT-assisted candidates and 75 for UDP-tunneled candidates").
+pub const UDP_TUNNELLED_TYPE_PREFERENCE: u16 = 75;
+
+/// Whether `ip` is a Teredo address, 2001::/32 (RFC 4380 Section 2.6): an address of a UDP
+/// tunnel (RFC 6544 Section 5.4).
+pub fn is_teredo(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6.segments()[..2] == [0x2001, 0],
+        std::net::IpAddr::V4(_) => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 /// One ICE candidate: a transport address this agent can be reached at, or can reach a peer
 /// at, together with its type, priority and liveness bookkeeping.
@@ -426,7 +440,20 @@ impl Candidate {
     /// server-reflexive one, a UDP candidate outranks the TCP one of its type. A relayed TCP
     /// candidate stays at 0 ("relayed candidates are still preferred lower than the other
     /// candidate types"), below the UDP relayed one by its local preference.
+    ///
+    /// A TCP host candidate on a Teredo address (2001::/32, RFC 4380) is a UDP-tunnelled
+    /// candidate (RFC 6544 Section 5.4: it "may appear to applications as host candidates from
+    /// a local pseudo-interface. Treating these candidates as host candidates results in
+    /// incorrect prioritization ... Implementations may attempt to detect pseudo-interfaces,
+    /// e.g., from the address prefix of the interface"): it takes the type preference Section
+    /// 4.2 recommends for UDP-tunnelled candidates, [`UDP_TUNNELLED_TYPE_PREFERENCE`].
     pub fn type_preference(&self, candidate_type: CandidateType) -> u16 {
+        if candidate_type == CandidateType::Host
+            && self.network_type().is_tcp()
+            && is_teredo(self.addr().ip())
+        {
+            return UDP_TUNNELLED_TYPE_PREFERENCE;
+        }
         let preference = candidate_type.preference();
         if self.network_type().is_tcp() {
             preference.saturating_sub(1)

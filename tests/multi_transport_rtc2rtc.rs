@@ -1481,6 +1481,118 @@ fn by_default_the_transports_share_credentials_and_still_run_apart() -> Result<(
     Ok(())
 }
 
+/// RFC 8835 section 4.2: "The sending implementation MAY choose to support other
+/// configurations, such as bundling each media type (audio, video, or data) into its own
+/// 5-tuple." Two audio and two video sections and a data section, offered in three BUNDLE
+/// groups by type (RFC 9143 section 5) and answered so: both sides send each media type on a
+/// 5-tuple of its own, the two audio senders sharing one transport, the two video senders
+/// another, the data channel a third.
+#[test]
+fn bundling_by_media_type_sends_each_type_on_a_transport_of_its_own() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    let mut senders = vec![];
+    for kind in [
+        RtpCodecKind::Audio,
+        RtpCodecKind::Audio,
+        RtpCodecKind::Video,
+        RtpCodecKind::Video,
+    ] {
+        let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                }],
+            }),
+        )?;
+        senders.push(
+            world.peers[0]
+                .pc
+                .rtp_transceiver(transceiver)
+                .and_then(|t| t.sender())
+                .expect("a sender"),
+        );
+    }
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let now = world.now;
+    let local = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, local.clone())?;
+    let by_type = local.sdp.replace(
+        "a=group:BUNDLE 0 1 2 3 4",
+        "a=group:BUNDLE 0 1\r\na=group:BUNDLE 2 3\r\na=group:BUNDLE 4",
+    );
+    let offer = RTCSessionDescription::offer(by_type)?;
+    assert_eq!(
+        offer.sdp.matches("a=group:BUNDLE").count(),
+        3,
+        "{}",
+        offer.sdp
+    );
+    world.peers[1].pc.set_remote_description(now, offer)?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    let groups: Vec<&str> = answer
+        .sdp
+        .lines()
+        .filter(|l| l.starts_with("a=group:BUNDLE"))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            "a=group:BUNDLE 0 1",
+            "a=group:BUNDLE 2 3",
+            "a=group:BUNDLE 4"
+        ],
+        "{}",
+        answer.sdp
+    );
+    world.peers[0].pc.set_remote_description(now, answer)?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.ice_transport_sections().len(), 3);
+    }
+
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    let media: Vec<RTCTransportId> = senders
+        .iter()
+        .map(|sender| {
+            world.peers[0]
+                .pc
+                .rtp_sender(*sender)
+                .expect("sender")
+                .transport()
+                .expect("a transport")
+                .id()
+        })
+        .collect();
+    let data = world.peers[0].pc.sctp().expect("SCTP").transport().id();
+    assert_eq!(media[0], media[1], "the audio senders share a transport");
+    assert_eq!(media[2], media[3], "the video senders share a transport");
+    let distinct: HashSet<RTCTransportId> = [media[0], media[2], data].into_iter().collect();
+    assert_eq!(distinct.len(), 3, "audio, video and data apart");
+    let ssrcs: Vec<u32> = senders.iter().map(|s| world.ssrc(*s)).collect();
+    for seq in 1..=5 {
+        for sender in &senders {
+            world.send_rtp(*sender, seq)?;
+        }
+    }
+    world.run("RTP of the four senders delivered", |peers| {
+        ssrcs
+            .iter()
+            .all(|ssrc| peers[1].rtp.iter().any(|h| h.ssrc == *ssrc))
+    })?;
+    Ok(())
+}
+
 /// The offer of `negotiate` with its one BUNDLE group split in two: the RTP sections and the
 /// data section.
 fn two_bundle_groups(sdp: String) -> String {

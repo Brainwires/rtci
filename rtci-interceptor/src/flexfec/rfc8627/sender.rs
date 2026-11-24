@@ -353,10 +353,12 @@ impl FlexFecSendInterceptor {
 
         for packet in repair_packets {
             self.rate.on_repair_sent(now, packet.marshal_size());
+            let fec_bytes = packet.payload.len();
             self.write_queue.push_back(TaggedPacket {
                 now,
                 transport,
-                message: AttributedPacket::new(Packet::Rtp(packet)),
+                message: AttributedPacket::new(Packet::Rtp(packet))
+                    .with(crate::FecSent::one(rtp_packet.header.ssrc, fec_bytes)),
             });
         }
     }

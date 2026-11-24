@@ -206,8 +206,16 @@ pub fn run(chain: &mut impl Interceptor, until: Instant) -> Vec<Sent> {
     sent
 }
 
-/// Takes what the chain passed towards the application: the packets and the session events.
+/// Takes what the chain passed towards the application: the packets and the session events,
+/// but for the announcements of the reporting SSRC ([`read_all`] keeps those).
 pub fn read(chain: &mut impl Interceptor) -> (Vec<TaggedPacket>, Vec<RtcpSessionEvent>) {
+    let (packets, mut events) = read_all(chain);
+    events.retain(|event| !matches!(event, RtcpSessionEvent::ReportingSsrc { .. }));
+    (packets, events)
+}
+
+/// [`read`], every session event kept.
+pub fn read_all(chain: &mut impl Interceptor) -> (Vec<TaggedPacket>, Vec<RtcpSessionEvent>) {
     let mut packets = vec![];
     let mut events = vec![];
     while let Some(tagged) = chain.poll_read() {

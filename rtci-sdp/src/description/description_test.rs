@@ -131,7 +131,7 @@ fn test_marshal() -> Result<()> {
                     formats: vec!["0".to_string()],
                 },
                 media_title: Some("Vivamus a posuere nisl".to_string()),
-                connection_information: Some(ConnectionInformation {
+                connection_information: vec![ConnectionInformation {
                     network_type: "IN".to_string(),
                     address_type: "IP4".to_string(),
                     address: Some(Address {
@@ -139,7 +139,7 @@ fn test_marshal() -> Result<()> {
                         ttl: None,
                         range: None,
                     }),
-                }),
+                }],
                 bandwidth: vec![Bandwidth {
                     experimental: true,
                     bandwidth_type: "YZ".to_string(),
@@ -159,7 +159,7 @@ fn test_marshal() -> Result<()> {
                     formats: vec!["99".to_string()],
                 },
                 media_title: None,
-                connection_information: None,
+                connection_information: vec![],
                 bandwidth: vec![],
                 encryption_key: None,
                 attributes: vec![Attribute::new(

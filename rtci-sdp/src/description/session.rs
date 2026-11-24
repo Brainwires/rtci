@@ -554,8 +554,8 @@ impl fmt::Display for SessionDescription {
         for media_description in &self.media_descriptions {
             write_key_value(f, "m=", Some(&media_description.media_name))?;
             write_key_value(f, "i=", media_description.media_title.as_ref())?;
-            if let Some(connection_information) = &media_description.connection_information {
-                write_key_value(f, "c=", Some(&connection_information))?;
+            for connection_information in &media_description.connection_information {
+                write_key_value(f, "c=", Some(connection_information))?;
             }
             for bandwidth in &media_description.bandwidth {
                 write_key_value(f, "b=", Some(&bandwidth))?;
@@ -1375,7 +1375,7 @@ impl Parser {
             }
             b'c' => {
                 let connection = self.connection(value)?;
-                self.last_media()?.connection_information = Some(connection);
+                self.last_media()?.connection_information.push(connection);
             }
             b'b' => {
                 let bandwidth = self.bandwidth(value)?;
@@ -1636,7 +1636,7 @@ impl Parser {
                 formats,
             },
             media_title: None,
-            connection_information: None,
+            connection_information: vec![],
             bandwidth: vec![],
             encryption_key: None,
             attributes: vec![],

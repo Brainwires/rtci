@@ -471,6 +471,9 @@ pub struct SettingEngine {
     /// connection gets ICE credentials of its own. The derived default `false` shares the first
     /// transport's.
     pub(crate) unique_transport_credentials: bool,
+    /// [`SettingEngineBuilder::with_separate_fec_sessions`]: an offered FEC session of its
+    /// own (RFC 5109 section 14.1) is accepted.
+    pub(crate) separate_fec_sessions: bool,
     /// [`SettingEngineBuilder::with_implicit_rollback`].
     /// Inverted so that the derived default is "implicit rollback on".
     pub(crate) explicit_rollback_only: bool,
@@ -660,6 +663,7 @@ impl SettingEngine {
             max_bundle_ignored: Default::default(),
             rtcp_mux_only_in_subsequent_offers: false,
             unique_transport_credentials: Default::default(),
+            separate_fec_sessions: false,
             explicit_rollback_only: Default::default(),
             answering_dtls_role: Default::default(),
             disable_certificate_fingerprint_verification: Default::default(),
@@ -2331,6 +2335,32 @@ impl SettingEngineBuilder {
     /// request is then the same for each.
     pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
         self.0.unique_transport_credentials = unique;
+        self
+    }
+
+    /// Whether an offered FEC session of its own is accepted: an m= section that lists only
+    /// `ulpfec`, grouped with a media section by `a=group:FEC-FR` (RFC 5956 section 4.1) or
+    /// `a=group:FEC` (RFC 4756), outside the BUNDLE group, which is how RFC 5109 section 14.1
+    /// sends FEC "as a separate stream": in an RTP session of its own, on a transport of its
+    /// own, where the FEC stream has the SSRC of the media stream it protects (section 7.2).
+    ///
+    /// `false`, the default, refuses it as RFC 5109 section 14.3 lets an answerer do (the FEC
+    /// section answered with port 0, the group left out), which is what RFC 8854 section 5.2
+    /// asks of a WebRTC endpoint: "Answerers SHOULD reject any FEC-only "m=" lines, unless they
+    /// specifically know how to handle such a thing in a WebRTC context". `true` accepts it:
+    /// the answer keeps the section and repeats the group (RFC 5109 section 14.3: "the
+    /// answerer simply accepts the FEC RTP session and the grouping in the offer by including
+    /// the same grouping in the answer"), with the direction of the transceiver it protects.
+    ///
+    /// Offering one is the application's call,
+    /// [`RTCPeerConnection::add_fec_session`](crate::peer_connection::RTCPeerConnection::add_fec_session),
+    /// whatever this says (RFC 8854 section 5.2: such sections "SHOULD NOT be offered", so
+    /// nothing offers one by itself). Both need the ULPFEC interceptors in the chain
+    /// ([`configure_ulpfec_sessions`](crate::peer_connection::configuration::interceptor_registry::configure_ulpfec_sessions)).
+    /// No browser understands such a section: this is for peers that implement RFC 5109 as
+    /// written.
+    pub fn with_separate_fec_sessions(mut self, accept: bool) -> Self {
+        self.0.separate_fec_sessions = accept;
         self
     }
 

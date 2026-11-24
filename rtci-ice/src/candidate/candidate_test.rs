@@ -776,3 +776,64 @@ fn test_tcptype_is_read_wherever_it_stands_among_the_extensions() -> Result<()> 
     assert_eq!(candidate.address(), "192.0.2.1");
     Ok(())
 }
+
+/// RFC 6544 Section 5.4: a UDP-tunnelled candidate "may appear to applications as host
+/// candidates from a local pseudo-interface. Treating these candidates as host candidates
+/// results in incorrect prioritization ... Implementations may attempt to detect
+/// pseudo-interfaces, e.g., from the address prefix of the interface", and Teredo's is
+/// 2001::/32. A TCP host candidate on a Teredo address takes the UDP-tunnelled type
+/// preference, 75 (Section 4.2), so it ranks below TCP host candidates on other addresses and
+/// below server-reflexive ones (99 for TCP); another IPv6 address keeps the host preference
+/// (125 for TCP), and a UDP candidate on a Teredo address is not a UDP-tunnelled TCP one.
+#[test]
+fn a_tcp_host_candidate_on_a_teredo_address_is_ranked_as_udp_tunnelled() -> Result<()> {
+    let host = |network: &str, address: &str, tcp_type| -> Result<Candidate> {
+        CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: network.to_owned(),
+                address: address.to_owned(),
+                port: 5000,
+                component: COMPONENT_RTP,
+                ..Default::default()
+            },
+            tcp_type,
+        }
+        .new_candidate_host()
+    };
+    let type_preference = |c: &Candidate| c.priority() >> 24;
+    let teredo = host(
+        "tcp",
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        TcpType::Passive,
+    )?;
+    assert_eq!(type_preference(&teredo), 75);
+    assert_eq!(
+        type_preference(&teredo),
+        u32::from(UDP_TUNNELLED_TYPE_PREFERENCE)
+    );
+    let other_v6 = host("tcp", "2001:db8::1", TcpType::Passive)?;
+    assert_eq!(type_preference(&other_v6), 125);
+    let srflx = CandidateServerReflexiveConfig {
+        base_config: CandidateConfig {
+            network: "tcp".to_owned(),
+            address: "2001:db8::9".to_owned(),
+            port: 5000,
+            component: COMPONENT_RTP,
+            ..Default::default()
+        },
+        rel_addr: "2001:db8::1".to_owned(),
+        rel_port: 5000,
+        url: None,
+    }
+    .new_candidate_server_reflexive()?;
+    assert!(teredo.priority() < srflx.priority() && srflx.priority() < other_v6.priority());
+    let udp = host(
+        "udp",
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        TcpType::Unspecified,
+    )?;
+    assert_eq!(type_preference(&udp), 126);
+    assert!(is_teredo("2001:0:1::1".parse()?));
+    assert!(!is_teredo("2001:1::1".parse()?) && !is_teredo("192.0.2.1".parse()?));
+    Ok(())
+}

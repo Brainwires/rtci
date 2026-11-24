@@ -407,6 +407,38 @@ fn several_local_ssrcs_report_together_once_per_interval() {
     }
 }
 
+/// RFC 8108 5.2: when an endpoint's SSRCs cannot all report in one packet, "the initial
+/// ones ... SHOULD be those most useful to the peers": the senders. Four SSRCs that only
+/// receive join first, four that send join a second later; the first compound packet, with
+/// room for four reports, carries the receiving SSRC whose timer expired and three sender
+/// reports, though the other receiving SSRCs' timers expire sooner.
+#[test]
+fn senders_report_first_when_not_every_ssrc_fits() {
+    let mut chain = chain(builder().with_profile(RtcpProfile::Avp).with_mtu(202));
+    let base = Instant::now();
+    for ssrc in [10, 20, 30, 40] {
+        chain.bind_local_stream(&video(ssrc));
+    }
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let later = base + secs(1.0);
+    for ssrc in [50, 60, 70, 80] {
+        chain.bind_local_stream(&video(ssrc));
+    }
+    for ssrc in [50, 60, 70, 80] {
+        chain.handle_write(rtp(later, ssrc, 1, 3000)).unwrap();
+    }
+    let sent = run(&mut chain, base + secs(3.0));
+    let first = sent.first().expect("a compound packet");
+    assert_eq!(Some(10), first.leader());
+    let mut senders: Vec<u32> = first
+        .get::<rtcp::sender_report::SenderReport>()
+        .iter()
+        .map(|sr| sr.ssrc)
+        .collect();
+    senders.sort_unstable();
+    assert_eq!(vec![50, 60, 70], senders, "{:?}", first.packets);
+}
+
 /// Regular (no feedback) packets among `sent` after `from`.
 fn regular_after(sent: &[Sent], from: Instant) -> usize {
     sent.iter()
