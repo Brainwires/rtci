@@ -282,6 +282,7 @@ impl InboundRtpStreamAccumulator {
     pub fn on_rtcp_sr_counts(&mut self, packets_sent: u64, bytes_sent: u64) {
         self.remote_packets_sent = packets_sent;
         self.remote_bytes_sent = bytes_sent;
+        self.reports_received += 1;
     }
 
     /// The RTP timestamp of the sender report `on_rtcp_sr_received` took.
