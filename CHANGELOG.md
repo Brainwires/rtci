@@ -90,6 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptors (pacer), a source whose media waits behind retransmissions is paused, not
+  discarded** (`conf/pacing-1-pause-on-media-wait`): the pacer told the source to pause when
+  the expected queue time (queued bits over the target) reached half the queue time bound,
+  and discarded new media that had waited the bound unless it was written before a pause or
+  within 250 ms of its start. Audio (never queued) and retransmissions (served first) leave
+  ahead of new media and near the congestion controller's floor can take the whole target:
+  the frames a source wrote after a pause ended then waited the bound with an expected queue
+  time of half a second, no pause began, and they were discarded with a key-frame request
+  although the source followed the target all along (capacity-cap ensemble with the smoothed
+  retransmission limiter, seed 638 of 1100: 71 one-packet frames written in 2.4 s at a
+  100 kbit/s target, a 6.15 s freeze; reproduced, hosted run 45493039743; with this change
+  0.98 s and no discard, run 45498091211). The pause now also begins when the oldest new
+  media has itself waited half the bound, and a pause begun that way lasts until what waited
+  then has left. Nothing changes while the expected queue time tells the truth. Test:
+  `rtci-interceptor/tests/pacing.rs::a_source_whose_media_waits_behind_retransmissions_is_paused_not_discarded`.
+
 - **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
   section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
   the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
