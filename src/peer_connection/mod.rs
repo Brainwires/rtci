@@ -2323,6 +2323,11 @@ impl RTCPeerConnection {
                 self.ice_transport_mut()
                     .agent
                     .replace_remote_candidates_pinning(now, candidates, pinned);
+                // RFC 6544 section 6.1: a TCP connection the offerer opened in parallel with
+                // this offer is kept if it matches the new pair, closed otherwise
+                // (`settle_lite_tcp_updates`, once the agent has selected the pair again).
+                let active = self.pipeline_context.transports.active_id();
+                self.streams.lite_updates.insert(active);
             } else {
                 // The description's candidate lines: candidates the application supplied, as
                 // much as those it trickles.

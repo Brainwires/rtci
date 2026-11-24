@@ -475,6 +475,9 @@ pub struct Agent {
     pub(crate) remote_lite: bool,
     /// The `LiteCandidateUpdate` event of this generation was raised.
     pub(crate) lite_update_raised: bool,
+    /// Two lite agents, controlled: the updated candidate exchange of this generation was
+    /// taken ([`Agent::replace_remote_candidates`]).
+    pub(crate) lite_update_taken: bool,
     /// Two lite agents, controlled: the local transport address an updated candidate
     /// exchange named in `a=remote-candidates` (RFC 8839 Section 4.4.2.2), which the pair
     /// takes as its local candidate. See [`Agent::replace_remote_candidates_pinning`].
@@ -762,6 +765,7 @@ impl Agent {
 
             remote_lite: false,
             lite_update_raised: false,
+            lite_update_taken: false,
             pinned_local_addr: None,
             configured_ta: config.ta,
             nomination_acceptance: config.nomination_acceptance,
@@ -1857,6 +1861,24 @@ impl Agent {
         self.lite
     }
 
+    /// Whether the peer is a lite implementation ([`Agent::set_remote_lite`]).
+    pub fn is_remote_lite(&self) -> bool {
+        self.remote_lite
+    }
+
+    /// Two lite agents, this one controlled, its pair chosen among several: the controlling
+    /// agent's updated candidate exchange is still to come (RFC 8445 Section 8.2: "ICE
+    /// processing is complete after and only after the updated candidate exchange is
+    /// complete"), and with it the pair. A TCP connection the controlling agent opened in
+    /// parallel with that exchange is kept until it arrives (RFC 6544 Section 6.1).
+    pub fn awaits_lite_update(&self) -> bool {
+        self.lite
+            && self.remote_lite
+            && !self.is_controlling
+            && !self.lite_update_taken
+            && self.candidate_pairs.len() > 1
+    }
+
     /// Tells the agent whether the peer is a lite implementation (in SDP, `a=ice-lite`).
     ///
     /// It matters to a lite agent: with a full peer it answers checks and waits for the
@@ -1921,6 +1943,7 @@ impl Agent {
             return false;
         }
         self.pinned_local_addr = local;
+        self.lite_update_taken = true;
         self.set_selected_pair(Some(now), None);
         self.announce_all_pairs_removed();
         self.candidate_pairs = Vec::new();
@@ -2333,6 +2356,7 @@ impl Agent {
         self.triggered_queue.clear();
         // A new generation: its candidates and its end-of-candidates are still to come.
         self.lite_update_raised = false;
+        self.lite_update_taken = false;
         self.pinned_local_addr = None;
         self.remote_end_of_candidates = false;
         self.local_gathering_complete = false;

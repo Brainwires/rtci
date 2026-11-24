@@ -1251,3 +1251,211 @@ fn tcp_candidates_are_gathered_and_paired_over_ipv6() -> Result<()> {
     }
     Ok(())
 }
+
+fn lite() -> SettingEngine {
+    SettingEngineBuilder::new().with_lite(true).build()
+}
+
+/// Two lite peers, one pair each: the offerer's active TCP candidate and the answerer's
+/// passive one are the only candidates carried.
+fn active_to_passive_only(peer: usize, c: &RTCIceCandidateInit) -> bool {
+    c.candidate.contains(" tcp ")
+        && c.candidate.contains(if peer == 0 {
+            "tcptype active"
+        } else {
+            "tcptype passive"
+        })
+}
+
+/// Two lite peers, several pairs: each one's active and passive TCP candidates are carried.
+fn active_and_passive(_: usize, c: &RTCIceCandidateInit) -> bool {
+    c.candidate.contains(" tcp ") && !c.candidate.contains("tcptype so")
+}
+
+fn connect_commands(p: &Peer) -> usize {
+    p.commands
+        .iter()
+        .filter(|c| matches!(c, StreamCommand::Connect { .. }))
+        .count()
+}
+
+/// The open connection, as peer 1 (the answerer) knows it.
+fn answerers_connection(net: &Net) -> Option<rtci::shared::stream::StreamId> {
+    net.conns.iter().filter(|c| c.open).find_map(|c| {
+        [Some(c.a), c.b]
+            .into_iter()
+            .flatten()
+            .find(|end| end.peer == 1)
+            .map(|end| end.id)
+    })
+}
+
+/// Steps until `done`, at most `limit` of virtual time.
+fn run_until(
+    peers: &mut [Peer],
+    net: &mut Net,
+    limit: Duration,
+    done: impl Fn(&Net, &[Peer]) -> bool,
+) -> Result<()> {
+    let until = net.elapsed() + limit;
+    while net.elapsed() < until {
+        net.step(peers);
+        if done(net, peers) {
+            return Ok(());
+        }
+        net.advance(peers);
+    }
+    bail!("not reached in {limit:?}")
+}
+
+/// The controlling lite peer's updated offer (RFC 8445 section 8.2), as `edit` leaves it on
+/// the way to the answerer, and its answer.
+fn lite_update(peers: &mut [Peer], net: &Net, edit: impl Fn(&str) -> String) -> Result<String> {
+    let now = net.now;
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    let sent = rtci::peer_connection::sdp::RTCSessionDescription::offer(edit(&offer.sdp))?;
+    peers[1].pc.set_remote_description(now, sent)?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+    Ok(offer.sdp)
+}
+
+fn negotiation_needed(p: &Peer, since: usize) -> bool {
+    p.events[since..]
+        .iter()
+        .any(|e| matches!(e, RTCPeerConnectionEvent::OnNegotiationNeededEvent))
+}
+
+/// RFC 6544 section 6.1: with two lite agents "the offerer MAY initiate the TCP connection on
+/// the selected pair"; no connectivity check ever opens one. The controlling lite peer opens
+/// the connection of the active-to-passive pair it selected at once, and the answerer carries
+/// its data on the connection it accepted on its passive candidate (RFC 6544 section 4.4: a
+/// lite agent's TCP candidates are passive, an active one only where it is needed).
+#[test]
+fn two_lite_agents_connect_over_tcp_from_the_offerers_active_candidate_at_selection() -> Result<()>
+{
+    let mut net = Net::new();
+    net.carry = Some(active_to_passive_only);
+    let mut peers = peers(&net, lite);
+    let channel = negotiate(&mut peers, &net)?;
+    let mut connect_at = None;
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(5),
+        |net, peers| {
+            if connect_at.is_none() && connect_commands(&peers[0]) > 0 {
+                connect_at = Some(net.elapsed());
+            }
+        },
+    )?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    let connect_at = connect_at.expect("the offerer connected");
+    assert!(
+        connect_at < Duration::from_secs(1),
+        "opened at {connect_at:?}: at selection, not with the first keepalive 15 s later"
+    );
+    assert_eq!(connect_commands(&peers[1]), 0, "the answerer only accepts");
+    assert_eq!(net.open_connections(), 1);
+    assert_eq!(net.tcp_writes_via_poll_write, 0);
+    Ok(())
+}
+
+/// RFC 6544 section 6.1: "If the answerer receives the new offer matching the candidate pair
+/// where a connection was already created in parallel with the new offer, it MUST accept the
+/// offer and respond to it while keeping the already-created connection." Several pairs: the
+/// controlling lite peer selects one, opens its connection and makes the updated offer; the
+/// answerer keeps the connection the offerer opened, restarts nothing, and data flows on it.
+#[test]
+fn two_lite_agents_keep_the_connection_opened_in_parallel_with_the_updated_offer() -> Result<()> {
+    let mut net = Net::new();
+    net.carry = Some(active_and_passive);
+    let mut peers = peers(&net, lite);
+    let channel = negotiate(&mut peers, &net)?;
+    run_until(
+        &mut peers,
+        &mut net,
+        Duration::from_secs(5),
+        |net, peers| negotiation_needed(&peers[0], 0) && answerers_connection(net).is_some(),
+    )?;
+    let parallel = answerers_connection(&net).expect("the parallel connection");
+    let mark = peers[1].events.len();
+    let offer = lite_update(&mut peers, &net, str::to_owned)?;
+    assert!(offer.contains("a=remote-candidates"), "{offer}");
+    let expected = messages();
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &expected,
+        Duration::from_secs(10),
+        |_, _| {},
+    )?;
+    assert_eq!(peers[1].received, expected, "every message, in order");
+    assert_eq!(
+        answerers_connection(&net),
+        Some(parallel),
+        "the connection was kept"
+    );
+    assert!(!net.closes_seen.contains(&(1, parallel)) && !net.resets_seen.contains(&(1, parallel)));
+    assert!(!negotiation_needed(&peers[1], mark), "no ICE restart");
+    assert_eq!(connect_commands(&peers[1]), 0);
+    Ok(())
+}
+
+/// RFC 6544 section 6.1: "If the connection that was created in parallel with the new offer
+/// does not match the candidate pair in the new offer, the connection MUST be closed, and ICE
+/// restart SHOULD be performed." The updated offer reaches the answerer naming the offerer's
+/// active candidate at another address than the connection came from: the answerer closes
+/// the connection and restarts ICE.
+#[test]
+fn two_lite_agents_close_a_parallel_connection_the_updated_offer_does_not_match() -> Result<()> {
+    let mut net = Net::new();
+    net.carry = Some(active_and_passive);
+    let mut peers = peers(&net, lite);
+    negotiate(&mut peers, &net)?;
+    run_until(
+        &mut peers,
+        &mut net,
+        Duration::from_secs(5),
+        |net, peers| negotiation_needed(&peers[0], 0) && answerers_connection(net).is_some(),
+    )?;
+    let parallel = answerers_connection(&net).expect("the parallel connection");
+    let mark = peers[1].events.len();
+    let offerer = peers[0].ip.to_string();
+    lite_update(&mut peers, &net, |sdp| {
+        sdp.lines()
+            .map(|l| {
+                if l.starts_with("a=candidate") && l.contains("tcptype active") {
+                    l.replace(&offerer, "10.0.0.9")
+                } else {
+                    l.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n")
+            + "\r\n"
+    })?;
+    run_until(
+        &mut peers,
+        &mut net,
+        Duration::from_secs(2),
+        |net, peers| {
+            (net.closes_seen.contains(&(1, parallel)) || net.resets_seen.contains(&(1, parallel)))
+                && negotiation_needed(&peers[1], mark)
+        },
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{e}: closed {}, ICE restart {}",
+            net.closes_seen.contains(&(1, parallel)),
+            negotiation_needed(&peers[1], mark)
+        )
+    })?;
+    Ok(())
+}
