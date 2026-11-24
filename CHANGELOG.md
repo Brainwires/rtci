@@ -372,6 +372,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the siblings of webrtc-rs/rtc#333 by @mitsuhiko (error-cause length and DCEP threshold
   panics), whose two sites the fork had fixed in 3866ed31. Test:
   `chunk_test::test_chunk_forward_tsn_is_read_within_its_own_length`.
+- **turn** (up-316): a CreatePermission the application asked for that fails no longer drops a
+  permission the server granted meanwhile. A permission is per IP address (RFC 8656 section 9):
+  `create_permission` for two ports of one address before the first answer sends two requests,
+  and when the first was granted and the second refused, the address lost its permission here
+  (`send_to` failed with `ErrNoPermission` and the refresh left it out) though the server held
+  it. The refusal is still reported (`CreatePermissionError`). Same defect as webrtc-rs/rtc#316
+  by @hsdfat (whose other half, permissions keyed per IP, the fork already had). Engine
+  behaviour change (TURN client). Test:
+  `client_permission_test::test_a_refused_request_keeps_a_permission_granted_meanwhile`.
 
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
