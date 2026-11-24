@@ -14,10 +14,10 @@ API is the default and tested too (`RULES.md`).
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
 | MUST | 5034 | 24 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
-| SHOULD | 874 | 0 | 2 | 4 | 48 | 38 | 1 | 327 | 1294 |
+| SHOULD | 875 | 0 | 2 | 4 | 47 | 38 | 1 | 327 | 1294 |
 | MAY | 458 | 0 | 0 | 18 | 30 | 100 | 0 | 172 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
-| all | 6435 | 24 | 9 | 24 | 92 | 144 | 1 | 1166 | 7895 |
+| all | 6436 | 24 | 9 | 24 | 91 | 144 | 1 | 1166 | 7895 |
 
 ## RFC behaviour tested
 
@@ -27,7 +27,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
 | MUST | 5080 | 5065 | 99.7 | 5034 | 99.1 |
-| SHOULD | 967 | 876 | 90.6 | 874 | 90.4 |
+| SHOULD | 967 | 877 | 90.7 | 875 | 90.5 |
 | MAY | 606 | 458 | 75.6 | 458 | 75.6 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
 
@@ -39,7 +39,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `av1-rtp.md` | SHOULD | 13 | 0 | 0 | 0 | 1 | 0 | 0 | 1 | 15 |
 | `av1-rtp.md` | MAY | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 10 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MUST | 36 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 36 |
-| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 1 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 3 |
+| `draft-holmer-rmcat-transport-wide-cc-extensions.md` | SHOULD | 2 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 3 |
 | `draft-holmer-rmcat-transport-wide-cc-extensions.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MUST | 30 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
