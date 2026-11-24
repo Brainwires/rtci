@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The datagram marking of ccrows-7 is the socket's (`runtime::Transmit::traffic_class`,
     `AsyncUdpSocket::unmarked`, `runtime::TrafficClassMarker`); `PeerDriver`'s counters are
     unchanged.
+  - (runtime-2) With `default-features = false` the crate has no async runtime in its normal
+    dependency tree (no tokio, mio, smol, async-io, hickory): CI checks it
+    (`tests/dependency_tree.rs`, the `cargo.yml` step "Stream driver without a built-in
+    runtime").
 
 ### Behaviour changes
 

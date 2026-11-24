@@ -48,6 +48,14 @@ jobs:
       # loopback: no other job turns the feature on.
       - name: Stream driver with dns-records
         run: cargo test --package rtci-stream-driver --features dns-records --lib --verbose
+      # rtci-stream-driver without a built-in runtime (`default-features = false`, `peer`): it
+      # builds, and its normal dependency tree holds no async runtime (the test runs
+      # `cargo tree -e normal --no-default-features`). A tokio primitive left in the driver
+      # would not build here; a tokio dependency left non-optional fails the test.
+      - name: Stream driver without a built-in runtime (no tokio)
+        run: |
+          cargo check --package rtci-stream-driver --no-default-features --features peer --verbose
+          cargo test --package rtci-stream-driver --test dependency_tree --verbose
       - name: Disk left after the build
         if: always()
         run: df -h
