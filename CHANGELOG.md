@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
   a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
   there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
-  original stream has arrived). Seen as Firefox's bandwidth probes on its RTX SSRC before its
-  first frame (`discardedRtp 15` with `discardedSsrcs` = the RTX SSRC in the "RTX by payload
-  type" interop cell). Engine behaviour change (a counter and an event; nothing was ever
+  original stream has arrived). The likely source of the Firefox interop cell's
+  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
+  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
 
 ## [0.1.0] - 2026-11-24
