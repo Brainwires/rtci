@@ -49,6 +49,25 @@ pub enum NackControl {
         /// The announced `rtx-time`.
         rtx_time: Option<Duration>,
     },
+    /// The oldest sequence number of the remote stream `media_ssrc` that the receiving
+    /// application can still use (RFC 4588 6.3: "the receiver should generally assess whether
+    /// the retransmitted packet would still be useful at the time it is received"): its video
+    /// pipeline released or gave up every frame before it. The
+    /// [`NackGeneratorInterceptor`](crate::NackGeneratorInterceptor) asks for no missing packet
+    /// older than `oldest_useful` from then on, and forgets the requests it had for them. A
+    /// request for them that the [`RtcpSessionInterceptor`](crate::RtcpSessionInterceptor)
+    /// still holds for its next packet (RFC 4585 3.5.2: early feedback is rate-limited, and
+    /// what is stored is sent only if it is still useful) is dropped there as well, so no
+    /// NACK that leaves after the horizon was given names a packet behind it.
+    /// `None` removes the horizon. Sequence numbers compare with wrap-around (RFC 3550 A.1):
+    /// a packet up to 32767 behind the horizon is older; the application moves the horizon
+    /// on as it plays out, so it never lags that far.
+    Horizon {
+        /// The SSRC of the remote stream.
+        media_ssrc: u32,
+        /// The oldest sequence number still useful.
+        oldest_useful: Option<u16>,
+    },
 }
 
 impl NackControl {
@@ -62,6 +81,12 @@ impl NackControl {
                 .with(Attribute::Custom(Arc::new(self))),
         }
     }
+}
+
+/// Whether `sequence_number` comes before `horizon` (RFC 3550 A.1 wrap-around: up to 32767
+/// behind it).
+pub(crate) fn older_than(sequence_number: u16, horizon: u16) -> bool {
+    (1..0x8000).contains(&horizon.wrapping_sub(sequence_number))
 }
 
 /// Check if a stream supports NACK feedback.

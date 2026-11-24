@@ -1482,6 +1482,19 @@ impl Agent {
     /// own `<uuid>.local` name, IPv4 and IPv6, as browsers publish host candidates: made when its
     /// first candidate is added, registered with the mDNS responder, reused for the address's
     /// other candidates (and across ICE restarts).
+    /// The `.local` name this agent gave the host address `ip` (published or not), if it hid
+    /// it behind one.
+    pub(crate) fn mdns_name_of_hidden(&self, ip: IpAddr) -> Option<String> {
+        if self.mdns_local_ip == Some(ip) {
+            return Some(self.mdns_local_name.clone());
+        }
+        self.mdns_local_names
+            .iter()
+            .chain(self.mdns_unpublished_names.iter())
+            .find(|(i, _)| *i == ip)
+            .map(|(_, name)| name.clone())
+    }
+
     fn mdns_name_for(&mut self, ip: IpAddr, network_type: NetworkType) -> MdnsHostName {
         if let Some(local_ip) = self.mdns_local_ip {
             let v4 = matches!(network_type, NetworkType::Udp4 | NetworkType::Tcp4);
@@ -1524,6 +1537,17 @@ impl Agent {
     /// at all with [`AgentConfig::multicast_dns_fail_closed`]. Names registered before stay.
     pub fn set_multicast_dns_publishing(&mut self, publishing: MulticastDnsPublishing) {
         self.mdns_publishing = publishing;
+    }
+
+    /// Declares, from now on, whether the application hands each mDNS datagram to
+    /// `handle_read` with its destination address in `local_addr` (as
+    /// [`AgentConfig::multicast_dns_destination_reported`]): the mDNS group's for one that
+    /// arrived by multicast (on the link whatever its source, RFC 6762 section 11), the host's
+    /// own for a unicast one, the unspecified address when it does not know.
+    pub fn set_multicast_dns_destination_reported(&mut self, reported: bool) {
+        if let Some(mdns_conn) = self.mdns.as_mut() {
+            mdns_conn.set_destination_reported(reported);
+        }
     }
 
     /// Whether the agent withheld the host candidates of `ip` because their mDNS name could

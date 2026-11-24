@@ -125,6 +125,9 @@ impl RTCPeerConnection {
         let mut agent_config =
             internal::ice_agent_config(&self.configuration, &self.setting_engine)?;
         agent_config.multicast_dns_publishing = self.mdns_publishing;
+        if let Some(reported) = self.mdns_destination_reported {
+            agent_config.multicast_dns_destination_reported = reported;
+        }
         // A transport's credentials are the first transport's, as the browsers have them,
         // unless each transport is to have its own (RFC 9429 section 5.2.1;
         // `with_unique_transport_credentials`). Fixed ones from the settings are the first
@@ -958,6 +961,23 @@ impl RTCPeerConnection {
                 .ice_transport
                 .agent
                 .set_multicast_dns_publishing(publishing);
+        }
+    }
+
+    /// Declares, for every transport (those made later included), whether the application
+    /// hands each mDNS datagram to `handle_read` with its destination address in `local_addr`
+    /// (as `SettingEngineBuilder::with_multicast_dns_destination_reported`, for a driver that
+    /// knows it): the mDNS group's for one that arrived by multicast, which RFC 6762 section 11
+    /// deems on the link whatever its source, the host's own for a unicast one, the unspecified
+    /// address when it does not know. `rtci-stream-driver`'s `PeerDriver` declares it.
+    pub fn set_multicast_dns_destination_reported(&mut self, reported: bool) {
+        self.mdns_destination_reported = Some(reported);
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_multicast_dns_destination_reported(reported);
         }
     }
 
