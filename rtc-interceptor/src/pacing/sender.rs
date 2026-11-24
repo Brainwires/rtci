@@ -250,7 +250,7 @@ impl PacerBuilder {
 /// bound, not at the bound, leaves a source that stops when told the time to notice (a frame
 /// interval, a read of its target) and room for the target to fall once more. What the source
 /// wrote before the pause is not discarded even when the target falls so far meanwhile that it
-/// would wait past the bound: while paused, that backlog is **drained** above the target as
+/// would wait past the bound: that backlog is **drained** above the target, until it has left, as
 /// [`QueueOverflow::Drain`] drains (libwebrtc pairs its encoder pause with
 /// `drain_large_queues`, `MaybeUpdateMediaRateDueToLongQueue`); it is bounded by what was
 /// queued when the pause began. So a source that follows the target never has its media
@@ -337,9 +337,10 @@ pub struct PacerInterceptor {
     discarded_frame: HashMap<u32, u32>,
     /// Whether the application is told to pause (see "Pausing the source").
     paused: bool,
-    /// When the pause began: media written before it is what the source wrote before it was
-    /// told to stop, drained rather than discarded (see "Pausing the source").
-    paused_since: Option<Instant>,
+    /// When the last pause began: media written before it is what the source wrote before it
+    /// was told to stop, drained rather than discarded, during the pause and after it (see
+    /// "Pausing the source").
+    drain_before: Option<Instant>,
     /// How many times a pause began.
     pauses: u64,
     /// Retransmissions not queued because the same packet's retransmission already waited.
@@ -380,7 +381,7 @@ impl PacerInterceptor {
             repair_flows: HashSet::new(),
             discarded_frame: HashMap::new(),
             paused: false,
-            paused_since: None,
+            drain_before: None,
             pauses: 0,
             duplicate_retransmissions: 0,
             departed: Vec::new(),
@@ -482,7 +483,7 @@ impl PacerInterceptor {
         }
         let remaining = limit.saturating_sub(self.queue_time(now)).as_secs_f64();
         let needed = if remaining > 0.001 {
-            self.queued_bits / remaining
+            self.bits_to_drain() / remaining
         } else {
             // Overdue: everything may leave (`handle_timeout` releases it).
             1e12
@@ -659,26 +660,44 @@ impl PacerInterceptor {
             self.paused = !self.paused;
             if self.paused {
                 self.pauses += 1;
-                self.paused_since = Some(now);
-            } else {
-                self.paused_since = None;
+                self.drain_before = Some(now);
             }
         }
         change
     }
 
     /// Whether the head of the queue is drained above the target rather than discarded: always
-    /// with [`QueueOverflow::Drain`]; with [`QueueOverflow::Drop`] while the source is paused
-    /// and the head was written before the pause (the backlog of a source that stopped when
-    /// told, which a target that fell further meanwhile would otherwise leave waiting past the
-    /// bound).
+    /// with [`QueueOverflow::Drain`]; with [`QueueOverflow::Drop`] when it is new media written
+    /// before the last pause began (the backlog of a source that stopped when told, which a
+    /// target that fell further meanwhile would otherwise leave waiting past the bound).
     fn drains_head(&self) -> bool {
         self.queue_overflow == QueueOverflow::Drain
-            || self.paused_since.is_some_and(|since| {
-                self.queue.front().is_some_and(|head| {
-                    head.now < since && !head.message.has(&Attribute::Retransmission)
-                })
-            })
+            || self
+                .queue
+                .front()
+                .is_some_and(|head| self.written_before_pause(head))
+    }
+
+    /// Whether `packet` is new media written before the last pause began.
+    fn written_before_pause(&self, packet: &TaggedPacket) -> bool {
+        self.drain_before.is_some_and(|since| {
+            packet.now < since && !packet.message.has(&Attribute::Retransmission)
+        })
+    }
+
+    /// The bits a raised pacing rate has to drain before the bound: all that waits with
+    /// [`QueueOverflow::Drain`], the backlog written before the last pause otherwise (what was
+    /// written during the pause is not drained above the target).
+    fn bits_to_drain(&self) -> f64 {
+        if self.queue_overflow == QueueOverflow::Drain {
+            return self.queued_bits;
+        }
+        self.queue
+            .iter()
+            .filter(|packet| !packet.message.has(&Attribute::Retransmission))
+            .take_while(|packet| self.written_before_pause(packet))
+            .map(Self::bits_of)
+            .sum()
     }
 
     /// The target as the application is to read it: zero while paused, with [`PacerPause`]
