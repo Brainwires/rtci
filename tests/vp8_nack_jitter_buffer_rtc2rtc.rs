@@ -439,6 +439,39 @@ impl Run {
         Ok(())
     }
 
+    /// For each loss the receiver could detect: milliseconds from when it could see the gap
+    /// (the first packet after it read) to its first transport-layer feedback (RTCP payload
+    /// type 205) sent at or after that, and to the first retransmission that arrived.
+    fn repair_latency(&self) -> (Vec<f64>, Vec<f64>) {
+        let (mut first_feedback, mut repaired) = (vec![], vec![]);
+        for seq in self.lost() {
+            if !self.detectable(seq) {
+                continue;
+            }
+            let Some(gap) = self.delivered.range(seq + 1..).map(|(_, t)| *t).min() else {
+                continue;
+            };
+            let ms = |t: Instant| (t - gap).as_secs_f64() * 1000.0;
+            if let Some(sent) = self
+                .rtcp_wire
+                .iter()
+                .filter(|(pt, w)| *pt == 205 && w.sent >= gap)
+                .map(|(_, w)| w.sent)
+                .min()
+            {
+                first_feedback.push(ms(sent));
+            }
+            if let Some(arrived) = self.rtp_wire[&seq][1..]
+                .iter()
+                .filter_map(|w| w.arrived)
+                .min()
+            {
+                repaired.push(ms(arrived));
+            }
+        }
+        (first_feedback, repaired)
+    }
+
     fn ms(&self, t: Instant) -> String {
         format!("{:.1}", (t - self.start).as_secs_f64() * 1000.0)
     }
@@ -820,9 +853,23 @@ fn vp8_seeds() -> Result<()> {
         }
         let failed: Vec<String> = checks.into_iter().filter_map(Result::err).collect();
         broken += usize::from(!failed.is_empty());
+        let (feedback, repaired) = r.repair_latency();
+        let stat = |v: &[f64]| {
+            if v.is_empty() {
+                "-".to_owned()
+            } else {
+                format!(
+                    "{:.0}/{:.0}",
+                    v.iter().sum::<f64>() / v.len() as f64,
+                    v.iter().copied().fold(0.0, f64::max)
+                )
+            }
+        };
         println!(
-            "VP8 {}{}{}",
+            "VP8 {} | ms from the gap seen (mean/max): first NACK {}, repaired {}{}{}",
             summary(seed, &r),
+            stat(&feedback),
+            stat(&repaired),
             if below { " (under 98 %)" } else { "" },
             if failed.is_empty() {
                 String::new()
