@@ -127,3 +127,106 @@ fn shutdown_ack_point_outside_the_window_is_ignored() -> Result<()> {
     }
     Ok(())
 }
+
+/// RFC 9260 3.3.8: a SHUTDOWN cannot report the DATA received beyond its Cumulative TSN Ack;
+/// "The sender of the SHUTDOWN chunk MAY bundle a SACK chunk to indicate any gaps in the
+/// received TSNs". With a gap, the SHUTDOWN goes with a SACK that reports it; without one, alone.
+#[test]
+fn a_shutdown_goes_with_a_sack_that_reports_the_gaps() -> Result<()> {
+    for gap in [false, true] {
+        let mut a = timed_test_association();
+        let now = Instant::now();
+        let base = a.peer_last_tsn;
+        let data = |tsn: u32| ChunkPayloadData {
+            tsn,
+            stream_identifier: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            unordered: true,
+            user_data: Bytes::from_static(b"x"),
+            ..Default::default()
+        };
+        a.handle_data(&data(base.wrapping_add(1)))?;
+        if gap {
+            // TSN base + 2 is missing.
+            a.handle_data(&data(base.wrapping_add(3)))?;
+        }
+        let _ = a.gather_outbound(now);
+        a.shutdown()?;
+
+        let packets: Vec<Packet> = a
+            .gather_outbound(now)
+            .0
+            .iter()
+            .map(|raw| Packet::unmarshal(raw).unwrap())
+            .collect();
+        let with_shutdown = packets
+            .iter()
+            .find(|p| p.chunks.iter().any(|c| c.as_any().is::<ChunkShutdown>()))
+            .expect("a SHUTDOWN is sent");
+        let sacks: Vec<&ChunkSelectiveAck> = with_shutdown
+            .chunks
+            .iter()
+            .filter_map(|c| c.as_any().downcast_ref::<ChunkSelectiveAck>())
+            .collect();
+        if gap {
+            assert_eq!(1, sacks.len(), "a SACK in the SHUTDOWN's packet");
+            assert_eq!(base.wrapping_add(1), sacks[0].cumulative_tsn_ack);
+            assert_eq!(1, sacks[0].gap_ack_blocks.len());
+            assert_eq!(
+                (2, 2),
+                (
+                    sacks[0].gap_ack_blocks[0].start,
+                    sacks[0].gap_ack_blocks[0].end
+                )
+            );
+        } else {
+            assert!(sacks.is_empty(), "nothing to report: no SACK");
+        }
+    }
+    Ok(())
+}
+
+/// RFC 9260 3.3.1 and RFC 7053: the I bit asks the receiver for a SACK without delay. The last
+/// DATA chunk sent while a SHUTDOWN waits for it to be acknowledged (9.2) carries it; DATA
+/// sent with more to follow, or outside a shutdown, does not.
+#[test]
+fn the_last_data_before_a_shutdown_asks_for_an_immediate_sack() -> Result<()> {
+    let mut a = timed_test_association();
+    let now = Instant::now();
+    {
+        let mut s = a.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+        s.write_sctp(
+            now,
+            &Bytes::from_static(b"first"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+    }
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(1, sent.len());
+    assert!(!sent[0].immediate_sack, "not while established");
+
+    // Two more messages, of which the window lets one out before the shutdown.
+    {
+        let mut s = a.stream(1)?;
+        for m in [&b"second"[..], b"third"] {
+            s.write_sctp(
+                now,
+                &Bytes::copy_from_slice(m),
+                PayloadProtocolIdentifier::Binary,
+            )?;
+        }
+    }
+    a.cwnd = 0;
+    a.shutdown()?;
+    assert_eq!(AssociationState::ShutdownPending, a.state());
+    a.cwnd = a.inflight_queue.get_num_bytes() as u32 + 6;
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(1, sent.len());
+    assert!(!sent[0].immediate_sack, "more DATA follows it");
+    a.cwnd = 1 << 20;
+    let sent = transmitted_data(&a.gather_outbound(now).0);
+    assert_eq!(1, sent.len());
+    assert!(sent[0].immediate_sack, "the last DATA before the SHUTDOWN");
+    Ok(())
+}

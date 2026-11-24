@@ -245,6 +245,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
   90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
   behaviour change: no (counters only).
+### Added
+
+- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
+  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
+  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
+  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
+  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
+  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
+  stale cookie; a counter).
+- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
+  9260 8.1: "report the failure to the upper layer and optionally report back all
+  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
+  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
+  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
+  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
+  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
+- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
+  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
+  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
+  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
+  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
+  the outbound queues of an ended association are emptied into the undelivered list.
+- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
+  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
+  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
+  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
+  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
+  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
+  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
+  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
+  test.
+
+### Changed
+
+- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
+  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
+  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
+  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
+  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
+  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
+  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
 
 ## [0.1.0] - 2026-11-24
 

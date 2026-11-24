@@ -65,6 +65,13 @@ pub(crate) const RESTART_OF_AN_ASSOCIATION_WITH_NEW_ADDRESSES: ErrorCauseCode = 
 pub(crate) const USER_INITIATED_ABORT: ErrorCauseCode = ErrorCauseCode(12);
 pub(crate) const PROTOCOL_VIOLATION: ErrorCauseCode = ErrorCauseCode(13);
 
+impl ErrorCauseCode {
+    /// The cause code's number (RFC 9260 3.3.10).
+    pub fn value(&self) -> u16 {
+        self.0
+    }
+}
+
 impl fmt::Display for ErrorCauseCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let others = format!("Unknown CauseCode: {}", self.0);

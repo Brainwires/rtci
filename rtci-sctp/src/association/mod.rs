@@ -81,6 +81,8 @@ pub(crate) mod state;
 pub(crate) mod stats;
 pub(crate) mod stream;
 pub(crate) mod timer;
+pub(crate) mod undelivered;
+use undelivered::{UndeliveredMessage, UndeliveredMode};
 
 #[cfg(test)]
 mod association_test;
@@ -277,6 +279,24 @@ pub enum Event {
     PathInactive,
     /// The path to the peer answers again after [`Event::PathInactive`].
     PathActive,
+    /// The peer sent an ERROR chunk (RFC 9260 11.2.5 COMMUNICATION ERROR): each cause's code
+    /// and its cause-specific information as received (RFC 9260 3.3.10).
+    CommunicationError {
+        /// The causes, in the order the chunk carried them.
+        causes: Vec<(crate::ErrorCauseCode, Bytes)>,
+    },
+    /// The association ended with user messages it did not deliver (RFC 9260 11.2.2 SEND
+    /// FAILURE, 8.1): read them with
+    /// [`Association::take_undelivered_messages`]. Reported before
+    /// [`Event::AssociationClosed`]. A message of a partially reliable stream given up while
+    /// the association ran is reported with
+    /// [`StreamEvent::MessageAbandoned`](crate::StreamEvent::MessageAbandoned) instead.
+    SendFailure {
+        /// Messages no part of which was sent.
+        unsent: usize,
+        /// Messages sent, at least in part, and not completely acknowledged.
+        unacknowledged: usize,
+    },
     /// Stream events
     Stream(StreamEvent),
     /// One or more application datagrams have been received
@@ -285,6 +305,34 @@ pub enum Event {
     /// answered, or the peer changed the association.
     Reconfig(ReconfigEvent),
 }
+
+/// What [`Association::status`] reports (RFC 9260 11.1.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AssociationStatus {
+    /// The association ended.
+    pub closed: bool,
+    /// The peer's receive window ("current receiver window size"), in bytes.
+    pub peer_receive_window: u32,
+    /// The congestion window, in bytes.
+    pub congestion_window: u32,
+    /// The slow start threshold, in bytes.
+    pub slow_start_threshold: u32,
+    /// DATA chunks sent and not cumulatively acknowledged ("number of unacknowledged DATA
+    /// chunks").
+    pub unacknowledged_data_chunks: usize,
+    /// DATA chunks waiting to be sent for the first time.
+    pub pending_data_chunks: usize,
+    /// The smoothed round-trip time; zero before the first measurement.
+    pub srtt: Duration,
+    /// The retransmission timeout.
+    pub rto: Duration,
+    /// The path MTU the association packs to.
+    pub path_mtu: u32,
+}
+
+/// How many T3-rtx retransmitted TSNs are remembered for SACK loss detection (RFC 9260 6.2).
+const MAX_T3_RETRANSMITTED_KEPT: usize = 512;
 
 /// Selection is stable even after fragments leave either queue.
 #[derive(Debug, Copy, Clone)]
@@ -440,6 +488,13 @@ pub struct Association {
     valid_cookie_life: Duration,
     /// How many times a Stale Cookie error sent this side back to a new INIT.
     stale_cookie_restarts: usize,
+    /// The TSNs most recently sent again on a retransmission timeout (at most
+    /// `MAX_T3_RETRANSMITTED_KEPT`): one the peer then reports as a duplicate shows a lost
+    /// SACK (RFC 9260 6.2).
+    t3_retransmitted: VecDeque<u32>,
+    /// When the last COOKIE ECHO was sent: the start of the COOKIE ECHO / ERROR exchange a
+    /// Cookie Preservative is sized from (RFC 9260 5.2.6).
+    cookie_echo_sent_at: Option<Instant>,
     /// The first DATA chunk of an association is acknowledged at once (RFC 9260 5.1).
     first_data_received: bool,
     /// Set while a packet is processed whose DATA must be acknowledged at once: it came with
@@ -602,6 +657,10 @@ pub struct Association {
     /// Error causes to report for the packet being processed, sent as one ERROR chunk when
     /// its last chunk has been handled.
     pending_error_causes: Vec<ErrorCause>,
+    /// What the association did not deliver, once it ended (RFC 9260 8.1, 11.1.14, 11.1.15).
+    undelivered: Vec<UndeliveredMessage>,
+    /// Messages held for a stream reset when the association ended.
+    undelivered_held: Vec<Vec<ChunkPayloadData>>,
 
     // per inbound packet context
     delayed_ack_triggered: bool,
@@ -684,6 +743,8 @@ impl Default for Association {
             random: RandomSource::default(),
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
+            t3_retransmitted: VecDeque::new(),
+            cookie_echo_sent_at: None,
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
@@ -767,6 +828,8 @@ impl Default for Association {
             ended_flag: Arc::new(AtomicBool::new(false)),
             drained_emitted: false,
             pending_error_causes: vec![],
+            undelivered: vec![],
+            undelivered_held: vec![],
 
             // per inbound packet context
             delayed_ack_triggered: false,
@@ -929,6 +992,28 @@ impl Association {
     /// The current retransmission timeout.
     pub fn rto(&self) -> Duration {
         Duration::from_millis(self.rto_mgr.get_rto())
+    }
+
+    /// The peer's receive window as this side tracks it (RFC 9260 6.2.1: the last a_rwnd
+    /// less the bytes sent since and not acknowledged), in bytes of user data.
+    pub fn peer_receive_window(&self) -> u32 {
+        self.rwnd
+    }
+
+    /// RFC 9260 11.1.8 Status: the association's state in one call (single-homed, RFC 8261
+    /// 6.1, so one destination: no address list or primary path).
+    pub fn status(&self) -> AssociationStatus {
+        AssociationStatus {
+            closed: self.is_closed(),
+            peer_receive_window: self.rwnd,
+            congestion_window: self.cwnd,
+            slow_start_threshold: self.ssthresh,
+            unacknowledged_data_chunks: self.inflight_queue.len(),
+            pending_data_chunks: self.pending_queue.len(),
+            srtt: self.rtt(),
+            rto: self.rto(),
+            path_mtu: self.path_mtu(),
+        }
     }
 
     /// Tells the association that its packets take another path from now on: the transport
@@ -1516,6 +1601,7 @@ impl Association {
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
                 self.unregister_stream(si, reason.clone());
             }
+            self.collect_undelivered_messages();
             self.events.push_back(Event::AssociationClosed {
                 reason: reason.clone(),
             });
@@ -1642,14 +1728,52 @@ impl Association {
             self.closed_stream_bytes_dequeued
                 .insert(stream_identifier, s.bytes_dequeued);
             self.reindex_stream(stream_identifier, s.get_num_bytes_in_reassembly_queue());
-            // Messages held for a reset of the stream go with it.
+            // Messages held for a reset of the stream go with it: when the association is
+            // ending, they are handed back as unsent (RFC 9260 8.1).
             self.held_write_count = self.held_write_count.saturating_sub(s.held_writes.len());
+            if self.ended {
+                self.undelivered_held.append(&mut s.held_writes);
+            }
             self.events.push_back(Event::AssociationLost {
                 reason,
                 id: stream_identifier,
             });
             s.state = RecvSendState::Closed;
         }
+    }
+
+    /// RFC 9260 8.1: an association that ends "SHOULD report the failure to the upper layer
+    /// and optionally report back all outstanding user data remaining in its outbound
+    /// queue". What was sent and not cumulatively acknowledged, what waits to be sent and
+    /// what was held for a stream reset become [`UndeliveredMessage`]s, reported with one
+    /// [`Event::SendFailure`] (11.2.2) and read with [`Self::take_undelivered_messages`].
+    fn collect_undelivered_messages(&mut self) {
+        let sent = self.inflight_queue.take_all();
+        let mut unsent = self.pending_queue.take_all_messages();
+        unsent.append(&mut self.undelivered_held);
+        let messages = undelivered::undelivered_messages(sent, unsent);
+        if messages.is_empty() {
+            return;
+        }
+        let unacknowledged = messages
+            .iter()
+            .filter(|m| m.mode == UndeliveredMode::Unacknowledged)
+            .count();
+        self.events.push_back(Event::SendFailure {
+            unsent: messages.len() - unacknowledged,
+            unacknowledged,
+        });
+        self.undelivered.extend(messages);
+    }
+
+    /// The user messages this association did not deliver, once it ended (RFC 9260 11.1.14
+    /// Receive Unsent Message, 11.1.15 Receive Unacknowledged Message): each message that
+    /// was never sent and each one sent and not completely acknowledged, in the order sent
+    /// then written, as [`Event::SendFailure`] counted them. Taken once; empty while the
+    /// association runs. A graceful shutdown ends only when everything was acknowledged, so
+    /// it leaves none.
+    pub fn take_undelivered_messages(&mut self) -> Vec<UndeliveredMessage> {
+        std::mem::take(&mut self.undelivered)
     }
 
     /// set_state atomically sets the state of the Association.
@@ -2091,6 +2215,16 @@ impl Association {
     /// Error" in COOKIE-ECHOED (5.2.6), where the cookie this side echoed had outlived its
     /// lifetime. The setup is tried again with a new INIT, a bounded number of times.
     fn handle_error(&mut self, c: &ChunkError, now: Instant) {
+        // RFC 9260 11.2.5 COMMUNICATION ERROR: the causes the peer's ERROR chunk carried.
+        if !self.ended {
+            self.events.push_back(Event::CommunicationError {
+                causes: c
+                    .error_causes
+                    .iter()
+                    .map(|e| (e.code, e.raw.clone()))
+                    .collect(),
+            });
+        }
         // RFC 3758 3.3.3: a peer that reports the Forward-TSN-Supported parameter as
         // unrecognized does not do PR-SCTP: no FORWARD TSN for the life of the association.
         if c.error_causes
@@ -2132,6 +2266,34 @@ impl Association {
             self.interleaving_enabled,
             self.zero_checksum_enabled,
         );
+        // RFC 9260 5.2.6: "The endpoint MAY add a Cookie Preservative parameter requesting
+        // an extension to the lifetime of the State Cookie. When calculating the time
+        // extension, an implementation SHOULD use the RTT information measured based on the
+        // previous COOKIE ECHO / ERROR exchange and SHOULD add no more than 1 second beyond
+        // the measured RTT". The increment is what the cookie was late by (the Measure of
+        // Staleness, in microseconds), at least that round trip and at most a second more.
+        let rtt_ms = self
+            .cookie_echo_sent_at
+            .take()
+            .map_or(0, |sent| now.saturating_duration_since(sent).as_millis())
+            .min(u128::from(u32::MAX)) as u32;
+        let staleness_ms = c
+            .error_causes
+            .iter()
+            .find(|e| e.code == STALE_COOKIE_ERROR)
+            .and_then(|e| e.raw.get(..4))
+            .map_or(0, |b| {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]]).div_ceil(1000)
+            });
+        let increment = staleness_ms
+            .max(rtt_ms)
+            .min(rtt_ms.saturating_add(1000))
+            .max(1);
+        init.params.push(Box::new(
+            crate::param::param_cookie_preservative::ParamCookiePreservative {
+                suggested_increment_ms: increment,
+            },
+        ));
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -2914,6 +3076,7 @@ impl Association {
 
         self.timers
             .start(Timer::T1Cookie, now, self.rto_mgr.get_rto());
+        self.cookie_echo_sent_at = Some(now);
 
         self.set_state(AssociationState::CookieEchoed);
 
@@ -3211,17 +3374,9 @@ impl Association {
     /// HEARTBEAT goes out, or the HEARTBEAT that went out has not been answered within an
     /// RTO.
     fn on_heartbeat_timeout(&mut self, now: Instant) {
-        if !matches!(
-            self.state(),
-            AssociationState::Established
-                | AssociationState::ShutdownPending
-                | AssociationState::ShutdownReceived
-        ) {
+        if !self.may_send_heartbeat() {
             return;
         }
-        let Some(interval) = self.heartbeat_interval else {
-            return;
-        };
 
         if self.heartbeat_outstanding.take().is_some() {
             // RFC 9260 8.3: a HEARTBEAT not acknowledged within an RTO counts against the
@@ -3232,9 +3387,14 @@ impl Association {
             if self.on_path_failure() {
                 return;
             }
-            self.timers.set(Timer::Heartbeat, Some(now + interval));
+            if let Some(interval) = self.heartbeat_interval {
+                self.timers.set(Timer::Heartbeat, Some(now + interval));
+            }
             return;
         }
+        let Some(interval) = self.heartbeat_interval else {
+            return;
+        };
 
         // The path is idle when nothing that measures the round trip has left for a
         // heartbeat period: not while DATA is being sent for the first time.
@@ -3247,7 +3407,21 @@ impl Association {
             self.timers.set(Timer::Heartbeat, Some(last + period));
             return;
         }
+        self.send_heartbeat(now);
+    }
 
+    /// HEARTBEATs go in ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-RECEIVED only.
+    fn may_send_heartbeat(&self) -> bool {
+        matches!(
+            self.state(),
+            AssociationState::Established
+                | AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+        )
+    }
+
+    /// Queues a HEARTBEAT and waits an RTO for its HEARTBEAT ACK (RFC 9260 8.3).
+    fn send_heartbeat(&mut self, now: Instant) {
         // RFC 9260 8.3: the HEARTBEAT carries the time it is sent, and a nonce, so that the
         // HEARTBEAT ACK can be told from any other.
         let nonce = self.random.u64();
@@ -3270,6 +3444,23 @@ impl Association {
             Timer::Heartbeat,
             Some(now + Duration::from_millis(self.rto_mgr.get_rto())),
         );
+    }
+
+    /// RFC 9260 11.1.10 Request Heartbeat: "Instructs the local endpoint to perform a
+    /// heartbeat on the specified destination transport address". Sends a HEARTBEAT now,
+    /// whether or not heartbeats are enabled ([`TransportConfig::with_heartbeat_interval`]),
+    /// unless one is waiting for its HEARTBEAT ACK already (its answer serves). Its HEARTBEAT
+    /// ACK measures the round trip ([`Self::rtt`]); left unanswered for an RTO it counts as an
+    /// error of the path, as a periodic one does (8.3). Returns whether a HEARTBEAT was
+    /// queued: `false` outside ESTABLISHED, SHUTDOWN-PENDING and SHUTDOWN-RECEIVED, or with
+    /// one outstanding. The association is single-homed (RFC 8261 6.1), so there is no
+    /// address to name.
+    pub fn request_heartbeat(&mut self, now: Instant) -> bool {
+        if !self.may_send_heartbeat() || self.heartbeat_outstanding.is_some() {
+            return false;
+        }
+        self.send_heartbeat(now);
+        true
     }
 
     /// RFC 8899 section 6.2: the path MTU probe that is due, if any, as a packet of its own
@@ -3880,6 +4071,17 @@ impl Association {
                 self.side, d.cumulative_tsn_ack, self.my_next_tsn
             );
             return Err(Error::ErrTsnRequestNotExist);
+        }
+
+        // RFC 9260 6.2: "When an endpoint receives a SACK chunk, it MAY use the duplicate TSN
+        // information to determine if SACK chunk loss is occurring." A TSN this side sent
+        // again on a retransmission timeout and that the peer reports as a duplicate had
+        // reached the peer before: the SACK that said so was lost (or came after the RTO).
+        for tsn in &d.duplicate_tsn {
+            if let Some(i) = self.t3_retransmitted.iter().position(|t| t == tsn) {
+                self.t3_retransmitted.remove(i);
+                self.stats.inc_sack_losses();
+            }
         }
 
         // The bytes outstanding before this SACK: the congestion window may grow only when
@@ -5011,9 +5213,20 @@ impl Association {
     ) -> Vec<Bytes> {
         // Pop unsent data chunks from the pending queue to send as much as
         // cwnd and rwnd allow.
-        let (chunks, resets) = self.pop_pending_data_chunks_to_send(now);
+        let (mut chunks, resets) = self.pop_pending_data_chunks_to_send(now);
         if self.state() == AssociationState::Closed {
             return vec![];
+        }
+        // RFC 9260 3.3.1: "The (I)mmediate bit MAY be set by the sender whenever the sender of
+        // a DATA chunk can benefit from the corresponding SACK chunk being sent back without
+        // delay" (RFC 7053 4). The last DATA before a SHUTDOWN is such a chunk: the SHUTDOWN
+        // waits for its acknowledgement (9.2), which a delayed SACK would hold back.
+        if self.state() == AssociationState::ShutdownPending
+            && self.pending_queue.is_empty()
+            && self.held_write_count == 0
+            && let Some(last) = chunks.last_mut()
+        {
+            last.immediate_sack = true;
         }
         if !chunks.is_empty() {
             // Start timer. (noop if already started)
@@ -5301,8 +5514,21 @@ impl Association {
             let shutdown = ChunkShutdown {
                 cumulative_tsn_ack: self.peer_last_tsn,
             };
+            // RFC 9260 3.3.8: "The sender of the SHUTDOWN chunk MAY bundle a SACK chunk to
+            // indicate any gaps in the received TSNs", which the SHUTDOWN's Cumulative TSN Ack
+            // cannot report: the peer then knows what arrived beyond it and need not send it
+            // again.
+            let mut chunks: Vec<Box<dyn Chunk>> = vec![];
+            if !self
+                .payload_queue
+                .get_gap_ack_blocks(self.peer_last_tsn)
+                .is_empty()
+            {
+                chunks.push(Box::new(self.create_selective_ack_chunk()));
+            }
+            chunks.push(Box::new(shutdown));
 
-            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown)])) {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(chunks)) {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 self.start_shutdown_guard(now);
@@ -5458,6 +5684,10 @@ impl Association {
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
                 self.stats.inc_retransmissions();
+                if self.t3_retransmitted.len() == MAX_T3_RETRANSMITTED_KEPT {
+                    self.t3_retransmitted.pop_front();
+                }
+                self.t3_retransmitted.push_back(chunk.tsn);
                 // RFC 9260 6.2.1 B: a retransmitted chunk takes its size from rwnd again.
                 self.rwnd = self
                     .rwnd
@@ -6357,6 +6587,7 @@ impl Association {
             }
 
             Timer::T1Cookie => {
+                self.cookie_echo_sent_at = Some(now);
                 if let Err(err) = self.send_cookie_echo() {
                     debug!(
                         "[{}] failed to retransmit cookie-echo (n_rtos={}): {:?}",

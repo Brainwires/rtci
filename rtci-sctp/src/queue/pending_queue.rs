@@ -789,6 +789,31 @@ impl PendingQueue {
         self.queue_len
     }
 
+    /// Takes every message still waiting, whole or the unsent tail of one part sent, in the
+    /// order they were written (across streams), and leaves the queue empty with its
+    /// configuration. For an association that ended: what it never sent (RFC 9260 8.1,
+    /// 11.1.14). Resets waiting here are dropped.
+    pub(crate) fn take_all_messages(&mut self) -> Vec<Vec<ChunkPayloadData>> {
+        let mut messages: Vec<(u64, Vec<ChunkPayloadData>)> = Vec::new();
+        for queue in self.streams.values_mut() {
+            for (arrival, entry) in queue.entries.drain(..) {
+                if let PendingEntry::Message(message) = entry {
+                    messages.push((arrival, message.into_fragments()));
+                }
+            }
+        }
+        messages.sort_by_key(|(arrival, _)| *arrival);
+        *self = PendingQueue {
+            scheduler: self.scheduler,
+            interleaving: self.interleaving,
+            priorities: std::mem::take(&mut self.priorities),
+            packet_budget: self.packet_budget,
+            next_arrival: self.next_arrival,
+            ..PendingQueue::default()
+        };
+        messages.into_iter().map(|(_, m)| m).collect()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
