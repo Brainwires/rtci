@@ -417,6 +417,24 @@ pub struct DefaultInterceptorOptions {
     /// desired, e.g., [RFC5109]", and FlexFEC is the mechanism it names for video; Chromium
     /// offers both for every video section.
     pub video_red_ulpfec: bool,
+    /// Whether the ULPFEC of [`Self::video_red_ulpfec`] covers the transport-wide sequence
+    /// number, abs-send-time and toffset extensions as zeros in both directions, as libwebrtc
+    /// does ([`configure_video_red_ulpfec_with`]). `false` by default: RFC 5109 section 8, the
+    /// FEC covers the packet as sent; `true` in the `Chrome` profile, so a packet a browser
+    /// rebuilds from this engine's FEC, and one this engine rebuilds from a browser's, is
+    /// exact (those values zero) instead of carrying XOR noise in them.
+    pub ulpfec_zero_mutable_extensions: bool,
+    /// Whether video offers RFC 8627 FlexFEC (`video/flexfec`) and the chain sends and
+    /// recovers it ([`configure_video_flexfec`]). `false` by default; `true` in the
+    /// `StrictRfc` profile.
+    ///
+    /// RFC 8854 section 5.2: support for an SSRC-multiplexed FlexFEC stream "SHOULD be
+    /// indicated by including video/flexfec ... in the SDP offer". RFC 8627 section 1.1.7: an
+    /// answerer that supports FlexFEC and RTX and is offered both "MUST respond with an Answer
+    /// containing only FLEX FEC", so with this on at both ends RTX is not negotiated for video
+    /// (repair of what FEC cannot rebuild is then by retransmission on the media SSRC). The
+    /// default keeps RTX: it is not offered.
+    pub video_flexfec: bool,
     /// How the RTP circuit breaker takes s, the packet size of RFC 8083 section 4.3's TCP
     /// throughput equation: by default the mean size of the packets sent over the reporting
     /// intervals the sending rate is measured over;
@@ -514,6 +532,11 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             )
             .field("video_red_ulpfec", &self.video_red_ulpfec)
             .field(
+                "ulpfec_zero_mutable_extensions",
+                &self.ulpfec_zero_mutable_extensions,
+            )
+            .field("video_flexfec", &self.video_flexfec)
+            .field(
                 "circuit_breaker_packet_size",
                 &self.circuit_breaker_packet_size,
             )
@@ -563,12 +586,14 @@ impl DefaultInterceptorOptions {
             rtcp_immediate_congestion_feedback: true,
             rtcp_report_from_every_ssrc: false,
             twcc_rereport_received: false,
-            gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
+            gcc_threshold_time_base: interceptor::ThresholdTimeBase::Arrival,
             gcc_one_decrease_per_round_trip: false,
             gcc_received_rate_bound: interceptor::ReceivedRateBound::LimitsIncrease,
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
             video_red_ulpfec: false,
+            ulpfec_zero_mutable_extensions: false,
+            video_flexfec: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
             circuit_breaker: true,
             circuit_breaker_automatic_restart: true,
@@ -785,7 +810,16 @@ pub fn register_default_interceptors_with_options(
     configure_abs_send_time(media_engine)?;
     options.register_audio_extras(media_engine)?;
     let registry = if options.video_red_ulpfec {
-        configure_video_red_ulpfec(registry, media_engine)?
+        configure_video_red_ulpfec_with(
+            registry,
+            media_engine,
+            options.ulpfec_zero_mutable_extensions,
+        )?
+    } else {
+        registry
+    };
+    let registry = if options.video_flexfec {
+        configure_video_flexfec(registry, media_engine)?
     } else {
         registry
     };
@@ -2161,6 +2195,24 @@ pub fn configure_video_red_ulpfec(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
+    configure_video_red_ulpfec_with(registry, media_engine, false)
+}
+
+/// [`configure_video_red_ulpfec`], with the transport-wide sequence number, abs-send-time and
+/// toffset values zeroed in what the encoder protects and in the decoder's copies when
+/// `zero_mutable_extensions` (libwebrtc's form:
+/// `UlpfecSendBuilder::with_mutable_extensions_zeroed`,
+/// `UlpfecReceiveBuilder::with_mutable_extensions_zeroed`;
+/// `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`).
+///
+/// # Errors
+///
+/// When a codec cannot be registered.
+pub fn configure_video_red_ulpfec_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    zero_mutable_extensions: bool,
+) -> Result<Registry> {
     let has = |media_engine: &MediaEngine, subtype: &str| {
         media_engine.video_codecs.iter().any(|codec| {
             codec
@@ -2201,6 +2253,7 @@ pub fn configure_video_red_ulpfec(
         interceptor::UlpfecSendBuilder::red(VIDEO_RED_PAYLOAD_TYPE, VIDEO_ULPFEC_PAYLOAD_TYPE)
             .with_red_placement(interceptor::RedPlacement::OwnPacket)
             .with_flush_on_marker(true)
+            .with_mutable_extensions_zeroed(zero_mutable_extensions)
             .build();
     let tap = encoder.wire_tap();
     Ok(registry
@@ -2212,7 +2265,85 @@ pub fn configure_video_red_ulpfec(
                 VIDEO_RED_PAYLOAD_TYPE,
                 VIDEO_ULPFEC_PAYLOAD_TYPE,
             )
+            .with_mutable_extensions_zeroed(zero_mutable_extensions)
             .build(),
+        ))
+}
+
+/// The payload type [`configure_video_flexfec`] registers `video/flexfec` under.
+pub const VIDEO_FLEXFEC_PAYLOAD_TYPE: PayloadType = 49;
+/// Where [`configure_video_flexfec`] puts the RFC 8627 encoder: `Slot::Custom(5_100)`, beside
+/// [`Slot::FecEncoder`] (5_000), which ULPFEC may hold. Both are above the NACK responder and the
+/// pacer, so repair packets are paced and recorded.
+pub const FLEXFEC_ENCODER_SLOT: usize = 5_100;
+/// Where the RFC 8627 encoder's wire tap sits: `Slot::Custom(1_510)`, beside
+/// [`Slot::FecWireImage`] (1_500), below the TWCC sender, so FlexFEC protects each source
+/// packet as it leaves (RFC 8627 section 4.1).
+pub const FLEXFEC_WIRE_IMAGE_SLOT: usize = 1_510;
+/// Where the RFC 8627 decoder sits: `Slot::Custom(10_310)`, beside [`Slot::FecDecoder`]
+/// (10_300): after the arrival recorders, which must report what the path delivered, and
+/// before the NACK generator, which must not ask for what FEC rebuilds.
+pub const FLEXFEC_DECODER_SLOT: usize = 10_310;
+
+/// RFC 8627 FlexFEC for video, in both directions (`DefaultInterceptorOptions::video_flexfec`,
+/// on in the `StrictRfc` profile; RFC 8854 sections 5.1 and 5.2):
+///
+/// - registers `video/flexfec` ([`VIDEO_FLEXFEC_PAYLOAD_TYPE`]) with
+///   `repair-window=10000000` (RFC 8627 section 5.1: required; 10 s,
+///   `interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW`) after the video codecs already registered,
+///   unless the media engine has a `video/flexfec` of its own. Each video sender then has a
+///   FEC SSRC, grouped with its media SSRC by `a=ssrc-group:FEC-FR` (RFC 5956 section 4.3);
+/// - the encoder at [`FLEXFEC_ENCODER_SLOT`] with its wire tap at [`FLEXFEC_WIRE_IMAGE_SLOT`]:
+///   flexible masks of two repair packets per five source packets at most, in the amount the
+///   receiver's reported loss asks for (`FecRate`, RFC 8854 section 8), taken out of the
+///   target the application encodes at;
+/// - the decoder at [`FLEXFEC_DECODER_SLOT`].
+///
+/// These slots are not ULPFEC's, so a chain may run both (the `Chrome` profile's ULPFEC in RED
+/// at [`Slot::FecEncoder`] / [`Slot::FecDecoder`]). A stream is protected only when its section
+/// negotiated `flexfec`; an answer to an offer with `flexfec` and `rtx` keeps only `flexfec`
+/// (RFC 8627 section 1.1.7, `MediaEngine::set_flexfec_with_retransmission`).
+///
+/// # Errors
+///
+/// When the codec cannot be registered.
+pub fn configure_video_flexfec(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+) -> Result<Registry> {
+    let registered = media_engine.video_codecs.iter().any(|codec| {
+        codec.rtp_codec.mime_type.eq_ignore_ascii_case(
+            crate::peer_connection::configuration::media_engine::MIME_TYPE_FLEX_FEC,
+        )
+    });
+    if !registered {
+        media_engine.register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type:
+                        crate::peer_connection::configuration::media_engine::MIME_TYPE_FLEX_FEC
+                            .to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: interceptor::FlexFecParameters::with_repair_window(
+                        interceptor::FLEXFEC_DEFAULT_REPAIR_WINDOW,
+                    )
+                    .to_fmtp(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: VIDEO_FLEXFEC_PAYLOAD_TYPE,
+            },
+            RtpCodecKind::Video,
+        )?;
+    }
+    let mut encoder = interceptor::FlexFecSendBuilder::new().build();
+    let tap = encoder.wire_tap();
+    Ok(registry
+        .with(Slot::Custom(FLEXFEC_ENCODER_SLOT), encoder)
+        .with(Slot::Custom(FLEXFEC_WIRE_IMAGE_SLOT), tap)
+        .with(
+            Slot::Custom(FLEXFEC_DECODER_SLOT),
+            interceptor::FlexFecReceiveBuilder::new().build(),
         ))
 }
 

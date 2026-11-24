@@ -398,6 +398,58 @@ fn a_gap_in_the_sequence_numbers_starts_a_new_block() {
     assert_eq!(vec![10, 11, 12], blocks[0].sequence_numbers());
 }
 
+/// A retransmission on the media SSRC (a NACK answered without RTX: an answer to an offer
+/// with FlexFEC and RTX keeps only FlexFEC, section 1.1.7) that leaves in the middle of a block
+/// is not taken into it: the packet was protected when it first left, and its old sequence
+/// number would break the run of consecutive source packets the block is. With the wire tap,
+/// as the standard chain has it (`configure_video_flexfec`), and without.
+#[test]
+fn a_retransmission_on_the_media_ssrc_does_not_break_the_block() {
+    for with_tap in [true, false] {
+        let mut fec = shape(FlexFecProtection::Row { l: 5 }).build();
+        let registry = Registry::new();
+        let registry = if with_tap {
+            let tap = fec.wire_tap();
+            registry.with(Slot::FecWireImage, tap)
+        } else {
+            registry
+        };
+        let mut chain = registry.with(Slot::FecEncoder, fec).build();
+        chain.bind_local_stream(&stream("video/flexfec", "repair-window=10000000"));
+        let epoch = Instant::now();
+        let mut out = Vec::new();
+        for (sequence_number, retransmission) in [
+            (0u16, false),
+            (1, false),
+            (0, true),
+            (2, false),
+            (3, false),
+            (4, false),
+        ] {
+            let mut packet = tagged(epoch, Packet::Rtp(media(MEDIA_SSRC, sequence_number)));
+            if retransmission {
+                packet.message.add(Attribute::Retransmission);
+            }
+            chain.handle_write(packet).expect("handle_write");
+            while let Some(packet) = chain.poll_write() {
+                out.push(packet);
+            }
+        }
+        let repair = repair_of(&out);
+        assert_eq!(1, repair.len(), "with tap {with_tap}");
+        let FlexFecHeader::Repair { blocks, .. } =
+            FlexFecHeader::parse(&repair[0].header.csrc, &repair[0].payload).expect("parses")
+        else {
+            panic!("a parity packet");
+        };
+        assert_eq!(
+            vec![0, 1, 2, 3, 4],
+            blocks[0].sequence_numbers(),
+            "with tap {with_tap}"
+        );
+    }
+}
+
 /// Section 1.1.8: repair packets reaching beyond the repair window MUST NOT be sent. A block
 /// whose first packet left longer ago than the window gets no repair packets.
 #[test]
