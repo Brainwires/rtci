@@ -888,6 +888,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process
     (`serve` on the child's side); a child that aborts, crashes or hangs costs that frame.
   - `codec::vp8` catches a panic of the decoder and replaces it (`DecodeError::Corrupt`).
+  - Features `libvpx` (VP8 / VP9 decode and encode), `dav1d` (AV1 decode) and `openh264`
+    (H.264 decode and encode with Cisco's binary only, accepted by its published SHA-256): each
+    loads its library at run time, so building them needs no system library (`cargo check
+    --all-features` stays pure Rust). libvpx's decode of the VP8 fixture equals libvpx's
+    reference output; libdav1d survives every single-bit flip of a key frame (19,352) and 1500
+    seeded mutations that abort rav1d. The AV1 wrappers no longer refuse a key frame after an
+    accepted hostile delta frame (an error met while taking out a waiting picture is the
+    earlier unit's). A CI job installing the libraries is proposed, not added.
   - The root crate no longer dev-depends on `rtc-video`: the interop peer's `pipeline`
     scenario is built by the new `rtc-video-interop` package (feature `pipeline`, binary
     `interop-peer-video`, which the browser stage now starts), so workspace builds compile no

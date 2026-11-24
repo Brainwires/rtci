@@ -638,6 +638,70 @@ closes a real path by reading: when taking a waiting picture out failed, `decode
 returned through `?` before releasing the temporal unit's `Dav1dData`; a guard (`OwnedData`) now
 releases it on every path.
 
+### 4.9 The system-library backends: `libvpx`, `dav1d`, `openh264`
+
+**All three load their library at run time** (`dlopen` through `libloading` 0.9, ISC; the
+`openh264` crate 0.9.10, BSD-2-Clause, without its `source` feature). Building any of them
+needs no library, no header and no C toolchain, so `cargo check --workspace --all-features`
+(cargo.yml) stays pure Rust and passes on a runner with nothing installed (checked: `cargo
+tree` of the three features has no `cc`, `nasm` or `pkg-config`). Running needs the library
+installed; a missing or different library is an error from the constructor, never a crash:
+
+| Feature | Library (checked against) | How a wrong library is refused |
+|---|---|---|
+| `libvpx` | libvpx 1.16.0 (`libvpx.so.12`; also tries `.so.11` to `.so.9`) | contexts are made through `vpx_codec_dec_init_ver` / `vpx_codec_enc_init_ver` with the headers' ABI versions (decoder 12, encoder 39): libvpx answers `VPX_CODEC_ABI_MISMATCH`; the structures libvpx writes before that check (encoder configuration, image, context) have 1 KiB of room after them |
+| `dav1d` | libdav1d 1.5.3 (`libdav1d.so.7`) | `dav1d_version_api()` must have major version 7 before any structure is exchanged |
+| `openh264` | Cisco's OpenH264 2.6.0 binary (`libopenh264-2.6.0-linux64.8.so`) | `OpenH264API::from_blob_path` loads a file only if its SHA-256 is in Cisco's published lists for 2.6.0 and 2.7.0 (a foreign file: "Invalid hash: ...") |
+
+The bindings for libvpx and libdav1d are written here from their public headers (those of the runner's packages, printed by run 45327646972), not generated and not taken
+from `parolnet-media`, whose libvpx binding is a C shim built with `cc` at build time (the
+opposite of what `--all-features` needs). OpenH264 is used as Cisco's binary only, never built
+from source here; the licensing of 4.1 applies, and `codec::openh264::ATTRIBUTION` is the text
+Cisco's conditions require.
+
+Measured on GitHub-hosted runners (ubuntu-26.04 image, 4 vCPUs), libraries from the
+distribution (`apt-get install libdav1d7 libvpx12`), Cisco's binary downloaded from
+`ciscobinary.openh264.org` (SHA-256 `2f0cde7c...` matched); runs 45328698491 (release build)
+and 45329271661 (every feature, all tests of the crate: 9 binaries, 81 passed, 0 failed):
+
+| Check | Result |
+|---|---|
+| libvpx, the repository's VP8 fixture | I420 MD5 `4b669885...`, equal to libvpx through ffmpeg (the reference `tests/codecs.rs` holds the pure-Rust decoder to) |
+| libvpx, the VP9 fixture | 300 of 300 frames, 176x144 (I420 MD5 `4c2587ad...`, recorded) |
+| libvpx encode, 640x360, 600 kbit/s, synthetic | VP8 39.2 dB at 575 kbit/s, VP9 40.2 dB at 583 kbit/s; every VP8 frame decoded by `vp8-decoder` to the same bytes as by libvpx (90 of 90) |
+| libvpx rate change in place (`vpx_codec_enc_config_set`) | 1015 kbit/s at a 1000 target, then 330 at 300, no key frame |
+| libvpx speed, 1280x720, 2 Mbit/s, one thread | VP8 encode 173 fps, decode 578 fps; VP9 encode 96 fps, decode 488 fps |
+| libdav1d against rav1d | the rav1e stream decoded to the same pictures, byte for byte |
+| libdav1d on rav1d's reproducer | `dav1d_send_data` returns -22 (EINVAL); the next key frame decodes |
+| libdav1d on hostile input, in process | every single-bit flip of the key frame (19,352): 768 refused, 0 crashes; phase 2's 1500 seeded mutations: 759 refused, 0 crashes, the key frame decodes after every one (against rav1d 1.1.0: 711 and 193 aborts, 4.8) |
+| libdav1d speed, 640x360, one thread | 1785 fps (rav1d without assembly: 462 fps, release builds) |
+| OpenH264 (Cisco 2.6.0), the H.264 fixture | 300 of 300 access units decoded, 176x144 |
+| OpenH264 encode, 640x360, 600 kbit/s, synthetic | 40.2 dB at 605 kbit/s, a frame for every picture, key frames exactly where asked (2 of 90); encode and decode together 463 fps |
+
+libFuzzer on libdav1d through this backend, the harness used on rav1d (4.8), 15 minutes, fork
+mode, AddressSanitizer and LeakSanitizer on the Rust side (the distribution's libdav1d is not
+instrumented, so a memory error inside it shows only if it crashes; run 45328745696): **no
+crash, no leak, no timeout, no out-of-memory** (rav1d, same harness and time: 1 crash, 3 and 4
+leak, 1 timeout artifacts). For AV1 from a peer that is not trusted, `dav1d` is the decoder to
+use; `isolation` still contains a C crash nobody has found yet.
+
+The first of those runs found a bug in this crate's AV1 wrappers (both): dav1d reports a
+frame's decode error when the next picture is taken out, and the wrappers took that error, met
+while sending the following unit, as the following unit's own, so a key frame after an accepted
+hostile delta frame was refused (`hostile_av1_frames_do_not_crash_dav1d` failed). An error from
+a waiting picture is now logged as the earlier unit's and the current unit is still sent (run
+45329271661: 0 key frames refused after a hostile frame).
+
+**CI job proposal (not added: the workflows are the train's, and this job installs system
+libraries).** A job `video-codecs` on ubuntu-latest: `sudo apt-get install -y libdav1d7
+libvpx12`, download Cisco's `libopenh264-2.6.0-linux64.8.so.bz2` from
+`http://ciscobinary.openh264.org/` into the runner's temporary directory (a CI machine fetching
+the binary for a test is the "separately downloaded" case; it is never committed or cached in
+the repository) and set `OPENH264_LIBRARY`, then `cargo test -p rtc-video --all-features`. About
+3 minutes with a warm cache. No other job changes: `cargo check --workspace --all-features`
+needs no library. macOS (Homebrew `libvpx`, `dav1d`) and Windows (vcpkg) variants are possible
+but not proposed until an application needs them.
+
 **rav1d 1.1.0 (decode) and rav1e 0.8.1 (encode), without assembly**
 
 | Check | Result |
@@ -659,8 +723,7 @@ what it sends: that cannot be a default of a library that takes media from the n
 separate process: `codec::isolated`, 4.8). The real-time AV1 path is the opt-in `dav1d` (decode) and the libaom or SVT
 encoders, which need C and assembly.
 
-**Not done in this phase:** the opt-in backends that link system libraries (`libvpx`, `dav1d`,
-`openh264` with the licensing of 4.1); phase 2 settled the default-feature story first.
+The opt-in backends that use system libraries (`libvpx`, `dav1d`, `openh264`) are in 4.9.
 
 ### 4.2 Hardware encoders and decoders (later, opt-in)
 
@@ -702,9 +765,9 @@ prompt; none runs in CI.
 | `vp8` (pure Rust, opt-in until the owner decides, 4.7) | VP8 (`vp8-decoder`, real time to 720p and beyond) | VP8 (`vp8-encoder`, real time to 720p on one core) |
 | `av1` (pure Rust, opt-in) | AV1 (`rav1d`, real time to 720p30 on one core; a hostile frame aborts the process, and it leaks about 50 to 100 bytes a frame, 4.8) | AV1 (`rav1e`, not real time: 5 to 8 fps at 360p) |
 | `isolation` (opt-in) | any of these in a child process: a crash costs a frame (4.8) | - |
-| `libvpx` | VP8, VP9 | VP8, VP9 (SVC included) |
-| `dav1d` | AV1 at browser speed | - |
-| `openh264` | H.264 Constrained Baseline | H.264 Constrained Baseline |
+| `libvpx` (C, loaded at run time, 4.9) | VP8, VP9 | VP8, VP9 (SVC later, phase 3) |
+| `dav1d` (C, loaded at run time, 4.9) | AV1 at browser speed, robust on hostile input | - |
+| `openh264` (Cisco's binary, loaded at run time, 4.9) | H.264 | H.264 Constrained Baseline |
 | hardware | H.264, H.265, others per platform | H.264, H.265 per platform |
 
 The default build decodes no video at all until the application enables a codec feature or

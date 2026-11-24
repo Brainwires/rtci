@@ -23,6 +23,10 @@ Codecs (phase two), all opt-in; the default build decodes no video:
   rav1d's C API that nothing can catch; rav1d issue 1497, fixed upstream but unreleased), and it
   leaks about 50 to 100 bytes a frame (rav1d issue 1522). Use it only for trusted senders, or
   with `isolation`.
+- `libvpx` (VP8, VP9), `dav1d` (AV1) and `openh264` (H.264 with Cisco's binary): C libraries
+  loaded at run time, so the build needs none of them; the application installs libvpx or
+  libdav1d, or obtains Cisco's OpenH264 binary under Cisco's conditions (see `codec::openh264`).
+  For AV1 from untrusted peers, `dav1d` is the robust decoder.
 - `isolation`: runs a decoder in a child process, so a decoder that aborts, crashes or hangs
   costs one frame instead of the application.
 
