@@ -53,8 +53,9 @@ impl Default for NackResponderBuilder {
 /// leg. Until a target has passed, and in a chain without a congestion controller, nothing is
 /// held back.
 ///
-/// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`]. A NACKed packet that
-/// does not fit now waits, oldest request first, and leaves when the window has room for it
+/// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`], and what the window
+/// allows leaves at its rate, not at once (a token bucket holding a tenth of it). A
+/// NACKed packet that does not fit now waits, oldest request first, and leaves when the window has room for it
 /// ([`poll_timeout`](sansio::Protocol::poll_timeout) is that instant), for as long as the
 /// receiver keeps asking for it ([`PENDING_REQUEST_LIFETIME`]). Section 7 lets the sender
 /// "selectively retransmit only the packets that it deems important and ignore NACK messages

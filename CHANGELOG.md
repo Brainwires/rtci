@@ -763,6 +763,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **interceptors (NACK responder), retransmissions leave at the limit's rate**
+  (`conf/rtx-2-smooth-limiter`): the retransmission rate limit counts octets over a sliding
+  1 s window, and what the window allowed left at once, so repairs left in bursts a window
+  apart (after an ICE restart that followed a 4 s outage: 22 at 14.3 s, 44 at 15.3 s, 72 at
+  16.3 s, the receiver's frames in the same steps), and a burst sent into a path's full
+  queue was dropped there. A token bucket now spreads them: filled at the window's allowance
+  per window, holding at most a tenth of it (at least 1500 octets), each retransmission
+  taking its size. The window and its allowance are unchanged, so what may be retransmitted
+  over any window is what it was (RFC 4588 section 7); only the release is spread. No
+  setting keeps the burst. Measured in `tests/capacity_cap_video_rtc2rtc.rs` (six seeds,
+  hosted run 45356581334, against the release before it, run 45348355656 / 45352461984):
+  ICE restart, freeze from one second after the switch, without a pacer 0.09 to 0.14 s
+  (0.33 to 0.92); capacity drop after 20 s without a pacer: longest freeze 0.73 to 1.08 s
+  (1.28 to 1.29), 44 to 48 retransmissions of which 1 to 4 dropped at the path's queue (58
+  to 64, 20 to 25), oldest picture 2.88 to 3.12 s (2.90 to 3.20); the default chain 0.81 to
+  1.05 s (0.75 to 1.13), 55 to 63 retransmissions (59 to 80), 4.17 to 5.78 s (4.14 to 6.58).
+  Costs: the median target under the cap without a pacer is 230 to 238 kbit/s (239 to 245),
+  some 10 kbit/s lower; an earlier form of this change (a 100 ms window rather than a
+  bucket, which also held the rate under the limit whenever a tenth of the allowance was not
+  a whole number of packets) showed the oldest picture up to 0.4 s older (3.08 to 3.60 s), which
+  the bucket does not. The paced chain after an outage and an ICE restart still shows no
+  usable frame to the end of the measured ten seconds (a known limit, under investigation).
+
 - **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
   (`conf/rtx-1-duplicate-repairs`): a request for a packet whose retransmission per-packet
   feedback reported received is no longer answered, and one whose retransmission left
