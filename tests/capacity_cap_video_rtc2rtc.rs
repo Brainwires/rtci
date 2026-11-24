@@ -1093,7 +1093,10 @@ impl World {
                 self.peers[1].unusable,
             ));
             for peer in self.peers.iter_mut() {
-                if let Some(outgoing) = peer.available_outgoing(now) {
+                // Only a peer connection whose chain tells it the estimate has one to report.
+                if peer.handles.is_some()
+                    && let Some(outgoing) = peer.available_outgoing(now)
+                {
                     peer.lowest_outgoing = Some(
                         peer.lowest_outgoing
                             .map_or(outgoing, |low| low.min(outgoing)),
@@ -1506,17 +1509,35 @@ fn run(setup: &Setup) -> Result<Outcome> {
     })
 }
 
-/// How long the cap is held in the permanent tests: 20 s on all six seeds ([`CAP_20`]), and
-/// 14, 17, 23 and 26 s on two ([`CAP_LENGTHS`]), each set a test of its own under each rule
-/// so that they run side by side (fourteen runs per rule; a third seed of each length is in
-/// `measure_the_capacity_cap`'s reach: `RTC_CAP_SECONDS=14,17,23,26 RTC_CAP_SEEDS=3`). A
-/// bound that holds at one length only can be the phase of the estimate's climb at the
-/// instant the cap goes (the estimator this engine had until v0.22.0+brainwires.6 gave 945,
-/// 1192, 477 to 1316, 549 and 693 kbit/s twenty seconds after caps of these five lengths,
-/// whatever the retransmission rule).
-const CAP_LENGTHS: [(u64, std::ops::RangeInclusive<u64>); 4] =
-    [(14, 1..=2), (17, 1..=2), (23, 1..=2), (26, 1..=2)];
-const CAP_20: [(u64, std::ops::RangeInclusive<u64>); 1] = [(20, 1..=6)];
+/// Whether the whole matrix runs (`RTC_CAP_FULL` set): twice the seeds of every test of this
+/// file, three times those of the cap lengths other than 20 s.
+fn full() -> bool {
+    std::env::var_os("RTC_CAP_FULL").is_some()
+}
+
+/// The seeds of a test: the first `usual`, and the first `whole` under `RTC_CAP_FULL`.
+fn seed_range(usual: u64, whole: u64) -> std::ops::RangeInclusive<u64> {
+    1..=if full() { whole } else { usual }
+}
+
+/// How long the cap is held in the permanent tests: 20 s on three seeds ([`cap_20`]) and 14,
+/// 17, 23 and 26 s on one ([`cap_lengths`]), each set a test of its own under each rule so
+/// that they run side by side; six and three seeds with `RTC_CAP_FULL` set (the matrix every
+/// change to the estimator is measured on: 18 runs per rule, some four minutes). A bound that
+/// holds at one length only can be the phase of the estimate's climb at the instant the cap
+/// goes (the estimator this engine had until v0.22.0+brainwires.6 gave 945, 1192, 477 to
+/// 1316, 549 and 693 kbit/s twenty seconds after caps of these five lengths, whatever the
+/// retransmission rule).
+fn cap_lengths() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
+    [14, 17, 23, 26]
+        .into_iter()
+        .map(|cap| (cap, seed_range(1, 3)))
+        .collect()
+}
+
+fn cap_20() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
+    vec![(20, seed_range(3, 6))]
+}
 
 /// The cap `lengths` and their seeds under `rate_limit` (`None`: the engine's default), each
 /// outcome printed; with the cap's length and the seed.
@@ -1593,7 +1614,7 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
 /// is asked for while it is missing, the retransmissions stay within the estimate, and the
 /// encoder leaves them room.
 ///
-/// The cap is held 20 s here and 14, 17, 23 and 26 s in the next test ([`CAP_LENGTHS`]), and
+/// The cap is held 20 s here and 14, 17, 23 and 26 s in the next test ([`cap_lengths`]), and
 /// the same bounds hold at each ([`assert_the_call_holds`]): with the engine's GCC estimator
 /// behind the TWCC-driven interceptor (a loss-based estimate of its own, over-use backing off
 /// from the received rate, the estimate not increased past one and a half times the received
@@ -1606,14 +1627,14 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
     // to 1.75 s before retransmissions left oldest first), the oldest picture 2.26 to 3.21 s,
     // 43 to 66 retransmissions, 238 to 266 kbit/s under the cap, 988 to 1352 kbit/s twenty
     // seconds after it at every length.
-    assert_the_call_holds(&seeds(None, &CAP_20)?, Duration::from_millis(3_500));
+    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(3_500));
     Ok(())
 }
 
 /// The same bounds whenever the cap goes: after 14, 17, 23 and 26 s.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
-    assert_the_call_holds(&seeds(None, &CAP_LENGTHS)?, Duration::from_millis(3_500));
+    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(3_500));
     Ok(())
 }
 
@@ -1627,7 +1648,7 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
     // freeze 0.84 to 1.29 s, the oldest picture 2.37 to 3.49 s, 42 to 78 retransmissions
     // (17 to 27 dropped at the link's queue, against 14 to 17 under the default).
     assert_the_call_holds(
-        &seeds(Some(RetransmissionRateLimit::UpToTarget), &CAP_20)?,
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_20())?,
         Duration::from_millis(4_000),
     );
     Ok(())
@@ -1638,7 +1659,7 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
 fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions_up_to_the_target()
 -> Result<()> {
     assert_the_call_holds(
-        &seeds(Some(RetransmissionRateLimit::UpToTarget), &CAP_LENGTHS)?,
+        &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_lengths())?,
         Duration::from_millis(4_000),
     );
     Ok(())
@@ -1650,8 +1671,8 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
-    seeds(Some(RetransmissionRateLimit::Unlimited), &CAP_20)?;
-    seeds(Some(RetransmissionRateLimit::Unlimited), &CAP_LENGTHS)?;
+    seeds(Some(RetransmissionRateLimit::Unlimited), &cap_20())?;
+    seeds(Some(RetransmissionRateLimit::Unlimited), &cap_lengths())?;
     Ok(())
 }
 
@@ -1734,7 +1755,7 @@ fn measure_the_capacity_cap() -> Result<()> {
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
-    let outcomes: Result<Vec<_>> = (1..=6)
+    let outcomes: Result<Vec<_>> = seed_range(3, 6)
         .map(|seed| {
             let outcome = run(&Setup::new(seed, None)
                 .chain(Chain::Default)
@@ -1931,7 +1952,7 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
 /// 437 to 242 kbit/s, and the video froze for 7 s. ParolNet's chain (the TWCC-driven GCC).
 #[test]
 fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<()> {
-    for seed in 1..=3 {
+    for seed in seed_range(2, 3) {
         let outcome = path_change_run(&Setup::new(seed, None))?;
         println!("ParolNet chain seed {seed}: {outcome:?}");
         assert!(
@@ -1969,7 +1990,7 @@ fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<(
 /// at it.
 #[test]
 fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chain() -> Result<()> {
-    let outcomes: Result<Vec<_>> = (1..=3)
+    let outcomes: Result<Vec<_>> = seed_range(2, 3)
         .map(|seed| {
             let outcome = path_change_run(&Setup::new(seed, None).chain(Chain::Default))?;
             println!("default chain seed {seed}: {outcome:?}");
@@ -2097,7 +2118,7 @@ fn assert_the_estimate_climbs(setup: &Setup, outcome: &OpenLinkOutcome, by: Dura
 /// available bandwidth".
 #[test]
 fn the_estimate_climbs_on_an_open_link_and_never_steps_down() -> Result<()> {
-    for seed in 1..=3 {
+    for seed in seed_range(2, 3) {
         let setup = Setup::new(seed, None).anchor(ANCHORS[0]);
         let outcome = open_link_run(&setup)?;
         println!("open link, ParolNet chain seed {seed}: {outcome:?}");
@@ -2116,7 +2137,7 @@ fn the_estimate_climbs_on_an_open_link_and_never_steps_down() -> Result<()> {
 /// interceptor, the pacer, bandwidth probing).
 #[test]
 fn the_estimate_climbs_on_an_open_link_in_the_default_chain() -> Result<()> {
-    for seed in 1..=3 {
+    for seed in seed_range(2, 3) {
         let setup = Setup::new(seed, None)
             .chain(Chain::Default)
             .anchor(ANCHORS[0]);
@@ -2233,9 +2254,13 @@ fn assert_the_estimate_is_held(setup: &Setup, outcome: &CameraOutcome) {
             );
         }
     }
-    assert_eq!(
-        Some(300_000),
-        outcome.at_first_on,
+    // The start rate, with the one step of 5% the loss-based controller takes on the first
+    // receiver report of a call (section 6: "As long as less than 2% of the packets have been
+    // lost As_hat(i) will be increased").
+    assert!(
+        outcome
+            .at_first_on
+            .is_some_and(|estimate| (300_000..=315_000).contains(&estimate)),
         "{setup:?}: the start rate kept through five seconds of audio alone: {outcome:?}"
     );
     assert!(
@@ -2267,7 +2292,7 @@ fn assert_the_estimate_is_held(setup: &Setup, outcome: &CameraOutcome) {
 /// perfect link, and the video climbed from the floor at 8% a second each time it came back.
 #[test]
 fn an_estimate_is_held_while_only_audio_is_sent_and_video_resumes_from_it() -> Result<()> {
-    for seed in 1..=3 {
+    for seed in seed_range(2, 3) {
         let setup = Setup::new(seed, None).anchor(ANCHORS[0]);
         let outcome = camera_run(&setup)?;
         println!("camera, ParolNet chain seed {seed}: {outcome:?}");
@@ -2279,7 +2304,7 @@ fn an_estimate_is_held_while_only_audio_is_sent_and_video_resumes_from_it() -> R
 /// The same call through the engine's default interceptors.
 #[test]
 fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result<()> {
-    for seed in 1..=3 {
+    for seed in seed_range(2, 3) {
         let setup = Setup::new(seed, None)
             .chain(Chain::Default)
             .anchor(ANCHORS[0]);
@@ -2298,7 +2323,7 @@ fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result
 #[test]
 fn an_estimate_started_over_on_a_new_path_does_not_fall_without_evidence() -> Result<()> {
     for chain in [Chain::ParolNet, Chain::Default] {
-        for seed in 1..=3 {
+        for seed in seed_range(2, 3) {
             let setup = Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]);
             let outcome = path_change_run(&setup)?;
             println!("path change, {chain:?} seed {seed}: {outcome:?}");

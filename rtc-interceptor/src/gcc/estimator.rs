@@ -388,7 +388,7 @@ impl BandwidthEstimator for Gcc {
         if self.queue_limit.on_reports(now, reports) && self.loss_at_queue_limit_is_overuse {
             usage = Usage::Over;
         }
-        let delay_target = self.delay_control.update(now, usage, received);
+        let mut delay_target = self.delay_control.update(now, usage, received);
 
         // Loss: a fraction over this batch. A packet that arrived marked ECN-CE counts as one
         // that did not: "a CE mark is a congestion signal" (RFC 8888 section 7 with RFC 6679
@@ -398,6 +398,12 @@ impl BandwidthEstimator for Gcc {
             .filter(|report| !report.arrived || report.ecn == Ecn::Ce)
             .count();
         self.loss_control.update(now, lost, reports.len());
+        // A path that loses more than a tenth of what is sent delivers the received rate:
+        // the delay-based estimate does not stay above the bound of section 5.5 then, though
+        // the sender sending less (and losing nothing) leaves it where it is.
+        if self.loss_control.losing_heavily() {
+            delay_target = self.delay_control.on_heavy_loss(received);
+        }
         if self.loss_capped_by_delay {
             self.loss_control.cap(delay_target);
         }

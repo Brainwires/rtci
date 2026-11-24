@@ -41,6 +41,8 @@ pub struct LossController {
     /// Exponentially-weighted average loss, so one bad report does not swing the target.
     average_loss: Option<f64>,
     last_change: Option<Instant>,
+    /// Whether the last batch was above the high threshold (the batch and the average both).
+    above_high: bool,
 }
 
 impl LossController {
@@ -55,6 +57,7 @@ impl LossController {
             interval: DEFAULT_LOSS_INTERVAL,
             average_loss: None,
             last_change: None,
+            above_high: false,
         }
     }
 
@@ -89,6 +92,14 @@ impl LossController {
         self.target
     }
 
+    /// Whether the last batch of feedback showed the path losing more than the high
+    /// threshold ("more than 10% of the packets have been lost", section 6): the condition
+    /// under which this controller lowers its own estimate, whether or not it did so on that
+    /// batch (its changes are spaced).
+    pub fn losing_heavily(&self) -> bool {
+        self.above_high
+    }
+
     /// The smoothed loss fraction, if any feedback has arrived.
     pub fn average_loss(&self) -> Option<f64> {
         self.average_loss
@@ -108,6 +119,7 @@ impl LossController {
             None => sample,
         };
         self.average_loss = Some(average);
+        self.above_high = average.min(sample) > self.high;
 
         if let Some(last) = self.last_change
             && now.saturating_duration_since(last) < self.interval
