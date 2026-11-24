@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptors (congestion control)**: one GCC estimator (`conf/gcc-4-release`). The
+  TWCC-driven interceptor (`GccInterceptorBuilder`, `GccHandle`) had an estimator of its own
+  that departed from draft-ietf-rmcat-gcc-02 in three places: the loss cut was applied to the
+  delay-based estimate (section 6 has a separate loss-based estimate, raised 5% per clean
+  feedback, the sending rate the minimum of the two), over-use multiplied the estimate by 0.85
+  (section 5.5: 0.85 of the received rate), and nothing held the estimate to one and a half
+  times the received rate (section 5.5). Under a 300 kbit/s cap its estimate was cut to the
+  floor by a second of loss and climbed back at 8% a second, and where it stood when the cap
+  went decided the recovery: caps held 14, 17, 20, 23, 26 s gave 945, 1192, 477 to 1316, 549,
+  693 kbit/s twenty seconds later, the same under either retransmission rule (and on the
+  release before). It now runs `Gcc`, the estimator of the default interceptors, behind the
+  same `GccHandle` API (`GccHandle::stats` is new; `GccShared` has a `stats` field): 988 to
+  1352 kbit/s twenty seconds after a cap of any of those lengths, 238 to 266 kbit/s of the
+  300 used under the cap (145 to 200 before), longest freeze 0.83 to 1.24 s.
+  **What an application polling the handle notices**: the estimate no longer runs ahead of
+  what is sent (at most one and a half times the rate the receiver reports as arriving: a
+  source that sends little is given a target near what it sends and climbs from there);
+  feedback that stops while packets are sent halves it (`Gcc::with_feedback_timeout`, 500 ms);
+  a REMB or a TMMBR from the peer bounds it.
+- **interceptors (congestion control)**: `Gcc` starts over from its starting estimate on a new
+  path (another candidate pair selected) in the default interceptors too; it kept its
+  estimate and restarted only the delay measurements. libwebrtc restarts likewise
+  (`call/rtp_transport_controller_send.cc:356-357`, `restart_bwe`).
+- **interceptors (pacer)**: the pacer tells the source to pause (a target of zero on
+  `Attribute::TargetBitrateChanged`, `RTCRtpSender::target_bitrates` and the `targetBitrate`
+  stat; `availableOutgoingBitrate` keeps the estimate) while the media it holds would take
+  1 s or more to leave at the target, and what a source that follows the pause wrote is never
+  discarded for its age; the 2 s bound and the whole-frame discard
+  (`RTCPeerConnectionEvent::OnPacerDiscard`, with a key-frame request) apply to media written
+  into a pause. Retransmissions leave ahead of new media, a stream's oldest packet first, and
+  none is made for a packet whose retransmission still waits in the pacer. See "Pausing the
+  source" on `PacerInterceptor` for what a target of zero means and how an encoder resumes.
+- **behaviour profiles**: `DefaultInterceptorOptions::nack_retransmission_rate_limit` is
+  governed: `WithinTarget` (RFC 4588 section 7) under `Rfc`, `StrictRfc` and `Performance`,
+  `UpToTarget` under `Chrome`.
+
 - **peer connection, interceptors**: the `Performance` behaviour profile and the
   `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
   RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
