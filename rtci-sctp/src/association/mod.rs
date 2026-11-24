@@ -331,6 +331,9 @@ pub struct AssociationStatus {
     pub path_mtu: u32,
 }
 
+/// How many T3-rtx retransmitted TSNs are remembered for SACK loss detection (RFC 9260 6.2).
+const MAX_T3_RETRANSMITTED_KEPT: usize = 512;
+
 /// Selection is stable even after fragments leave either queue.
 #[derive(Debug, Copy, Clone)]
 struct MessageToAbandon {
@@ -485,6 +488,13 @@ pub struct Association {
     valid_cookie_life: Duration,
     /// How many times a Stale Cookie error sent this side back to a new INIT.
     stale_cookie_restarts: usize,
+    /// The TSNs most recently sent again on a retransmission timeout (at most
+    /// `MAX_T3_RETRANSMITTED_KEPT`): one the peer then reports as a duplicate shows a lost
+    /// SACK (RFC 9260 6.2).
+    t3_retransmitted: VecDeque<u32>,
+    /// When the last COOKIE ECHO was sent: the start of the COOKIE ECHO / ERROR exchange a
+    /// Cookie Preservative is sized from (RFC 9260 5.2.6).
+    cookie_echo_sent_at: Option<Instant>,
     /// The first DATA chunk of an association is acknowledged at once (RFC 9260 5.1).
     first_data_received: bool,
     /// Set while a packet is processed whose DATA must be acknowledged at once: it came with
@@ -733,6 +743,8 @@ impl Default for Association {
             random: RandomSource::default(),
             valid_cookie_life: Duration::from_secs(60),
             stale_cookie_restarts: 0,
+            t3_retransmitted: VecDeque::new(),
+            cookie_echo_sent_at: None,
             first_data_received: false,
             sack_packet_immediately: false,
             discard_rest_of_packet: false,
@@ -2254,6 +2266,34 @@ impl Association {
             self.interleaving_enabled,
             self.zero_checksum_enabled,
         );
+        // RFC 9260 5.2.6: "The endpoint MAY add a Cookie Preservative parameter requesting
+        // an extension to the lifetime of the State Cookie. When calculating the time
+        // extension, an implementation SHOULD use the RTT information measured based on the
+        // previous COOKIE ECHO / ERROR exchange and SHOULD add no more than 1 second beyond
+        // the measured RTT". The increment is what the cookie was late by (the Measure of
+        // Staleness, in microseconds), at least that round trip and at most a second more.
+        let rtt_ms = self
+            .cookie_echo_sent_at
+            .take()
+            .map_or(0, |sent| now.saturating_duration_since(sent).as_millis())
+            .min(u128::from(u32::MAX)) as u32;
+        let staleness_ms = c
+            .error_causes
+            .iter()
+            .find(|e| e.code == STALE_COOKIE_ERROR)
+            .and_then(|e| e.raw.get(..4))
+            .map_or(0, |b| {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]]).div_ceil(1000)
+            });
+        let increment = staleness_ms
+            .max(rtt_ms)
+            .min(rtt_ms.saturating_add(1000))
+            .max(1);
+        init.params.push(Box::new(
+            crate::param::param_cookie_preservative::ParamCookiePreservative {
+                suggested_increment_ms: increment,
+            },
+        ));
         self.stored_init = Some(init);
         self.set_state(AssociationState::CookieWait);
         let _ = self.send_init();
@@ -3036,6 +3076,7 @@ impl Association {
 
         self.timers
             .start(Timer::T1Cookie, now, self.rto_mgr.get_rto());
+        self.cookie_echo_sent_at = Some(now);
 
         self.set_state(AssociationState::CookieEchoed);
 
@@ -4029,6 +4070,17 @@ impl Association {
                 self.side, d.cumulative_tsn_ack, self.my_next_tsn
             );
             return Err(Error::ErrTsnRequestNotExist);
+        }
+
+        // RFC 9260 6.2: "When an endpoint receives a SACK chunk, it MAY use the duplicate TSN
+        // information to determine if SACK chunk loss is occurring." A TSN this side sent
+        // again on a retransmission timeout and that the peer reports as a duplicate had
+        // reached the peer before: the SACK that said so was lost (or came after the RTO).
+        for tsn in &d.duplicate_tsn {
+            if let Some(i) = self.t3_retransmitted.iter().position(|t| t == tsn) {
+                self.t3_retransmitted.remove(i);
+                self.stats.inc_sack_losses();
+            }
         }
 
         // The bytes outstanding before this SACK: the congestion window may grow only when
@@ -5626,6 +5678,10 @@ impl Association {
                 c.retransmit = false;
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
+                if self.t3_retransmitted.len() == MAX_T3_RETRANSMITTED_KEPT {
+                    self.t3_retransmitted.pop_front();
+                }
+                self.t3_retransmitted.push_back(chunk.tsn);
                 // RFC 9260 6.2.1 B: a retransmitted chunk takes its size from rwnd again.
                 self.rwnd = self
                     .rwnd
@@ -6522,6 +6578,7 @@ impl Association {
             }
 
             Timer::T1Cookie => {
+                self.cookie_echo_sent_at = Some(now);
                 if let Err(err) = self.send_cookie_echo() {
                     debug!(
                         "[{}] failed to retransmit cookie-echo (n_rtos={}): {:?}",

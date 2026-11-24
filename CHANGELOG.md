@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
+  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
+  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
+  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
+  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
+  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
+  stale cookie; a counter).
 - **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
   9260 8.1: "report the failure to the upper layer and optionally report back all
   outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)

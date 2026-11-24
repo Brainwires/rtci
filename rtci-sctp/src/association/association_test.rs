@@ -2299,6 +2299,8 @@ mod zero_checksum_test;
 
 #[path = "cookie_ack_loss_test.rs"]
 mod cookie_ack_loss_test;
+#[path = "handshake_mays_test.rs"]
+mod handshake_mays_test;
 #[path = "undelivered_test.rs"]
 mod undelivered_test;
 

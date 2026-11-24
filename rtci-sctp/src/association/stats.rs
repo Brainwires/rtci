@@ -6,6 +6,7 @@ pub struct AssociationStats {
     n_t3timeouts: u64,
     n_ack_timeouts: u64,
     n_fast_retrans: u64,
+    n_sack_losses: u64,
 }
 
 impl AssociationStats {
@@ -59,6 +60,19 @@ impl AssociationStats {
         self.n_fast_retrans
     }
 
+    /// Counts one SACK loss found from a Duplicate TSN report (RFC 9260 6.2).
+    pub fn inc_sack_losses(&mut self) {
+        self.n_sack_losses += 1;
+    }
+
+    /// The SACKs found lost (RFC 9260 6.2: the sender "MAY use the duplicate TSN information
+    /// to determine if SACK chunk loss is occurring"): DATA this side sent again on a
+    /// retransmission timeout that the peer then reported as a duplicate, which it had
+    /// received before, so the SACK that acknowledged it did not arrive in time.
+    pub fn get_num_sack_losses(&mut self) -> u64 {
+        self.n_sack_losses
+    }
+
     /// Zeroes every counter.
     pub fn reset(&mut self) {
         self.n_datas = 0;
@@ -66,5 +80,6 @@ impl AssociationStats {
         self.n_t3timeouts = 0;
         self.n_ack_timeouts = 0;
         self.n_fast_retrans = 0;
+        self.n_sack_losses = 0;
     }
 }
