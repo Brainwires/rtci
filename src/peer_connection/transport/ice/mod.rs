@@ -56,6 +56,12 @@ pub(crate) struct IceTransport {
     /// before it, which a rollback restores.
     pub(crate) previous_association_addresses_before_local_restart: Option<Vec<SocketAddr>>,
 
+    /// The transport dropped its local candidates (a new DTLS association, a replacement, or
+    /// the discarding setting): `OnLocalCandidatesNeeded` is fired, with this reason, when
+    /// the next local description begins the transport's gathering.
+    pub(crate) candidates_needed:
+        Option<crate::peer_connection::event::RTCLocalCandidatesNeededReason>,
+
     /// Whether W3C `[[IceRole]]` has left "unknown": set by the first offer processed, local
     /// (controlling) or remote (by RFC 8445's rules), and kept for the life of the transport.
     /// The role itself is the agent's, which an ICE role conflict may change (RFC 8445
@@ -83,6 +89,7 @@ impl IceTransport {
             gathering_before_local_restart: None,
             previous_association_addresses: Vec::new(),
             previous_association_addresses_before_local_restart: None,
+            candidates_needed: None,
             role_determined: false,
         })
     }

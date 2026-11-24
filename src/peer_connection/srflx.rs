@@ -272,6 +272,16 @@ impl EngineSrflx {
         }
     }
 
+    /// The UDP bases `bases` of `transport` were refused (a new DTLS association runs on new
+    /// transport addresses, RFC 8842 section 5.1): their probes end, so that no mapped address
+    /// of the previous association's socket is announced for the new generation. Probes from
+    /// the new bases the application adds start as for any host candidate.
+    pub(crate) fn forget_bases(&mut self, transport: TransportId, bases: &[SocketAddr]) {
+        self.probes.retain(|p| {
+            !(p.transport == transport && p.kind == Base::Udp && bases.contains(&p.base))
+        });
+    }
+
     /// The Binding connections kept open: probe index, connection.
     fn kept_streams(&self) -> Vec<(usize, StreamId)> {
         self.probes
@@ -395,6 +405,17 @@ impl RTCPeerConnection {
                 self.announce_srflx(on, base, Base::Udp, mapped, &url);
             }
             self.drive_srflx(self.pipeline_context.now);
+        }
+    }
+
+    /// The active transport's UDP bases were refused (a new DTLS association,
+    /// `IceTransport::previous_association_addresses`): the engine's probes from them end
+    /// ([`EngineSrflx::forget_bases`]).
+    pub(crate) fn forget_srflx_of_refused_bases(&mut self) {
+        let on = self.pipeline_context.transports.active_id();
+        let bases = self.ice_transport().previous_association_addresses.clone();
+        if !bases.is_empty() {
+            self.streams.srflx.forget_bases(on, &bases);
         }
     }
 
