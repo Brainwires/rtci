@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
+  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
+  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
+  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
+  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
+  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
+  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
+  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
+
 - **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
   candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,
   `candidate::UDP_TUNNELLED_TYPE_PREFERENCE`) instead of the TCP host preference 125, so it
