@@ -746,10 +746,11 @@ fn reports_on_lossy_sources_go_first_when_not_all_fit() {
     );
 }
 
-/// RFC 8108 5.1 to the letter, as an option: every local SSRC reports on every remote one.
+/// RFC 8108 5.1, the default: every local SSRC reports on every remote one. With
+/// `with_report_from_every_ssrc(false)` (libwebrtc's form) the blocks are carried once.
 #[test]
 fn every_local_ssrc_can_report_on_every_remote_one() {
-    let mut chain = chain(builder().with_report_from_every_ssrc(true));
+    let mut chain = chain(builder());
     let base = Instant::now();
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
@@ -767,8 +768,8 @@ fn every_local_ssrc_can_report_on_every_remote_one() {
             .all(|rr| rr.reports.len() == 1 && rr.reports[0].ssrc == 200)
     );
 
-    // By default the blocks are carried once, by the first media SSRC.
-    let mut chain = self::chain(builder());
+    // Turned off, the blocks are carried once, by the first media SSRC.
+    let mut chain = self::chain(builder().with_report_from_every_ssrc(false));
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
     chain.bind_remote_stream(&video(200));

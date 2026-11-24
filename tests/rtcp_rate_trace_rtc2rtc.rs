@@ -801,7 +801,10 @@ fn the_performance_profile_sends_regular_reports_about_once_a_second() -> Result
     print_row(&ONE_MBIT, BehaviourProfile::Performance, &performance);
     // The default pinned: RFC 3550 6.2 timing with T_rr_interval zero (the receiver's regular
     // reports in what its 20 feedback packets a second leave of the RTCP bandwidth).
-    assert!(rfc.sides[0].regular >= 8.0, "{rfc:?}");
+    // (RFC 8108 5.1: every SSRC of the sender reports on the others too, so its compound
+    // packets are larger and, in the same bandwidth, fewer: about 7 a second, 8 or more with
+    // the blocks carried once.)
+    assert!(rfc.sides[0].regular >= 6.0, "{rfc:?}");
     assert!(rfc.sides[1].regular >= 3.0, "{rfc:?}");
     assert!(rfc.share >= 0.025, "{rfc:?}");
     // About once a second, dithered over [0.5, 1.5] s.
