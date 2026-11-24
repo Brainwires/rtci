@@ -515,7 +515,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     while it "would still be useful"); the generator asks for no older missing packet and
     forgets its requests for them (wrap-aware; `None` removes the horizon)
     (`packets_older_than_the_horizon_are_not_asked_for`,
-    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). `rtci_video::engine::
+    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). The RTCP session drops
+    them from a NACK it still holds for its next packet as well (RFC 4585 3.5.2, step 4a:
+    stored feedback is sent only if it is still useful), and sends no NACK that is left
+    asking for nothing: before, a request made just ahead of the horizon left with the next
+    regular RTCP packet, up to about two seconds after the application had given the packet
+    up (`conf/vp-9r2-vp8-partitions`;
+    `a_nack_held_for_the_regular_packet_drops_what_the_nack_horizon_passed`). `rtci_video::engine::
     VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
     nack_horizon`, on by default, as libwebrtc's `NackRequester::ClearUpTo`).
   - The jitter buffer members (`jitterBufferDelay`, `jitterBufferTargetDelay`,

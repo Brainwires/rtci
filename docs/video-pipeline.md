@@ -951,8 +951,13 @@ scenario, retransmissions of packets older than the horizon = 0.
 
 - `NackControl::Horizon { media_ssrc, oldest_useful }` (rtci-interceptor) and
   `RTCRtpReceiver::set_nack_horizon(now, ssrc, Option<u16>)` (rtc): the generator drops
-  missing sequence numbers older than the horizon, wrap-aware, and forgets their requests
-  (`rtci-interceptor/tests/nack_control_horizon.rs`; two peers:
+  missing sequence numbers older than the horizon, wrap-aware, and forgets their requests;
+  the RTCP session drops them from a NACK it still holds for its next packet (RFC 4585 3.5.2:
+  early feedback is rate-limited, and what waits is sent only if still useful), so no NACK
+  that leaves after the horizon names a packet behind it
+  (`rtci-interceptor/tests/nack_control_horizon.rs`,
+  `rtcp_session_feedback.rs::a_nack_held_for_the_regular_packet_drops_what_the_nack_horizon_passed`;
+  two peers:
   `tests/rtcp_session_rtc2rtc.rs::a_receiver_stops_asking_for_packets_behind_its_nack_horizon`).
   `VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
   nack_horizon`, on by default and in `chrome()`: libwebrtc's `NackRequester::ClearUpTo`).
