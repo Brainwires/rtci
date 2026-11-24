@@ -147,6 +147,19 @@ enum PeerRequest {
     Bad,
 }
 
+/// Puts DATA chunks in TSN order (serial number arithmetic, RFC 9260 1.6: they lie within
+/// one receive window of each other).
+fn sort_by_tsn(chunks: &mut [ChunkPayloadData]) {
+    let Some(base) = chunks
+        .iter()
+        .map(|c| c.tsn)
+        .reduce(|a, b| if sna32lt(b, a) { b } else { a })
+    else {
+        return;
+    };
+    chunks.sort_by_key(|c| c.tsn.wrapping_sub(base));
+}
+
 /// RFC 6525 3.1: the ten combinations of parameters a RE-CONFIG chunk may hold.
 fn allowed_combination(a: u16, b: Option<u16>) -> bool {
     match b {
@@ -763,14 +776,25 @@ impl Association {
     /// Only *readable* data counts: an incomplete fragment set can never be
     /// completed once the peer has reset, so it is discardable and must not
     /// hold the reset open forever.
+    ///
+    /// Nor does data on a stream the application has stopped reading (`Stream::stop`, or
+    /// `Stream::close`: the close of a data channel): reads of it fail, so nothing would ever
+    /// drain it, and the reset that completes the close (RFC 8831 6.7) would wait for good,
+    /// with the stream id never freed and the bytes never given back to the window. That data
+    /// is abandoned with the stream ("[RFC6525] also guarantees that all the messages are
+    /// delivered (or abandoned) before the stream is reset"): its channel is closed.
     fn streams_awaiting_drain(&self, p: &ParamOutgoingResetRequest) -> Vec<StreamId> {
         p.stream_identifiers
             .iter()
             .copied()
             .filter(|id| {
-                self.streams
-                    .get(id)
-                    .is_some_and(|s| s.reassembly_queue.is_readable())
+                self.streams.get(id).is_some_and(|s| {
+                    let still_read = matches!(
+                        s.state,
+                        RecvSendState::Readable | RecvSendState::ReadWritable
+                    );
+                    still_read && s.reassembly_queue.is_readable()
+                })
             })
             .collect()
     }
@@ -821,7 +845,29 @@ impl Association {
                     // that takes the id.
                     let outgoing_open = (stream.state as u8) & 0x1 != 0;
                     if echo && outgoing_open {
-                        sis_to_reset.push(*id);
+                        if self.pending_queue.holds_stream(*id) {
+                            // What the application wrote to the stream before now is still
+                            // to be sent, all or part of it without a TSN. RFC 6525 5.1.2 A3
+                            // makes the request's Sender's Last Assigned TSN "the next TSN
+                            // the sender assigns minus 1", and RFC 8831 6.7 relies on it:
+                            // "[RFC6525] also guarantees that all the messages are delivered
+                            // (or abandoned) before the stream is reset". Sent at once, the
+                            // reset would leave that data after the Sender's Last Assigned
+                            // TSN, where the peer takes it for data of the stream after the
+                            // reset (5.2.2 E2, E4): the rest of a message half sent there
+                            // waits in front of the next channel on the stream for good. So
+                            // the reset waits behind it in the send queue, as a reset this
+                            // side asks for itself does (`send_reset_request`).
+                            let generation = stream.generation;
+                            self.pending_queue.push_reset(ResetMarker {
+                                stream_identifier: *id,
+                                generation,
+                                response_to: None,
+                            });
+                            self.awake_write_loop();
+                        } else {
+                            sis_to_reset.push(*id);
+                        }
                     }
                     self.unregister_stream(*id, AssociationError::Reset);
                 } else if echo
@@ -891,7 +937,10 @@ impl Association {
         if self.held_reset_data.is_empty() {
             return;
         }
-        let held = std::mem::take(&mut self.held_reset_data);
+        let mut held = std::mem::take(&mut self.held_reset_data);
+        // In TSN order, as they would have been processed had they not waited: a fragment
+        // goes to its stream after the one before it in its message.
+        sort_by_tsn(&mut held);
         for d in held {
             if self.holds_for_reset(&d) {
                 self.held_reset_data.push(d);
@@ -1355,7 +1404,8 @@ impl Association {
     /// is the Sender's Next TSN and the Receiver's Next TSN of a successful response.
     fn finish_tsn_reset(&mut self, next_tsns: Option<(u32, u32)>, denied: bool) {
         self.tsn_reset_requested = false;
-        let held = std::mem::take(&mut self.held_reset_data);
+        let mut held = std::mem::take(&mut self.held_reset_data);
+        sort_by_tsn(&mut held);
         let release = |this: &mut Self, chunks: Vec<ChunkPayloadData>| {
             for d in chunks {
                 this.reassembly_bytes = this.reassembly_bytes.saturating_sub(d.user_data.len());
