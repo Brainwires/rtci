@@ -776,14 +776,25 @@ impl Association {
     /// Only *readable* data counts: an incomplete fragment set can never be
     /// completed once the peer has reset, so it is discardable and must not
     /// hold the reset open forever.
+    ///
+    /// Nor does data on a stream the application has stopped reading (`Stream::stop`, or
+    /// `Stream::close`: the close of a data channel): reads of it fail, so nothing would ever
+    /// drain it, and the reset that completes the close (RFC 8831 6.7) would wait for good,
+    /// with the stream id never freed and the bytes never given back to the window. That data
+    /// is abandoned with the stream ("[RFC6525] also guarantees that all the messages are
+    /// delivered (or abandoned) before the stream is reset"): its channel is closed.
     fn streams_awaiting_drain(&self, p: &ParamOutgoingResetRequest) -> Vec<StreamId> {
         p.stream_identifiers
             .iter()
             .copied()
             .filter(|id| {
-                self.streams
-                    .get(id)
-                    .is_some_and(|s| s.reassembly_queue.is_readable())
+                self.streams.get(id).is_some_and(|s| {
+                    let still_read = matches!(
+                        s.state,
+                        RecvSendState::Readable | RecvSendState::ReadWritable
+                    );
+                    still_read && s.reassembly_queue.is_readable()
+                })
             })
             .collect()
     }
