@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
+  did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
+  as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
+  RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
+  and RFC7798-4.3-1 are `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
