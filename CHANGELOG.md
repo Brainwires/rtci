@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### mDNS
+
+- **`rtci-stream-driver`: `PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
+- **Breaking: `PeerDriverConfig` has a new public field `mdns_rate_limit`** (`None`: the process's budget). Migration: a configuration written as a struct literal adds `mdns_rate_limit: None`, or builds on `..PeerDriverConfig::on(addresses)`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

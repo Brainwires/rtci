@@ -39,6 +39,12 @@ local candidates (`OnLocalCandidatesNeeded`: a new DTLS association runs on a ne
 RFC 8842 section 5.1), binding new ports in its range and closing the previous sockets once a
 pair on the new ones is selected. The application only signals.
 
+A connection with mDNS on gets its mDNS carried too: at its first mDNS datagram the driver
+binds the host's mDNS sockets (port 5353, the IPv4 and, where available, IPv6 groups), and
+every driver of the process sends its mDNS within one message budget
+(`peer::process_mdns_rate_limit`), the implementation-wide rate limit of
+draft-ietf-mmusic-mdns-ice-candidates section 7.1.
+
 ## I/O
 
 Unlike the other crates of the workspace this one does I/O: it is the tokio side of the

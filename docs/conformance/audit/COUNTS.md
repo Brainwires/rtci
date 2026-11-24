@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5032 | 25 | 7 | 1 | 10 | 5 | 0 | 666 | 5746 |
+| MUST | 5033 | 25 | 7 | 1 | 9 | 5 | 0 | 666 | 5746 |
 | SHOULD | 853 | 0 | 0 | 14 | 55 | 42 | 4 | 326 | 1294 |
 | MAY | 445 | 0 | 0 | 20 | 34 | 108 | 0 | 171 | 778 |
 | PROC | 69 | 0 | 0 | 1 | 5 | 1 | 0 | 1 | 77 |
-| all | 6399 | 25 | 7 | 36 | 104 | 156 | 4 | 1164 | 7895 |
+| all | 6400 | 25 | 7 | 36 | 103 | 156 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -26,7 +26,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5080 | 5064 | 99.7 | 5032 | 99.1 |
+| MUST | 5080 | 5065 | 99.7 | 5033 | 99.1 |
 | SHOULD | 968 | 853 | 88.1 | 853 | 88.1 |
 | MAY | 607 | 445 | 73.3 | 445 | 73.3 |
 | PROC | 76 | 69 | 90.8 | 69 | 90.8 |
@@ -44,7 +44,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-avtcore-rtp-sframe.md` | MUST | 30 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
-| `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 |
+| `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 12 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 1 | 0 | 0 | 1 | 0 | 2 | 0 | 1 | 5 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 8 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 10 |
