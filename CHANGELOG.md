@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-24
+
+The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
+`rtci-*` (see "Crate rename" below and `docs/rename.md`), the repository is `Brainwires/rtci`,
+and the version line restarts at 0.1.0 (crates.io ignores the `+brainwires.N` build metadata of
+the `0.22.0+brainwires.N` line, whose tags stay). Since 0.22.0+brainwires.6: trains 11 to 17 of
+the clause-by-clause conformance work (the audit's open MUST rows down to 16, every one
+classified), behaviour profiles (`Rfc`, `StrictRfc`, `Chrome`, `Performance`) that govern 49
+settings, one draft-conforming congestion estimator with the RFC 4588 section 7 retransmission
+rule as the default, a pacer whose queue time is bounded and which pauses a source that follows
+the target, SRTP re-keying that keeps the call when both sides' offers cross and loses no
+packet, and data channels reopened on a just-closed stream that deliver every message.
+
+- **Breaking changes**: the crate rename, and the API changes listed below by area (the GCC
+  interceptor runs the default estimator behind the same `GccHandle`, retransmissions are held
+  within the target by default, and more).
+- **Known limits** (below): the cost of a capacity drop that meets the estimate at a higher rate
+  (about 1.4 Mbit/s), the picture's age after a sudden drop with the pacer, the delay-side
+  detector's blind interval after a sudden drop, and the margin a short SRTP key lifetime leaves
+  for a re-keying.
+- Fixed since brainwires.6's known issues: the pacer's unbounded queue, the circuit breaker's
+  missing verdict for video flows, simulcast packets without RID or MID on SSRCs declared in a
+  section with `a=rid`, video freezing for seconds after a capacity drop, STUN SOFTWARE that
+  could not be turned off, and sender reports after a clock-rate switch on one SSRC.
+
 ### Crate rename
 
 <!-- rtci-rename:start -->
@@ -764,6 +789,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window). Planned after this release: no repeat repair of a packet whose first repair
   transport-wide feedback reports received, and first repairs ahead of repeats.
 
+- **interceptors (congestion control), delay-side detection after a sudden drop**: the
+  delay-based over-use detector sees queue growth only through transport-wide feedback, so for
+  some 0.45 s after a sudden capacity drop (the path's queue, its delay and one feedback
+  interval) nothing tells the sender, and the first cuts follow the received rate, whose 500 ms
+  window still holds the old rate. Fresh repairs sent in that time meet a full queue (20 to 22 of
+  the 23 to 32 retransmissions dropped at the path in
+  `a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`). On a reordering,
+  lossless path the delay side still settles below capacity (the loss side no longer takes a
+  packet that is only overtaken for a loss; the delay-based grouping is a proposal,
+  `docs/gcc-reordering.md`).
+
+- **peer connection (SRTP re-keying), the margin a short key lifetime leaves**: the re-keying has
+  the last sixteenth of an SRTP key's lifetime to complete (an offer and its answer through the
+  application's signalling, ICE checks on new candidates and a DTLS handshake), and the margin is
+  counted in packets: a lifetime short enough that a sixteenth of it lasts less than the
+  re-keying at the stream's packet rate ends the session instead. Size a lifetime as at least
+  `16 x packet rate x re-keying time` (a 9600-packet lifetime at 188 packets a second leaves
+  3.2 s, and a re-keying through TURN takes about 2 s); the connection logs a warning when the
+  margin it has is under 2 s. The profiles' lifetimes are far longer; shorter ones are for tests
+  and constrained deployments (`conf/rekey-3-server-margin`).
+
 ### Behaviour changes
 
 - **peer connection**: automatic SRTP re-keying has a tie-break (`conf/rekey-1-glare`). Two
@@ -1277,6 +1323,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker`,
   `reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker`,
   and the `never_sent` unit tests).
+- **interceptors** (RFC 8083 section 4.4, `conf/gcc-4-release`): the media-usability circuit
+  breaker judged a flow by the loss its receiver reports, which counts the sequence numbers the
+  pacer discarded before they left (RFC 3550 section 6.4.1), so a sender above the target could
+  be ceased as unusable for its own discards. It now reads the same corrected loss as the
+  congestion breaker (the loss of the interval a report covers, less the numbers never sent).
+  Loss on the path ceases an unusable flow as before
+  (`reported_loss_of_sequence_numbers_never_sent_does_not_make_the_media_unusable`).
 - **sctp, data channels** (RFC 6525 5.1.2 A3, 5.2.2 E2/E4; RFC 8831 6.7;
   `conf/sctp-16-delivery-stall`): a data channel opened right after another one was closed in
   the middle of a transfer stalled: its messages up to one Stream Sequence Number arrived and

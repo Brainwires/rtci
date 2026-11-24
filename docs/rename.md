@@ -69,24 +69,23 @@ directories back to `rtc-<x>` when it collects the fork's tests.
 ## What it leaves on purpose
 
 After applying, the script prints every remaining occurrence of the old names, grouped by reason.
-On master at `c51a4709` (5834 occurrences):
+On the tree the rename commit was made from (master `4e6de256`, train 17 merged; 5879 occurrences):
 
 | Reason | Count |
 |---|---|
 | Upstream test lists `docs/upstream-tests/*.txt` (upstream data) | 3481 |
-| Identifiers and names that are not crate names (`rtc_pc` 447, `rtc_connected` 79, test names such as `offer_answer_rtc2rtc`, `rtc-env`, `rtc-testenv`, `rtc-interop`, thread names) | 1181 |
-| The word `rtc` in prose, local variables, strings and keys (not a crate path) | 365 |
-| URLs of other projects: upstream's repository, badges, crates.io and docs.rs pages of upstream's crates, the webrtc.rs logo files | 214 |
+| Identifiers and names that are not crate names (`rtc_pc` 515, `rtc_connected` 108, test names such as `offer_answer_rtc2rtc`, `rtc-env`, `rtc-testenv`, `rtc-interop`, thread names) | 1246 |
+| The word `rtc` in prose, local variables, strings and keys (not a crate path) | 409 |
+| URLs of other projects: upstream's repository, badges, crates.io and docs.rs pages of upstream's crates, the webrtc.rs logo files | 57 |
 | Released CHANGELOG sections | 170 |
-| The rename script and its tests (and, once committed, this page) | 189 |
-| The parity table's rows (upstream keys) | 103 |
+| The rename script and its tests (and, once committed, this page) | 280 |
+| The parity table's rows (upstream keys) | 105 |
 | `docs/crypto-provider-migration.md`, the migration guide of the `rtc` 0.21 line (history) | 51 |
-| The test environment's realm `rtc.test` (certificates, coturn) | 27 |
+| The test environment's realm `rtc.test` (certificates, coturn) | 28 |
 | `scripts/check-test-parity.py` (upstream names) | 23 |
 | The layers peer's lock file before regeneration | 19 |
 | FORK.md table cells about upstream (`Upstream changes not taken`, `Fork features dropped`) and `upstream's rtc-...` statements | 7 |
 | fuzz.yml's runner-plan key `rtc` (a job key like `dtls`; check-fuzz-registry.py checks it) | 3 |
-| Vendored third-party file (`scripts/test-env/peers/aiortc/image/`) | 1 |
 
 Also unchanged: W3C and IETF names in Rust and C (`RTCPeerConnection`, `RTCRtpSender`,
 `RTCIceCandidate`, `RTCConfiguration`, `RTCP`, `rtcp-mux`, `srtcp`, `webrtc`), licence files and
