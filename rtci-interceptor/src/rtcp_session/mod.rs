@@ -1389,6 +1389,8 @@ impl RtcpSessionInterceptor {
     fn reporting_interval(&self, now: Instant) -> RtcpReportingInterval {
         let senders = self.sender_count(now);
         let td = |we_sent: bool| {
+            // A member that sends is one of the senders, whether or not it has been heard to.
+            let senders = if we_sent { senders.max(1) } else { senders };
             let td = deterministic_interval(&self.interval_input(now, we_sent, false, senders));
             // A member with no share of the RTCP bandwidth sends no regular report: an hour
             // stands for never.
@@ -3262,6 +3264,59 @@ mod tests {
         session.send(Instant::now(), vec![rr(1), rr(2)]);
         // (28 + 16) / 2 = 22: 100 * 15/16 + 22 / 16.
         assert!((session.avg_rtcp_size - (93.75 + 1.375)).abs() < 1e-9);
+    }
+
+    /// RFC 8083 section 3 has a sender estimate its receiver's reporting interval "by
+    /// executing the algorithm in Section 6.2 of \[RFC3550\]". The session executes it and
+    /// attaches what it gives to the RTCP it hands application-ward: Td for a member that
+    /// sends and for one that does not, from the session's bandwidth, members and average
+    /// packet size, with the profile's minimum (five seconds under RTP/AVP, none under
+    /// RTP/AVPF).
+    #[test]
+    fn the_calculated_reporting_interval_rides_on_the_rtcp_handed_application_ward() {
+        let now = Instant::now();
+        let read = |profile: RtcpProfile| {
+            let mut session = RtcpSessionBuilder::new()
+                .with_profile(profile)
+                .with_bandwidth(RtcpBandwidth {
+                    session: Some(1_000_000),
+                    ..Default::default()
+                })
+                .build();
+            session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+            assert!(session.started);
+            session
+                .handle_read(TaggedPacket {
+                    now,
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtcp(vec![rr(7)])),
+                })
+                .unwrap();
+            let packet = session.poll_read().expect("the packet is passed on");
+            let interval = *packet
+                .message
+                .custom::<RtcpReportingInterval>()
+                .expect("the calculated interval rides on it");
+            // The remote reporter is a member now; nobody has sent RTP.
+            let input = session.interval_input(now, false, false, 0);
+            (interval, input)
+        };
+
+        let (interval, input) = read(RtcpProfile::Avpf);
+        // 5 % of 1 Mbit/s is 6250 octets a second. Nobody is a sender yet, so the receivers
+        // (both members) share three quarters of it, and one sender would have the quarter.
+        assert!((input.rtcp_bw - 6250.0).abs() < 1e-9);
+        assert_eq!(2, input.members);
+        let receiver = input.avg_rtcp_size * 2.0 / (6250.0 * 0.75);
+        let sender = input.avg_rtcp_size / (6250.0 * 0.25);
+        assert!(receiver > MIN_INTERVAL && receiver < 0.1, "{receiver}");
+        assert!((interval.receiver.as_secs_f64() - receiver).abs() < 1e-6);
+        assert!((interval.sender.as_secs_f64() - sender).abs() < 1e-6);
+
+        // RTP/AVP: the same calculation is held to the five second minimum.
+        let (interval, _) = read(RtcpProfile::Avp);
+        assert_eq!(Duration::from_secs(5), interval.receiver);
+        assert_eq!(Duration::from_secs(5), interval.sender);
     }
 
     /// RFC 3711 section 3.4: the SRTCP index, E flag and authentication tag are part of the

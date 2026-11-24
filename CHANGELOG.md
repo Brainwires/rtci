@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **interceptor, peer connection** (breaker-1): `DefaultInterceptorOptions` has two new public
+  fields, `circuit_breaker` and `circuit_breaker_automatic_restart` (both `true`; see "Fixed"
+  and "Added"). **Migration**: a struct literal adds them or builds on
+  `..DefaultInterceptorOptions::default()`.
+  `CircuitBreakerHandle::report_round_trip_time` now takes each round trip measurement as it
+  is made and smooths them itself (RFC 8083 section 3); it used to store the value given.
+  **Migration**: a caller that handed in an average hands in the samples.
+  The RTP circuit breaker restarts a ceased flow by itself when the receiver's reports show
+  the cause has gone (it never did). **Migration**: an application that wants every restart to
+  be its own sets `circuit_breaker_automatic_restart: false`
+  (`CircuitBreakerBuilder::with_automatic_restart(false)`).
+  With the `Chrome` behaviour profile the default chain has no circuit breaker (`cb.enabled`).
+
 - **turn, ice** (`conf/transport3-mays`): `turn::client::ClientConfig` has a new public field,
   `software_in_indications`, and `ice::agent::agent_config::AgentConfig` one,
   `new_tie_breaker_on_restart` (both off by default, see "Added"). A struct literal of either
@@ -441,6 +454,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **interceptors** (breaker-1): `CircuitBreakerBuilder::with_automatic_restart` and
+  `DefaultInterceptorOptions::circuit_breaker_automatic_restart` (on by default: RFC 8083
+  section 4.5's restart on information that the congestion has dissipated; off leaves every
+  restart to the application); `DefaultInterceptorOptions::circuit_breaker` and the governed
+  behaviour `cb.enabled` (`Rfc` and `StrictRfc` on: RFC 8834 section 7.1; `Chrome` off:
+  libwebrtc has no RTP circuit breaker); `RtcpReportingInterval`, the deterministic
+  reporting interval the RTCP session calculates, attached to the RTCP it hands
+  application-ward.
+
 - **rtci, interceptor** (collapse-3): `RTCPeerConnectionEvent::OnCircuitBreaker` and
   `CircuitBreakerNotice` (see "Fixed"). An application that sends media should handle the
   event: a flow the circuit breaker ceased stays silent until the application restarts it
@@ -654,6 +676,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet on.
 
 ### Fixed
+
+- **interceptors (RTP circuit breaker, RFC 8083): a call's voice no longer goes silent for
+  good after a capacity drop** (breaker-1). In a call between two peers of this engine a
+  sudden drop of the path's capacity ceased the voice 145 ms later (seven voice packets
+  dropped in a row at the bottleneck's full queue; the peer reports every 25 ms, so
+  MEDIA_TIMEOUT = 5 reports), and with both directions capped, or a 1 s queue, the video
+  (and voice) a few seconds later for congestion. Nothing restarted them. Read against the
+  text:
+  - **Restart (section 4.5).** "RTP flows halted by the circuit breaker SHOULD NOT be
+    restarted automatically unless the sender has received information that the congestion
+    has dissipated". The breaker now restarts a ceased flow, never before the triggering
+    interval has passed again, on the receiver's reports on another flow sent over the same
+    transport: packets of that flow arriving (media timeout); its loss over a whole hold at
+    which the rate that tripped is within ten times TCP again (congestion); loss and round
+    trip inside the application's bound (media usability); a report on an SSRC of this
+    endpoint (RTCP timeout). A flow that trips again within ten holds of a restart is held
+    twice as long each time (up to 64 times). When every flow of a transport has ceased
+    there is nothing a report could speak of, and the restart is the application's:
+    `OnCircuitBreaker`, then `CircuitBreakerHandle::restart` once `restart_after` has passed.
+  - **The sending rate (section 4.3)** compared with ten times the TCP throughput was the
+    average over all of CB_INTERVAL, which after a drop still holds what was sent before the
+    congestion controller reacted. "The actual sending rate" is now also taken over the last
+    round trip (RFC 3551: "The timescale on which TCP throughput is measured is the
+    round-trip time"): the breaker trips on a flow that was above the bound over the interval
+    the loss is averaged over and still is.
+  - **The media timeout (section 4.2)** counted reports that could not have shown the packet
+    they were held against (they arrived less than a round trip after it left), and went on
+    counting for a flow that had stopped sending (a paused pacer); "When stopping sending an
+    RTP stream, a sender MUST cancel the corresponding media timeout circuit breaker".
+  - **Tr (section 3)** was smoothed twice in the default chain (by the congestion controller
+    and again by the breaker) and trailed a filling queue; once now.
+  - **Tdr (section 3)** was the spacing of the receiver's reports; it is the estimate of the
+    receiver's calculated interval: what the chain's RTCP session calculates (RFC 3550
+    6.3.1; `RtcpReportingInterval`), or the spacing of the reports where that is longer.
+    Reports that come closer together than the calculated interval are each counted and no
+    longer stretch the counts (section 5).
+  What stays as the RFC has it: with a peer that reports every few tens of milliseconds
+  (RTP/AVPF without a `T_rr_interval`, this engine's default beside video) five reports
+  without a new packet of a flow that is being sent are a media timeout, in a quarter of a
+  second or less. The flow now comes back when the flow beside it is seen arriving.
+  A ceased encoding takes no share of the congestion controller's target
+  (`RTCRtpSender::target_bitrates`) until it is restarted.
+  Audit rows RFC8083-3-1, 3-6, 4.2-4, 4.2-5, 4.2-6, 4.3-4, 4.5-1, 4.5-2, 5-3.
 
 - **rtci, interceptor / RTP circuit breaker** (collapse-3): the application is told when the
   circuit breaker (RFC 8083, in the default interceptor set) ceases one of its flows. A ceased

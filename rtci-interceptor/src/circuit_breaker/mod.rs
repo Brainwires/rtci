@@ -1587,6 +1587,90 @@ mod tests {
         );
     }
 
+    /// The boundary values of MEDIA_TIMEOUT = ceil(k * max(Tf, Tr, Tdr) / Tdr): a ratio that is
+    /// a whole number is that number, the least bit more is one more report; each of the
+    /// three intervals takes over at the instant it becomes the longest.
+    #[test]
+    fn media_timeout_at_its_boundaries() {
+        // Tr exactly Tdr: k. A millisecond longer: ceil(5 * 0.026 / 0.025) = 6.
+        assert_eq!(5, media_timeout(5, secs(0.02), secs(0.025), secs(0.025)));
+        assert_eq!(6, media_timeout(5, secs(0.02), secs(0.026), secs(0.025)));
+        // Tf exactly twice Tdr: 10. Tf just past it: 11.
+        assert_eq!(10, media_timeout(5, secs(0.05), secs(0.0), secs(0.025)));
+        assert_eq!(11, media_timeout(5, secs(0.0501), secs(0.0), secs(0.025)));
+        // A queue that makes the round trip 300 ms against reports every 25 ms: 60 reports.
+        assert_eq!(60, media_timeout(5, secs(0.02), secs(0.3), secs(0.025)));
+        // k = 1 with everything shorter than Tdr: one report.
+        assert_eq!(1, media_timeout(1, secs(0.0), secs(0.0), secs(5.0)));
+    }
+
+    /// The boundary values of CB_INTERVAL: where each term of the inner max takes over, and
+    /// the cap max(15, 3 * Td).
+    #[test]
+    fn cb_interval_at_its_boundaries() {
+        // 10 * Tr exactly 3 * Tdr (0.3 s, 1 s): 3 reports. Tr a little longer: 4.
+        assert_eq!(
+            3,
+            cb_interval(1, secs(0.02), secs(0.3), secs(1.0), secs(5.0))
+        );
+        assert_eq!(
+            4,
+            cb_interval(1, secs(0.02), secs(0.31), secs(1.0), secs(5.0))
+        );
+        // 10 * G * Tf takes over from 10 * Tr: G = 30 frames of 33 ms is 10 s, 10 reports.
+        assert_eq!(
+            10,
+            cb_interval(30, secs(1.0 / 30.0), secs(0.1), secs(1.0), secs(5.0))
+        );
+        // The cap: 10 * Tr = 20 s is held to max(15, 3 * 5) = 15 s; with Td = 6 s to 18 s.
+        assert_eq!(
+            15,
+            cb_interval(1, secs(0.02), secs(2.0), secs(1.0), secs(5.0))
+        );
+        assert_eq!(
+            18,
+            cb_interval(1, secs(0.02), secs(2.0), secs(1.0), secs(6.0))
+        );
+        // Reports every 25 ms and a 142 ms round trip: ceil(1.42 / 0.025) = 57 reports.
+        assert_eq!(
+            57,
+            cb_interval(1, secs(0.02), secs(0.142), secs(0.025), secs(5.0))
+        );
+    }
+
+    /// The sending rate "now": over the newest samples that cover the span, one at least.
+    #[test]
+    fn the_recent_rate_is_that_of_the_newest_samples_covering_the_span() {
+        let sample = |milliseconds: u64, bytes: u64| LossSample {
+            fraction_lost: 0.0,
+            duration: Duration::from_millis(milliseconds),
+            bytes_sent: bytes,
+            packets_sent: 1,
+            net_lost: 0,
+            net_expected: 1,
+        };
+        let samples: VecDeque<LossSample> =
+            [sample(100, 50_000), sample(100, 10_000), sample(100, 2_000)].into();
+        // A span shorter than the newest sample: that sample, 2000 bytes in 0.1 s.
+        assert!((recent_rate(&samples, secs(0.05)) - 20_000.0).abs() < 1e-6);
+        // Exactly one sample long: still that one. A little more: two (12000 in 0.2 s).
+        assert!((recent_rate(&samples, secs(0.1)) - 20_000.0).abs() < 1e-6);
+        assert!((recent_rate(&samples, secs(0.101)) - 60_000.0).abs() < 1e-6);
+        // Longer than everything held: all of it.
+        assert!((recent_rate(&samples, secs(5.0)) - 62_000.0 / 0.3).abs() < 1e-6);
+        assert_eq!(0.0, recent_rate(&VecDeque::new(), secs(1.0)));
+    }
+
+    /// RFC 3550 A.1 sequence number order, across the wrap.
+    #[test]
+    fn sequence_numbers_are_ordered_across_the_wrap() {
+        assert!(is_newer(2, 1));
+        assert!(!is_newer(1, 2));
+        assert!(!is_newer(7, 7));
+        assert!(is_newer(3, 65_530));
+        assert!(!is_newer(65_530, 3));
+    }
+
     /// RFC 8083 section 4.3: X = s / (Tr * sqrt(2*b*p/3)), b = 1.
     #[test]
     fn the_simplified_tcp_equation_matches_the_rfc() {

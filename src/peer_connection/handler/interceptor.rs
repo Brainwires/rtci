@@ -2778,6 +2778,10 @@ mod interceptor_session_test;
 #[path = "interceptor_early_media_test.rs"]
 mod interceptor_early_media_test;
 
+#[cfg(test)]
+#[path = "interceptor_circuit_breaker_test.rs"]
+mod interceptor_circuit_breaker_test;
+
 /// The octets SRTCP adds to a compound packet under `context`'s profile (RFC 3711 section
 /// 3.3 and 3.4, RFC 7714 section 9): the E flag and SRTCP index, and the HMAC or AEAD tag. No
 /// MKI is used (RFC 8827 section 6.5). 0 without SRTP.
