@@ -250,10 +250,12 @@ impl PacerBuilder {
 /// bound, not at the bound, leaves a source that stops when told the time to notice (a frame
 /// interval, a read of its target) and room for the target to fall once more. What the source
 /// wrote before the pause is not discarded even when the target falls so far meanwhile that it
-/// would wait past the bound: that backlog is **drained** above the target, until it has left, as
+/// would wait past the bound: that backlog (and what the source writes in the first 250 ms of
+/// the pause, before it can have heard of it) is **drained** above the target, until it has
+/// left, as
 /// [`QueueOverflow::Drain`] drains (libwebrtc pairs its encoder pause with
 /// `drain_large_queues`, `MaybeUpdateMediaRateDueToLongQueue`); it is bounded by what was
-/// queued when the pause began. So a source that follows the target never has its media
+/// queued when the pause began and 250 ms of writing. So a source that follows the target never has its media
 /// discarded; only media written during the pause is.
 ///
 /// **A target of zero means: produce nothing until the next target.** An encoder skips (does
@@ -337,9 +339,9 @@ pub struct PacerInterceptor {
     discarded_frame: HashMap<u32, u32>,
     /// Whether the application is told to pause (see "Pausing the source").
     paused: bool,
-    /// When the last pause began: media written before it is what the source wrote before it
-    /// was told to stop, drained rather than discarded, during the pause and after it (see
-    /// "Pausing the source").
+    /// When the last pause began, plus [`PAUSE_GRACE`]: media written before it is what the
+    /// source wrote before it could stop, drained rather than discarded, during the pause and
+    /// after it (see "Pausing the source").
     drain_before: Option<Instant>,
     /// How many times a pause began.
     pauses: u64,
@@ -660,7 +662,7 @@ impl PacerInterceptor {
             self.paused = !self.paused;
             if self.paused {
                 self.pauses += 1;
-                self.drain_before = Some(now);
+                self.drain_before = Some(now + PAUSE_GRACE);
             }
         }
         change
@@ -887,6 +889,13 @@ const PAUSE_AT: f64 = 0.5;
 /// of the default 2 s): what then waits is the delay the call carries on with, so it is kept
 /// short; the gap between the two shares keeps one frame from switching it on and off.
 const RESUME_AT: f64 = 0.05;
+
+/// How long after the pause begins what the source writes still counts as written before it:
+/// a source hears of the pause when it next reads its target and may finish the frame in hand
+/// (an application reading its target every 100 ms at 30 frames a second writes up to four
+/// frames meanwhile). Measured in `tests/capacity_cap_video_rtc2rtc.rs`: without it those
+/// frames waited behind the backlog and were discarded (1 to 3 frames on every seed).
+const PAUSE_GRACE: Duration = Duration::from_millis(250);
 
 /// Rides a target of zero ([`Attribute::TargetBitrateChanged`]) that the pacer hands
 /// application-ward while it tells the source to pause (see "Pausing the source" on
