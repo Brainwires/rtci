@@ -53,6 +53,13 @@ impl SenderStream {
         }
     }
 
+    /// The wall-clock anchor the stream's NTP times derive from; `None` keeps the process-wide
+    /// [`SystemInstant::shared`], taken at the first packet.
+    pub(crate) fn with_wall_clock(mut self, wall_clock: Option<SystemInstant>) -> Self {
+        self.time_baseline = wall_clock;
+        self
+    }
+
     pub(crate) fn ssrc(&self) -> u32 {
         self.ssrc
     }
