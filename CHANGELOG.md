@@ -25,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
+- **RFC 8108 section 5.1 by default: every SSRC reports, on the remote SSRCs and on the
+  co-located ones.** `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` and
+  `RtcpSessionBuilder::with_report_from_every_ssrc` default to `true` (were `false`): each local
+  SSRC's SR or RR carries a block for every remote source and for each of the endpoint's other
+  SSRCs that has sent ("including those co-located at the same endpoint": nothing lost, no
+  jitter, the highest sequence number sent, that SSRC's last SR). RFC 8861 reporting groups,
+  which would allow fewer, are not implemented. `Chrome` keeps `false` (libwebrtc reports each
+  remote SSRC once, from its receive module). On the wire: larger compound packets, in the same
+  RTCP bandwidth (fewer of them: the sender's regular packets at 1 Mbit/s about 7 a second
+  instead of 8 or more). Rows: RFC8108-5.1-1 `tested`.
+- **The circuit breaker counts one receiver's report once (RFC 8083 with RFC 8108 5.1).** A
+  peer whose every SSRC reports on a flow sends the same block several times per compound
+  packet; the breaker took each copy as a report (MEDIA_TIMEOUT reached in a fraction of the
+  reports, zero spacing in its Tdr). It now follows one reporting SSRC per flow, another only
+  after the RTCP timeout. Test: `every_ssrc_of_the_receiver_reporting_counts_as_one_report`.
 - **RTCP stays inside RFC 3550's 5% of the session bandwidth with congestion control feedback
   counted, and the feedback is sized to that budget (RFC 3550 6.2, RFC 4585 3.2: feedback is
   "subject to the RTCP bandwidth constraints").** A 24 kbit/s audio call's RTCP was 12.2% of

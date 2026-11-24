@@ -174,6 +174,33 @@ impl Harness {
         );
     }
 
+    /// A compound packet in which two SSRCs of the receiving endpoint (its media and its RTX
+    /// stream, say) each carry the same block about `ssrc`, as RFC 8108 section 5.1 has every
+    /// SSRC of an endpoint report on every source it receives.
+    fn report_from_two_ssrcs(&mut self, at: Duration, ssrc: u32, fraction_lost: u8, highest: u32) {
+        let lost = self.cumulative(ssrc, fraction_lost, highest);
+        let mut block = ReceptionReport {
+            ssrc,
+            fraction_lost,
+            last_sequence_number: highest,
+            ..Default::default()
+        };
+        block.set_cumulative_lost(lost);
+        self.receive(
+            at,
+            [0x9999_9999u32, 0x9999_999a]
+                .into_iter()
+                .map(|reporter| {
+                    Box::new(ReceiverReport {
+                        ssrc: reporter,
+                        reports: vec![block.clone()],
+                        ..Default::default()
+                    }) as Box<dyn rtcp::Packet>
+                })
+                .collect(),
+        );
+    }
+
     /// The same, echoing the sender report sent at `sr_at` so the round trip is `rtt`.
     fn report_with_rtt(
         &mut self,
@@ -360,6 +387,36 @@ fn five_reports_without_progress_trip_the_media_timeout() {
     harness.send_for(ms(7000), ms(8000), VIDEO, 10);
     harness.report(ms(7999), VIDEO, 0, 30);
 
+    assert_eq!(
+        Some(CircuitBreakerReason::MediaTimeout),
+        harness.reason(VIDEO)
+    );
+}
+
+/// RFC 8108 section 5.1: every SSRC of the receiving endpoint reports on the flow, so each of
+/// its compound packets carries the same block twice (its media and its RTX SSRC). They are one
+/// receiver's report (RFC 8083 is a unicast breaker: one receiver), and the breaker takes one
+/// reporting SSRC's blocks: MEDIA_TIMEOUT stays five compound packets, not three, and the report
+/// spacing it takes for Tdr is the compound packets', not zero between the two copies.
+#[test]
+fn every_ssrc_of_the_receiver_reporting_counts_as_one_report() {
+    let mut harness = Harness::new(CircuitBreakerBuilder::new());
+    for second in 0..3u64 {
+        harness.send_for(ms(second * 1000), ms(second * 1000 + 1000), VIDEO, 10);
+        harness.report_from_two_ssrcs(ms(second * 1000 + 999), VIDEO, 0, (second as u32 + 1) * 10);
+    }
+    for second in 3..7u64 {
+        harness.send_for(ms(second * 1000), ms(second * 1000 + 1000), VIDEO, 10);
+        harness.report_from_two_ssrcs(ms(second * 1000 + 999), VIDEO, 0, 30);
+        assert_eq!(
+            Some(CircuitBreakerState::Running),
+            harness.handle.state(VIDEO),
+            "{} stalled compound packets are fewer than MEDIA_TIMEOUT",
+            second - 2
+        );
+    }
+    harness.send_for(ms(7000), ms(8000), VIDEO, 10);
+    harness.report_from_two_ssrcs(ms(7999), VIDEO, 0, 30);
     assert_eq!(
         Some(CircuitBreakerReason::MediaTimeout),
         harness.reason(VIDEO)

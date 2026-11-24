@@ -154,6 +154,10 @@ struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
+    /// `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` for the default chains and
+    /// `RtcpSessionBuilder::with_report_from_every_ssrc` for ParolNet's, their default when
+    /// `None`.
+    report_from_every_ssrc: Option<bool>,
 }
 
 impl Setup {
@@ -166,7 +170,14 @@ impl Setup {
             cap: Duration::from_secs(20),
             cap_at_target: None,
             video: [true, true],
+            report_from_every_ssrc: None,
         }
+    }
+
+    /// Every local SSRC reports on every other (RFC 8108 section 5.1) or the blocks go once.
+    fn report_from_every_ssrc(mut self, every: bool) -> Self {
+        self.report_from_every_ssrc = Some(every);
+        self
     }
 
     /// A call that starts with audio alone, either way.
@@ -555,6 +566,9 @@ impl Peer {
             let mut options = DefaultInterceptorOptions::default();
             options.rtcp_random = Some(provider.clone());
             options.wall_clock = wall_clock;
+            if let Some(every) = setup.report_from_every_ssrc {
+                options.rtcp_report_from_every_ssrc = every;
+            }
             if let Some(rate_limit) = rate_limit {
                 options.nack_retransmission_rate_limit = rate_limit;
             }
@@ -601,6 +615,10 @@ impl Peer {
         let session = RtcpSessionBuilder::new()
             .with_t_rr_interval(Duration::ZERO)
             .with_random(SeededRtcpRandom(Rng(seed ^ 0x5eed)));
+        let session = match setup.report_from_every_ssrc {
+            Some(every) => session.with_report_from_every_ssrc(every),
+            None => session,
+        };
         let session = match wall_clock {
             Some(anchor) => session.with_wall_clock(anchor),
             None => session,
@@ -1871,8 +1889,10 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 
 /// A measurement over what the environment names, one line per run; asserts nothing.
 /// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
-/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
-/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
+/// (`within`, `upto`, `unlimited`, `default`: the engine's), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
+/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_EVERY` (`true` or `false`: RFC 8108
+/// 5.1's report blocks from every SSRC or once; the chains' default when unset),
+/// `RTC_CAP_SECONDS` (how long the cap stays;
 /// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
 /// cap arrives, instead of after 20 s).
 #[test]
@@ -1892,13 +1912,14 @@ fn measure_the_capacity_cap() -> Result<()> {
                 for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
                     for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
                         let rate_limit = match rule.as_str() {
-                            "within" => RetransmissionRateLimit::WithinTarget,
-                            "upto" => RetransmissionRateLimit::UpToTarget,
-                            "unlimited" => RetransmissionRateLimit::Unlimited,
+                            "within" => Some(RetransmissionRateLimit::WithinTarget),
+                            "upto" => Some(RetransmissionRateLimit::UpToTarget),
+                            "unlimited" => Some(RetransmissionRateLimit::Unlimited),
+                            "default" => None,
                             other => bail!("unknown rule {other}"),
                         };
                         let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
-                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
+                        let mut setup = Setup::new(seed.parse()?, rate_limit)
                             .chain(match chain.as_str() {
                                 "parolnet" => Chain::ParolNet,
                                 "default" => Chain::Default,
@@ -1909,6 +1930,9 @@ fn measure_the_capacity_cap() -> Result<()> {
                         setup.cap = Duration::from_secs(seconds.parse()?);
                         if let Some(bps) = &at_target {
                             setup = setup.capped_at_a_target_of(bps.parse()?);
+                        }
+                        if let Ok(every) = std::env::var("RTC_CAP_EVERY") {
+                            setup = setup.report_from_every_ssrc(every.parse()?);
                         }
                         match run(&setup) {
                             Ok(o) => println!(
