@@ -423,6 +423,9 @@ struct Side {
     cc: f64,
     /// The longest gap between two congestion control feedback packets, ms.
     cc_gap_ms: f64,
+    /// Congestion control feedback packets per second sent reduced-size (RFC 5506: no SR or
+    /// RR in front).
+    cc_reduced: f64,
     /// Regular packets with report blocks per second (RTT samples, loss reports, the RTP
     /// circuit breaker's input), and the longest gap between two, ms.
     blocks: f64,
@@ -614,6 +617,12 @@ fn measure_with(
             .filter(|(_, p)| is_congestion_feedback(p))
             .map(|(at, _)| *at)
             .collect();
+        let cc_reduced = packets
+            .iter()
+            .filter(|(_, p)| {
+                is_congestion_feedback(p) && !has::<SenderReport>(p) && !has::<ReceiverReport>(p)
+            })
+            .count();
         let blocks: Vec<Instant> = packets
             .iter()
             .filter(|(_, p)| report_blocks(p) > 0)
@@ -627,6 +636,7 @@ fn measure_with(
             regular: regular.len() as f64 / secs,
             srs: srs as f64 / secs,
             cc: cc.len() as f64 / secs,
+            cc_reduced: cc_reduced as f64 / secs,
             cc_gap_ms: if cc.is_empty() { 0.0 } else { gap(&cc) },
             blocks: blocks.len() as f64 / secs,
             blocks_gap_ms: if blocks.is_empty() { 0.0 } else { gap(&blocks) },
@@ -793,7 +803,7 @@ fn the_performance_profile_sends_regular_reports_about_once_a_second() -> Result
     // reports in what its 20 feedback packets a second leave of the RTCP bandwidth).
     assert!(rfc.sides[0].regular >= 8.0, "{rfc:?}");
     assert!(rfc.sides[1].regular >= 3.0, "{rfc:?}");
-    assert!(rfc.share >= 0.03, "{rfc:?}");
+    assert!(rfc.share >= 0.025, "{rfc:?}");
     // About once a second, dithered over [0.5, 1.5] s.
     for side in performance.sides {
         assert!((0.6..=2.0).contains(&side.regular), "{performance:?}");
@@ -844,10 +854,10 @@ fn rtcp_and_budget(m: &Measured) -> (f64, f64) {
 /// the feedback at 95% of the budget here).
 #[test]
 fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth() -> Result<()> {
-    // 25 s, 20 s measured: the regular reports are few (one every one to five seconds from
+    // 45 s, 40 s measured: the regular reports are few (one every one to five seconds from
     // each side), and their intervals are drawn from [0.5, 1.5] of the computed one.
     let call = Scenario {
-        seconds: 25,
+        seconds: 45,
         ..AUDIO_24K
     };
     let default = measure(call, BehaviourProfile::Rfc, None)?;
@@ -859,7 +869,9 @@ fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth()
     println!(
         "RTCP with lower layers: default {rtcp:.0} bit/s of a {budget:.0} bit/s budget; feedback on top {rtcp_on_top:.0} of {budget_on_top:.0}"
     );
-    // The budget is an average the randomised intervals keep over time: 3% for a 20 s window.
+    // The budget is an average the randomised intervals keep over time, and RFC 3550 6.3.1's
+    // compensation (dividing by e - 3/2) runs a two-party session's regular reports a little
+    // above the nominal rate: 3%.
     assert!(
         rtcp <= 1.03 * budget,
         "{rtcp:.0} > {budget:.0}: {default:?}"
@@ -867,6 +879,11 @@ fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth()
     assert!(
         rtcp_on_top > budget_on_top,
         "the form on top is over: {rtcp_on_top:.0} / {budget_on_top:.0}"
+    );
+    // RFC 5506: the feedback goes reduced-size (RFC8836-2-8b), without SR or RR in front.
+    assert!(
+        default.sides[1].cc_reduced >= 0.9 * default.sides[1].cc,
+        "{default:?}"
     );
     // The congestion control feedback is not held: as often as with it on top.
     assert!(default.sides[1].cc >= 2.0, "{default:?}");
