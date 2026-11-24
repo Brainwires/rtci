@@ -14,7 +14,7 @@ readme = "README.md"
 publish = false
 
 [package.metadata.docs.rs]
-features = ["engine", "vp8", "av1", "isolation"]
+features = ["engine", "vp8", "av1", "isolation", "libvpx", "dav1d", "openh264"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
 # none. The default build has no codec at all (it assembles, times and requests key frames for
@@ -40,6 +40,19 @@ av1 = ["dep:rav1d", "dep:rav1e", "dep:libc"]
 # or hangs on a hostile frame costs that frame, not the application. No dependency; it is the
 # one part of the crate that starts a process and a thread, and only when the application asks.
 isolation = []
+# The system-library backends: each LOADS its library at run time (dlopen), so building any of
+# them needs no library, no headers and no C toolchain (the workspace's `cargo check
+# --all-features` stays pure Rust); running needs the library installed. docs/video-pipeline.md
+# 4.9.
+# VP8 / VP9 decode and encode with libvpx (BSD-3-Clause).
+libvpx = ["dep:libloading"]
+# AV1 decode with libdav1d (BSD-2-Clause), the browsers' decoder.
+dav1d = ["dep:libloading", "dep:libc"]
+# H.264 decode and encode with Cisco's OpenH264 BINARY only, loaded from a path the application
+# gives, accepted only if its SHA-256 is one Cisco published. Never built from source here. The
+# patent licence comes with Cisco's binary under Cisco's conditions, which the application must
+# meet (codec::openh264 and docs/video-pipeline.md 4.1).
+openh264 = ["dep:openh264"]
 
 [dependencies]
 rtp.workspace = true
@@ -57,6 +70,9 @@ rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8"]
 rav1e = { version = "0.8.1", default-features = false, optional = true }
 # The errno values rav1d's C API returns (bindings only, no C code).
 libc = { version = "0.2", optional = true }
+libloading = { version = "0.9.1", optional = true }
+# Without its default `source` feature: no C is compiled, Cisco's binary is loaded at run time.
+openh264 = { version = "0.9.10", default-features = false, features = ["libloading"], optional = true }
 
 [dev-dependencies]
 rtc = { version = "0.22.0", path = ".." }
@@ -72,6 +88,21 @@ required-features = ["vp8", "av1"]
 name = "codecs"
 path = "tests/codecs.rs"
 required-features = ["vp8", "av1"]
+
+[[test]]
+name = "libvpx"
+path = "tests/libvpx.rs"
+required-features = ["libvpx", "vp8"]
+
+[[test]]
+name = "dav1d"
+path = "tests/dav1d.rs"
+required-features = ["dav1d", "av1"]
+
+[[test]]
+name = "openh264"
+path = "tests/openh264.rs"
+required-features = ["openh264"]
 
 [[test]]
 name = "isolated"

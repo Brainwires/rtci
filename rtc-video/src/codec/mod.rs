@@ -5,6 +5,9 @@
 //! |---|---|---|---|
 //! | `vp8` (opt-in) | VP8 (`vp8-decoder`) | VP8 (`vp8-encoder`) | yes |
 //! | `av1` (opt-in) | AV1 (`rav1d`, no assembly; **a hostile frame aborts the process**) | AV1 (`rav1e`, no assembly; not real time) | yes |
+//! | `libvpx` (opt-in) | VP8, VP9 (libvpx, loaded at run time) | VP8, VP9 | no: C, loaded at run time |
+//! | `dav1d` (opt-in) | AV1 (libdav1d, loaded at run time) | - | no: C, loaded at run time |
+//! | `openh264` (opt-in) | H.264 (Cisco's OpenH264 binary, loaded at run time) | H.264 | no: Cisco's binary |
 //! | `isolation` (opt-in) | any decoder above, in a child process ([`isolated`]) | - | yes |
 //!
 //! The default build has no codec: it receives, assembles and times every payload format and
@@ -16,8 +19,16 @@
 #[cfg(feature = "av1")]
 #[allow(unsafe_code)]
 pub mod av1;
+#[cfg(feature = "dav1d")]
+#[allow(unsafe_code)]
+pub mod dav1d;
 #[cfg(feature = "isolation")]
 pub mod isolated;
+#[cfg(feature = "libvpx")]
+#[allow(unsafe_code)]
+pub mod libvpx;
+#[cfg(feature = "openh264")]
+pub mod openh264;
 #[cfg(feature = "vp8")]
 pub mod vp8;
 
