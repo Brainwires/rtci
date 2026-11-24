@@ -18,8 +18,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+
+use crate::runtime::{AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, Runtime};
 
 /// An inclusive range of ports for the sockets a peer connection gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,18 +110,35 @@ pub fn bind_udp_in_range(ip: IpAddr, range: PortRange) -> io::Result<std::net::U
     })
 }
 
-/// A TCP listener on `ip`, on a free port of `range`.
+/// A UDP socket of `runtime` on `ip`, on a free port of `range`, skipping refused ports as
+/// [`bind_udp_in_range`] does.
+///
+/// # Errors
+///
+/// As [`bind_udp_in_range`].
+pub fn bind_runtime_udp_in_range(
+    runtime: &dyn Runtime,
+    ip: IpAddr,
+    range: PortRange,
+) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+    bind_first(range, range.ports(), |port| {
+        runtime.bind_udp(SocketAddr::new(ip, port))
+    })
+}
+
+/// A TCP listener of `runtime` on `ip`, on a free port of `range`.
 ///
 /// # Errors
 ///
 /// As [`bind_udp_in_range`].
 pub fn bind_tcp_listener_in_range(
+    runtime: &dyn Runtime,
     ip: IpAddr,
     range: PortRange,
     reuse_address: bool,
-) -> io::Result<TcpListener> {
+) -> io::Result<Arc<dyn AsyncTcpListener>> {
     bind_first(range, range.ports(), |port| {
-        crate::bind_listener(SocketAddr::new(ip, port), reuse_address)
+        runtime.listen_tcp(SocketAddr::new(ip, port), reuse_address)
     })
 }
 
@@ -305,7 +322,7 @@ impl<K: Clone + Eq + Hash> UfragMux<K> {
 #[derive(Debug)]
 pub struct SharedAccept {
     /// The connection.
-    pub stream: TcpStream,
+    pub stream: Arc<dyn AsyncTcpStream>,
     /// Its local address (the shared port).
     pub local: SocketAddr,
     /// The peer's address.
@@ -325,14 +342,15 @@ pub struct SharedAccept {
 ///
 /// An accept error.
 pub async fn accept_by_ufrag(
-    listener: &TcpListener,
+    runtime: &dyn Runtime,
+    listener: &dyn AsyncTcpListener,
     timeout: Duration,
 ) -> io::Result<SharedAccept> {
     loop {
-        let (mut stream, remote) = listener.accept().await?;
+        let (stream, remote) = listener.accept().await?;
         let local = stream.local_addr()?;
         let mut read = Vec::new();
-        let first = tokio::time::timeout(timeout, async {
+        let first = crate::runtime::timeout(runtime, timeout, async {
             let mut buf = [0u8; 4096];
             loop {
                 if read.len() >= 2 {
@@ -360,7 +378,6 @@ pub async fn accept_by_ufrag(
             continue;
         };
         let ufrag = ufrag.to_owned();
-        let _ = stream.set_nodelay(true);
         return Ok(SharedAccept {
             stream,
             local,

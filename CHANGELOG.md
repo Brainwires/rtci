@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
 - **stream-driver**: `PeerDriverConfig` has a new public field `mdns_rate_limit` (`None`: the process's budget). Migration: a configuration written as a struct literal adds `mdns_rate_limit: None`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (runtime-1): **the driver runs on an injected async runtime** (`runtime::Runtime`,
+  an object-safe trait used as `Arc<dyn Runtime>`: spawn, the clock and timers, UDP sockets
+  multicast included, TCP listen / connect, name resolution, `block_on`). It is given per driver
+  (`StreamDriver::with_runtime`, `PeerDriver::with_runtime`); there is no global or default
+  runtime. Built-in runtime types are features: `runtime-tokio` (default) gives `TokioRuntime`.
+  Changes for users:
+  - `StreamDriver::new`, `StreamDriver::default` and `PeerDriver::new` need `runtime-tokio`
+    (on by default) and are otherwise unchanged. Migration: none with default features; with
+    `default-features = false` add `features = ["runtime-tokio"]` or call `with_runtime`.
+  - `sockets::bind_tcp_listener_in_range(ip, range, reuse)` takes the runtime first and returns
+    `Arc<dyn runtime::AsyncTcpListener>`; `sockets::accept_by_ufrag(&listener, timeout)` is
+    `accept_by_ufrag(runtime, listener, timeout)` over a `dyn AsyncTcpListener`;
+    `SharedAccept::stream` is an `Arc<dyn runtime::AsyncTcpStream>`;
+    `nat_mapping::map_port` takes the runtime first. Migration: pass `&TokioRuntime::new()` and
+    make listeners with `runtime.listen_tcp(addr, false)`.
+  - `dns-records` turns `runtime-tokio` on: the per-family and SRV / NAPTR lookups are
+    `TokioRuntime`'s (`Runtime::resolve_family`, `Runtime::resolve_records`; another runtime
+    answers the default: both families together, no records).
+  - The datagram marking of ccrows-7 is the socket's (`runtime::Transmit::traffic_class`,
+    `AsyncUdpSocket::unmarked`, `runtime::TrafficClassMarker`); `PeerDriver`'s counters are
+    unchanged.
 
 ### Behaviour changes
 

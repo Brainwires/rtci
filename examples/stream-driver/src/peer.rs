@@ -53,8 +53,9 @@
 //! }
 //! ```
 
-use crate::mdns_io::{MDNS_MAX_DATAGRAM, MdnsEgress, bind_mdns_v4, bind_mdns_v6};
+use crate::mdns_io::{MDNS_MAX_DATAGRAM, MdnsEgress, mdns_v4, mdns_v6};
 pub use crate::mdns_io::{MDNS_MULTICAST_IPV6, process_mdns_rate_limit};
+use crate::runtime::{self, AsyncUdpSocket, JoinHandle, Runtime, Transmit};
 use crate::sockets::{self, PortRange};
 use crate::{DriverConfig, DriverInput, StreamDriver};
 use bytes::BytesMut;
@@ -73,13 +74,15 @@ use rtci::sansio::Protocol;
 use rtci::shared::error::{Error, IoError, Result};
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+
+/// A datagram a socket of the driver received: its local address, the sender, the bytes.
+type Received = (SocketAddr, SocketAddr, Vec<u8>);
 
 /// What a [`PeerDriver`] binds.
 #[derive(Debug, Clone)]
@@ -127,9 +130,9 @@ impl PeerDriverConfig {
 
 /// The host's mDNS sockets of a driver, bound at the connection's first mDNS datagram.
 struct MdnsSockets {
-    v4: Option<(Arc<UdpSocket>, SocketAddr)>,
-    v6: Option<(Arc<UdpSocket>, SocketAddr)>,
-    readers: Vec<JoinHandle<()>>,
+    v4: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
+    v6: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
+    readers: Vec<Box<dyn JoinHandle>>,
 }
 
 impl Drop for MdnsSockets {
@@ -142,7 +145,7 @@ impl Drop for MdnsSockets {
 
 /// One UDP socket of the connection, with the reader that hands its datagrams to the driver.
 struct HostSocket {
-    socket: Arc<UdpSocket>,
+    socket: Arc<dyn AsyncUdpSocket>,
     local: SocketAddr,
     /// The section its candidate was added for.
     mid: String,
@@ -151,10 +154,10 @@ struct HostSocket {
     retired_for: Option<RTCTransportId>,
     /// Once its transport selected a pair on another socket: when it is closed.
     close_at: Option<Instant>,
-    /// The TOS / Traffic Class byte last set on it (a new socket's is 0), or `None` once the
-    /// platform refused to set one: its datagrams then leave unmarked.
-    traffic_class: Option<u8>,
-    reader: JoinHandle<()>,
+    /// Counted in [`PeerDriver::unmarked_sockets`] (the platform refused to mark it: its
+    /// datagrams leave unmarked).
+    counted_unmarked: bool,
+    reader: Box<dyn JoinHandle>,
 }
 
 impl Drop for HostSocket {
@@ -165,12 +168,13 @@ impl Drop for HostSocket {
 
 /// Drives an `RTCPeerConnection` over sockets of its own (see the [module documentation](self)).
 pub struct PeerDriver {
+    runtime: Arc<dyn Runtime>,
     pc: RTCPeerConnection,
     streams: StreamDriver,
     config: PeerDriverConfig,
     sockets: Vec<HostSocket>,
-    datagrams_tx: mpsc::UnboundedSender<(SocketAddr, SocketAddr, Vec<u8>)>,
-    datagrams: mpsc::UnboundedReceiver<(SocketAddr, SocketAddr, Vec<u8>)>,
+    datagrams_tx: async_channel::Sender<Received>,
+    datagrams: async_channel::Receiver<Received>,
     /// The engine's events, for the application, after the driver had its look.
     events: VecDeque<RTCPeerConnectionEvent>,
     /// The transports whose generation the driver gathered for on an
@@ -193,13 +197,27 @@ pub struct PeerDriver {
 }
 
 impl PeerDriver {
-    /// A driver for `pc`, with no socket yet: it binds when the connection's first local
-    /// description begins gathering. Must be used inside a tokio runtime.
+    /// A driver for `pc` on tokio ([`runtime::TokioRuntime::new`]: it must be used inside a
+    /// tokio runtime), with no socket yet: it binds when the connection's first local
+    /// description begins gathering. Feature `runtime-tokio` (on by default).
+    #[cfg(feature = "runtime-tokio")]
     pub fn new(pc: RTCPeerConnection, config: PeerDriverConfig) -> Self {
-        let (datagrams_tx, datagrams) = mpsc::unbounded_channel();
+        Self::with_runtime(Arc::new(runtime::TokioRuntime::new()), pc, config)
+    }
+
+    /// A driver for `pc` on `runtime`, with no socket yet: it binds when the connection's first
+    /// local description begins gathering. Every time it gives the connection is the
+    /// runtime's ([`Runtime::now`]).
+    pub fn with_runtime(
+        runtime: Arc<dyn Runtime>,
+        pc: RTCPeerConnection,
+        config: PeerDriverConfig,
+    ) -> Self {
+        let (datagrams_tx, datagrams) = async_channel::unbounded();
         Self {
+            streams: StreamDriver::with_runtime(runtime.clone(), config.streams),
+            runtime,
             pc,
-            streams: StreamDriver::new(config.streams),
             sockets: Vec::new(),
             datagrams_tx,
             datagrams,
@@ -214,6 +232,11 @@ impl PeerDriver {
             unmarked_sockets: 0,
             sent_by_traffic_class: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// The runtime the driver runs on.
+    pub fn runtime(&self) -> &Arc<dyn Runtime> {
+        &self.runtime
     }
 
     /// The peer connection.
@@ -271,10 +294,7 @@ impl PeerDriver {
     /// `None` without such a socket.
     pub fn socket_traffic_class(&self, local: SocketAddr) -> Option<io::Result<u32>> {
         let host = self.sockets.iter().find(|s| s.local == local)?;
-        Some(sockets::traffic_class(
-            socket2::SockRef::from(host.socket.as_ref()),
-            local.is_ipv6(),
-        ))
+        Some(host.socket.traffic_class())
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -313,7 +333,7 @@ impl PeerDriver {
                 progress = true;
             }
             if !progress {
-                self.send_mdns(Instant::now());
+                self.send_mdns(self.runtime.now());
                 return Ok(());
             }
         }
@@ -327,7 +347,7 @@ impl PeerDriver {
     /// As [`flush`](Self::flush).
     pub async fn step(&mut self, wait: Duration) -> Result<()> {
         self.flush()?;
-        let now = Instant::now();
+        let now = self.runtime.now();
         let deadline = self
             .pc
             .poll_timeout()
@@ -335,18 +355,33 @@ impl PeerDriver {
             .chain(self.mdns_egress.next_ready(now))
             .fold(now + wait, Instant::min)
             .max(now);
-        tokio::select! {
-            Some((local, peer, data)) = self.datagrams.recv() => {
+        let woke = {
+            let mut datagram = std::pin::pin!(self.datagrams.recv());
+            let mut input = std::pin::pin!(self.streams.next());
+            let mut timer = self.runtime.sleep_until(deadline);
+            std::future::poll_fn(|cx| {
+                if let Poll::Ready(Ok(received)) = datagram.as_mut().poll(cx) {
+                    return Poll::Ready(Woke::Datagram(received));
+                }
+                if let Poll::Ready(input) = input.as_mut().poll(cx) {
+                    return Poll::Ready(Woke::Stream(input));
+                }
+                timer.as_mut().poll(cx).map(|()| Woke::Timer)
+            })
+            .await
+        };
+        match woke {
+            Woke::Datagram((local, peer, data)) => {
                 self.feed(local, peer, data);
                 while let Ok((local, peer, data)) = self.datagrams.try_recv() {
                     self.feed(local, peer, data);
                 }
             }
-            input = self.streams.next() => self.feed_stream(input),
-            _ = tokio::time::sleep_until(deadline.into()) => {}
+            Woke::Stream(input) => self.feed_stream(input),
+            Woke::Timer => {}
         }
         // The engine's timers; one that fails is the connection's to report (its states).
-        let now = Instant::now();
+        let now = self.runtime.now();
         let _ = self.pc.handle_timeout(now);
         self.sockets
             .retain(|s| s.close_at.is_none_or(|close_at| close_at > now));
@@ -364,7 +399,7 @@ impl PeerDriver {
         // A datagram the engine cannot take (a stray, a late one) is its business, not the
         // driver's: it goes on.
         let _ = self.pc.handle_read(TaggedBytesMut {
-            now: Instant::now(),
+            now: self.runtime.now(),
             transport: TransportContext {
                 local_addr: local,
                 peer_addr: peer,
@@ -376,7 +411,7 @@ impl PeerDriver {
     }
 
     fn feed_stream(&mut self, input: DriverInput) {
-        let now = Instant::now();
+        let now = self.runtime.now();
         match input {
             DriverInput::Event(event) => {
                 let _ = self.pc.handle_stream_event(now, event);
@@ -413,44 +448,28 @@ impl PeerDriver {
             return;
         }
         let traffic_class = self.pc.traffic_class(&datagram);
-        let mut refused = false;
-        let mut applied = 0;
-        let sent = self
-            .sockets
-            .iter_mut()
-            .find(|s| s.local == datagram.transport.local_addr)
-            .is_some_and(|host| {
-                if let Some(current) = host.traffic_class
-                    && current != traffic_class
-                {
-                    match sockets::set_traffic_class(
-                        socket2::SockRef::from(host.socket.as_ref()),
-                        host.local.is_ipv6(),
-                        traffic_class,
-                    ) {
-                        Ok(()) => host.traffic_class = Some(traffic_class),
-                        // The platform does not mark (RFC 8835 4.2: "appropriate to depart
-                        // ... on platforms where QoS marking is not implemented"): the socket
-                        // is not asked again.
-                        Err(_) => {
-                            host.traffic_class = None;
-                            refused = true;
-                        }
-                    }
-                }
-                applied = host.traffic_class.unwrap_or(0);
-                // UDP: a datagram the socket cannot take now is lost, as on the wire.
-                host.socket
-                    .try_send_to(&datagram.message, datagram.transport.peer_addr)
-                    .is_ok()
-            });
-        if refused {
+        let Some(host) = self.sockets.iter_mut().find(|s| s.local == local) else {
+            self.unsent += 1;
+            return;
+        };
+        // UDP: a datagram the socket cannot take now is lost, as on the wire.
+        let sent = host.socket.try_send(&Transmit {
+            destination: datagram.transport.peer_addr,
+            contents: &datagram.message,
+            traffic_class,
+            segment_size: None,
+        });
+        // The platform does not mark (RFC 8835 4.2: "appropriate to depart ... on platforms
+        // where QoS marking is not implemented"): counted once per socket.
+        let unmarked = host.socket.unmarked();
+        if unmarked && !host.counted_unmarked {
+            host.counted_unmarked = true;
             self.unmarked_sockets += 1;
         }
         if sent {
+            let applied = if unmarked { 0 } else { traffic_class };
             *self.sent_by_traffic_class.entry(applied).or_default() += 1;
-        }
-        if !sent {
+        } else {
             self.unsent += 1;
         }
     }
@@ -461,20 +480,19 @@ impl PeerDriver {
         while let Some(datagram) = self.mdns_egress.pop_ready(now) {
             let sockets = self.mdns_sockets.get_or_insert_with(|| {
                 let mut readers = Vec::new();
-                let mut open = |bound: io::Result<std::net::UdpSocket>| {
-                    let socket = UdpSocket::from_std(bound.ok()?).ok()?;
+                let mut open = |config: runtime::MulticastConfig| {
+                    let socket = self.runtime.bind_udp_multicast(&config).ok()?;
                     let local = socket.local_addr().ok()?;
-                    let socket = Arc::new(socket);
-                    readers.push(tokio::spawn(read_loop(
+                    readers.push(self.runtime.spawn(Box::pin(read_loop(
                         socket.clone(),
                         local,
                         self.datagrams_tx.clone(),
                         MDNS_MAX_DATAGRAM,
-                    )));
+                    ))));
                     Some((socket, local))
                 };
-                let v4 = open(bind_mdns_v4());
-                let v6 = open(bind_mdns_v6());
+                let v4 = open(mdns_v4());
+                let v6 = open(mdns_v6());
                 MdnsSockets { v4, v6, readers }
             });
             let socket = match datagram.transport.peer_addr {
@@ -482,9 +500,12 @@ impl PeerDriver {
                 SocketAddr::V6(_) => &sockets.v6,
             };
             let sent = socket.as_ref().is_some_and(|(socket, _)| {
-                socket
-                    .try_send_to(&datagram.message, datagram.transport.peer_addr)
-                    .is_ok()
+                socket.try_send(&Transmit {
+                    destination: datagram.transport.peer_addr,
+                    contents: &datagram.message,
+                    traffic_class: 0,
+                    segment_size: None,
+                })
             });
             if sent {
                 self.mdns_sent += 1;
@@ -660,29 +681,24 @@ impl PeerDriver {
     fn gather_section(&mut self, mid: &str, index: Option<u16>) -> Result<()> {
         for ip in self.config.addresses.clone() {
             let socket = match self.config.udp_port_range {
-                Some(range) => sockets::bind_udp_in_range(ip, range),
-                None => std::net::UdpSocket::bind(SocketAddr::new(ip, 0)),
+                Some(range) => sockets::bind_runtime_udp_in_range(self.runtime.as_ref(), ip, range),
+                None => self.runtime.bind_udp(SocketAddr::new(ip, 0)),
             }
-            .and_then(|socket| {
-                socket.set_nonblocking(true)?;
-                UdpSocket::from_std(socket)
-            })
             .map_err(io_error)?;
             let local = socket.local_addr().map_err(io_error)?;
-            let socket = Arc::new(socket);
-            let reader = tokio::spawn(read_loop(
+            let reader = self.runtime.spawn(Box::pin(read_loop(
                 socket.clone(),
                 local,
                 self.datagrams_tx.clone(),
                 2048,
-            ));
+            )));
             self.sockets.push(HostSocket {
                 socket,
                 local,
                 mid: mid.to_owned(),
                 retired_for: None,
                 close_at: None,
-                traffic_class: Some(0),
+                counted_unmarked: false,
                 reader,
             });
             self.pc
@@ -707,7 +723,7 @@ impl PeerDriver {
     /// `transport` selected a pair on a new socket: its retired sockets are closed after
     /// [`PeerDriverConfig::retired_socket_linger`], for what the peer still sends to them.
     fn release_after_linger(&mut self, transport: RTCTransportId) {
-        let close_at = Instant::now() + self.config.retired_socket_linger;
+        let close_at = self.runtime.now() + self.config.retired_socket_linger;
         for host in self
             .sockets
             .iter_mut()
@@ -750,23 +766,30 @@ fn host_candidate(local: SocketAddr, mid: &str, index: Option<u16>) -> Result<RT
     Ok(init)
 }
 
+/// What woke a [`PeerDriver::step`].
+enum Woke {
+    Datagram(Received),
+    Stream(DriverInput),
+    Timer,
+}
+
 async fn read_loop(
-    socket: Arc<UdpSocket>,
+    socket: Arc<dyn AsyncUdpSocket>,
     local: SocketAddr,
-    tx: mpsc::UnboundedSender<(SocketAddr, SocketAddr, Vec<u8>)>,
+    tx: async_channel::Sender<Received>,
     max_datagram: usize,
 ) {
     let mut buf = vec![0u8; max_datagram];
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((n, peer)) => {
-                if tx.send((local, peer, buf[..n].to_vec())).is_err() {
+                if tx.try_send((local, peer, buf[..n].to_vec())).is_err() {
                     return;
                 }
             }
             // An ICMP error reported on the socket (Windows: a port unreachable) is not the
             // end of it.
-            Err(_) => tokio::task::yield_now().await,
+            Err(_) => runtime::yield_now().await,
         }
     }
 }

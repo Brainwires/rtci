@@ -4,7 +4,7 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "A tokio driver for the stream transports (ICE-TCP, TURN over TCP and TLS) of a sans-I/O WebRTC engine"
+description = "A socket driver for a sans-I/O WebRTC engine (ICE-TCP, TURN over TCP and TLS, whole peer connections) on an async runtime of your choice"
 license.workspace = true
 repository.workspace = true
 keywords = ["webrtc", "tokio", "tcp", "ice-tcp", "turn"]
@@ -21,31 +21,47 @@ all-features = true
 # families together, through the system resolver. hickory 0.26.2 or later: 0.25 carries
 # RUSTSEC-2026-0491 (memory amplification from a response's record counts, reachable from any
 # name server the client asks) and DNSSEC advisories (not compiled in: no `dnssec-*` feature).
-dns-records = ["dep:hickory-resolver"]
+# They are lookups of the tokio runtime (`TokioRuntime::resolve_family` / `resolve_records`), so
+# the feature turns `runtime-tokio` on.
+dns-records = ["runtime-tokio", "dep:hickory-resolver"]
 # `peer`: a whole `rtci` peer connection driven over sockets the driver owns, UDP included,
 # gathering again by itself when a transport needs new candidates (`OnLocalCandidatesNeeded`).
 # On by default. `rtci` dev-depends on this crate without a version and without this feature,
 # so the two are published in the order rtc, then rtci-stream-driver.
-default = ["peer"]
+default = ["peer", "runtime-tokio"]
 peer = ["dep:rtci", "dep:bytes"]
+# Built-in runtime types (`runtime::TokioRuntime`). Features only decide which types exist,
+# never what the driver uses: a driver runs on the `Arc<dyn Runtime>` it is given. With none
+# the crate builds without any async runtime, for an application's own (`custom-runtime`).
+runtime-tokio = ["dep:tokio"]
 
 [dependencies]
 shared = { workspace = true, default-features = false, features = ["ifaces"] }
-tokio.workspace = true
+tokio = { workspace = true, optional = true }
 socket2.workspace = true
+async-channel = "2.5"
 hickory-resolver = { version = "0.26.2", optional = true, default-features = false, features = ["tokio", "system-config"] }
 rtci = { version = "0.2.0-dev", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
 env_logger.workspace = true
+tokio.workspace = true
 
 # The `peer` module's tests need the feature (on by default; off in the workspace jobs that
-# build with `--no-default-features`).
+# build with `--no-default-features`), and these tests run on tokio.
 [[test]]
 name = "peer"
-required-features = ["peer"]
+required-features = ["peer", "runtime-tokio"]
 
 [[test]]
 name = "mdns"
-required-features = ["peer"]
+required-features = ["peer", "runtime-tokio"]
+
+[[test]]
+name = "loopback"
+required-features = ["runtime-tokio"]
+
+[[test]]
+name = "sockets"
+required-features = ["runtime-tokio"]

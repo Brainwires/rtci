@@ -1,6 +1,7 @@
 //! The driver's server-side socket choices on real sockets: port ranges, the local address
 //! list, and a passive ICE-TCP port shared by several engines.
 
+use rtci_stream_driver::runtime::{Runtime, TokioRuntime};
 use rtci_stream_driver::sockets::{
     AddressFilter, PortRange, accept_by_ufrag, bind_tcp_listener_in_range, bind_udp_in_range,
 };
@@ -69,7 +70,13 @@ fn sockets_bind_inside_their_port_range_until_it_is_full() {
 async fn listeners_bind_inside_the_range_the_driver_is_given() {
     let base = bindable_block(21, |port| std::net::TcpListener::bind(("127.0.0.1", port)));
     let range = PortRange::new(base, base + 20).unwrap();
-    let listener = bind_tcp_listener_in_range("127.0.0.1".parse().unwrap(), range, false).unwrap();
+    let listener = bind_tcp_listener_in_range(
+        &TokioRuntime::new(),
+        "127.0.0.1".parse().unwrap(),
+        range,
+        false,
+    )
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!((range.min..=range.max).contains(&port));
     drop(listener);
@@ -107,7 +114,10 @@ fn the_local_address_list_has_loopback_only_when_asked() {
 
 #[tokio::test]
 async fn a_shared_passive_port_hands_each_connection_to_the_engine_its_first_check_names() {
-    let shared = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let runtime = TokioRuntime::new();
+    let shared = runtime
+        .listen_tcp("127.0.0.1:0".parse().unwrap(), false)
+        .unwrap();
     let shared_addr = shared.local_addr().unwrap();
 
     // The engine's passive listener is answered with the shared address, and nothing binds.
@@ -149,7 +159,7 @@ async fn a_shared_passive_port_hands_each_connection_to_the_engine_its_first_che
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     });
-    let accepted = accept_by_ufrag(&shared, Duration::from_secs(5))
+    let accepted = accept_by_ufrag(&runtime, shared.as_ref(), Duration::from_secs(5))
         .await
         .unwrap();
     assert_eq!(accepted.ufrag, "ours");

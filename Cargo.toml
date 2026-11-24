@@ -55,7 +55,7 @@ turn = { version = "0.2.0-dev", path = "rtci-turn", package = "rtci-turn", defau
 signal = { path = "examples/signal", package = "rtci-signal" }
 # The reference driver depends on `rtci` (its `peer` module), so the root crate's dev-dependency
 # on it has no version (`cargo publish` drops it) and leaves that feature off.
-stream-driver = { path = "examples/stream-driver", package = "rtci-stream-driver", default-features = false }
+stream-driver = { path = "examples/stream-driver", package = "rtci-stream-driver", default-features = false, features = ["runtime-tokio"] }
 
 # common dependencies
 sansio = "1"

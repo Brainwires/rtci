@@ -11,12 +11,11 @@
 //! one message from one budget ([`process_mdns_rate_limit`]); one the budget refuses waits
 //! in its driver, in order, until the budget has room.
 
-use rtci::mdns::{MDNS_PORT, MdnsRateLimit, MulticastSocket};
+use crate::runtime::MulticastConfig;
+use rtci::mdns::{MDNS_MULTICAST_IPV4, MdnsRateLimit};
 use rtci::shared::TaggedBytesMut;
-use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::VecDeque;
-use std::io;
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::Ipv6Addr;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -86,34 +85,25 @@ impl MdnsEgress {
     }
 }
 
-/// The IPv4 mDNS socket: port 5353, joined to 224.0.0.251 (`rtci_mdns::MulticastSocket`).
-pub(crate) fn bind_mdns_v4() -> io::Result<std::net::UdpSocket> {
-    MulticastSocket::new().into_std()
+/// The IPv4 mDNS socket: port 5353, joined to 224.0.0.251 (as rtci-mdns' `MulticastSocket`).
+pub(crate) fn mdns_v4() -> MulticastConfig {
+    MulticastConfig::mdns(MDNS_MULTICAST_IPV4.into())
 }
 
 /// The IPv6 mDNS socket: `[::]:5353`, IPv6 only, joined to ff02::fb on the default interface,
-/// sending with hop limit 255 (RFC 6762 section 11). An error where the host has no IPv6 or
-/// cannot join the group.
-pub(crate) fn bind_mdns_v6() -> io::Result<std::net::UdpSocket> {
-    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_only_v6(true)?;
-    socket.set_reuse_address(true)?;
-    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-    socket.set_reuse_port(true)?;
-    socket.set_nonblocking(true)?;
-    socket.set_multicast_hops_v6(255)?;
-    socket.set_unicast_hops_v6(255)?;
-    socket.bind(&SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), MDNS_PORT).into())?;
-    socket.join_multicast_v6(&MDNS_MULTICAST_IPV6, 0)?;
-    Ok(socket.into())
+/// sending with hop limit 255 (RFC 6762 section 11). Binding fails where the host has no IPv6
+/// or cannot join the group.
+pub(crate) fn mdns_v6() -> MulticastConfig {
+    MulticastConfig::mdns(MDNS_MULTICAST_IPV6.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use rtci::mdns::MDNS_MULTICAST_IPV4;
+    use rtci::mdns::MDNS_PORT;
     use rtci::shared::{TransportContext, TransportProtocol};
+    use std::net::SocketAddr;
     use std::time::Duration;
 
     fn datagram(n: u8) -> TaggedBytesMut {
