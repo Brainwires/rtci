@@ -817,6 +817,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **media**: `SampleBuilder::with_max_gap_wait(Duration)`, an optional wall-clock bound on a
+  gap (off by default; behaviour unchanged without it). `max_late` bounds the wait for a missing
+  packet in packets, which is a time only at one bit rate: a receiver with `max_late` 256 froze
+  8.6 s at 100 kbit/s on a gap that never filled (`tests/capacity_cap_video_rtc2rtc.rs`). With
+  the bound, once the oldest missing packet has been missing that long (from the arrival of the
+  first packet after it), the builder gives the gap up as `max_late` does (the incomplete
+  sample and the missing packets dropped, counted in the next `Sample::prev_dropped_packets`,
+  building resumed at the next packet that starts a sample) and raises a key-frame request
+  (`take_key_frame_request() -> bool`; `skipped_gaps() -> u64` counts them). Checked on `push`
+  and `pop` with their `now`; `poll_timeout() -> Option<Instant>` names when to call `pop`
+  while a gap waits (sans-I/O, no clock read). `docs/receiver-gap-policy.md` updated
+  (`a_gap_that_never_fills_is_skipped_at_the_bound_with_a_key_frame_request`,
+  `a_gap_repaired_before_the_bound_changes_nothing`,
+  `without_the_bound_a_gap_is_held_until_max_late`,
+  `the_deadline_is_the_oldest_gap_plus_the_bound`).
+
 - **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
   (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
   set of local candidates, on transport addresses the previous DTLS association did not use
