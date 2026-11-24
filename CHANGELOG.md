@@ -1591,6 +1591,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **rtc**: the capacity-cap port's recovery is measured over a window and, for the paced
+  chain, against the estimate the cap left (`conf/gcc-7-recovery-mean`). A single reading 20 s
+  after the cap fell on the estimate's sawtooth: renaming the crates shortened the ICE
+  agent's STUN SOFTWARE text from 27 to 14 bytes, which moved the seeded run's packet sizes and
+  timing, the paced chain's target at the cap's end on seed 1 from 212 to 132 kbit/s, and its
+  reading 20 s later from 1137 to 632 kbit/s (under the 800 kbit/s bound). After the cap a
+  source that follows its target is not application limited, so no probe is due, and the
+  estimate climbs from where the cap left it at the 8 % a second of draft-ietf-rmcat-gcc-02
+  section 5.5. Every run now goes on to 25 s after the cap and records the target's lowest,
+  mean and highest from 15 to 25 s; the 800 kbit/s bounds of the chains without a pacer are
+  on that mean. `a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer`
+  asserts that the target never falls from 1 s after the cap on and that its mean from 15 to
+  25 s is at least nine tenths of the draft's climb from the target at the cap's end
+  (measured 0.99 to 2.81 times it, six seeds on three wall clocks, with either SOFTWARE text).
 - **rtc** (`conf/mt-10-gather-anew`): rtc-to-rtc tests driven by `OnLocalCandidatesNeeded`:
   `transport_close_rtc2rtc.rs::the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering`
   (stop all, then a new transceiver; the twin of the browser cell) and

@@ -193,6 +193,11 @@ impl Setup {
 }
 
 /// Three wall clocks a run is repeated on: the same second, a different phase within it.
+///
+/// A seeded run is reproducible for one wire image only: its figures follow from every
+/// packet's size, down to the ICE agent's SOFTWARE text in each STUN message (its length moved
+/// the paced chain's target at the cap's end from 212 to 132 kbit/s on one seed), so a bound
+/// on them is measured over seeds and wall clocks, never on one run's figure.
 const ANCHORS: [Duration; 3] = [
     Duration::new(1_800_000_000, 0),
     Duration::new(1_800_000_000, 333_333_333),
@@ -1387,6 +1392,12 @@ struct Outcome {
     /// a single reading is the phase of the tooth it falls on; the mean over ten seconds is
     /// the level.
     recovery_window: (u32, u32, u32),
+    /// The target the encoder followed when the cap went, and every fall of it from 1 s after
+    /// that to the end (when, from, to). The capped link's queue (300 ms) and the feedback on
+    /// it can still report congestion for some hundreds of milliseconds after the cap goes;
+    /// from 1 s on, the path is open and nothing should cut the estimate.
+    target_at_lift: u32,
+    recovery_falls: Vec<(Duration, u32, u32)>,
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
@@ -1496,6 +1507,13 @@ fn run(setup: &Setup) -> Result<Outcome> {
         (window.iter().map(|bps| u64::from(*bps)).sum::<u64>() / window.len() as u64) as u32,
         window.iter().copied().max().unwrap_or(0),
     );
+    let target_at_lift = target_at(&world.peers[0].targets, opened_at);
+    let recovery_falls = world.peers[0]
+        .targets
+        .windows(2)
+        .filter(|pair| pair[1].0 >= opened_at + Duration::from_secs(1) && pair[1].1 < pair[0].1)
+        .map(|pair| (pair[1].0 - opened_at, pair[0].1, pair[1].1))
+        .collect();
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
@@ -1559,6 +1577,8 @@ fn run(setup: &Setup) -> Result<Outcome> {
         estimate_at_lift,
         recovery,
         recovery_window,
+        target_at_lift,
+        recovery_falls,
         freeze,
         freeze_at,
         lag,
@@ -1892,7 +1912,7 @@ fn measure_the_capacity_cap() -> Result<()> {
                         }
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} window {}/{}/{} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {}",
                                 o.before / 1000,
                                 o.capped_at.as_secs_f64(),
                                 o.freeze.as_secs_f64(),
@@ -1911,10 +1931,13 @@ fn measure_the_capacity_cap() -> Result<()> {
                                 o.keyframe_requests.len(),
                                 o.under / 1000,
                                 o.estimate_at_lift / 1000,
+                                o.target_at_lift / 1000,
                                 o.recovery.map(|bps| bps / 1000),
                                 o.recovery_window.0 / 1000,
                                 o.recovery_window.1 / 1000,
                                 o.recovery_window.2 / 1000,
+                                draft_climb_mean(o.target_at_lift) / 1000,
+                                o.recovery_falls.len(),
                                 o.estimate_after / 1000,
                             ),
                             Err(error) => println!(
@@ -1929,6 +1952,19 @@ fn measure_the_capacity_cap() -> Result<()> {
     Ok(())
 }
 
+/// The mean, over the window of `Outcome::recovery_window` (15 to 25 s after the cap, every
+/// 100 ms), of an estimate that climbs from `from` bit/s at the multiplicative increase of
+/// draft-ietf-rmcat-gcc-02 section 5.5 ("During multiplicative increase, the estimate is
+/// increased by at most 8% per second"), up to `MAX_BPS`.
+fn draft_climb_mean(from: u32) -> u32 {
+    let samples: Vec<f64> = (150..=250)
+        .map(|tenths| {
+            (f64::from(from) * 1.08f64.powf(f64::from(tenths) / 10.0)).min(f64::from(MAX_BPS))
+        })
+        .collect();
+    (samples.iter().sum::<f64>() / samples.len() as f64) as u32
+}
+
 /// The same call through the engine's default interceptors (the pacer with its default
 /// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
 /// section 7 default), the video following the target the senders are given
@@ -1938,6 +1974,8 @@ fn measure_the_capacity_cap() -> Result<()> {
 /// until the queue has drained, and the video produces nothing meanwhile. So nothing is
 /// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
 /// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
+/// Once the cap goes, the target is never cut again and climbs at least about as fast as the
+/// draft's multiplicative increase from where the cap left it.
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
     let outcomes: Result<Vec<_>> = seed_range(2, 6)
@@ -2011,10 +2049,34 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
+        // The recovery, against the target the cap left: from 1 s after the cap went it never
+        // falls, and from 15 to 25 s after it its mean is at least nine tenths of the draft's
+        // multiplicative increase from the target at that instant ([`draft_climb_mean`]).
+        // Not a fixed figure: once the path is open, a source that follows its target is not
+        // application limited and no probe is due (`ProbeController`: the start, a further
+        // probe after a confirming result, a large drop within the last 2 s, a sender under
+        // 65 % of the target), so the estimate climbs from wherever the cap left it at the
+        // draft's 8 % a second. Where it left it is the phase of the sawtooth under the cap,
+        // and with that the seeded run's packet sizes and timing, down to the length of the
+        // ICE agent's SOFTWARE text in every STUN message: the same seed ended the cap at
+        // 212 or 132 kbit/s with that text 27 or 14 bytes long, and was 1150 or 641 kbit/s on
+        // average 15 to 25 s later. Measured (hosted runs 45370399055 and 45370404660, six
+        // seeds on three wall clocks, with each of the two texts): target at the cap's end
+        // 124 to 270 kbit/s, no fall from 1 s on, mean 641 to 2500 kbit/s; 0.99 to 1.21 times
+        // the draft's climb where no probe landed, 1.29 to 2.81 where one did (the drop rule
+        // firing as the cap went, or a sender held under its target).
         assert!(
-            outcome.recovery_window.1 >= 800_000,
-            "seed {seed}: {} bit/s on average 15 to 25 s after the cap: {outcome:?}",
-            outcome.recovery_window.1
+            outcome.recovery_falls.is_empty(),
+            "seed {seed}: the target fell after the cap went: {:?}: {outcome:?}",
+            outcome.recovery_falls
+        );
+        let climb = draft_climb_mean(outcome.target_at_lift);
+        assert!(
+            u64::from(outcome.recovery_window.1) * 10 >= u64::from(climb) * 9,
+            "seed {seed}: {} bit/s on average 15 to 25 s after the cap, under nine tenths of \
+             the draft's climb from {} bit/s ({climb}): {outcome:?}",
+            outcome.recovery_window.1,
+            outcome.target_at_lift
         );
     }
     Ok(())
