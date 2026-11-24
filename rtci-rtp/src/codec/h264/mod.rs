@@ -285,7 +285,9 @@ pub struct MtapUnit {
 /// The DON base is the DON of the unit that is first in decoding order, each unit's DOND its
 /// distance from that; the packet's timestamp is the earliest NALU-time, whose unit gets the
 /// timestamp offset zero, and each other unit's offset is its NALU-time less that (modulo
-/// 2^32). The units are written in the order given, which should be decoding order.
+/// 2^32). The units are written in decoding order (section 5.7.2: "The NAL units in the
+/// multi-time aggregation packet SHOULD be in decoding order"), ascending DOND, whatever
+/// order they are given in; units with the same DON keep their order.
 ///
 /// # Errors
 ///
@@ -306,6 +308,11 @@ pub fn mtap(kind: MtapKind, units: &[MtapUnit]) -> Result<(Bytes, u32)> {
             timestamp = unit.timestamp;
         }
     }
+
+    // Decoding order: ascending DON distance from the DON base (a stable sort).
+    let mut ordered: Vec<&MtapUnit> = units.iter().collect();
+    ordered.sort_by_key(|unit| don_diff(don_base, unit.don));
+    let units = ordered;
 
     let nalus: Vec<Bytes> = units.iter().map(|unit| unit.nalu.clone()).collect();
     let mut out = BytesMut::with_capacity(

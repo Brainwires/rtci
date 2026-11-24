@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
+  application; no default format is one) is offered and answered with
+  `deint-buf-cap=33554432`, the de-interleaving buffer the depacketizer holds
+  (`MAX_DEINTERLEAVING_BYTES`), unless the application gave its own value (RFC 6184 section
+  8.2.2). Default offers are unchanged.
+- **rtp**: `rtp::codec::h264::mtap` writes its units in decoding order (ascending DON from the
+  DON base), whatever order they are given in (RFC 6184 section 5.7.2). Conformance rows
+  RFC6184-5.7.2-3, 7.2.1-1, 7.2.1-2 and 8.2.2-9 are `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
