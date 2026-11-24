@@ -1144,9 +1144,11 @@ fn test_connections_given_one_rate_limit_share_it() {
 fn test_many_records_are_split_into_messages_of_one_datagram() {
     let base = Instant::now();
     let mut conn = Mdns::new(base, config());
+    // One address for every name: records are aggregated only when they leave from the same
+    // address (RFC 6762 section 14), so they share one source here and fill whole datagrams.
     for i in 0..MAX_LOCAL_NAMES {
         let name = format!("aaaaaaaa-0000-4000-8000-{i:012}.local");
-        assert!(conn.add_local_name(&name, ip(&format!("fe80::{i:x}"))));
+        assert!(conn.add_local_name(&name, ip("fe80::1")));
     }
     conn.handle_timeout(base).unwrap();
     let out = sent(&mut conn, base);

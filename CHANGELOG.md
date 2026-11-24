@@ -326,7 +326,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mdns.rs::drivers_on_loopback_resolve_each_other_on_the_loopback_interface`. The mock
   network gives each address its own ephemeral ports and has a default multicast interface
   (`MockNet::set_default_multicast_interface`). Engine behaviour change (rtci-mdns: the source
-  address of an IPv6 record's messages).
+  address of an IPv6 record's messages; IPv6 records of different addresses are no longer
+  aggregated into one message, as IPv4 records already were not).
 
 ### Changed
 
