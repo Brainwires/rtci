@@ -2355,7 +2355,8 @@ impl RtcpSessionInterceptor {
 
         if shape == Shape::Full {
             // RFC 8108 5.3.2: the other SSRCs, in the order their timers would expire, as
-            // long as their reports fit.
+            // long as their reports fit; RFC 8108 5.2: the senders first, the reports "most
+            // useful" to the peers when not every one fits.
             let mut others: Vec<usize> = (0..self.locals.len())
                 .filter(|&index| {
                     !included.contains(&index)
@@ -2363,7 +2364,12 @@ impl RtcpSessionInterceptor {
                         && self.locals[index].timing.is_some()
                 })
                 .collect();
-            others.sort_by_key(|&index| self.locals[index].timing.map(|timing| timing.tn));
+            others.sort_by_key(|&index| {
+                (
+                    !self.we_sent(index, now),
+                    self.locals[index].timing.map(|timing| timing.tn),
+                )
+            });
             // The SSRC that carries the blocks reports right behind the leader.
             if let Some(reporter) = reporter
                 && let Some(position) = others.iter().position(|&index| index == reporter)

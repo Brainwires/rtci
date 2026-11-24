@@ -171,6 +171,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `with_congestion_feedback_in_budget` (the `Performance` profile) the regular reports' budget
   still rests on their own size. Engine behaviour change (RTCP timing). Rows: RFC4585-3.5.4-2
   (`partial` -> `tested`).
+### Behaviour changes
+
+- **RFC 8108 section 5.2: senders report first when not every SSRC fits.** When an endpoint's
+  SSRCs cannot all report in one aggregated compound packet (the MTU), the RTCP session now
+  puts the sending SSRCs' reports in first ("those most useful to the peers"), then the others
+  by their timers; before, the order was the timers' alone. The SSRCs left out still report
+  when their own timers expire. Engine behaviour change (report content on the wire, only for
+  endpoints with more SSRCs than one packet holds). Rows: RFC8108-5.2-3 (`missing` ->
+  `tested`); RFC8108-5.2-1 (initial report at zero delay, already done by
+  `with_first_report_at_join`) marked `tested`.
 
 ## [0.1.0] - 2026-11-24
 
