@@ -1002,18 +1002,6 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.pacer_queue_overflow,
     },
     {
-        id: "cb.packet-size",
-        setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
-        clause: "RFC 8083 3, 4.3",
-        rfc: interceptor::CircuitBreakerPacketSize::SendingWindow => "SendingWindow",
-        chrome: interceptor::CircuitBreakerPacketSize::SendingWindow => "SendingWindow",
-        strict_rfc: interceptor::CircuitBreakerPacketSize::LastFrames => "LastFrames",
-        chrome_source: "libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow and the engine's value stands (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556). Performance: same as Rfc",
-        evidence: Source,
-        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.circuit_breaker_packet_size = v,
-        read: |o: &DefaultInterceptorOptions| o.circuit_breaker_packet_size,
-    },
-    {
         id: "nack.max-requests-per-packet",
         setting: "DefaultInterceptorOptions::nack_max_nacks_per_packet",
         clause: "RFC 4588 6.3, Appendix A",
@@ -1524,6 +1512,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_dtls_connection_id",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further",
+    },
+    NotGoverned {
+        setting: "DefaultInterceptorOptions::circuit_breaker_packet_size",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8083 circuit breaker's packet size s; libwebrtc has no RTP circuit breaker, so nothing of Chrome's to follow (searched @ a222406d: \"circuit\" appears only in modules/pacing/pacing_controller.cc's loop guard SetCircuitBreakerThreshold, lines 143-145, 477, 556)",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_new_association_on_previous_addresses",

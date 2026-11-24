@@ -157,6 +157,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
 
+### Changed
+
+- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
+  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
+  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
+  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
+  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
+  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
+  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
+
 ### Features
 
 - **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
@@ -187,6 +197,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
   6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
 
+- **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
+  `RTCPeerConnectionBuilder::with_rtcp_cname(existing.rtcp_cname())`: "if explicitly
+  requested at creation, an RTCPeerConnection MAY use the same CNAME as an existing
+  RTCPeerConnection", so a receiver can synchronise the streams of both. Without it each
+  connection generates its own (unchanged). A CNAME outside 1 to 255 octets fails `build`
+  with the new `Error::ErrRtcpCnameLength`. Audit: RFC8834-4.9-5 `tested`; with new tests
+  RFC8835-4.2-8 (bundling by media type), RFC8837-5-6 (AF3x for non-interactive video) and
+  the stale RFC8834-8-2 (RTCP XR generation) `tested`.
+
 ### Added
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
@@ -203,33 +222,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt is delivered with the media stream's transport context. **Breaking**: `StreamInfo`
   has a new public field (`..Default::default()` in a struct literal covers it).
 
-### Fixed
-
-- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
-  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
-  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
-  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
-  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
-  no state here was not reported. It is now answered as a reset performed at once is. (2)
-  Whether this side has reset its direction of a stream (so that the peer's reset is not
-  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
-  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
-  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
-  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
-  the peer resets it. Engine behaviour change. Tests:
-  `rtci-sctp/src/association/reset_answer_test.rs`.
-
-- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
-  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
-  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
-  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
-  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
-  original stream has arrived). The likely source of the Firefox interop cell's
-  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
-  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
-  delivered from such a packet).
-### Added
-
 - **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
   (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
   Retransmit found in messages whose retransmission budget was spent and abandoned instead
@@ -245,7 +237,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
   90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
   behaviour change: no (counters only).
-### Added
 
 - **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
   Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
@@ -277,35 +268,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
   test.
 
-### Changed
+### Fixed
 
-- **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
-  with their tests, each checked by mutation: the ABORT with Unresolvable Address (3.3.2), the
-  negotiated stream count (5.1.1), the stale cookie of a restart or collision (5.2.4, SHOULD),
-  route changes (7.2.5.2), the protocol parameters and failure threshold as settings (11.1),
-  and the COOKIE ACK bundled with the SACK for the DATA that came with the cookie (3.3.12,
-  5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
-  `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
-### Behaviour changes
+- **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
+  arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
+  performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
+  TSN; it was then never answered with this side's own reset (RFC 8831 6.7), so the peer's
+  channel stayed "closing" and the stream id stayed taken there, and the reset of a stream with
+  no state here was not reported. It is now answered as a reset performed at once is. (2)
+  Whether this side has reset its direction of a stream (so that the peer's reset is not
+  answered with a second one) was the Readable bit of the stream's `RecvSendState`, which the
+  peer's Incoming SSN Reset Request cleared: the stream stopped being readable although the
+  peer had not reset its direction (RFC 6525 5.2.3), and its unread messages were dropped when
+  the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
+  the peer resets it. Engine behaviour change. Tests:
+  `rtci-sctp/src/association/reset_answer_test.rs`.
 
-- **`cb.packet-size`, a governed behaviour: `BehaviourProfile::StrictRfc` takes RFC 8083
-  section 3's packet size for the RTP circuit breaker** (`CircuitBreakerPacketSize::LastFrames`,
-  the mean over the last 4 * G frames). `Rfc` (the default), `Chrome` and `Performance` keep
-  the sending window's mean (libwebrtc has no RTP circuit breaker). Measured
-  (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
-  and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
-  section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
-  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
-### Features
-
-- **A connection can take an existing connection's RTCP CNAME (RFC 8834 section 4.9 MAY).**
-  `RTCPeerConnectionBuilder::with_rtcp_cname(existing.rtcp_cname())`: "if explicitly
-  requested at creation, an RTCPeerConnection MAY use the same CNAME as an existing
-  RTCPeerConnection", so a receiver can synchronise the streams of both. Without it each
-  connection generates its own (unchanged). A CNAME outside 1 to 255 octets fails `build`
-  with the new `Error::ErrRtcpCnameLength`. Audit: RFC8834-4.9-5 `tested`; with new tests
-  RFC8835-4.2-8 (bundling by media type), RFC8837-5-6 (AF3x for non-interactive video) and
-  the stale RFC8834-8-2 (RTCP XR generation) `tested`.
+- A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
+  SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
+  `discarded_rtp_packets` or reported by `OnUnassociatedRtpDiscarded`: its payload type names
+  a repair format of the section, so it is not unassociated media (RFC 8830 section 3.1), and
+  there is nothing to repair yet (RFC 4588 section 5.3 associates the RTX SSRC once the
+  original stream has arrived). The likely source of the Firefox interop cell's
+  `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
+  unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
+  delivered from such a packet).
 
 ## [0.1.0] - 2026-11-24
 

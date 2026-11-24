@@ -22,9 +22,6 @@ thread_local! {
     static WITHOUT_PACER: Cell<bool> = const { Cell::new(false) };
     /// Whether the next `World`'s pacer drains above the target (`PacerQueueOverflow::Drain`).
     static DRAIN: Cell<bool> = const { Cell::new(false) };
-    /// Whether the next `World`'s breaker takes RFC 8083 section 3's packet size, the mean of
-    /// the last 4 * G frames' packets (`CircuitBreakerPacketSize::LastFrames`).
-    static LAST_FRAMES: Cell<bool> = const { Cell::new(false) };
     /// When set, the next `World`'s sender sends from fixed SSRCs and each peer records what
     /// its interceptor chain hands to SRTP (the first peer's into the first).
     static RECORD: RefCell<Option<[Wire; 2]>> = const { RefCell::new(None) };
@@ -288,9 +285,7 @@ impl Peer {
         if DRAIN.with(|d| d.get()) {
             options.pacer_queue_overflow = rtci::interceptor::PacerQueueOverflow::Drain;
         }
-        if LAST_FRAMES.with(|l| l.get())
-            || std::env::var("RTC_CB_PACKET_SIZE").as_deref() == Ok("last-frames")
-        {
+        if std::env::var("RTC_CB_PACKET_SIZE").as_deref() == Ok("last-frames") {
             options.circuit_breaker_packet_size = CircuitBreakerPacketSize::LastFrames;
         }
         let (mut registry, handles) = register_default_interceptors_with_options(
@@ -831,61 +826,6 @@ fn a_flow_far_above_the_tcp_rate_over_a_lossy_link_is_ceased() -> Result<()> {
         "{congested:?}"
     );
     assert!(light.ceased.is_empty(), "{light:?}");
-    Ok(())
-}
-
-/// RFC 8083 section 3: "If the RTP packets being sent vary in size, then the average size
-/// over the packet comprising the last 4 * G frames MUST be used" as s, the packet size of
-/// section 4.3's TCP throughput. The breaker's default takes s over the reporting intervals
-/// the sending rate is measured over instead, so that both describe the same packets. A
-/// talking call (400 ms of 750-byte frames, 600 ms of 11-byte silence frames) over a link that
-/// holds every datagram back by up to 40 or 100 ms and loses 5 % of them: with section 3's s
-/// the last four frames are often silence, ten times TCP for 23-byte packets falls under the
-/// talkspurts' rate, and the breaker ceases the call; the default keeps it running (the
-/// congestion controller's pacer holds the flow to its target, nowhere near ten times TCP).
-/// Measured (the sweep, speech, 60 s each, hosted run 45409132256): section 3's s ceased the
-/// call in 14 of 24 cells (jitter 0 / 10 / 40 / 100 ms x loss 0 / 1 / 2 / 5 / 20 / 30 %): at 1 %
-/// with 100 ms after 32.7 s, at 2 % with 40 and 100 ms after 10.7 and 9.8 s, at 5 % after 5.0
-/// and 3.8 s, at 20 and 30 % at every jitter after 1.5 to 13.5 s; the default in none.
-#[test]
-fn the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps() -> Result<()> {
-    let _ = env_logger::builder().is_test(true).try_init();
-    for jitter in [40, 100] {
-        let loss = 0.05;
-        let default = run(
-            RtpCodecKind::Audio,
-            Shape::Talkspurts,
-            Link::jittered(jitter, loss),
-            15,
-            11,
-        )?;
-        LAST_FRAMES.with(|l| l.set(true));
-        let last_frames = run(
-            RtpCodecKind::Audio,
-            Shape::Talkspurts,
-            Link::jittered(jitter, loss),
-            15,
-            11,
-        );
-        LAST_FRAMES.with(|l| l.set(false));
-        let last_frames = last_frames?;
-        println!(
-            "{jitter} ms, {:.0} % loss: default ceased {:?} at {:?}; last 4 * G frames ceased {:?} at {:?}",
-            loss * 100.0,
-            default.ceased,
-            default.ceased_at,
-            last_frames.ceased,
-            last_frames.ceased_at
-        );
-        assert!(default.ceased.is_empty(), "{default:?}");
-        assert!(
-            last_frames
-                .ceased
-                .iter()
-                .any(|(_, reason)| reason == "Congestion"),
-            "{last_frames:?}"
-        );
-    }
     Ok(())
 }
 
