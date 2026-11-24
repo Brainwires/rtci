@@ -749,7 +749,7 @@ fn reports_on_lossy_sources_go_first_when_not_all_fit() {
 /// RFC 8108 5.1 to the letter, as an option: every local SSRC reports on every remote one.
 #[test]
 fn every_local_ssrc_can_report_on_every_remote_one() {
-    let mut chain = chain(builder().with_report_from_every_ssrc(true));
+    let mut chain = chain(builder());
     let base = Instant::now();
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
@@ -767,8 +767,9 @@ fn every_local_ssrc_can_report_on_every_remote_one() {
             .all(|rr| rr.reports.len() == 1 && rr.reports[0].ssrc == 200)
     );
 
-    // By default the blocks are carried once, by the first media SSRC.
-    let mut chain = self::chain(builder());
+    // With `with_report_from_every_ssrc(false)` (the `Chrome` profile) the blocks are
+    // carried once, by the first media SSRC.
+    let mut chain = self::chain(builder().with_report_from_every_ssrc(false));
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
     chain.bind_remote_stream(&video(200));
@@ -783,6 +784,85 @@ fn every_local_ssrc_can_report_on_every_remote_one() {
         .find(|rr| !rr.reports.is_empty())
         .unwrap();
     assert_eq!(10, carrier.ssrc);
+}
+
+/// RFC 8108 5.1: an endpoint with several SSRCs treats each as a participant, and "each SSRC
+/// will send RTCP reports for all other SSRCs, including those co-located at the same
+/// endpoint". Two local senders each report on the remote stream and on each other: the
+/// block about the co-located SSRC shows nothing lost, no jitter, the extended highest
+/// sequence number it sent (across a wrap), and its last sender report with the time since.
+#[test]
+fn each_ssrc_reports_on_the_remote_and_the_colocated_ssrcs() {
+    let mut chain = chain(builder().with_bandwidth(busy_session()));
+    let base = Instant::now();
+    chain.bind_local_stream(&audio(10));
+    chain.bind_local_stream(&video(20));
+    chain.bind_remote_stream(&video(200));
+    control(&mut chain, base, RtcpSessionControl::Start);
+    let mut sent = vec![];
+    for step in 0..150u32 {
+        let now = base + secs(0.02) * step;
+        // 20's sequence numbers wrap: 65530 onwards.
+        let seq_20 = 65_530u16.wrapping_add(step as u16);
+        chain
+            .handle_write(rtp(now, 10, step as u16, step * 960))
+            .unwrap();
+        chain
+            .handle_write(rtp(now, 20, seq_20, step * 1800))
+            .unwrap();
+        chain
+            .handle_read(rtp(now, 200, step as u16, step * 1800))
+            .unwrap();
+        read(&mut chain);
+        sent.extend(run(&mut chain, now));
+    }
+    let mut previous: std::collections::HashMap<u32, (u32, Instant)> = Default::default();
+    let mut checked = 0;
+    for sent in &sent {
+        let reports = sent.get::<SenderReport>();
+        for sr in &reports {
+            let mut about: Vec<u32> = sr.reports.iter().map(|block| block.ssrc).collect();
+            about.sort_unstable();
+            let other = if sr.ssrc == 10 { 20 } else { 10 };
+            assert_eq!(
+                {
+                    let mut want = vec![200, other];
+                    want.sort_unstable();
+                    want
+                },
+                about,
+                "SR of {} at {:?}",
+                sr.ssrc,
+                sent.at - base
+            );
+            let block = sr.reports.iter().find(|b| b.ssrc == other).unwrap();
+            assert_eq!(
+                (0, 0, 0),
+                (block.fraction_lost, block.total_lost, block.jitter)
+            );
+            // The packets of the step whose time the report is at or before have been written.
+            let step = ((sent.at - base).as_secs_f64() / 0.02 - 1e-9).ceil() as u32;
+            let highest = if other == 10 { step } else { 65_530 + step };
+            assert_eq!(highest, block.last_sequence_number, "{other}");
+            if let Some(&(lsr, at)) = previous.get(&other) {
+                assert_eq!(lsr, block.last_sender_report);
+                let delay = (sent.at - at).as_secs_f64() * 65536.0;
+                assert!(
+                    (f64::from(block.delay) - delay).abs() <= 1.0,
+                    "{} {delay}",
+                    block.delay
+                );
+                checked += 1;
+            }
+        }
+        for sr in &reports {
+            previous.insert(sr.ssrc, ((sr.ntp_time >> 16) as u32, sent.at));
+        }
+    }
+    assert!(
+        checked >= 2,
+        "{checked} blocks echoing an earlier sender report"
+    );
 }
 
 /// RFC 3611 4.4 and 4.5: the receiver reference time rides the regular report when the stream

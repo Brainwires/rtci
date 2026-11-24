@@ -333,7 +333,7 @@ impl Default for RtcpSessionBuilder {
             mtu: RTCP_SESSION_DEFAULT_MTU,
             cname: None,
             point_to_point: None,
-            report_from_every_ssrc: false,
+            report_from_every_ssrc: true,
             immediate_congestion_feedback: true,
             congestion_feedback_in_budget: false,
             minimum_session_bandwidth: RTCP_SESSION_MIN_BANDWIDTH,
@@ -420,9 +420,12 @@ impl RtcpSessionBuilder {
         self
     }
 
-    /// RFC 8108 5.1 to the letter: every local SSRC carries a report block for every remote
-    /// SSRC. Default: off, the blocks are carried once, by the first local media SSRC (what
-    /// browsers do, and what RFC 8861 reporting groups exist to allow).
+    /// RFC 8108 5.1: "each SSRC will send RTCP reports for all other SSRCs, including those
+    /// co-located at the same endpoint": every local SSRC carries a report block for every
+    /// remote SSRC and for each of the endpoint's other SSRCs that has sent. The default
+    /// (`true`). `false` carries the blocks once, by the first local media SSRC, and none
+    /// about the co-located SSRCs: what libwebrtc does (the `Chrome` behaviour profile), and
+    /// what RFC 8861 reporting groups allow where they are signalled.
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
@@ -2060,6 +2063,36 @@ impl RtcpSessionInterceptor {
             .collect()
     }
 
+    /// RFC 8108 5.1: the report blocks about this endpoint's own SSRCs that have sent, for
+    /// the other local SSRCs to carry ("each SSRC will send RTCP reports for all other SSRCs,
+    /// including those co-located at the same endpoint"). What a co-located receiver measures
+    /// over a path with no loss and no delay: nothing lost, no jitter, the highest sequence
+    /// number sent, and the last sender report of the source with the time since it.
+    fn colocated_blocks(&self, now: Instant) -> Vec<ReceptionReport> {
+        self.locals
+            .iter()
+            .filter(|local| local.participates())
+            .filter_map(|local| {
+                let last_sequence_number = local.stream.extended_highest_sequence()?;
+                let (last_sender_report, delay) = local
+                    .sent_reports
+                    .back()
+                    .map(|&(lsr, at)| {
+                        let delay = now.saturating_duration_since(at).as_secs_f64() * 65536.0;
+                        (lsr, delay.min(f64::from(u32::MAX)) as u32)
+                    })
+                    .unwrap_or((0, 0));
+                Some(ReceptionReport {
+                    ssrc: local.ssrc,
+                    last_sequence_number,
+                    last_sender_report,
+                    delay,
+                    ..Default::default()
+                })
+            })
+            .collect()
+    }
+
     /// RFC 3611 section 5.1: the maximum DLRR size a stream's `rcvr-rtt=<mode>:<max>` names
     /// (an `rrtr` feedback whose parameter is the `xr-format` as signalled).
     fn record_dlrr_limit(&mut self, info: &StreamInfo) {
@@ -2301,22 +2334,35 @@ impl RtcpSessionInterceptor {
         let every = self.report_from_every_ssrc;
         let carries_blocks =
             move |index: usize| every || Some(index) == reporter || reporter.is_none();
-        let first_blocks = if carries_blocks(first) {
-            blocks.clone()
+        // RFC 8108 5.1: with every SSRC reporting, each reports on the co-located SSRCs too.
+        let colocated = if every {
+            self.colocated_blocks(now)
         } else {
             vec![]
         };
+        let blocks_of = |index: usize, ssrc: u32| -> Vec<ReceptionReport> {
+            if !carries_blocks(index) {
+                return vec![];
+            }
+            let mut own = blocks.clone();
+            let room = MAX_REPORT_BLOCKS.saturating_sub(own.len());
+            own.extend(
+                colocated
+                    .iter()
+                    .filter(|block| block.ssrc != ssrc)
+                    .take(room)
+                    .cloned(),
+            );
+            own
+        };
+        let first_blocks = blocks_of(first, self.locals[first].ssrc);
         let report = self.report(first, now, first_blocks);
         budget = budget.saturating_sub(report.marshal_size() + 4 + chunk);
         reports.push(report);
         // The other clock rates' reports (and the SSRC whose timer this is) right behind the
         // leader, whatever the shape.
         for &index in &switched {
-            let own_blocks = if carries_blocks(index) {
-                blocks.clone()
-            } else {
-                vec![]
-            };
+            let own_blocks = blocks_of(index, self.locals[index].ssrc);
             let report = self.report(index, now, own_blocks);
             budget = budget.saturating_sub(report.marshal_size() + chunk);
             reports.push(report);
@@ -2342,11 +2388,7 @@ impl RtcpSessionInterceptor {
                 others.insert(0, reporter);
             }
             for index in others {
-                let own_blocks = if carries_blocks(index) {
-                    blocks.clone()
-                } else {
-                    vec![]
-                };
+                let own_blocks = blocks_of(index, self.locals[index].ssrc);
                 let size = 28 + block * own_blocks.len() + chunk;
                 if size > budget && Some(index) != reporter {
                     // It keeps its own timer and reports when that expires.
