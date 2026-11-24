@@ -38,7 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
   packets that it deems important and ignore NACK messages for other packets"; RFC 8834
   section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
-  NACK": the sender's choice, bounded. RTX_1R_MEASURED Not offered: libwebrtc's
+  NACK": the sender's choice, bounded. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (cap after 20 s, six seeds on three wall clocks, hosted run 45408404348; 0.1.0: run
+  45407054812): without a pacer the oldest picture 2.90 to 3.15 s (4.35 to 4.51), 57 to 64
+  retransmissions (89 to 97), longest freeze 1.28 to 1.29 s (1.28 to 1.32); the default chain
+  4.14 to 7.13 s (5.56 to 10.23), 59 to 80 (90 to 104), 0.75 to 1.13 s (0.97 to 1.91), and the
+  recovery's mean 15 to 25 s after the cap 898 to 2500 kbit/s (646 to 2500). After a 4 s
+  outage and an ICE restart (six seeds) the chain without a pacer is frozen 0.33 to 0.92 s
+  from one second after the switch (0.70 to 0.99), the default chain still shows no usable
+  frame to the end of the run (a known limit of 0.1.0). The tests' bounds on the picture's
+  age and the retransmissions are tightened to these figures (3.6 s and 74 without a pacer,
+  8.2 s and 92 with it). Not offered: libwebrtc's
   form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
   (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
   every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
