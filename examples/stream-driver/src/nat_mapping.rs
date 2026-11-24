@@ -1,7 +1,7 @@
 //! NAT-assisted candidates (RFC 6544 section 5.3, RFC 8445 section 5.1.1.2): an opt-in client of
 //! the Port Control Protocol (PCP, RFC 6887) with a fallback to NAT-PMP (RFC 6886), asking the
 //! gateway for a port mapping. Nothing here runs unless the application calls it, and it
-//! adds no dependency: one UDP socket on tokio.
+//! adds no dependency: one UDP socket of the driver's [`Runtime`].
 //!
 //! The engine needs nothing new: the mapped address is a candidate the application adds
 //! itself, a server-reflexive one whose related address is the base (RFC 6544 section 5.3
@@ -20,7 +20,8 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
-use tokio::net::UdpSocket;
+
+use crate::runtime::{AsyncUdpSocket, Runtime};
 
 /// The port PCP and NAT-PMP servers listen on (RFC 6887 section 19.1, RFC 6886 section 3).
 pub const SERVER_PORT: u16 = 5351;
@@ -253,7 +254,8 @@ fn answers_nat_pmp(data: &[u8]) -> bool {
 /// Sends `request` to `to`, retransmitted from `initial` doubling, `attempts` times, and
 /// returns the first answer `accept` takes.
 async fn exchange<T>(
-    socket: &UdpSocket,
+    runtime: &dyn Runtime,
+    socket: &dyn AsyncUdpSocket,
     to: SocketAddr,
     request: &[u8],
     initial: Duration,
@@ -264,9 +266,9 @@ async fn exchange<T>(
     let mut buf = [0u8; 1100];
     for _ in 0..attempts {
         socket.send_to(request, to).await?;
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = runtime.now() + wait;
         loop {
-            match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
+            match crate::runtime::timeout_at(runtime, deadline, socket.recv_from(&mut buf)).await {
                 Err(_) => break,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => break,
                 Ok(Err(e)) => return Err(e),
@@ -288,20 +290,31 @@ async fn exchange<T>(
 /// interface the gateway is reached from): PCP first, NAT-PMP when the gateway does not speak
 /// PCP. `Ok(None)` when no gateway answered; an error when it refused.
 pub async fn map_port(
+    runtime: &dyn Runtime,
     gateway: IpAddr,
     local_ip: IpAddr,
     protocol: Protocol,
     internal_port: u16,
     config: &MappingConfig,
 ) -> io::Result<Option<Mapping>> {
-    let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
+    let socket = runtime.bind_udp(SocketAddr::new(local_ip, 0))?;
     let server = SocketAddr::new(gateway, SERVER_PORT);
-    map_port_at(&socket, server, local_ip, protocol, internal_port, config).await
+    map_port_at(
+        runtime,
+        socket.as_ref(),
+        server,
+        local_ip,
+        protocol,
+        internal_port,
+        config,
+    )
+    .await
 }
 
 /// [`map_port`] from `socket` to the server at `server`.
 async fn map_port_at(
-    socket: &UdpSocket,
+    runtime: &dyn Runtime,
+    socket: &dyn AsyncUdpSocket,
     server: SocketAddr,
     local_ip: IpAddr,
     protocol: Protocol,
@@ -314,6 +327,7 @@ async fn map_port_at(
         let request = pcp_map_request(local_ip, nonce, protocol, internal_port, config);
         let mut nat_pmp = false;
         let answer = exchange(
+            runtime,
             socket,
             server,
             &request,
@@ -344,6 +358,7 @@ async fn map_port_at(
     }
     let attempts = config.attempts.min(9);
     let address = exchange(
+        runtime,
         socket,
         server,
         &nat_pmp_address_request(),
@@ -361,6 +376,7 @@ async fn map_port_at(
     };
     let opcode = protocol.nat_pmp_opcode();
     let mapped = exchange(
+        runtime,
         socket,
         server,
         &nat_pmp_map_request(protocol, internal_port, config),
@@ -595,9 +611,10 @@ mod tests {
     /// RFC 6887 section 9 and RFC 6886: a gateway that answers a PCP request with a NAT-PMP
     /// response (it speaks NAT-PMP only) is asked with NAT-PMP: the external address, then the
     /// mapping. A gateway on loopback, scripted.
+    #[cfg(feature = "runtime-tokio")]
     #[tokio::test]
     async fn a_nat_pmp_gateway_is_asked_again_with_nat_pmp() -> io::Result<()> {
-        let gateway = UdpSocket::bind("127.0.0.1:0").await?;
+        let gateway = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
         let at = gateway.local_addr()?;
         let task = tokio::spawn(async move {
             let mut buf = [0u8; 100];
@@ -619,14 +636,16 @@ mod tests {
         });
         // The test's gateway listens on an ephemeral port: ask through `exchange` the way
         // `map_port` does, against it.
-        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let runtime = crate::runtime::TokioRuntime::new();
+        let socket = runtime.bind_udp("127.0.0.1:0".parse().unwrap())?;
         let config = MappingConfig {
             pcp_initial: Duration::from_millis(50),
             nat_pmp_initial: Duration::from_millis(50),
             ..Default::default()
         };
         let mapping = map_port_at(
-            &socket,
+            &runtime,
+            socket.as_ref(),
             at,
             "127.0.0.1".parse().unwrap(),
             Protocol::Udp,
@@ -652,9 +671,10 @@ mod tests {
 
     /// RFC 6887 section 8.1.1: an unanswered request is sent again; a PCP gateway's answer to
     /// the retransmission is taken.
+    #[cfg(feature = "runtime-tokio")]
     #[tokio::test]
     async fn an_unanswered_pcp_request_is_retransmitted() -> io::Result<()> {
-        let gateway = UdpSocket::bind("127.0.0.1:0").await?;
+        let gateway = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
         let at = gateway.local_addr()?;
         let task = tokio::spawn(async move {
             let mut buf = [0u8; 100];
@@ -666,13 +686,15 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let runtime = crate::runtime::TokioRuntime::new();
+        let socket = runtime.bind_udp("127.0.0.1:0".parse().unwrap())?;
         let config = MappingConfig {
             pcp_initial: Duration::from_millis(50),
             ..Default::default()
         };
         let mapping = map_port_at(
-            &socket,
+            &runtime,
+            socket.as_ref(),
             at,
             "127.0.0.1".parse().unwrap(),
             Protocol::Tcp,

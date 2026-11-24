@@ -956,6 +956,9 @@ pub struct RTCPeerConnection {
     /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
     /// congestion control; `priority.rs`).
     pub(crate) last_data_dscp: Option<u8>,
+    /// The marked media flows watched for blocking, and those turned back to Default
+    /// Forwarding (RFC 8835 section 4.2; `priority.rs`).
+    pub(crate) dscp_fallback: priority::DscpFallback,
     /// The engine's stream transports: its ICE-TCP candidates and their connections.
     pub(crate) streams: streams::EngineStreams,
 }

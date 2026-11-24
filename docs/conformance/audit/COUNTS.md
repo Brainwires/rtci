@@ -13,11 +13,11 @@ API is the default and tested too (`RULES.md`).
 
 | Level | tested | setting | conflict | untested | partial | missing | violated | n/a | rows |
 |---|---|---|---|---|---|---|---|---|---|
-| MUST | 5043 | 27 | 7 | 1 | 3 | 3 | 0 | 666 | 5750 |
+| MUST | 5044 | 27 | 7 | 1 | 2 | 3 | 0 | 666 | 5750 |
 | SHOULD | 904 | 0 | 2 | 5 | 49 | 24 | 0 | 327 | 1311 |
-| MAY | 495 | 0 | 0 | 12 | 22 | 74 | 0 | 177 | 780 |
+| MAY | 496 | 0 | 0 | 12 | 22 | 73 | 0 | 177 | 780 |
 | PROC | 72 | 0 | 0 | 1 | 3 | 1 | 0 | 1 | 78 |
-| all | 6514 | 27 | 9 | 19 | 77 | 102 | 0 | 1171 | 7919 |
+| all | 6516 | 27 | 9 | 19 | 76 | 101 | 0 | 1171 | 7919 |
 
 ## RFC behaviour tested
 
@@ -26,9 +26,9 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 
 | Level | rows that apply | RFC behaviour tested | % | tested as the default | % |
 |---|---|---|---|---|---|
-| MUST | 5084 | 5077 | 99.9 | 5043 | 99.2 |
+| MUST | 5084 | 5078 | 99.9 | 5044 | 99.2 |
 | SHOULD | 984 | 906 | 92.1 | 904 | 91.9 |
-| MAY | 603 | 495 | 82.1 | 495 | 82.1 |
+| MAY | 603 | 496 | 82.3 | 496 | 82.3 |
 | PROC | 77 | 72 | 93.5 | 72 | 93.5 |
 
 ## Per file
@@ -44,7 +44,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `draft-ietf-avtcore-rtp-sframe.md` | MUST | 30 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 30 |
 | `draft-ietf-avtcore-rtp-sframe.md` | SHOULD | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 4 |
 | `draft-ietf-avtcore-rtp-sframe.md` | MAY | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
-| `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 11 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 |
+| `draft-ietf-mmusic-mdns-ice-candidates.md` | MUST | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 12 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | SHOULD | 9 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 15 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | MAY | 2 | 0 | 0 | 0 | 0 | 2 | 0 | 1 | 5 |
 | `draft-ietf-mmusic-mdns-ice-candidates.md` | PROC | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
@@ -268,7 +268,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8834.md` | MAY | 12 | 0 | 0 | 0 | 0 | 4 | 0 | 0 | 16 |
 | `rfc8835.md` | MUST | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 25 |
 | `rfc8835.md` | SHOULD | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 6 |
-| `rfc8835.md` | MAY | 2 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 5 |
+| `rfc8835.md` | MAY | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 5 |
 | `rfc8836.md` | MUST | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 |
 | `rfc8836.md` | SHOULD | 16 | 0 | 0 | 3 | 2 | 3 | 0 | 0 | 24 |
 | `rfc8837.md` | MUST | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 4 |

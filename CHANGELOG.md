@@ -44,6 +44,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **statistics** (vp-8r, `conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
   fields (`jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay`,
   `jitter_buffer_emitted_count`). A struct literal adds `..Default::default()`.
+- **stream-driver**: `PeerDriverConfig` has a new public field `mdns_rate_limit` (`None`: the process's budget). Migration: a configuration written as a struct literal adds `mdns_rate_limit: None`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (runtime-1): **the driver runs on an injected async runtime** (`runtime::Runtime`,
+  an object-safe trait used as `Arc<dyn Runtime>`: spawn, the clock and timers, UDP sockets
+  multicast included, TCP listen / connect, name resolution, `block_on`). It is given per driver
+  (`StreamDriver::with_runtime`, `PeerDriver::with_runtime`); there is no global or default
+  runtime. Built-in runtime types are features: `runtime-tokio` (default) gives `TokioRuntime`.
+  Changes for users:
+  - `StreamDriver::new`, `StreamDriver::default` and `PeerDriver::new` need `runtime-tokio`
+    (on by default) and are otherwise unchanged. Migration: none with default features; with
+    `default-features = false` add `features = ["runtime-tokio"]` or call `with_runtime`.
+  - `sockets::bind_tcp_listener_in_range(ip, range, reuse)` takes the runtime first and returns
+    `Arc<dyn runtime::AsyncTcpListener>`; `sockets::accept_by_ufrag(&listener, timeout)` is
+    `accept_by_ufrag(runtime, listener, timeout)` over a `dyn AsyncTcpListener`;
+    `SharedAccept::stream` is an `Arc<dyn runtime::AsyncTcpStream>`;
+    `nat_mapping::map_port` takes the runtime first. Migration: pass `&TokioRuntime::new()` and
+    make listeners with `runtime.listen_tcp(addr, false)`.
+  - `dns-records` turns `runtime-tokio` on: the per-family and SRV / NAPTR lookups are
+    `TokioRuntime`'s (`Runtime::resolve_family`, `Runtime::resolve_records`; another runtime
+    answers the default: both families together, no records).
+  - The datagram marking of ccrows-7 is the socket's (`runtime::Transmit::traffic_class`,
+    `AsyncUdpSocket::unmarked`, `runtime::TrafficClassMarker`); `PeerDriver`'s counters are
+    unchanged.
+  - (runtime-2) With `default-features = false` the crate has no async runtime in its normal
+    dependency tree (no tokio, mio, smol, async-io, hickory): CI checks it
+    (`tests/dependency_tree.rs`, the `cargo.yml` step "Stream driver without a built-in
+    runtime").
+  - (runtime-3) `runtime-smol` gives `SmolRuntime` (smol's global executor, async-io's reactor
+    and timers, smol's resolver). Several runtime features can be on at once; drivers on
+    different runtimes live in one process (`tests/runtimes.rs`: a peer on tokio and a peer on
+    smol connect and exchange data-channel messages).
+  - (runtime-4) `examples/custom-runtime` (package `rtci-custom-runtime-example`, not
+    published): `Runtime` implemented over async-executor and async-io, the driver with
+    `default-features = false`; CI checks its tree has no tokio and runs it (two peer
+    connections on it exchange data-channel messages). New public helpers for such runtimes:
+    `runtime::{std_udp, std_multicast, std_tcp_listener, std_tcp_bound, std_tcp_connect_start,
+    set_and_read_traffic_class, reset_on_close, TrafficClassMarker}`.
+  - (runtime-5) `runtime-mock` gives `MockRuntime`: a virtual clock (`MockClock::advance`, and
+    `MockRuntime::run` moves it to the next timer whenever nothing can run, panicking on a
+    deadlock instead of hanging) and an in-memory network (`MockNet`: UDP, multicast and TCP
+    between mock sockets; per-direction `LinkConfig` delay, seeded loss and blocking; a datagram
+    filter; a log with each datagram's traffic class and fate; a host table). Two
+    `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
+    data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
+    a lost DTLS ClientHello retransmitted after its timer).
+- **`StreamTransmit` has a new public field, `dscp`** (rtci-shared): the codepoint the driver
+  sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
+  flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
 
 ### Behaviour changes
 
@@ -87,6 +134,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
+- **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
+- **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
+  `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
+  differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
+  datagram's ECN bits), and `StreamDriver` sets each TCP connection's from
+  `StreamTransmit::dscp`. Linux, macOS and the BSDs mark; Windows accepts `IP_TOS` and leaves the
+  packets unmarked (marking there needs qWAVE or a Group Policy QoS rule; the driver uses
+  neither). New: `sockets::set_traffic_class` / `traffic_class`,
+  `PeerDriver::socket_traffic_class`, `PeerDriver::unmarked_sockets`,
+  `StreamDriver::socket_traffic_class`.
+- **A media flow whose DSCP the network blocks goes back to DSCP 0 (RFC 8835 section 4.2
+  MAY).** Under the default `RTCDscpMarking::Rfc8837`, a flow sent with a codepoint other than
+  DF that the peer's sender and receiver reports on its transport never name (three of them, at
+  least two seconds after the flow began) is marked DF from then on, its RTX and FEC streams
+  too; the other flows keep theirs. `RTCPeerConnection::dscp_blocked_flows` lists them.
+  `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
+  `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
+  packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,

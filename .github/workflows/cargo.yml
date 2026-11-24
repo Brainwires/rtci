@@ -48,6 +48,30 @@ jobs:
       # loopback: no other job turns the feature on.
       - name: Stream driver with dns-records
         run: cargo test --package rtci-stream-driver --features dns-records --lib --verbose
+      # rtci-stream-driver without a built-in runtime (`default-features = false`, `peer`): it
+      # builds, and its normal dependency tree holds no async runtime (the test runs
+      # `cargo tree -e normal --no-default-features`). A tokio primitive left in the driver
+      # would not build here; a tokio dependency left non-optional fails the test.
+      - name: Stream driver without a built-in runtime (no tokio)
+        run: |
+          cargo check --package rtci-stream-driver --no-default-features --features peer --verbose
+          cargo test --package rtci-stream-driver --test dependency_tree --verbose
+      # The built-in runtimes other than tokio (off by default): their tests need the features.
+      - name: Stream driver on every built-in runtime
+        run: cargo test --package rtci-stream-driver --features runtime-smol,runtime-mock --verbose
+      # Bring your own runtime: examples/custom-runtime implements `Runtime` over async-executor
+      # and async-io and depends on the driver with `default-features = false`. Its tree must
+      # hold no tokio (nor smol), and two peer connections on it must connect and exchange a
+      # data-channel message (the program exits 1 otherwise).
+      - name: Custom runtime example (no built-in runtime)
+        shell: bash
+        run: |
+          cargo tree --edges normal --package rtci-custom-runtime-example --prefix none --format '{p}' > custom-runtime-tree.txt
+          if grep -E '^(tokio|tokio-util|mio|smol|hickory-resolver) ' custom-runtime-tree.txt; then
+            echo "an async runtime is in the custom-runtime example's dependency tree"
+            exit 1
+          fi
+          cargo run --package rtci-custom-runtime-example --no-default-features --verbose
       - name: Disk left after the build
         if: always()
         run: df -h

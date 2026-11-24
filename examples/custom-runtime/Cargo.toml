@@ -1,0 +1,25 @@
+[package]
+name = "rtci-custom-runtime-example"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rtci-stream-driver on an application's own async runtime (async-executor + async-io), without any built-in runtime"
+publish = false
+
+# No built-in runtime: `default-features = false` leaves tokio (and smol) out of the build. The
+# example implements `Runtime` itself; if anything in the driver still reached for tokio this
+# package would not build (CI runs it, and checks its dependency tree has no tokio).
+[dependencies]
+rtci-stream-driver = { path = "../stream-driver", default-features = false, features = ["peer"] }
+rtci = { path = "../.." }
+async-executor = "1.13"
+async-io = "2.4"
+async-channel = "2.5"
+bytes.workspace = true
+
+[[bin]]
+name = "custom-runtime"
+path = "src/main.rs"

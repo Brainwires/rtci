@@ -162,7 +162,7 @@ or no RFC-permitted setting changes it:
   the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an
   audit row for the owner).
 
-## 2. Engine-only capabilities: the same in every profile (26)
+## 2. Engine-only capabilities: the same in every profile (27)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
@@ -180,6 +180,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_sctp_message_interleaving` | RFC 8260 I-DATA announced; libwebrtc announces it only under the WebRTC-DataChannelMessageInterleaving field trial (media/sctp/dcsctp_transport.cc::CreateDcSctpOptions @ a222406d), off by default, so it negotiates down to DATA chunks |
 | `SettingEngineBuilder::with_sctp_path_mtu_discovery` | RFC 8899 PLPMTUD probes (HEARTBEAT + PAD); a peer without it answers the HEARTBEAT and nothing else changes |
 | `SettingEngineBuilder::with_sctp_zero_checksum` | RFC 9653 zero checksum, used only when the peer announces it too; dcsctp has it but libwebrtc leaves zero_checksum_alternate_error_detection_method at None (net/dcsctp/public/dcsctp_options.h @ a222406d), so it announces none |
+| `SettingEngineBuilder::with_dscp_marking` | RFC 8837 marking with the RFC 8835 4.2 fallback (a media flow the peer never reports on goes back to DSCP 0) in every profile. libwebrtc marks by default too (media/base/media_config.h @ a222406d: MediaConfig::enable_dscp = true; Chromium's rtc_peer_connection_handler.cc @ 8dafa8bc does not change it) and has no fallback (media/base/media_channel_impl.cc @ a222406d: UpdateDscp sets the preferred codepoint, or DSCP_DEFAULT only when enable_dscp is off, on the RTP and RTCP sockets alike); the fallback changes nothing until a flow is blocked |
 | `SettingEngineBuilder::with_sctp_weighted_fair_queueing` | RFC 8260 3.6 scheduling of the engine's own sends; not visible to the peer |
 | `SettingEngineBuilder::with_disable_sdp_tls_id` | a=tls-id (RFC 8842) is written; libwebrtc writes and reads none (api/webrtc_sdp.cc @ a222406d has no tls-id) |
 | `SettingEngineBuilder::with_tcp_candidate_gathering` | engine-run ICE-TCP; the train's Chromium gathered no TCP candidate (matrix: "ICE-TCP" cells na-browser) |
@@ -204,7 +205,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_dtls_connection_id` | RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further |
 | `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` | the ceiling on incomplete inbound messages held above SCTP, which exists because the engine's SCTP gives a message it cannot hold out in parts (RFC 9260 6.9 partial delivery) and the data channel layer joins them; 64 MiB in every profile. libwebrtc's dcSCTP has no partial delivery: a message is reassembled inside the receive window (net/dcsctp/public/dcsctp_options.h @ a222406d, max_receiver_window_buffer_size 5 MiB, line 86), and net/dcsctp/socket/dcsctp_socket.cc::DcSctpSocket::HandleDataCommon (lines 1157-1172) drops data while the reassembly queue is full and assembled messages wait, and aborts the association (OutOfResourceErrorCause) when none do; nothing of Chrome's to follow |
 
-## Examined: the default is libwebrtc's too, or already the RFC's (40)
+## Examined: the default is libwebrtc's too, or already the RFC's (41)
 
 | Setting | Note |
 |---|---|

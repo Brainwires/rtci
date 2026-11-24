@@ -12,6 +12,8 @@ struct Side {
     driver: StreamDriver,
     received: Vec<Vec<u8>>,
     notices: Vec<StreamNotice>,
+    /// The DSCP the engine would put on this side's transmits (`StreamTransmit::dscp`).
+    dscp: u8,
 }
 
 impl Side {
@@ -21,6 +23,7 @@ impl Side {
             driver: StreamDriver::default(),
             received: Vec::new(),
             notices: Vec::new(),
+            dscp: 0,
         }
     }
 
@@ -32,7 +35,8 @@ impl Side {
                 self.driver.execute(command);
                 progress = true;
             }
-            while let Some(transmit) = self.table.poll_transmit() {
+            while let Some(mut transmit) = self.table.poll_transmit() {
+                transmit.dscp = self.dscp;
                 assert!(
                     transmit.data.len() <= self.table.config().window.max(70_000),
                     "a transmit beyond the window"
@@ -310,4 +314,57 @@ async fn a_socket_connected_to_itself_is_a_failed_connection() {
             client.notices
         );
     }
+}
+
+/// RFC 8837 section 5: every packet of one TCP connection carries one DSCP, the one the
+/// engine gives its transmits (`StreamTransmit::dscp`). The driver sets it on the connection's
+/// socket before the bytes: EF (46) is TOS 184 as the operating system reports it
+/// (`getsockopt(IP_TOS)`); the other side, given DSCP 0, never touches its socket. On
+/// Windows, where `IP_TOS` does not mark (see `sockets::set_traffic_class`), the bytes cross
+/// and what the system reported is printed, not asserted.
+#[tokio::test]
+async fn a_connection_is_marked_with_the_dscp_of_its_transmits() {
+    let mut server = Side::new(StreamConfig::default());
+    let mut client = Side::new(StreamConfig::default());
+    client.dscp = 46;
+    let listener = server
+        .table
+        .listen("127.0.0.1:0".parse().unwrap(), Framing::Rfc4571, 1, false);
+    server.pump();
+    let mut bound = None;
+    for _ in 0..100 {
+        server.step(Duration::from_millis(20)).await;
+        bound = server.table.listener_address(listener);
+        if bound.is_some() {
+            break;
+        }
+    }
+    let bound = bound.expect("the listener is bound");
+    let id = client
+        .table
+        .connect(
+            "127.0.0.1:0".parse().unwrap(),
+            bound,
+            Framing::Rfc4571,
+            2,
+            false,
+            None,
+        )
+        .unwrap();
+    assert!(client.table.send(id, b"marked").unwrap());
+    for _ in 0..400 {
+        client.step(Duration::from_millis(5)).await;
+        server.step(Duration::from_millis(5)).await;
+        if !server.received.is_empty()
+            && (cfg!(windows) || client.driver.socket_traffic_class(id).is_some())
+        {
+            break;
+        }
+    }
+    assert_eq!(server.received, vec![b"marked".to_vec()]);
+    println!("TCP: {:?}", client.driver.socket_traffic_class(id));
+    #[cfg(not(windows))]
+    assert_eq!(client.driver.socket_traffic_class(id), Some(46 << 2));
+    let accepted = server.table.connections().next().expect("accepted").id;
+    assert_eq!(server.driver.socket_traffic_class(accepted), None);
 }

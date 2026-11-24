@@ -530,6 +530,8 @@ pub struct SettingEngine {
     pub(crate) data_channel_send_before_ack: bool,
     /// [`SettingEngineBuilder::with_non_interactive_video`].
     pub(crate) non_interactive_video: bool,
+    /// [`SettingEngineBuilder::with_dscp_marking`].
+    pub(crate) dscp_marking: crate::peer_connection::priority::RTCDscpMarking,
     /// [`SettingEngineBuilder::with_srtp_key_lifetime`].
     pub(crate) srtp_key_lifetime: Option<srtp::keying::KeyLifetime>,
     /// [`SettingEngineBuilder::with_dtls_connection_id`].
@@ -692,6 +694,7 @@ impl SettingEngine {
             data_channel_max_buffer_size: Default::default(),
             data_channel_send_before_ack: Default::default(),
             non_interactive_video: Default::default(),
+            dscp_marking: Default::default(),
             srtp_key_lifetime: Default::default(),
             srtp_automatic_rekeying_off: Default::default(),
             srtp_rekeying_both_at_warning: Default::default(),
@@ -2971,6 +2974,31 @@ impl SettingEngineBuilder {
     /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
     pub fn with_non_interactive_video(mut self, non_interactive: bool) -> Self {
         self.0.non_interactive_video = non_interactive;
+        self
+    }
+
+    /// How [`RTCPeerConnection::dscp`] and the codepoint of each stream transmit
+    /// ([`StreamTransmit::dscp`](shared::stream::StreamTransmit::dscp)) mark what the
+    /// connection sends.
+    ///
+    /// [`RTCDscpMarking::Rfc8837`], the default, marks by RFC 8837 Table 1 (RFC 8835 section
+    /// 4.2: implementations "SHOULD attempt to set QoS on the packets sent") and turns a media
+    /// flow whose marked packets the network blocks back to Default Forwarding (RFC 8835
+    /// section 4.2: "MAY turn off use of DSCP markings if it detects symptoms of unexpected
+    /// behavior such as ... blocking of packets with certain DSCP markings"; see the enum).
+    /// [`RTCDscpMarking::WithoutFallback`] marks and never turns back; [`RTCDscpMarking::Off`]
+    /// marks nothing (Default Forwarding, DSCP 0, for every datagram), for a platform where
+    /// marking is not implemented or a network known to misbehave.
+    ///
+    /// [`RTCPeerConnection::dscp`]: crate::peer_connection::RTCPeerConnection::dscp
+    /// [`RTCDscpMarking::Rfc8837`]: crate::peer_connection::priority::RTCDscpMarking::Rfc8837
+    /// [`RTCDscpMarking::WithoutFallback`]: crate::peer_connection::priority::RTCDscpMarking::WithoutFallback
+    /// [`RTCDscpMarking::Off`]: crate::peer_connection::priority::RTCDscpMarking::Off
+    pub fn with_dscp_marking(
+        mut self,
+        marking: crate::peer_connection::priority::RTCDscpMarking,
+    ) -> Self {
+        self.0.dscp_marking = marking;
         self
     }
 

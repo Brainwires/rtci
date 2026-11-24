@@ -8,9 +8,9 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5750; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5084.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5077 of 5084 (99.9 %).
-- Tested as the default (`tested`): 5043 of 5084 (99.2 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 7: 1 untested, 3 partial, 3 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5078 of 5084 (99.9 %).
+- Tested as the default (`tested`): 5044 of 5084 (99.2 %); `setting`: 27; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 6: 1 untested, 2 partial, 3 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
@@ -18,14 +18,14 @@ Verdicts and classes are defined in `RULES.md`.
 | B | implemented, lacking a test that fails without it | 0 | 0 |
 | C | partly implemented | 2 | 0 |
 | D | not implemented | 2 | 0 |
-| E | cannot be met or observed inside this engine | 10 | 8 |
+| E | cannot be met or observed inside this engine | 9 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 41 | 28 |
+| all | | 40 | 28 |
 
 ## What 100 % takes
 
 - Work in code and tests (classes B, C, D, F): 4 rows, 2 of size S, 1 of size M, 1 of size L. They are listed below by owner and size.
-- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
+- Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 0 rows.
 - Never testable inside this engine (class E, reason stated): 2 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
   - RFC7714-13.1-3 (`rfc7714.md`): Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested)
@@ -39,7 +39,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | Owner | B | C | D | E | F | open rows | S | M | L |
 |---|---|---|---|---|---|---|---|---|---|
 | dtls-srtp | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
-| ice | 0 | 0 | 1 | 1 | 0 | 2 | 1 | 1 | 0 |
+| ice | 0 | 0 | 1 | 0 | 0 | 1 | 0 | 1 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
 | media (running) | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
@@ -82,7 +82,6 @@ Sorted by class, then owner, size and ID.
 | RFC6544-6.1-3 | `rfc6544.md` | Keep a connection made in parallel if it matches the new offer; else ... | missing | D | Lite-to-lite parallel connection (RFC6544-6.1-1 first; audit-6: the tcp agent has ended, owner ice). Binds an answerer that received a TCP connection a lite offerer opened in parallel with its updated offer; the engine opens none (6.1-1, MAY, missing) and has no test peer that does | M | ice |
 | RFC9605-6.1.3-1 | `rfc9605.md` | So an SFU can drop layers, each layer is its own SFrame ciphertext | missing | D | One SFrame ciphertext per layer: needs per-layer packetization of an SVC frame | L | sframe |
 | RFC7714-13.1-3 | `rfc7714.md` | All keys erased when no longer needed | partial | E | Never testable here: the key schedules inside the provider's cipher objects are the provider's; master keys, salts and session keys held by the crate are zeroized (tested) | S | dtls-srtp |
-| MDNSICE-7.1-1 | `draft-ietf-mmusic-mdns-ice-candidates.md` | An implementation-wide rate limit covers all mDNS queries and ... | partial | E | Stays partial (audit-5): a process-wide bucket by default is ambient state, which the sans-I/O crates do not keep (`docs/sans-io-deterministic-time.md`), and agents on different clocks cannot share one; one bucket shared by every agent given it is tested. Closes only by an owner decision to share a default bucket. Re-examined (transport-1, with rtci-stream-driver and PeerDriver on master): neither meets it today. PeerDriver binds UDP host sockets and the StreamDriver TCP ones, but no mDNS socket (no port 5353, no group join), so a PeerDriver connection sends no mDNS at all; and PeerDriver takes an already-built RTCPeerConnection, so it cannot give it a shared MdnsRateLimit. The driver crate may keep process-wide state (it is not a sans-I/O crate), so the row could move there: mDNS I/O in PeerDriver plus one process-wide default bucket handed to every connection it builds (size M) | S | ice |
 | RFC8830-3-6 | `rfc8830.md` | A new msid-id (not -) lets the application learn of a new ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-7 | `rfc8830.md` | When a description no longer lists any msid for a media description, ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
 | RFC8830-3-8 | `rfc8830.md` | The track also ends when all its SSRCs are gone (BYE, timeout) or the ... | conflict | E | `conflict`: both forms tested, the governing specification's is the default; open only if the owner changes the default | S | jsep (running) |
