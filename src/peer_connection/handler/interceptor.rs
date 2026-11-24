@@ -2190,11 +2190,16 @@ impl<'a> InterceptorHandler<'a> {
                     && self.ctx.fec_session_remote_streams.len()
                         < Self::MAX_FEC_SESSION_REMOTE_STREAMS
                 {
+                    // Arrivals recorded and reported on the session's own transport, for
+                    // the remote's congestion controller of that path.
+                    let (rtp_header_extensions, rtcp_feedback) = fec.feedback.stream_info();
                     let info = interceptor::StreamInfo {
                         ssrc: chain_ssrc,
                         payload_type: fec.payload_type,
                         mime_type: format!("{}/ulpfec", fec.kind),
                         clock_rate: fec.clock_rate,
+                        rtp_header_extensions,
+                        rtcp_feedback,
                         ..Default::default()
                     };
                     self.interceptor.bind_remote_stream(&info);
