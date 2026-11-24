@@ -470,8 +470,24 @@ async fn connect(
     let socket = new_socket(local, reuse_address)?;
     socket.bind(local)?;
     let stream = socket.connect(remote).await?;
+    // A connection whose two ends are the same address is the socket connected to itself, not
+    // to a peer: connecting from an ephemeral port to a loopback port nothing listens on, the
+    // system can pick that very port as the source, and TCP's simultaneous open (RFC 9293
+    // section 3.5) then "connects" the socket to itself. It is a failed connection (an ICE-TCP
+    // check toward a dead loopback candidate would otherwise succeed against its own echo).
+    if is_self_connection(stream.local_addr()?, stream.peer_addr()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("{remote}: the socket connected to itself"),
+        ));
+    }
     stream.set_nodelay(true)?;
     Ok(stream)
+}
+
+/// Whether a connection runs from an address to that same address.
+fn is_self_connection(local: SocketAddr, peer: SocketAddr) -> bool {
+    local == peer
 }
 
 async fn accept_loop(
@@ -587,15 +603,25 @@ mod dns {
     use shared::stream::{DnsRecord, RecordKind};
     use std::net::{IpAddr, SocketAddr};
 
+    /// The system's resolver (its name servers and search list).
     fn resolver() -> Option<TokioResolver> {
-        TokioResolver::builder_tokio().ok().map(|b| b.build())
+        TokioResolver::builder_tokio().ok()?.build().ok()
     }
 
     /// The addresses of one family of `host`, with `port`.
     pub(crate) async fn addresses(host: &str, port: u16, ipv6: bool) -> Vec<SocketAddr> {
-        let Some(resolver) = resolver() else {
-            return vec![];
-        };
+        match resolver() {
+            Some(resolver) => addresses_with(&resolver, host, port, ipv6).await,
+            None => vec![],
+        }
+    }
+
+    async fn addresses_with(
+        resolver: &TokioResolver,
+        host: &str,
+        port: u16,
+        ipv6: bool,
+    ) -> Vec<SocketAddr> {
         let kind = if ipv6 {
             RecordType::AAAA
         } else {
@@ -605,8 +631,9 @@ mod dns {
             return vec![];
         };
         found
+            .answers()
             .iter()
-            .filter_map(|r| match r {
+            .filter_map(|r| match &r.data {
                 RData::A(a) => Some(IpAddr::V4(a.0)),
                 RData::AAAA(a) => Some(IpAddr::V6(a.0)),
                 _ => None,
@@ -617,9 +644,17 @@ mod dns {
 
     /// The SRV or NAPTR records of `name` (none on any error).
     pub(crate) async fn records(name: &str, kind: RecordKind) -> Vec<DnsRecord> {
-        let Some(resolver) = resolver() else {
-            return vec![];
-        };
+        match resolver() {
+            Some(resolver) => records_with(&resolver, name, kind).await,
+            None => vec![],
+        }
+    }
+
+    async fn records_with(
+        resolver: &TokioResolver,
+        name: &str,
+        kind: RecordKind,
+    ) -> Vec<DnsRecord> {
         let record_type = match kind {
             RecordKind::Srv => RecordType::SRV,
             RecordKind::Naptr => RecordType::NAPTR,
@@ -630,24 +665,169 @@ mod dns {
         };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         found
+            .answers()
             .iter()
-            .filter_map(|r| match r {
+            .filter_map(|r| match &r.data {
                 RData::SRV(srv) => Some(DnsRecord::Srv {
-                    priority: srv.priority(),
-                    weight: srv.weight(),
-                    port: srv.port(),
-                    target: srv.target().to_utf8(),
+                    priority: srv.priority,
+                    weight: srv.weight,
+                    port: srv.port,
+                    target: srv.target.to_utf8(),
                 }),
                 RData::NAPTR(n) => Some(DnsRecord::Naptr {
-                    order: n.order(),
-                    preference: n.preference(),
-                    flags: text(n.flags()),
-                    services: text(n.services()),
-                    regexp: text(n.regexp()),
-                    replacement: n.replacement().to_utf8(),
+                    order: n.order,
+                    preference: n.preference,
+                    flags: text(&n.flags),
+                    services: text(&n.services),
+                    regexp: text(&n.regexp),
+                    replacement: n.replacement.to_utf8(),
                 }),
                 _ => None,
             })
             .collect()
+    }
+
+    /// The lookups against a name server on loopback that answers from a fixed zone, through
+    /// the resolver's own UDP client: what the engine's SRV / NAPTR discovery of STUN and TURN
+    /// servers (RFC 5928, RFC 8489 section 8) and its per-family answers (RFC 8305 section 3)
+    /// receive.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+        use hickory_resolver::net::runtime::TokioRuntimeProvider;
+        use hickory_resolver::proto::op::{Message, OpCode};
+        use hickory_resolver::proto::rr::rdata::{A, AAAA, NAPTR, SRV};
+        use hickory_resolver::proto::rr::{Name, Record};
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        /// A name server on 127.0.0.1 answering `turn.example.`; its port.
+        async fn name_server() -> u16 {
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let port = socket.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1500];
+                loop {
+                    let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                        return;
+                    };
+                    let Ok(query) = Message::from_vec(&buf[..n]) else {
+                        continue;
+                    };
+                    let mut response = Message::response(query.metadata.id, OpCode::Query);
+                    response.metadata.recursion_desired = query.metadata.recursion_desired;
+                    response.metadata.recursion_available = true;
+                    response.metadata.authoritative = true;
+                    for q in &query.queries {
+                        response.add_query(q.clone());
+                        let name = q.name().clone();
+                        let rdata = |r| Record::from_rdata(name.clone(), 60, r);
+                        let host = |s: &str| Name::from_ascii(s).unwrap();
+                        let answers: Vec<Record> = match q.query_type() {
+                            RecordType::A => vec![rdata(RData::A(A(Ipv4Addr::new(192, 0, 2, 7))))],
+                            RecordType::AAAA => vec![rdata(RData::AAAA(AAAA(Ipv6Addr::new(
+                                0x2001, 0xdb8, 0, 0, 0, 0, 0, 7,
+                            ))))],
+                            RecordType::SRV => vec![
+                                rdata(RData::SRV(SRV::new(1, 5, 3478, host("turn1.example.")))),
+                                rdata(RData::SRV(SRV::new(2, 0, 3479, host("turn2.example.")))),
+                            ],
+                            RecordType::NAPTR => vec![rdata(RData::NAPTR(NAPTR::new(
+                                10,
+                                20,
+                                b"s".to_vec().into_boxed_slice(),
+                                b"RELAY:turn.udp".to_vec().into_boxed_slice(),
+                                Vec::new().into_boxed_slice(),
+                                host("_turn._udp.example."),
+                            )))],
+                            _ => vec![],
+                        };
+                        for a in answers {
+                            response.add_answer(a);
+                        }
+                    }
+                    if let Ok(bytes) = response.to_vec() {
+                        let _ = socket.send_to(&bytes, from).await;
+                    }
+                }
+            });
+            port
+        }
+
+        fn resolver_at(port: u16) -> TokioResolver {
+            let mut server = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            for connection in &mut server.connections {
+                connection.port = port;
+            }
+            let config = ResolverConfig::from_parts(None, vec![], vec![server]);
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+                .build()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn srv_and_naptr_records_and_each_address_family_come_back_whole() {
+            let resolver = resolver_at(name_server().await);
+            let mut srv = records_with(&resolver, "turn.example.", RecordKind::Srv).await;
+            srv.sort_by_key(|r| match r {
+                DnsRecord::Srv { priority, .. } => *priority,
+                _ => u16::MAX,
+            });
+            assert_eq!(
+                srv,
+                vec![
+                    DnsRecord::Srv {
+                        priority: 1,
+                        weight: 5,
+                        port: 3478,
+                        target: "turn1.example.".into(),
+                    },
+                    DnsRecord::Srv {
+                        priority: 2,
+                        weight: 0,
+                        port: 3479,
+                        target: "turn2.example.".into(),
+                    },
+                ]
+            );
+            assert_eq!(
+                records_with(&resolver, "turn.example.", RecordKind::Naptr).await,
+                vec![DnsRecord::Naptr {
+                    order: 10,
+                    preference: 20,
+                    flags: "s".into(),
+                    services: "RELAY:turn.udp".into(),
+                    regexp: String::new(),
+                    replacement: "_turn._udp.example.".into(),
+                }]
+            );
+            assert_eq!(
+                addresses_with(&resolver, "turn.example.", 3478, false).await,
+                vec![SocketAddr::new(Ipv4Addr::new(192, 0, 2, 7).into(), 3478)]
+            );
+            assert_eq!(
+                addresses_with(&resolver, "turn.example.", 3478, true).await,
+                vec![SocketAddr::new(
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7).into(),
+                    3478
+                )]
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod self_connection_tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_is_to_itself_only_when_both_ends_are_the_same_address() {
+        let a: SocketAddr = "127.0.0.1:45149".parse().unwrap();
+        assert!(is_self_connection(a, a));
+        assert!(!is_self_connection(a, "127.0.0.1:45150".parse().unwrap()));
+        assert!(!is_self_connection(a, "127.0.0.2:45149".parse().unwrap()));
+        let v6: SocketAddr = "[::1]:45149".parse().unwrap();
+        assert!(is_self_connection(v6, v6));
+        assert!(!is_self_connection(v6, "[::1]:9".parse().unwrap()));
     }
 }

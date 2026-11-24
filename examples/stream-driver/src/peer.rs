@@ -45,9 +45,9 @@ use rtc::peer_connection::event::{
     RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent,
     RTCTransportEventKind,
 };
-use rtc::peer_connection::state::RTCIceGatheringState;
+use rtc::peer_connection::state::{RTCIceGatheringState, RTCSignalingState};
 use rtc::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
+    CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit, RTCIceProtocol,
     RTCIceTransportState, RTCTransportId,
 };
 use rtc::sansio::Protocol;
@@ -126,6 +126,8 @@ pub struct PeerDriver {
     /// The transports whose generation the driver gathered for on an
     /// `OnLocalCandidatesNeeded`: their `gatheringstatechange` that follows needs nothing.
     gathered: HashSet<RTCTransportId>,
+    /// Datagrams the engine wrote that no socket sent ([`Self::unsent_datagrams`]).
+    unsent: u64,
 }
 
 impl PeerDriver {
@@ -142,6 +144,7 @@ impl PeerDriver {
             datagrams,
             events: VecDeque::new(),
             gathered: HashSet::new(),
+            unsent: 0,
         }
     }
 
@@ -161,6 +164,13 @@ impl PeerDriver {
     /// pair included.
     pub fn local_addresses(&self) -> Vec<SocketAddr> {
         self.sockets.iter().map(|s| s.local).collect()
+    }
+
+    /// How many datagrams the connection wrote that were not sent: from a local address with
+    /// no open socket (one closed already), or refused by the socket (its send buffer full:
+    /// UDP drops them, as the wire would). Counted so that none is lost unseen.
+    pub fn unsent_datagrams(&self) -> u64 {
+        self.unsent
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -277,15 +287,18 @@ impl PeerDriver {
         if datagram.transport.transport_protocol != TransportProtocol::UDP {
             return;
         }
-        if let Some(host) = self
+        let sent = self
             .sockets
             .iter()
             .find(|s| s.local == datagram.transport.local_addr)
-        {
-            // UDP: a datagram the socket cannot take now is lost, as on the wire.
-            let _ = host
-                .socket
-                .try_send_to(&datagram.message, datagram.transport.peer_addr);
+            .is_some_and(|host| {
+                // UDP: a datagram the socket cannot take now is lost, as on the wire.
+                host.socket
+                    .try_send_to(&datagram.message, datagram.transport.peer_addr)
+                    .is_ok()
+            });
+        if !sent {
+            self.unsent += 1;
         }
     }
 
@@ -293,6 +306,10 @@ impl PeerDriver {
         match event {
             RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => {
                 self.on_candidates_needed(needed)
+            }
+            RTCPeerConnectionEvent::OnSignalingStateChangeEvent(RTCSignalingState::Stable) => {
+                self.match_sockets_to_candidates();
+                Ok(())
             }
             RTCPeerConnectionEvent::OnTransportEvent(event) => match &event.event {
                 RTCTransportEventKind::GatheringStateChange(RTCIceGatheringState::Gathering) => {
@@ -356,6 +373,37 @@ impl PeerDriver {
             self.release(needed.ice_transport);
         }
         self.gather_section(&mid, index)
+    }
+
+    /// Back in the stable state, the sockets are matched against the candidates the
+    /// transports hold. A local offer that is rolled back takes its ICE restart back (RFC
+    /// 9429 section 5.7: "any resources or candidates that were allocated by the abandoned
+    /// local description are discarded"), the `OnLocalCandidatesNeeded` it fired included: a
+    /// socket retired for it whose candidate the transport holds again carries the
+    /// transport's packets as before (it is no longer retired), and a socket bound for the
+    /// abandoned generation, whose candidate the transport dropped, is closed. The answer to
+    /// the peer's colliding offer, if it sets up a new association, fires its own event.
+    fn match_sockets_to_candidates(&mut self) {
+        let held: Vec<(String, u16)> = self
+            .pc
+            .dtls_transports()
+            .iter()
+            .flat_map(|t| t.ice_transport().get_local_candidates())
+            .filter(|c| c.protocol == RTCIceProtocol::Udp)
+            .map(|c| (c.address, c.port))
+            .collect();
+        let holds = |local: &SocketAddr| {
+            held.iter()
+                .any(|(address, port)| *port == local.port() && *address == local.ip().to_string())
+        };
+        for host in self.sockets.iter_mut() {
+            if host.retired_for.is_some() && holds(&host.local) {
+                host.retired_for = None;
+                host.close_at = None;
+            }
+        }
+        self.sockets
+            .retain(|s| s.retired_for.is_some() || holds(&s.local));
     }
 
     /// A transport begins gathering an ICE generation the driver was not told about: the

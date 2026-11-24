@@ -1636,6 +1636,10 @@ impl RTCPeerConnection {
             self.do_signaling_state_change(next_state);
         }
         if reached_stable {
+            // A re-keying that waited for the renewal under way to end (one at a time): if
+            // that one did not give this transport a new association (it was rolled back),
+            // it is asked for now.
+            self.request_wanted_srtp_rekeying();
             // W3C "update the negotiation-needed flag" is re-run each time the connection
             // returns to a stable signaling state. A transceiver added while the
             // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
@@ -3745,7 +3749,7 @@ impl RTCPeerConnection {
             self.ice_transport_mut().ice_gathering_state = gathering;
         }
         if pending.staged_tls_id {
-            self.dtls_transport_mut().staged_local_tls_id = None;
+            self.dtls_transport_mut().drop_answer_tls_id();
         }
         for (id, gathering, staged_tls_id) in pending.other_restarts {
             if self.pipeline_context.transports.transport(id).is_none() {
@@ -3757,7 +3761,7 @@ impl RTCPeerConnection {
                     pc.ice_transport_mut().ice_gathering_state = gathering;
                 }
                 if staged_tls_id {
-                    pc.dtls_transport_mut().staged_local_tls_id = None;
+                    pc.dtls_transport_mut().drop_answer_tls_id();
                 }
             });
         }
@@ -3858,6 +3862,8 @@ impl RTCPeerConnection {
     /// its credentials, candidates and selected pair, and the gathering state it had (RFC 9429
     /// section 5.7). A no-op when the offer restarted nothing.
     pub(super) fn revert_local_ice_restart(&mut self, now: Instant) {
+        // The `tls-id` of the new association the offer asked for goes with it.
+        self.dtls_transport_mut().discard_offer_tls_id();
         let gathering = self
             .ice_transport_mut()
             .gathering_before_local_restart
