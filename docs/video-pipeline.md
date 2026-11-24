@@ -376,11 +376,11 @@ measures each one used on hosted runners.
 
 | Codec | Crate (version) | Licence | Pure Rust | MSRV | Platforms | Real-time evidence | Feature |
 |---|---|---|---|---|---|---|---|
-| VP8 decode | `vp8-decoder` 0.1.3 (repo `AlakazamLabs/vp8`, crate first published 2026-11-06) | (MIT OR Apache-2.0) AND BSD-3-Clause (a port of the RFC 6386 section 20 reference decoder) | yes (small NEON / SSE2 loop-filter kernels via `std::arch`; `--cfg vp8_portable` removes them) | 1.80 | any | README: 560 fps at 1280x720 1.2 Mbit/s on an Apple M4, 270 fps on a Xeon E-2288G, one core; "matches the WebM project's 59 VP8 test vectors bit for bit" | `vp8` (**default**, pinned `=0.1.3`; 4.6) |
-| VP8 encode | `vp8-encoder` 0.1.3 (same repo) | same | yes, `#![forbid(unsafe_code)]` | 1.80 | any | README: 720p camera clip at 2 Mbit/s, 47 fps on one Ryzen 7 3800X core, 124 fps on an Apple M4; rate control within 12 % of target; key frames on request; L1T2 / L1T3; streams decoded by libvpx and Chrome's WebCodecs "byte-identical" | `vp8` (**default**, pinned `=0.1.3`; 4.6) |
+| VP8 decode | `vp8-decoder` 0.1.3 (repo `AlakazamLabs/vp8`, crate first published 2026-11-06) | (MIT OR Apache-2.0) AND BSD-3-Clause (a port of the RFC 6386 section 20 reference decoder) | yes (small NEON / SSE2 loop-filter kernels via `std::arch`; `--cfg vp8_portable` removes them) | 1.80 | any | README: 560 fps at 1280x720 1.2 Mbit/s on an Apple M4, 270 fps on a Xeon E-2288G, one core; "matches the WebM project's 59 VP8 test vectors bit for bit" | `vp8` (opt-in until the owner decides; pinned `=0.1.3`; 4.6, 4.7) |
+| VP8 encode | `vp8-encoder` 0.1.3 (same repo) | same | yes, `#![forbid(unsafe_code)]` | 1.80 | any | README: 720p camera clip at 2 Mbit/s, 47 fps on one Ryzen 7 3800X core, 124 fps on an Apple M4; rate control within 12 % of target; key frames on request; L1T2 / L1T3; streams decoded by libvpx and Chrome's WebCodecs "byte-identical" | `vp8` (opt-in until the owner decides; pinned `=0.1.3`; 4.6, 4.7) |
 | VP8 / VP9 encode + decode | libvpx (BSD-3-Clause, C and assembly) through a binding written here, as `parolnet-media` has one (MIT OR Apache-2.0, same owner) | BSD-3-Clause | no: system library | - | Linux, macOS, Windows (vcpkg) | the reference implementation | `libvpx` (opt-in) |
 | AV1 encode | `rav1e` 0.8.1 | BSD-2-Clause | yes with `default-features = false` (the default `asm` feature needs NASM on x86_64) | 1.83 | any | README: "11 speed settings (0-10, exhaustive to near real-time)"; no figure without assembly; to be measured at speed 10, low-latency mode | `av1` (**opt-in**: not real time without assembly; 4.6) |
-| AV1 decode | `rav1d` 1.1.0 (Rust port of dav1d) | BSD-2-Clause | yes without its default `asm` feature (which needs NASM on x86) | 1.79 (crates.io) | stable for x86, x86_64, aarch64; "requires a nightly compiler for `arm` and `riscv64`" (README) | none for the Rust fallback; the API is dav1d's C API in Rust ("A Rust API is planned") | `av1` (**opt-in**: aborts the process on a hostile frame; 4.6) |
+| AV1 decode | `rav1d` 1.1.0 (Rust port of dav1d) | BSD-2-Clause | yes without its default `asm` feature (which needs NASM on x86) | 1.79 (crates.io) | stable for x86, x86_64, aarch64; "requires a nightly compiler for `arm` and `riscv64`" (README) | none for the Rust fallback; the API is dav1d's C API in Rust ("A Rust API is planned") | `av1` (**opt-in**: a hostile frame aborts the process; 4.6, 4.8) |
 | AV1 decode | `dav1d` 0.12.0 / `dav1d-sys` 0.9.0 (bindings) to libdav1d | bindings MIT; libdav1d BSD-2-Clause | no: C and assembly, system or built library | 1.85 | any | dav1d is the decoder browsers ship | `dav1d` (opt-in) |
 | H.264 encode + decode | `openh264` 0.9.10 / `openh264-sys2` | BSD-2-Clause (wrapper and OpenH264) | no: C++ (feature `source` builds the bundled source with `cc`; `libloading` loads a Cisco binary) | 1.85 | any | the codec Firefox ships (as Cisco's binary) | `openh264` (opt-in) |
 | H.264 decode | `rust_h264` 0.6.1 (repo `roticv/rust_h264`, created 2026-02) | MIT OR Apache-2.0 (repository LICENSE: Apache-2.0) | yes (SIMD) | 1.89 | any | README: "199 of 204" JVT conformance vectors, byte-identical to FFmpeg on its streams; speed in its BENCHMARK.md | candidate for a later `h264-rust` (opt-in) |
@@ -397,8 +397,8 @@ Searched and rejected: `vpx-sys` 0.1.1 (MIT, last release 2021), `env-libvpx-sys
 or decoder on crates.io. `vp8-decoder` and `vp8-encoder` were first published on 2026-11-06
 (0.1.0; 0.1.3 on 2026-11-23); their repository `AlakazamLabs/vp8` was created on 2026-11-23
 with one import commit. (The first version of this section said the crates were published the
-day the repository was created; the crates are 17 days older.) Phase 2 checked their claims;
-section 4.6 has the evidence and the decision.
+day the repository was created; the crates are 17 days older.) Phase 2 checked their claims
+(section 4.6); section 4.7 sets out who publishes them and what is in them, and recommends.
 
 **H.264 and H.265 licensing, plainly.** The code licences are permissive (OpenH264 BSD-2,
 `rust_h264` / `rust_h265` MIT or Apache-2.0). The patents are a separate matter, and no crate
@@ -447,20 +447,185 @@ per codec, `conf/vp-5-codecs`; `scripts/video-codec-check.sh` (runs 45314695095,
 | Streams decodable by libvpx | every stream it made decoded identically by libvpx and by vp8-decoder (4 of 4) |
 | In a call | two peers, 2 % loss, 320x240, 500 kbit/s, 20 s: 596 pictures decoded, PSNR 40.1 dB mean, 39.5 dB worst, no decoder error (`a_call_with_the_real_vp8_codecs_decodes_every_released_picture`, run 45317355088) |
 
-**Decision: `vp8` is a default feature.** Every claim checked held: conformance on the
+**Technically, `vp8` qualifies as a default.** Every claim checked held: conformance on the
 published vectors, identity with libvpx both ways, real-time speed on one core with margin
 (the acceptance was 720p decode at 30 fps: measured 257 or more), and robustness under
-fuzzing. The owner's decision 2 (section 7) recommended exactly this, conditional on these
-checks.
+fuzzing. Phase 2 made it a default feature on that evidence. **It is opt-in again since
+`conf/vp-6-codec-safety`**: a default dependency of a security-sensitive library is also a
+supply-chain decision, which is the owner's (section 4.7 has the facts and the recommendation;
+section 7, decision 2). Until the owner decides, the default build decodes and encodes no video
+at all: it receives, assembles, times and requests key frames for every payload format, and
+hands frames to whatever decoder the application registers.
 
-*Supply chain.* A crate weeks old from a new organisation, in the default build of a
-security-sensitive library, needs a reason and a fence. The reason is above. The fence: both
-crates are pinned to `=0.1.3` (a new release, even a patch, reaches no build without a change
-here that someone reviews); `cargo deny` allows crates.io only; the decoder's only `unsafe`
-is the two SIMD loop-filter files (about 700 lines), read for this decision. Vendoring (copying
-the 0.1.3 sources into the repository) would remove the registry from the trust path entirely,
-at the cost of carrying the code; it is the owner's call and not done here. Re-run
-`scripts/video-codec-check.sh` and the fuzz targets before moving the pin.
+### 4.7 Supply chain of the VP8 crates
+
+Checked 2026-11-24 from crates.io (`/api/v1/crates/<name>`, `/owners`, `/users`, the published
+`.crate` files from `static.crates.io`) and GitHub (`gh api`, a clone of the repository).
+
+**Who publishes them.**
+
+| | Fact |
+|---|---|
+| crates.io owner | one user, `z3thon` (name on the account: Rosson Long), the only owner of both crates and the publisher of all eight versions; crates.io account created **2026-11-03**, three days before the first version; versions published with an API token (no crates.io trusted publishing) |
+| GitHub account `z3thon` | created 2016-04-01, 113 public repositories, 2 followers |
+| Repository | `AlakazamLabs/vp8`, created **2026-11-23**, one commit (`28844d61`, "vp8: import vp8-decoder and vp8-encoder 0.1.3", unsigned), tags `vp8-decoder-v0.1.3` and `vp8-encoder-v0.1.3` on it; no history before 0.1.3 is public; 0 stars, 0 forks; organisation `AlakazamLabs` created 2026-11-20, one repository, not verified |
+| Other work of the publisher | 13 other crates on crates.io, all first published 2026-11-05 to 2026-11-17, from the GitHub organisation `Alakazam-211` ("Alakazam Labs", created 2025-10-14, 26 public repositories): `sew-*` (a voice/call client: LiveKit-protocol signalling, MLS, Noise), `kessel-*` (capture and codecs; `kessel-video` depends on both VP8 crates), and `sew-str0m` / `sew-str0m-is`, published from `Alakazam-211/str0m`, a fork of `algesten/str0m` (the Rust WebRTC library). That fork is the only link to a known project; no sign that str0m's maintainers know of or review these crates |
+| Use | reverse dependencies: `vp8-encoder` (on the decoder), `kessel-video`, `nestor-satellite`. Downloads: 40,231 (decoder) and 36,079 (encoder) by 2026-11-24, almost all from 2026-11-18 on (2,971 to 10,705 a day), against 100 to 700 in total for each of the publisher's other crates. Where these downloads come from cannot be seen; they are not evidence of review |
+
+**Is the published code the repository's code?** Yes, exactly. The two `.crate` files'
+SHA-256 sums equal the index's (`7011d3a4...` for the decoder, `f3a93dc2...` for the encoder;
+cargo checks every download against them). Each crate's `.cargo_vcs_info.json` names commit
+`28844d61`; every file in each crate is byte-identical to the same file of the repository at
+that commit, except cargo's own additions (`.cargo_vcs_info.json`, `Cargo.lock`, the normalised
+`Cargo.toml`, whose `Cargo.toml.orig` is identical to the repository's manifest). The
+repository has more files than the crates: tests, benches, scripts (left out by the manifests'
+`include` lists). No mismatch.
+
+**What runs at build time.** Nothing: `build = false` in both manifests, no build script, no
+proc-macro, no `links`. No dependency: `vp8-decoder` has none; `vp8-encoder` depends only on
+`vp8-decoder = "=0.1.3"` (for its tables and reconstruction); `serde_json` is a dev-dependency
+of both and never built for a user. Nothing in the source reads files, the environment, the
+network or a process (`std::fs`, `std::env`, `std::net`, `std::process`, `include_bytes!`,
+`extern "C"`, `asm!`: none; one `include_str!` of the README for documentation).
+
+**`unsafe`.** 8,767 lines of Rust in both crates. The encoder is `#![forbid(unsafe_code)]`. The
+decoder is `#![deny(unsafe_code)]` except two modules compiled only for their target:
+`src/sse2.rs` (409 lines, x86_64 with SSE2) and `src/neon.rs` (314 lines, aarch64 with NEON),
+46 `unsafe` occurrences in all: SIMD loop filters made of `core::arch` intrinsics inside private
+`unsafe fn`s that `assert!` the length of every slice they load from or store to before the
+first access; the safe callers cut those slices with bounds-checked indexing. `--cfg
+vp8_portable` (a `RUSTFLAGS` setting) removes both modules, leaving no `unsafe` at all, at the
+cost of speed. They were read for this review; 82,382 fuzz runs under AddressSanitizer
+exercised them on x86_64 (4.6).
+
+**Licence `(MIT OR Apache-2.0) AND BSD-3-Clause`: what is BSD-3 and why.** The BSD-3-Clause part
+is **not libvpx**. It is the reference decoder published inside RFC 6386 itself (section 20,
+"dixie", copyright 2010, 2011 Google Inc., licensed in section 20.26). Per each crate's
+PROVENANCE.md, the decoder is a port of that reference decoder (its files `dixie.c`,
+`modemv.c`, `predict.c`, `tokens.c`, `idct_add.c`, `dixie_loopfilter.c` decided the edge cases)
+and its probability, quantizer and mode tables were extracted from section 20's headers by
+script; the encoder uses those tables and routines. "libvpx source was not opened". Everything
+else is the publisher's own, MIT OR Apache-2.0. Each crate ships the section 20.26 licence
+verbatim in `NOTICE`.
+
+What that requires downstream: the BSD-3 conditions ("Redistributions in binary form must
+reproduce the above copyright notice, this list of conditions and the following disclaimer in
+the documentation and/or other materials provided with the distribution"; no use of Google's
+name to endorse). For source, the crates satisfy it themselves (NOTICE travels in the
+`.crate`). For **binaries**, the obligation falls on whoever ships an application built with
+`vp8`: it must carry Google's notice from the crates' `NOTICE` with its other licence notices.
+`rtc-video` is not published and contains no code derived from section 20, so it carries no
+notice of its own; its README says what an application must include.
+
+The patent text is a different matter and is **not** a condition to ship. RFC 6386 section
+20.27 ("Additional IP Rights Grant (Patents)", the same text as libvpx's `PATENTS`) grants
+Google's VP8 patent licence for "the copyrightable works distributed by Google as part of the
+WebM Project", and "does not include claims that would be infringed only as a consequence of
+further modification of this implementation". A Rust port is not a work Google distributes, so
+the grant does not plainly extend to these crates, and the crates do not claim it (PROVENANCE.md:
+"Nothing here grants any patent licence beyond what Apache-2.0 grants for our own
+contributions"; libvpx's PATENTS file is deliberately not included). Whether other patent
+arrangements for VP8 cover an independent implementation is a legal question this review does
+not answer; the owner should treat it as such. Nothing has to be added to `rtc-video` for the
+patent text: there is no obligation to ship it, and shipping it would claim a grant that may not
+apply.
+
+**Prior art: is there an older pure-Rust VP8 decoder?** No, not one that decodes video. Every
+pure-Rust VP8 decoder that handles inter frames on crates.io is from 2026: `zvidlib-vp8`
+(2026-10-07, MIT, one owner; PROVENANCE.md of `vp8-decoder` says it passes the same vectors;
+private decoder API, RGBA output, about 100 `unsafe` blocks, edition 2024), `filmcraft-vp8`
+(2026-11-04, one version, MSRV 1.95, no repository), `oxideav-vp8` (2026-04, "scaffold pending
+clean-room re-implementation", MSRV 1.95). The one VP8 decoder with years of history and real
+use is in `image-webp` (image-rs, since 2024-02, 117 million downloads, MIT OR Apache-2.0); it
+decodes WebP's lossy images, which are VP8 **key frames only**: no inter prediction, motion
+vectors, golden / alt-ref buffers or probability persistence, so it cannot decode a WebRTC
+stream. The other route with history is libvpx through the opt-in `libvpx` backend (C).
+
+**The pin and how it is enforced.**
+
+- `vp8-decoder = "=0.1.3"` and `vp8-encoder = "=0.1.3"` in `rtc-video/Cargo.toml`: cargo
+  cannot select another version, not even a patch release.
+- crates.io never changes the contents of a published version (a version can be yanked, not
+  replaced), and cargo checks each download against the SHA-256 in the index.
+- `Cargo.lock` is git-ignored at the root of this repository, so the checksum is recorded
+  nowhere in the tree. `scripts/check-video-codec-pins.py` closes that: it fails when the
+  manifest asks for anything but `=0.1.3`, or when a `Cargo.lock` (any build generates one; it
+  lists optional dependencies whether or not their feature is on) holds either crate at another
+  version, from another source, or with another checksum than the reviewed one. Wiring it into
+  `cargo.yml` after the build step is proposed to the train (not done here: that workflow is
+  the train's).
+- `deny.toml` already has `[sources] unknown-registry = "deny"` and `unknown-git = "deny"`: no
+  other registry or git source can stand in for them.
+
+**Recommendation.** Keep the crates as dependencies pinned by exact version and checksum (the
+first option), and make `vp8` a default again when the owner accepts the facts above, on two
+conditions: the pin check runs in CI, and a VP8 decoder fuzz target is registered in the
+train's fuzz job (it ran only on a throwaway branch: 82,382 runs in 15 minutes is a smoke test,
+not a campaign). Reasons: (1) what made a weeks-old crate from a new publisher risky is the
+next release, and the exact pin plus the checksum check already keeps every release out until
+someone reviews it, which is the whole benefit of vendoring; (2) vendoring the 8,767 lines would
+add no review the pinned bytes have not had and would make this repository the maintainer of a
+VP8 fork, with upstream fixes arriving only by hand; (3) waiting until the crates "have a
+history" has no end date and buys less than the evidence already gathered (59/59 conformance
+vectors, identity with libvpx both ways, fuzzing) — history is a proxy for exactly that kind of
+evidence. The residual risk, stated plainly: the code is a single author's, unreviewed by anyone
+else in public, parsing what any peer sends; a logic bug is caught at worst as a decoder error
+(the wrapper also catches a panic, `codec::vp8`), and memory safety rests on 723 lines of
+asserted SIMD, which `--cfg vp8_portable` removes for an application that wants none.
+
+### 4.8 AV1 on hostile input: the abort, the leak, containment
+
+**The abort is rav1d's, known upstream, fixed but not released.** `rav1d` 1.1.0 panics at
+`src/decode.rs:4997:33` (`called Option::unwrap() on a None value`). The line is in `on_error`
+of `rav1d_submit_frame`: with one frame context (`n_fc = min(max_frame_delay, n_threads) = 1`,
+which a real-time decoder has: each picture out of the call that took its data), when
+`rav1d_decode_frame` fails, `rav1d_decode_frame_exit` has already taken `f.frame_hdr`
+(`decode.rs:4873`), and `on_error` (called at `:5343`) unwraps it. The panic happens inside
+`dav1d_send_data`, an `extern "C"` function, which cannot unwind: the process aborts
+(`panic in a function that cannot unwind`), whatever the caller does. Upstream: issue
+memorysafety/rav1d#1497 (closed) and #1492 report exactly this; pull request #1503 fixed it on
+`main` on 2026-10-12 (`6c6f463`, a one-line change in `on_error`); 1.1.0 (2025-05-06) is still
+the latest release, and #1521 (open) asks for a release and for the `dav1d_*` functions to be
+`extern "C-unwind"`. No new report was filed; a comment for #1521 with the figures below is
+prepared for the owner (not posted).
+
+How easy it is to reach (hosted run 45322103402, a throwaway program decoding each candidate in
+a child process; rav1e 96x64 stream, 12 temporal units):
+
+| Input | Aborts rav1d 1.1.0 (`n_threads` 1, `max_frame_delay` 1) |
+|---|---|
+| every single-bit flip of the 2419-byte key frame, alone | **711 of 19,352** |
+| phase 2's seeded mutations of the stream (flips, truncation, appended or overwritten bytes) | 193 of 750 |
+
+The reproducer (`rtc-video/tests/data/rav1d-abort.ivf`, 2463 bytes): the key frame with bit 6
+of byte 4 flipped (the first payload byte of the sequence header: `seq_profile` 0 becomes 2).
+With rav1d 1.1.0 it aborts at `n_threads` 1 or 4 with `max_frame_delay` 1; at `n_threads` 2,
+`max_frame_delay` 2 it does not (the delayed-output path, unusable for a decoder that must
+return the picture of the frame it was given); rav1d `main` at `6c6f463` returns `EINVAL` (-22)
+and carries on.
+
+**Containment.** In process there is none with rav1d 1.1.0: its Rust functions
+(`rav1d_open`, `rav1d_send_data`, `rav1d_get_picture`) are `pub(crate)`; only the `extern
+"C"` functions are reachable, and `catch_unwind` never sees a panic inside them. rav1d's `main`
+branch has a public Rust API (`rav1d::Decoder`, `src/rust_api.rs`, since 2026-04) through which a
+panic would unwind normally and could be caught, but it is unreleased; taking it as a git
+dependency would need a `deny.toml` exception for one git source and would track an unreleased
+branch (not done; the owner's call when a release does not come). What is sound today is a
+**separate process**: `codec::isolated` (feature `isolation`) runs any `VideoDecoder` in a child
+process; when the child aborts, crashes or hangs past a timeout (2 s by default), that frame
+returns `DecodeError::Corrupt`, the next frame starts a new child, which asks for a key frame
+like any fresh decoder. It costs two copies through a pipe per frame. Tested in
+`rtc-video/tests/isolated.rs` (the reproducer kills an in-process decoder; through the child it
+costs one frame and the next key frame decodes to the same picture; a hung child is killed). It
+contains the C backends' crashes too (libvpx, dav1d, OpenH264), which no in-process mechanism
+can.
+
+**The 96-byte leak** (found by phase 2's fuzz run) was this crate's wrapper, not rav1d: when the
+decoder answered "try again" (a picture waiting) and taking that picture out failed (for example
+a picture in a format the wrapper does not convert, as a hostile sequence header can announce),
+`decode_bytes` returned through `?` before releasing the temporal unit's `Dav1dData`. The buffer
+is now owned by a guard that releases it on every path (`codec::av1`, `OwnedData`). Fuzz runs
+before and after: section 6.4.
 
 **rav1d 1.1.0 (decode) and rav1e 0.8.1 (encode), without assembly**
 
@@ -468,7 +633,7 @@ at the cost of carrying the code; it is the owner's call and not done here. Re-r
 |---|---|
 | rav1d against dav1d (libaom's AV1 vectors: sizes, intra, CDF update, motion vectors, SVC L1T2 / L2T1 / L2T2) | 10 of 10 byte-identical (with `all_layers = 0`: the highest spatial layer, as a WebRTC receiver renders) |
 | rav1d speed | 360p: 136 to 182 fps; 720p: 37 to 43 fps (one thread) |
-| rav1d on hostile input | **aborts the process**: a seeded mutation of a rav1e stream panicked in `rav1d/src/decode.rs:4997`; the panic crosses rav1d's `extern "C"` API, which cannot unwind, so the process aborts whatever catches it (run 45316346260). The fuzz run found a 96-byte leak within minutes (not yet attributed to this crate's wrapper or to rav1d) |
+| rav1d on hostile input | **aborts the process**: a seeded mutation of a rav1e stream panicked in `rav1d/src/decode.rs:4997`; the panic crosses rav1d's `extern "C"` API, which cannot unwind, so the process aborts whatever catches it (run 45316346260; 711 of 19,352 single-bit flips of a key frame do it, rav1d issue 1497, section 4.8). The fuzz run found a 96-byte leak within minutes: this crate's wrapper (4.8) |
 | rav1e speed, speed preset 10 | 360p camera: 4.8 to 6.3 fps; 360p synthetic: 7.8 to 10.2 fps; 720p camera: 1.4 to 1.8 fps; presets 8 and 6 slower (2.0 to 2.6, 1.2 to 1.6 fps at 360p) |
 | rav1e latency | holds 4 pictures back even in low-latency mode (`keyframe_lookahead_distance` = reordering latency + 1, plus one picture of RDO look-ahead): 133 ms at 30 fps before the first output |
 | rav1e rate and quality | synthetic 640x360: 612 to 655 kbit/s for 600, 39.6 to 40.2 dB; the camera clip overshoots in 60 pictures (1572 kbit/s at 360p) |
@@ -480,7 +645,7 @@ time: 5 to 8 pictures a second at 360p, against 30. It can decode AV1 in real ti
 720p30 on one core, but rav1d aborts the process on a malformed frame, and a peer chooses
 what it sends: that cannot be a default of a library that takes media from the network. The
 `av1` feature is for an application that accepts both limits (a trusted sender, or decode in a
-separate process). The real-time AV1 path is the opt-in `dav1d` (decode) and the libaom or SVT
+separate process: `codec::isolated`, 4.8). The real-time AV1 path is the opt-in `dav1d` (decode) and the libaom or SVT
 encoders, which need C and assembly.
 
 **Not done in this phase:** the opt-in backends that link system libraries (`libvpx`, `dav1d`,
@@ -522,14 +687,17 @@ prompt; none runs in CI.
 
 | | Receive (decode) | Send (encode) |
 |---|---|---|
-| Default (pure Rust) | VP8 (`vp8-decoder`, real time to 720p and beyond) | VP8 (`vp8-encoder`, real time to 720p on one core) |
-| `av1` (pure Rust, opt-in) | AV1 (`rav1d`, real time to 720p30 on one core; not safe on hostile input) | AV1 (`rav1e`, not real time: 5 to 8 fps at 360p) |
+| Default (pure Rust) | nothing (the pipeline receives, assembles and times every payload format; no decoder) | nothing |
+| `vp8` (pure Rust, opt-in until the owner decides, 4.7) | VP8 (`vp8-decoder`, real time to 720p and beyond) | VP8 (`vp8-encoder`, real time to 720p on one core) |
+| `av1` (pure Rust, opt-in) | AV1 (`rav1d`, real time to 720p30 on one core; a hostile frame aborts the process, 4.8) | AV1 (`rav1e`, not real time: 5 to 8 fps at 360p) |
+| `isolation` (opt-in) | any of these in a child process: a crash costs a frame (4.8) | - |
 | `libvpx` | VP8, VP9 | VP8, VP9 (SVC included) |
 | `dav1d` | AV1 at browser speed | - |
 | `openh264` | H.264 Constrained Baseline | H.264 Constrained Baseline |
 | hardware | H.264, H.265, others per platform | H.264, H.265 per platform |
 
-The default build cannot do VP9 or H.264 at all. The receive pipeline of phase 1 is
+The default build decodes no video at all until the application enables a codec feature or
+registers its own decoder; it cannot do VP9 or H.264 at all. The receive pipeline of phase 1 is
 codec-agnostic: it assembles, orders, times and requests key frames for every payload format
 the engine depacketizes, and hands frames to whichever decoder the application registers.
 
@@ -543,7 +711,11 @@ the engine depacketizes, and hands frames to whichever decoder the application r
   timing, key-frame policy, render statistics), the decoder and encoder traits, the send
   pipeline (cadence, scaling, allocation, adaptation), the codec backends behind features,
   and `engine` (feature, default) for the glue to `RTCRtpReceiver` / `RTCRtpSender`, as
-  `rtc-audio` does. Default features: `engine` and `vp8` (4.6); `av1` is opt-in.
+  `rtc-audio` does. Default features: `engine` only; `vp8` (4.7), `av1` (4.8) and `isolation`
+  are opt-in. The engine does not depend on `rtc-video` in any way (not even as a
+  dev-dependency): the interop peer's video scenario is built by the `rtc-video-interop`
+  package (`rtc-video/interop`, not published) from `examples/interop-peer`, and the
+  workspace's ordinary builds compile no codec (6.4).
 - **Capture**: not in `rtc-devices`, which is audio-only and another agent's; a crate
   `rtc-video-devices` (or features of `rtc-video`) for cameras and screens is an owner decision
   (section 7). Synthetic sources (test patterns, moving shapes, noise) are in `rtc-video` itself
@@ -757,7 +929,9 @@ Built: the `vp8` (default) and `av1` (opt-in) backends (`codec::vp8`, `codec::av
 `openh264` backends.
 
 Browser cells (`scripts/test-env/interop/webrtc.spec.mjs`, `pipeline receive VP8` and
-`pipeline receive AV1`; interop-peer scenario `{"media":"pipeline","video":...}`): the
+`pipeline receive AV1`; interop-peer scenario `{"media":"pipeline","video":...}`, which only
+the peer built by `cargo build -p rtc-video-interop --features pipeline` (binary
+`interop-peer-video`, what `scripts/test-env/interop/run.sh` now starts) has): the
 browser sends its canvas track, the peer runs it through `rtc-video` and its pure-Rust
 decoder and reports what it decoded. Not run here (browsers run on the integration train). The
 train must confirm, for Chromium, Firefox and WebKit: at least 15 pictures decoded within
@@ -767,7 +941,18 @@ train must confirm, for Chromium, Firefox and WebKit: at least 15 pictures decod
 encoder is skipped by its own capabilities. Rust sending to the browser waits for phase 3
 (the send pipeline).
 
-### Phase 3: the send pipeline (`conf/vp-5-send`)
+#### 6.4 Codec safety (`conf/vp-6-codec-safety`)
+
+What changed: `vp8` opt-in (4.7, with `scripts/check-video-codec-pins.py`); the AV1 wrapper's
+leak fixed and the abort documented where the feature is (4.8); `codec::vp8` catches a decoder
+panic (pure Rust: it unwinds) and replaces the decoder; `codec::isolated` (feature
+`isolation`); the `rtc` crate no longer dev-depends on `rtc-video`: the interop peer's
+`pipeline` scenario is behind the `pipeline` feature of the new `rtc-video-interop` package,
+which compiles the same `examples/interop-peer/interop-peer.rs`.
+
+MEASUREMENTS_6_4
+
+### Phase 3: the send pipeline (`conf/vp-7-send`)
 
 Synthetic sources, cadence adapter, I420 scaler, encoder driver with rate control from
 `target_bitrates()`, key frames on `OnKeyFrameRequest`, simulcast (one encoder per RID),
@@ -796,7 +981,8 @@ flash / beep source in both directions.
 | Decision | Recommendation | Meanwhile |
 |---|---|---|
 | 1. H.264 software encoding in scope at all | Yes, opt-in only: `openh264` with the Cisco binary loaded at run time (the only route with a patent licence that costs the application nothing, under Cisco's four conditions); building from source as a separate named feature; no pure-Rust H.264 encoder (the only candidate's provenance is unclear) | H.264 receive is fully supported by the codec-agnostic pipeline; no H.264 code is written until decided |
-| 2. Accept `vp8-decoder` / `vp8-encoder` (published 2026-11-23, unproven) as default dependencies | Yes, conditional on phase 2's checks; otherwise VP8 only through `libvpx` | phase 1 needs no codec |
+| 2. Accept `vp8-decoder` / `vp8-encoder` (first published 2026-11-06 by a crates.io account from 2026-11-03; one-commit repository; section 4.7) as default dependencies | Yes, pinned by exact version and checksum (`scripts/check-video-codec-pins.py` in CI) once a VP8 fuzz target is in the train's fuzz job; not vendored (4.7 gives the reasons) | `vp8` is opt-in: the default build decodes no video |
+| 2b. AV1 decode with rav1d while 1.1.0 aborts on hostile input | Keep `av1` opt-in with the warning; recommend `isolation` for untrusted senders; move to rav1d's Rust API (catchable panics) when it is released; the opt-in `dav1d` backend as the robust decoder | the reproducer and a comment for rav1d#1521 are prepared, not posted |
 | 3. Hardware backends: order | VideoToolbox, then Media Foundation, then VA-API; NVENC when the MSRV reaches 1.93 | none built |
 | 4. Capture: where and how much | A new crate `rtc-video-devices` (camera via `nokhwa`; screen per platform), opt-in features, never run in CI | synthetic sources only |
 | 5. Screen capture in scope | Yes, after camera; with the zero-hertz cadence and screen-content encoder modes it needs | the cadence adapter and screen-content mode are designed in phase 3 |

@@ -871,6 +871,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
+- **video pipeline: codec safety** (`conf/vp-6-codec-safety`, `docs/video-pipeline.md` 4.7,
+  4.8, 6.4):
+  - Breaking: `rtc-video`'s `vp8` feature is opt-in again (default features: `engine`). The
+    default build decodes no video until the application enables a codec. Supply-chain review
+    of `vp8-decoder` / `vp8-encoder` 0.1.3 (publisher, contents against the tagged commit,
+    `unsafe`, build-time code, licences, prior art) with a recommendation for the owner;
+    `scripts/check-video-codec-pins.py` fails on any other version or checksum.
+  - `codec::av1`: the 96-byte leak found by fuzzing was the wrapper's (a temporal unit's
+    `Dav1dData` not released when taking out a waiting picture failed); now released on every
+    path. The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
+    main branch, unreleased), documented on the feature in plain words; reproducer in
+    `rtc-video/tests/data/rav1d-abort.ivf`.
+  - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process
+    (`serve` on the child's side); a child that aborts, crashes or hangs costs that frame.
+  - `codec::vp8` catches a panic of the decoder and replaces it (`DecodeError::Corrupt`).
+  - The root crate no longer dev-depends on `rtc-video`: the interop peer's `pipeline`
+    scenario is built by the new `rtc-video-interop` package (feature `pipeline`, binary
+    `interop-peer-video`, which the browser stage now starts), so workspace builds compile no
+    codec.
+
 - **video pipeline, phase 2: codecs** (`conf/vp-5-codecs`, `docs/video-pipeline.md` 4.6):
   - `rtc-video` feature `vp8` (default): VP8 decode and encode in pure Rust with
     `vp8-decoder` / `vp8-encoder` pinned to `=0.1.3`. Checked on hosted runners: the WebM
