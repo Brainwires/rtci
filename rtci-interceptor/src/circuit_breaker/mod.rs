@@ -701,7 +701,7 @@ impl CircuitBreakerInterceptor {
                 flow.stalled_reports = 0;
                 log::warn!("RTP circuit breaker: SSRC {ssrc:#x} ceased transmission ({reason:?})");
                 self.publish(ssrc);
-                self.notify(now, ssrc, Some(reason), hold);
+                let _ = hold;
             }
         }
     }
