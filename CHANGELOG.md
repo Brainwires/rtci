@@ -122,6 +122,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **examples / stun** (up-954): the `trickle-ice`, `trickle-ice-srflx` and `rtci-stun` `stun_client`
+  examples sent their STUN Binding requests with the all-zero transaction id
+  (`Box::<TransactionId>::default()`); they use `TransactionId::new()`, which RFC 8489 section 5
+  requires ("MUST be cryptographically random"), and `TransactionId`'s documentation says
+  `Default` is never for a request. The engine itself always drew random ids (ICE checks,
+  srflx gathering, the TURN client: `rand::rng()`, a CSPRNG). Same defect as
+  webrtc-rs/webrtc#954 (webrtc-rs/rtc#283), in an application's gatherer there. No engine
+  behaviour change.
+
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
   performed when DATA or a FORWARD TSN brings the cumulative TSN to its Sender's Last Assigned
