@@ -34,14 +34,16 @@ jobs:
       - name: Resolve dependencies afresh
         run: cargo generate-lockfile
       # Fails on any advisory (vulnerability, unmaintained, unsound, yanked) reachable from the
-      # library: normal and build dependencies, all features. No ignores.
+      # libraries: every workspace member's normal and build dependencies (`--workspace`;
+      # without it cargo-deny reads the root package's graph alone), all features. No ignores.
       - name: Library dependency graph
-        run: cargo deny --config .github/deny-library.toml check advisories
-      # The whole workspace, dev-dependencies and examples included; ignores in deny.toml are
+        run: cargo deny --workspace --config .github/deny-library.toml check advisories
+      # The whole workspace (`--workspace`: every member's graph), dev-dependencies and
+      # examples included; ignores in deny.toml are
       # limited to advisories that cannot reach the library, each with its reason.
       - name: Whole workspace
-        run: cargo deny --config deny.toml check advisories
+        run: cargo deny --workspace --config deny.toml check advisories
       # Permissive licences only (no GPL, LGPL or AGPL), crates.io as the only source; every
       # feature, so optional dependencies (webpki-roots) are covered.
       - name: Licences, bans and sources
-        run: cargo deny --all-features --config deny.toml check licenses bans sources
+        run: cargo deny --workspace --all-features --config deny.toml check licenses bans sources

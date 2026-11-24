@@ -593,7 +593,21 @@ fn run_case(c: &SweepCase) -> (Outcome, Duration) {
             );
         }
     }
-    (Outcome::Delivered, link.now - start)
+    // The class guard: once the link is quiet and the application has read everything it was
+    // told was readable, neither side holds anything it acknowledged and has not delivered.
+    let took = link.now - start;
+    link.run_for(Duration::from_secs(5));
+    let receiver = link.server.conn().undelivered();
+    let sender = link.client.conn().undelivered();
+    if receiver.is_some() || sender.is_some() {
+        return (
+            Outcome::Stalled(format!(
+                "acknowledged and never delivered: receiver {receiver:?}; sender {sender:?}"
+            )),
+            took,
+        );
+    }
+    (Outcome::Delivered, took)
 }
 
 /// The sweep: no combination of message size, receive buffer, ordering, I-DATA, stream count

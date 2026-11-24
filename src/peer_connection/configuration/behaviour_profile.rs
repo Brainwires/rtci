@@ -1103,6 +1103,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 5764 4.4 re-keying by a new association; libwebrtc has none, and a browser peer ignores the new tls-id",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_srtp_rekeying_dtls_client_first",
+        class: NotGovernedClass::EngineOnly,
+        note: "which side starts the automatic re-keying; no RFC names one (RFC 9429 4.1.10 resolves a collision by rollback), and it applies only between engines that re-key by themselves",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_video_receive_limits",
         class: NotGovernedClass::EngineOnly,
         note: "a=imageattr (RFC 6236); none by default in every profile, Chromium writes none",

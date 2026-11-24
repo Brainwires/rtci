@@ -1108,3 +1108,105 @@ fn a_reopened_connection_on_a_shared_port_waits_for_a_check_to_name_its_transpor
     }
     Ok(())
 }
+
+/// An ICE restart that moves the call from an ICE-TCP pair to a UDP pair: each peer selects
+/// the new pair on its own (the controlled one when the nomination reaches it, the
+/// controlling one when its response comes back), and until the other has, it still sends on
+/// the TCP pair. The TCP connection of the replaced pair stays open while the agents take data
+/// on it (`Agent::retired_media_path`, RFC 8445 section 12.2: "prepared to receive data on any
+/// of the candidates provided in the most recent candidate exchange"): it is not closed before
+/// both peers have selected the new pair. Closed by the first to select (RFC 6544 section 8
+/// applied at once), whatever the other side sent on it meanwhile was lost: one RTP packet per
+/// SRTP re-keying over ICE-TCP in `rtc-stream-driver`'s re-keying test.
+#[test]
+fn moving_from_tcp_to_udp_keeps_the_tcp_connection_until_both_peers_switched() -> Result<()> {
+    let mut net = Net::new();
+    let mut peers = peers(&net, SettingEngine::default);
+    let channel = negotiate(&mut peers, &net)?;
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &[b"over tcp".to_vec()],
+        Duration::from_secs(30),
+        |_, _| {},
+    )?;
+    let until = net.elapsed() + Duration::from_secs(3);
+    while net.elapsed() < until {
+        net.step(&mut peers);
+        net.advance(&mut peers);
+    }
+    let now = net.now;
+    for p in peers.iter_mut() {
+        assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("tcp"));
+    }
+    let selected: Vec<(usize, rtc::shared::stream::StreamId)> = net
+        .conns
+        .iter()
+        .filter(|c| c.open)
+        .flat_map(|c| {
+            [
+                Some((c.a.peer, c.a.id)),
+                c.b.as_ref().map(|b| (b.peer, b.id)),
+            ]
+        })
+        .flatten()
+        .collect();
+    assert!(!selected.is_empty(), "a TCP connection carries the pair");
+
+    // UDP opens; an ICE restart finds the UDP pair, of higher priority.
+    net.udp = true;
+    let marks: Vec<usize> = peers.iter().map(|p| p.events.len()).collect();
+    let closes = net.closes_seen.len();
+    peers[0].pc.restart_ice();
+    let offer = peers[0].pc.create_offer(None)?;
+    peers[0].pc.set_local_description(now, offer.clone())?;
+    peers[1].pc.set_remote_description(now, offer)?;
+    let answer = peers[1].pc.create_answer(None)?;
+    peers[1].pc.set_local_description(now, answer.clone())?;
+    peers[0].pc.set_remote_description(now, answer)?;
+
+    let mut closed_early = vec![];
+    let mut seen = closes;
+    exchange(
+        &mut peers,
+        &mut net,
+        channel,
+        &messages(),
+        Duration::from_secs(30),
+        |net, peers| {
+            for &(peer, id) in &net.closes_seen[seen..] {
+                let both_switched = peers.iter().zip(&marks).all(|(p, mark)| {
+                    p.events[*mark..].iter().any(|e| {
+                        matches!(e, RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_))
+                    })
+                });
+                if selected.contains(&(peer, id)) && !both_switched {
+                    closed_early.push((peer, id));
+                }
+            }
+            seen = net.closes_seen.len();
+        },
+    )?;
+    let until = net.elapsed() + Duration::from_secs(10);
+    while net.elapsed() < until {
+        net.step(&mut peers);
+        net.advance(&mut peers);
+    }
+    let now = net.now;
+    for p in peers.iter_mut() {
+        assert_eq!(nominated_protocol(&mut p.pc, now).as_deref(), Some("udp"));
+    }
+    assert_eq!(
+        closed_early,
+        vec![],
+        "the replaced pair's TCP connection closed before both peers selected the UDP pair"
+    );
+    assert_eq!(
+        net.open_connections(),
+        0,
+        "once the agents no longer take data on it, it is closed (RFC 6544 section 8): {:?}",
+        net.conns
+    );
+    Ok(())
+}
