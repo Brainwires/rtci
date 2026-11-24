@@ -34,7 +34,7 @@ shared = { workspace = true, default-features = false, features = ["ifaces"] }
 tokio.workspace = true
 socket2.workspace = true
 hickory-resolver = { version = "0.26.2", optional = true, default-features = false, features = ["tokio", "system-config"] }
-rtci = { version = "0.1.0", path = "../..", optional = true }
+rtci = { version = "0.2.0-dev", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
 
 # The `peer` module's tests need the feature (on by default; off in the workspace jobs that
