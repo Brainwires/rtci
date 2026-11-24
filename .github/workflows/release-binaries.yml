@@ -1,0 +1,174 @@
+name: Release binaries (rtc-ffi)
+
+# The prebuilt C library of rtc-ffi (cdylib, staticlib, header) for five platforms, with SHA-256
+# sums and a manifest. Runs only on a version tag or by hand: a dispatch uploads the archives
+# as workflow artifacts; a tag also attaches them to the GitHub release of that tag. Tagging and
+# publishing are the owner's decision (docs/packaging.md). No secret but GITHUB_TOKEN.
+#
+# GitHub-hosted runners on purpose (marked `runners-first:` below): choosing one of our pools
+# takes the pick-runners action, which needs RUNNER_STATUS_TOKEN, and a release build takes no
+# secret but GITHUB_TOKEN and comes from a clean image. It runs only on a tag or by hand.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: rtc-ffi (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.17 baseline (CentOS 7, Ubuntu 14.04 and later), linked by cargo-zigbuild.
+          - name: linux-x86_64
+            # runners-first: release build, no secret but GITHUB_TOKEN (see the top).
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            zigbuild: x86_64-unknown-linux-gnu.2.17
+            baseline: glibc 2.17
+          - name: linux-aarch64
+            # runners-first: release build, no secret but GITHUB_TOKEN (see the top).
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            zigbuild: aarch64-unknown-linux-gnu.2.17
+            baseline: glibc 2.17
+          - name: macos-aarch64
+            # runners-first: release build, no secret but GITHUB_TOKEN (see the top).
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            macos: '11.0'
+            baseline: macOS 11.0
+          - name: macos-x86_64
+            # runners-first: release build, no secret but GITHUB_TOKEN (see the top).
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            macos: '10.13'
+            baseline: macOS 10.13
+          - name: windows-x86_64
+            # runners-first: release build, no secret but GITHUB_TOKEN (see the top).
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            baseline: Windows 10, MSVC (dynamic CRT)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      # cargo-zigbuild (MIT) and Zig (MIT, from PyPI's ziglang) link against a glibc 2.17
+      # sysroot; both are build tools only, not dependencies of the library.
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        run: |
+          python3 -m pip install --user ziglang==0.13.0
+          cargo install cargo-zigbuild --locked --version 0.19.8
+      - name: Build (Linux, glibc 2.17)
+        if: matrix.zigbuild
+        run: cargo zigbuild -p rtc-ffi --release --target ${{ matrix.zigbuild }}
+      - name: Build
+        if: ${{ !matrix.zigbuild }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+        run: cargo build -p rtc-ffi --release --target ${{ matrix.target }}
+      - name: Check the glibc baseline
+        if: matrix.zigbuild
+        run: |
+          lib=target/${{ matrix.target }}/release/librtc_ffi.so
+          newest=$(objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "newest glibc symbol version: $newest"
+          [ "$(printf '%s\n' "$newest" GLIBC_2.17 | sort -V | tail -1)" = GLIBC_2.17 ]
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="dev-${GITHUB_SHA::12}"
+          name="rtc-ffi-${version}-${{ matrix.name }}"
+          out="dist/$name"
+          mkdir -p "$out/lib" "$out/include"
+          release="target/${{ matrix.target }}/release"
+          case "${{ matrix.target }}" in
+            *windows*) cp "$release/rtc_ffi.dll" "$release/rtc_ffi.dll.lib" "$release/rtc_ffi.lib" "$out/lib/" ;;
+            *apple*) cp "$release/librtc_ffi.dylib" "$release/librtc_ffi.a" "$out/lib/" ;;
+            *) cp "$release/librtc_ffi.so" "$release/librtc_ffi.a" "$out/lib/" ;;
+          esac
+          cp rtc-ffi/include/rtc.h "$out/include/"
+          cp LICENSE-MIT LICENSE-APACHE "$out/"
+          printf '{"target":"%s","baseline":"%s","commit":"%s"}\n' \
+            "${{ matrix.target }}" "${{ matrix.baseline }}" "$GITHUB_SHA" > "$out/build.json"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "$out"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rtc-ffi-${{ matrix.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  manifest:
+    name: Sums and manifest
+    needs: build
+    # runners-first: release job, no secret but GITHUB_TOKEN (see the top).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: rtc-ffi-*
+          path: dist
+          merge-multiple: true
+      - name: SHA-256 sums and manifest.json
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          python3 - <<'EOF'
+          import hashlib, json, os, tarfile
+          entries = []
+          for name in sorted(f for f in os.listdir(".") if f.endswith(".tar.gz")):
+              with open(name, "rb") as f:
+                  digest = hashlib.sha256(f.read()).hexdigest()
+              with tarfile.open(name) as t:
+                  build = next(m for m in t.getmembers() if m.name.endswith("/build.json"))
+                  info = json.load(t.extractfile(build))
+              entries.append({
+                  "file": name,
+                  "target": info["target"],
+                  "baseline": info["baseline"],
+                  "sha256": digest,
+                  "size": os.path.getsize(name),
+              })
+          manifest = {
+              "name": "rtc-ffi",
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "commit": os.environ["GITHUB_SHA"],
+              "abi": 1,
+              "artifacts": entries,
+          }
+          with open("manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          EOF
+          cat SHA256SUMS manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rtc-ffi-release
+          path: dist/*
+          if-no-files-found: error
+      - name: Attach to the GitHub release of the tag
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/manifest.json
+          token: ${{ secrets.GITHUB_TOKEN }}
