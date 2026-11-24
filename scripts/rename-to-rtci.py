@@ -147,6 +147,9 @@ PATCHES: list[tuple[str, str, str, str, str, bool]] = [
     ),
 ]
 
+# Markdown code blocks in these languages get the shell rules (a bare `rtc` word is the crate).
+SHELL_FENCES = ("sh", "bash", "shell", "console", "zsh")
+
 TEXT_SUFFIX_CLASS = {
     ".rs": "rust",
     ".md": "prose",
@@ -642,6 +645,12 @@ def cargo_toml(r: Renamer, path: str, text: str, crate: Crate | None, events: li
                         events.append(Event(path, i + 1, "cargo-dependency", key, r.pkg[key]))
                 elif key in (c.new for c in r.crates):
                     dotted_dep_ours = True
+            # [profile.<name>.package.<crate>]: per-package profile settings.
+            if parts[0] == "profile" and len(parts) >= 4 and parts[2] == "package":
+                key = parts[3].strip("\"'")
+                if key in r.pkg:
+                    parts[3] = parts[3].replace(key, r.pkg[key])
+                    events.append(Event(path, i + 1, "cargo-profile-package", key, r.pkg[key]))
             if parts[0] == "replace" and len(parts) >= 2:
                 m = re.match(r'^(["\'])(rtc(?:-[a-z0-9-]+)?)(:.*)$', parts[1])
                 if m and m.group(2) in r.pkg:
@@ -836,7 +845,7 @@ def rewrite_file(r: Renamer, path: str, text: str, events: list[Event], residue:
             elif fence == "toml":
                 new = r.toml_snippet(line, events, ctx)
             elif fence is not None:
-                new = r.code(line, events, ctx, path, shell=False, ffi_scope=ffi_scope)
+                new = r.code(line, events, ctx, path, shell=fence in SHELL_FENCES, ffi_scope=ffi_scope)
             elif rule and cells is not None and rule.get("keep_rows") and not re.match(r"^\s*\|[\s:|-]+\|\s*$", line):
                 exempt_reason.append("upstream test parity table (upstream crate names as keys)")
                 out.append(line)

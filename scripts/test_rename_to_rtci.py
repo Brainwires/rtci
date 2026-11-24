@@ -111,6 +111,12 @@ class CargoToml(unittest.TestCase):
         self.assertIn("[dependencies.rtci-dtls]", out)
         self.assertIn("[dependencies.rtci]", out)
 
+    def test_per_package_profile_tables(self):
+        src = '[profile.dev.package.rtc-dtls]\nopt-level = 3\n\n[profile.release.package."rtc"]\nopt-level = 3\n\n[profile.dev.package.ring]\nopt-level = 3\n'
+        out, events, _ = rewrite("Cargo.toml", src)
+        self.assertEqual(out, src.replace("package.rtc-dtls]", "package.rtci-dtls]").replace('package."rtc"]', 'package."rtci"]'))
+        self.assertEqual(sorted(e.category for e in events if e.category == "cargo-profile-package"), ["cargo-profile-package"] * 2)
+
     def test_a_registry_dependency_named_rtc_is_upstream_and_stays(self):
         src = '[dev-dependencies]\nrtc = "0.21"\n'
         out, _, _ = rewrite("x/Cargo.toml", src)
@@ -158,6 +164,17 @@ class Shell(unittest.TestCase):
 
 
 class Markdown(unittest.TestCase):
+    def test_shell_code_blocks_rename_a_bare_crate_word(self):
+        src = "```sh\nfor p in rtc-dtls rtc; do cargo publish -p $p; done  # rtc last\n```\n\nThe rtc word in prose stays.\n"
+        out, events, _ = rewrite("docs/releasing.md", src)
+        self.assertEqual(out, "```sh\nfor p in rtci-dtls rtci; do cargo publish -p $p; done  # rtc last\n```\n\nThe rtc word in prose stays.\n")
+        self.assertIn("shell-word", {e.category for e in events})
+
+    def test_a_bare_word_in_a_text_code_block_stays(self):
+        src = "```text\nrtc peer <-> browser\n```\n"
+        out, _, _ = rewrite("docs/x.md", src)
+        self.assertEqual(out, src)
+
     def test_upstream_urls_and_statements_stay(self):
         src = (
             "[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc/tree/master/rtc-dtls) and "
