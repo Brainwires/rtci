@@ -392,10 +392,13 @@ impl<'a> EndpointHandler<'a> {
                 })),
             });
         } else if self.is_early_repair(rtp_packet.header.payload_type) {
-            // A repair packet (RTX, FEC) that arrives while this endpoint's offer is pending,
-            // before the stream it repairs: the answer's `a=ssrc-group` has not arrived and
-            // there is nothing to repair yet. It is not unassociated media: the offer lists
-            // its format (RFC 3264 section 5.1), and nothing of the stream is lost with it.
+            // A repair packet (RTX, FEC) that arrives before the stream it repairs: while
+            // this endpoint's offer is pending (the answer's `a=ssrc-group` has not arrived),
+            // or for a section whose streams are not signalled (RFC 9143 section 9.2; a
+            // browser's bandwidth probes on its RTX SSRC come before its first frame). There
+            // is nothing to repair yet. It is not unassociated media (RFC 8830 section 3.1):
+            // its payload type names the section and a repair format of it, and nothing of
+            // the stream is lost with it.
             trace!("drop repair packet ssrc = {ssrc} that precedes its stream and the answer");
         } else {
             // RFC 8830 section 3.1: media that cannot be associated is not buffered; the
@@ -574,11 +577,16 @@ impl<'a> EndpointHandler<'a> {
     }
 
     /// Whether `payload_type` is a repair format (RTX, FEC) of a section a pending local
-    /// offer lists.
+    /// offer lists, or of a section whose receiver has no original stream yet (its SSRCs not
+    /// signalled, RFC 9143 section 9.2: the stream it would repair has not arrived).
     fn is_early_repair(&self, payload_type: PayloadType) -> bool {
         self.rtp_transceivers.iter().any(|transceiver| {
             transceiver.receiver().as_ref().is_some_and(|receiver| {
-                receiver.has_offered()
+                (receiver.has_offered()
+                    || receiver
+                        .get_coding_parameters()
+                        .iter()
+                        .all(|coding| coding.ssrc.is_none()))
                     && receiver.receivable_codecs().any(|codec| {
                         codec.payload_type == payload_type
                             && is_repair_mime_type(&codec.rtp_codec.mime_type)
@@ -1186,6 +1194,37 @@ mod rtx_test {
             ctx.discarded_rtp_packets, 2,
             "media that matches no stream is"
         );
+    }
+
+    /// RFC 9143 section 9.2: a section's streams need no `a=ssrc` lines. A browser that
+    /// signals none (Firefox) sends packets on its RTX SSRC (bandwidth probes) before the
+    /// first packet of the stream they repair; until that stream has arrived the RTX SSRC
+    /// cannot be associated with it (RFC 4588 section 5.3) and there is nothing to repair.
+    /// The packet is a repair format of the section, not media that cannot be associated
+    /// (RFC 8830 section 3.1): dropped, neither counted nor reported. Media of the section
+    /// that nothing took still is.
+    #[test]
+    fn a_repair_packet_before_an_unsignalled_stream_is_not_reported_as_unassociated() {
+        let mut transceivers = vec![rtx_receiver_transceiver(1000, 2000, 96, 97)];
+        // Nothing signalled, nothing arrived yet: the receiver has no stream.
+        transceivers[0]
+            .receiver_mut()
+            .as_mut()
+            .unwrap()
+            .set_coding_parameters(vec![]);
+        let mut ctx = EndpointHandlerContext::default();
+        for _ in 0..3 {
+            assert!(dispatch(&mut ctx, &mut transceivers, 2000, 97, &[0, 7, 0xDE]).is_none());
+        }
+        assert_eq!(ctx.discarded_rtp_packets, 0);
+        assert!(!ctx.event_outs.iter().any(|e| matches!(
+            e.event,
+            RTCEventInternal::RTCPeerConnectionEvent(
+                RTCPeerConnectionEvent::OnUnassociatedRtpDiscarded(_)
+            )
+        )));
+        assert!(dispatch(&mut ctx, &mut transceivers, 3000, 96, &[0xDE]).is_none());
+        assert_eq!(ctx.discarded_rtp_packets, 1, "media no stream took is");
     }
 
     #[test]

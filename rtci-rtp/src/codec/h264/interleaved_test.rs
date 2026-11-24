@@ -187,12 +187,14 @@ fn an_mtap16_carries_don_base_dond_and_timestamp_offsets() -> Result<()> {
     ];
     let (payload, timestamp) = mtap(MtapKind::Mtap16, &units)?;
     assert_eq!(90_000, timestamp, "the earliest NALU-time");
+    // Given out of decoding order, written in it (section 5.7.2: "The NAL units in the
+    // multi-time aggregation packet SHOULD be in decoding order").
     assert_eq!(
         &[
             0x5A, // NRI 2, type 26
             0x00, 0x0A, // DONB: the DON of the first NAL unit in decoding order
-            0x00, 0x02, 0x02, 0x0B, 0xB8, 0x41, 0x0B, // size 2, DOND 2, TS offset 3000
             0x00, 0x02, 0x00, 0x00, 0x00, 0x41, 0x0A, // size 2, DOND 0, TS offset 0
+            0x00, 0x02, 0x02, 0x0B, 0xB8, 0x41, 0x0B, // size 2, DOND 2, TS offset 3000
         ],
         &payload[..]
     );
@@ -200,14 +202,14 @@ fn an_mtap16_carries_don_base_dond_and_timestamp_offsets() -> Result<()> {
     assert_eq!(
         vec![
             H264NalUnit {
-                data: slice(0xB),
-                don: Some(12),
-                timestamp_offset: Some(3000),
-            },
-            H264NalUnit {
                 data: slice(0xA),
                 don: Some(10),
                 timestamp_offset: Some(0),
+            },
+            H264NalUnit {
+                data: slice(0xB),
+                don: Some(12),
+                timestamp_offset: Some(3000),
             },
         ],
         parsed
@@ -564,4 +566,79 @@ fn with_the_literal_pdon_the_order_is_the_rfc_procedures_from_don_0() {
         out.extend(buffer.flush());
         assert_eq!(rfc_6184_order(2, &sent), tags(&out), "from DON {first}");
     }
+}
+
+/// RFC 6184 section 7.2.1: "it is RECOMMENDED to set the de-interleaving buffer size, in
+/// terms of number of bytes, equal to or greater than the value of the sprop-deint-buf-req
+/// media type parameter". The buffer holds `MAX_DEINTERLEAVING_BYTES`, which this endpoint
+/// states as its `deint-buf-cap` (section 8.2.2), so every stream whose `sprop-deint-buf-req`
+/// is within it (section 7.2.1: "the properties of the received stream SHOULD be such that the
+/// receiver capabilities are not exceeded") is put in decoding order: a stream that fills the
+/// buffer to that many bytes loses nothing to the bound, and one byte more releases a unit.
+#[test]
+fn the_buffer_holds_the_deint_buf_cap_it_states() {
+    const UNITS: usize = 32;
+    let size = MAX_DEINTERLEAVING_BYTES / UNITS;
+    let big = |tag: u8| {
+        let mut data = vec![0x41, tag];
+        data.resize(size, 0xAA);
+        Bytes::from(data)
+    };
+    let mut buffer = H264DeinterleavingBuffer::new(32767, None);
+    // Sent in the reverse of decoding order: every unit has to wait for all the others.
+    for don in (0..UNITS as u16).rev() {
+        assert!(
+            buffer.push(unit(don, big(don as u8))).is_empty(),
+            "nothing leaves while the buffer holds no more than its capacity"
+        );
+    }
+    let out = buffer.flush();
+    assert_eq!((0..UNITS as u8).collect::<Vec<_>>(), tags(&out));
+
+    let mut buffer = H264DeinterleavingBuffer::new(32767, None);
+    for don in (0..UNITS as u16).rev() {
+        buffer.push(unit(don, big(don as u8)));
+    }
+    assert_eq!(
+        1,
+        buffer.push(unit(100, slice(0xEE))).len(),
+        "one byte more"
+    );
+}
+
+/// RFC 6184 section 5.7.2: "The NAL units in the multi-time aggregation packet SHOULD be in
+/// decoding order": units given in any order, across the DON wrap, come out in ascending DON
+/// from the DON base; units that share a DON keep the order they were given in.
+#[test]
+fn mtap_units_are_written_in_decoding_order() -> Result<()> {
+    let unit = |don: u16, tag: u8| MtapUnit {
+        don,
+        timestamp: 90_000,
+        nalu: slice(tag),
+    };
+    let (payload, _) = mtap(
+        MtapKind::Mtap16,
+        &[
+            unit(2, 0xC),
+            unit(65534, 0xA),
+            unit(0, 0xB),
+            unit(2, 0xD),
+            unit(65534, 0xE),
+        ],
+    )?;
+    let parsed = H264Packet::default().nal_units(&payload)?;
+    assert_eq!(
+        vec![
+            (Some(65534), 0xA),
+            (Some(65534), 0xE),
+            (Some(0), 0xB),
+            (Some(2), 0xC),
+            (Some(2), 0xD)
+        ],
+        parsed
+            .iter()
+            .map(|u| (u.don, u.data[1]))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
 }
