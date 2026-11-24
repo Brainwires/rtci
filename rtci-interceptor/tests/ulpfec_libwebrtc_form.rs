@@ -20,8 +20,10 @@
 use bytes::Bytes;
 use rtci_interceptor::{
     AttributedPacket, Interceptor, Packet, RTCPFeedback, RTPHeaderExtension, RedPlacement,
-    Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder, UlpfecSendBuilder,
+    Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder, UlpfecReceiveBuilder,
+    UlpfecSendBuilder,
 };
+use sansio::Protocol;
 use shared::TransportContext;
 use shared::marshal::Marshal;
 use std::time::Instant;
@@ -77,10 +79,17 @@ fn stream(with_twcc: bool) -> StreamInfo {
 /// The `Chrome` profile's encoder (`configure_video_red_ulpfec`): FEC in RED packets of its own,
 /// a block closed at the end of each frame; a fixed amount, one FEC packet per block.
 fn sender(with_twcc: bool) -> impl Interceptor {
+    sender_zeroing(with_twcc, false)
+}
+
+/// [`sender`], the encoder protecting the pacer-written extensions as zeros when `zero`
+/// (`with_mutable_extensions_zeroed`, the `Chrome` profile's).
+fn sender_zeroing(with_twcc: bool, zero: bool) -> impl Interceptor {
     let mut fec = UlpfecSendBuilder::red(RED_PT, FEC_PT)
         .with_red_placement(RedPlacement::OwnPacket)
         .with_flush_on_marker(true)
         .with_adaptive_rate(false)
+        .with_mutable_extensions_zeroed(zero)
         .build();
     let tap = fec.wire_tap();
     let registry = Registry::new()
@@ -402,6 +411,112 @@ fn libwebrtcs_receiver_rebuilds_the_packet_exactly_without_pacer_extensions() {
                 Some(libwebrtc_media_copy(media[lost])),
                 libwebrtc_recover(&fec[0].payload, fec[0].header.ssrc, &arrived),
                 "frame of {count}, packet {lost} lost (sequence numbers wrap)"
+            );
+        }
+    }
+}
+
+/// With the mutable extensions zeroed in what the encoder protects, as libwebrtc's sender
+/// protects them (its FEC is computed before `RtpSenderEgress::SendPacket` writes the
+/// transport-wide sequence number, abs-send-time and toffset), libwebrtc's receiver rebuilds
+/// each lost packet exactly as it rebuilds one from its own FEC: every octet as sent, those
+/// values zero. Without it (the test above) those octets are XOR noise.
+#[test]
+fn with_mutable_extensions_zeroed_libwebrtcs_receiver_rebuilds_exactly_what_its_own_fec_would() {
+    let mut chain = sender_zeroing(true, true);
+    let wire = send(&mut chain, frame(1_000, 3, 90_000));
+    let (media, fec): (Vec<_>, Vec<_>) = wire.iter().partition(|packet| !is_fec(packet));
+    assert_eq!((3, 1), (media.len(), fec.len()), "{wire:?}");
+    let fec = fec[0];
+    for lost in 0..media.len() {
+        let arrived: Vec<Vec<u8>> = media
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != lost)
+            .map(|(_, packet)| {
+                let mut copy = libwebrtc_media_copy(packet);
+                zero_mutable_extensions(&mut copy);
+                copy
+            })
+            .collect();
+        let rebuilt = libwebrtc_recover(&fec.payload, fec.header.ssrc, &arrived)
+            .unwrap_or_else(|| panic!("packet {lost} not rebuilt"));
+        let mut expected = libwebrtc_media_copy(media[lost]);
+        zero_mutable_extensions(&mut expected);
+        assert_eq!(expected, rebuilt, "packet {lost} rebuilt exactly");
+        // The transport-wide number did leave with the packet: only the FEC left it out.
+        let mut sent = libwebrtc_media_copy(media[lost]);
+        assert_ne!(sent, rebuilt, "packet {lost}: the number was on the wire");
+        zero_mutable_extensions(&mut sent);
+        assert_eq!(sent, rebuilt);
+    }
+}
+
+/// The receiving half, as libwebrtc's receiver does it
+/// (`UlpfecReceiveBuilder::with_mutable_extensions_zeroed`): FEC computed over the packets with
+/// the pacer-written values zeroed (libwebrtc's sender's form, here the engine's sender with the
+/// same setting) rebuilds a lost packet with every octet as sent and the transport-wide number
+/// zero. A receiver that keeps the values in its copies rebuilds that number as XOR noise.
+#[test]
+fn with_mutable_extensions_zeroed_the_engines_receiver_rebuilds_libwebrtcs_form_exactly() {
+    let mut chain = sender_zeroing(true, true);
+    let wire = send(&mut chain, frame(1_000, 3, 90_000));
+    let lost = 1;
+    let media: Vec<&rtp::Packet> = wire.iter().filter(|packet| !is_fec(packet)).collect();
+    let lost_packet = media[lost].clone();
+    for zeroing in [true, false] {
+        let mut receiver = Registry::new()
+            .with(
+                Slot::FecDecoder,
+                UlpfecReceiveBuilder::red(RED_PT, FEC_PT)
+                    .with_mutable_extensions_zeroed(zeroing)
+                    .build(),
+            )
+            .build();
+        receiver.bind_remote_stream(&stream(true));
+        let mut delivered = Vec::new();
+        for packet in &wire {
+            if packet.header.sequence_number == lost_packet.header.sequence_number {
+                continue;
+            }
+            receiver
+                .handle_read(TaggedPacket {
+                    now: Instant::now(),
+                    transport: TransportContext::default(),
+                    message: AttributedPacket::new(Packet::Rtp(packet.clone())),
+                })
+                .expect("read");
+            while let Some(out) = receiver.poll_read() {
+                if let Packet::Rtp(rtp) = out.message.packet {
+                    delivered.push(rtp);
+                }
+            }
+        }
+        let rebuilt = delivered
+            .iter()
+            .find(|packet| packet.header.sequence_number == lost_packet.header.sequence_number)
+            .expect("the lost packet is rebuilt");
+        assert_eq!(
+            rebuilt.payload,
+            lost_packet.payload.slice(1..),
+            "zeroing {zeroing}"
+        );
+        let number = rebuilt
+            .header
+            .get_extension(TWCC_ID)
+            .expect("the extension is there");
+        if zeroing {
+            assert_eq!(number.as_ref(), [0, 0], "rebuilt as libwebrtc rebuilds it");
+            assert_eq!(
+                rebuilt.header.get_extension(MID_ID),
+                lost_packet.header.get_extension(MID_ID),
+                "the other extensions as sent"
+            );
+        } else {
+            assert_ne!(
+                number,
+                lost_packet.header.get_extension(TWCC_ID).unwrap(),
+                "noise: the FEC covered zeros, the copies the numbers"
             );
         }
     }

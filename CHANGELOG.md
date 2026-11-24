@@ -111,6 +111,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **fec** (fec-15): libwebrtc's ULPFEC form for the pacer-written extensions, a `Chrome`
+  profile row (`fec.ulpfec-zero-mutable-extensions`, `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`):
+  `UlpfecSendBuilder::with_mutable_extensions_zeroed` protects the transport-wide sequence
+  number, abs-send-time and toffset values as zeros (libwebrtc computes its FEC before it
+  writes them, `RtpSenderEgress::SendPacket` @ a222406d) and
+  `UlpfecReceiveBuilder::with_mutable_extensions_zeroed` zeroes them in the decoder's copies
+  (`ZeroMutableExtensions`), so a packet rebuilt on either side is exact with those values
+  zero. `configure_video_red_ulpfec_with(registry, media_engine, zero)`; the `Chrome` profile's
+  chain has it on. `Rfc` keeps RFC 5109 section 8's FEC over the packet as sent.
+
 - **fec** (fec-13): RFC 8854 section 5.2's `video/flexfec` in the offer as a setting:
   `DefaultInterceptorOptions::video_flexfec` / `configure_video_flexfec` registers
   `video/flexfec` (payload type 49, `repair-window=10000000`) and runs the RFC 8627 coder in the

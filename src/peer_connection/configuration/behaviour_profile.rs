@@ -966,6 +966,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.video_red_ulpfec,
     },
     {
+        id: "fec.ulpfec-zero-mutable-extensions",
+        setting: "DefaultInterceptorOptions::ulpfec_zero_mutable_extensions",
+        clause: "RFC 5109 8 (FEC over the packet as sent)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc modules/rtp_rtcp/source/rtp_sender_egress.cc::RtpSenderEgress::SendPacket @ a222406d: AddPacketAndGenerateFec runs before SetExtension<TransmissionOffset>, <AbsoluteSendTime> and <TransportSequenceNumber> (\"these modifications of the header below are happening after the FEC protection packets are calculated\"; modules/pacing/packet_router.cc only sets transport_sequence_number on the packet object), so its FEC covers those reserved values as zeros; ulpfec_receiver.cc::ProcessReceivedFec zeroes them in its copies (rtp_packet.cc::ZeroMutableExtensions)",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.ulpfec_zero_mutable_extensions = v,
+        read: |o: &DefaultInterceptorOptions| o.ulpfec_zero_mutable_extensions,
+    },
+    {
         id: "fec.video-flexfec",
         setting: "DefaultInterceptorOptions::video_flexfec",
         clause: "RFC 8854 5.2 (SHOULD), RFC 8627 1.1.7",

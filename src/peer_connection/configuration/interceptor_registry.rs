@@ -416,6 +416,13 @@ pub struct DefaultInterceptorOptions {
     /// desired, e.g., [RFC5109]", and FlexFEC is the mechanism it names for video; Chromium
     /// offers both for every video section.
     pub video_red_ulpfec: bool,
+    /// Whether the ULPFEC of [`Self::video_red_ulpfec`] covers the transport-wide sequence
+    /// number, abs-send-time and toffset extensions as zeros in both directions, as libwebrtc
+    /// does ([`configure_video_red_ulpfec_with`]). `false` by default: RFC 5109 section 8, the
+    /// FEC covers the packet as sent; `true` in the `Chrome` profile, so a packet a browser
+    /// rebuilds from this engine's FEC, and one this engine rebuilds from a browser's, is
+    /// exact (those values zero) instead of carrying XOR noise in them.
+    pub ulpfec_zero_mutable_extensions: bool,
     /// Whether video offers RFC 8627 FlexFEC (`video/flexfec`) and the chain sends and
     /// recovers it ([`configure_video_flexfec`]). `false` by default; `true` in the
     /// `StrictRfc` profile.
@@ -510,6 +517,10 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
                 &self.receiver_reference_time_on_audio,
             )
             .field("video_red_ulpfec", &self.video_red_ulpfec)
+            .field(
+                "ulpfec_zero_mutable_extensions",
+                &self.ulpfec_zero_mutable_extensions,
+            )
             .field("video_flexfec", &self.video_flexfec)
             .field(
                 "circuit_breaker_packet_size",
@@ -562,6 +573,7 @@ impl DefaultInterceptorOptions {
             abs_send_time_on_audio: false,
             receiver_reference_time_on_audio: false,
             video_red_ulpfec: false,
+            ulpfec_zero_mutable_extensions: false,
             video_flexfec: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
             rtcp_congestion_feedback_in_budget: false,
@@ -775,7 +787,11 @@ pub fn register_default_interceptors_with_options(
     configure_abs_send_time(media_engine)?;
     options.register_audio_extras(media_engine)?;
     let registry = if options.video_red_ulpfec {
-        configure_video_red_ulpfec(registry, media_engine)?
+        configure_video_red_ulpfec_with(
+            registry,
+            media_engine,
+            options.ulpfec_zero_mutable_extensions,
+        )?
     } else {
         registry
     };
@@ -2156,6 +2172,24 @@ pub fn configure_video_red_ulpfec(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
+    configure_video_red_ulpfec_with(registry, media_engine, false)
+}
+
+/// [`configure_video_red_ulpfec`], with the transport-wide sequence number, abs-send-time and
+/// toffset values zeroed in what the encoder protects and in the decoder's copies when
+/// `zero_mutable_extensions` (libwebrtc's form:
+/// `UlpfecSendBuilder::with_mutable_extensions_zeroed`,
+/// `UlpfecReceiveBuilder::with_mutable_extensions_zeroed`;
+/// `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`).
+///
+/// # Errors
+///
+/// When a codec cannot be registered.
+pub fn configure_video_red_ulpfec_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    zero_mutable_extensions: bool,
+) -> Result<Registry> {
     let has = |media_engine: &MediaEngine, subtype: &str| {
         media_engine.video_codecs.iter().any(|codec| {
             codec
@@ -2196,6 +2230,7 @@ pub fn configure_video_red_ulpfec(
         interceptor::UlpfecSendBuilder::red(VIDEO_RED_PAYLOAD_TYPE, VIDEO_ULPFEC_PAYLOAD_TYPE)
             .with_red_placement(interceptor::RedPlacement::OwnPacket)
             .with_flush_on_marker(true)
+            .with_mutable_extensions_zeroed(zero_mutable_extensions)
             .build();
     let tap = encoder.wire_tap();
     Ok(registry
@@ -2207,6 +2242,7 @@ pub fn configure_video_red_ulpfec(
                 VIDEO_RED_PAYLOAD_TYPE,
                 VIDEO_ULPFEC_PAYLOAD_TYPE,
             )
+            .with_mutable_extensions_zeroed(zero_mutable_extensions)
             .build(),
         ))
 }
