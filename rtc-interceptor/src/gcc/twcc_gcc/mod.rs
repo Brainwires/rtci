@@ -213,8 +213,7 @@ impl<P> GccInterceptorBuilder<P> {
                 f64::from(self.max_bitrate_bps).max(f64::from(self.min_bitrate_bps)),
             );
             // The estimate starts at 300 kbit/s, and starts over from there on a new path.
-            let estimator =
-                Gcc::new(DEFAULT_INITIAL_BITRATE, min, max).with_restart_on_path_change(true);
+            let estimator = Gcc::new(DEFAULT_INITIAL_BITRATE, min, max);
             let (control, handle) = CongestionControlBuilder::new(estimator).build_with_handle();
             GccInterceptor {
                 inner,

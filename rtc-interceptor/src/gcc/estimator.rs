@@ -133,8 +133,6 @@ pub struct Gcc {
     loss_at_queue_limit_is_overuse: bool,
     queue_limit: QueueLimitDetector,
     threshold_time_base: ThresholdTimeBase,
-    /// Whether a new path starts the estimate over from the starting estimate.
-    restart_on_path_change: bool,
 }
 
 impl Default for Gcc {
@@ -196,23 +194,7 @@ impl Gcc {
             loss_at_queue_limit_is_overuse: true,
             queue_limit: QueueLimitDetector::new(),
             threshold_time_base: ThresholdTimeBase::default(),
-            restart_on_path_change: false,
         }
-    }
-
-    /// Whether a new path ([`BandwidthEstimator::on_path_change`]: another candidate pair
-    /// selected) starts the estimate over from the starting estimate, instead of keeping the
-    /// estimate and starting only the delay measurements over (the default).
-    ///
-    /// The estimate describes the path it was measured on (RFC 8836 section 2, requirement
-    /// 1d: the flow reacts to a change of the path). Kept, it is right for a change between
-    /// like paths and wrong in either direction otherwise: too high for a slower network,
-    /// and, after an outage that the missing feedback halved it through, far too low for the
-    /// network the connection came back on. Starting over is what libwebrtc does
-    /// (`RtpTransportControllerSend::OnNetworkRouteChanged`: `restart_bwe`).
-    pub fn with_restart_on_path_change(mut self, enabled: bool) -> Self {
-        self.restart_on_path_change = enabled;
-        self
     }
 
     /// Whether a packet lost out of a queue at its limit counts as over-use for the
@@ -494,9 +476,19 @@ impl BandwidthEstimator for Gcc {
             .clamp(self.min, self.max);
     }
 
+    /// A new path (another candidate pair selected) starts the estimate over from the starting
+    /// estimate. The estimate describes the path it was measured on (RFC 8836 section 2,
+    /// requirement 1d: the flow reacts to a change of the path; draft-ietf-rmcat-gcc-02 says
+    /// nothing of it). Kept, it is right for a change between like paths and wrong in either
+    /// direction otherwise: too high for a slower network, and, after an outage that the
+    /// missing feedback halved it through, far too low for the network the connection came
+    /// back on. libwebrtc starts over as well
+    /// (`call/rtp_transport_controller_send.cc:356-357`, `OnNetworkRouteChanged`: "If it is,
+    /// restart BWE.", `restart_bwe = IsRelevantRouteChange(old_route, network_route)`, sent
+    /// to the controller at line 393 as `msg.restart_bwe`).
     fn on_path_change(&mut self, _now: Instant) {
         // Delay measurements across two paths mean nothing, and neither does where the old
-        // path converged: start the delay side over, at the current target.
+        // path converged.
         self.slope = SlopeEstimator::new();
         self.detector = OveruseDetector::new().with_threshold_time_base(self.threshold_time_base);
         self.rate = RateCalculator::default();
@@ -506,15 +498,13 @@ impl BandwidthEstimator for Gcc {
         self.queue_limit = QueueLimitDetector::new();
         self.delay_control.reset_convergence();
         self.feedback_deadline = None;
-        if self.restart_on_path_change {
-            self.target = self.initial.clamp(self.min, self.max);
-            self.delay_control.set_target(self.target);
-            self.delay_control.set_measured_rate(None);
-            self.probed_at = None;
-            self.loss_control.cap(self.target);
-            self.loss_control.raise(self.target);
-            self.last_sent = None;
-        }
+        self.target = self.initial.clamp(self.min, self.max);
+        self.delay_control.set_target(self.target);
+        self.delay_control.set_measured_rate(None);
+        self.probed_at = None;
+        self.loss_control.cap(self.target);
+        self.loss_control.raise(self.target);
+        self.last_sent = None;
     }
 
     fn handle_timeout(&mut self, now: Instant) {

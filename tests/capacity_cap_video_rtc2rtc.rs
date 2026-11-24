@@ -712,12 +712,13 @@ impl Peer {
         (shares > 0).then_some(total as u32)
     }
 
-    /// The fraction of packets the default chain's congestion controller counts as lost
-    /// (smoothed); `None` in ParolNet's chain.
+    /// The fraction of packets the congestion controller counts as lost (smoothed).
     fn packet_loss(&self) -> Option<f64> {
-        self.handles
-            .as_ref()
-            .and_then(|handles| handles.congestion_control.stats().packet_loss)
+        match (&self.gcc, &self.handles) {
+            (Some(gcc), _) => gcc.stats().packet_loss,
+            (None, Some(handles)) => handles.congestion_control.stats().packet_loss,
+            _ => None,
+        }
     }
 
     /// The congestion controller's estimate itself.
@@ -1332,32 +1333,70 @@ fn run(setup: &Setup) -> Result<Outcome> {
     })
 }
 
-/// The six seeds under `rate_limit` (`None`: the engine's default), each outcome printed.
-fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, Outcome)>> {
+/// How long the cap is held in the permanent tests: 20 s on all six seeds, and 14, 17, 23 and
+/// 26 s on three. A bound that holds at one length only can be the phase of the estimate's
+/// climb at the instant the cap goes (the estimator this engine had until
+/// v0.22.0+brainwires.6 gave 945, 1192, 477 to 1316, 549 and 693 kbit/s twenty seconds after
+/// caps of these five lengths, whatever the retransmission rule).
+const CAP_LENGTHS: [(u64, std::ops::RangeInclusive<u64>); 5] = [
+    (20, 1..=6),
+    (14, 1..=3),
+    (17, 1..=3),
+    (23, 1..=3),
+    (26, 1..=3),
+];
+
+/// The cap lengths and seeds of [`CAP_LENGTHS`] under `rate_limit` (`None`: the engine's
+/// default), each outcome printed; with the cap's length and the seed.
+fn seeds(rate_limit: Option<RetransmissionRateLimit>) -> Result<Vec<(u64, u64, Outcome)>> {
     let mut outcomes = Vec::new();
-    for seed in 1..=6 {
-        let outcome = run(&Setup::new(seed, rate_limit))?;
-        println!("{rate_limit:?} seed {seed}: {outcome:?}");
-        outcomes.push((seed, outcome));
+    for (cap, seeds) in CAP_LENGTHS {
+        for seed in seeds {
+            let mut setup = Setup::new(seed, rate_limit).anchor(ANCHORS[0]);
+            setup.cap = Duration::from_secs(cap);
+            let outcome = run(&setup)?;
+            println!("{rate_limit:?} cap {cap} s seed {seed}: {outcome:?}");
+            outcomes.push((cap, seed, outcome));
+        }
     }
     Ok(outcomes)
 }
 
-/// Never more than 2 s without a usable frame on the receiving side, and the retransmissions
-/// congestion controlled (RFC 4588 section 7): at most 100 sent through the cap, on every seed
-/// (the rules held to the target sent 61 to 70, 11 to 14 of them dropped at the link's queue;
-/// without a limit 257 to 367 were sent and three in four dropped).
-fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
-    for (seed, outcome) in outcomes {
+/// What every run of the call without a pacer is held to, at every cap length:
+///
+/// - never more than 2 s without a usable frame on the receiving side;
+/// - the oldest picture shown from the cap on (capture to decoder) no older than `lag`;
+/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 100 sent
+///   through the cap (the rules held to the target send 42 to 78, 14 to 27 of them dropped at
+///   the link's queue; without a limit 54 to 105 are sent and more than half dropped);
+/// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
+/// - the estimate recovered: at least 800 kbit/s twenty seconds after the cap went.
+fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
+    for (cap, seed, outcome) in outcomes {
         assert!(
             outcome.freeze <= Duration::from_secs(2),
-            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            "cap {cap} s seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
         assert!(
+            outcome.lag <= lag,
+            "cap {cap} s seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
             outcome.rtx_sent <= 100,
-            "seed {seed}: {} retransmissions: {outcome:?}",
+            "cap {cap} s seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
+        );
+        assert!(
+            outcome.under >= 200_000,
+            "cap {cap} s seed {seed}: {} bit/s under the cap: {outcome:?}",
+            outcome.under
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "cap {cap} s seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
         );
     }
 }
@@ -1379,14 +1418,19 @@ fn assert_no_long_freeze(outcomes: &[(u64, Outcome)]) {
 /// is asked for while it is missing, the retransmissions stay within the estimate, and the
 /// encoder leaves them room.
 ///
-/// Not asserted: the estimate 20 s after the cap went (`estimate_after` in the output). In
-/// ParolNet's simulation v0.22.0+brainwires.5 was at 1.18 Mbit/s there; here it depends on
-/// the seed: GCC climbs from its floor at 8% a second, and when it has reached the capacity
-/// again before the cap goes, the loss at the overflowing queue cuts it back to the floor on
-/// every feedback (draft-ietf-rmcat-gcc-02 section 6) just before the path opens.
+/// The cap is held 14, 17, 20, 23 and 26 s ([`CAP_LENGTHS`]) and the same bounds hold at each
+/// ([`assert_the_call_holds`]): with the engine's GCC estimator behind the TWCC-driven
+/// interceptor (a loss-based estimate of its own, over-use backing off from the received
+/// rate, the estimate within one and a half times the received rate: draft-ietf-rmcat-gcc-02
+/// sections 5.5 and 6) the estimate holds about 250 kbit/s of the 300 under the cap and is
+/// at 1 to 1.35 Mbit/s twenty seconds after it, whenever the cap goes.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
-    assert_no_long_freeze(&seeds(None)?);
+    // Measured (hosted runs 45315535896, 45312738975): freeze 0.83 to 1.24 s at 20 s (0.88
+    // to 1.75 s before retransmissions left oldest first), the oldest picture 2.26 to 3.21 s,
+    // 43 to 66 retransmissions, 238 to 266 kbit/s under the cap, 988 to 1352 kbit/s twenty
+    // seconds after it at every length.
+    assert_the_call_holds(&seeds(None)?, Duration::from_millis(3_500));
     Ok(())
 }
 
@@ -1396,7 +1440,13 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
 {
-    assert_no_long_freeze(&seeds(Some(RetransmissionRateLimit::UpToTarget))?);
+    // Measured under this setting (hosted run 45315535896, six seeds, three wall clocks):
+    // freeze 0.84 to 1.29 s, the oldest picture 2.37 to 3.49 s, 42 to 78 retransmissions
+    // (17 to 27 dropped at the link's queue, against 14 to 17 under the default).
+    assert_the_call_holds(
+        &seeds(Some(RetransmissionRateLimit::UpToTarget))?,
+        Duration::from_millis(4_000),
+    );
     Ok(())
 }
 
@@ -1491,7 +1541,9 @@ fn measure_the_capacity_cap() -> Result<()> {
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
     let outcomes: Result<Vec<_>> = (1..=6)
         .map(|seed| {
-            let outcome = run(&Setup::new(seed, None).chain(Chain::Default))?;
+            let outcome = run(&Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]))?;
             println!("default chain seed {seed}: {outcome:?}");
             Ok((seed, outcome))
         })
@@ -1517,6 +1569,24 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
+        );
+        // Measured (hosted run 45315529565, six seeds on three wall clocks): freeze 1.38 to
+        // 1.90 s, 902 to 1484 kbit/s twenty seconds after the cap, and the oldest picture
+        // shown 5.95 to 8.56 s old. That last figure is the known cost of this chain at a
+        // sudden drop: some hundred full-sized packets the path lost while the source was at
+        // 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s, of which the
+        // audio takes 76, at about 17 packets a second, under every retransmission rule (the
+        // pacer holds repairs to the estimate; without one they leave in a burst while the
+        // estimate is still falling). The bound here guards it from growing.
+        assert!(
+            outcome.lag <= Duration::from_secs(10),
+            "seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
         );
     }
     Ok(())
@@ -1638,9 +1708,17 @@ fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<(
             outcome.at_switch,
             "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
         );
+        // The estimator's own word on it: the loss it counted after the switch (the packets
+        // of the outage counted, some thirty of thirty-five, would read 0.8). The estimate
+        // itself may back off after the switch for what the new path shows (over-use sets it
+        // to 0.85 of the received rate: 178 kbit/s here), which is not the old path's loss.
         assert!(
-            outcome.lowest_after >= 200_000,
-            "seed {seed}: cut to {} for the old path's losses: {outcome:?}",
+            outcome.most_loss_after < 0.1,
+            "seed {seed}: the old path's packets counted as lost: {outcome:?}"
+        );
+        assert!(
+            outcome.lowest_after >= 150_000,
+            "seed {seed}: cut to {}: {outcome:?}",
             outcome.lowest_after
         );
     }
@@ -1666,9 +1744,15 @@ fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chai
             outcome.most_loss_after < 0.1,
             "seed {seed}: the old path's packets counted as lost: {outcome:?}"
         );
+        assert_eq!(
+            Some(300_000),
+            outcome.at_switch,
+            "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+        );
         assert!(
-            outcome.estimate_after >= outcome.at_switch,
-            "seed {seed}: the target fell after the switch: {outcome:?}"
+            outcome.lowest_after >= 150_000,
+            "seed {seed}: cut to {}: {outcome:?}",
+            outcome.lowest_after
         );
     }
     Ok(())

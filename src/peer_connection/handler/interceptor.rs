@@ -2298,6 +2298,13 @@ impl<'a>
                                     on_transport,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
+                            // A pause of the source (the pacer's queue is long) is a target
+                            // of zero for the streams; the path's estimate is unchanged.
+                            if let Some(pause) = packet.message.custom::<interceptor::PacerPause>()
+                            {
+                                self.stats
+                                    .on_outgoing_estimate(key, pause.target_bits_per_second);
+                            }
                         }
                         Attribute::Custom(value) => {
                             if let Some(event) = value.downcast_ref::<RtcpSessionEvent>() {

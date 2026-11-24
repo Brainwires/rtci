@@ -888,7 +888,7 @@ impl CircuitBreakerInterceptor {
 
         // --- Media usability (section 4.4) ---
         if let Some(usability) = config.usability {
-            let unusable = f64::from(report.fraction_lost) / 256.0 > usability.max_loss
+            let unusable = fraction_lost > usability.max_loss
                 || flow
                     .round_trip_time
                     .is_some_and(|rtt| rtt > usability.max_round_trip_time);
