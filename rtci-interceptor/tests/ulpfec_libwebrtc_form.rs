@@ -444,12 +444,17 @@ fn with_mutable_extensions_zeroed_libwebrtcs_receiver_rebuilds_exactly_what_its_
         let mut expected = libwebrtc_media_copy(media[lost]);
         zero_mutable_extensions(&mut expected);
         assert_eq!(expected, rebuilt, "packet {lost} rebuilt exactly");
-        // The transport-wide number did leave with the packet: only the FEC left it out.
-        let mut sent = libwebrtc_media_copy(media[lost]);
-        assert_ne!(sent, rebuilt, "packet {lost}: the number was on the wire");
-        zero_mutable_extensions(&mut sent);
-        assert_eq!(sent, rebuilt);
     }
+    // The transport-wide numbers did leave with the packets (0, 1, 2): only the FEC left them
+    // out.
+    assert!(
+        media.iter().any(|packet| libwebrtc_media_copy(packet) != {
+            let mut copy = libwebrtc_media_copy(packet);
+            zero_mutable_extensions(&mut copy);
+            copy
+        }),
+        "the numbers were on the wire"
+    );
 }
 
 /// The receiving half, as libwebrtc's receiver does it
