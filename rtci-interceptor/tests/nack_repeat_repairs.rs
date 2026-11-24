@@ -993,3 +993,58 @@ fn requests_and_lost_reports_without_end_stay_within_the_rate_limit() {
         "{worst} octets of retransmissions within one second, the target allows 50 000"
     );
 }
+
+/// A packet repaired twice (the report on the first retransmission was overdue, the receiver
+/// asked again): a report that the first copy was lost says nothing of the second, which is
+/// on its way, so a request keeps waiting for the second's report; that one lost, it is
+/// answered at once.
+#[test]
+fn the_loss_of_an_earlier_retransmission_does_not_end_the_wait_for_the_later_one() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let other = nack(&mut chain, ms(base, 150), &[1]);
+    feedback(&mut chain, ms(base, 180), other[0].number.unwrap(), true);
+    let first = nack(&mut chain, ms(base, 200), &[3]);
+    // No report within the wait (1 s, no round trip known): asked again, repaired again.
+    let second = nack(&mut chain, ms(base, 1_300), &[3]);
+    assert_eq!(1, second.len());
+    assert!(
+        feedback(&mut chain, ms(base, 1_350), first[0].number.unwrap(), false).is_empty(),
+        "the first copy lost: nothing leaves for it"
+    );
+    assert!(
+        nack(&mut chain, ms(base, 1_400), &[3]).is_empty(),
+        "the second copy has no report yet: the request waits"
+    );
+    let again = feedback(
+        &mut chain,
+        ms(base, 1_450),
+        second[0].number.unwrap(),
+        false,
+    );
+    assert_eq!(
+        vec![3],
+        again.iter().map(|left| left.repaired).collect::<Vec<_>>(),
+        "the second copy lost: repaired at once"
+    );
+}
+
+/// And a report that the first copy arrived is the packet's: the receiver has it, whichever
+/// copy came, so later requests are declined although the second copy's report never comes.
+#[test]
+fn the_arrival_of_an_earlier_retransmission_counts_for_the_packet() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let other = nack(&mut chain, ms(base, 150), &[1]);
+    feedback(&mut chain, ms(base, 180), other[0].number.unwrap(), true);
+    let first = nack(&mut chain, ms(base, 200), &[3]);
+    assert_eq!(1, nack(&mut chain, ms(base, 1_300), &[3]).len());
+    feedback(&mut chain, ms(base, 1_350), first[0].number.unwrap(), true);
+    // Past the wait for the second copy's report (2.3 s), inside the memory of the first's.
+    assert!(
+        nack(&mut chain, ms(base, 2_500), &[3]).is_empty(),
+        "the packet arrived with its first retransmission"
+    );
+}
