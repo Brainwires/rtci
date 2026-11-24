@@ -37,8 +37,15 @@ hickory-resolver = { version = "0.26.2", optional = true, default-features = fal
 rtci = { version = "0.2.0-dev", path = "../..", optional = true }
 bytes = { workspace = true, optional = true }
 
+[dev-dependencies]
+env_logger.workspace = true
+
 # The `peer` module's tests need the feature (on by default; off in the workspace jobs that
 # build with `--no-default-features`).
 [[test]]
 name = "peer"
+required-features = ["peer"]
+
+[[test]]
+name = "mdns"
 required-features = ["peer"]
