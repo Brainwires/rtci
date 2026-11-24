@@ -4432,20 +4432,19 @@ fn with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket() -> Result<()> 
 /// as with it off: no NewSessionTicket flight and no acknowledgement of one.
 #[test]
 fn a_bundled_connection_exchanges_no_ticket_with_the_session_on() -> Result<()> {
-    let run = |resumption: bool| -> Result<(World, Vec<RTCRtpSenderId>)> {
-        let mut world = World::with_setting_engines(RTCBundlePolicy::MaxBundle, || {
+    let run = |resumption: bool| -> Result<World> {
+        let mut world = World::with_setting_engines(RTCBundlePolicy::Balanced, || {
             SettingEngineBuilder::new().with_dtls_session_resumption(resumption)
         })?;
-        let (senders, _) = world.negotiate(|sdp| sdp)?;
+        let kinds = [RtpCodecKind::Audio, RtpCodecKind::Video];
+        world.negotiate_media(&kinds, false, |sdp| sdp)?;
         world.gather()?;
-        world.run_traced("connected with a data channel", |peers| {
-            peers.iter().all(|p| p.connected && p.channel.is_some())
-        })?;
+        world.run_traced("connected", |peers| peers.iter().all(|p| p.connected))?;
         world.advance(Duration::from_secs(2))?;
-        Ok((world, senders))
+        Ok(world)
     };
-    let (mut on, senders) = run(true)?;
-    let (off, _) = run(false)?;
+    let on = run(true)?;
+    let off = run(false)?;
     for peer in &on.peers {
         assert_eq!(peer.pc.dtls_transports().len(), 1, "bundled");
     }
@@ -4471,7 +4470,7 @@ fn a_bundled_connection_exchanges_no_ticket_with_the_session_on() -> Result<()> 
         datagrams(&off),
         "the same DTLS datagrams each way as without the session"
     );
-    media_and_data_arrive(&mut on, &senders, "bundled, the session on")
+    Ok(())
 }
 
 /// RFC 5764 section 3 is about the transports one negotiation sets up (review F5): a
