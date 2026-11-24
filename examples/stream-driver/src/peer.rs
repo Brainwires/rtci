@@ -22,6 +22,22 @@
 //! engine keeps the candidates and fires no event: the driver keeps its sockets and gives their
 //! candidates to each new ICE generation again.
 //!
+//! # mDNS
+//!
+//! A connection with mDNS on (`SettingEngineBuilder::with_multicast_dns_mode`) publishes its
+//! host addresses behind `.local` names and resolves the peer's: its ICE agents write their
+//! mDNS datagrams from local port 5353. At the first one the driver binds the host's mDNS
+//! sockets, port 5353 joined to 224.0.0.251 and, where the host has IPv6, to ff02::fb (shared
+//! with other mDNS responders of the host through address reuse); it sends the connection's
+//! queries, probes and answers there and hands what arrives back to the connection. A
+//! connection without mDNS writes none, and the driver binds nothing.
+//!
+//! Every mDNS datagram takes one message from a budget shared by every driver of the process
+//! ([`process_mdns_rate_limit`], unless [`PeerDriverConfig::mdns_rate_limit`] names another):
+//! draft-ietf-mmusic-mdns-ice-candidates section 7.1 requires "an implementation-wide rate
+//! limit" over the mDNS queries and responses of all connections. A datagram the budget refuses
+//! waits in the driver and leaves, in order, when the budget has room.
+//!
 //! # The loop
 //!
 //! ```text
@@ -37,9 +53,12 @@
 //! }
 //! ```
 
+use crate::mdns_io::{MDNS_MAX_DATAGRAM, MdnsEgress, bind_mdns_v4, bind_mdns_v6};
+pub use crate::mdns_io::{MDNS_MULTICAST_IPV6, process_mdns_rate_limit};
 use crate::sockets::{self, PortRange};
 use crate::{DriverConfig, DriverInput, StreamDriver};
 use bytes::BytesMut;
+use rtci::mdns::{MDNS_PORT, MdnsRateLimit};
 use rtci::peer_connection::RTCPeerConnection;
 use rtci::peer_connection::event::{
     RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent,
@@ -79,6 +98,11 @@ pub struct PeerDriverConfig {
     /// (each side selects on its own), and those packets must not be lost. 5 seconds by
     /// default.
     pub retired_socket_linger: Duration,
+    /// The budget the connection's mDNS datagrams take from
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 7.1). `None`, the default: the one of
+    /// the process, [`process_mdns_rate_limit`], shared by every driver that has none named.
+    /// A limit given here is shared by the drivers given clones of it.
+    pub mdns_rate_limit: Option<MdnsRateLimit>,
 }
 
 impl PeerDriverConfig {
@@ -89,6 +113,29 @@ impl PeerDriverConfig {
             udp_port_range: None,
             streams: DriverConfig::default(),
             retired_socket_linger: Duration::from_secs(5),
+            mdns_rate_limit: None,
+        }
+    }
+
+    /// The budget this configuration's mDNS takes from: the one named, or the process's.
+    pub fn mdns_rate_limit(&self) -> MdnsRateLimit {
+        self.mdns_rate_limit
+            .clone()
+            .unwrap_or_else(process_mdns_rate_limit)
+    }
+}
+
+/// The host's mDNS sockets of a driver, bound at the connection's first mDNS datagram.
+struct MdnsSockets {
+    v4: Option<(Arc<UdpSocket>, SocketAddr)>,
+    v6: Option<(Arc<UdpSocket>, SocketAddr)>,
+    readers: Vec<JoinHandle<()>>,
+}
+
+impl Drop for MdnsSockets {
+    fn drop(&mut self) {
+        for reader in &self.readers {
+            reader.abort();
         }
     }
 }
@@ -128,6 +175,12 @@ pub struct PeerDriver {
     gathered: HashSet<RTCTransportId>,
     /// Datagrams the engine wrote that no socket sent ([`Self::unsent_datagrams`]).
     unsent: u64,
+    /// The connection's mDNS datagrams, held to the budget.
+    mdns_egress: MdnsEgress,
+    /// `None` until the connection writes its first mDNS datagram.
+    mdns_sockets: Option<MdnsSockets>,
+    /// mDNS datagrams sent ([`Self::mdns_datagrams_sent`]).
+    mdns_sent: u64,
 }
 
 impl PeerDriver {
@@ -138,13 +191,16 @@ impl PeerDriver {
         Self {
             pc,
             streams: StreamDriver::new(config.streams),
-            config,
             sockets: Vec::new(),
             datagrams_tx,
             datagrams,
             events: VecDeque::new(),
             gathered: HashSet::new(),
             unsent: 0,
+            mdns_egress: MdnsEgress::new(config.mdns_rate_limit()),
+            mdns_sockets: None,
+            mdns_sent: 0,
+            config,
         }
     }
 
@@ -171,6 +227,12 @@ impl PeerDriver {
     /// UDP drops them, as the wire would). Counted so that none is lost unseen.
     pub fn unsent_datagrams(&self) -> u64 {
         self.unsent
+    }
+
+    /// How many mDNS datagrams the driver sent for the connection (queries, probes,
+    /// announcements, answers, goodbyes), after the budget let them go.
+    pub fn mdns_datagrams_sent(&self) -> u64 {
+        self.mdns_sent
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -209,6 +271,7 @@ impl PeerDriver {
                 progress = true;
             }
             if !progress {
+                self.send_mdns(Instant::now());
                 return Ok(());
             }
         }
@@ -226,7 +289,9 @@ impl PeerDriver {
         let deadline = self
             .pc
             .poll_timeout()
-            .map_or(now + wait, |due| due.min(now + wait))
+            .into_iter()
+            .chain(self.mdns_egress.next_ready(now))
+            .fold(now + wait, Instant::min)
             .max(now);
         tokio::select! {
             Some((local, peer, data)) = self.datagrams.recv() => {
@@ -287,6 +352,13 @@ impl PeerDriver {
         if datagram.transport.transport_protocol != TransportProtocol::UDP {
             return;
         }
+        let local = datagram.transport.local_addr;
+        if local.port() == MDNS_PORT && !self.sockets.iter().any(|s| s.local == local) {
+            if !self.mdns_egress.push(datagram) {
+                self.unsent += 1;
+            }
+            return;
+        }
         let sent = self
             .sockets
             .iter()
@@ -299,6 +371,45 @@ impl PeerDriver {
             });
         if !sent {
             self.unsent += 1;
+        }
+    }
+
+    /// Sends the held mDNS datagrams the budget lets go at `now`, binding the mDNS sockets at
+    /// the first. A datagram for a family the host has no mDNS socket for is unsent.
+    fn send_mdns(&mut self, now: Instant) {
+        while let Some(datagram) = self.mdns_egress.pop_ready(now) {
+            let sockets = self.mdns_sockets.get_or_insert_with(|| {
+                let mut readers = Vec::new();
+                let mut open = |bound: io::Result<std::net::UdpSocket>| {
+                    let socket = UdpSocket::from_std(bound.ok()?).ok()?;
+                    let local = socket.local_addr().ok()?;
+                    let socket = Arc::new(socket);
+                    readers.push(tokio::spawn(read_loop(
+                        socket.clone(),
+                        local,
+                        self.datagrams_tx.clone(),
+                        MDNS_MAX_DATAGRAM,
+                    )));
+                    Some((socket, local))
+                };
+                let v4 = open(bind_mdns_v4());
+                let v6 = open(bind_mdns_v6());
+                MdnsSockets { v4, v6, readers }
+            });
+            let socket = match datagram.transport.peer_addr {
+                SocketAddr::V4(_) => &sockets.v4,
+                SocketAddr::V6(_) => &sockets.v6,
+            };
+            let sent = socket.as_ref().is_some_and(|(socket, _)| {
+                socket
+                    .try_send_to(&datagram.message, datagram.transport.peer_addr)
+                    .is_ok()
+            });
+            if sent {
+                self.mdns_sent += 1;
+            } else {
+                self.unsent += 1;
+            }
         }
     }
 
@@ -480,7 +591,12 @@ impl PeerDriver {
             .map_err(io_error)?;
             let local = socket.local_addr().map_err(io_error)?;
             let socket = Arc::new(socket);
-            let reader = tokio::spawn(read_loop(socket.clone(), local, self.datagrams_tx.clone()));
+            let reader = tokio::spawn(read_loop(
+                socket.clone(),
+                local,
+                self.datagrams_tx.clone(),
+                2048,
+            ));
             self.sockets.push(HostSocket {
                 socket,
                 local,
@@ -549,8 +665,9 @@ async fn read_loop(
     socket: Arc<UdpSocket>,
     local: SocketAddr,
     tx: mpsc::UnboundedSender<(SocketAddr, SocketAddr, Vec<u8>)>,
+    max_datagram: usize,
 ) {
-    let mut buf = vec![0u8; 2048];
+    let mut buf = vec![0u8; max_datagram];
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((n, peer)) => {

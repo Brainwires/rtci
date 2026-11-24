@@ -79,6 +79,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "peer")]
+mod mdns_io;
 pub mod nat_mapping;
 #[cfg(feature = "peer")]
 pub mod peer;

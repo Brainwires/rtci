@@ -42,3 +42,7 @@ bytes = { workspace = true, optional = true }
 [[test]]
 name = "peer"
 required-features = ["peer"]
+
+[[test]]
+name = "mdns"
+required-features = ["peer"]
