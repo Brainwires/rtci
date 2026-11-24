@@ -945,7 +945,7 @@ governed_behaviours! {
         id: "gcc.threshold-time-base",
         setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
         clause: "draft-ietf-rmcat-gcc-02 5.4",
-        rfc: ThresholdTimeBase::Departure => "Departure",
+        rfc: ThresholdTimeBase::Arrival => "Arrival",
         chrome: ThresholdTimeBase::ArrivalCapped => "ArrivalCapped",
         strict_rfc: ThresholdTimeBase::Arrival => "Arrival",
         chrome_source: "libwebrtc modules/congestion_controller/goog_cc/trendline_estimator.cc::TrendlineEstimator::UpdateThreshold @ a222406d: the step is now_ms - last_update_ms_ capped at kMaxTimeDeltaMs 100, where now_ms is the packet's receive_time (delay_based_bwe.cc::DelayBasedBwe::IncomingPacketFeedback): the arrival gaps, capped; remote_bitrate_estimator/overuse_detector.cc the same",
