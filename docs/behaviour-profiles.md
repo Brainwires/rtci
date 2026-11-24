@@ -163,7 +163,7 @@ or no RFC-permitted setting changes it:
   the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an
   audit row for the owner).
 
-## 2. Engine-only capabilities: the same in every profile (27)
+## 2. Engine-only capabilities: the same in every profile (28)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
@@ -201,6 +201,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `MediaEngine::set_header_extension_encryption` | RFC 6904 encrypted header extensions offered beside the clear ones; libwebrtc's CryptoOptions has them on (api/crypto/crypto_options.h @ a222406d) but Chromium turns them on only with the kWebRtcEncryptedRtpHeaderExtensions feature (rtc_peer_connection_handler.cc @ Chromium 8dafa8bc), and takes the clear ones |
 | `DefaultInterceptorOptions::congestion_feedback` | RFC 8888 (ack ccfb) offered beside transport-cc; libwebrtc offers and accepts it only under the WebRTC-RFC8888CongestionControlFeedback field trial (pc/media_session.cc::OfferRfc8888 @ a222406d), so Chromium answers transport-cc |
 | `DefaultInterceptorOptions::unnegotiated_tmmbr` | TMMBR (RFC 5104) offered; Chromium answers no ccm tmmbr |
+| `DefaultInterceptorOptions::pacer_backlog` | the pacer's queue is flushed, with a key-frame request, when the target collapses (RFC 8834 section 6.1, RFC 8836 section 2); libwebrtc has no counterpart: it drops frames before they are numbered and drains its pacer above the target (modules/pacing/pacing_controller.cc MaybeUpdateMediaRateDueToLongQueue @ a222406d), which is pacer_queue_overflow Drain, the Chrome profile's value, under which nothing is flushed |
 | `DefaultInterceptorOptions::rapid_synchronisation` | RFC 6051 ntp-64 offered; Chromium answers without it |
 | `SettingEngineBuilder::with_dtls_alpn` | RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228) |
 | `SettingEngineBuilder::with_dtls_connection_id` | RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further |

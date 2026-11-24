@@ -944,6 +944,45 @@ impl NackResponderInterceptor {
         }
     }
 
+    /// The pacer gave its queue up at a collapse of the target
+    /// ([`PacerFlush`](crate::PacerFlush)): everything sent before on the streams it names is
+    /// forgotten (the retransmission buffer, the requests waiting, the retransmissions
+    /// counted as waiting in the pacer), so a NACK for any of it is answered by nothing.
+    /// Those packets belong to frames sized for a rate the path no longer carries, and the
+    /// stream restarts at the key frame the pacer asks the application for (RFC 8834 section
+    /// 6.1: "the likelihood of them arriving in time to be useful need[s] to be considered";
+    /// RFC 4588 section 7: the sender "MAY selectively retransmit only the packets that it
+    /// deems important"). What is written after it is buffered and repaired as ever.
+    fn forget_flushed(&mut self, flush: &crate::PacerFlush) {
+        let size = self.size;
+        for ssrc in &flush.ssrcs {
+            let Some(stream) = self.streams.get_mut(ssrc) else {
+                continue;
+            };
+            if let Some(buffer) = SendBuffer::new(size) {
+                stream.send_buffer = buffer;
+            }
+            stream.sent_at.iter_mut().for_each(|sent| *sent = None);
+            stream.last_retransmit.clear();
+        }
+        let before = self.pending.len();
+        let asked = &mut self.pending_asked;
+        let octets = &mut self.pending_octets;
+        self.pending.retain(|entry| {
+            let flushed = flush.ssrcs.contains(&entry.ssrc);
+            if flushed {
+                asked.remove(&(entry.ssrc, entry.sequence_number));
+                *octets -= entry.octets;
+            }
+            !flushed
+        });
+        if self.pending.len() != before {
+            self.release_at = None;
+        }
+        self.in_pacer
+            .retain(|(ssrc, _), _| !flush.ssrcs.contains(ssrc));
+    }
+
     /// The pacer's report of retransmissions that left it or were dropped
     /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)): no longer on their way. One that
     /// left counts its resend interval from now, the instant it went toward the wire, not from
@@ -1209,6 +1248,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         if let Some(discard) = msg.message.custom::<crate::PacerDiscard>() {
             let discard = discard.clone();
             self.forget_discarded(&discard);
+        }
+
+        // The pacer gave its queue up at a collapse: nothing sent before is repaired.
+        if let Some(flush) = msg.message.custom::<crate::PacerFlush>() {
+            let flush = flush.clone();
+            self.forget_flushed(&flush);
         }
 
         // A probe cluster the congestion controller asks for: fill it.
