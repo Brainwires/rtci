@@ -731,8 +731,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a time bound): measured with repairs older than 1 s declined and a key frame asked for
   (hosted run 45342372315), the video froze for 8.36 to 8.49 s and the oldest picture was
   7.55 to 7.77 s old, because the receiver holds the gap for its whole packet window and the
-  key frame waits behind it. Planned after this release: no repeat repair of a packet whose
-  first repair transport-wide feedback reports received, and first repairs ahead of repeats.
+  key frame waits behind it. Cause (2) is gone since repeat repairs follow the feedback
+  (behaviour change below, `conf/rtx-1-duplicate-repairs`): 1.28 to 1.29 s, oldest picture
+  2.90 to 3.20 s, 58 to 64 retransmissions of which 20 to 25 are dropped (hosted run
+  45348355656); cause (1) remains.
 - **interceptors (pacer), a sudden drop of the path's capacity**: with the default
   interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
   after a sudden drop, though it never stops for more than 2 s. Measured in
@@ -755,10 +757,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts the two apart. Giving up old repairs and asking for a key frame instead makes it
   worse for a receiver that plays in order (measured, hosted run 45342372315: frozen 8.03 to
   8.53 s, oldest picture 7.15 to 7.53 s; the receiver holds the gap for its whole packet
-  window). Planned after this release: no repeat repair of a packet whose first repair
-  transport-wide feedback reports received, and first repairs ahead of repeats.
+  window). Since repeat repairs follow the feedback (behaviour change below): longest time
+  without a usable frame 0.75 to 1.13 s, oldest picture 4.14 to 6.58 s, 59 to 80
+  retransmissions (hosted run 45348355656).
 
 ### Behaviour changes
+
+- **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
+  (`conf/rtx-1-duplicate-repairs`): a request for a packet whose retransmission per-packet
+  feedback reported received is no longer answered, and one whose retransmission left
+  without a report yet waits for it: answered at once when the retransmission is reported
+  lost, or when two round trips and the feedback interval (`REPAIR_REPORT_MARGIN`, 100 ms;
+  1 s before a round trip is known) pass without a report; held requests keep their place
+  and those behind them are served meanwhile. The receiver asks again every round trip while
+  a packet is missing, and a retransmission can wait longer than that in the path's queue:
+  after a sudden capacity drop 24 to 28 of 92 to 101 retransmissions (a chain without a
+  pacer) and 35 to 41 of 90 to 103 (the default chain) repeated a packet whose first repair
+  then arrived first (hosted traces 45341865225, 45342290711). The TWCC sender reports what
+  transport-wide feedback says of each retransmission it numbered (`RetransmissionsReported`,
+  new, on an empty RTCP carrier application-ward; keyed as `RetransmissionsLeft`); with RFC
+  8888 feedback (the default between two endpoints of this engine) the responder reads the
+  report on the RTX stream itself. Without per-packet feedback of either kind every request
+  is answered as before. RFC 4588 section 7: the sender "MAY selectively retransmit only the
+  packets that it deems important and ignore NACK messages for other packets"; RFC 8834
+  section 6.1: "It is not appropriate to blindly retransmit RTP packets in response to a
+  NACK": the sender's choice, bounded. Measured in `tests/capacity_cap_video_rtc2rtc.rs`
+  (cap after 20 s, six seeds, hosted run 45348355656; before: run 45340678499): without a
+  pacer the oldest picture 2.90 to 3.20 s (4.40 to 4.51), 58 to 64 retransmissions (92 to
+  101), longest freeze 1.28 to 1.29 s (1.28 to 1.32); the default chain 4.14 to 6.58 s (5.59
+  to 9.84), 59 to 80 (90 to 103), 0.75 to 1.13 s (0.97 to 1.91). Not offered: libwebrtc's
+  form (no resend within one round trip, `rtp_packet_history.cc` `VerifyRtt`) loses a repair
+  (`vp8_nack_jitter_buffer_rtc2rtc::a_jitter_buffer_deeper_than_the_feedback_delay_repairs_
+  every_detectable_loss` fails, hosted run 45346502179), and first repairs ahead of repeats
+  (measured, run 45349364771: freezes of 1.62 to 2.39 s without a pacer, against 1.28 to
+  1.29 s; the repeats left are repairs of lost repairs, which a receiver that plays in order
+  waits for first). Tests: `rtc-interceptor/tests/nack_repeat_repairs.rs`.
 
 - **congestion control, peer connection**: a new selected candidate pair is a new path for the
   congestion controllers also when the datagrams keep their addresses

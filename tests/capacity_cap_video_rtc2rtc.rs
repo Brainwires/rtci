@@ -1750,9 +1750,12 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
 ///
-/// Measured (hosted run 45334499296, six seeds): freeze 1.28 to 1.32 s, the oldest picture
-/// 4.40 to 4.51 s, 92 to 101 retransmissions (23 to 32 dropped at the link's queue), 246 to
-/// 254 kbit/s under the cap, 1086 to 1361 kbit/s twenty seconds after it. Some sixty video
+/// Measured (hosted run 45348355656, six seeds): freeze 1.28 to 1.29 s, the oldest picture
+/// 2.90 to 3.20 s, 58 to 64 retransmissions (20 to 25 dropped at the link's queue), 239 to
+/// 245 kbit/s under the cap, 1095 to 1229 kbit/s twenty seconds after it; the bounds below
+/// are some 30 % over the most measured (4.2 s, 85). Before a repair the feedback reports
+/// received was no longer sent again (run 45334499296): 1.28 to 1.32 s, 4.40 to 4.51 s, 92 to
+/// 101 retransmissions (23 to 32 dropped), 246 to 254 and 1086 to 1361 kbit/s. Some sixty video
 /// packets are lost before the first feedback about the capped link can arrive and while
 /// the received rate's 500 ms window still holds what arrived before the cap (about forty
 /// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
@@ -1761,16 +1764,17 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// after the first NACKs, into the link's queue still full of media sent at the old rate;
 /// and 24 to 28 of the retransmissions repeat a packet whose first repair was still in the
 /// queue when the receiver asked again, sent after that repair arrived and, oldest packet
-/// first, ahead of first repairs of newer gaps. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
+/// first, ahead of first repairs of newer gaps; the feedback on each retransmission now
+/// stops those (`RetransmissionsReported`). The release before (v0.22.0+brainwires.6, whose
+/// estimator met the cap at
 /// 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest picture
 /// 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s under the
-/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.1 to
-/// 0.3 s longer than it was, the picture up to 0.3 s older and the retransmissions half
-/// again as many, while the capped link carries 45 to 50 kbit/s more and the recovery has
-/// no slow seed (473 and 737 kbit/s on two of six before). What shortens it is not in the
-/// estimator: no repeat repair of a packet whose first repair transport-wide feedback
-/// reports received (planned), and a delay-based detector that reads a queue filling within
-/// a feedback interval (a known limit). Giving up repairs older than 1 s and asking for a key
+/// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.05 to
+/// 0.3 s longer than it was and twice as many retransmissions are dropped at the queue,
+/// while the picture is 1.0 to 1.5 s younger, the capped link carries some 40 kbit/s more
+/// and the recovery has no slow seed (473 and 737 kbit/s on two of six before). The drops
+/// are the fresh repairs sent into the full queue: what shortens that is a delay-based
+/// detector that reads a queue filling within a feedback interval (a known limit). Giving up repairs older than 1 s and asking for a key
 /// frame instead was measured (hosted run 45342372315): frozen 8.36 to 8.49 s, the oldest
 /// picture 7.55 to 7.77 s, because this receiver (the sample builder without a time bound)
 /// holds the gap for its whole packet window and the key frame waits behind it.
@@ -1790,12 +1794,12 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.freeze
         );
         assert!(
-            outcome.lag <= Duration::from_millis(5_500),
+            outcome.lag <= Duration::from_millis(4_200),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 130,
+            outcome.rtx_sent <= 85,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -1967,19 +1971,23 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // repairs to the estimate; without one they leave in a burst while the estimate is
         // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
         // still in flight when the receiver asked again (hosted traces 45341865225,
-        // 45342290711). The bound here guards it from growing.
+        // 45342290711). With the RFC 8888 feedback on each retransmission those are no longer
+        // sent (hosted run 45348355656): freeze 0.75 to 1.13 s, the oldest picture 4.14 to
+        // 6.58 s, 1064 to 2500 kbit/s twenty seconds after the cap. The bound (some 30 % over
+        // the most measured) guards it from growing.
         assert!(
-            outcome.lag <= Duration::from_secs(10),
+            outcome.lag <= Duration::from_millis(8_500),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         // The retransmissions, apart from the probe clusters' padding on the RTX stream
         // (154 to 330 packets, which this test counted with them until it told them apart):
-        // 90 to 103 on six seeds, none dropped at the link (hosted run 45343885944). The bound
-        // (as the cap after 20 s without a pacer: some 30 % over the most measured) guards
-        // them from growing, and fails if the padding is counted with them again.
+        // 59 to 80 on six seeds, none dropped at the link (hosted run 45348355656; 90 to 103
+        // while repairs the feedback reported received were sent again, run 45343885944). The
+        // bound (some 30 % over the most measured) guards them from growing, and fails if the
+        // padding is counted with them again.
         assert!(
-            outcome.rtx_sent <= 130,
+            outcome.rtx_sent <= 105,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
