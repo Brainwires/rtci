@@ -157,19 +157,24 @@ enum TapEvent {
 }
 
 type TapLog = Arc<Mutex<Vec<(Instant, TapEvent, Vec<u16>)>>>;
+/// Media sequence numbers lost for good: the uplink drops the original, and the sender's tap
+/// every RTX copy.
+type Doomed = Arc<Mutex<Vec<u16>>>;
 
 struct Tap {
     point: TapPoint,
     log: TapLog,
+    doomed: Doomed,
     read_queue: VecDeque<TaggedPacket>,
     write_queue: VecDeque<TaggedPacket>,
 }
 
 impl Tap {
-    fn new(point: TapPoint, log: TapLog) -> Self {
+    fn new(point: TapPoint, log: TapLog, doomed: Doomed) -> Self {
         Self {
             point,
             log,
+            doomed,
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
         }
@@ -238,6 +243,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Tap {
                 {
                     let osn = u16::from_be_bytes([p.payload[0], p.payload[1]]);
                     self.record(msg.now, TapEvent::RtxLeft, vec![osn]);
+                    if self.doomed.lock().expect("doomed").contains(&osn) {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -275,6 +283,8 @@ struct RepairTrace {
     horizons: Vec<(Instant, u16)>,
     /// Both peers' taps.
     log: TapLog,
+    /// Packets lost for good.
+    doomed: Doomed,
 }
 
 /// What the taps saw, summed.
@@ -477,6 +487,7 @@ fn build_pc(
     send: bool,
     nack_interval: Option<Duration>,
     log: TapLog,
+    doomed: Doomed,
 ) -> Result<(RTCPeerConnection, GccHandle, Option<RTCRtpSenderId>)> {
     let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
         inner: default_provider()?,
@@ -528,16 +539,19 @@ fn build_pc(
         ),
     );
     let registry = if send {
-        registry.with(Slot::Custom(100), Tap::new(TapPoint::SenderWire, log))
+        registry.with(
+            Slot::Custom(100),
+            Tap::new(TapPoint::SenderWire, log, doomed),
+        )
     } else {
         registry
             .with(
                 Slot::Custom(100),
-                Tap::new(TapPoint::ReceiverWire, log.clone()),
+                Tap::new(TapPoint::ReceiverWire, log.clone(), doomed.clone()),
             )
             .with(
                 Slot::Custom(10_550),
-                Tap::new(TapPoint::ReceiverGenerator, log),
+                Tap::new(TapPoint::ReceiverGenerator, log, doomed),
             )
     };
     let mut pc = RTCPeerConnectionBuilder::new()
@@ -621,8 +635,15 @@ impl Call {
         nack_interval: Option<Duration>,
     ) -> Result<Self> {
         let trace = RepairTrace::default();
-        let (spc, gcc, track) = build_pc(seed, true, None, trace.log.clone())?;
-        let (rpc, _, _) = build_pc(seed ^ 0xabcd, false, nack_interval, trace.log.clone())?;
+        let (spc, gcc, track) =
+            build_pc(seed, true, None, trace.log.clone(), trace.doomed.clone())?;
+        let (rpc, _, _) = build_pc(
+            seed ^ 0xabcd,
+            false,
+            nack_interval,
+            trace.log.clone(),
+            trace.doomed.clone(),
+        )?;
         let now = Instant::now();
         let mut call = Self {
             now,
@@ -769,12 +790,17 @@ impl Call {
         // Sender to receiver: the impaired uplink for media.
         while let Some(msg) = self.sender.pc.poll_write() {
             let header = rtp_header(&msg.message);
-            let at = if is_rtp(&msg.message) {
+            let doomed = header.is_some_and(|(ssrc, seq)| {
+                ssrc == MEDIA_SSRC && self.trace.doomed.lock().expect("doomed").contains(&seq)
+            });
+            let at = if doomed {
+                None
+            } else if is_rtp(&msg.message) {
                 self.uplink(msg.message.len())
             } else {
                 Some(now + self.link.delay)
             };
-            if self.impaired
+            if (self.impaired || doomed)
                 && let Some((MEDIA_SSRC, seq)) = header
                 && at.is_none()
             {
@@ -869,8 +895,10 @@ impl Call {
         if let Some(h) = self
             .receiver
             .video
-            .as_ref()
-            .and_then(|v| v.nack_horizon(MEDIA_SSRC))
+            .as_mut()
+            .and_then(|v| v.pipeline(MEDIA_SSRC))
+            .and_then(|p| p.nack_horizon())
+            .map(|seq| seq as u16)
             && self
                 .trace
                 .horizons
@@ -1103,5 +1131,57 @@ fn the_jitter_buffer_holds_about_the_network_jitter() -> Result<()> {
     );
     assert_eq!(s.freeze_count, 0);
     assert_eq!(s.frames_dropped, 0);
+    Ok(())
+}
+
+/// RFC 4588 6.3 in a call: a packet lost for good (the original and every retransmission)
+/// leaves the pictures after it undecodable; the pipeline asks for a key frame after its
+/// repair window and plays on from it. From the moment playout has passed the lost packet,
+/// the receiver's NACK generator asks for it no more (phase 1b: `set_nack_horizon`); without
+/// the horizon it would keep asking for as long as its receive log holds the packet.
+#[test]
+fn a_packet_lost_for_good_is_not_asked_for_once_playout_has_passed_it() -> Result<()> {
+    let mut call = Call::new(Link::lossy(0.0, 0), 15, Some(500_000))?;
+    call.run_for(Duration::from_secs(3))?;
+    let next = call
+        .trace
+        .horizons
+        .last()
+        .map(|(_, h)| *h)
+        .expect("pictures played");
+    // A packet about a second ahead of playout, lost for good.
+    let doomed = next.wrapping_add(60);
+    call.trace.doomed.lock().expect("doomed").push(doomed);
+    call.run_for(Duration::from_secs(10))?;
+    let s = report("a packet lost for good", &mut call);
+    let nacks = call.trace.nack_counts();
+    let asked = call.trace.count(TapEvent::NackGenerated, doomed);
+    let passed = call
+        .trace
+        .horizons
+        .iter()
+        .find(|(_, h)| before(doomed, *h))
+        .map(|(t, _)| *t);
+    println!(
+        "MEASURE horizon, lost for good: seq {doomed} asked for {asked} times, playout passed it \
+         {:?} ms into the call, sequence numbers asked for {} of which behind the horizon {}",
+        passed.map(|t| t.duration_since(call.start).as_millis()),
+        nacks.asked,
+        nacks.behind_horizon
+    );
+    assert!(asked > 0, "the lost packet was asked for");
+    assert!(passed.is_some(), "playout went past the lost packet");
+    assert!(
+        s.key_frame_requests
+            .contains_key(&KeyFrameReason::RepairWindow),
+        "a key frame after the repair window: {:?}",
+        s.key_frame_requests
+    );
+    assert_eq!(call.receiver.corrupt, 0);
+    assert_eq!(call.receiver.decoder.errors, 0);
+    assert_eq!(
+        nacks.behind_horizon, 0,
+        "NACKs for packets behind the horizon"
+    );
     Ok(())
 }
