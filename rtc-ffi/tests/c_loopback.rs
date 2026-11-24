@@ -104,7 +104,9 @@ fn a_c_program_exchanges_a_data_channel_message_through_the_driven_layer() {
         String::from_utf8_lossy(&built.stderr)
     );
     let ran = Command::new(&exe).output().expect("the C program runs");
-    let stdout = String::from_utf8_lossy(&ran.stdout);
+    // The C runtime writes "\n" as "\r\n" to a text-mode stdout on Windows (MSVC's CRT does for
+    // a redirected stdout too): compare lines, not bytes.
+    let stdout = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
     println!("{stdout}{}", String::from_utf8_lossy(&ran.stderr));
     assert!(ran.status.success(), "the C program failed: {}", ran.status);
     assert!(stdout.contains("the echo came back"), "{stdout}");
