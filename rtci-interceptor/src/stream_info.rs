@@ -201,6 +201,35 @@ pub struct StreamInfo {
     /// 5.1 and 6.1), which decides whether the RED interceptor sends RED. Empty when the
     /// binder did not say.
     pub section_mime_types: Vec<(u8, String)>,
+    /// The stream's ULPFEC stream when it runs in an RTP session of its own (RFC 5109 section
+    /// 14.1): see [`FecSessionStream`]. `None` for FEC in the media's own session (RED, or a
+    /// repair flow on [`ssrc_fec`](Self::ssrc_fec)) and for no FEC.
+    pub fec_session: Option<FecSessionStream>,
+}
+
+/// The FEC stream of a media stream, sent in a separate RTP session (RFC 5109 section 14.1:
+/// "the FEC stream and the payload stream SHOULD be sent through two separate RTP session").
+///
+/// In that session the FEC stream has the media stream's SSRC (section 7.2: "The SSRC value
+/// SHALL be the same as the SSRC value of the media stream it protects"). A chain keys what
+/// it keeps on the SSRC, and both sessions pass through the one chain, so within the chain
+/// the FEC stream is known by an SSRC of its own, [`ssrc`](Self::ssrc); whoever drives the
+/// chain puts the media stream's SSRC back on the FEC session's transport and takes it off
+/// again on the way in ([`FecSessionSsrcMap`](crate::FecSessionSsrcMap)), and binds
+/// [`ssrc`](Self::ssrc) as a stream of that session.
+///
+/// It is a field of its own, not [`StreamInfo::ssrc_fec`]: a repair flow named there is part
+/// of the media stream's own RTP session for every interceptor (the RTCP session reports on
+/// it there, the per-session wrappers move the stream with it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FecSessionStream {
+    /// The SSRC the FEC stream has inside the chain.
+    pub ssrc: u32,
+    /// The payload type of `ulpfec` in the FEC session's m= section (RFC 5109 section 14.1:
+    /// "dynamic payload type numbers MUST be used").
+    pub payload_type: u8,
+    /// `onelevelonly=1` on that format (RFC 5109 section 13).
+    pub one_level_only: bool,
 }
 
 impl StreamInfo {

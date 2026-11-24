@@ -46,7 +46,6 @@ RFC7742-5-2	F	S	payload	`tests/jsep_sweep_rfc9429.rs::an_offer_has_the_mandatory
 RFC7742-6.2-6	C	S	payload	Give an application-registered H.264 format without fmtp a `profile-level-id`
 RFC7742-6.2-7	C	S	sdp	Compare the level; take the RFC 6184 defaults (`42000A`, mode 0) when absent (codec matching is JSEP's)
 RFC7742-6.2-10	C	S	payload	Stale in part: the H.264 answer fmtp is this endpoint's own (`h264_answer_fmtp`, `tests/jsep_answer_fmtp.rs`), so an offered `sprop-parameter-sets` is not echoed (the audit's Bug 1 is gone; no test pins it). Open: an application-registered H.264 format whose fmtp has it is written as given: strip it from generated SDP, and test both
-RFC7798-7.2.5-1	D	L	media (running)	H.265 MRST / MRMT transmission (multi-stream), never negotiated now
 RFC7874-3-12	B	S	rtp	A test that a received telephone-event packet is delivered as RTP without disturbing the stream
 RFC7941-6-1	A	S	security	`setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it
 RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_transceiver`; mutation-check and cite

@@ -51,7 +51,8 @@ jobs:
 
       # Only the publishable crates that the baseline release also has are compared: a crate
       # new since the release has nothing to be compared with.
-      - name: Run cargo-semver-checks against the baseline tag
+      - name: List the crates the baseline release also has
+        id: crates
         if: steps.baseline.outputs.tag != ''
         env:
           BASELINE: ${{ steps.baseline.outputs.tag }}
@@ -61,11 +62,53 @@ jobs:
             cargo metadata --no-deps --format-version 1 --manifest-path "$1" |
               python3 -c 'import json,sys; print("\n".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p.get("publish") != [])))'
           }
-          packages=$(comm -12 <(names Cargo.toml) <(names ../semver-baseline/Cargo.toml))
-          if [ -z "$packages" ]; then
+          packages=$(comm -12 <(names Cargo.toml) <(names ../semver-baseline/Cargo.toml) | tr '\n' ' ')
+          if [ -z "${packages// /}" ]; then
             echo "::notice title=SemVer Check::No crate in common with $BASELINE; skipped."
-            exit 0
           fi
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
+      # The required check: the release type comes from the manifests' version, so on a line
+      # whose version already says what the next release is (0.2.0-dev after 0.1.0, see
+      # docs/releasing.md) breaking changes pass here, and a patch line still fails on them.
+      - name: Run cargo-semver-checks against the baseline tag
+        if: steps.baseline.outputs.tag != '' && steps.crates.outputs.packages != ''
+        env:
+          BASELINE: ${{ steps.baseline.outputs.tag }}
+          PACKAGES: ${{ steps.crates.outputs.packages }}
+        run: |
           args=()
-          for p in $packages; do args+=(--package "$p"); done
+          for p in $PACKAGES; do args+=(--package "$p"); done
           cargo semver-checks --baseline-rev "$BASELINE" --default-features "${args[@]}"
+
+      # Report only, never fails the job: the same comparison with the release type forced to
+      # minor, so every breaking change since the baseline is listed even while the version
+      # line allows it. Each one listed must be in CHANGELOG.md as Breaking.
+      - name: Report breaking changes since the baseline (report only)
+        if: always() && steps.baseline.outputs.tag != '' && steps.crates.outputs.packages != ''
+        continue-on-error: true
+        env:
+          BASELINE: ${{ steps.baseline.outputs.tag }}
+          PACKAGES: ${{ steps.crates.outputs.packages }}
+          CARGO_TERM_COLOR: never
+        run: |
+          args=()
+          for p in $PACKAGES; do args+=(--package "$p"); done
+          status=0
+          cargo semver-checks --baseline-rev "$BASELINE" --default-features --release-type minor \
+            "${args[@]}" > semver-report.log 2>&1 || status=$?
+          cat semver-report.log
+          {
+            echo "## Breaking since $BASELINE (expected on the 0.2 line; each must be in the CHANGELOG as Breaking)"
+            echo
+            if [ "$status" -eq 0 ]; then
+              echo "None: every compared crate passes as a minor release of $BASELINE."
+            elif grep -q -- '^--- failure' semver-report.log; then
+              echo '```'
+              grep -E -- '^--- failure|^Failed in:|^  [a-z_]+ .* in .*:[0-9]+$|^  [^ ].*:[0-9]+$|^     Summary semver requires|^    Checking ' semver-report.log
+              echo '```'
+            else
+              echo "cargo-semver-checks exited $status without a lint finding (tool or build error); see the step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
