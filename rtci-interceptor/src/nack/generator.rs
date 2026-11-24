@@ -42,6 +42,9 @@ pub struct NackGeneratorBuilder {
     reorder_delay: Duration,
     /// The round-trip time assumed until one is measured.
     round_trip_time: Option<Duration>,
+    /// Whether a first request is made when the gap is seen (see
+    /// [`NackGeneratorBuilder::with_first_request_on_arrival`]).
+    first_request_on_arrival: bool,
 }
 
 /// A limit for [`NackGeneratorBuilder::with_max_nacks_per_packet`]: ten requests, the
@@ -134,6 +137,7 @@ impl Default for NackGeneratorBuilder {
             max_packet_age: None,
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
+            first_request_on_arrival: false,
         }
     }
 }
@@ -213,18 +217,37 @@ impl NackGeneratorBuilder {
     /// On top of it the generator learns each stream's reordering: a first request also
     /// waits for as long as the stream's out-of-order packets arrived late in the last ten
     /// seconds (a quarter more, at most 500 ms), so a path that reorders does not have every
-    /// overtaken packet asked for and retransmitted. A packet is missing from when the packet
-    /// after it arrives; with no delay and no reordering it is asked for then (RFC 4588 6.3:
-    /// "in environments where packet reordering is rare or does not take place ... the delay
-    /// may be extremely low or even take the value zero"), and otherwise when the delay has
-    /// passed, not at the next generation cycle; on a stream that can carry FEC (a FEC flow,
-    /// or ULPFEC, FlexFEC or RED among its formats) at least one generation interval after,
-    /// for the frame's repair packets. A retransmission teaches nothing about
-    /// reordering: one that arrived as RTX is marked (`Attribute::Retransmitted`), and on a
-    /// stream without RTX a packet asked for counts as one unless it came sooner than half a
-    /// measured round trip after the request.
+    /// overtaken packet asked for and retransmitted.
     pub fn with_reorder_delay(mut self, reorder_delay: Duration) -> Self {
         self.reorder_delay = reorder_delay;
+        self
+    }
+
+    /// Whether a packet's first request is made when the gap is seen rather than at the next
+    /// generation cycle. Off by default (the `Chrome` behaviour profile turns it on).
+    ///
+    /// Off, a packet is found missing by the cycle (every [`Self::with_interval`], 100 ms)
+    /// and asked for at the first cycle after the reordering delay: 0 to 100 ms after the gap
+    /// was seen on a stream that does not reorder, 100 to 200 ms on one that does (measured:
+    /// 157 ms on average, 102 to 200, `docs/video-repair-latency.md` on the video line).
+    /// On, a packet is missing from the arrival of the packet after it; with no delay and no
+    /// learned reordering it is asked for on that arrival (RFC 4588 6.3: "in environments
+    /// where packet reordering is rare or does not take place ... the delay may be extremely
+    /// low or even take the value zero"; libwebrtc's `NackRequester::OnReceivedPacket` asks
+    /// at once while its reordering histogram is empty), otherwise exactly when the delay has
+    /// passed; a stream that can carry FEC waits one interval for the repair; and a
+    /// retransmission teaches nothing about reordering (one that came as RTX is marked
+    /// `Attribute::Retransmitted`; without RTX a packet asked for counts as one unless it came
+    /// within half a measured round trip of the request).
+    ///
+    /// Not the default because it measured worse in one scenario: after a sudden capacity drop
+    /// in the default chain (`tests/capacity_cap_video_rtc2rtc.rs`) the earlier requests put
+    /// repairs into the full queue sooner, and the longest freeze grew by about 0.15 s (0.5 s
+    /// on the release before the repair changes). On a lossy link with a jitter buffer
+    /// (`tests/vp8_nack_jitter_buffer_rtc2rtc.rs`) it repairs a loss 31 ms sooner on average and
+    /// plays more frames.
+    pub fn with_first_request_on_arrival(mut self, on: bool) -> Self {
+        self.first_request_on_arrival = on;
         self
     }
 
@@ -249,6 +272,7 @@ impl NackGeneratorBuilder {
         interceptor.max_packet_age = self.max_packet_age;
         interceptor.reorder_delay = self.reorder_delay;
         interceptor.round_trip_time = self.round_trip_time;
+        interceptor.first_request_on_arrival = self.first_request_on_arrival;
         interceptor
     }
 }
@@ -278,7 +302,8 @@ pub struct NackGeneratorInterceptor {
     /// The retransmission payload type of each bound stream that has one, by SSRC.
     rtx_payload_types: HashMap<u32, u8>,
     /// The bound streams that can carry forward error correction (a FEC flow of their own,
-    /// or ULPFEC / FlexFEC / RED among their section's formats).
+    /// FEC in an RTP session of its own, or ULPFEC / FlexFEC / RED among their section's
+    /// formats).
     fec_streams: std::collections::HashSet<u32>,
     /// The `rtx-time` the remote endpoint announced, by retransmission payload type
     /// ([`NackControl::RemoteRtxTime`](super::NackControl::RemoteRtxTime)).
@@ -286,6 +311,7 @@ pub struct NackGeneratorInterceptor {
     reorder_delay: Duration,
     /// The round-trip time to the senders, measured by the RTCP session when there is one.
     round_trip_time: Option<Duration>,
+    first_request_on_arrival: bool,
 
     /// What has been asked for, per SSRC and missing sequence number.
     requests: HashMap<u32, HashMap<u16, Request>>,
@@ -315,6 +341,7 @@ impl NackGeneratorInterceptor {
             remote_rtx_times: HashMap::new(),
             reorder_delay: Duration::ZERO,
             round_trip_time: None,
+            first_request_on_arrival: false,
             requests: HashMap::new(),
             reordering: HashMap::new(),
             write_queue: VecDeque::new(),
@@ -342,11 +369,7 @@ impl NackGeneratorInterceptor {
                 (age, rtx_time) => age.or(rtx_time),
             };
 
-            let reorder_delay = self.reorder_delay.max(
-                self.reordering
-                    .get(&ssrc)
-                    .map_or(Duration::ZERO, |reordering| reordering.allowance(now)),
-            );
+            let reorder_delay = self.first_request_delay(ssrc, now);
             let requests = self.requests.entry(ssrc).or_default();
             // A packet that arrived, or that the log no longer covers, is forgotten.
             requests.retain(|sequence_number, _| missing.contains(sequence_number));
@@ -419,7 +442,7 @@ impl NackGeneratorInterceptor {
                 .get(&ssrc)
                 .map_or(Duration::ZERO, |reordering| reordering.allowance(now)),
         );
-        if self.fec_streams.contains(&ssrc) {
+        if self.first_request_on_arrival && self.fec_streams.contains(&ssrc) {
             delay.max(self.interval)
         } else {
             delay
@@ -508,23 +531,32 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
                 })
                 .is_some();
             let round_trip_time = self.round_trip_time;
-            let asked_for = retransmitted
-                || (!self.rtx_payload_types.contains_key(&ssrc)
-                    && self
-                        .requests
-                        .get(&ssrc)
-                        .and_then(|requests| requests.get(&seq))
-                        .and_then(|request| request.first_asked)
-                        .is_some_and(|asked| {
-                            round_trip_time
-                                .is_none_or(|rtt| now.saturating_duration_since(asked) >= rtt / 2)
-                        }));
+            let on_arrival = self.first_request_on_arrival;
+            let asked_for = if !on_arrival {
+                self.requests
+                    .get(&ssrc)
+                    .and_then(|requests| requests.get(&seq))
+                    .is_some_and(|request| request.last_asked.is_some())
+            } else {
+                retransmitted
+                    || (!self.rtx_payload_types.contains_key(&ssrc)
+                        && self
+                            .requests
+                            .get(&ssrc)
+                            .and_then(|requests| requests.get(&seq))
+                            .and_then(|request| request.first_asked)
+                            .is_some_and(|asked| {
+                                round_trip_time.is_none_or(|rtt| {
+                                    now.saturating_duration_since(asked) >= rtt / 2
+                                })
+                            }))
+            };
             let reordering = self.reordering.entry(ssrc).or_default();
             let highest = reordering.highest;
             reordering.on_packet(now, seq, asked_for);
             // The packets this one shows missing are missing from now (RFC 4588 6.3: the
             // first request waits only for the reordering allowance).
-            let gap = highest.map_or(0, |highest| {
+            let gap = highest.filter(|_| on_arrival).map_or(0, |highest| {
                 let ahead = seq.wrapping_sub(highest);
                 if (2..0x8000).contains(&ahead) {
                     (ahead - 1).min(self.size)
@@ -596,10 +628,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
         {
             self.generate_nacks(now);
             let cycle = now + self.interval;
-            self.next_timeout = Some(
-                self.next_first_request(now)
-                    .map_or(cycle, |first| first.min(cycle)),
-            );
+            let first = self
+                .first_request_on_arrival
+                .then(|| self.next_first_request(now))
+                .flatten();
+            self.next_timeout = Some(first.map_or(cycle, |first| first.min(cycle)));
         }
         Ok(())
     }
@@ -624,6 +657,7 @@ impl Interceptor for NackGeneratorInterceptor {
             };
             if info.ssrc_fec.is_some()
                 || info.payload_type_fec.is_some()
+                || info.fec_session.is_some()
                 || info
                     .section_mime_types
                     .iter()

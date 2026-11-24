@@ -447,6 +447,10 @@ pub struct DefaultInterceptorOptions {
     /// it is missing (RFC 4588 section 6.3, Appendix A gives no number). See
     /// [`NackGeneratorBuilder::with_max_nacks_per_packet`](interceptor::NackGeneratorBuilder::with_max_nacks_per_packet).
     pub nack_max_nacks_per_packet: u16,
+    /// Whether the NACK generator makes a packet's first request when the gap is seen rather
+    /// than at its next generation cycle. `false` by default; `true` in the `Chrome` profile.
+    /// See [`NackGeneratorBuilder::with_first_request_on_arrival`](interceptor::NackGeneratorBuilder::with_first_request_on_arrival).
+    pub nack_first_request_on_arrival: bool,
     /// How the NACK responder's retransmissions are held to the congestion controller's
     /// target (RFC 4588 section 7). See
     /// [`NackResponderBuilder::with_rate_limit`](interceptor::NackResponderBuilder::with_rate_limit).
@@ -511,6 +515,10 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             )
             .field("nack_max_nacks_per_packet", &self.nack_max_nacks_per_packet)
             .field(
+                "nack_first_request_on_arrival",
+                &self.nack_first_request_on_arrival,
+            )
+            .field(
                 "nack_retransmission_rate_limit",
                 &self.nack_retransmission_rate_limit,
             )
@@ -549,6 +557,7 @@ impl DefaultInterceptorOptions {
             congestion_feedback_max_interval: Duration::from_millis(250),
             rtcp_random: None,
             nack_max_nacks_per_packet: 0,
+            nack_first_request_on_arrival: false,
             nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),
             wall_clock: None,
         }
@@ -1193,6 +1202,7 @@ fn configure_nack_with(
             Slot::NackGenerator,
             NackGeneratorBuilder::new()
                 .with_max_nacks_per_packet(options.nack_max_nacks_per_packet)
+                .with_first_request_on_arrival(options.nack_first_request_on_arrival)
                 .build(),
         )
 }

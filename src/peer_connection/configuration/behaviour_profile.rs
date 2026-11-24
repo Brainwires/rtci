@@ -1001,6 +1001,18 @@ governed_behaviours! {
         apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_max_nacks_per_packet = v,
         read: |o: &DefaultInterceptorOptions| o.nack_max_nacks_per_packet,
     },
+    {
+        id: "nack.first-request-on-arrival",
+        setting: "DefaultInterceptorOptions::nack_first_request_on_arrival",
+        clause: "RFC 4588 6.3",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc modules/video_coding/nack_requester.cc::NackRequester::OnReceivedPacket @ a222406d: the packet that shows a gap adds the missing ones (AddPacketsToNack, line 175; send_at_seq_num = seq_num + WaitNumberOfPackets(0.5), 0 while the reordering histogram is empty, line 229) and GetNackBatch(kSeqNumOnly) sends those due at once (line 179); repeats wait the RTT on the periodic process (GetNackBatch(kTimeOnly), line 118). Performance: same as Rfc (measured worse after a capacity drop with the pacer: longest freeze about 0.15 s longer)",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.nack_first_request_on_arrival = v,
+        read: |o: &DefaultInterceptorOptions| o.nack_first_request_on_arrival,
+    },
 }
 
 /// Why a setting is not governed by the profiles.

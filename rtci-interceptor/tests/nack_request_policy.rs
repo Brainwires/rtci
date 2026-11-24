@@ -55,31 +55,13 @@ fn generator(builder: NackGeneratorBuilder) -> impl Interceptor {
     chain
 }
 
-/// Receives 1 and 3 at `base` (2 is missing) and returns whether 2 was asked for on the
-/// arrival of 3 and then at each of `ticks` NACK cycles.
+/// Receives 1 and 3 at `base` (2 is missing) and returns, for each of `ticks` NACK cycles,
+/// whether 2 was asked for.
 fn requests(chain: &mut impl Interceptor, base: Instant, ticks: u32) -> Vec<bool> {
     chain.handle_read(rtp(base, 1)).unwrap();
     chain.handle_read(rtp(base, 3)).unwrap();
     while chain.poll_read().is_some() {}
-    let mut asked = vec![drain_asked(chain)];
-    asked.extend(cycles(chain, base, 1..=ticks));
-    asked
-}
-
-/// Whether what the chain has queued to send asks for 2.
-fn drain_asked(chain: &mut impl Interceptor) -> bool {
-    let mut asked = false;
-    while let Some(tagged) = chain.poll_write() {
-        if let Packet::Rtcp(packets) = tagged.message.packet {
-            for packet in packets {
-                if let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() {
-                    assert_eq!(SSRC, nack.media_ssrc);
-                    asked |= nack.nacks.iter().any(|p| p.packet_list().contains(&2));
-                }
-            }
-        }
-    }
-    asked
+    cycles(chain, base, 1..=ticks)
 }
 
 fn cycles(
@@ -90,7 +72,18 @@ fn cycles(
     ticks
         .map(|tick| {
             chain.handle_timeout(base + TICK * tick).unwrap();
-            drain_asked(chain)
+            let mut asked = false;
+            while let Some(tagged) = chain.poll_write() {
+                if let Packet::Rtcp(packets) = tagged.message.packet {
+                    for packet in packets {
+                        if let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() {
+                            assert_eq!(SSRC, nack.media_ssrc);
+                            asked |= nack.nacks.iter().any(|p| p.packet_list().contains(&2));
+                        }
+                    }
+                }
+            }
+            asked
         })
         .collect()
 }
@@ -122,7 +115,7 @@ fn a_lost_packet_is_not_asked_for_past_its_age() {
             .with_max_packet_age(Some(Duration::from_millis(500))),
     );
     let asked = requests(&mut chain, Instant::now(), 50);
-    // Missing from the arrival of 3, asked for then and for the half second after.
+    // Found missing at the first cycle, asked for then and for the half second after.
     assert_eq!(6, count(&asked));
     assert!(asked[..6].iter().all(|asked| *asked));
 
@@ -141,7 +134,7 @@ fn a_lost_packet_is_not_asked_for_past_its_age() {
 fn by_default_a_lost_packet_is_asked_for_while_it_is_missing() {
     let mut chain = generator(NackGeneratorBuilder::new());
     let asked = requests(&mut chain, Instant::now(), 50);
-    assert_eq!(51, count(&asked));
+    assert_eq!(50, count(&asked));
 }
 
 /// The limits can be lifted: the request repeats for as long as the packet is missing.
@@ -152,7 +145,7 @@ fn without_limits_the_request_repeats() {
             .with_max_nacks_per_packet(0)
             .with_max_packet_age(None),
     );
-    assert_eq!(51, count(&requests(&mut chain, Instant::now(), 50)));
+    assert_eq!(50, count(&requests(&mut chain, Instant::now(), 50)));
 }
 
 /// RFC 4588 6.3: "the timer value shall be based on the observed round-trip time": a packet
@@ -166,10 +159,9 @@ fn a_repeated_request_waits_for_a_round_trip() {
             .with_round_trip_time(Duration::from_millis(250)),
     );
     let asked = requests(&mut chain, Instant::now(), 10);
-    // Asked on arrival, then at the first cycles a round trip later (300, 600, 900 ms).
     assert_eq!(
         vec![
-            true, false, false, true, false, false, true, false, false, true, false
+            true, false, false, true, false, false, true, false, false, true
         ],
         asked
     );
@@ -185,7 +177,7 @@ fn the_measured_round_trip_time_paces_the_requests() {
     );
     let base = Instant::now();
     let asked = requests(&mut chain, base, 3);
-    assert_eq!(vec![true, true, true, true], asked);
+    assert_eq!(vec![true, true, true], asked);
 
     chain
         .handle_read(TaggedPacket {
@@ -216,13 +208,13 @@ fn the_first_request_waits_out_the_reordering_allowance() {
     };
     let mut chain = generator(builder());
     let asked = requests(&mut chain, Instant::now(), 4);
-    // Missing from the arrival of 3, 200 ms old at the second cycle.
-    assert_eq!(vec![false, false, true, true, true], asked);
+    // Missing at the first cycle, 200 ms old at the third.
+    assert_eq!(vec![false, false, true, true], asked);
 
     // A packet that was only late is never asked for.
     let mut chain = generator(builder());
     let base = Instant::now();
-    assert_eq!(vec![false, false], requests(&mut chain, base, 1));
+    assert_eq!(vec![false], requests(&mut chain, base, 1));
     chain
         .handle_read(rtp(base + Duration::from_millis(150), 2))
         .unwrap();
@@ -273,6 +265,99 @@ fn a_packet_past_rtx_time_is_not_retransmitted() {
     assert_eq!(1, retransmitted(None, Duration::from_secs(60)));
 }
 
+/// The sequence numbers each NACK cycle at `base + TICK * tick` asked for.
+fn asked_at(
+    chain: &mut impl Interceptor,
+    base: Instant,
+    ticks: std::ops::RangeInclusive<u32>,
+) -> Vec<Vec<u16>> {
+    ticks
+        .map(|tick| {
+            chain.handle_timeout(base + TICK * tick).unwrap();
+            let mut asked = vec![];
+            while let Some(tagged) = chain.poll_write() {
+                if let Packet::Rtcp(packets) = tagged.message.packet {
+                    for packet in packets {
+                        if let Some(nack) = packet.as_any().downcast_ref::<TransportLayerNack>() {
+                            asked.extend(nack.nacks.iter().flat_map(|p| p.packet_list()));
+                        }
+                    }
+                }
+            }
+            asked
+        })
+        .collect()
+}
+
+/// RFC 4588 6.3: the first request is delayed "to allow for reordering". The generator learns
+/// how much a stream reorders: after 2 came 60 ms behind 3, a later gap (5) is not asked for
+/// at the cycle that first finds it missing, only once 75 ms (60 ms and a quarter) have passed
+/// since; a packet that the path only reordered is then never asked for. Without that
+/// history (a fresh generator), the gap is asked for at once.
+#[test]
+fn a_stream_that_reorders_has_its_gaps_asked_for_after_its_reordering() {
+    let feed = |chain: &mut dyn FnMut(Instant, u16), base: Instant| {
+        chain(base, 1);
+        chain(base, 3);
+        chain(base + Duration::from_millis(60), 2);
+    };
+    let builder = || NackGeneratorBuilder::new().with_max_packet_age(None);
+
+    let base = Instant::now();
+    let mut chain = generator(builder());
+    feed(
+        &mut |now, seq| {
+            chain.handle_read(rtp(now, seq)).unwrap();
+        },
+        base,
+    );
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![Vec::<u16>::new()], asked_at(&mut chain, base, 1..=1));
+    for seq in [4, 6] {
+        chain
+            .handle_read(rtp(base + Duration::from_millis(150), seq))
+            .unwrap();
+    }
+    while chain.poll_read().is_some() {}
+    // Found missing at 200 ms, asked for at 300 ms (100 ms later, past 75 ms).
+    assert_eq!(
+        vec![vec![], vec![5]],
+        asked_at(&mut chain, base, 2..=3),
+        "the learned allowance holds the first request back one cycle"
+    );
+
+    // The retransmission of 5 arrives (it says nothing about reordering).
+    chain
+        .handle_read(rtp(base + Duration::from_millis(310), 5))
+        .unwrap();
+    // A late packet within the allowance is never asked for.
+    chain
+        .handle_read(rtp(base + Duration::from_millis(350), 7))
+        .unwrap();
+    chain
+        .handle_read(rtp(base + Duration::from_millis(350), 9))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![Vec::<u16>::new()], asked_at(&mut chain, base, 4..=4));
+    chain
+        .handle_read(rtp(base + Duration::from_millis(420), 8))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    let later: Vec<u16> = asked_at(&mut chain, base, 5..=8)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(!later.contains(&8), "8 came 70 ms late: {later:?}");
+
+    // Without reordering seen, the first cycle asks.
+    let mut chain = generator(builder());
+    for seq in [4, 6] {
+        chain.handle_read(rtp(base, seq)).unwrap();
+    }
+    while chain.poll_read().is_some() {}
+    assert_eq!(vec![vec![5]], asked_at(&mut chain, base, 1..=1));
+}
+
 /// What the chain has queued to send: the sequence numbers its NACKs ask for.
 fn asked_now(chain: &mut impl Interceptor) -> Vec<u16> {
     let mut asked = vec![];
@@ -317,10 +402,14 @@ fn retransmitted(now: Instant, sequence_number: u16) -> TaggedPacket {
 /// gap is asked for at once, so the first reordered packet is asked for (as libwebrtc's
 /// `NackRequester` does with an empty reordering histogram); a retransmission teaches nothing.
 #[test]
-fn a_stream_that_reorders_has_its_gaps_asked_for_after_its_reordering() {
+fn on_arrival_a_stream_that_reorders_has_its_gaps_asked_for_after_its_reordering() {
     let at = |ms: u64, base: Instant| base + Duration::from_millis(ms);
     let base = Instant::now();
-    let mut chain = rtx_generator(NackGeneratorBuilder::new().with_max_packet_age(None));
+    let mut chain = rtx_generator(
+        NackGeneratorBuilder::new()
+            .with_first_request_on_arrival(true)
+            .with_max_packet_age(None),
+    );
     chain.handle_read(rtp(base, 1)).unwrap();
     chain.handle_read(rtp(base, 3)).unwrap();
     assert_eq!(vec![2], asked_now(&mut chain), "nothing learned yet");
@@ -363,14 +452,14 @@ fn a_stream_that_reorders_has_its_gaps_asked_for_after_its_reordering() {
     assert!(!later.contains(&8), "8 came 70 ms late: {later:?}");
 }
 
-/// RFC 4588 6.3: "in environments where packet reordering is rare or does not take place
+/// With first requests on arrival (`with_first_request_on_arrival`), RFC 4588 6.3: "in environments where packet reordering is rare or does not take place
 /// ... the delay may be extremely low or even take the value zero". On a stream that has not
 /// reordered, a packet is asked for when the packet after it arrives, not at the next
 /// generation cycle (which left the first request 100 to 200 ms after the loss was seen).
 #[test]
-fn a_gap_on_a_stream_that_does_not_reorder_is_asked_for_when_it_is_seen() {
+fn on_arrival_a_gap_on_a_stream_that_does_not_reorder_is_asked_for_when_it_is_seen() {
     let base = Instant::now();
-    let mut chain = rtx_generator(NackGeneratorBuilder::new());
+    let mut chain = rtx_generator(NackGeneratorBuilder::new().with_first_request_on_arrival(true));
     chain.handle_read(rtp(base, 4)).unwrap();
     chain
         .handle_read(rtp(base + Duration::from_millis(33), 6))
@@ -397,7 +486,7 @@ fn a_gap_on_a_stream_that_does_not_reorder_is_asked_for_when_it_is_seen() {
 /// Without RTX a retransmission is the original packet again; one that comes sooner after
 /// the request than half the measured round trip cannot be it, and teaches the reordering.
 #[test]
-fn without_rtx_a_packet_too_early_to_be_its_retransmission_is_reordering() {
+fn on_arrival_without_rtx_a_packet_too_early_to_be_its_retransmission_is_reordering() {
     let base = Instant::now();
     let at = |ms: u64| base + Duration::from_millis(ms);
     let mut chain =
@@ -417,4 +506,46 @@ fn without_rtx_a_packet_too_early_to_be_its_retransmission_is_reordering() {
         "5 waits for the 50 ms allowance"
     );
     assert_eq!(Some(at(150)), chain.poll_timeout());
+}
+
+/// With first requests on arrival, a stream that can carry FEC (here a FEC flow of its own)
+/// waits one generation interval before its first request: a packet FEC rebuilds needs none.
+#[test]
+fn on_arrival_a_stream_with_fec_waits_one_interval_for_the_repair() {
+    let base = Instant::now();
+    let mut chain = Registry::new()
+        .with(
+            Slot::NackGenerator,
+            NackGeneratorBuilder::new()
+                .with_first_request_on_arrival(true)
+                .build(),
+        )
+        .build();
+    chain.bind_remote_stream(&StreamInfo {
+        ssrc_fec: Some(SSRC + 2),
+        payload_type_fec: Some(98),
+        ..stream_info()
+    });
+    chain.handle_read(rtp(base, 4)).unwrap();
+    chain
+        .handle_read(rtp(base + Duration::from_millis(33), 6))
+        .unwrap();
+    while chain.poll_read().is_some() {}
+    assert!(asked_now(&mut chain).is_empty());
+    assert_eq!(
+        Some(base + Duration::from_millis(100)),
+        chain.poll_timeout()
+    );
+    chain
+        .handle_timeout(base + Duration::from_millis(100))
+        .unwrap();
+    assert!(asked_now(&mut chain).is_empty(), "67 ms after the gap");
+    assert_eq!(
+        Some(base + Duration::from_millis(133)),
+        chain.poll_timeout()
+    );
+    chain
+        .handle_timeout(base + Duration::from_millis(133))
+        .unwrap();
+    assert_eq!(vec![5], asked_now(&mut chain));
 }

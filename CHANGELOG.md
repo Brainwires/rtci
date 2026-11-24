@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NACK generator, first requests on arrival** (`conf/nack-1-first-request`, opt-in):
+  `NackGeneratorBuilder::with_first_request_on_arrival`,
+  `DefaultInterceptorOptions::nack_first_request_on_arrival` (`false`; `true` in the `Chrome`
+  profile, row `nack.first-request-on-arrival`: libwebrtc's `NackRequester::OnReceivedPacket`
+  asks at once). By default a packet is found missing by the generator's 100 ms cycle and
+  asked for at the first cycle after the reordering delay: 0 to 100 ms after the gap was seen,
+  100 to 200 ms with any learned reordering (157 ms on average in the video line's trace).
+  With the option a packet is missing from the arrival of the packet after it and is asked for
+  then, or exactly when the reordering delay ends (RFC 4588 section 6.3 allows a delay of
+  zero where reordering is rare); a stream that can carry FEC (a FEC flow, FEC in a session of
+  its own, ULPFEC / FlexFEC / RED among its formats) waits one cycle for the repair; and a
+  retransmission teaches nothing about reordering (one that came as RTX is marked
+  `Attribute::Retransmitted`; without RTX a packet asked for counts as one unless it came
+  within half a round trip of the request). Measured: on the testenv's lossy link with a 250 ms
+  jitter buffer (`tests/vp8_nack_jitter_buffer_rtc2rtc.rs` `vp8_seeds`, 200 seeds, hosted runs
+  45421924230 / 45421930348) a loss is repaired 327 ms after the gap was seen on average
+  (358), and 59237 of 60000 frames are played (59167); after a sudden capacity drop with the
+  pacer (`tests/capacity_cap_video_rtc2rtc.rs`, six seeds on three wall clocks, with the repair
+  changes of rtx-1r/rtx-2r, run 45427875062 against 45417676638) the earlier requests put
+  repairs into the full queue sooner: longest freeze 0.96 to 1.22 s (0.81 to 1.05), 2 to 3
+  retransmissions dropped at the link (none); without a pacer 0.68 to 0.95 s (0.74 to 1.08).
+  Hence not the default. The NACK investigation tool (`vp8_seeds`) prints the repair latency.
+
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
