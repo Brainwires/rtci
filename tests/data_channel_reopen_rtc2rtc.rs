@@ -21,6 +21,9 @@ use rtc::peer_connection::transport::RTCDtlsRole;
 use std::time::Duration;
 
 const SIZE: usize = 64 * 1024;
+/// The messages of the second channel: enough to number past whatever the first channel's
+/// sender had queued when the close came (its old numbers would collide with these).
+const SECOND: u32 = 60;
 
 /// A message's bytes: its number, then a pattern that depends on it.
 fn msg(id: u32) -> Vec<u8> {
@@ -155,14 +158,14 @@ fn close_and_reopen(close_after: usize) -> Result<()> {
         &mut p,
         Duration::from_secs(120),
         |p| {
-            top_up(p, sender2, &mut next, 2000, 15);
+            top_up(p, sender2, &mut next, 2000, SECOND);
         },
-        |p| received_on(p, file2).len() >= 15,
+        |p| received_on(p, file2).len() >= SECOND as usize,
     )?;
     let got = received_on(&p, file2);
     if !all {
         bail!(
-            "close after {close_after}: file-2 got {} of its 15 messages (a stall)",
+            "close after {close_after}: file-2 got {} of its {SECOND} messages (a stall)",
             got.len()
         );
     }
