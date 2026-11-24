@@ -1394,8 +1394,9 @@ struct Outcome {
     lowest_outgoing: Option<f64>,
 }
 
-/// The call: 20 s open, the caller's uplink capped at 300 kbit/s until 20 s after its
-/// estimate went under 400 kbit/s, then open again for 20 s.
+/// The call: open for 20 s (or until the caller's target reaches `Setup::cap_at_target`),
+/// the caller's uplink capped at 300 kbit/s until `Setup::cap` (20 s) after its estimate went
+/// under 400 kbit/s, then open again for 20 s.
 fn run(setup: &Setup) -> Result<Outcome> {
     let seed = setup.seed;
     let mut world = World::connected(setup)?;
@@ -1562,6 +1563,17 @@ fn cap_20() -> Vec<(u64, std::ops::RangeInclusive<u64>)> {
     vec![(20, seed_range(3, 6))]
 }
 
+/// The target the caller's encoder has reached when the cap arrives in the permanent tests
+/// of the call without a pacer: 1 Mbit/s, some 15.5 s into the call. Their bounds were
+/// measured on a cap that arrived at this rate (20 s into the call under the estimator of
+/// v0.22.0+brainwires.6's branch, whose estimate stepped down on an open link and climbed
+/// that much slower). How much is lost at a cap is a matter of the rate it meets: for
+/// some 0.45 s (the capped link's 300 ms of queue, the path and a feedback interval) nothing
+/// can tell the sender, and what it sends above the link's rate meanwhile is dropped. The
+/// cap that arrives after 20 s, at 1.4 Mbit/s, is
+/// [`a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`].
+const CAP_AT_TARGET: u32 = 1_000_000;
+
 /// The cap `lengths` and their seeds under `rate_limit` (`None`: the engine's default), each
 /// outcome printed; with the cap's length and the seed.
 fn seeds(
@@ -1571,7 +1583,9 @@ fn seeds(
     let mut outcomes = Vec::new();
     for (cap, seeds) in lengths.iter().cloned() {
         for seed in seeds {
-            let mut setup = Setup::new(seed, rate_limit).anchor(ANCHORS[0]);
+            let mut setup = Setup::new(seed, rate_limit)
+                .anchor(ANCHORS[0])
+                .capped_at_a_target_of(CAP_AT_TARGET);
             setup.cap = Duration::from_secs(cap);
             let outcome = run(&setup)?;
             println!("{rate_limit:?} cap {cap} s seed {seed}: {outcome:?}");
@@ -1586,8 +1600,8 @@ fn seeds(
 /// - never more than 2 s without a usable frame on the receiving side;
 /// - the oldest picture shown from the cap on (capture to decoder) no older than `lag`;
 /// - the retransmissions congestion controlled (RFC 4588 section 7): at most 100 sent
-///   through the cap (the rules held to the target send 42 to 78, 14 to 27 of them dropped at
-///   the link's queue; without a limit 54 to 105 are sent and more than half dropped);
+///   through the cap (the rules held to the target send 42 to 54, 13 to 17 of them dropped at
+///   the link's queue; without a limit 54 to 105 were sent and more than half dropped);
 /// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
 /// - the estimate recovered: at least 800 kbit/s twenty seconds after the cap went.
 fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
@@ -1628,8 +1642,8 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
 /// v0.22.0+brainwires.6 froze for 5.9 to 6.8 s here on every seed; now 1.33 to 1.44 s, and
 /// 2.46 to 2.47 s with the RFC's sharing but without the lowered target).
 ///
-/// When the cap comes, the sender is still at 1.4 Mbit/s for half a second and some fifty
-/// video packets are dropped at the link's queue. With the release's NACK request policy (ten
+/// When the cap comes ([`CAP_AT_TARGET`]), the sender is still at 1 Mbit/s for half a second
+/// and some forty video packets are dropped at the link's queue. With the release's NACK request policy (ten
 /// requests or two seconds, then a packet is given up) and retransmissions that nothing held
 /// to the estimate (about 300, five times the link, three in four of them dropped at the same
 /// queue), some of those packets were given up, stayed lost, the sample builder held every
@@ -1646,10 +1660,12 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
 /// goes.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()> {
-    // Measured (hosted runs 45315535896, 45312738975): freeze 0.83 to 1.24 s at 20 s (0.88
-    // to 1.75 s before retransmissions left oldest first), the oldest picture 2.26 to 3.21 s,
-    // 43 to 66 retransmissions, 238 to 266 kbit/s under the cap, 988 to 1352 kbit/s twenty
-    // seconds after it at every length.
+    // Measured (hosted run 45330969396, six seeds): freeze 0.85 to 1.36 s, the oldest
+    // picture 2.33 to 2.61 s, 42 to 49 retransmissions (13 to 15 dropped), 236 to 251 kbit/s
+    // under the cap, 1050 to 1214 kbit/s twenty seconds after it. (With the cap arriving
+    // after 20 s at the 0.99 Mbit/s the earlier estimator had reached by then, runs
+    // 45315535896 and 45312738975: 0.83 to 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266,
+    // 988 to 1352.)
     assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(3_500));
     Ok(())
 }
@@ -1667,9 +1683,9 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_target() -> Result<()>
 {
-    // Measured under this setting (hosted run 45315535896, six seeds, three wall clocks):
-    // freeze 0.84 to 1.29 s, the oldest picture 2.37 to 3.49 s, 42 to 78 retransmissions
-    // (17 to 27 dropped at the link's queue, against 14 to 17 under the default).
+    // Measured under this setting (hosted run 45330969396, six seeds): freeze 1.28 to
+    // 1.36 s, the oldest picture 2.49 to 3.35 s, 49 to 54 retransmissions (15 to 17 dropped
+    // at the link's queue, against 13 to 15 under the default).
     assert_the_call_holds(
         &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_20())?,
         Duration::from_millis(4_000),
@@ -1685,6 +1701,65 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
         &seeds(Some(RetransmissionRateLimit::UpToTarget), &cap_lengths())?,
         Duration::from_millis(4_000),
     );
+    Ok(())
+}
+
+/// The cap that arrives after 20 s of call, when the estimate is at 1.4 Mbit/s (8% a second
+/// from 300 kbit/s: draft-ietf-rmcat-gcc-02 section 5.5), under the default rule. The video
+/// keeps playing (never 2 s without a usable frame), the capped link is used and the
+/// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
+/// and the retransmissions, held here to what was measured so that they do not grow.
+///
+/// Measured (hosted run 45330363761, six seeds): freeze 1.28 to 1.38 s, the oldest picture
+/// 4.46 to 5.32 s, 106 to 138 retransmissions (25 to 37 dropped at the link's queue), 241 to
+/// 254 kbit/s under the cap, 986 to 1364 kbit/s twenty seconds after it. Some 75 video
+/// packets are lost before the first feedback about the capped link can arrive (about forty
+/// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
+/// that much longer. The release before (v0.22.0+brainwires.6, whose estimator met the cap
+/// at 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest
+/// picture 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s
+/// under the cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is
+/// 0.15 to 0.3 s longer than it was, the picture up to 0.9 s older and the retransmissions
+/// about twice as many, while the capped link carries 40 to 50 kbit/s more and the recovery
+/// has no slow seed. What shortens it is not in the estimator: giving up a repair backlog
+/// that has gone stale and sending a key frame instead, and a delay-based detector that
+/// reads a queue filling within a feedback interval (both planned).
+#[test]
+fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
+    for seed in seed_range(2, 6) {
+        let outcome = run(&Setup::new(seed, None).anchor(ANCHORS[0]))?;
+        println!("cap after 20 s seed {seed}: {outcome:?}");
+        assert!(
+            outcome.before >= 1_300_000,
+            "seed {seed}: the cap met {} bit/s: {outcome:?}",
+            outcome.before
+        );
+        assert!(
+            outcome.freeze <= Duration::from_secs(2),
+            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
+        );
+        assert!(
+            outcome.lag <= Duration::from_secs(6),
+            "seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
+        );
+        assert!(
+            outcome.rtx_sent <= 160,
+            "seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
+        );
+        assert!(
+            outcome.under >= 200_000,
+            "seed {seed}: {} bit/s under the cap: {outcome:?}",
+            outcome.under
+        );
+        assert!(
+            outcome.recovery[3] >= 800_000,
+            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
+            outcome.recovery[3]
+        );
+    }
     Ok(())
 }
 
