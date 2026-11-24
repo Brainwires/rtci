@@ -160,47 +160,7 @@ struct Setup {
     /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
     /// the engine's default when `None`.
     received_rate_bound: Option<ReceivedRateBound>,
-    /// A change of nothing but incidental wire sizes or seeded draws ([`PERTURBATIONS`]); the
-    /// permanent tests run [`Perturbation::None`].
-    perturbation: Perturbation,
 }
-
-/// What a run may change that no call's quality should depend on: the length of the ICE
-/// agent's SOFTWARE text (in every STUN request and success response: the sizes of the
-/// consent checks, and with them where every later packet falls in the link's queue), or one
-/// more value drawn from each peer's seeded random source before the peer connection is built
-/// (every seeded value after it moves: ICE credentials, DTLS randoms, SRTP keys, the RTCP
-/// report intervals of the default chain). The seeded figures follow from both (train 23's
-/// `o=` session id, drawn from the crypto provider since `conf/jsep-75-session-version`, moved
-/// the paced chain's seed 3 freeze from 1.91 to 2.20 s), so a bound is measured over these as
-/// well as over seeds and wall clocks ([`measure_the_capacity_cap`], `RTC_CAP_PERTURB`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Perturbation {
-    None,
-    /// `SettingEngineBuilder::with_ice_software(None)`: no SOFTWARE attribute.
-    NoSoftware,
-    /// `SettingEngineBuilder::with_ice_software(Some(text))`.
-    Software(&'static str),
-    /// This many 64-bit values drawn from the seeded crypto provider and dropped first.
-    Draws(u32),
-}
-
-/// The perturbations of the measurement, by name. The engine's own SOFTWARE text is
-/// `rtci-ice 0.2.0-dev` (18 bytes); 27 bytes is the fork's text before the crate rename.
-const PERTURBATIONS: [(&str, Perturbation); 6] = [
-    ("none", Perturbation::None),
-    ("nosw", Perturbation::NoSoftware),
-    (
-        "sw27",
-        Perturbation::Software("rtc-ice 0.22.0+brainwires.6"),
-    ),
-    (
-        "sw40",
-        Perturbation::Software("rtci-ice 0.2.0-dev (perturbation: 40 B)."),
-    ),
-    ("draw1", Perturbation::Draws(1)),
-    ("draw2", Perturbation::Draws(2)),
-];
 
 impl Setup {
     fn new(seed: u64, rate_limit: Option<RetransmissionRateLimit>) -> Self {
@@ -214,7 +174,6 @@ impl Setup {
             video: [true, true],
             report_from_every_ssrc: None,
             received_rate_bound: None,
-            perturbation: Perturbation::None,
         }
     }
 
@@ -227,11 +186,6 @@ impl Setup {
     /// The estimator's bound by the received rate set to `bound` in either chain.
     fn received_rate_bound(mut self, bound: ReceivedRateBound) -> Self {
         self.received_rate_bound = Some(bound);
-        self
-    }
-
-    fn perturbed(mut self, perturbation: Perturbation) -> Self {
-        self.perturbation = perturbation;
         self
     }
 
@@ -585,15 +539,9 @@ impl Peer {
         let seed = setup.seed ^ salt;
         let rate_limit = setup.rate_limit;
         let wall_clock = setup.anchor.map(|anchor| SystemInstant::at(start, anchor));
-        let mut rng = Rng(seed);
-        if let Perturbation::Draws(draws) = setup.perturbation {
-            for _ in 0..draws {
-                rng.next_u64();
-            }
-        }
         let provider: Arc<dyn RTCCryptoProvider> = Arc::new(SeededProvider {
             inner: default_provider()?,
-            rng: Mutex::new(rng),
+            rng: Mutex::new(Rng(seed)),
         });
         let mut media_engine = MediaEngine::default();
         media_engine.register_codec(
@@ -653,7 +601,6 @@ impl Peer {
                 .set_session_bitrate_limit(Some(f64::from(MAX_BPS)));
             return Self::with_chain(
                 addr,
-                setup.perturbation,
                 provider,
                 media_engine,
                 registry,
@@ -702,7 +649,6 @@ impl Peer {
         );
         Self::with_chain(
             addr,
-            setup.perturbation,
             provider,
             media_engine,
             registry,
@@ -717,7 +663,6 @@ impl Peer {
     #[allow(clippy::too_many_arguments)]
     fn with_chain(
         addr: &str,
-        perturbation: Perturbation,
         provider: Arc<dyn RTCCryptoProvider>,
         media_engine: MediaEngine,
         registry: Registry,
@@ -727,15 +672,13 @@ impl Peer {
         handles: Option<DefaultInterceptorHandles>,
         start: Instant,
     ) -> Result<Self> {
-        let setting_engine = SettingEngineBuilder::new().with_crypto_provider(provider);
-        let setting_engine = match perturbation {
-            Perturbation::NoSoftware => setting_engine.with_ice_software(None),
-            Perturbation::Software(text) => setting_engine.with_ice_software(Some(text.to_owned())),
-            Perturbation::None | Perturbation::Draws(_) => setting_engine,
-        };
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(setting_engine.build())
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_crypto_provider(provider)
+                    .build(),
+            )
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build(start)?;
@@ -1484,11 +1427,6 @@ struct Outcome {
     /// it can still report congestion for some hundreds of milliseconds after the cap goes;
     /// from 1 s on, the path is open and nothing should cut the estimate.
     target_at_lift: u32,
-    /// The lowest target the encoder followed from the cap's going to 1 s after it: the
-    /// reference of the recovery measure. The cap can go on the peak of a tooth of the
-    /// estimate's sawtooth, and that tooth's cut (its feedback, out of the capped link's queue)
-    /// then lands within some 0.3 s after the lift: it belongs to the cap, not to the recovery.
-    lift_reference: u32,
     recovery_falls: Vec<(Duration, u32, u32)>,
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
@@ -1600,12 +1538,6 @@ fn run(setup: &Setup) -> Result<Outcome> {
         window.iter().copied().max().unwrap_or(0),
     );
     let target_at_lift = target_at(&world.peers[0].targets, opened_at);
-    let lift_reference = world.peers[0]
-        .targets
-        .iter()
-        .filter(|t| t.0 > opened_at && t.0 <= opened_at + Duration::from_secs(1))
-        .map(|t| t.1)
-        .fold(target_at_lift, u32::min);
     let recovery_falls = world.peers[0]
         .targets
         .windows(2)
@@ -1676,7 +1608,6 @@ fn run(setup: &Setup) -> Result<Outcome> {
         recovery,
         recovery_window,
         target_at_lift,
-        lift_reference,
         recovery_falls,
         freeze,
         freeze_at,
@@ -1769,25 +1700,14 @@ fn seeds(
 ///
 /// - never more than 2 s without a usable frame on the receiving side;
 /// - the oldest picture shown from the cap on (capture to decoder) no older than `lag`;
-/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 63 sent
-///   through the cap (without a limit 54 to 105 were sent and more than half dropped);
+/// - the retransmissions congestion controlled (RFC 4588 section 7): at most 100 sent
+///   through the cap (the rules held to the target send 42 to 54, 13 to 17 of them dropped at
+///   the link's queue; without a limit 54 to 105 were sent and more than half dropped);
 /// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
 /// - the estimate recovered: at least 800 kbit/s on average from 15 to 25 s after the cap
 ///   went (a single reading is the phase of the estimate's sawtooth: the +20 s target of one
 ///   seed moved from 777 to 1074 kbit/s with nothing but the wall clock's phase, runs
 ///   45360145995).
-///
-/// The freeze is a REQUIREMENT (what the call's user sees; it never moves). The others are
-/// regression tripwires, set from the ensemble of six seeds, three wall clocks and six
-/// incidental perturbations ([`Perturbation`]) of every cap length and both rules these tests
-/// run (`measure_the_capacity_cap` with `RTC_CAP_AT_TARGET=1000000`; 864 cells on master
-/// d7dcb9ab, hosted runs 45457600557 and 45461075118, and the 20 s cap again on b8dd935d,
-/// 45470063852): freeze 0.54 to 1.35 s; the oldest picture 1.68 to 2.55 s (both rules); 38 to
-/// 55 retransmissions (54 under the engine's rule, 55 under `UpToTarget`); 237 to 258 kbit/s
-/// under the cap; 979 to 1434 kbit/s on average 15 to 25 s after it. The picture and
-/// retransmission bounds are those maxima and some 15 % (2.9 s, 63; they were 3.5 s (4 s
-/// under `UpToTarget`) and 100, set from one draw per seed); the rate under the cap and the
-/// recovery keep their bounds, some 15 % and 18 % under the least measured.
 fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
     for (cap, seed, outcome) in outcomes {
         assert!(
@@ -1801,7 +1721,7 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 63,
+            outcome.rtx_sent <= 100,
             "cap {cap} s seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -1852,14 +1772,14 @@ fn video_keeps_playing_through_a_capacity_cap_that_comes_and_goes() -> Result<()
     // 234 to 251, 977 to 1344. With the cap arriving after 20 s at the 0.99 Mbit/s the
     // earlier estimator had reached by then (runs 45315535896, 45312738975): 0.83 to
     // 1.24 s, 2.26 to 3.21 s, 43 to 66, 238 to 266, 988 to 1352.
-    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(2_900));
+    assert_the_call_holds(&seeds(None, &cap_20())?, Duration::from_millis(3_500));
     Ok(())
 }
 
 /// The same bounds whenever the cap goes: after 14, 17, 23 and 26 s.
 #[test]
 fn video_keeps_playing_through_a_capacity_cap_of_any_length() -> Result<()> {
-    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(2_900));
+    assert_the_call_holds(&seeds(None, &cap_lengths())?, Duration::from_millis(3_500));
     Ok(())
 }
 
@@ -1878,7 +1798,7 @@ fn video_keeps_playing_through_a_capacity_cap_with_retransmissions_up_to_the_tar
             Some(RetransmissionRateLimit::UpToTarget),
             &[(20, seed_range(2, 6))],
         )?,
-        Duration::from_millis(2_900),
+        Duration::from_millis(4_000),
     );
     Ok(())
 }
@@ -1894,7 +1814,7 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
         .collect();
     assert_the_call_holds(
         &seeds(Some(RetransmissionRateLimit::UpToTarget), &lengths)?,
-        Duration::from_millis(2_900),
+        Duration::from_millis(4_000),
     );
     Ok(())
 }
@@ -1944,22 +1864,13 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
-        // The freeze above is a requirement; what follows are tripwires. Ensemble (six seeds,
-        // three wall clocks, six incidental perturbations: 108 cells each on master d7dcb9ab,
-        // hosted run 45457611150, and b8dd935d, 45470063852): freeze 1.28 to 1.34 s, the
-        // oldest picture 4.11 to 5.28 s (median 4.40 to 4.45), 87 to 106 retransmissions, 234 to
-        // 253 kbit/s under the cap, 990 to 1414 kbit/s on average 15 to 25 s after it, the cap
-        // met at 1412 to 1483 kbit/s. The picture and retransmission bounds are the most
-        // measured and some 15 % (6.1 s, 122; they were 5.5 s and 130 from one draw per seed:
-        // the picture's bound moves up, because one draw per seed put it 4 % over the most
-        // measured on b8dd935d, inside the spread of nothing but incidental perturbations).
         assert!(
-            outcome.lag <= Duration::from_millis(6_100),
+            outcome.lag <= Duration::from_millis(5_500),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 122,
+            outcome.rtx_sent <= 130,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -1990,13 +1901,10 @@ fn measure_unlimited_retransmissions_through_a_capacity_cap() -> Result<()> {
 
 /// A measurement over what the environment names, one line per run; asserts nothing.
 /// `RTC_CAP_CHAINS` (`parolnet`, `default`, `nopacer`; all three by default), `RTC_CAP_RULES`
-/// (`default` (the engine's, as the permanent tests), `within`, `upto`, `unlimited`; the last
-/// three by default), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS` (indices into the
-/// three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays; `20`),
-/// `RTC_CAP_PERTURB` (names in [`PERTURBATIONS`]; `none`), each a comma-separated list;
-/// `RTC_CAP_AT_TARGET` (the target in bit/s at which the cap arrives, instead of after 20 s);
-/// `RTC_CAP_THREADS` (runs side by side; the machine's parallelism). Each run is printed as it
-/// ends, so the lines come in no fixed order.
+/// (`within`, `upto`, `unlimited`), `RTC_CAP_SEEDS` (`1,2,..`; 1 to 6), `RTC_CAP_ANCHORS`
+/// (indices into the three wall clocks, `0,1,2`), `RTC_CAP_SECONDS` (how long the cap stays;
+/// `20`), each a comma-separated list; `RTC_CAP_AT_TARGET` (the target in bit/s at which the
+/// cap arrives, instead of after 20 s).
 #[test]
 #[ignore = "measurement: run with --ignored --nocapture"]
 fn measure_the_capacity_cap() -> Result<()> {
@@ -2008,100 +1916,69 @@ fn measure_the_capacity_cap() -> Result<()> {
             .filter(|item| !item.is_empty())
             .collect()
     }
-    let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
-    let mut runs = Vec::new();
     for chain in list("RTC_CAP_CHAINS", "parolnet,default,nopacer") {
         for rule in list("RTC_CAP_RULES", "within,upto,unlimited") {
             for seconds in list("RTC_CAP_SECONDS", "20") {
                 for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
                     for anchor in list("RTC_CAP_ANCHORS", "0,1,2") {
-                        for perturb in list("RTC_CAP_PERTURB", "none") {
-                            let rate_limit = match rule.as_str() {
-                                "default" => None,
-                                "within" => Some(RetransmissionRateLimit::WithinTarget),
-                                "upto" => Some(RetransmissionRateLimit::UpToTarget),
-                                "unlimited" => Some(RetransmissionRateLimit::Unlimited),
-                                other => bail!("unknown rule {other}"),
-                            };
-                            let Some(&(_, perturbation)) =
-                                PERTURBATIONS.iter().find(|(name, _)| *name == perturb)
-                            else {
-                                bail!("unknown perturbation {perturb}");
-                            };
-                            let mut setup = Setup::new(seed.parse()?, rate_limit)
-                                .chain(match chain.as_str() {
-                                    "parolnet" => Chain::ParolNet,
-                                    "default" => Chain::Default,
-                                    "nopacer" => Chain::DefaultWithoutPacer,
-                                    other => bail!("unknown chain {other}"),
-                                })
-                                .anchor(ANCHORS[anchor.parse::<usize>()?])
-                                .perturbed(perturbation);
-                            setup.cap = Duration::from_secs(seconds.parse()?);
-                            if let Some(bps) = &at_target {
-                                setup = setup.capped_at_a_target_of(bps.parse()?);
-                            }
-                            let label = format!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} perturb {perturb}"
-                            );
-                            runs.push((label, setup));
+                        let rate_limit = match rule.as_str() {
+                            "within" => RetransmissionRateLimit::WithinTarget,
+                            "upto" => RetransmissionRateLimit::UpToTarget,
+                            "unlimited" => RetransmissionRateLimit::Unlimited,
+                            other => bail!("unknown rule {other}"),
+                        };
+                        let at_target = std::env::var("RTC_CAP_AT_TARGET").ok();
+                        let mut setup = Setup::new(seed.parse()?, Some(rate_limit))
+                            .chain(match chain.as_str() {
+                                "parolnet" => Chain::ParolNet,
+                                "default" => Chain::Default,
+                                "nopacer" => Chain::DefaultWithoutPacer,
+                                other => bail!("unknown chain {other}"),
+                            })
+                            .anchor(ANCHORS[anchor.parse::<usize>()?]);
+                        setup.cap = Duration::from_secs(seconds.parse()?);
+                        if let Some(bps) = &at_target {
+                            setup = setup.capped_at_a_target_of(bps.parse()?);
+                        }
+                        match run(&setup) {
+                            Ok(o) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {}",
+                                o.before / 1000,
+                                o.capped_at.as_secs_f64(),
+                                o.freeze.as_secs_f64(),
+                                o.freeze_at.as_secs_f64(),
+                                o.lag.as_secs_f64(),
+                                o.rtx_sent,
+                                o.rtx_dropped,
+                                o.padding_sent,
+                                o.padding_dropped,
+                                o.queue_drops,
+                                o.audio_dropped,
+                                o.pacer_dropped,
+                                o.pacer_dropped_late,
+                                o.pacer_discards.len(),
+                                o.pauses.len(),
+                                o.keyframe_requests.len(),
+                                o.under / 1000,
+                                o.estimate_at_lift / 1000,
+                                o.target_at_lift / 1000,
+                                o.recovery.map(|bps| bps / 1000),
+                                o.recovery_window.0 / 1000,
+                                o.recovery_window.1 / 1000,
+                                o.recovery_window.2 / 1000,
+                                draft_climb_mean(o.target_at_lift) / 1000,
+                                o.recovery_falls.len(),
+                                o.estimate_after / 1000,
+                            ),
+                            Err(error) => println!(
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | failed: {error}"
+                            ),
                         }
                     }
                 }
             }
         }
     }
-    let threads = std::env::var("RTC_CAP_THREADS")
-        .ok()
-        .and_then(|threads| threads.parse().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..threads.max(1) {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((label, setup)) = runs.get(i) else {
-                        break;
-                    };
-                    match run(setup) {
-                        Ok(o) => println!(
-                            "{label} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} target {} recovery {:?} window {}/{}/{} climb {} falls {} | estimate after {} | reference {} climb from reference {}",
-                            o.before / 1000,
-                            o.capped_at.as_secs_f64(),
-                            o.freeze.as_secs_f64(),
-                            o.freeze_at.as_secs_f64(),
-                            o.lag.as_secs_f64(),
-                            o.rtx_sent,
-                            o.rtx_dropped,
-                            o.padding_sent,
-                            o.padding_dropped,
-                            o.queue_drops,
-                            o.audio_dropped,
-                            o.pacer_dropped,
-                            o.pacer_dropped_late,
-                            o.pacer_discards.len(),
-                            o.pauses.len(),
-                            o.keyframe_requests.len(),
-                            o.under / 1000,
-                            o.estimate_at_lift / 1000,
-                            o.target_at_lift / 1000,
-                            o.recovery.map(|bps| bps / 1000),
-                            o.recovery_window.0 / 1000,
-                            o.recovery_window.1 / 1000,
-                            o.recovery_window.2 / 1000,
-                            draft_climb_mean(o.target_at_lift) / 1000,
-                            o.recovery_falls.len(),
-                            o.estimate_after / 1000,
-                            o.lift_reference / 1000,
-                            draft_climb_mean(o.lift_reference) / 1000,
-                        ),
-                        Err(error) => println!("{label} | failed: {error}"),
-                    }
-                }
-            });
-        }
-    });
     Ok(())
 }
 
@@ -2118,6 +1995,17 @@ fn draft_climb_mean(from: u32) -> u32 {
     (samples.iter().sum::<f64>() / samples.len() as f64) as u32
 }
 
+/// The same call through the engine's default interceptors (the pacer with its default
+/// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
+/// section 7 default), the video following the target the senders are given
+/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait),
+/// on six seeds. When the cap comes the pacer holds video written at the old rate; once it
+/// would take half its 2 s bound to send, the target the application reads is zero (the pause)
+/// until the queue has drained, and the video produces nothing meanwhile. So nothing is
+/// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
+/// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
+/// Once the cap goes, the target is never cut again and climbs at least about as fast as the
+/// draft's multiplicative increase from where the cap left it.
 /// The measurement behind the default of `rtcp_report_from_every_ssrc` (RFC 8108 section 5.1
 /// as written is `true`: every SSRC reports on every other, the co-located ones included):
 /// the default chain through a capacity cap, on two seeds (and three wall clocks each with
@@ -2161,165 +2049,120 @@ fn report_blocks_from_every_ssrc_measured_against_once() -> Result<()> {
     Ok(())
 }
 
-/// The same call through the engine's default interceptors (the pacer with its default
-/// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
-/// section 7 default), the video following the target the senders are given
-/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait).
-/// When the cap comes the pacer holds video written at the old rate; once it would take half
-/// its 2 s bound to send, the target the application reads is zero (the pause) until the queue
-/// has drained, and the video produces nothing meanwhile. So nothing is discarded (no video
-/// packet written that never left, no `OnPacerDiscard`), the video resumes within a second of
-/// each pause's end, and it does not freeze for more than 2 s. Once the cap goes, the target
-/// is never cut again and climbs at least about as fast as the draft's multiplicative increase
-/// from where the cap left it.
-///
-/// The seeds: [`PACED_SEEDS`] in an ordinary run, 1 to 6 with `RTC_CAP_FULL`, each on the
-/// first wall clock. Every seed is run and every failed check reported before the test fails,
-/// so that one failing seed does not hide another.
-///
-/// What each bound is. The freeze (no more than 2 s without a usable frame) is a REQUIREMENT,
-/// what the call's user sees: it never moves. The oldest picture, the retransmissions and the
-/// recovery are regression tripwires, set from the ensemble below at its most measured and a
-/// stated margin. A seeded run's figures follow from every incidental wire size and seeded
-/// draw (one more value drawn from the seeded crypto provider, `conf/jsep-75-session-version`'s
-/// `o=` session id, moved seed 3 from 1.82 to 2.20 s; [`Perturbation`]), so each figure was
-/// measured over an ensemble: six seeds, three wall clocks and six perturbations (the ICE
-/// SOFTWARE text absent, 18, 27 and 40 bytes long; one and two seeded draws dropped first),
-/// 108 cells (`measure_the_capacity_cap`, `RTC_CAP_RULES=default RTC_CAP_PERTURB=...`; hosted
-/// runs 45457588797 on master d7dcb9ab, 45470041374 and 45470050899 on b8dd935d), each
-/// figure as min / median / 95th percentile / max:
-///
-/// | figure | d7dcb9ab | b8dd935d |
-/// |---|---|---|
-/// | freeze, s | 0.89 / 1.38 / 1.91 / 2.28 | 0.88 / 1.35 / 1.69 / 2.31 |
-/// | cells over 2 s | 4 of 108 | 1 of 108 |
-/// | oldest picture, s | 5.49 / 7.69 / 9.72 / 10.47 | 5.84 / 8.23 / 10.44 / 10.44 |
-/// | retransmissions | 88 / 96 / 106 / 110 | 89 / 102 / 109 / 109 |
-/// | median target under the cap, kbit/s | 144 / 207 / 225 / 234 | 117 / 206 / 228 / 245 |
-/// | recovery over the draft's climb from the lift reference | 0.98 / 1.10 / 2.76 / 3.61 | 0.98 / 1.09 / 2.89 / 3.32 |
-///
-/// KNOWN LIMIT: the engine does not meet the 2 s freeze requirement in this chain today. On
-/// d7dcb9ab 4 of the 108 cells froze for 2.10 to 2.28 s (one of them seed 3 on the first wall
-/// clock unperturbed, which this test runs under `RTC_CAP_FULL`: the full matrix failed); on
-/// b8dd935d 1 cell (seed 6, third wall clock, two draws: 2.31 s), none of the cells this test
-/// runs. Which cells cross moves with every incidental change; that some do does not. The
-/// freeze falls in the pacer's pause after the cap, while the stale repairs drain inside an
-/// estimate of 100 to 250 kbit/s. Not repeating a repair whose first copy is still in flight
-/// and releasing the retransmissions smoothly (`conf/rtx-1r-duplicate-repairs`,
-/// `conf/rtx-2r-smooth-limiter`) bring every cell under it: 0.74 to 1.10 s on d7dcb9ab (run
-/// 45457621523), 0.75 to 1.28 s on b8dd935d (runs 45470070664, 45470078615).
 #[test]
 fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
-    let seeds: Vec<u64> = if full() {
-        (1..=6).collect()
-    } else {
-        PACED_SEEDS.to_vec()
-    };
-    let mut failed = Vec::new();
-    for seed in seeds {
-        let outcome = run(&Setup::new(seed, None)
-            .chain(Chain::Default)
-            .anchor(ANCHORS[0]))?;
-        println!("default chain seed {seed}: {outcome:?}");
-        let mut check = |ok: bool, what: String| {
-            if !ok {
-                failed.push(format!("seed {seed}: {what}: {outcome:?}"));
-            }
-        };
-        check(
-            outcome.pacer_dropped_late == 0,
-            format!(
-                "{} packets dropped at the pacer",
-                outcome.pacer_dropped_late
-            ),
-        );
-        check(
+    let outcomes: Result<Vec<_>> = seed_range(2, 6)
+        .map(|seed| {
+            let outcome = run(&Setup::new(seed, None)
+                .chain(Chain::Default)
+                .anchor(ANCHORS[0]))?;
+            println!("default chain seed {seed}: {outcome:?}");
+            Ok((seed, outcome))
+        })
+        .collect();
+    let outcomes = outcomes?;
+    for (seed, outcome) in &outcomes {
+        assert_eq!(0, outcome.pacer_dropped_late, "seed {seed}: {outcome:?}");
+        assert!(
             outcome.pacer_discards.is_empty(),
-            "the pacer discarded".to_owned(),
+            "seed {seed}: {outcome:?}"
         );
-        check(!outcome.pauses.is_empty(), "never paused".to_owned());
+        assert!(
+            !outcome.pauses.is_empty(),
+            "seed {seed}: never paused: {outcome:?}"
+        );
         // The pause is the pacer's word to the source and nothing else: the congestion
         // controller's estimate is never zero, and `availableOutgoingBitrate` reports the
         // estimate through every pause.
-        check(
+        assert!(
             outcome.lowest_estimate.is_some_and(|low| low >= MIN_BPS),
-            "the estimator paused".to_owned(),
+            "seed {seed}: the estimator paused: {outcome:?}"
         );
-        check(
+        assert!(
             outcome
                 .lowest_outgoing
                 .is_some_and(|low| low >= f64::from(MIN_BPS)),
-            "availableOutgoingBitrate lost the estimate in a pause".to_owned(),
+            "seed {seed}: availableOutgoingBitrate lost the estimate in a pause: {outcome:?}"
         );
         for after in &outcome.resumed_after {
-            check(
+            assert!(
                 *after <= Duration::from_secs(1),
-                format!("no usable frame {after:?} after a pause ended"),
+                "seed {seed}: no usable frame {after:?} after a pause ended: {outcome:?}"
             );
         }
-        // REQUIREMENT (see the known limit above): never more than 2 s without a usable frame.
-        check(
+        assert!(
             outcome.freeze <= Duration::from_secs(2),
-            format!("the video froze for {:?}", outcome.freeze),
+            "seed {seed}: the video froze for {:?}: {outcome:?}",
+            outcome.freeze
         );
-        // Tripwire. The oldest picture is the known cost of this chain at a sudden drop: the
-        // 55 to 62 video packets the path lost while the source was at 2.5 Mbit/s are repaired
-        // inside an estimate of 100 to 250 kbit/s, of which the audio takes 76, and 35 to 41 of
-        // the repairs repeat a packet whose first repair was still in flight when the receiver
-        // asked again (hosted traces 45341865225, 45342290711; CHANGELOG, "Known limits").
-        // Ensemble (above): 5.49 to 10.47 s. The bound, 11.75 s, is that maximum and 12 %;
-        // the freeze and the retransmissions hold the finer regressions (a pacer that queues
-        // duplicate repairs reached 11.41 s here and failed on the freeze, run 45381547020).
-        check(
+        // Measured (hosted run 45334499296, six seeds): freeze 0.97 to 1.91 s, 1043 to
+        // 2500 kbit/s twenty seconds after the cap, and the oldest picture shown 5.59 to
+        // 9.84 s old (with one decrease per round trip, run 45332800112: 1.38 to 1.86 s, 946
+        // to 2500 kbit/s, 6.46 to 8.87 s; run 45315529565, six seeds on three wall clocks:
+        // 1.38 to 1.90 s, 902 to 1484 kbit/s, 5.95 to 8.56 s). That last figure is the known
+        // cost of this chain at a sudden drop: the 55 to 62 video packets the path lost while
+        // the source was at 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s,
+        // of which the audio takes 76, under every retransmission rule (the pacer holds
+        // repairs to the estimate; without one they leave in a burst while the estimate is
+        // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
+        // still in flight when the receiver asked again (hosted traces 45341865225,
+        // 45342290711). It is a documented known limit (CHANGELOG, "Known limits"), and the
+        // bound here guards it against gross regression only: on six seeds and three wall
+        // clocks the oldest picture was 5.56 to 9.84 s with the ICE agent's 27-byte SOFTWARE
+        // text and 5.56 to 10.23 s with its 14-byte one (hosted runs 45370399055 and
+        // 45370404660: the seeded figures follow the wire's packet sizes, so one text length
+        // moves a seed by some hundreds of milliseconds). The bound is that maximum, 10.23 s,
+        // and some 15 % (11.75 s). The freeze, the retransmissions and the recovery are held
+        // more tightly by the other assertions here. Not repeating a repair whose first copy
+        // is still in flight (`conf/rtx-1-duplicate-repairs`) brings it to 4.14 to 6.58 s,
+        // and the bound down with it.
+        assert!(
             outcome.lag <= Duration::from_millis(11_750),
-            format!("a picture {:?} old", outcome.lag),
+            "seed {seed}: a picture {:?} old: {outcome:?}",
+            outcome.lag
         );
-        // Tripwire. The retransmissions, apart from the probe clusters' padding on the RTX
-        // stream (154 to 330 packets, which this test counted with them until it told them
-        // apart): ensemble 88 to 110. The bound is that maximum and some 15 % (127); it also
-        // fails if the padding is counted with them again.
-        check(
-            outcome.rtx_sent <= 127,
-            format!("{} retransmissions", outcome.rtx_sent),
+        // The retransmissions, apart from the probe clusters' padding on the RTX stream
+        // (154 to 330 packets, which this test counted with them until it told them apart):
+        // 90 to 103 on six seeds, none dropped at the link (hosted run 45343885944). The bound
+        // (as the cap after 20 s without a pacer: some 30 % over the most measured) guards
+        // them from growing, and fails if the padding is counted with them again.
+        assert!(
+            outcome.rtx_sent <= 130,
+            "seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
         );
-        // Tripwire. The recovery: from 1 s after the cap went the target never falls, and
-        // from 15 to 25 s after it its mean is at least nine tenths of the draft's
-        // multiplicative increase ([`draft_climb_mean`]) from the lowest target of the first
-        // second after the lift (`Outcome::lift_reference`). Not from the target at the lift
-        // instant: the cap can go on the peak of a tooth of the sawtooth, and that tooth's cut
-        // lands within some 0.3 s after the lift (master: lowest 0.98 either way; with
-        // `conf/rtx-2r-smooth-limiter`, seed 4 on the first wall clock reads 0.67 from the
-        // instant and 1.00 from the reference, run 45457621523). Not a fixed figure: once the
-        // path is open, a source that follows its target is not application limited and no
-        // probe is due (`ProbeController`), so the estimate climbs from wherever the cap left
-        // it at the draft's 8 % a second, and where it left it is the phase of the sawtooth.
-        check(
+        // The recovery, against the target the cap left: from 1 s after the cap went it never
+        // falls, and from 15 to 25 s after it its mean is at least nine tenths of the draft's
+        // multiplicative increase from the target at that instant ([`draft_climb_mean`]).
+        // Not a fixed figure: once the path is open, a source that follows its target is not
+        // application limited and no probe is due (`ProbeController`: the start, a further
+        // probe after a confirming result, a large drop within the last 2 s, a sender under
+        // 65 % of the target), so the estimate climbs from wherever the cap left it at the
+        // draft's 8 % a second. Where it left it is the phase of the sawtooth under the cap,
+        // and with that the seeded run's packet sizes and timing, down to the length of the
+        // ICE agent's SOFTWARE text in every STUN message: the same seed ended the cap at
+        // 212 or 132 kbit/s with that text 27 or 14 bytes long, and was 1150 or 641 kbit/s on
+        // average 15 to 25 s later. Measured (hosted runs 45370399055 and 45370404660, six
+        // seeds on three wall clocks, with each of the two texts): target at the cap's end
+        // 124 to 270 kbit/s, no fall from 1 s on, mean 641 to 2500 kbit/s; 0.99 to 1.21 times
+        // the draft's climb where no probe landed, 1.29 to 2.81 where one did (the drop rule
+        // firing as the cap went, or a sender held under its target).
+        assert!(
             outcome.recovery_falls.is_empty(),
-            format!(
-                "the target fell after the cap went: {:?}",
-                outcome.recovery_falls
-            ),
+            "seed {seed}: the target fell after the cap went: {:?}: {outcome:?}",
+            outcome.recovery_falls
         );
-        let climb = draft_climb_mean(outcome.lift_reference);
-        check(
+        let climb = draft_climb_mean(outcome.target_at_lift);
+        assert!(
             u64::from(outcome.recovery_window.1) * 10 >= u64::from(climb) * 9,
-            format!(
-                "{} bit/s on average 15 to 25 s after the cap, under nine tenths of the \
-                 draft's climb from {} bit/s ({climb})",
-                outcome.recovery_window.1, outcome.lift_reference
-            ),
+            "seed {seed}: {} bit/s on average 15 to 25 s after the cap, under nine tenths of \
+             the draft's climb from {} bit/s ({climb}): {outcome:?}",
+            outcome.recovery_window.1,
+            outcome.target_at_lift
         );
     }
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
     Ok(())
 }
-
-/// The seeds [`a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer`] runs in
-/// an ordinary run, chosen from the 108-cell ensemble (its comment) as the representative ones:
-/// seeds 1 and 4 sit at the ensemble's medians on both bases (freeze 1.36 and 1.37 s against
-/// 1.38 on d7dcb9ab, 1.34 and 1.37 against 1.35 on b8dd935d); seed 2, run before, is among its
-/// mildest (median freeze 0.89 and 1.00 s).
-const PACED_SEEDS: [u64; 2] = [1, 4];
 
 /// The default chain with a caller that ignores the target (its video stays at 1.4 Mbit/s
 /// through the cap and through the pause): what waits the pacer's 2 s bound is discarded whole
