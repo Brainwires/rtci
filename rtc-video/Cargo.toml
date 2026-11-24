@@ -1,0 +1,44 @@
+[package]
+name = "rtc-video"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Sans-I/O video pipeline for RTC: frame assembly, frame reference finding, a jitter buffer with playout timing, key-frame requests and the W3C video statistics"
+license.workspace = true
+documentation = "https://docs.rs/rtc-video"
+repository.workspace = true
+readme = "README.md"
+
+# The default features are pure Rust and need no system library: the workspace's CI installs
+# none. Codec backends arrive as features in later phases (docs/video-pipeline.md).
+[features]
+default = ["engine"]
+# The glue that connects the receive pipeline to an `RTCRtpReceiver` of the `rtc` peer
+# connection. Without it the crate has no dependency on the engine.
+engine = ["dep:rtc"]
+
+[dependencies]
+rtp.workspace = true
+shared = { workspace = true, default-features = false, features = ["marshal"] }
+bytes.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+# The engine with its default crypto backend (ring); `rtc` has no build without one.
+rtc = { version = "0.22.0", path = "..", optional = true }
+
+[dev-dependencies]
+rtc = { version = "0.22.0", path = ".." }
+media.workspace = true
+anyhow.workspace = true
+
+[[test]]
+name = "receive_rtc2rtc"
+path = "tests/receive_rtc2rtc.rs"
+required-features = ["engine"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

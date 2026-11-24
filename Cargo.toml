@@ -20,6 +20,7 @@ members = [
     "rtc-srtp",
     "rtc-stun",
     "rtc-turn",
+    "rtc-video",
 ]
 resolver = "2"
 
@@ -32,6 +33,10 @@ opt-level = 0
 opt-level = 2
 
 [profile.dev.package.opus-rs]
+opt-level = 2
+
+# The video pipeline's tests run minutes of virtual-time calls through two peer connections.
+[profile.dev.package.rtc-video]
 opt-level = 2
 
 [workspace.package]
