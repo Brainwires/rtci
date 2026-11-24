@@ -96,6 +96,8 @@ pub(crate) struct InterceptorHandlerContext {
     /// `allocate_target_bitrate_on` divides among that transport's encodings, again when the
     /// encodings change.
     pub(crate) transport_targets: std::collections::BTreeMap<usize, f64>,
+    /// The streams' weights last written to the pacer (`interceptor::PacerPriorities`).
+    pub(crate) pacer_priorities: Vec<(u32, f64)>,
     /// The RTP sessions (transport ids) whose RTCP session has been told to join and not to
     /// leave since (`RTCPeerConnection::sync_rtcp_sessions`).
     pub(crate) rtcp_joined: std::collections::BTreeSet<usize>,
@@ -165,6 +167,7 @@ impl Default for InterceptorHandlerContext {
             arrival_mids: None,
             target_bitrate: None,
             transport_targets: std::collections::BTreeMap::new(),
+            pacer_priorities: Vec::new(),
             rtcp_joined: Default::default(),
             rtcp_leaving: Default::default(),
             srtp_keyed: Default::default(),
@@ -2305,6 +2308,21 @@ impl<'a>
                                     on_transport,
                                 );
                             self.stats.on_target_bitrate(key, *bits_per_second, &shares);
+                            // The pacer shares the rate among the streams waiting in it by
+                            // the same priorities (RFC 8835 section 4.1).
+                            let weights = crate::peer_connection::priority::pacer_priorities(
+                                self.rtp_transceivers,
+                            );
+                            if weights != self.ctx.pacer_priorities {
+                                self.ctx.pacer_priorities = weights.clone();
+                                let control = interceptor::PacerPriorities { weights };
+                                if let Err(err) = self
+                                    .interceptor
+                                    .handle_write(control.into_packet(packet.now))
+                                {
+                                    log::warn!("pacer priorities: {err}");
+                                }
+                            }
                             // A pause of the source (the pacer's queue is long) is a target
                             // of zero for the streams; the path's estimate is unchanged.
                             if let Some(pause) = packet.message.custom::<interceptor::PacerPause>()

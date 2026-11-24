@@ -217,7 +217,50 @@ pub(crate) fn allocate_target_bitrate_on(
     by_ssrc
 }
 
+/// The weights the pacer shares its rate by among the streams waiting in it (RFC 8835 section
+/// 4.1, `interceptor::PacerPriorities`): each active encoding with an SSRC of a transceiver
+/// that is not stopped and has a sending direction, and its FEC stream, with the weight of its
+/// `priority` ([`bandwidth_weight`]); by SSRC.
+pub(crate) fn pacer_priorities(
+    transceivers: &[crate::rtp_transceiver::internal::RTCRtpTransceiverInternal],
+) -> Vec<(u32, f64)> {
+    let mut weights = Vec::new();
+    for transceiver in transceivers {
+        if transceiver.stopped() || !transceiver.direction().has_send() {
+            continue;
+        }
+        let Some(sender) = transceiver.sender() else {
+            continue;
+        };
+        for encoding in sender.send_encodings() {
+            let Some(ssrc) = encoding.rtp_coding_parameters.ssrc else {
+                continue;
+            };
+            let weight = bandwidth_weight(encoding.priority);
+            weights.push((ssrc, weight));
+            if let Some(fec) = &encoding.rtp_coding_parameters.fec {
+                weights.push((fec.ssrc, weight));
+            }
+        }
+    }
+    weights.sort_by_key(|(ssrc, _)| *ssrc);
+    weights
+}
+
 impl crate::peer_connection::RTCPeerConnection {
+    /// Writes the streams' weights to the pacer ([`pacer_priorities`]) when they changed.
+    pub(crate) fn sync_pacer_priorities(&mut self) -> shared::error::Result<()> {
+        let weights = pacer_priorities(&self.rtp_transceivers);
+        let context = &mut self.pipeline_context.interceptor_handler_context;
+        if weights == context.pacer_priorities {
+            return Ok(());
+        }
+        context.pacer_priorities = weights.clone();
+        let now = self.pipeline_context.now;
+        self.interceptor
+            .handle_write(interceptor::PacerPriorities { weights }.into_packet(now))
+    }
+
     /// Divides the congestion controller's last target among the encodings again
     /// (`allocate_target_bitrate`), after a change of their parameters. Nothing before the
     /// first target.

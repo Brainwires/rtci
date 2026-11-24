@@ -11,8 +11,8 @@
 
 use rtci_interceptor::{
     Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerDiscard, PacerPause,
-    PacerQueueOverflow as QueueOverflow, Packet, Registry, RetransmissionsLeft, Slot, StreamInfo,
-    TaggedPacket,
+    PacerPriorities, PacerQueueOverflow as QueueOverflow, Packet, Registry, RetransmissionsLeft,
+    Slot, StreamInfo, TaggedPacket,
 };
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 struct Released {
     sequence_number: u16,
     at: Duration,
+    ssrc: u32,
 }
 
 struct Marker {
@@ -57,6 +58,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Marker {
             self.released.lock().unwrap().push(Released {
                 sequence_number: rtp.header.sequence_number,
                 at: msg.now.saturating_duration_since(self.epoch),
+                ssrc: rtp.header.ssrc,
             });
         }
         self.write_queue.push_back(msg);
@@ -519,6 +521,108 @@ fn retransmissions_of_a_stream_leave_oldest_packet_first() {
     harness.advance_to(ms(200));
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
     assert_eq!(vec![1, 500, 10, 20, 30, 501, 65_535, 0, 2], order);
+}
+
+/// How many of the packets released were of each of the streams `ssrcs`.
+fn released_by_stream(harness: &Harness, ssrcs: &[u32]) -> Vec<usize> {
+    let released = harness.released();
+    ssrcs
+        .iter()
+        .map(|ssrc| released.iter().filter(|r| r.ssrc == *ssrc).count())
+        .collect()
+}
+
+/// RFC 8835 section 4.1: with packets of several streams waiting, "each stream at each level
+/// of priority is being given approximately twice the transmission capacity (measured in
+/// payload bytes) of the level below". A high-priority stream (weight 8) and a low-priority
+/// one (weight 2), a hundred full-sized packets each written at 0 ms, the low one's first:
+/// of the 50 packets 500 ms at 1.2 Mb/s let out, the high stream has four times the low one's
+/// (40 and 10, give or take the order of a tie); in order within each stream.
+#[test]
+fn waiting_streams_share_the_rate_by_priority() {
+    let mut harness = Harness::new();
+    harness
+        .chain
+        .handle_write(
+            PacerPriorities {
+                weights: vec![(10, 8.0), (20, 2.0)],
+            }
+            .into_packet(harness.epoch),
+        )
+        .expect("handle_write");
+    for sequence_number in 0..100u16 {
+        harness.send_of(
+            ms(0),
+            20,
+            sequence_number,
+            u32::from(sequence_number) * 3000,
+        );
+    }
+    for sequence_number in 0..100u16 {
+        harness.send_of(
+            ms(0),
+            10,
+            sequence_number,
+            u32::from(sequence_number) * 3000,
+        );
+    }
+    harness.advance_to(ms(495));
+    let counts = released_by_stream(&harness, &[10, 20]);
+    assert_eq!(50, counts[0] + counts[1], "{counts:?}");
+    assert!(
+        (38..=42).contains(&counts[0]) && (8..=12).contains(&counts[1]),
+        "high 4 : low 1 of 50, got {counts:?}"
+    );
+    for ssrc in [10, 20] {
+        let order: Vec<u16> = harness
+            .released()
+            .iter()
+            .filter(|r| r.ssrc == ssrc)
+            .map(|r| r.sequence_number)
+            .collect();
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "{ssrc}: {order:?}"
+        );
+    }
+    // The carrier is the pacer's: nothing of it goes on toward the wire.
+    assert!(
+        harness
+            .released()
+            .iter()
+            .all(|r| r.ssrc == 10 || r.ssrc == 20)
+    );
+}
+
+/// Streams of one priority share equally whatever order they were written in: without a
+/// [`PacerPriorities`] every stream weighs as `low`, and two streams of a hundred packets each,
+/// all of one written before the other's, leave 25 and 25 of the first 50 (a single queue in
+/// the order written would send 50 of the first and none of the second).
+#[test]
+fn waiting_streams_of_one_priority_share_equally() {
+    let mut harness = Harness::new();
+    for sequence_number in 0..100u16 {
+        harness.send_of(
+            ms(0),
+            20,
+            sequence_number,
+            u32::from(sequence_number) * 3000,
+        );
+    }
+    for sequence_number in 0..100u16 {
+        harness.send_of(
+            ms(0),
+            10,
+            sequence_number,
+            u32::from(sequence_number) * 3000,
+        );
+    }
+    harness.advance_to(ms(495));
+    let counts = released_by_stream(&harness, &[10, 20]);
+    assert!(
+        (24..=26).contains(&counts[0]) && (24..=26).contains(&counts[1]),
+        "{counts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------

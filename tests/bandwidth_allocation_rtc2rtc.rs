@@ -123,10 +123,43 @@ struct World {
     wire: Vec<Header>,
     /// The SSRC `send` writes on.
     media_ssrc: Option<u32>,
+    /// The first peer's RTP on the wire: (when, SSRC, datagram octets).
+    wire_octets: Vec<(Instant, u32, usize)>,
+    /// A bottleneck on the first peer's datagrams, when set.
+    link: Option<Link>,
+}
+
+/// A bottleneck from the first peer to the second: datagrams leave one after the other at
+/// `bits_per_second` behind a drop-tail queue of `queue` of that rate.
+struct Link {
+    bits_per_second: f64,
+    queue: Duration,
+    /// When the link has sent what it holds.
+    free_at: Instant,
+    /// Datagrams on their way: (arrival, from, to, data).
+    in_flight: std::collections::VecDeque<(Instant, SocketAddr, SocketAddr, bytes::BytesMut)>,
 }
 
 impl World {
     fn pump(&mut self) -> Result<()> {
+        let now = self.now;
+        if let Some(link) = self.link.as_mut() {
+            while link.in_flight.front().is_some_and(|d| d.0 <= now) {
+                let (_, from, to, data) = link.in_flight.pop_front().expect("front");
+                if let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) {
+                    let _ = peer.pc.handle_read(TaggedBytesMut {
+                        now,
+                        transport: TransportContext {
+                            local_addr: to,
+                            peer_addr: from,
+                            ecn: None,
+                            transport_protocol: TransportProtocol::UDP,
+                        },
+                        message: data,
+                    });
+                }
+            }
+        }
         loop {
             let mut in_flight = Vec::new();
             for (i, peer) in self.peers.iter_mut().enumerate() {
@@ -144,8 +177,25 @@ impl World {
             }
             for (i, from, to, data) in in_flight {
                 if i == 0
+                    && let Some(link) = self.link.as_mut()
+                {
+                    let start = link.free_at.max(self.now);
+                    if start.saturating_duration_since(self.now) > link.queue {
+                        continue;
+                    }
+                    let arrival = start
+                        + Duration::from_secs_f64(data.len() as f64 * 8.0 / link.bits_per_second);
+                    link.free_at = arrival;
+                    if let Some(header) = wire_rtp_header(&data) {
+                        self.wire_octets.push((start, header.ssrc, data.len()));
+                    }
+                    link.in_flight.push_back((arrival, from, to, data));
+                    continue;
+                }
+                if i == 0
                     && let Some(header) = wire_rtp_header(&data)
                 {
+                    self.wire_octets.push((self.now, header.ssrc, data.len()));
                     self.wire.push(header);
                 }
                 let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) else {
@@ -211,6 +261,9 @@ impl World {
                     next = next.min(deadline);
                 }
             }
+            if let Some(arrival) = self.link.as_ref().and_then(|l| l.in_flight.front()) {
+                next = next.min(arrival.0);
+            }
             self.now = next.max(self.now + Duration::from_millis(1)).min(until);
             for peer in self.peers.iter_mut() {
                 peer.pc.handle_timeout(self.now)?;
@@ -262,6 +315,8 @@ impl World {
             now: Instant::now(),
             wire: Vec::new(),
             media_ssrc: None,
+            wire_octets: Vec::new(),
+            link: None,
         };
         for peer in world.peers.iter_mut() {
             // The tests read the header extensions on the wire: in the clear unless a test
@@ -323,6 +378,80 @@ impl World {
             world.run_until(next)?;
         }
         Ok((world, sender))
+    }
+
+    /// Two peers, the first sending one video stream per entry of `priorities` (one
+    /// transceiver each, its one encoding at that priority), the second receiving; connected
+    /// over host candidates.
+    fn connected_senders(
+        priorities: &[rtci::peer_connection::priority::RTCPriorityType],
+    ) -> Result<(Self, Vec<RTCRtpSenderId>)> {
+        let mut world = World {
+            peers: [
+                Peer::new("10.0.0.1:5000", false)?,
+                Peer::new("10.0.0.2:5000", false)?,
+            ],
+            now: Instant::now(),
+            wire: Vec::new(),
+            media_ssrc: None,
+            wire_octets: Vec::new(),
+            link: None,
+        };
+        let mut senders = Vec::new();
+        for priority in priorities {
+            let transceiver = world.peers[0].pc.add_transceiver_from_kind(
+                RtpCodecKind::Video,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    streams: vec![],
+                    send_encodings: vec![RTCRtpEncodingParameters {
+                        active: true,
+                        priority: *priority,
+                        ..Default::default()
+                    }],
+                }),
+            )?;
+            senders.push(
+                world.peers[0]
+                    .pc
+                    .rtp_transceiver(transceiver)
+                    .and_then(|t| t.sender())
+                    .expect("a sendonly transceiver has a sender"),
+            );
+        }
+        let now = world.now;
+        let offer = world.peers[0].pc.create_offer(None)?;
+        world.peers[0]
+            .pc
+            .set_local_description(now, offer.clone())?;
+        world.peers[1]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::offer(offer.sdp)?)?;
+        let answer = world.peers[1].pc.create_answer(None)?;
+        world.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        world.peers[0]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::answer(answer.sdp)?)?;
+        for i in 0..2 {
+            let candidate = world.peers[i].candidate()?;
+            world.peers[i].pc.add_local_candidate(candidate.clone())?;
+            world.peers[1 - i].pc.add_remote_candidate(candidate)?;
+        }
+        let start = world.now;
+        while !world.peers.iter().all(|p| p.connected) {
+            if world.now.duration_since(start) >= CONNECT_WITHIN {
+                bail!(
+                    "not connected: {:?} / {:?}",
+                    world.peers[0].states,
+                    world.peers[1].states
+                );
+            }
+            let next = world.now + Duration::from_millis(10);
+            world.run_until(next)?;
+        }
+        Ok((world, senders))
     }
 
     /// Writes a packet on the sender's stream with the given header extension elements.
@@ -521,6 +650,84 @@ fn the_congestion_target_reaches_the_sender_capped_at_max_bitrate() -> Result<()
         .find(|s| s.sent_rtp_stream_stats.rtp_stream_stats.ssrc == ssrc)
         .and_then(|s| s.target_bitrate);
     assert_eq!(target, Some(shares[0].1));
+    Ok(())
+}
+
+/// RFC 8835 section 4.1 with the default interceptors: two video streams, one at `high`
+/// priority and one at `low`, each written at some 1.2 Mbit/s whatever its target (30 frames a
+/// second of five 1000-octet packets) into a path of 1 Mbit/s. What leaves is the pacer's to
+/// share, and it shares it by priority: from 3 to 8 s the high stream puts about four times the
+/// low stream's octets on the wire (8 : 2, each level twice the level below; a single queue in
+/// the order written gives about one to one).
+#[test]
+fn streams_written_above_their_targets_leave_by_priority() -> Result<()> {
+    use rtci::peer_connection::priority::RTCPriorityType;
+    let (mut world, senders) =
+        World::connected_senders(&[RTCPriorityType::High, RTCPriorityType::Low])?;
+    world.link = Some(Link {
+        bits_per_second: 1_000_000.0,
+        queue: Duration::from_millis(300),
+        free_at: world.now,
+        in_flight: Default::default(),
+    });
+    let streams: Vec<(u32, u8)> = senders
+        .iter()
+        .map(|sender| ssrc_and_pt(&mut world, *sender))
+        .collect();
+    let start = world.now;
+    let mut seq = [1u16; 2];
+    for frame in 0..30 * 8u32 {
+        let now = start + Duration::from_micros(33_333 * u64::from(frame));
+        world.run_until(now)?;
+        for (i, sender) in senders.iter().enumerate() {
+            let (ssrc, pt) = streams[i];
+            for part in 0..5 {
+                world.peers[0]
+                    .pc
+                    .rtp_sender(*sender)
+                    .expect("sender")
+                    .write_rtp(
+                        now,
+                        rtci::rtp::Packet {
+                            header: Header {
+                                version: 2,
+                                payload_type: pt,
+                                sequence_number: seq[i],
+                                timestamp: frame * 3000,
+                                ssrc,
+                                marker: part == 4,
+                                ..Default::default()
+                            },
+                            payload: Bytes::from(vec![0x42u8; 1000]),
+                        },
+                    )?;
+                seq[i] = seq[i].wrapping_add(1);
+            }
+        }
+        world.pump()?;
+    }
+    let octets: Vec<usize> = streams
+        .iter()
+        .map(|(ssrc, _)| {
+            world
+                .wire_octets
+                .iter()
+                .filter(|(at, s, _)| s == ssrc && *at >= start + Duration::from_secs(3))
+                .map(|(_, _, octets)| octets)
+                .sum()
+        })
+        .collect();
+    let ratio = octets[0] as f64 / octets[1].max(1) as f64;
+    println!(
+        "octets on the wire 3 to 8 s: high {} low {} ratio {ratio:.2}",
+        octets[0], octets[1]
+    );
+    assert!(
+        (3.0..=5.0).contains(&ratio),
+        "high {} octets, low {}: {ratio:.2} (8 : 2 is 4)",
+        octets[0],
+        octets[1]
+    );
     Ok(())
 }
 

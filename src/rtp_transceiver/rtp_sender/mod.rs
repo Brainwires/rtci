@@ -424,6 +424,7 @@ impl RTCRtpSender<'_> {
         // The encodings' priority, maxBitrate or active flag may have changed: the target is
         // divided again (W3C webrtc-priority 3.2, webrtc 5.2.5).
         self.peer_connection.reallocate_target_bitrate();
+        self.peer_connection.sync_pacer_priorities()?;
         Ok(())
     }
 

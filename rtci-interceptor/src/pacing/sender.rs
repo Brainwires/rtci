@@ -207,8 +207,14 @@ impl PacerBuilder {
 ///    ([`PacerInterceptor::duplicate_retransmissions`]), and each that leaves or is dropped is
 ///    reported application-ward ([`RetransmissionsLeft`]), so the NACK responder does not make
 ///    another while one waits.
-/// 4. **Video and FEC** (every other RTP packet that is not padding) wait behind them, in the
-///    order written. The **queue time bound** (2 s by default,
+/// 4. **Video and FEC** (every other RTP packet that is not padding) wait behind them. Each
+///    stream's packets leave in the order written; **among streams the payload bytes are shared
+///    by priority** (RFC 8835 section 4.1: "each stream at each level of priority is being
+///    given approximately twice the transmission capacity (measured in payload bytes) of the
+///    level below"): start-time fair queuing over the streams with packets waiting, each
+///    weighted by [`PacerPriorities`] (very-low 1, low 2, medium 4, high 8; a stream it does
+///    not name weighs as `low`, the W3C default). Streams of one priority share equally; a
+///    single stream leaves in the order written, as before. The **queue time bound** (2 s by default,
 ///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's (3 and 4):
 ///    by default ([`QueueOverflow::Drop`]) what has waited the bound, or the oldest packet when
 ///    the queue is full, is discarded, so nothing leaves above the target (a retransmission
@@ -342,6 +348,13 @@ pub struct PacerInterceptor {
     immediate_release: bool,
     /// The probe cluster being sent, if one is (see [`ProbeRequest`]).
     probe: Option<ActiveProbe>,
+    /// Each stream's weight among the new media waiting ([`PacerPriorities`]).
+    weights: HashMap<u32, f64>,
+    /// Start-time fair queuing among the streams' new media: each stream's finish tag (the
+    /// virtual time at which its last packet served ends) and the virtual time (the start tag
+    /// of the packet served last).
+    finish: HashMap<u32, f64>,
+    virtual_time: f64,
     /// Packets released over the budget ([`QueueOverflow::Drain`]).
     forced: u64,
     /// Media packets dropped for want of room in the target ([`QueueOverflow::Drop`]).
@@ -392,6 +405,9 @@ impl PacerInterceptor {
             audio: HashSet::new(),
             immediate_release: true,
             probe: None,
+            weights: HashMap::new(),
+            finish: HashMap::new(),
+            virtual_time: 0.0,
             forced: 0,
             dropped: 0,
             discarded_frames: 0,
@@ -538,6 +554,70 @@ impl PacerInterceptor {
         matches!(&packet.message.packet, Packet::Rtp(rtp) if self.audio.contains(&rtp.header.ssrc))
     }
 
+    /// The weight of the stream `ssrc` among the new media waiting ([`PacerPriorities`]).
+    fn weight_of(&self, ssrc: u32) -> f64 {
+        self.weights
+            .get(&ssrc)
+            .copied()
+            .filter(|weight| *weight > 0.0)
+            .unwrap_or(DEFAULT_STREAM_WEIGHT)
+    }
+
+    /// The stream and payload octets of an RTP packet.
+    fn stream_and_payload(packet: &TaggedPacket) -> Option<(u32, f64)> {
+        match &packet.message.packet {
+            Packet::Rtp(rtp) => Some((rtp.header.ssrc, rtp.payload.len() as f64)),
+            Packet::Rtcp(_) => None,
+        }
+    }
+
+    /// The index in the queue of the packet to leave next (see the order of service): the
+    /// front while it is a retransmission; otherwise, among the oldest waiting packet of each
+    /// stream, the one whose start tag (start-time fair queuing, weighted by priority) is
+    /// lowest, the older on a tie. One stream waiting: its oldest packet, the front.
+    fn next_index(&self) -> Option<usize> {
+        let front = self.queue.front()?;
+        if front.message.has(&Attribute::Retransmission) {
+            return Some(0);
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        let mut best: Option<(f64, usize)> = None;
+        for (index, packet) in self.queue.iter().enumerate() {
+            let Some((ssrc, _)) = Self::stream_and_payload(packet) else {
+                continue;
+            };
+            if seen.contains(&ssrc) {
+                continue;
+            }
+            seen.push(ssrc);
+            let start = self
+                .finish
+                .get(&ssrc)
+                .copied()
+                .unwrap_or(0.0)
+                .max(self.virtual_time);
+            if best.is_none_or(|(lowest, _)| start < lowest) {
+                best = Some((start, index));
+            }
+        }
+        Some(best.map_or(0, |(_, index)| index))
+    }
+
+    /// Accounts a new-media packet leaving in the fair queuing among streams.
+    fn served(&mut self, packet: &TaggedPacket) {
+        if packet.message.has(&Attribute::Retransmission) || Self::is_padding(packet) {
+            return;
+        }
+        let Some((ssrc, octets)) = Self::stream_and_payload(packet) else {
+            return;
+        };
+        let weight = self.weight_of(ssrc);
+        let finish = self.finish.entry(ssrc).or_insert(0.0);
+        let start = finish.max(self.virtual_time);
+        self.virtual_time = start;
+        *finish = start + octets / weight;
+    }
+
     /// The size of a packet on the wire, in bits — the unit the budget is kept in.
     fn bits_of(packet: &TaggedPacket) -> f64 {
         match &packet.message.packet {
@@ -561,7 +641,11 @@ impl PacerInterceptor {
             let head = self.padding.front()?;
             return self.bucket().releasable_at(Self::bits_of(head));
         };
-        let by_budget = self.bucket().releasable_at(Self::bits_of(head)).map(|at| {
+        let next = self
+            .next_index()
+            .and_then(|index| self.queue.get(index))
+            .unwrap_or(head);
+        let by_budget = self.bucket().releasable_at(Self::bits_of(next)).map(|at| {
             // While the rate is raised it moves with every call, and the instant computed at
             // one rate can come out a hair short of the budget at the next: a microsecond
             // later it is not, and the deadline advances (webrtc#862).
@@ -906,6 +990,34 @@ pub struct PacerPause {
     pub target_bits_per_second: f64,
 }
 
+/// The weight of a stream that no [`PacerPriorities`] names: `low`'s (2), the W3C default
+/// priority.
+const DEFAULT_STREAM_WEIGHT: f64 = 2.0;
+
+/// The streams' weights among the new media waiting in the pacer (see its order of service):
+/// each SSRC (a media stream, its FEC stream) with the weight of its encoding's priority, each
+/// level twice the level below (RFC 8835 section 4.1; very-low 1, low 2, medium 4, high 8). The
+/// peer connection writes it toward the wire on an empty RTCP carrier whenever the encodings'
+/// priorities change; it replaces the weights the pacer had. Consumed by the pacer; without one
+/// in the chain it reaches the terminus and is dropped there.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PacerPriorities {
+    /// (SSRC, weight).
+    pub weights: Vec<(u32, f64)>,
+}
+
+impl PacerPriorities {
+    /// The packet that carries this to the pacer when written into the chain at `now`.
+    pub fn into_packet(self, now: Instant) -> TaggedPacket {
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::Custom(Arc::new(self))),
+        }
+    }
+}
+
 /// The retransmissions that left the pacer, or were dropped there, since the last notice: each
 /// as (SSRC on the wire, sequence number of the packet it repairs; the original sequence
 /// number on an RTX stream). The pacer sends it application-ward on an empty RTCP carrier; the
@@ -1032,6 +1144,11 @@ impl PacerInterceptor {
         // RTCP is control traffic and mostly time-sensitive — feedback is only useful while it is
         // fresh — so it is not paced.
         if matches!(msg.message.packet, Packet::Rtcp(_)) {
+            // The streams' priorities (written by the peer connection): taken here, not sent.
+            if let Some(priorities) = msg.message.custom::<PacerPriorities>() {
+                self.weights = priorities.weights.iter().copied().collect();
+                return Ok(());
+            }
             self.write_queue.push_back(msg);
             return Ok(());
         }
@@ -1070,6 +1187,7 @@ impl PacerInterceptor {
         {
             let bits = Self::bits_of(&msg);
             if self.try_spend(bits) {
+                self.served(&msg);
                 self.release(msg, bits);
                 return Ok(());
             }
@@ -1115,6 +1233,7 @@ impl PacerInterceptor {
                         let bits = Self::bits_of(&oldest);
                         self.queued_bits -= bits;
                         if self.queue_overflow == QueueOverflow::Drain {
+                            self.served(&oldest);
                             self.pacer.consume(bits);
                             oldest.now = msg.now;
                             self.forced += 1;
@@ -1182,13 +1301,14 @@ impl PacerInterceptor {
         self.follow_queue(now);
 
         while let Some(head) = self.queue.front() {
-            let bits = Self::bits_of(head);
+            let mut bits = Self::bits_of(head);
             // Past the queue time limit the head is dropped (`Drop`) or leaves whatever the
             // budget says (`Drain`).
             let overdue = self
                 .queue_time_limit
                 .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit)
                 && (self.queue_overflow == QueueOverflow::Drain || self.ages_out(head));
+            let mut index = 0;
             if overdue {
                 if self.queue_overflow == QueueOverflow::Drop {
                     // A retransmission is dropped alone; new media with every queued frame
@@ -1206,11 +1326,17 @@ impl PacerInterceptor {
                 }
                 self.pacer.consume(bits);
                 self.forced += 1;
-            } else if !self.try_spend(bits) {
-                break;
+            } else {
+                // Not overdue: the stream whose turn it is (see the order of service).
+                index = self.next_index().unwrap_or(0);
+                bits = self.queue.get(index).map_or(bits, Self::bits_of);
+                if !self.try_spend(bits) {
+                    break;
+                }
             }
 
-            let mut packet = self.queue.pop_front().expect("front just checked");
+            let mut packet = self.queue.remove(index).expect("index within the queue");
+            self.served(&packet);
             self.queued_bits = (self.queued_bits - bits).max(0.0);
             // Rule 3: the packet departs now. Anything below recording departure — the send
             // history congestion control reads — must see the release instant, not the enqueue
