@@ -630,7 +630,15 @@ fn a_retransmission_waiting_in_the_pacer_is_not_made_again() {
                 writes: Default::default(),
             },
         )
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        // The rule under test is the pacer's report, whatever the rate limit: with the default
+        // limit the originals written here fill the 12 kbit/s target and no retransmission
+        // would be made at all.
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new()
+                .with_rate_limit(RetransmissionRateLimit::Unlimited)
+                .build(),
+        )
         .build();
     chain.bind_local_stream(&stream_info());
     let count = || made.load(std::sync::atomic::Ordering::Relaxed);

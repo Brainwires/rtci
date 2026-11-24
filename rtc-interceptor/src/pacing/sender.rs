@@ -248,8 +248,19 @@ impl PacerBuilder {
 /// (`modules/congestion_controller/rtp/control_handler.cc`, `pacing_controller.h`: "the packet
 /// producers should wait (eg drop frames rather than encoding them)"). Pausing at half the
 /// bound, not at the bound, leaves a source that stops when told the time to notice (a frame
-/// interval, a read of its target) and room for the target to fall once more, so a source that
-/// follows the target never has its media discarded.
+/// interval, a read of its target) and room for the target to fall once more.
+///
+/// **What a source that follows the pause wrote is never discarded for its age**: the media
+/// written before the pause began (and within 250 ms of it, the time to notice) stays queued
+/// until it leaves, however long that takes. At a sudden drop of the path's capacity that can be
+/// seconds: the target may fall to a tenth of what the queued media was written for, and the
+/// retransmissions of what the path lost at the drop leave ahead of it (order of service 3),
+/// which is also the order a receiver needs them in. Nothing new joins the queue meanwhile, so
+/// it is bounded by what was there when the pause began; discarding it would leave a gap in the
+/// stream that costs the receiver more than the wait (a receiver that waits for missing packets
+/// by count, as `rtc-media`'s `SampleBuilder` does, sat 9 s on such a gap in
+/// `tests/capacity_cap_video_rtc2rtc.rs`). The queue time bound and the discard below are for
+/// media written into a pause: a source that does not follow it.
 ///
 /// **A target of zero means: produce nothing until the next target.** An encoder skips (does
 /// not encode) the frames captured meanwhile; it does not need a key frame to resume, because
@@ -332,6 +343,8 @@ pub struct PacerInterceptor {
     discarded_frame: HashMap<u32, u32>,
     /// Whether the application is told to pause (see "Pausing the source").
     paused: bool,
+    /// When the pause in force, or the last one, began.
+    pause_began: Option<Instant>,
     /// How many times a pause began.
     pauses: u64,
     /// Retransmissions not queued because the same packet's retransmission already waited.
@@ -372,6 +385,7 @@ impl PacerInterceptor {
             repair_flows: HashSet::new(),
             discarded_frame: HashMap::new(),
             paused: false,
+            pause_began: None,
             pauses: 0,
             duplicate_retransmissions: 0,
             departed: Vec::new(),
@@ -544,8 +558,13 @@ impl PacerInterceptor {
                 at
             }
         });
-        // The rate rises as the oldest packet ages: wake by the time it reaches the limit.
-        let by_limit = self.queue_time_limit.map(|limit| head.now + limit);
+        // The rate rises as the oldest packet ages: wake by the time it reaches the limit
+        // (never for a packet the bound does not apply to: that deadline would stay in the
+        // past and a driver would spin on it).
+        let by_limit = self
+            .queue_time_limit
+            .filter(|_| self.queue_overflow == QueueOverflow::Drain || self.ages_out(head))
+            .map(|limit| head.now + limit);
         match (by_budget, by_limit) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -639,7 +658,7 @@ impl PacerInterceptor {
 
     /// Whether the pause should begin or end now (see "Pausing the source"); `true` when it
     /// changed.
-    fn update_pause(&mut self) -> bool {
+    fn update_pause(&mut self, now: Instant) -> bool {
         let expected = self.expected_queue_time();
         let change = match self.queue_time_limit {
             Some(limit) if !self.paused => expected >= limit.mul_f64(PAUSE_AT),
@@ -650,9 +669,25 @@ impl PacerInterceptor {
             self.paused = !self.paused;
             if self.paused {
                 self.pauses += 1;
+                self.pause_began = Some(now);
             }
         }
         change
+    }
+
+    /// Whether new media written at `written` is what a source that follows the pause left
+    /// behind: written before the pause in force (or the last one) began, or within
+    /// [`PAUSE_GRACE`] of that. It is never discarded for its age (see "Pausing the source").
+    fn written_before_pause(&self, written: Instant) -> bool {
+        self.pause_began
+            .is_some_and(|began| written <= began + PAUSE_GRACE)
+    }
+
+    /// Whether the queued `packet` is discarded once it has waited the queue time bound
+    /// ([`QueueOverflow::Drop`]): a retransmission, and new media a pausing source would not
+    /// have written.
+    fn ages_out(&self, packet: &TaggedPacket) -> bool {
+        packet.message.has(&Attribute::Retransmission) || !self.written_before_pause(packet.now)
     }
 
     /// The target as the application is to read it: zero while paused, with [`PacerPause`]
@@ -678,7 +713,7 @@ impl PacerInterceptor {
     /// After a write or a timeout: a pause that began or ended goes application-ward as the
     /// target, and the retransmissions that left or were dropped as [`RetransmissionsLeft`].
     fn tell_application_ward(&mut self, now: Instant) {
-        if self.update_pause() {
+        if self.update_pause(now) {
             let mut message =
                 AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
                     bits_per_second: self.target(),
@@ -843,6 +878,10 @@ const PAUSE_AT: f64 = 0.5;
 /// short; the gap between the two shares keeps one frame from switching it on and off.
 const RESUME_AT: f64 = 0.05;
 
+/// How long after a pause began media still counts as written by a source that follows it:
+/// the time such a source takes to notice (a read of its target, the frame being encoded).
+const PAUSE_GRACE: Duration = Duration::from_millis(250);
+
 /// Rides a target of zero ([`Attribute::TargetBitrateChanged`]) that the pacer hands
 /// application-ward while it tells the source to pause (see "Pausing the source" on
 /// [`PacerInterceptor`]): the congestion controller's target, for what application-ward of the
@@ -913,7 +952,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             }
             // A new rate changes how long the queue takes to leave: the pause may begin or
             // end, and the application reads it on this packet.
-            self.update_pause();
+            self.update_pause(msg.now);
             self.tag_target(&mut msg.message);
         }
 
@@ -1115,7 +1154,8 @@ impl PacerInterceptor {
             // budget says (`Drain`).
             let overdue = self
                 .queue_time_limit
-                .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit);
+                .is_some_and(|limit| now.saturating_duration_since(head.now) >= limit)
+                && (self.queue_overflow == QueueOverflow::Drain || self.ages_out(head));
             if overdue {
                 if self.queue_overflow == QueueOverflow::Drop {
                     // A retransmission is dropped alone; new media with every queued frame

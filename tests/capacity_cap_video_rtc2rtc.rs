@@ -381,6 +381,8 @@ struct Peer {
     builder: SampleBuilder<Vp8Packet>,
     decoder: ModelDecoder,
     usable_at: Vec<Duration>,
+    /// How long after its capture each usable frame came out of the decoder.
+    usable_lag: Vec<Duration>,
     unusable: u64,
     last_keyframe_request: Option<Instant>,
     keyframe_requests: Vec<Duration>,
@@ -613,6 +615,7 @@ impl Peer {
             builder: SampleBuilder::new(256, Vp8Packet::default(), 90_000),
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
+            usable_lag: Vec::new(),
             unusable: 0,
             last_keyframe_request: None,
             keyframe_requests: Vec::new(),
@@ -904,7 +907,20 @@ impl World {
                     peer.builder.push(now, packet);
                     while let Some(sample) = peer.builder.pop(now) {
                         match peer.decoder.accept(&sample.data) {
-                            Some(true) => peer.usable_at.push(at),
+                            Some(true) => {
+                                peer.usable_at.push(at);
+                                let data = &sample.data;
+                                let captured = u32::from_be_bytes([
+                                    0,
+                                    data[VideoModel::HEADER],
+                                    data[VideoModel::HEADER + 1],
+                                    data[VideoModel::HEADER + 2],
+                                ]);
+                                peer.usable_lag
+                                    .push(at.saturating_sub(Duration::from_millis(
+                                        u64::from(captured) * 10,
+                                    )));
+                            }
                             Some(false) => peer.unusable += 1,
                             None => {}
                         }
@@ -963,7 +979,11 @@ impl World {
                 }
                 let bitrate = if ignoring { 1_400_000 } else { peer.target_bps };
                 let key = std::mem::take(&mut peer.force_key);
-                let frame = peer.model.next_frame(video_bitrate_for(bitrate), key);
+                let mut frame = peer.model.next_frame(video_bitrate_for(bitrate), key);
+                // When it was captured, in units of 10 ms, after the model's header.
+                let captured = (at.as_millis() / 10) as u32;
+                frame[VideoModel::HEADER..VideoModel::HEADER + 3]
+                    .copy_from_slice(&captured.to_be_bytes()[1..]);
                 if key {
                     peer.keyframes_sent.push(at);
                 }
@@ -1162,6 +1182,10 @@ struct Outcome {
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
+    /// The oldest picture the callee showed from the cap on: the longest time between a
+    /// frame's capture and its coming out of the decoder (a frame held back for a repair is
+    /// usable when it comes, and late).
+    lag: Duration,
     capped_at: Duration,
     opened_at: Duration,
     keyframe_requests: Vec<Duration>,
@@ -1247,6 +1271,14 @@ fn run(setup: &Setup) -> Result<Outcome> {
     }
     let callee = &world.peers[1];
     let (freeze, freeze_at) = longest_gap(&callee.usable_at, Duration::from_secs(2), end);
+    let lag = callee
+        .usable_at
+        .iter()
+        .zip(&callee.usable_lag)
+        .filter(|(at, _)| **at >= capped_at)
+        .map(|(_, lag)| *lag)
+        .max()
+        .unwrap_or_default();
     let mut pauses = Vec::new();
     let mut started = None;
     for &(at, bps) in &caller.targets {
@@ -1282,6 +1314,7 @@ fn run(setup: &Setup) -> Result<Outcome> {
         recovery,
         freeze,
         freeze_at,
+        lag,
         capped_at,
         opened_at,
         keyframe_requests: callee.keyframe_requests.clone(),
@@ -1415,9 +1448,10 @@ fn measure_the_capacity_cap() -> Result<()> {
                         setup.cap = Duration::from_secs(seconds.parse()?);
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
                                 o.freeze.as_secs_f64(),
                                 o.freeze_at.as_secs_f64(),
+                                o.lag.as_secs_f64(),
                                 o.rtx_sent,
                                 o.rtx_dropped,
                                 o.queue_drops,

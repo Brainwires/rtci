@@ -988,12 +988,31 @@ mod tests {
             .with(Slot::from(3_500), observer)
             .with(Slot::KeyFrameRequests, KeyFrameRequestInterceptor::new())
             .build();
+        // The first inbound packet carries the starting estimate for the chain (an attribute:
+        // a terminus passes a marked packet on); the key-frame request comes after it.
+        chain
+            .handle_read(TaggedPacket {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+                    rtcp::receiver_report::ReceiverReport {
+                        ssrc: 42,
+                        ..Default::default()
+                    },
+                )])),
+            })
+            .unwrap();
+        while chain.poll_read().is_some() {}
+        let before = seen.load(std::sync::atomic::Ordering::SeqCst);
         chain.handle_read(pli()).unwrap();
         let mut delivered = 0;
         while chain.poll_read().is_some() {
             delivered += 1;
         }
-        (seen.load(std::sync::atomic::Ordering::SeqCst), delivered)
+        (
+            seen.load(std::sync::atomic::Ordering::SeqCst) - before,
+            delivered,
+        )
     }
 
     /// With GCC registered the documented way (around a pass-through), inbound RTCP GCC doesn't
