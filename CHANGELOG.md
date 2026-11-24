@@ -192,6 +192,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for first). This narrows two known limits of 0.1.0 (the 1.4 Mbit/s cliff's cause (2),
   and the picture's age after a sudden drop with the pacer). Tests:
   `rtci-interceptor/tests/nack_repeat_repairs.rs`.
+  **What is remembered of a repair is one packet's and ends by the clock**
+  (`conf/rtx-1r2-duplicate-repairs`, after an independent review proved two defects in the
+  first form, hosted run 45477234586: a "received" memory pruned only when another report
+  came, so a request could be declined for ever and the packet that reused a 16-bit sequence
+  number a cycle later was never retransmitted; and a transport-wide number kept for a
+  retransmission by count only, so feedback on the packet that had the number a cycle later
+  was taken for the old retransmission arriving). The responder keeps one record per packet
+  for its latest retransmission (waiting in the pacer, left with no report yet, report
+  overdue, reported received), named by the packet's place in the order the stream was
+  written, which no later packet has again; a waiting request is for its packet too. Every
+  state ends by the engine's clock at the request, write, notice or timeout at hand, whether
+  or not another report or pacer notice ever comes: in the pacer 4 s, the wait for a report
+  two round trips and 100 ms, a late report 4 s (`RETRANSMISSION_REPORT_HORIZON`), reported
+  received 4 s (`DELIVERED_MEMORY`). A report counts once, for a retransmission of the packet
+  held now: a report repeated (RFC 8888 reports a span of packets every time) does not extend
+  the memory, one on nothing remembered begins none, the loss of an earlier copy does not end
+  the wait for a later one. So a receiver whose feedback reports repairs it did not get stops
+  the repairs of its own packet for 4 s per retransmission and no longer, and what is
+  remembered is at most one record per place of the send buffer. The TWCC sender's number
+  is a retransmission's until it is handed out again, until the numbering is half a cycle
+  past it, and for 4 s. `RetransmissionsReported` names each retransmission with the instant
+  it was made (`ReportedRetransmission`, new). Tests (the reviewer's three among them):
+  sequence numbers and transport-wide numbers coming round at 100 000 packets a second,
+  feedback and pacer notices that never come, a receiver that reports every repair received,
+  feedback naming every number, requests and lost reports without end against the rate
+  limit, and the sizes of what is remembered (`nack_repeat_repairs.rs`,
+  `nack::responder::tests`, `twcc::sender::tests`); each rule has a mutation a test catches.
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written

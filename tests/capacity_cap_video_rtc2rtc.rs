@@ -1910,8 +1910,8 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// Measured (hosted run 45408404348, six seeds on three wall clocks, rtci 0.1.0's wire
 /// sizes): freeze 1.28 to 1.29 s, the oldest picture 2.90 to 3.15 s, 57 to 64
 /// retransmissions (21 to 25 dropped at the link's queue), 242 to 250 kbit/s under the cap,
-/// 1089 to 1230 kbit/s on average 15 to 25 s after it; the bounds below are the most measured
-/// and some 15 % (3.6 s, 74). Before a repair the feedback reports received was no longer
+/// 1089 to 1230 kbit/s on average 15 to 25 s after it (the bounds below are tripwires from
+/// the ensemble of the tree before, see the test's body). Before a repair the feedback reports received was no longer
 /// sent again (rtci 0.1.0, run 45407054812): 1.28 to 1.32 s, 4.35 to 4.51 s, 89 to 97
 /// retransmissions (23 to 29 dropped), 246 to 252 and 1060 to 1363 kbit/s. Some sixty video
 /// packets are lost before the first feedback about the capped link can arrive and while
