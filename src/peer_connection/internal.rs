@@ -280,6 +280,14 @@ impl RTCPeerConnection {
         // Record the resolution so `SettingEngine::crypto_provider` reports the provider this
         // connection actually uses, not merely what was requested.
         setting_engine.crypto_provider = Some(crypto_provider.clone());
+        // The `o=` line of every description this peer connection generates (RFC 9429 section
+        // 5.2.1): its version the time the peer connection is built, on the wall clock the
+        // application gave or the system's, read here once.
+        let built_at = setting_engine
+            .wall_clock
+            .unwrap_or_else(|| shared::time::SystemInstant::now(now))
+            .unix(now);
+        let sdp_origin = super::sdp::jsep_origin(crypto_provider.random(), built_at);
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
         let engine_srflx = super::srflx::EngineSrflx::new(
@@ -378,7 +386,8 @@ impl RTCPeerConnection {
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
             interceptor_handler_context: InterceptorHandlerContext::default()
-                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track),
+                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track)
+                .with_wall_clock(setting_engine.wall_clock),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
             data_read_outs: VecDeque::new(),
@@ -448,7 +457,7 @@ impl RTCPeerConnection {
             removed_transceivers: Vec::new(),
             default_remote_stream_id: None,
             greater_mid: -1,
-            sdp_origin: Origin::default(),
+            sdp_origin,
             last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
@@ -773,7 +782,8 @@ impl RTCPeerConnection {
     /// generate_unmatched_sdp generates an SDP that doesn't take remote state into account
     /// This is used for the initial call for CreateOffer
     pub(super) fn generate_unmatched_sdp(&mut self) -> Result<SessionDescription> {
-        let d = SessionDescription::new_jsep_session_description(false);
+        let d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
         let candidates = self.offered_local_candidates(true)?;
@@ -894,7 +904,8 @@ impl RTCPeerConnection {
         connection_role: ConnectionRole,
         ignore_rid_pause_for_recv: bool,
     ) -> Result<SessionDescription> {
-        let mut d = SessionDescription::new_jsep_session_description(false);
+        let mut d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;

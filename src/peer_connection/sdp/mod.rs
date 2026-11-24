@@ -5766,31 +5766,52 @@ fn reoffered_header_extensions_adds_listed_extensions_back() {
     );
 }
 
+/// The `o=` line of a peer connection's descriptions (RFC 9429 section 5.2.1), drawn once
+/// when the peer connection is built: `<sess-id>` from `random` (the crypto provider's, so a
+/// seeded provider makes it the same in every run), 63 bits and "less than (2^63)-1";
+/// `<sess-version>` the wall-clock time `since_unix_epoch` in seconds since 1900 (RFC 8866
+/// section 5.2: "it is RECOMMENDED that a timestamp be used"), from which each later
+/// description that differs counts up by one ([`update_sdp_origin`]).
+pub(crate) fn jsep_origin(
+    random: &dyn crypto::RTCRandom,
+    since_unix_epoch: std::time::Duration,
+) -> Origin {
+    let mut bytes = [0u8; 8];
+    let drawn = match random.fill(&mut bytes) {
+        Ok(()) => u64::from_be_bytes(bytes),
+        // The id needs uniqueness, not a particular source.
+        Err(_) => rand::random(),
+    };
+    Origin::jsep(
+        drawn % (u64::MAX >> 1),
+        since_unix_epoch.as_secs() + NTP_UNIX_EPOCH_OFFSET_SECS,
+    )
+}
+
 /// Gives a generated description the session's `o=` line (RFC 9429 sections 5.2.2 and 5.3.2:
 /// "The 'o=' line MUST stay the same except for the <session-version> field, which MUST
 /// increment by one on each call ... if the offer might differ from the output of the
 /// previous call"; RFC 3264 section 8: "the version in the origin field MUST increment by one
 /// from the previous SDP").
 ///
-/// The first description generated sets the session's origin (`origin`). Each later one gets
-/// that origin, with the version one higher than the previous description's when it differs
-/// from it (`last_generated`, the text of the previous one) and the same version when it is
-/// the same text. Offers and answers are one sequence: they describe one session.
+/// `origin` is the session's, drawn when the peer connection was built ([`jsep_origin`]). The
+/// first description generated gets it as it is; each later one gets it with the version one
+/// higher than the previous description's when it differs from it (`last_generated`, the
+/// text of the previous one) and the same version when it is the same text. Offers and
+/// answers are one sequence: they describe one session.
 pub(crate) fn update_sdp_origin(
     origin: &mut Origin,
     last_generated: &mut String,
     d: &mut SessionDescription,
 ) {
-    if last_generated.is_empty() {
-        *origin = d.origin.clone();
-    } else {
-        d.origin = origin.clone();
-        if d.marshal() == *last_generated {
-            return;
-        }
-        origin.session_version = origin.session_version.incremented();
-        d.origin.session_version = origin.session_version.clone();
+    d.origin = origin.clone();
+    let text = d.marshal();
+    if last_generated.is_empty() || text == *last_generated {
+        *last_generated = text;
+        return;
     }
+    origin.session_version = origin.session_version.incremented();
+    d.origin.session_version = origin.session_version.clone();
     *last_generated = d.marshal();
 }
 

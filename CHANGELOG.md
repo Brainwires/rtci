@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
   the peer resets it. Engine behaviour change. Tests:
   `rtci-sctp/src/association/reset_answer_test.rs`.
+### Behaviour changes
+
+- **jsep / sdp**: the `o=` line of a peer connection's descriptions is drawn once, when it is
+  built (`conf/jsep-75-session-version`). The session version starts at a timestamp, the
+  seconds since 1900 of the wall clock at that moment (RFC 8866 section 5.2: "it is RECOMMENDED
+  that a timestamp be used"), instead of the clock's sub-second nanoseconds, and still goes up
+  by one with each description that differs (RFC 9429 section 5.2.2). The session id comes from
+  the crypto provider's `random()` and is below 2^63 - 1 (RFC 9429 section 5.2.1).
+  `SessionDescription::new_jsep_session_description` writes the same kind of version. Peers
+  see a larger first version (about 3.9e9, still below 2^32). Tests:
+  `tests/jsep_session_version.rs::the_first_session_version_is_the_wall_clocks_seconds_since_1900`,
+  `rtci-sdp` `grammar_test::the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives`.
+  RFC8866-5.2-3 is `tested`.
+
+### Features
+
+- **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
+  time paired with the instant the peer connection is built, for the values it writes on the
+  wall clock itself: the `o=` session version, the receivers' source timestamps and the NTP
+  times of the RTCP session it installs. With a seeded crypto provider the `o=` line is the
+  same in every run under virtual time. Also `sdp::description::session::Origin::jsep`,
+  `SessionDescription::new_jsep_session_description_with_origin` and
+  `NTP_UNIX_EPOCH_OFFSET_SECS`.
 
 ## [0.1.0] - 2026-11-24
 
