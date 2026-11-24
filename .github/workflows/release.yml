@@ -58,6 +58,8 @@ jobs:
           body_path: RELEASE_NOTES.md
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # This is the only workflow a version tag starts.
+      #
       # Publishing to crates.io stays manual for now: docs/releasing.md has the procedure (dry
       # runs, the order, what to do when a publish fails midway; crates.io versions are
       # permanent). When it moves here, uncomment the step below and add the CRATES_IO_TOKEN
