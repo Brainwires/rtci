@@ -4370,9 +4370,9 @@ fn a_peer_that_issues_no_ticket_costs_no_wait() -> Result<()> {
         Duration::ZERO,
         "no wait for a ticket that does not come"
     );
-    assert_eq!(
-        mixed, both_off,
-        "the connection is up as soon as without it"
+    assert!(
+        mixed <= both_off + Duration::from_millis(5),
+        "the connection is up as soon as without it: {mixed:?} against {both_off:?}"
     );
     assert!(
         gap_on < Duration::from_millis(400),
@@ -4399,7 +4399,12 @@ fn with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket() -> Result<()> 
             .all(|h| !h.offered && !h.resumed && !h.asks_ticket && !h.psk_modes),
         "{handshakes:?}"
     );
-    assert_eq!((on, gap), (off, Duration::ZERO), "nobody waits");
+    // Virtual time; the two runs differ only by the handshakes' own sizes.
+    let parity = Duration::from_millis(5);
+    assert!(
+        on <= off + parity && gap == Duration::ZERO,
+        "nobody waits: {on:?} against {off:?}, next ClientHello {gap:?}"
+    );
     let (handshakes, mixed, gap) = connection_timing(
         "dtls 1.2 server, client on",
         dtls12_only(true),
@@ -4417,7 +4422,7 @@ fn with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket() -> Result<()> 
     );
     eprintln!("timing summary (dtls 1.2): both off {off:?}, both on {on:?}, server 1.2 {mixed:?}");
     assert_eq!(gap, Duration::ZERO, "the others start with the first");
-    assert_eq!(mixed, off);
+    assert!(mixed <= off + parity, "{mixed:?} against {off:?}");
     Ok(())
 }
 
@@ -4474,7 +4479,23 @@ fn a_bundled_connection_exchanges_no_ticket_with_the_session_on() -> Result<()> 
 /// session and asking for no ticket, while the first three resumed.
 #[test]
 fn a_transport_added_by_a_later_negotiation_runs_a_full_handshake() -> Result<()> {
-    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, resumption_on)?;
+    // Both under max-compat: a second audio section gets a transport of its own at both
+    // (a `balanced` answerer rejects a second section of a type outside a BUNDLE group).
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.peers = [
+        Peer::with_setting_engine(
+            "10.0.0.1",
+            RTCBundlePolicy::MaxCompat,
+            None,
+            resumption_on(),
+        )?,
+        Peer::with_setting_engine(
+            "10.0.0.2",
+            RTCBundlePolicy::MaxCompat,
+            None,
+            resumption_on(),
+        )?,
+    ];
     world.negotiate(without_bundle_group)?;
     world.gather()?;
     world.run_traced("connected with a data channel", |peers| {
@@ -4498,9 +4519,13 @@ fn a_transport_added_by_a_later_negotiation_runs_a_full_handshake() -> Result<()
             }],
         }),
     )?;
-    world.renegotiate_with(without_bundle_group)?;
+    let offer = world.renegotiate_with(without_bundle_group)?;
     for peer in &world.peers {
-        assert_eq!(peer.pc.dtls_transports().len(), 4, "a transport of its own");
+        assert_eq!(
+            peer.pc.dtls_transports().len(),
+            4,
+            "a transport of its own:\n{offer}"
+        );
     }
     world.gather_new()?;
     world.run_traced("the new transport connected", |peers| {

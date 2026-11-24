@@ -1523,7 +1523,7 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_session_resumption",
         class: NotGovernedClass::EngineOnly,
-        note: "RFC 5764 3 (SHOULD): the transports of unbundled sections share one DTLS session, the others waiting for the first and resuming it (DTLS 1.3 tickets with psk_dhe_ke, DTLS 1.2 tickets or session ids), on in every profile. A bundled connection, Chrome's in every bundle policy, has one transport and is unchanged; a peer that issues or accepts no ticket gets full handshakes",
+        note: "RFC 5764 3 (SHOULD, \"as an optimization\"): the transports of unbundled sections share one DTLS session, the others waiting for the first (at most three flight intervals) and resuming it with DTLS 1.3 tickets (psk_dhe_ke only; no DTLS 1.2 session id or ticket in any configuration). Off in every profile, an opt-in (`true`): no browser issues tickets (libwebrtc rtc_base/openssl_stream_adapter.cc @ a222406d sets SSL_OP_NO_TICKET, line 1223, an SSL_CTX per adapter, line 1149), a bundled connection, Chrome's in every bundle policy, has one transport and exchanges no ticket, and whether it becomes the default is decided after review of this bounded, DTLS 1.3-only form. On, a peer that issues no ticket costs no wait (the others start when the first handshake is complete); before 0.2 it cost them 800 ms",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_connection_id",

@@ -35,29 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
-- **dtls / peer connection** (`conf/dtls-resume-1`): the DTLS transports of a connection whose
-  sections are not bundled share one DTLS session (RFC 5764 section 3: "a single DTLS
-  association is established, and all other DTLS associations wait until that connection is
-  established before proceeding with their handshakes"). The first client transport runs a
-  full handshake; every other client transport waits until it is connected and the peer's
-  ticket has come (at most two flight intervals after it connected, then without one), then
-  resumes it (DTLS 1.3 PSK with `psk_dhe_ke` only, a fresh (EC)DHE exchange; DTLS 1.2 RFC 5077
-  ticket or session id). As the server, each transport accepts a ticket or session another
-  transport of the same connection issued (four DTLS 1.3 tickets per handshake). Only the
-  first association of each transport set up by the negotiation that set up the transports
-  takes part, and only when its section names the same remote fingerprints as the transport
-  that made the session; each transport's fingerprint check also runs on the certificates
-  stored with the session, so a mismatch fails with `fingerprint-failure` as a full handshake
-  does. Nothing is shared between connections; a later association (SRTP re-keying, an ICE
-  restart with new DTLS parameters) is a full handshake; a connection with one transport
-  (bundled) is unchanged on the wire. A peer that issues no ticket gets full handshakes. Tests:
-  `tests/multi_transport_rtc2rtc.rs::unbundled_transports_wait_for_the_first_and_resume_its_dtls_session`,
-  `a_section_naming_another_certificate_does_not_resume_as_the_dtls_client`,
-  `a_section_naming_another_certificate_does_not_resume_as_the_dtls_server`,
-  `a_new_dtls_association_after_a_resumed_one_is_a_full_handshake`,
-  `without_dtls_session_resumption_every_transport_runs_a_full_handshake`;
-  `transport/dtls/resumption.rs::a_session_of_one_connection_does_not_resume_on_another`,
-  `a_new_association_of_a_transport_is_a_full_handshake`. RFC5764-3-4 is `tested`.
+- **rtci-dtls**: a resumption that carries no certificate is refused when a
+  `verify_peer_certificate` check is configured (fails closed): a DTLS 1.3 or 1.2 server
+  resumes no such ticket or session (a full handshake runs, with the normal check), and a
+  client fails a handshake that would resume one with `bad_certificate`. Before, the check was
+  skipped for an empty list. Not reachable from the peer connection (its tickets always carry
+  certificates); reachable by other users of `rtci-dtls`. Tests:
+  `dtls13/psk_test.rs::a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate`,
+  `a_server_with_a_check_resumes_no_ticket_that_carries_no_certificate`,
+  `resumption_test.rs::a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate`,
+  `a_server_with_a_check_resumes_no_session_that_carries_no_certificate`.
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
@@ -297,6 +284,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stale RFC8834-8-2 (RTCP XR generation) `tested`.
 
 ### Added
+
+- **DTLS session resumption between a connection's transports, opt-in** (RFC 5764 section 3
+  SHOULD, "as an optimization"; `conf/dtls-resume-2`, reworked from `conf/dtls-resume-1` after
+  its security review): `SettingEngineBuilder::with_dtls_session_resumption(true)`. **Off by
+  default**: no browser issues tickets (libwebrtc sets `SSL_OP_NO_TICKET`), a bundled
+  connection has one transport, and default-on is reconsidered once this form has been
+  reviewed. When the negotiation that sets up the transports sets up more than one in a DTLS
+  role, the first client transport runs a full handshake and the others resume with the
+  peer's **DTLS 1.3** tickets (`psk_dhe_ke` only, a fresh (EC)DHE exchange); server
+  transports share the connection's ticket keys for their first handshake only. **No DTLS 1.2
+  session id or ticket is asked for, issued or accepted by the peer connection in any
+  configuration** (a DTLS 1.2 ticket carries the master secret, and a resumed 1.2 association
+  runs no key exchange). The wait is bounded: a transport waits for the first handshake at
+  most three of its initial flight intervals (1.2 s at 400 ms; 4.5 round trips where ICE
+  measured one), not at all once the first failed, was closed or could not start, and not for
+  a ticket that does not come: against a peer that issues none the others start when the
+  first handshake is complete. The reviewed form waited without bound for a stalled first
+  handshake, and cost 800 ms (two flight intervals) against a peer without tickets; both are
+  gone. A bundled connection asks for and issues no ticket (the same DTLS datagrams as
+  without the setting); a transport added later, re-keying and a server's later handshake on
+  the same transport are full handshakes; same remote fingerprints only, and each section's
+  fingerprint check runs on the certificates stored with the ticket; client tickets are kept at
+  most five minutes and dropped once every transport has started. RFC5764-3-4 is `partial`
+  (implemented, not the default). New in `rtci-dtls`: `ConfigBuilder::with_dtls12_resumption`
+  (DTLS 1.2 out of resumption, DTLS 1.3 kept), `ConfigBuilder::with_session_ticket_issuer`
+  and `session::SessionTicketIssuer` (ticket keys shared by several configurations),
+  `Tls13Session::peer_certificates` / `limit_lifetime`, `Dtls12Session::peer_certificates`,
+  `HandshakeConfig::supports_dtls13` (now public). Tests: `tests/multi_transport_rtc2rtc.rs`
+  (`unbundled_transports_wait_for_the_first_and_resume_its_dtls_session`,
+  `a_first_handshake_that_never_completes_holds_the_others_back_three_flight_intervals_at_most`,
+  `a_peer_that_issues_no_ticket_costs_no_wait`,
+  `with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket`,
+  `a_bundled_connection_exchanges_no_ticket_with_the_session_on`,
+  `a_transport_added_by_a_later_negotiation_runs_a_full_handshake`, the wrong-fingerprint and
+  re-key tests); `transport/dtls/resumption.rs` (the re-check behind the admission gate in
+  both roles, a final answer with other fingerprints, the store's lifetime and emptying, the
+  wait rules); `handler/dtls.rs` (the bound, a leader that cannot start, no resumption of a
+  later handshake in place); `rtci-dtls` server-side re-check tests in DTLS 1.3 and 1.2
+  (`the_server_runs_its_peer_certificate_check_again_on_a_resumed_client`).
 
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than

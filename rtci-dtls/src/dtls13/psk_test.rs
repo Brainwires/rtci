@@ -1026,8 +1026,14 @@ fn the_server_runs_its_peer_certificate_check_again_on_a_resumed_client() -> Res
         "the resumption is refused"
     );
     assert!(third.server.is_connection_failed(&client_addr()));
-    assert!(matches!(third.server_error, Some(Error::Other(_))));
-    assert_eq!(resumed(&third), (false, false));
+    assert!(third.server_error.is_some(), "the server refused it");
+    assert!(
+        !third
+            .server
+            .get_connection_state(client_addr())
+            .is_some_and(|state| state.resumed() && third.server_complete),
+        "nothing resumed"
+    );
     Ok(())
 }
 

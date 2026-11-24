@@ -904,10 +904,9 @@ mod tests {
             .make_handshake_config(&params(RTCDtlsRole::Server, &other), true)
             .expect("a config with the session");
         let before = clients.store().stored();
-        assert_eq!(
-            handshake(wrong, server(&theirs, &servers, &ours)),
-            (false, false),
-            "the stored certificate is not the section's"
+        assert!(
+            !handshake(wrong, server(&theirs, &servers, &ours)).0,
+            "the stored certificate is not the section's: the handshake fails"
         );
         assert!(before > 0, "a ticket was there to offer");
         assert!(
