@@ -891,6 +891,10 @@ pub struct RTCPeerConnection {
     /// ([`Self::set_multicast_dns_publishing`]); given to every transport's agent, those made
     /// later included.
     pub(crate) mdns_publishing: ice::mdns::MulticastDnsPublishing,
+    /// The local addresses the application marked as RFC 4941 temporary
+    /// ([`Self::set_temporary_ipv6_addresses`]); given to every transport's agent, those made
+    /// later included.
+    pub(crate) temporary_ipv6_addresses: Vec<std::net::Ipv6Addr>,
     /// Every SSRC a local description of this connection has described for a local stream
     /// (RFC 5576 section 5: an SSRC is not reused for another source, "SHOULD NOT" ever; and
     /// section 8: an updated offer's new SSRCs differ from any used before): new SSRCs are
@@ -4123,6 +4127,20 @@ impl RTCPeerConnection {
         }
         self.configuration.ice_transport_policy = configuration.ice_transport_policy;
         self.configuration.ice_candidate_pool_size = configuration.ice_candidate_pool_size;
+        // The agents learn the new set of servers: one that differs discards what their
+        // gatherings showed about public addresses (draft-ietf-mmusic-mdns-ice-candidates
+        // section 3.1.2.2).
+        let mut urls = vec![];
+        for server in &configuration.ice_servers {
+            urls.extend(server.urls()?);
+        }
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_ice_servers(urls.clone());
+        }
         self.configuration.ice_servers = configuration.ice_servers;
 
         Ok(())

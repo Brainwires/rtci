@@ -208,6 +208,10 @@ pub struct MulticastDNS {
     pub rate_limit: Option<ice::mdns::MdnsRateLimit>,
     /// See [`SettingEngineBuilder::with_multicast_dns_fail_closed`].
     pub fail_closed: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_known_public_addresses`].
+    pub expose_known_public_addresses: bool,
+    /// See [`SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses`].
+    pub expose_temporary_ipv6_addresses: bool,
 }
 
 impl Default for MulticastDNS {
@@ -229,6 +233,8 @@ impl Default for MulticastDNS {
             unicast_response: false,
             rate_limit: None,
             fail_closed: false,
+            expose_known_public_addresses: false,
+            expose_temporary_ipv6_addresses: false,
         }
     }
 }
@@ -1726,6 +1732,59 @@ impl SettingEngineBuilder {
     /// neither case.
     pub fn with_multicast_dns_fail_closed(mut self, fail_closed: bool) -> Self {
         self.0.multicast_dns.fail_closed = fail_closed;
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: leave unwrapped a host address that the gathering before
+    /// the current ICE generation showed to be public. Off by default, in every behaviour
+    /// profile; in the other mDNS modes it changes nothing.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2: "If the STUN response returns
+    /// the same value as the local IP address, this indicates the address is in fact public
+    /// [...] once an address has been identified as public, the ICE agent MAY cache this
+    /// information and skip mDNS protection for that address in future ICE gathering phases.
+    /// Note that if the set of STUN servers changes, any cached information SHOULD be
+    /// discarded". The address is shown public when a server-reflexive candidate (the
+    /// engine's or the application's) has its base's address, that base is a host candidate
+    /// of the transport (an interface address: a STUN server cannot name another), and the
+    /// address is a global unicast one (`ice::mdns::is_global_unicast`: never a private,
+    /// loopback, link-local, unique-local or CGNAT address, whatever the server said). The
+    /// gathering that shows it is not changed (its `.local` candidate went out first, the
+    /// server-reflexive candidate follows with raddr `0.0.0.0` / `::` rport 9); from the next
+    /// ICE restart, host candidates on the address carry it, as long as each restart's
+    /// gathering shows it again. Per transport, never shared between connections; a change of
+    /// the ICE servers (`set_configuration`) forgets it.
+    ///
+    /// What it exposes, and to whom: an address the remote peer and the application (a web
+    /// page, in a browser) already received as the server-reflexive candidate; the later host
+    /// candidates add that it is the host's own interface address. Chrome's own form (it
+    /// writes host addresses for a page with media permission) is a browser consent policy,
+    /// not the engine's: the `Chrome` behaviour profile leaves this off.
+    pub fn with_multicast_dns_expose_known_public_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_known_public_addresses = expose;
+        self
+    }
+
+    /// With mDNS `QueryAndGather`: leave unwrapped the host addresses the application marked
+    /// as RFC 4941 temporary IPv6 addresses (`RTCPeerConnection::set_temporary_ipv6_addresses`;
+    /// `rtci-stream-driver`'s `PeerDriver` marks them from the operating system's interface
+    /// list where it reports the flag). Off by default, in every behaviour profile; in the
+    /// other mDNS modes it changes nothing.
+    ///
+    /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3: "the [RFC4941] IPv6 addresses
+    /// recommended for WebRTC have inherent privacy protections, namely a short lifetime and
+    /// the lack of any stateful information. Accordingly, implementations MAY choose to not
+    /// conceal [RFC4941] addresses with mDNS names as a tradeoff for improved peer-to-peer
+    /// connectivity." The engine cannot tell a temporary address by its bits: an address not
+    /// marked stays hidden, and a marked one is unwrapped only if it is a global unicast
+    /// address (`ice::mdns::is_global_unicast`).
+    ///
+    /// What it exposes, and to whom: the temporary address, to the remote peer and the
+    /// application (a web page, in a browser), for the address's lifetime; not the stable
+    /// IPv6 address, nor any IPv4 one. The `Chrome` behaviour profile leaves this off (a
+    /// browser's choice of what to write is its consent policy, not the engine's).
+    pub fn with_multicast_dns_expose_temporary_ipv6_addresses(mut self, expose: bool) -> Self {
+        self.0.multicast_dns.expose_temporary_ipv6_addresses = expose;
         self
     }
 

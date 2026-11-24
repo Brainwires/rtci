@@ -788,8 +788,19 @@ impl RTCPeerConnection {
             .ufrag
             .clone();
         let key = (transport, mapped, kind, ufrag);
-        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant.
-        if mapped == base || self.streams.srflx.announced.contains(&key) {
+        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant. With
+        // `with_multicast_dns_expose_known_public_addresses` in `QueryAndGather` it goes to
+        // the agent all the same: it is what shows the base public
+        // (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.2, which also says it "MUST NOT
+        // be considered redundant" with the base's mDNS candidate); the agent drops it as
+        // redundant when the base's host candidate carries the address.
+        let shows_public = self.setting_engine.multicast_dns.mode
+            == ice::mdns::MulticastDnsMode::QueryAndGather
+            && self
+                .setting_engine
+                .multicast_dns
+                .expose_known_public_addresses;
+        if (mapped == base && !shows_public) || self.streams.srflx.announced.contains(&key) {
             return;
         }
         self.streams.srflx.announced.push(key);

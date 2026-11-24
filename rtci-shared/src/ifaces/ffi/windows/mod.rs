@@ -380,6 +380,42 @@ pub fn ifaces() -> Result<Vec<Interface>, ::std::io::Error> {
     }
 }
 
+/// `IpSuffixOriginRandom` of `NL_SUFFIX_ORIGIN`: "an anonymous IPv6 address where the host
+/// part of the address was generated randomly" (Microsoft's term for RFC 4941 temporary
+/// addresses).
+const IP_SUFFIX_ORIGIN_RANDOM: u32 = 5;
+
+/// The local IPv6 addresses the operating system reports as RFC 4941 temporary addresses:
+/// the unicast IPv6 addresses `GetAdaptersAddresses` lists with the suffix origin
+/// `IpSuffixOriginRandom` (deprecated ones left out, as `ifaces` leaves them).
+pub fn temporary_ipv6_addresses() -> io::Result<Vec<std::net::Ipv6Addr>> {
+    let mut buffer = Vec::with_capacity(PREALLOC_ADAPTERS_LEN);
+    let mut out = Vec::new();
+    unsafe {
+        local_ifaces_with_buffer(&mut buffer)?;
+        let mut adapter_addr = buffer.as_ptr() as *const IpAdapterAddresses;
+        while !adapter_addr.is_null() {
+            let adapter = &*adapter_addr;
+            let mut unicast_addr = adapter.all.first_unicast_address;
+            while !unicast_addr.is_null() {
+                let unicast = &*unicast_addr;
+                // Read as the integer the OS wrote, not as the Rust enum.
+                let suffix_origin =
+                    *(&unicast.suffix_origin as *const IpSuffixOrigin as *const u32);
+                if unicast.dad_state != IpDadState::Deprecated
+                    && is_ipv6_enabled(unicast)
+                    && suffix_origin == IP_SUFFIX_ORIGIN_RANDOM
+                {
+                    out.push(*v6_socket_from_adapter(unicast).ip());
+                }
+                unicast_addr = unicast.next;
+            }
+            adapter_addr = adapter.all.next;
+        }
+    }
+    Ok(out)
+}
+
 unsafe fn is_ipv4_enabled(unicast_addr: &IpAdapterUnicastAddress) -> bool {
     unsafe {
         if unicast_addr.length != 0 {
