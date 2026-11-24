@@ -269,6 +269,8 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 ///   RFC 3890): [`set_session_bitrate_limit`](Self::set_session_bitrate_limit). `b=AS` counts
 ///   IP and UDP headers, `b=TIAS` does not; the caller converts.
 /// - a selected candidate pair change: [`notify_path_change`](Self::notify_path_change).
+///   The engine's peer connection tells the interceptor of its own pair changes
+///   ([`PathChanged`](crate::PathChanged)); this is for a change it cannot see.
 ///
 /// TMMBR and REMB arrive as RTCP and are read by the interceptor itself.
 #[derive(Clone)]
@@ -820,10 +822,29 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
         if seen >= PATH_CHANGE_PACKETS {
             self.path = Some(key);
             self.path_candidate = None;
-            self.estimator.on_path_change(now);
+            self.on_new_path(now);
         } else {
             self.path_candidate = Some((key, seen));
         }
+    }
+
+    /// The path changed: seen in the addresses inbound packets arrive between
+    /// ([`observe_path`](Self::observe_path)), or said by the peer connection
+    /// ([`PathChanged`](crate::PathChanged)), which covers a change that keeps the addresses.
+    ///
+    /// The estimator starts over ([`BandwidthEstimator::on_path_change`]), and the packets sent
+    /// before the change are forgotten: they went into the path that was left, and the
+    /// feedback that reports them missing after a break (every packet sent while the old path
+    /// was already dead) would read as the new path's loss. libwebrtc's feedback adapter
+    /// likewise "only reports packets sent on the new route"
+    /// (`RtpTransportControllerSend::OnNetworkRouteChanged`,
+    /// `TransportFeedbackAdapter::SetNetworkRoute`). The probe clusters in flight go with
+    /// them: their packets are among those forgotten.
+    fn on_new_path(&mut self, now: Instant) {
+        self.estimator.on_path_change(now);
+        self.history.forget_sent();
+        self.probe_packets.clear();
+        self.probe_clusters.clear();
     }
 
     /// Bits per second sent over the last second.
@@ -933,9 +954,16 @@ impl<E: BandwidthEstimator> Protocol<TaggedPacket, TaggedPacket, ()>
     type Time = Instant;
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
-        // A packet from the wire, not one of the chain's attribute carriers (an empty RTCP
-        // packet, which never had an address).
-        if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+        if msg.message.custom::<crate::PathChanged>().is_some() {
+            // The peer connection selected another candidate pair. The next inbound packet's
+            // addresses are the new path's, whatever they are: the address-based detection
+            // starts from them and does not count the same change a second time.
+            self.path = None;
+            self.path_candidate = None;
+            self.on_new_path(msg.now);
+        } else if !matches!(&msg.message.packet, Packet::Rtcp(packets) if packets.is_empty()) {
+            // A packet from the wire, not one of the chain's attribute carriers (an empty
+            // RTCP packet, which never had an address).
             self.observe_path(msg.now, &msg.transport);
         }
         if let Packet::Rtp(ref rtp_packet) = msg.message.packet {

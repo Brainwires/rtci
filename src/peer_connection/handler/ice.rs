@@ -33,6 +33,10 @@ pub(crate) struct IceHandlerContext {
     /// it, is told through this (RFC 8831 section 5: "SCTP SHOULD be notified when an address
     /// change has happened"): the event itself ends at the DTLS handler.
     pub(crate) selected_pair_changes: u64,
+    /// `selected_pair_changes` as the interceptor chain was last told of it: a change after
+    /// the first selection is a new path for the congestion controllers
+    /// (`interceptor::PathChanged`), whatever the addresses the datagrams are handed over with.
+    pub(crate) selected_pair_changes_told_chain: u64,
 
     /// Two lite agents, this one controlling: the pair it chose among several, which the
     /// next offer conveys (RFC 8445 section 8.2, RFC 8839 section 4.4.1.3: the local candidate
@@ -67,6 +71,7 @@ impl IceHandlerContext {
 
             selected_pair_key: None,
             selected_pair_changes: 0,
+            selected_pair_changes_told_chain: 0,
             lite_candidate_update: None,
             lite_candidate_update_raised: false,
             early_dtls: VecDeque::new(),

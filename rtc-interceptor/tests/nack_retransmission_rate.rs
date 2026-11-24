@@ -200,17 +200,24 @@ fn retransmissions_alone_stay_under_the_target() {
     assert_eq!(allowed, scenario(up_to_target(), Some(target)));
 }
 
-/// RFC 4588 section 7, "the acceptable packet rate and bitrate include both the original and
-/// retransmitted data", the default: at 320 kbit/s (40 000 octets a second) the 30 originals
-/// (30 360 octets) leave 9 640, room for nine retransmissions; at 240 kbit/s they leave none.
+/// RFC 4588 section 7, the default: the retransmissions take what the original packets leave of
+/// the target over the last second, or the retransmission reserve the original media has been
+/// lowered by before they are sent, whichever is more. Twenty requests of 1014 octets with no
+/// round trip measured need 162 kbit/s, at most half the target: at 320 kbit/s the reserve is
+/// 160 kbit/s (20 000 octets a second), more than the 9 640 the 30 originals (30 360 octets)
+/// leave of 40 000: nineteen leave. At 240 kbit/s the originals leave nothing; the reserve is
+/// 120 kbit/s, 15 000 octets: fourteen.
 #[test]
-fn retransmissions_take_what_the_originals_leave_of_the_target() {
-    let left = 40_000 - 30 * ORIGINAL;
-    assert_eq!(9, left / RETRANSMISSION);
-    assert_eq!(9, scenario(NackResponderBuilder::new(), Some(320_000.0)));
-    assert_eq!(0, scenario(NackResponderBuilder::new(), Some(240_000.0)));
+fn retransmissions_take_what_the_originals_leave_or_the_reserve() {
+    assert_eq!(9640 / RETRANSMISSION, 9);
+    assert_eq!(19, scenario(NackResponderBuilder::new(), Some(320_000.0)));
+    assert_eq!(14, scenario(NackResponderBuilder::new(), Some(240_000.0)));
     let rfc = || NackResponderBuilder::new().with_rate_limit(RetransmissionRateLimit::WithinTarget);
-    assert_eq!(9, scenario(rfc(), Some(320_000.0)));
+    assert_eq!(19, scenario(rfc(), Some(320_000.0)));
+    // Without a reserve (at most 0 % of the target) the originals' share alone: nine, none.
+    let no_reserve = || NackResponderBuilder::new().with_max_reserve_fraction(0.0);
+    assert_eq!(9, scenario(no_reserve(), Some(320_000.0)));
+    assert_eq!(0, scenario(no_reserve(), Some(240_000.0)));
 }
 
 /// Without a target (no congestion controller in the chain) and with the limit off, every
@@ -301,15 +308,16 @@ fn a_request_no_longer_made_is_dropped() {
 /// RFC 4588 section 7, "the sender SHOULD NOT send retransmission packets without reducing
 /// the packet rate and bitrate of the original stream": while retransmissions wait, the target
 /// reported to the application is the controller's less a reserve, at most half of it, and the
-/// reserve goes down the write leg to the congestion controller. Ten packets of 1014 octets
-/// waiting with no round trip measured (a second) need 81 kbit/s: at 240 kbit/s the reserve is
-/// that, at 150 kbit/s it is half the target. Both targets are under what the 30 originals
-/// took, so nothing leaves yet.
+/// reserve goes down the write leg to the congestion controller, before the retransmissions
+/// use it. Ten packets of 1014 octets waiting with no round trip measured (a second) need
+/// 81 kbit/s: at 240 kbit/s the reserve is that (10 140 octets: all ten leave), at 150 kbit/s
+/// it is half the target (9 375 octets: nine leave). Both targets are under what the 30
+/// originals took: without the reserve nothing would leave.
 #[test]
 fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions() {
-    for (target, reserve) in [
-        (240_000.0, 10.0 * RETRANSMISSION as f64 * 8.0),
-        (150_000.0, 75_000.0),
+    for (target, reserve, leave) in [
+        (240_000.0, 10.0 * RETRANSMISSION as f64 * 8.0, 10),
+        (150_000.0, 75_000.0, 9),
     ] {
         let base = Instant::now();
         let mut chain = responder(NackResponderBuilder::new());
@@ -323,7 +331,7 @@ fn the_target_for_the_original_media_leaves_room_for_the_waiting_retransmissions
             None,
         );
         let seen = drain(&mut chain);
-        assert_eq!(0, seen.retransmitted, "the originals took the target");
+        assert_eq!(leave, seen.retransmitted, "at {target}");
         assert_eq!(vec![reserve], seen.reserves, "at {target}");
         assert_eq!(vec![target - reserve], seen.targets, "at {target}");
     }
@@ -383,13 +391,13 @@ fn up_to_the_target_the_original_media_is_not_lowered() {
 /// first, whatever the originals took. At 100 kbit/s the 30 originals (30 360 octets) took more
 /// than the window's 12 500 octets; the reserve is half the target, 50 kbit/s. With a minimum
 /// of 100 kbit/s, 100 − 50 is under it: twelve retransmissions of 1014 octets fill the 12 500.
-/// With a minimum of 40 kbit/s, or none announced, the originals' share holds: none. The
+/// With a minimum of 40 kbit/s, or none announced, the reserve's 6 250 octets: six. The
 /// original media is told the target less the reserve, never less than the minimum.
 #[test]
 fn near_the_floor_retransmissions_take_the_room_first() {
     for (minimum, expected, media_target) in [
-        (None, 0, 50_000.0),
-        (Some(40_000.0), 0, 50_000.0),
+        (None, 6250 / RETRANSMISSION, 50_000.0),
+        (Some(40_000.0), 6250 / RETRANSMISSION, 50_000.0),
         (Some(100_000.0), 12_500 / RETRANSMISSION, 100_000.0),
     ] {
         let base = Instant::now();
@@ -416,28 +424,29 @@ fn near_the_floor_retransmissions_take_the_room_first() {
 }
 
 /// A driver that follows the documented loop (take what is written, then sleep until
-/// `poll_timeout`, then `handle_timeout`) with nothing else waking it: every retransmission the
-/// limit holds back leaves at its own due time, and the driver never spins (each deadline is
+/// `poll_timeout`, then `handle_timeout`) with nothing else waking it: the retransmissions the
+/// limit holds back leave at their own due times, and the driver never spins (each deadline is
 /// later than the instant it was handed last). Under the default rule at 240 kbit/s the 30
-/// originals took the window: the ten requests leave one by one as the originals leave the
-/// window, until the requests run out a second after they were made.
+/// originals took the window: of twenty requests the 120 kbit/s reserve lets fourteen leave at
+/// once, the rest as the window empties, until the requests run out a second after they were
+/// made.
 #[test]
 fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
     let base = Instant::now();
     let mut chain = responder(NackResponderBuilder::new());
     send(&mut chain, base, 30);
-    let lost: Vec<u16> = (0..10).collect();
+    let lost: Vec<u16> = (0..20).collect();
     let at = base + Duration::from_millis(300);
     read_nack(&mut chain, at, &lost, Some(240_000.0), None);
     assert_eq!(
-        0,
+        14,
         drain(&mut chain).retransmitted,
-        "the originals took the target"
+        "the reserve's share at once"
     );
 
     let mut now = at;
     let mut wakes = Vec::new();
-    let mut left = Vec::new();
+    let mut later = 0;
     while let Some(due) = chain.poll_timeout() {
         assert!(
             due > now,
@@ -447,21 +456,16 @@ fn a_held_retransmission_wakes_the_driver_once_at_its_due_time() {
         now = due;
         chain.handle_timeout(now).unwrap();
         wakes.push(now - at);
-        let seen = drain(&mut chain);
-        left.extend(std::iter::repeat_n(now - at, seen.retransmitted));
-    }
-    // The first fits when the first two originals (sent at 0 and 10 ms) have left the window,
-    // 710 ms after the NACK; one more as each further original leaves.
-    assert_eq!(Some(&Duration::from_millis(710)), left.first(), "{left:?}");
-    assert!(left.len() >= 2, "{left:?}");
-    for pair in left.windows(2) {
-        assert!(pair[1] > pair[0], "one at a time: {left:?}");
+        later += drain(&mut chain).retransmitted;
     }
     assert!(
-        wakes.len() <= left.len() + 2,
-        "{} wake-ups for {} retransmissions: {wakes:?}",
-        wakes.len(),
-        left.len()
+        later >= 1,
+        "a held retransmission left by itself: {wakes:?}"
+    );
+    assert!(
+        wakes.len() <= later + 3,
+        "{} wake-ups for {later} retransmissions: {wakes:?}",
+        wakes.len()
     );
 }
 

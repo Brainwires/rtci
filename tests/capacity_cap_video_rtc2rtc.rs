@@ -329,6 +329,8 @@ struct Peer {
     /// requests (PLI / FIR) it was handed.
     pacer_discards: Vec<(Duration, u32, usize)>,
     key_requests_received: u32,
+    /// When the application was told of a selected candidate pair, with the estimate then.
+    pair_changes: Vec<(Duration, Option<u32>)>,
 }
 
 fn video_codec() -> RTCRtpCodec {
@@ -546,6 +548,7 @@ impl Peer {
             keyframe_requests: Vec::new(),
             pacer_discards: Vec::new(),
             key_requests_received: 0,
+            pair_changes: Vec::new(),
         })
     }
 
@@ -636,6 +639,14 @@ impl Peer {
         (total > 0.0).then_some(total as u32)
     }
 
+    /// The fraction of packets the default chain's congestion controller counts as lost
+    /// (smoothed); `None` in ParolNet's chain.
+    fn packet_loss(&self) -> Option<f64> {
+        self.handles
+            .as_ref()
+            .and_then(|handles| handles.congestion_control.stats().packet_loss)
+    }
+
     /// The congestion controller's estimate itself.
     fn estimate(&self) -> Option<u32> {
         match (&self.gcc, &self.handles) {
@@ -688,6 +699,14 @@ struct World {
     /// retransmissions it sent and lost there, the callee's usable frames so far. Printed
     /// with `RTC_CAP_TRACE=1`.
     trace: Vec<String>,
+    /// Nothing sent either way arrives (both hosts' network is gone).
+    blackhole: bool,
+    /// Only STUN arrives until the caller's application is told of a newly selected pair: the
+    /// path the media went on is gone, and the new one carries the restart's checks first.
+    stun_only: bool,
+    /// The caller's estimate and counted loss after every step, while `sampling`.
+    sampling: bool,
+    samples: Vec<(Duration, Option<u32>, Option<f64>)>,
 }
 
 impl World {
@@ -709,6 +728,13 @@ impl World {
                     {
                         let seq = u16::from_be_bytes([msg.message[2], msg.message[3]]);
                         self.peers[i].video_left.insert(seq);
+                    }
+                    // RFC 7983: a first octet of 0 to 3 is STUN.
+                    let stun = msg.message.first().is_some_and(|b| *b <= 3);
+                    if self.blackhole
+                        || (self.stun_only && !stun && self.peers[0].pair_changes.is_empty())
+                    {
+                        continue;
                     }
                     let arrives = self.uplinks[i].send(self.now, msg.message.len());
                     if payload_type == Some(RTX_PT) {
@@ -780,6 +806,10 @@ impl World {
                         bail!("peer {i} failed");
                     }
                     peer.connected = state == RTCPeerConnectionState::Connected;
+                }
+                RTCPeerConnectionEvent::OnSelectedCandidatePairChange(_) => {
+                    let estimate = peer.estimate();
+                    peer.pair_changes.push((at, estimate));
                 }
                 RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
                     let video = peer
@@ -913,6 +943,11 @@ impl World {
             }
             self.tick()?;
             self.pump()?;
+            if self.sampling {
+                let caller = &self.peers[0];
+                let sample = (self.elapsed(), caller.estimate(), caller.packet_loss());
+                self.samples.push(sample);
+            }
             if self.now == next && next < to {
                 // Progress even when a deadline repeats at the same instant.
                 let quiet = self
@@ -926,6 +961,31 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Each peer's host candidate to the other, as after gathering.
+    fn trickle(&mut self) -> Result<()> {
+        for i in 0..2 {
+            let candidate = self.peers[i].candidate()?;
+            self.peers[i].pc.add_local_candidate(candidate.clone())?;
+            self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+        }
+        Ok(())
+    }
+
+    /// An ICE restart from the caller, signalled at once, with the same host candidates.
+    fn restart_ice(&mut self) -> Result<()> {
+        let now = self.now;
+        self.peers[0].pc.restart_ice();
+        let offer = self.peers[0].pc.create_offer(None)?;
+        self.peers[0].pc.set_local_description(now, offer.clone())?;
+        self.peers[1].pc.set_remote_description(now, offer)?;
+        let answer = self.peers[1].pc.create_answer(None)?;
+        self.peers[1]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        self.peers[0].pc.set_remote_description(now, answer)?;
+        self.trickle()
     }
 
     /// Two peers over host candidates, audio and video each way, connected.
@@ -947,6 +1007,10 @@ impl World {
             frame: 0,
             media: false,
             trace: Vec::new(),
+            blackhole: false,
+            stun_only: false,
+            sampling: false,
+            samples: Vec::new(),
         };
         let now = world.now;
         let offer = world.peers[0].pc.create_offer(None)?;
@@ -959,11 +1023,7 @@ impl World {
             .pc
             .set_local_description(now, answer.clone())?;
         world.peers[0].pc.set_remote_description(now, answer)?;
-        for i in 0..2 {
-            let candidate = world.peers[i].candidate()?;
-            world.peers[i].pc.add_local_candidate(candidate.clone())?;
-            world.peers[1 - i].pc.add_remote_candidate(candidate)?;
-        }
+        world.trickle()?;
         while !world.peers.iter().all(|p| p.connected) {
             if world.elapsed() > Duration::from_secs(10) {
                 bail!("not connected");
@@ -1241,6 +1301,137 @@ fn a_sender_following_the_lowered_target_loses_only_frames_discarded_at_the_cap(
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Read through `Debug`.
+struct PathChangeOutcome {
+    /// The caller's estimate before its network went.
+    before: Option<u32>,
+    /// When its application was told of the restart's pair, and the estimate then.
+    switched_at: Duration,
+    at_switch: Option<u32>,
+    /// The lowest estimate, and the highest loss the default chain's controller counted, in
+    /// the three seconds after the switch; the estimate at their end.
+    lowest_after: u32,
+    most_loss_after: f64,
+    estimate_after: Option<u32>,
+}
+
+/// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
+/// open, then nothing arrives either way for four seconds (the caller's machine left its
+/// network, and every packet sent meanwhile went into the dead path), then an ICE restart
+/// whose checks reach the other side while the media path still does not, until the caller
+/// has selected the new pair. Every datagram keeps the same addresses throughout, as in an
+/// application that hands them over with a placeholder pair: only the peer connection's word
+/// tells the congestion controllers that the path changed.
+fn path_change_run(seed: u64) -> Result<PathChangeOutcome> {
+    let mut world = World::connected(seed, None)?;
+    let t = world.now + Duration::from_secs(10);
+    world.advance(t)?;
+    let before = world.peers[0].estimate();
+    for peer in world.peers.iter_mut() {
+        peer.pair_changes.clear();
+    }
+    world.blackhole = true;
+    let t = world.now + Duration::from_secs(4);
+    world.advance(t)?;
+    world.blackhole = false;
+    world.stun_only = true;
+    world.restart_ice()?;
+    let restarted_at = world.elapsed();
+    while world.peers[0].pair_changes.is_empty() {
+        if world.elapsed() > restarted_at + Duration::from_secs(10) {
+            bail!("the restart selected no pair");
+        }
+        let t = world.now + Duration::from_millis(10);
+        world.advance(t)?;
+    }
+    world.stun_only = false;
+    let (switched_at, at_switch) = world.peers[0].pair_changes[0];
+    world.sampling = true;
+    let t = world.now + Duration::from_secs(3);
+    world.advance(t)?;
+    let after: Vec<_> = world
+        .samples
+        .iter()
+        .filter(|(at, _, _)| *at >= switched_at)
+        .collect();
+    Ok(PathChangeOutcome {
+        before,
+        switched_at,
+        at_switch,
+        lowest_after: after
+            .iter()
+            .filter_map(|(_, estimate, _)| *estimate)
+            .min()
+            .unwrap_or(0),
+        most_loss_after: after
+            .iter()
+            .filter_map(|(_, _, loss)| *loss)
+            .fold(0.0, f64::max),
+        estimate_after: world.peers[0].estimate(),
+    })
+}
+
+/// A new selected pair is a new path for the congestion controller also when the datagrams
+/// keep their addresses (RFC 8836 section 2, requirement 1): the peer connection tells the
+/// chain (`PathChanged`), the estimate starts over from the start rate, and the packets sent
+/// into the dead path during the outage are not counted as the new path's loss (libwebrtc's
+/// `RtpTransportControllerSend::OnNetworkRouteChanged`: `restart_bwe`, and a feedback adapter
+/// that reports only packets sent on the new route). ParolNet's simulation of this call saw
+/// one feedback report a loss of 0.985 after the restart and its GCC cut the estimate from
+/// 437 to 242 kbit/s, and the video froze for 7 s. ParolNet's chain (the TWCC-driven GCC).
+#[test]
+fn an_ice_restart_with_the_same_addresses_starts_the_estimate_over() -> Result<()> {
+    for seed in 1..=3 {
+        let outcome = path_change_run(seed)?;
+        println!("ParolNet chain seed {seed}: {outcome:?}");
+        assert!(
+            outcome.before.is_some_and(|before| before > 300_000),
+            "seed {seed}: the estimate climbed before the outage: {outcome:?}"
+        );
+        assert_eq!(
+            Some(300_000),
+            outcome.at_switch,
+            "seed {seed}: the estimate starts over at the new pair: {outcome:?}"
+        );
+        assert!(
+            outcome.lowest_after >= 200_000,
+            "seed {seed}: cut to {} for the old path's losses: {outcome:?}",
+            outcome.lowest_after
+        );
+    }
+    Ok(())
+}
+
+/// The same call through the engine's default interceptors (GCC on transport-wide feedback in
+/// the congestion control interceptor, the pacer): the packets sent into the dead path are not
+/// counted as lost after the switch (the controller's smoothed loss stays under the 10 % at
+/// which it starts cutting), and the target is not lower three seconds after the switch than
+/// at it.
+#[test]
+fn an_ice_restart_with_the_same_addresses_counts_no_old_loss_in_the_default_chain() -> Result<()> {
+    DEFAULT_CHAIN.with(|d| d.set(true));
+    let outcomes: Result<Vec<_>> = (1..=3)
+        .map(|seed| {
+            let outcome = path_change_run(seed)?;
+            println!("default chain seed {seed}: {outcome:?}");
+            Ok((seed, outcome))
+        })
+        .collect();
+    DEFAULT_CHAIN.with(|d| d.set(false));
+    for (seed, outcome) in &outcomes? {
+        assert!(
+            outcome.most_loss_after < 0.1,
+            "seed {seed}: the old path's packets counted as lost: {outcome:?}"
+        );
+        assert!(
+            outcome.estimate_after >= outcome.at_switch,
+            "seed {seed}: the target fell after the switch: {outcome:?}"
         );
     }
     Ok(())
