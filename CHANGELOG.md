@@ -518,6 +518,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The paced test's recovery is measured from the lowest target of the first second after the
   lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was among its mildest),
   and it reports every failing seed, not the first.
+- **capacity-cap test: the retransmission branches' bounds from the same ensemble**
+  (`conf/capmatrix-2-rtx2r-guards`, on `conf/rtx-2r-smooth-limiter`): with repeat repairs gone
+  and retransmissions released at the limit's rate every one of the 108 paced cells meets the
+  2 s freeze requirement on both bases (0.74 to 1.28 s), and the tripwires follow that
+  ensemble's maxima and some 15 %: paced oldest picture 9.1 s (was 6.8 s from one draw per
+  seed; 7.91 s measured) and retransmissions 102 (72; 89 measured); the cap after 20 s without
+  a pacer 3.7 s and 58 (3.6 s and 55); at a 1 Mbit/s target 2.0 s and 38.
 
 ## [0.1.0] - 2026-11-24
 
