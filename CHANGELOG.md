@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser cell: video RED + ULPFEC from the browser.** `examples/interop-peer` takes
+  `?video_red_ulpfec=1` (`DefaultInterceptorOptions::video_red_ulpfec`) and reports the
+  engine's FEC counts (`fec`); `scenarios.spec.mjs` has the browser send VP8 in RED with
+  ULPFEC, NACK off, through netem loss, and checks that the engine rebuilt packets from it.
+  `scripts/test-env/hosted-cell.sh` runs a browser cell on a disposable Linux machine (a
+  GitHub-hosted runner through `agent-test.yml`) outside the test image.
 - **Video `red` + `ulpfec` in the `Chrome` behaviour profile.**
   `DefaultInterceptorOptions::video_red_ulpfec` (profile row `fec.video-red-ulpfec`: `Rfc`
   `false`, `Chrome` `true`): `register_default_interceptors` then registers `video/red` (116),
