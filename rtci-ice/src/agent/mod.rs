@@ -39,6 +39,8 @@ mod agent_test;
 #[cfg(test)]
 mod agent_trickle_test;
 
+#[cfg(test)]
+mod address_policy_test;
 /// Configuration for a new [`Agent`]: servers, timeouts and role.
 pub mod agent_config;
 mod agent_proto;
@@ -82,7 +84,7 @@ use crate::rand::*;
 use crate::state::*;
 use crate::tcp_type::TcpType;
 use crate::url::*;
-use remote_policy::RemotePolicy;
+use remote_policy::{AddressPurpose, RemotePolicy};
 use shared::error::*;
 use shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 
@@ -802,6 +804,7 @@ impl Agent {
                 allow_loopback: config.allow_loopback_remote_candidates,
                 allow_link_local: config.allow_link_local_remote_candidates,
                 filter: config.remote_address_filter.clone(),
+                address: config.address_policy.clone(),
             },
             ext_ip_mapper,
 
@@ -1695,8 +1698,12 @@ impl Agent {
                 continue;
             }
             // RFC 8445 §5.1.1.1: a candidate is a unicast transport address. One that can't be
-            // a destination, or that the application's filter refuses, is never held or paired.
-            if !self.remote_policy.allows_candidate(c.addr()) {
+            // a destination, or that the application's filter or address policy refuses, is
+            // never held or paired.
+            if !self
+                .remote_policy
+                .allows_remote(c.addr(), AddressPurpose::RemoteCandidate)
+            {
                 warn!(
                     "[{}]: ignoring remote candidate {}: its address {} is not an allowed destination",
                     self.get_name(),
@@ -2266,8 +2273,10 @@ impl Agent {
     ///
     /// Guards against accepting media from an address that has not passed a connectivity check.
     pub fn is_valid_non_stun_traffic(&mut self, now: Instant, transport: TransportContext) -> bool {
-        self.find_local_candidate(transport.local_addr, transport.transport_protocol)
-            .is_some()
+        self.remote_policy.allows_source(transport.peer_addr)
+            && self
+                .find_local_candidate(transport.local_addr, transport.transport_protocol)
+                .is_some()
             && self.validate_non_stun_traffic(now, transport.peer_addr)
     }
 
@@ -2401,6 +2410,10 @@ impl Agent {
     /// As [`Agent::accepts_data`], saying which pair the data arrived on: the one in use, or
     /// another valid pair (its local and remote candidates).
     pub fn data_path(&self, transport: TransportContext) -> Option<DataPath<'_>> {
+        // Nothing from a source the embedder's address policy refuses.
+        if !self.remote_policy.allows_source(transport.peer_addr) {
+            return None;
+        }
         let path = self.media_path()?;
         if self.data_from_selected_pair_only {
             // (The hardening compares the source only, as it always did.)
@@ -3842,8 +3855,18 @@ impl Agent {
             // initiating agent will receive a Binding request prior to receiving the candidates
             // from its peer. If this happens, the agent MUST immediately generate a response
             // [...] Once the answer is received, it MUST proceed with the remaining steps."
-            // A source the destination policy refuses is not answered, now or later.
-            if !self.remote_policy.allows_candidate(remote_addr) {
+            // A source the destination policy refuses is not answered, now or later. Nor is
+            // one the embedder's address policy would refuse as a peer-reflexive candidate
+            // (what the source of a request from no known candidate becomes, Section 7.3.1.3,
+            // once the credentials are here): answered now, it would have its answer, and its
+            // reflexive address in it, before the policy was ever asked about it.
+            if !self.remote_policy.allows_candidate(remote_addr)
+                || (self.find_remote_candidate(remote_addr).is_none()
+                    && !self
+                        .remote_policy
+                        .address
+                        .allows(remote_addr, AddressPurpose::PeerReflexiveSource))
+            {
                 return Err(Error::ErrUnhandledStunpacket);
             }
             self.send_binding_success(now, m, local_index, remote_addr);
@@ -4078,7 +4101,10 @@ impl Agent {
             );
             return Ok(None);
         }
-        if !self.remote_policy.allows_candidate(remote_addr) {
+        if !self
+            .remote_policy
+            .allows_remote(remote_addr, AddressPurpose::PeerReflexiveSource)
+        {
             warn!(
                 "[{}]: ignoring peer-reflexive candidate {}: not an allowed destination",
                 self.get_name(),
