@@ -250,8 +250,30 @@ impl HevcPayloader {
             if pending.is_empty() {
                 pending_size = NAL_HEADER_SIZE + first_unit_size;
             } else if pending_size + next_unit_size > mtu {
-                flush(&mut pending, &mut payloads);
-                pending_size = NAL_HEADER_SIZE + first_unit_size;
+                // RFC 7798 section 5: the non-VCL units that precede this VCL unit go on with
+                // it when they fit one packet together (as in `payload`).
+                let buffered: Vec<Bytes> = pending.iter().map(|(_, nalu)| nalu.clone()).collect();
+                let carried = Self::trailing_prefix_units(&buffered, &nalu);
+                let carried_size = NAL_HEADER_SIZE
+                    + pending[pending.len() - carried..]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, n))| if i == 0 { DONL_SIZE } else { DOND_SIZE } + 2 + n.len())
+                        .sum::<usize>()
+                    + if carried == 0 {
+                        first_unit_size
+                    } else {
+                        next_unit_size
+                    };
+                if carried > 0 && carried < pending.len() && carried_size <= mtu {
+                    let next = pending.split_off(pending.len() - carried);
+                    flush(&mut pending, &mut payloads);
+                    pending = next;
+                    pending_size = carried_size;
+                } else {
+                    flush(&mut pending, &mut payloads);
+                    pending_size = NAL_HEADER_SIZE + first_unit_size;
+                }
             } else {
                 pending_size += next_unit_size;
             }
@@ -431,6 +453,27 @@ impl HevcPayloader {
     }
 }
 
+impl HevcPayloader {
+    /// How many NAL units at the end of `buffer` are non-VCL units associated with `next`, a
+    /// VCL NAL unit: those that precede the VCL unit they belong to (every non-VCL type but
+    /// the ones that follow it, EOS_NUT 36, EOB_NUT 37, FD_NUT 38 and SUFFIX_SEI_NUT 40; ITU-T
+    /// H.265 section 7.4.2.4.4). None when `next` is not a VCL NAL unit.
+    fn trailing_prefix_units(buffer: &[Bytes], next: &Bytes) -> usize {
+        let header = |nalu: &Bytes| H265NALUHeader::new(nalu[0], nalu[1]);
+        if !header(next).is_type_vcl_unit() {
+            return 0;
+        }
+        buffer
+            .iter()
+            .rev()
+            .take_while(|nalu| {
+                let header = header(nalu);
+                !header.is_type_vcl_unit() && !matches!(header.nalu_type(), 36..=38 | 40)
+            })
+            .count()
+    }
+}
+
 impl Payloader for HevcPayloader {
     /// Payload fragments a H264 packet across one or more byte arrays
     fn payload(&mut self, mtu: usize, payload: &Bytes) -> Result<Vec<Bytes>> {
@@ -462,7 +505,26 @@ impl Payloader for HevcPayloader {
                 + 2
                 + nalu.len();
             if !aggregation_buffer.is_empty() && aggregated_size > mtu {
-                Self::flush_aggregation_buffer(&mut aggregation_buffer, mtu, &mut payloads);
+                // RFC 7798 section 5: "Each non-VCL NAL unit SHOULD, when possible from an MTU
+                // size match viewpoint, be encapsulated in an aggregation packet together with
+                // its associated VCL NAL unit". The non-VCL units that precede a VCL unit
+                // (parameter sets, prefix SEI, ...) at the end of the buffer go on with it when
+                // they fit one packet together, rather than with the units before them.
+                let carried = Self::trailing_prefix_units(&aggregation_buffer, &nalu);
+                let carried_size = NAL_HEADER_SIZE
+                    + aggregation_buffer[aggregation_buffer.len() - carried..]
+                        .iter()
+                        .map(|nalu| 2 + nalu.len())
+                        .sum::<usize>()
+                    + 2
+                    + nalu.len();
+                if carried > 0 && carried < aggregation_buffer.len() && carried_size <= mtu {
+                    let mut next = aggregation_buffer.split_off(aggregation_buffer.len() - carried);
+                    Self::flush_aggregation_buffer(&mut aggregation_buffer, mtu, &mut payloads);
+                    aggregation_buffer.append(&mut next);
+                } else {
+                    Self::flush_aggregation_buffer(&mut aggregation_buffer, mtu, &mut payloads);
+                }
             }
 
             aggregation_buffer.push(nalu);

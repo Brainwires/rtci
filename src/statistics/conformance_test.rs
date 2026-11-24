@@ -104,10 +104,11 @@ fn a_sender_report_without_wall_clock_time_gives_no_remote_timestamp() {
             "NTP time {ntp_time:#x} is before 1970: {remote}"
         );
     }
-    // The first second of 1970 is one.
-    stats.on_rtcp_received(&sender_report(7, 0x83AA_7E80_0000_0000), now);
+    // A second into 1970 is one. (The first second of a month and the last before it are
+    // a possible leap second's, whose timestamps are not taken: RFC 7164 section 5.1.)
+    stats.on_rtcp_received(&sender_report(7, 0x83AA_7E81_0000_0000), now);
     let remote = remote_outbound(&stats.snapshot(now));
-    assert_eq!(remote["remoteTimestamp"], 0.0);
+    assert_eq!(remote["remoteTimestamp"], 1000.0);
     assert_eq!(remote["reportsSent"], 5);
 }
 

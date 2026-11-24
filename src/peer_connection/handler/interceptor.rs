@@ -119,6 +119,11 @@ pub(crate) struct InterceptorHandlerContext {
     /// `source_departure_ends_track`: a track ends when every one of its SSRCs is here.
     /// Bounded by `MAX_REMOTE_CNAMES`.
     departed_sources: HashSet<SSRC>,
+    /// The SSRC an RTCP session reports from while the connection sends no media, as the
+    /// session announced it (`RtcpSessionEvent::ReportingSsrc`); the first media SSRC the
+    /// connection mints is this one (RFC 8108 section 6.1,
+    /// `RTCPeerConnection::unused_media_ssrc`).
+    pub(crate) reporting_ssrc: Option<SSRC>,
 }
 
 impl InterceptorHandlerContext {
@@ -172,6 +177,7 @@ impl Default for InterceptorHandlerContext {
             source_departure_ends_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
+            reporting_ssrc: None,
         }
     }
 }
@@ -218,6 +224,25 @@ impl<'a> InterceptorHandler<'a> {
         now: Instant,
     ) {
         self.stats.on_rtcp_received(rtcp_packets, now);
+        // RFC 7941 section 4.2.3: a reception report about a local stream tells its sender
+        // whether the receiver got the packets that carried its MID and RtpStreamId.
+        for packet in rtcp_packets {
+            let any = packet.as_any();
+            let blocks = if let Some(sr) = any.downcast_ref::<SenderReport>() {
+                &sr.reports[..]
+            } else if let Some(rr) = any.downcast_ref::<ReceiverReport>() {
+                &rr.reports[..]
+            } else {
+                continue;
+            };
+            for block in blocks {
+                for transceiver in self.rtp_transceivers.iter_mut() {
+                    if let Some(sender) = transceiver.sender_mut() {
+                        sender.on_report_block(block.ssrc, block.last_sequence_number);
+                    }
+                }
+            }
+        }
         // RFC 6679 sections 7.2.1 and 7.4.2: what the ECN validations detected goes to the
         // application, as well as to the log, "to enable follow up".
         for (ssrc, failure) in self.stats.take_ecn_failures() {
@@ -900,6 +925,9 @@ impl<'a> InterceptorHandler<'a> {
                     })
                 });
                 log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
+                if Some(*ssrc) == self.ctx.reporting_ssrc {
+                    self.ctx.reporting_ssrc = Some(*replacement);
+                }
                 if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
                     for transceiver in self.rtp_transceivers.iter_mut() {
                         let Some(sender) = transceiver.sender_mut() else {
@@ -924,6 +952,8 @@ impl<'a> InterceptorHandler<'a> {
             }
             // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE.
             RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc),
+            // RFC 8108 6.1: the SSRC the first stream is to be sent on.
+            RtcpSessionEvent::ReportingSsrc { ssrc } => self.ctx.reporting_ssrc = *ssrc,
             _ => {}
         }
     }

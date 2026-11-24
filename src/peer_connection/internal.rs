@@ -748,7 +748,7 @@ impl RTCPeerConnection {
         let port = section.media_name.port.value;
         let address = section
             .connection_information
-            .as_ref()
+            .first()
             .and_then(|c| c.address.as_ref())
             .map(|a| a.address.as_str());
         // A trickled description's placeholder (`9` and `0.0.0.0` / `::`, RFC 8838 section
@@ -3564,8 +3564,49 @@ impl RTCPeerConnection {
         }
     }
 
-    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
-    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
+    /// An unused SSRC for a stream's media (not a repair flow): the SSRC the RTCP sessions
+    /// report from while the connection has never had a local stream, any other unused one
+    /// after that.
+    ///
+    /// RFC 8108 section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC
+    /// that it uses for RTCP reporting. If that endpoint wants to start sending an RTP
+    /// stream, it is RECOMMENDED that it use its existing SSRC for that stream, since
+    /// otherwise the participant count in the RTP session will be unnecessarily increased".
+    /// The session announces its reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`](interceptor::RtcpSessionEvent)) when it draws it
+    /// (with its own random source, which an application may seed). The second and later
+    /// streams get new SSRCs ("it will need to generate a new SSRC for the second and any
+    /// subsequent RTP streams"), and so does every stream once a local stream has been
+    /// described (the SSRC may then have said BYE as the reporting SSRC).
+    pub(super) fn unused_media_ssrc(&self, minted: &mut Vec<SSRC>) -> SSRC {
+        let reporting = self
+            .pipeline_context
+            .interceptor_handler_context
+            .reporting_ssrc;
+        let never_sent = self.ssrc_history.is_empty()
+            && self.rtp_transceivers.iter().all(|transceiver| {
+                transceiver.sender().as_ref().is_none_or(|sender| {
+                    sender
+                        .send_encodings()
+                        .iter()
+                        .all(|encoding| encoding.rtp_coding_parameters.ssrc.is_none())
+                        && sender.parked_ssrcs().next().is_none()
+                })
+            });
+        if let Some(reporting) = reporting
+            && never_sent
+            && !self.taken_ssrcs(minted).contains(&reporting)
+        {
+            minted.push(reporting);
+            return reporting;
+        }
+        self.unused_ssrc(minted)
+    }
+
+    /// The SSRCs a new local SSRC must differ from: `minted`, every local stream's (with
+    /// their repair flows and the streams of other clock rates), the remote descriptions'
+    /// and those local streams used before.
+    fn taken_ssrcs(&self, minted: &[SSRC]) -> HashSet<SSRC> {
         let mut taken: HashSet<SSRC> = minted.iter().copied().collect();
         for transceiver in &self.rtp_transceivers {
             if let Some(sender) = transceiver.sender() {
@@ -3589,6 +3630,12 @@ impl RTCPeerConnection {
         }
         // RFC 5576 sections 5 and 8: nor one a local stream used before.
         taken.extend(&self.ssrc_history);
+        taken
+    }
+
+    /// [`unused_ssrc`](Self::unused_ssrc) with the candidates drawn from `draw`.
+    fn unused_ssrc_drawn(&self, minted: &mut Vec<SSRC>, draw: &mut dyn FnMut() -> SSRC) -> SSRC {
+        let taken = self.taken_ssrcs(minted);
         let ssrc = unused_ssrc_from(std::iter::repeat_with(draw), &taken);
         minted.push(ssrc);
         ssrc
@@ -4836,7 +4883,7 @@ impl RTCPeerConnection {
         }
         for encoding in &mut send_encodings {
             if encoding.rtp_coding_parameters.ssrc.is_none() {
-                encoding.rtp_coding_parameters.ssrc = Some(self.unused_ssrc(&mut minted));
+                encoding.rtp_coding_parameters.ssrc = Some(self.unused_media_ssrc(&mut minted));
             }
             if is_rtx_enabled && encoding.rtp_coding_parameters.rtx.is_none() {
                 encoding.rtp_coding_parameters.rtx = Some(RTCRtpRtxParameters {
