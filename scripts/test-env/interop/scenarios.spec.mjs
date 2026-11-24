@@ -176,7 +176,11 @@ test("ULPFEC in RED to the browser: Rust's FEC reaches the browser's decoder thr
     s.mungeRemoteOffer = withoutNack;
     s.pc.addTransceiver("video", { direction: "recvonly" });
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
-    await s.negotiate(withoutNack);
+    // libwebrtc configures its receive stream's NACK from its own description: the offer it
+    // applies has none either.
+    const offer = await s.pc.createOffer();
+    await s.pc.setLocalDescription({ type: "offer", sdp: withoutNack(offer.sdp) });
+    await s.sendOffer();
     await s.connected();
   }, `${WS}/?video_red_ulpfec=1`);
   const answer = await page.evaluate(() => S.pc.remoteDescription.sdp);
