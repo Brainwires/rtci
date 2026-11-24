@@ -3,7 +3,7 @@ use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::dtls::resumption::StartGate;
+use crate::peer_connection::transport::dtls::resumption::{LEADER_WAIT_FLIGHTS, StartGate};
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::peer_connection::transport::dtls::{DTLS_SRTP_FLIGHT_INTERVAL, DtlsTransport};
@@ -46,9 +46,11 @@ pub(crate) struct DtlsHandlerContext {
 
     /// Set when the client's handshake was due while another transport of the connection was
     /// establishing the connection's DTLS session (RFC 5764 section 3): it starts, offering
-    /// that session, once the other is done (`DtlsSessionGroup::ready_at`). The instant it
-    /// was due at.
-    pub(crate) waiting_for_session: Option<Instant>,
+    /// a ticket of that session if one came, once the other is done
+    /// (`DtlsSessionGroup::ready_at`), and with a full handshake at the latest at the second
+    /// instant ([`LEADER_WAIT_FLIGHTS`] of its initial flight intervals after the first, the
+    /// instant it was due at).
+    pub(crate) waiting_for_session: Option<(Instant, Instant)>,
 }
 
 impl DtlsHandlerContext {
@@ -120,46 +122,70 @@ impl<'a> DtlsHandler<'a> {
             return Ok(());
         }
         // RFC 5764 section 3: "all other DTLS associations wait until that connection is
-        // established before proceeding with their handshakes".
+        // established before proceeding with their handshakes", for a bounded time.
         if let Some(group) = self.ctx.dtls_transport.session_group()
             && group.start_gate(&self.ctx.dtls_transport.resumption_token, now) == StartGate::Wait
         {
-            debug!("dtls handshake waits for the connection's session");
-            self.ctx.waiting_for_session.get_or_insert(now);
+            if self.ctx.waiting_for_session.is_none() {
+                let bound = LEADER_WAIT_FLIGHTS * self.initial_flight_interval();
+                debug!("dtls handshake waits for the connection's session, at most {bound:?}");
+                self.ctx.waiting_for_session = Some((now, now + bound));
+            }
             return Ok(());
         }
+        self.start_client_handshake(now, queue_flight)
+    }
+
+    /// The initial value of the client's retransmission timer (RFC 9147 section 5.8.2): where
+    /// ICE has measured the round trip time of the path, the retransmission timer starts from
+    /// 1.5 times it (`DtlsFlightInterval`; libwebrtc's rule takes twice it).
+    fn initial_flight_interval(&self) -> std::time::Duration {
+        self.ctx
+            .dtls_transport
+            .flight_interval_rule
+            .initial(self.selected_pair_round_trip_time())
+    }
+
+    /// Sends the client's ClientHello now, whatever other transports do.
+    fn start_client_handshake(&mut self, now: Instant, queue_flight: bool) -> Result<()> {
         self.ctx.waiting_for_session = None;
         let Some(dtls_handshake_config) = self.ctx.dtls_transport.dtls_handshake_config.take()
         else {
             return Ok(());
         };
-        // RFC 9147 section 5.8.2: where ICE has measured the round trip time of the path,
-        // the retransmission timer starts from 1.5 times it (`DtlsFlightInterval`; libwebrtc's
-        // rule takes twice it).
         let dtls_handshake_config = match self.selected_pair_round_trip_time() {
-            Some(round_trip_time) => Arc::new(
-                dtls_handshake_config.with_flight_interval(
-                    self.ctx
-                        .dtls_transport
-                        .flight_interval_rule
-                        .initial(Some(round_trip_time)),
-                ),
-            ),
+            Some(_) => {
+                Arc::new(dtls_handshake_config.with_flight_interval(self.initial_flight_interval()))
+            }
             None => dtls_handshake_config,
         };
         self.ctx.dtls_transport.flight_interval = Some(dtls_handshake_config.flight_interval());
+        let token = self.ctx.dtls_transport.resumption_token.clone();
+        let group = self.ctx.dtls_transport.session_group().cloned();
+        let connected = match self.ctx.dtls_transport.dtls_endpoint.as_mut() {
+            Some(dtls_endpoint) => dtls_endpoint.connect(
+                now,
+                TransportContext::default().peer_addr, // always use default for transport to make DTLS tunneled
+                dtls_handshake_config,
+                None,
+            ),
+            None => Err(Error::ErrDtlsTransportNotStarted),
+        };
+        // The ClientHello took its ticket, if there was one. A handshake that could not
+        // start leads nothing: the others start too (review F9).
+        if let Some(group) = group {
+            match connected {
+                Ok(()) => group.started(&token),
+                Err(_) => group.ended(&token, Some(now)),
+            }
+        }
+        connected?;
         let dtls_endpoint = self
             .ctx
             .dtls_transport
             .dtls_endpoint
             .as_mut()
             .ok_or(Error::ErrDtlsTransportNotStarted)?;
-        dtls_endpoint.connect(
-            now,
-            TransportContext::default().peer_addr, // always use default for transport to make DTLS tunneled
-            dtls_handshake_config,
-            None,
-        )?;
         // On a pair change the first flight is left in the endpoint and goes out with the
         // next read or timeout, once every handler has seen the event (the ICE handler counts
         // a pair's packets from then). Asked for outside an event, it is queued here.
@@ -526,14 +552,22 @@ impl<'a>
                 if self.ctx.dtls_transport.dtls_role == RTCDtlsRole::Client
                     && let Some(group) = self.ctx.dtls_transport.session_group()
                 {
-                    // The others wait for the session's ticket, at most two flight intervals
-                    // (it comes a round trip after the client's Finished).
-                    let grace = 2 * self
+                    // The others start now, or once the rest of the flight of tickets that
+                    // began to come has come (at most a flight interval).
+                    let ticket_wait = self
                         .ctx
                         .dtls_transport
                         .flight_interval
                         .unwrap_or(DTLS_SRTP_FLIGHT_INTERVAL);
-                    group.connected(&self.ctx.dtls_transport.resumption_token, msg.now, grace);
+                    group.leader_connected(
+                        &self.ctx.dtls_transport.resumption_token,
+                        msg.now,
+                        dtls_version_for_stats == Some(dtls::config::DtlsVersion::Dtls1_3),
+                        ticket_wait,
+                    );
+                }
+                if let Err(err) = self.ctx.dtls_transport.leave_session_after_handshake() {
+                    warn!("dtls: a later handshake may resume the session: {err}");
                 }
 
                 let (local_srtp_context, remote_srtp_context) = srtp_contexts.unzip();
@@ -633,7 +667,7 @@ impl<'a>
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
-        if let Some(due) = self.ctx.waiting_for_session
+        if let Some((due, _)) = self.ctx.waiting_for_session
             && let Some(ready) = self
                 .ctx
                 .dtls_transport
@@ -678,6 +712,15 @@ impl<'a>
             group.observe(now);
             group.poll_leader(&self.ctx.dtls_transport.resumption_token, now);
         }
+        // The leader's handshake is not complete within the bound: a full handshake.
+        if let Some((_, deadline)) = self.ctx.waiting_for_session
+            && now >= deadline
+        {
+            debug!("dtls: the connection's first handshake is not complete; a full handshake");
+            if let Err(err) = self.start_client_handshake(now, true) {
+                warn!("failed to start the dtls handshake: {}", err);
+            }
+        }
         let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
             return Ok(());
         };
@@ -720,12 +763,18 @@ impl<'a>
     }
 
     fn poll_timeout(&mut self) -> Option<Instant> {
-        // The leader stops waiting for the session's ticket.
-        let deadline = self
+        // The leader stops waiting for the rest of the session's tickets; a waiting transport
+        // stops waiting for the leader.
+        let leader = self
             .ctx
             .dtls_transport
             .session_group()
             .and_then(|group| group.leader_deadline(&self.ctx.dtls_transport.resumption_token));
+        let waiter = self.ctx.waiting_for_session.map(|(_, deadline)| deadline);
+        let deadline = match (leader, waiter) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         if let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_ref() {
             let mut eto = deadline;
 
@@ -1369,6 +1418,299 @@ mod tests {
                 "SRTP_AES128_CM_HMAC_SHA1_80"
             );
         }
+        Ok(())
+    }
+
+    /// A DTLS server transport taking part in its connection's session (RFC 5764 section 3:
+    /// two server transports of the negotiation, the same remote fingerprints), and a peer
+    /// client with a session store, its ClientHello queued.
+    fn session_server_pair(
+        store: &Arc<dtls::session::MemorySessionStore>,
+    ) -> Result<(HandlerAndPeer, Arc<dtls::config::HandshakeConfig>)> {
+        use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+        use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
+        use crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup;
+        use crate::peer_connection::transport::ice::role::RTCIceRole;
+        use dtls::config::{ConfigBuilder, ExtendedMasterSecretType};
+
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        let group = Arc::new(DtlsSessionGroup::new(provider.as_ref())?);
+        let params = RTCDtlsParameters {
+            role: RTCDtlsRole::Client,
+            fingerprints: vec![RTCDtlsFingerprint {
+                algorithm: "sha-256".to_owned(),
+                value: "01".repeat(32),
+            }],
+        };
+        let new_transport = || {
+            let mut transport = DtlsTransport::new(
+                crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                    id: test_transport_id(TransportKind::Dtls),
+                    ice_transport_id: test_transport_id(TransportKind::Ice),
+                    certificates: vec![],
+                    answering_dtls_role: Default::default(),
+                    srtp_protection_profiles: vec![],
+                    use_srtp_always: true,
+                    dtls_cipher_suites: vec![],
+                    allow_insecure_verification_algorithm: false,
+                    disable_certificate_fingerprint_verification: true,
+                    replay_protection: Default::default(),
+                    crypto_provider: provider.clone(),
+                },
+            )?;
+            transport.resumption = Some(group.clone());
+            transport.start(RTCIceRole::Controlling, params.clone())?;
+            Ok::<_, Error>(transport)
+        };
+        let _sibling = new_transport()?;
+        let mut transport = new_transport()?;
+        group.close_admission();
+        transport.engage_session()?;
+        assert!(transport.resumption_member, "it takes part");
+        assert_eq!(transport.role(), RTCDtlsRole::Server);
+
+        let peer_config = Arc::new(
+            ConfigBuilder::default()
+                .with_crypto_provider(provider.clone())
+                .with_certificates(vec![dtls::crypto::Certificate::generate_self_signed(
+                    vec!["peer".into()],
+                    provider.crypto(),
+                )?])
+                .with_insecure_skip_verify(true)
+                .with_extended_master_secret(ExtendedMasterSecretType::Require)
+                .with_server_name("localhost".to_owned())
+                .with_session_store(Some(store.clone() as Arc<dyn dtls::session::SessionStore>))
+                .build(true, None)?,
+        );
+        let now = Instant::now();
+        let mut peer = dtls::endpoint::Endpoint::new(
+            TransportContext::default().peer_addr,
+            shared::TransportProtocol::UDP,
+            None,
+        );
+        peer.connect(
+            now,
+            HandlerAndPeer::handler_addr(),
+            peer_config.clone(),
+            None,
+        )?;
+        Ok((
+            HandlerAndPeer {
+                context: DtlsHandlerContext::new(transport),
+                stats: RTCStatsAccumulator::default(),
+                peer,
+                now,
+                events: vec![],
+                sent: vec![],
+            },
+            peer_config,
+        ))
+    }
+
+    /// A server transport of the connection's session accepts a resumption for its first
+    /// handshake only (RFC 5764 section 3 is about establishing the associations): its first
+    /// handshake issues the tickets, and a later handshake on the same transport within their
+    /// lifetime (a peer that re-handshakes in place, RFC 6347 section 4.2.8), offering one of
+    /// them, is a full one.
+    #[test]
+    fn a_server_transport_resumes_no_later_handshake_in_place() -> Result<()> {
+        let store = Arc::new(dtls::session::MemorySessionStore::new());
+        let (mut pair, peer_config) = session_server_pair(&store)?;
+        assert!(pair.run().is_none());
+        assert_eq!(
+            pair.context.dtls_transport.state(),
+            RTCDtlsTransportState::Connected
+        );
+        assert!(!handler_resumed(&pair));
+        let tickets = store.len("localhost");
+        assert!(
+            tickets > 0,
+            "the first handshake issued the session's tickets"
+        );
+
+        // The same peer, in place, offering one of them.
+        let mut peer = dtls::endpoint::Endpoint::new(
+            TransportContext::default().peer_addr,
+            shared::TransportProtocol::UDP,
+            None,
+        );
+        peer.connect(pair.now, HandlerAndPeer::handler_addr(), peer_config, None)?;
+        assert_eq!(store.len("localhost"), tickets - 1, "a ticket is offered");
+        pair.peer = peer;
+        pair.events.clear();
+        let _ = pair.run();
+        assert!(
+            pair.events
+                .iter()
+                .any(|event| matches!(event, RTCEventInternal::DTLSHandshakeComplete(..))),
+            "the second handshake completed"
+        );
+        assert!(!handler_resumed(&pair), "as a full handshake");
+        assert!(
+            pair.peer
+                .get_connection_state(HandlerAndPeer::handler_addr())
+                .is_some_and(|state| !state.resumed()),
+            "the peer sees a full handshake too"
+        );
+        Ok(())
+    }
+
+    /// Review F9: a client transport becomes the session's leader as it starts its handshake;
+    /// when the handshake cannot start (here: no endpoint), it leads nothing, and the
+    /// transports waiting for it start at once.
+    #[test]
+    fn a_leader_whose_handshake_cannot_start_holds_no_one_back() -> Result<()> {
+        use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+        use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
+        use crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup;
+        use crate::peer_connection::transport::ice::role::RTCIceRole;
+
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        let group = Arc::new(DtlsSessionGroup::new(provider.as_ref())?);
+        let params = RTCDtlsParameters {
+            role: RTCDtlsRole::Server,
+            fingerprints: vec![RTCDtlsFingerprint {
+                algorithm: "sha-256".to_owned(),
+                value: "02".repeat(32),
+            }],
+        };
+        let mut transports = vec![];
+        for _ in 0..2 {
+            let mut transport = DtlsTransport::new(
+                crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                    id: test_transport_id(TransportKind::Dtls),
+                    ice_transport_id: test_transport_id(TransportKind::Ice),
+                    certificates: vec![],
+                    answering_dtls_role: Default::default(),
+                    srtp_protection_profiles: vec![],
+                    use_srtp_always: true,
+                    dtls_cipher_suites: vec![],
+                    allow_insecure_verification_algorithm: false,
+                    disable_certificate_fingerprint_verification: true,
+                    replay_protection: Default::default(),
+                    crypto_provider: provider.clone(),
+                },
+            )?;
+            transport.resumption = Some(group.clone());
+            transport.start(RTCIceRole::Controlled, params.clone())?;
+            transports.push(transport);
+        }
+        group.close_admission();
+        for transport in &mut transports {
+            transport.engage_session()?;
+            assert!(transport.resumption_member);
+            assert_eq!(transport.role(), RTCDtlsRole::Client);
+        }
+        use sansio::Protocol;
+        let mut leader = DtlsHandlerContext::new(transports.remove(0));
+        let mut other = DtlsHandlerContext::new(transports.remove(0));
+        leader.dtls_transport.dtls_endpoint = None;
+        let now = Instant::now();
+        let mut stats = RTCStatsAccumulator::default();
+        let pair_selected = || TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::ICESelectedCandidatePairChange,
+        };
+        assert!(
+            DtlsHandler::new(&mut leader, &mut stats)
+                .handle_event(pair_selected())
+                .is_err(),
+            "the leader's handshake cannot start"
+        );
+        assert_eq!(group.ready_at(), Some(now), "it leads nothing");
+        let mut handler = DtlsHandler::new(&mut other, &mut stats);
+        handler.handle_event(pair_selected())?;
+        assert!(
+            handler.ctx.waiting_for_session.is_none(),
+            "the other does not wait"
+        );
+        assert!(
+            handler.ctx.dtls_transport.dtls_handshake_config.is_none(),
+            "it started its handshake"
+        );
+        Ok(())
+    }
+
+    /// Review F1: a client transport waits for the leader's handshake at most
+    /// `LEADER_WAIT_FLIGHTS` of its initial flight intervals; then it starts a full
+    /// handshake, whatever the leader does.
+    #[test]
+    fn a_waiting_transport_starts_after_the_bound_whatever_the_leader_does() -> Result<()> {
+        use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
+        use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
+        use crate::peer_connection::transport::dtls::resumption::DtlsSessionGroup;
+        use crate::peer_connection::transport::ice::role::RTCIceRole;
+        use sansio::Protocol;
+
+        let provider = crypto::default_provider().expect("a built-in crypto provider");
+        let group = Arc::new(DtlsSessionGroup::new(provider.as_ref())?);
+        let params = RTCDtlsParameters {
+            role: RTCDtlsRole::Server,
+            fingerprints: vec![RTCDtlsFingerprint {
+                algorithm: "sha-256".to_owned(),
+                value: "03".repeat(32),
+            }],
+        };
+        let mut contexts = vec![];
+        for _ in 0..2 {
+            let mut transport = DtlsTransport::new(
+                crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                    id: test_transport_id(TransportKind::Dtls),
+                    ice_transport_id: test_transport_id(TransportKind::Ice),
+                    certificates: vec![],
+                    answering_dtls_role: Default::default(),
+                    srtp_protection_profiles: vec![],
+                    use_srtp_always: true,
+                    dtls_cipher_suites: vec![],
+                    allow_insecure_verification_algorithm: false,
+                    disable_certificate_fingerprint_verification: true,
+                    replay_protection: Default::default(),
+                    crypto_provider: provider.clone(),
+                },
+            )?;
+            transport.resumption = Some(group.clone());
+            transport.start(RTCIceRole::Controlled, params.clone())?;
+            contexts.push(transport);
+        }
+        group.close_admission();
+        for transport in &mut contexts {
+            transport.engage_session()?;
+        }
+        let mut leader = DtlsHandlerContext::new(contexts.remove(0));
+        let mut other = DtlsHandlerContext::new(contexts.remove(0));
+        let now = Instant::now();
+        let mut stats = RTCStatsAccumulator::default();
+        let pair_selected = || TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::ICESelectedCandidatePairChange,
+        };
+        // The leader starts; its handshake never completes (nothing answers it).
+        DtlsHandler::new(&mut leader, &mut stats).handle_event(pair_selected())?;
+        let mut handler = DtlsHandler::new(&mut other, &mut stats);
+        handler.handle_event(pair_selected())?;
+        let bound = LEADER_WAIT_FLIGHTS
+            * crate::peer_connection::transport::dtls::DTLS_SRTP_FLIGHT_INTERVAL;
+        assert_eq!(
+            handler.ctx.waiting_for_session,
+            Some((now, now + bound)),
+            "it waits, at most {bound:?} (no round trip measured: 400 ms flights)"
+        );
+        assert!(
+            handler.poll_timeout().is_some_and(|at| at <= now + bound),
+            "a timer for the bound"
+        );
+        handler.handle_timeout(now + bound - std::time::Duration::from_millis(1))?;
+        while handler.poll_write().is_some() {}
+        assert!(handler.ctx.waiting_for_session.is_some(), "still waiting");
+        assert!(handler.ctx.dtls_transport.dtls_handshake_config.is_some());
+        handler.handle_timeout(now + bound)?;
+        assert!(handler.ctx.waiting_for_session.is_none());
+        assert!(
+            handler.ctx.dtls_transport.dtls_handshake_config.is_none(),
+            "it started its handshake"
+        );
+        assert!(handler.poll_write().is_some(), "its ClientHello goes out");
+        assert_eq!(group.ready_at(), None, "the leader is still not done");
         Ok(())
     }
 

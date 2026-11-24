@@ -520,10 +520,9 @@ impl RTCPeerConnection {
         }
         let view = self.default_transport_view(parsed);
         if we_offer {
-            self.single_transport_closes_dtls_session_admission();
             self.apply_remote_transport(now, &view, true, None)?;
             self.start_other_transports(now, parsed, true)?;
-            self.close_dtls_session_admission();
+            self.settle_dtls_session();
         } else {
             self.defer_remote_transport(&view)?;
             if self.pipeline_context.transports.len() > 1 {
@@ -545,7 +544,6 @@ impl RTCPeerConnection {
         if self.pipeline_context.transports.len() > 1 {
             self.apply_transport_layout(&groups)?;
         }
-        self.single_transport_closes_dtls_session_admission();
         let remote = self.remote_description().and_then(|r| r.parsed.clone());
         if let Some(pending) = self.pending_remote_transport.take()
             && let Some(parsed) = &remote
@@ -574,39 +572,37 @@ impl RTCPeerConnection {
         if let Some(parsed) = &remote {
             self.start_other_transports(now, parsed, false)?;
         }
-        self.close_dtls_session_admission();
+        self.settle_dtls_session();
         Ok(())
     }
 
     /// RFC 5764 section 3 is about the transports a negotiation sets up: once a description
-    /// has started them, no later association joins the connection's DTLS session.
-    fn close_dtls_session_admission(&self) {
+    /// has started them, no later association joins the connection's DTLS session, and those
+    /// it admitted take part when their DTLS role has more than one of them
+    /// (`DtlsTransport::engage_session`). A connection with one transport (every section
+    /// bundled) has nothing to share: it runs as it would without the session, asking for and
+    /// issuing no ticket.
+    fn settle_dtls_session(&mut self) {
         let default = &self
             .pipeline_context
             .transports
             .default()
-            .dtls_handler_context;
-        if default.dtls_transport.state != RTCDtlsTransportState::New
-            && let Some(group) = &default.dtls_transport.resumption
-        {
-            group.close_admission();
+            .dtls_handler_context
+            .dtls_transport;
+        if default.state == RTCDtlsTransportState::New {
+            return;
         }
-    }
-
-    /// A connection with one transport (every section bundled) has one association, with
-    /// nothing to share: it runs as it would without the session (no ticket asked for or
-    /// issued).
-    fn single_transport_closes_dtls_session_admission(&self) {
-        let transports = &self.pipeline_context.transports;
-        if transports.len() < 2
-            && let Some(group) = &transports
-                .default()
-                .dtls_handler_context
-                .dtls_transport
-                .resumption
-        {
-            group.close_admission();
+        let Some(group) = default.resumption.clone() else {
+            return;
+        };
+        group.close_admission();
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            let transport = &mut bundle.dtls_handler_context.dtls_transport;
+            if let Err(err) = transport.engage_session() {
+                log::warn!("a transport runs outside the connection's DTLS session: {err}");
+            }
         }
+        group.settle();
     }
 
     /// Gives every transport but the default one the parameters of its sections of the remote

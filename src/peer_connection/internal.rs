@@ -328,7 +328,7 @@ impl RTCPeerConnection {
         let certificates = configuration.certificates.clone();
         // RFC 5764 section 3: one DTLS session for the connection's transports, never shared
         // with another connection.
-        let resumption = if setting_engine.dtls_session_resumption_off {
+        let resumption = if !setting_engine.dtls_session_resumption {
             None
         } else {
             Some(std::sync::Arc::new(

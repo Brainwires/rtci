@@ -928,3 +928,174 @@ const RFC8448_RESUMED_CLIENT_HELLO: &str = "010001fc03031bc3ceb6bbe39cff938355b5
 
 /// RFC 8448 section 3, "construct a NewSessionTicket handshake message": 205 octets.
 const RFC8448_NEW_SESSION_TICKET: &str = "040000c90000001efad6aac502000000b22c035d829359ee5ff7af4ec900000000262a6494dc486d2c8a34cb33fa90bf1b0070ad3c498883c9367c09a2be785abc55cd226097a3a982117283f82a03a143efd3ff5dd36d64e861be7fd61d2827db279cce145077d454a3664d4e6da4d29ee03725a6a4dafcd0fc67d2aea70529513e3da2677fa5906c5b3f7d8f92f228bda40dda721470f9fbf297b5aea617646fac5c03272e970727c621a79141ef5f7de6505e5bfbc388e93343694093934ae4d3570008002a000400000400";
+
+/// A store that keeps tickets without the certificates of the handshake they came from:
+/// what a resumption with nothing to check looks like.
+struct WithoutCertificates(MemorySessionStore);
+
+impl SessionStore for WithoutCertificates {
+    fn put(&self, server_name: &str, mut session: crate::session::Tls13Session) {
+        session.peer_certificates.clear();
+        self.0.put(server_name, session);
+    }
+
+    fn take(&self, server_name: &str) -> Option<crate::session::Tls13Session> {
+        self.0.take(server_name)
+    }
+}
+
+/// A configured peer-certificate check that answers as `refuse` says, counting its calls,
+/// and the chain it was last given.
+type Check = (
+    Arc<AtomicBool>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+);
+
+fn counting_check() -> (Check, crate::config::VerifyPeerCertificateFn) {
+    let refuse = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let chain = Arc::new(std::sync::Mutex::new(vec![]));
+    let (refuse_in, calls_in, chain_in) = (refuse.clone(), calls.clone(), chain.clone());
+    let check: crate::config::VerifyPeerCertificateFn = Arc::new(move |given: &[Vec<u8>], _| {
+        calls_in.fetch_add(1, Ordering::SeqCst);
+        *chain_in.lock().unwrap() = given.to_vec();
+        if refuse_in.load(Ordering::SeqCst) {
+            Err(Error::Other("no longer trusted".to_owned()))
+        } else {
+            Ok(())
+        }
+    });
+    ((refuse, calls, chain), check)
+}
+
+/// The server side of the re-check (RFC 8446 section 4.6.1: a ticket carries the client's
+/// identity; RFC 5764 section 3 in WebRTC: on a resumed handshake the DTLS server's only
+/// check of the client is this one). The server's configured peer-certificate check runs
+/// again on the client certificate the ticket carries, before the server answers: accepted,
+/// the association resumes; refused, the handshake ends with bad_certificate and nothing is
+/// resumed.
+#[test]
+fn the_server_runs_its_peer_certificate_check_again_on_a_resumed_client() -> Result<()> {
+    let provider = provider();
+    let store = store();
+    let client = Arc::new(
+        client_builder()
+            .with_certificates(vec![crate::crypto::Certificate::generate_self_signed(
+                vec!["client".to_owned()],
+                provider.crypto(),
+            )?])
+            .with_session_store(Some(store.clone()))
+            .build(true, None)?,
+    );
+    let ((refuse, calls, chain), check) = counting_check();
+    let server = Arc::new(
+        server_builder()
+            .with_client_auth(crate::config::ClientAuthType::RequireAnyClientCert)
+            .with_verify_peer_certificate(Some(check))
+            .with_session_tickets(2)
+            .build(false, None)?,
+    );
+    let mut first = Pair::with(client.clone(), server.clone())?.complete();
+    let client_chain = first.server_conn().peer_certificates.clone();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the full handshake's check"
+    );
+    let second = Pair::with(client.clone(), server.clone())?.complete();
+    assert_eq!(resumed(&second), (true, true));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "run again on the resumption"
+    );
+    assert_eq!(
+        *chain.lock().unwrap(),
+        client_chain,
+        "on the ticket's chain"
+    );
+
+    refuse.store(true, Ordering::SeqCst);
+    assert!(store.len(NAME) > 0, "a ticket to offer");
+    let mut third = Pair::with(client, server)?;
+    third.run();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(
+        !third.server_complete && !third.client_complete,
+        "the resumption is refused"
+    );
+    assert!(third.server.is_connection_failed(&client_addr()));
+    assert!(matches!(third.server_error, Some(Error::Other(_))));
+    assert_eq!(resumed(&third), (false, false));
+    Ok(())
+}
+
+/// A client with a configured peer-certificate check does not take a resumption whose
+/// ticket carries no certificate as checked: the check cannot run, so the handshake fails
+/// with bad_certificate (it fails closed), where a client without a check resumes.
+#[test]
+fn a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate() -> Result<()> {
+    let store = Arc::new(WithoutCertificates(MemorySessionStore::new()));
+    let ((_, calls, _), check) = counting_check();
+    let client = Arc::new(
+        client_builder()
+            .with_session_store(Some(store.clone()))
+            .with_verify_peer_certificate(Some(check))
+            .build(true, None)?,
+    );
+    let server = ticket_server(2)?;
+    let _ = Pair::with(client.clone(), server.clone())?.complete();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.0.len(NAME), 2, "tickets kept, without certificates");
+    let mut pair = Pair::with(client, server.clone())?;
+    pair.run();
+    assert!(!pair.client_complete, "the resumption is refused");
+    assert!(pair.client.is_connection_failed(&server_addr()));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "nothing was checked");
+
+    // Without a check the same ticket resumes.
+    let unchecked = Arc::new(
+        client_builder()
+            .with_session_store(Some(store.clone()))
+            .build(true, None)?,
+    );
+    let pair = Pair::with(unchecked, server)?.complete();
+    assert_eq!(resumed(&pair), (true, true));
+    Ok(())
+}
+
+/// A server with a configured peer-certificate check resumes no ticket that carries no
+/// client certificate (one it issued to a client that sent none): the check could not run
+/// again, so the handshake is a full one, where a server without a check resumes.
+#[test]
+fn a_server_with_a_check_resumes_no_ticket_that_carries_no_certificate() -> Result<()> {
+    let store = store();
+    let client = resuming_client(&store)?;
+    let ((_, calls, _), check) = counting_check();
+    let server = Arc::new(
+        server_builder()
+            .with_verify_peer_certificate(Some(check))
+            .with_session_tickets(2)
+            .build(false, None)?,
+    );
+    let _ = Pair::with(client.clone(), server.clone())?.complete();
+    assert_eq!(
+        store.len(NAME),
+        2,
+        "tickets for a client without a certificate"
+    );
+    let pair = Pair::with(client.clone(), server)?.complete();
+    assert_eq!(resumed(&pair), (false, false), "a full handshake");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no client certificate, ever"
+    );
+
+    let unchecked = ticket_server(2)?;
+    let _ = Pair::with(client.clone(), unchecked.clone())?.complete();
+    let pair = Pair::with(client, unchecked)?.complete();
+    assert_eq!(resumed(&pair), (true, true));
+    Ok(())
+}

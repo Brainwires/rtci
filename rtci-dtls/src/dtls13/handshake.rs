@@ -321,12 +321,19 @@ impl Conn13 {
 
     /// Runs the configured peer-certificate check again on the certificates a PSK carries
     /// from the handshake that made it: a resumed association is the same peer only if the
-    /// application still accepts that one.
+    /// application still accepts that one. With a check configured, a resumption that
+    /// carries no certificate is refused: there is nothing to run the check on, and the
+    /// check is not skipped (it fails closed).
     fn verify_resumed_peer(&self) -> std::result::Result<(), Refusal> {
-        if self.peer_certificates.is_empty() {
-            return Ok(());
-        }
         if let Some(verify_peer_certificate) = &self.cfg.verify_peer_certificate {
+            if self.peer_certificates.is_empty() {
+                return Err(refuse(
+                    alert::BAD_CERTIFICATE,
+                    Error::Other(
+                        "a resumption carries no certificate for the configured check".to_owned(),
+                    ),
+                ));
+            }
             verify_peer_certificate(&self.peer_certificates, &[])
                 .map_err(|error| refuse(alert::BAD_CERTIFICATE, error))?;
         }
@@ -1260,7 +1267,12 @@ impl Conn13 {
                         && ticket.issued_ms <= now_ms
                         && now_ms < expires
                         && ticket.server_name == negotiated.server_name
-                        && (!requires_certificate || !ticket.peer_certificates.is_empty());
+                        && (!requires_certificate || !ticket.peer_certificates.is_empty())
+                        // A configured peer-certificate check is run again on a ticket's
+                        // certificates (`verify_resumed_peer`): a ticket without any is not
+                        // resumed, and the handshake is a full one.
+                        && (cfg.verify_peer_certificate.is_none()
+                            || !ticket.peer_certificates.is_empty());
                     claim = Some((ticket.id, now_ms, expires));
                     // RFC 8446 sections 4.2.10 and 8.3: 0-RTT with the first PSK, a ticket
                     // that allows it, of the same suite, in a first ClientHello, whose age as

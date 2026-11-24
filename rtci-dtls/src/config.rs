@@ -142,6 +142,7 @@ pub struct ConfigBuilder {
     session_ticket_lifetime: Duration,
     session_store: Option<Arc<dyn crate::session::SessionStore>>,
     session_cache: Option<Arc<dyn crate::session::SessionCache>>,
+    dtls12_resumption: bool,
     external_psks: Vec<crate::session::ExternalPsk>,
     psk_without_key_exchange: bool,
     post_handshake_auth: bool,
@@ -193,6 +194,7 @@ impl Default for ConfigBuilder {
             session_ticket_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
             session_store: None,
             session_cache: None,
+            dtls12_resumption: true,
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
@@ -522,6 +524,22 @@ impl ConfigBuilder {
         cache: Option<Arc<dyn crate::session::SessionCache>>,
     ) -> Self {
         self.session_cache = cache;
+        self
+    }
+
+    /// Whether DTLS 1.2 associations resume sessions at all (RFC 5246 section 7.3 by session
+    /// id, RFC 5077 by ticket). `true`, the default, has a client with a
+    /// [session store](Self::with_session_store) ask for a ticket and offer its sessions, and
+    /// a server with a [session cache](Self::with_session_cache) or
+    /// [tickets](Self::with_session_tickets) give session ids and tickets and resume them.
+    /// `false` leaves DTLS 1.3 resumption as configured and takes DTLS 1.2 out of it: a
+    /// client asks for no ticket, offers no session id or ticket and keeps no DTLS 1.2
+    /// session; a server gives no session id, issues no ticket and resumes nothing, so every
+    /// DTLS 1.2 handshake is a full one with its own (EC)DHE exchange. (A DTLS 1.2 ticket
+    /// carries the master secret of the association it came from, and a resumed DTLS 1.2
+    /// association runs no new key exchange.)
+    pub fn with_dtls12_resumption(mut self, resumption: bool) -> Self {
+        self.dtls12_resumption = resumption;
         self
     }
 
@@ -1134,6 +1152,7 @@ impl ConfigBuilder {
             session_lifetime: self
                 .session_ticket_lifetime
                 .min(crate::session::MAX_TICKET_LIFETIME),
+            dtls12_resumption: self.dtls12_resumption,
             external_psks,
             psk_without_key_exchange: self.psk_without_key_exchange,
             post_handshake_auth: is_client && self.post_handshake_auth,
@@ -1233,6 +1252,8 @@ pub struct HandshakeConfig {
     pub(crate) session_cache: Option<Arc<dyn crate::session::SessionCache>>,
     /// How long a DTLS 1.2 session in `session_cache` may be resumed.
     pub(crate) session_lifetime: Duration,
+    /// DTLS 1.2 sessions are resumed (`ConfigBuilder::with_dtls12_resumption`).
+    pub(crate) dtls12_resumption: bool,
     pub(crate) external_psks: Vec<crate::session::ExternalPsk>,
     pub(crate) psk_without_key_exchange: bool,
     /// DTLS 1.3 client: it offers post-handshake authentication.
@@ -1329,6 +1350,7 @@ impl HandshakeConfig {
             session_store: None,
             session_cache: None,
             session_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
+            dtls12_resumption: true,
             external_psks: vec![],
             psk_without_key_exchange: false,
             post_handshake_auth: false,
@@ -1365,8 +1387,9 @@ impl HandshakeConfig {
         &self.crypto_provider
     }
 
-    /// Whether DTLS 1.3 is negotiated at all.
-    pub(crate) fn supports_dtls13(&self) -> bool {
+    /// Whether DTLS 1.3 is negotiated at all: the configuration allows it and has a DTLS 1.3
+    /// cipher suite, group and signature scheme to run it with.
+    pub fn supports_dtls13(&self) -> bool {
         self.max_version == DtlsVersion::Dtls1_3
     }
 

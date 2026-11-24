@@ -31,15 +31,19 @@
 //! the extended master secret are resumed (RFC 7627 section 5.3), with the master secret of
 //! the session and fresh randoms: no key exchange, no Certificate, no CertificateVerify. The
 //! certificates of the full handshake are what the association reports, and the configured
-//! peer-certificate checks run on them again. A session is forgotten when an association that
-//! used it fails (RFC 5246 sections 7.2 and 7.2.2).
+//! peer-certificate checks run on them again; with a check configured, a resumption that
+//! carries no certificate is refused (a server runs a full handshake, a client fails it). A
+//! session is forgotten when an association that used it fails (RFC 5246 sections 7.2 and
+//! 7.2.2). [`ConfigBuilder::with_dtls12_resumption`](crate::config::ConfigBuilder::with_dtls12_resumption)
+//! takes DTLS 1.2 out of resumption and leaves DTLS 1.3's.
 //!
 //! WebRTC authenticates every DTLS association by the certificate fingerprints its SDP carries.
-//! The peer connection of the `rtci` crate resumes only within one connection (RFC 5764
-//! section 3: the transports of unbundled sections share the session of the first): it gives
-//! the first association of each such transport the connection's own store, session cache
-//! and ticket keys ([`SessionTicketIssuer`]), and every other association none, so that it
-//! neither offers nor accepts a resumption.
+//! The peer connection of the `rtci` crate resumes only within one connection, when the
+//! application turns it on (RFC 5764 section 3: the transports of unbundled sections share
+//! the session of the first), and in DTLS 1.3 only (`psk_dhe_ke`): it gives the first
+//! association of each such transport the connection's own store or ticket keys
+//! ([`SessionTicketIssuer`]) with DTLS 1.2 resumption off, and every other association none,
+//! so that it neither offers nor accepts a resumption.
 
 use crate::cipher_suite::{CipherSuiteHash, CipherSuiteId};
 use crypto::SecretVec;
@@ -93,6 +97,13 @@ impl Tls13Session {
     /// with it reports, and what the configured peer-certificate check runs on again.
     pub fn peer_certificates(&self) -> &[Vec<u8>] {
         &self.peer_certificates
+    }
+
+    /// Shortens the time the ticket may be offered for to at most `lifetime` from its
+    /// arrival (a client may keep a ticket for less than the server allows, RFC 8446
+    /// section 4.6.1: "Clients MUST NOT cache tickets for longer than 7 days").
+    pub fn limit_lifetime(&mut self, lifetime: Duration) {
+        self.lifetime = self.lifetime.min(lifetime);
     }
 
     /// The `obfuscated_ticket_age` of an offer made at `now` (RFC 8446 section 4.2.11.1): the

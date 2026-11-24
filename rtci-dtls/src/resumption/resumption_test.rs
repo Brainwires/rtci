@@ -1301,3 +1301,228 @@ fn a_lost_last_flight_of_a_resumption_is_sent_again() -> Result<()> {
     );
     Ok(())
 }
+
+/// A configured peer-certificate check that answers as the flag says, counting its calls.
+fn flagged_check() -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    crate::config::VerifyPeerCertificateFn,
+) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let refuse = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (refuse_in, calls_in) = (refuse.clone(), calls.clone());
+    let check: crate::config::VerifyPeerCertificateFn = Arc::new(
+        move |chain: &[Vec<u8>], _: &[rustls::pki_types::CertificateDer<'static>]| {
+            calls_in.fetch_add(1, Ordering::SeqCst);
+            assert!(!chain.is_empty(), "the check is given a chain");
+            if refuse_in.load(Ordering::SeqCst) {
+                Err(Error::Other("no longer trusted".to_owned()))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    (refuse, calls, check)
+}
+
+/// The server side of the re-check (RFC 5246 section 7.3: the session carries the client's
+/// certificate; RFC 5764 section 3 in WebRTC: on a resumed handshake the DTLS server's only
+/// check of the client is this one): the server's configured peer-certificate check runs
+/// again on the client certificate of the cached session before it resumes it; refused, the
+/// handshake ends with bad_certificate.
+#[test]
+fn the_server_runs_its_peer_certificate_check_again_on_a_resumed_client() {
+    use std::sync::atomic::Ordering;
+    let certificate = self_signed();
+    let (store, cache) = (store(), cache());
+    let client = client_config(&store, builder().with_certificates(vec![self_signed()]));
+    let (refuse, calls, check) = flagged_check();
+    let server = server_config(
+        Some(&cache),
+        false,
+        &certificate,
+        builder()
+            .with_client_auth(crate::config::ClientAuthType::RequireAnyClientCert)
+            .with_verify_peer_certificate(Some(check)),
+    );
+    let first = handshake(&client, &server);
+    assert!(
+        first.completed(),
+        "{:?} {:?}",
+        first.client_err,
+        first.server_err
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the full handshake's check"
+    );
+    let second = handshake(&client, &server);
+    assert!(second.completed());
+    assert!(second.server.connection_state().resumed());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "run again on the resumption"
+    );
+
+    refuse.store(true, Ordering::SeqCst);
+    let third = handshake(&client, &server);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(
+        !third.server.is_handshake_completed(),
+        "the resumption is refused"
+    );
+    assert!(!third.client.is_handshake_completed());
+    assert!(!third.server.connection_state().resumed());
+    assert_alert(
+        &third.from_server,
+        ALERT_BAD_CERTIFICATE,
+        "the server's re-check refused the client",
+    );
+}
+
+/// A server with a configured peer-certificate check resumes no session that carries no
+/// client certificate: the check could not run again, so the handshake is a full one.
+#[test]
+fn a_server_with_a_check_resumes_no_session_that_carries_no_certificate() {
+    use std::sync::atomic::Ordering;
+    let certificate = self_signed();
+    let (store, cache) = (store(), cache());
+    let client = client_config(&store, builder());
+    let (_, calls, check) = flagged_check();
+    let checking = server_config(
+        Some(&cache),
+        false,
+        &certificate,
+        builder().with_verify_peer_certificate(Some(check)),
+    );
+    assert!(handshake(&client, &checking).completed());
+    assert_eq!(cache.len(), 1, "a session without a client certificate");
+    let exchange = handshake(&client, &checking);
+    assert!(exchange.completed());
+    assert!(!exchange.server.connection_state().resumed(), "a full one");
+    assert!(types(&exchange.from_server).contains(&CERTIFICATE));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Without a check, the same kind of session resumes.
+    let open = server_config(Some(&cache), false, &certificate, builder());
+    assert!(handshake(&client, &open).completed());
+    assert!(
+        handshake(&client, &open)
+            .server
+            .connection_state()
+            .resumed()
+    );
+}
+
+/// A store that keeps DTLS 1.2 sessions without the certificates of their full handshake.
+struct WithoutCertificates(MemorySessionStore);
+
+impl SessionStore for WithoutCertificates {
+    fn put(&self, server_name: &str, session: crate::session::Tls13Session) {
+        self.0.put(server_name, session);
+    }
+
+    fn take(&self, server_name: &str) -> Option<crate::session::Tls13Session> {
+        self.0.take(server_name)
+    }
+
+    fn put_dtls12(&self, server_name: &str, mut session: Dtls12Session) {
+        session.peer_certificates.clear();
+        self.0.put_dtls12(server_name, session);
+    }
+
+    fn take_dtls12(&self, server_name: &str) -> Option<Dtls12Session> {
+        self.0.take_dtls12(server_name)
+    }
+
+    fn forget_dtls12(&self, server_name: &str, session_id: &[u8]) {
+        self.0.forget_dtls12(server_name, session_id);
+    }
+}
+
+/// A client with a configured peer-certificate check does not take a resumed session that
+/// carries no certificate as checked: the handshake fails with bad_certificate (it fails
+/// closed).
+#[test]
+fn a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate() {
+    use std::sync::atomic::Ordering;
+    let certificate = self_signed();
+    let cache = cache();
+    let store = Arc::new(WithoutCertificates(MemorySessionStore::new()));
+    let (_, calls, check) = flagged_check();
+    let client = Arc::new(
+        builder()
+            .with_protocol_versions(DtlsVersion::Dtls1_2, DtlsVersion::Dtls1_2)
+            .with_insecure_skip_verify(true)
+            .with_server_name(NAME.to_owned())
+            .with_session_store(Some(store.clone() as Arc<dyn SessionStore>))
+            .with_verify_peer_certificate(Some(check))
+            .build(true, None)
+            .expect("a client configuration"),
+    );
+    let server = server_config(Some(&cache), false, &certificate, builder());
+    assert!(handshake(&client, &server).completed());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.0.len_dtls12(NAME), 1, "kept without certificates");
+    let exchange = handshake(&client, &server);
+    assert!(!exchange.client.is_handshake_completed(), "refused");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "nothing was checked");
+    assert_eq!(alert_of(&exchange.client), Some(ALERT_BAD_CERTIFICATE));
+}
+
+/// `ConfigBuilder::with_dtls12_resumption(false)`: DTLS 1.2 takes no part in resumption,
+/// whatever store, cache or tickets are configured. The client asks for no ticket and
+/// offers no session id; the server gives no session id and no ticket and resumes no
+/// session it would otherwise resume.
+#[test]
+fn without_dtls12_resumption_nothing_is_asked_for_given_or_resumed() {
+    let certificate = self_signed();
+    let (store, cache) = (store(), cache());
+    let off = |builder: ConfigBuilder| builder.with_dtls12_resumption(false);
+    let client = client_config(&store, off(builder()));
+    let server = server_config(Some(&cache), true, &certificate, off(builder()));
+    for round in 0..2 {
+        let exchange = handshake(&client, &server);
+        assert!(exchange.completed(), "round {round}");
+        assert!(
+            !exchange.server.connection_state().resumed(),
+            "round {round}"
+        );
+        let client_hello = last_body(&exchange.from_client, CLIENT_HELLO).unwrap();
+        assert!(hello_session_id(&client_hello).is_empty(), "round {round}");
+        assert!(
+            !client_hello_extensions(&client_hello)
+                .iter()
+                .any(|(kind, _)| *kind == EXT_SESSION_TICKET),
+            "round {round}: no ticket asked for"
+        );
+        let server_hello = last_body(&exchange.from_server, SERVER_HELLO).unwrap();
+        assert!(hello_session_id(&server_hello).is_empty(), "round {round}");
+        assert!(!types(&exchange.from_server).contains(&NEW_SESSION_TICKET));
+    }
+    assert_eq!(store.len_dtls12(NAME), 0);
+    assert_eq!(cache.len(), 0);
+
+    // A resuming server and client of their own: each still resumes, and resumes with
+    // neither side switched off.
+    let resuming_server = server_config(Some(&cache), true, &certificate, builder());
+    let resuming_client = client_config(&store, builder());
+    assert!(handshake(&resuming_client, &resuming_server).completed());
+    assert!(
+        handshake(&resuming_client, &resuming_server)
+            .server
+            .connection_state()
+            .resumed()
+    );
+    // A session the client holds is not offered by a client with it off, nor resumed by a
+    // server with it off.
+    assert!(store.len_dtls12(NAME) > 0);
+    let exchange = handshake(&client, &resuming_server);
+    assert!(!exchange.server.connection_state().resumed());
+    let exchange = handshake(&resuming_client, &server);
+    assert!(exchange.completed());
+    assert!(!exchange.server.connection_state().resumed());
+}

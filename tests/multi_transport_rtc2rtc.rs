@@ -173,6 +173,12 @@ struct World {
     tolerate_failure: bool,
     /// DTLS datagrams are lost (recorded in `dtls`, not delivered).
     drop_dtls: bool,
+    /// The DTLS datagrams from or to this address are lost (ICE goes through).
+    dtls_lost_at: Option<SocketAddr>,
+    /// The sender of the first DTLS datagram becomes `dtls_lost_at`.
+    lose_dtls_of_first_client: bool,
+    /// The virtual time of each step (index: step - 1).
+    step_times: Vec<Instant>,
 }
 
 impl World {
@@ -218,6 +224,9 @@ impl World {
             dtls: vec![],
             tolerate_failure: false,
             drop_dtls: false,
+            dtls_lost_at: None,
+            lose_dtls_of_first_client: false,
+            step_times: vec![],
         })
     }
 
@@ -500,6 +509,7 @@ impl World {
 
     fn step(&mut self) -> Result<bool> {
         self.steps += 1;
+        self.step_times.push(self.now);
         let now = self.now;
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.trickling)
             .into_iter()
@@ -528,6 +538,15 @@ impl World {
             if data.first().is_some_and(|first| (20..=63).contains(first)) {
                 self.dtls.push((self.steps, from, to, data.clone()));
                 if self.drop_dtls {
+                    continue;
+                }
+                if self.lose_dtls_of_first_client && self.dtls_lost_at.is_none() {
+                    self.dtls_lost_at = Some(from);
+                }
+                if self
+                    .dtls_lost_at
+                    .is_some_and(|lost| lost == from || lost == to)
+                {
                     continue;
                 }
             }
@@ -3613,6 +3632,12 @@ struct WireHandshake {
     offered: bool,
     answered: bool,
     resumed: bool,
+    /// A ClientHello asked for a DTLS 1.2 ticket (an RFC 5077 SessionTicket extension, empty
+    /// or not).
+    asks_ticket: bool,
+    /// A ClientHello sent `psk_key_exchange_modes` (RFC 8446 section 4.2.9): the client can
+    /// resume, and a server may send it DTLS 1.3 tickets; without it none does.
+    psk_modes: bool,
 }
 
 /// The extension types of a hello's extensions block, from `at`.
@@ -3639,6 +3664,7 @@ fn wire_handshakes(world: &World, latest_from: u64) -> Vec<WireHandshake> {
     use std::collections::HashMap;
     const PRE_SHARED_KEY: u16 = 41;
     const SUPPORTED_VERSIONS: u16 = 43;
+    const PSK_KEY_EXCHANGE_MODES: u16 = 45;
     const SESSION_TICKET: u16 = 35;
     // (from, to, message_seq, type) -> (step, body, bytes received)
     type Message = (u64, Vec<u8>, usize);
@@ -3709,9 +3735,15 @@ fn wire_handshakes(world: &World, latest_from: u64) -> Vec<WireHandshake> {
                     offered: false,
                     answered: false,
                     resumed: false,
+                    asks_ticket: false,
+                    psk_modes: false,
                 });
                 entry.first_hello = entry.first_hello.min(*step);
                 entry.offered |= offered;
+                entry.asks_ticket |= extensions.iter().any(|(kind, _)| *kind == SESSION_TICKET);
+                entry.psk_modes |= extensions
+                    .iter()
+                    .any(|(kind, _)| *kind == PSK_KEY_EXCHANGE_MODES);
             }
             11 => {
                 certificates_from.insert(*from);
@@ -3862,22 +3894,40 @@ fn unbundled_transports_wait_for_the_first_and_resume_its_dtls_session() -> Resu
             "the others resume its session: {handshakes:?}"
         );
     }
+    assert!(
+        handshakes.iter().all(|h| h.psk_modes && !h.asks_ticket),
+        "DTLS 1.3 tickets only: {handshakes:?}"
+    );
     media_and_data_arrive(&mut world, &senders, "the resumed associations")
 }
 
-/// `with_dtls_session_resumption(false)`: every transport runs a full handshake, none offers
-/// a session.
+/// `with_dtls_session_resumption(false)`, and the default (the setting is off unless the
+/// application turns it on): every transport runs a full handshake, none asks for a ticket
+/// or offers a session.
 #[test]
 fn without_dtls_session_resumption_every_transport_runs_a_full_handshake() -> Result<()> {
     let (mut world, senders) = three_unbundled_transports(false)?;
-    let handshakes = wire_handshakes(&world, 0);
-    assert_eq!(handshakes.len(), 3, "{handshakes:?}");
-    for handshake in &handshakes {
-        assert!(
-            !handshake.offered && handshake.answered && !handshake.resumed,
-            "{handshakes:?}"
-        );
+    let mut default = World::new(RTCBundlePolicy::MaxCompat)?;
+    let (default_senders, _) = default.negotiate(without_bundle_group)?;
+    default.gather()?;
+    default.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    for (world, what) in [(&world, "off"), (&default, "the default")] {
+        let handshakes = wire_handshakes(world, 0);
+        assert_eq!(handshakes.len(), 3, "{what}: {handshakes:?}");
+        for handshake in &handshakes {
+            assert!(
+                !handshake.offered
+                    && handshake.answered
+                    && !handshake.resumed
+                    && !handshake.psk_modes
+                    && !handshake.asks_ticket,
+                "{what}: {handshakes:?}"
+            );
+        }
     }
+    media_and_data_arrive(&mut default, &default_senders, "the default")?;
     media_and_data_arrive(&mut world, &senders, "full handshakes")
 }
 
@@ -3887,9 +3937,12 @@ fn without_dtls_session_resumption_every_transport_runs_a_full_handshake() -> Re
 /// no server resumes one.
 #[test]
 fn a_new_dtls_association_after_a_resumed_one_is_a_full_handshake() -> Result<()> {
-    // As `renewing_the_dtls_association_renews_every_transport`, with the default settings
-    // (session resumption on).
-    let mut world = World::with_credentials(RTCBundlePolicy::MaxCompat, false)?;
+    // As `renewing_the_dtls_association_renews_every_transport`, with session resumption on.
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new()
+            .with_unique_transport_credentials(false)
+            .with_dtls_session_resumption(true)
+    })?;
     let (senders, _) = world.negotiate(without_bundle_group)?;
     world.gather()?;
     world.run("connected with a data channel", |peers| {
@@ -4137,6 +4190,329 @@ fn a_section_naming_another_certificate_does_not_resume_as_the_dtls_server() -> 
     assert_eq!(
         (with.answered, with.resumed),
         (without.answered, without.resumed)
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// RFC 5764 section 3 with a bound: the review of conf/dtls-resume-1 (its proof tests, made
+// permanent for the bounded, DTLS 1.3-only form), and what it left unchecked.
+// ---------------------------------------------------------------------------------------
+
+fn connected_count(peer: &Peer) -> usize {
+    peer.pc
+        .dtls_transports()
+        .iter()
+        .filter(|t| t.state() == RTCDtlsTransportState::Connected)
+        .count()
+}
+
+fn resumption_on() -> SettingEngineBuilder {
+    SettingEngineBuilder::new().with_dtls_session_resumption(true)
+}
+
+fn resumption_off() -> SettingEngineBuilder {
+    SettingEngineBuilder::new().with_dtls_session_resumption(false)
+}
+
+/// DTLS 1.2 only (an ECDHE suite, no DTLS 1.3 suite).
+fn dtls12_only(resumption: bool) -> SettingEngineBuilder {
+    SettingEngineBuilder::new()
+        .with_dtls_session_resumption(resumption)
+        .with_dtls_cipher_suites(vec![
+            dtls::cipher_suite::CipherSuiteId::Tls_Ecdhe_Ecdsa_With_Aes_128_Gcm_Sha256,
+        ])
+}
+
+/// Three unbundled transports; every DTLS datagram of the transport whose client sent the
+/// first ClientHello is lost for a minute (its ICE path works). Returns how many DTLS
+/// transports of the DTLS client are connected after that minute, how many transports
+/// sent a ClientHello at all, and the longest time between the first ClientHello and
+/// another transport's first.
+fn first_client_transport_never_completes(resumption: bool) -> Result<(usize, usize, Duration)> {
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new().with_dtls_session_resumption(resumption)
+    })?;
+    world.tolerate_failure = true;
+    world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.lose_dtls_of_first_client = true;
+    world.advance(Duration::from_secs(60))?;
+    let lost = world.dtls_lost_at.context("a first ClientHello")?;
+    let client = usize::from(!world.peers[0].addrs.contains(&lost));
+    let handshakes = wire_handshakes(&world, 0);
+    let at = |step: u64| world.step_times[step as usize - 1];
+    let first = handshakes.first().context("a handshake")?.first_hello;
+    let latest = handshakes
+        .iter()
+        .map(|h| at(h.first_hello).saturating_duration_since(at(first)))
+        .max()
+        .unwrap_or_default();
+    eprintln!(
+        "stall: resumption {resumption}: connected {}, transports that sent a ClientHello {}, \
+         latest first ClientHello {latest:?} after the first",
+        connected_count(&world.peers[client]),
+        handshakes.len()
+    );
+    Ok((
+        connected_count(&world.peers[client]),
+        handshakes.len(),
+        latest,
+    ))
+}
+
+/// Review F1, made permanent: one transport whose DTLS never completes (its DTLS lost, its
+/// ICE working) holds the connection's other transports back at most
+/// `LEADER_WAIT_FLIGHTS` (3) of their initial flight intervals, then they run full
+/// handshakes and connect, as without the session. (Before: they never sent a ClientHello.)
+#[test]
+fn a_first_handshake_that_never_completes_holds_the_others_back_three_flight_intervals_at_most()
+-> Result<()> {
+    let (connected, hellos, off) = first_client_transport_never_completes(false)?;
+    assert_eq!((connected, hellos), (2, 3), "without the session");
+    let (connected, hellos, on) = first_client_transport_never_completes(true)?;
+    assert_eq!(
+        (connected, hellos),
+        (2, 3),
+        "with the session the two others connect too"
+    );
+    // Three flight intervals of at most 400 ms (RFC 9147 section 5.8.2; less where ICE
+    // measured the round trip), counted from when each was due, which is after the first
+    // ClientHello.
+    assert!(
+        on <= off + Duration::from_millis(1200),
+        "held back {on:?} (without the session {off:?})"
+    );
+    eprintln!("stall summary: others' first ClientHello after the first: off {off:?}, on {on:?}");
+    Ok(())
+}
+
+/// Connects three unbundled transports with each peer's settings, and reports: the wire
+/// handshakes, the virtual time from the start to every transport connected, and the time
+/// between the first transport's "connected" and the next ClientHello of another transport.
+fn connection_timing(
+    what: &str,
+    offerer: SettingEngineBuilder,
+    answerer: SettingEngineBuilder,
+) -> Result<(Vec<WireHandshake>, Duration, Duration)> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.peers = [
+        Peer::with_setting_engine("10.0.0.1", RTCBundlePolicy::MaxCompat, None, offerer)?,
+        Peer::with_setting_engine("10.0.0.2", RTCBundlePolicy::Balanced, None, answerer)?,
+    ];
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    let start = world.now;
+    world.run_traced("every DTLS transport connected", |peers| {
+        peers.iter().all(|p| connected_count(p) == 3)
+    })?;
+    let all_connected = world.now.duration_since(start);
+    let handshakes = wire_handshakes(&world, 0);
+    let client = dtls_client(&world, &handshakes);
+    let leader = handshakes.first().context("a handshake")?.clone();
+    let leader_connected = connected_step(&world.peers[client], leader.client, 0)
+        .context("the first transport connected")?;
+    let at = |step: u64| world.step_times[step as usize - 1];
+    let next_hello = handshakes[1..]
+        .iter()
+        .map(|h| h.first_hello)
+        .min()
+        .context("another handshake")?;
+    let gap = at(next_hello).saturating_duration_since(at(leader_connected));
+    eprintln!(
+        "timing [{what}]: all connected after {all_connected:?}; next ClientHello {gap:?} \
+         after the first transport connected (steps {leader_connected} -> {next_hello}); \
+         handshakes {handshakes:?}"
+    );
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    media_and_data_arrive(&mut world, &senders, what)?;
+    Ok((handshakes, all_connected, gap))
+}
+
+/// Review F2 and F3 (DTLS 1.3), made permanent: what the session costs in time.
+///
+/// - Against a peer that issues no ticket (every browser: libwebrtc sets `SSL_OP_NO_TICKET`)
+///   the DTLS client's other transports start when the first handshake is complete, with no
+///   wait for a ticket: the connection is up as soon as with the session off (before: 800 ms
+///   later, two flight intervals of waiting for a ticket that never came).
+/// - Against one that issues them, both other transports resume (four tickets per
+///   handshake), and start as soon as the tickets are there.
+#[test]
+fn a_peer_that_issues_no_ticket_costs_no_wait() -> Result<()> {
+    let (_, both_off, _) = connection_timing("both off", resumption_off(), resumption_off())?;
+    let (handshakes, both_on, gap_on) =
+        connection_timing("both on", resumption_on(), resumption_on())?;
+    let (leader, others) = handshakes.split_first().context("handshakes")?;
+    assert!(!leader.offered && !leader.resumed, "{handshakes:?}");
+    assert!(
+        others.iter().all(|h| h.offered && h.resumed),
+        "both others resume: {handshakes:?}"
+    );
+    // The answerer is the DTLS client: it waits; the offerer (the server) issues nothing.
+    let (handshakes, mixed, gap) = connection_timing(
+        "client on, server issues no ticket",
+        resumption_off(),
+        resumption_on(),
+    )?;
+    assert!(
+        handshakes.iter().all(|h| !h.offered && !h.resumed),
+        "nothing to resume: {handshakes:?}"
+    );
+    eprintln!(
+        "timing summary: both off {both_off:?}; both on {both_on:?} (next ClientHello \
+         {gap_on:?} after the first connected); client on, no-ticket server {mixed:?} \
+         (next ClientHello {gap:?} after the first connected)"
+    );
+    assert_eq!(
+        gap,
+        Duration::ZERO,
+        "no wait for a ticket that does not come"
+    );
+    assert_eq!(
+        mixed, both_off,
+        "the connection is up as soon as without it"
+    );
+    assert!(
+        gap_on < Duration::from_millis(400),
+        "the tickets came with the first handshake: {gap_on:?}"
+    );
+    Ok(())
+}
+
+/// The peer connection resumes in DTLS 1.3 only (coordinator decision after review F3, F6).
+/// With DTLS 1.2 only on both sides no transport takes part: none asks for a ticket, offers
+/// or resumes a session, and none waits. With a DTLS 1.2-only server and a client that has
+/// the session on, the client's transports take part, the first handshake comes out DTLS
+/// 1.2, and the others start at once, asking for no ticket and resuming nothing.
+#[test]
+fn with_dtls12_the_transports_neither_wait_nor_ask_for_a_ticket() -> Result<()> {
+    let (_, off, _) =
+        connection_timing("dtls 1.2, both off", dtls12_only(false), dtls12_only(false))?;
+    let (handshakes, on, gap) =
+        connection_timing("dtls 1.2, both on", dtls12_only(true), dtls12_only(true))?;
+    assert_eq!(handshakes.len(), 3);
+    assert!(
+        handshakes
+            .iter()
+            .all(|h| !h.offered && !h.resumed && !h.asks_ticket && !h.psk_modes),
+        "{handshakes:?}"
+    );
+    assert_eq!((on, gap), (off, Duration::ZERO), "nobody waits");
+    let (handshakes, mixed, gap) = connection_timing(
+        "dtls 1.2 server, client on",
+        dtls12_only(true),
+        resumption_on(),
+    )?;
+    assert!(
+        handshakes
+            .iter()
+            .all(|h| !h.offered && !h.resumed && !h.asks_ticket),
+        "no DTLS 1.2 ticket asked for: {handshakes:?}"
+    );
+    assert!(
+        handshakes.iter().all(|h| h.psk_modes),
+        "the client's transports took part (DTLS 1.3 offered): {handshakes:?}"
+    );
+    eprintln!("timing summary (dtls 1.2): both off {off:?}, both on {on:?}, server 1.2 {mixed:?}");
+    assert_eq!(gap, Duration::ZERO, "the others start with the first");
+    assert_eq!(mixed, off);
+    Ok(())
+}
+
+/// A bundled connection (one transport) has nothing to share: with the session on at both
+/// peers its client asks for no ticket (no `psk_key_exchange_modes`, so no server may send
+/// one, RFC 8446 section 4.2.9) and offers none, and the DTLS datagrams each way are as many
+/// as with it off: no NewSessionTicket flight and no acknowledgement of one.
+#[test]
+fn a_bundled_connection_exchanges_no_ticket_with_the_session_on() -> Result<()> {
+    let run = |resumption: bool| -> Result<(World, Vec<RTCRtpSenderId>)> {
+        let mut world = World::with_setting_engines(RTCBundlePolicy::MaxBundle, || {
+            SettingEngineBuilder::new().with_dtls_session_resumption(resumption)
+        })?;
+        let (senders, _) = world.negotiate(|sdp| sdp)?;
+        world.gather()?;
+        world.run_traced("connected with a data channel", |peers| {
+            peers.iter().all(|p| p.connected && p.channel.is_some())
+        })?;
+        world.advance(Duration::from_secs(2))?;
+        Ok((world, senders))
+    };
+    let (mut on, senders) = run(true)?;
+    let (off, _) = run(false)?;
+    for peer in &on.peers {
+        assert_eq!(peer.pc.dtls_transports().len(), 1, "bundled");
+    }
+    let handshakes = wire_handshakes(&on, 0);
+    assert_eq!(handshakes.len(), 1, "{handshakes:?}");
+    assert!(
+        handshakes
+            .iter()
+            .all(|h| !h.psk_modes && !h.offered && !h.asks_ticket && !h.resumed),
+        "{handshakes:?}"
+    );
+    let client = handshakes[0].client;
+    let datagrams = |world: &World| -> (usize, usize) {
+        let from_client = world
+            .dtls
+            .iter()
+            .filter(|(_, from, _, _)| *from == client)
+            .count();
+        (from_client, world.dtls.len() - from_client)
+    };
+    assert_eq!(
+        datagrams(&on),
+        datagrams(&off),
+        "the same DTLS datagrams each way as without the session"
+    );
+    media_and_data_arrive(&mut on, &senders, "bundled, the session on")
+}
+
+/// RFC 5764 section 3 is about the transports one negotiation sets up (review F5): a
+/// transport added by a later negotiation runs a full handshake, its client offering no
+/// session and asking for no ticket, while the first three resumed.
+#[test]
+fn a_transport_added_by_a_later_negotiation_runs_a_full_handshake() -> Result<()> {
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, resumption_on)?;
+    world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    let first = wire_handshakes(&world, 0);
+    assert_eq!(
+        first.iter().filter(|h| h.resumed).count(),
+        2,
+        "the first negotiation's transports resumed: {first:?}"
+    );
+    let from = world.steps + 1;
+    world.peers[0].pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(RTCRtpTransceiverInit {
+            direction: RTCRtpTransceiverDirection::Sendonly,
+            streams: vec![],
+            send_encodings: vec![RTCRtpEncodingParameters {
+                active: true,
+                ..Default::default()
+            }],
+        }),
+    )?;
+    world.renegotiate_with(without_bundle_group)?;
+    for peer in &world.peers {
+        assert_eq!(peer.pc.dtls_transports().len(), 4, "a transport of its own");
+    }
+    world.gather_new()?;
+    world.run_traced("the new transport connected", |peers| {
+        peers.iter().all(|p| connected_count(p) == 4)
+    })?;
+    let later = wire_handshakes(&world, from);
+    assert_eq!(later.len(), 1, "one new handshake: {later:?}");
+    assert!(
+        later
+            .iter()
+            .all(|h| h.answered && !h.offered && !h.resumed && !h.psk_modes),
+        "a full handshake, outside the session: {later:?}"
     );
     Ok(())
 }
