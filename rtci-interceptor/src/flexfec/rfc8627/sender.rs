@@ -369,6 +369,13 @@ impl FlexFecSendInterceptor {
             return;
         };
         for image in images {
+            // A retransmission on the media SSRC (a NACK answered without RTX, RFC 8627
+            // section 1.1.7 leaves none negotiated next to FlexFEC) is a source packet that
+            // already left and was protected then: taken again, its old sequence number would
+            // break the run of consecutive packets every block is (section 4.2.2.2).
+            if image.message.has(&Attribute::Retransmission) {
+                continue;
+            }
             if let Packet::Rtp(rtp_packet) = &image.message.packet {
                 // `image.now` is the instant the pacer released the packet.
                 self.protect(image.now, image.transport, rtp_packet);
@@ -432,6 +439,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for FlexFecSendInterceptor {
             self.write_queue.push_back(msg);
             return Ok(());
         };
+        if msg.message.has(&Attribute::Retransmission) {
+            // Protected when it was first sent (see `protect_wire_images`).
+            self.write_queue.push_back(msg);
+            return Ok(());
+        }
         let rtp_packet = rtp_packet.clone();
         let now = msg.now;
         let transport = msg.transport;

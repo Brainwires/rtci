@@ -155,6 +155,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SettingEngineBuilder::with_dscp_marking(RTCDscpMarking::WithoutFallback)` keeps marking,
   `RTCDscpMarking::Off` marks nothing. Nothing changes on a path that delivers the marked
   packets. Audit: RFC8835-4.2-2 `tested`; RFC8835-4.2-1, RFC8837-5-1 and 5-8 cite the driver.
+
+- **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
+  6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
+  4.1 asks ("attempt to approximate this information"), where it had no header extension
+  before; other extensions of the RED packet are still left out.
+
+- **fec** (fec-12): a FEC session's m= section (RFC 5109 section 14.1, `add_fec_session`)
+  states the per-packet congestion feedback the media sections state for the kind: the
+  transport-wide sequence number extension (`a=extmap:1`, its own id in a section of its own)
+  with `a=rtcp-fb:<pt> transport-cc`, and `a=rtcp-fb:<pt> ack ccfb` (RFC 8888), and an
+  answerer keeps one of them (RFC 8888 section 6), RFC 8888 when both sides state it as for
+  the media, the extension under the offer's id. The FEC session's packets then
+  carry the transport-wide sequence number of their own transport and are reported on, so that
+  transport's congestion controller (each transport is a path, RFC 8836 section 2) has the
+  feedback it ran without before. A section without these lines (an earlier peer) is taken as
+  before: no extension, no feedback.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
@@ -447,6 +464,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says whether an address's host candidates were withheld. `rtci-stream-driver`'s
   `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
   turns its mDNS sockets off.
+- **fec** (fec-15): libwebrtc's ULPFEC form for the pacer-written extensions, a `Chrome`
+  profile row (`fec.ulpfec-zero-mutable-extensions`, `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`):
+  `UlpfecSendBuilder::with_mutable_extensions_zeroed` protects the transport-wide sequence
+  number, abs-send-time and toffset values as zeros (libwebrtc computes its FEC before it
+  writes them, `RtpSenderEgress::SendPacket` @ a222406d) and
+  `UlpfecReceiveBuilder::with_mutable_extensions_zeroed` zeroes them in the decoder's copies
+  (`ZeroMutableExtensions`), so a packet rebuilt on either side is exact with those values
+  zero. `configure_video_red_ulpfec_with(registry, media_engine, zero)`; the `Chrome` profile's
+  chain has it on. `Rfc` keeps RFC 5109 section 8's FEC over the packet as sent.
+
+- **fec** (fec-13): RFC 8854 section 5.2's `video/flexfec` in the offer as a setting:
+  `DefaultInterceptorOptions::video_flexfec` / `configure_video_flexfec` registers
+  `video/flexfec` (payload type 49, `repair-window=10000000`) and runs the RFC 8627 coder in the
+  standard chain at slots of its own (`FLEXFEC_ENCODER_SLOT` 5_100, `FLEXFEC_WIRE_IMAGE_SLOT`
+  1_510, `FLEXFEC_DECODER_SLOT` 10_310), beside ULPFEC's, so a chain can run both. On in the
+  `StrictRfc` profile (row `fec.video-flexfec`); off by default and in `Chrome`, because RFC 8627
+  section 1.1.7 has an answerer offered FlexFEC and RTX answer with FlexFEC only, which would
+  leave two default peers without RTX (audit row RFC8854-5.2-1, `conflict`). No change to the
+  default's offers.
+
+- **ULPFEC across an SRTP key change** (RFC 5109 section 11, row RFC5109-11-3 untested ->
+  tested): `tests/ulpfec_across_srtp_rekeying_rtc2rtc.rs` sends a FEC block whose first media
+  packet leaves under one DTLS association's keys and whose second media packet and FEC
+  packet leave under a new association's (`renew_dtls_association`), after the receiver
+  dropped the old keys; whichever media packet the network loses is rebuilt. No engine
+  change.
+- **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
+  has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
+  and checks that the browser decodes every frame although Rust's sender discarded every
+  tenth media packet after the FEC protected it (`examples/interop-peer`
+  `?drop_video_every=N`, reported as `videoDropped`). The earlier finding that Chromium does
+  not rebuild from the engine's FEC was wrong: the packets are byte for byte what libwebrtc's
+  `UlpfecReceiver` reads, and Chromium rebuilds from them; the earlier cell's threshold under
+  random netem loss failed on frames whose media and FEC packets were both dropped (VP8
+  without NACK then waits for a key frame). The browser offers VP8, red and ulpfec only
+  (`setCodecPreferences`): as offerer Firefox otherwise also receives the VP9 and AV1 it
+  offered, with its default NACK, and turns NACK on for the whole receive stream. Firefox
+  rebuilds every dropped packet too; it never decodes the fixture's first group of pictures in
+  that cell, loss or not, which its column leaves out. No engine change.
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than
   `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
@@ -607,6 +663,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   srflx gathering, the TURN client: `rand::rng()`, a CSPRNG). Same defect as
   webrtc-rs/webrtc#954 (webrtc-rs/rtc#283), in an application's gatherer there. No engine
   behaviour change.
+
+- **interceptor** (fec-13): the RFC 8627 FlexFEC encoder no longer takes a retransmission on
+  the media SSRC (a NACK answered without RTX, as after an answer that kept only FlexFEC, RFC
+  8627 section 1.1.7) into its current block: its old sequence number broke the run of
+  consecutive source packets, and the block went unprotected.
 
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
