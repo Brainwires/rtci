@@ -49,6 +49,23 @@ fn mdns_egress_ip() -> Option<IpAddr> {
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
+/// The address the test runs on ([`mdns_egress_ip`]), or `None` when this host has no
+/// interface that carries multicast to the mDNS group: some GitHub-hosted Windows images have
+/// none, and the test is then skipped with the reason printed (the same connection runs on
+/// virtual time on every platform, `tests/mdns_virtual_time.rs`). On Linux the hosted runners
+/// always have one, so its absence fails the test there rather than hiding a regression.
+fn mdns_egress_or_skip(test: &str) -> Option<IpAddr> {
+    let ip = mdns_egress_ip();
+    if ip.is_none() {
+        assert!(
+            !cfg!(target_os = "linux"),
+            "{test} needs an interface that carries multicast to the mDNS group"
+        );
+        println!("SKIPPED {test}: no interface on this host carries multicast to the mDNS group");
+    }
+    ip
+}
+
 struct Side {
     driver: PeerDriver,
     outgoing: Vec<RTCIceCandidateInit>,
@@ -161,8 +178,10 @@ fn assert_only_local_names(who: &str, side: &Side, ip: IpAddr) {
 #[tokio::test]
 async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() -> Result<()> {
     let _group = MDNS_GROUP_IN_USE.lock().await;
-    let Some(ip) = mdns_egress_ip() else {
-        panic!("this test needs an interface that carries multicast to the mDNS group");
+    let Some(ip) =
+        mdns_egress_or_skip("driven_connections_resolve_each_others_mdns_candidates_and_connect")
+    else {
+        return Ok(());
     };
     let limit = MdnsRateLimit::default();
     let mut a = Side::new(ip, Some(limit.clone()))?;
@@ -201,8 +220,10 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
     const BURST: u32 = 1;
     const PER_SECOND: u32 = 1;
     let _group = MDNS_GROUP_IN_USE.lock().await;
-    let Some(ip) = mdns_egress_ip() else {
-        panic!("this test needs an interface that carries multicast to the mDNS group");
+    let Some(ip) =
+        mdns_egress_or_skip("two_driven_connections_send_their_mdns_within_one_shared_budget")
+    else {
+        return Ok(());
     };
     let limit = MdnsRateLimit::new(BURST, PER_SECOND);
     let start = Instant::now();
