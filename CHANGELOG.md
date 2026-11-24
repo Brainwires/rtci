@@ -106,6 +106,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **fec** (fec-13): RFC 8854 section 5.2's `video/flexfec` in the offer as a setting:
+  `DefaultInterceptorOptions::video_flexfec` / `configure_video_flexfec` registers
+  `video/flexfec` (payload type 49, `repair-window=10000000`) and runs the RFC 8627 coder in the
+  standard chain at slots of its own (`FLEXFEC_ENCODER_SLOT` 5_100, `FLEXFEC_WIRE_IMAGE_SLOT`
+  1_510, `FLEXFEC_DECODER_SLOT` 10_310), beside ULPFEC's, so a chain can run both. On in the
+  `StrictRfc` profile (row `fec.video-flexfec`); off by default and in `Chrome`, because RFC 8627
+  section 1.1.7 has an answerer offered FlexFEC and RTX answer with FlexFEC only, which would
+  leave two default peers without RTX (audit row RFC8854-5.2-1, `conflict`). No change to the
+  default's offers.
+
 - **ULPFEC across an SRTP key change** (RFC 5109 section 11, row RFC5109-11-3 untested ->
   tested): `tests/ulpfec_across_srtp_rekeying_rtc2rtc.rs` sends a FEC block whose first media
   packet leaves under one DTLS association's keys and whose second media packet and FEC
