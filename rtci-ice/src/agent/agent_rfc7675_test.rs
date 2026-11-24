@@ -303,13 +303,17 @@ fn test_previous_path_is_dropped_when_its_consent_expires() {
     let mut dropped_at = None;
     let mut t = now;
     while t < now + Duration::from_secs(60) {
-        run_traced(&mut a, t, t, |_, _| false);
+        // One timeout at `t` exactly, nothing answered: a drop at `t` is the agent's, not a
+        // later instant a helper stepped to.
+        a.handle_timeout(t).unwrap();
+        while a.poll_write().is_some() {}
+        while a.poll_event().is_some() {}
         if a.media_path().is_none() {
             dropped_at = Some(t);
             break;
         }
-        // Straight to the agent's next timer: `run_traced` has handled every one due by `t`.
-        // (Stepping at least a millisecond, as this loop did, jumped past the expiry when a
+        // Straight to the agent's next timer, which must lie after `t`: a deadline left in
+        // the past is a path not dropped when due. (Stepping at least a millisecond, as this loop did, jumped past the expiry when a
         // consent request fell less than a millisecond before it: the randomized 4 to 6 s
         // intervals put one there about once in five thousand runs.)
         let next = a
