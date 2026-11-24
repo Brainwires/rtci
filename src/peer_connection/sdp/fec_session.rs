@@ -13,7 +13,7 @@ use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::RTCFecGroupSemantics;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
-use crate::rtp_transceiver::internal::FecSessionFormat;
+use crate::rtp_transceiver::internal::{FecSessionFeedback, FecSessionFormat};
 use sdp::description::media::MediaDescription;
 use sdp::description::session::{ATTR_KEY_CONNECTION_SETUP, ATTR_KEY_GROUP, ATTR_KEY_MID};
 use sdp::description::session::{ATTR_KEY_RTCPMUX, SessionDescription};
@@ -92,6 +92,7 @@ pub(crate) fn fec_section_format(media: &MediaDescription) -> Option<FecSessionF
             payload_type,
             clock_rate,
             one_level_only,
+            feedback: section_feedback(media, payload_type),
         });
     }
     // RFC 5109 section 14.1: "dynamic payload type numbers MUST be used".
@@ -99,6 +100,49 @@ pub(crate) fn fec_section_format(media: &MediaDescription) -> Option<FecSessionF
         .into_iter()
         .next()
         .filter(|format| format.clock_rate > 1000 && format.payload_type >= 96)
+}
+
+/// The per-packet congestion feedback `media` states for its format `payload_type`: the
+/// transport-wide sequence number extension with `a=rtcp-fb:<pt> transport-cc` (both needed:
+/// the extension numbers the packets, the feedback type is what the reports are), and
+/// `a=rtcp-fb:<pt> ack ccfb` (RFC 8888 section 6). `a=rtcp-fb:*` applies to every format
+/// (RFC 4585 section 4.2).
+fn section_feedback(media: &MediaDescription, payload_type: u8) -> FecSessionFeedback {
+    let feedback: Vec<&str> = media
+        .attributes
+        .iter()
+        .filter(|a| a.key == "rtcp-fb")
+        .filter_map(|a| a.value.as_deref())
+        .filter_map(|value| {
+            let (pt, rest) = value.trim().split_once(' ')?;
+            (pt == "*" || pt.parse::<u8>().ok() == Some(payload_type)).then_some(rest.trim())
+        })
+        .collect();
+    let has = |wanted: &str| {
+        feedback
+            .iter()
+            .any(|f| f.split_whitespace().eq(wanted.split_whitespace()))
+    };
+    let extension = media
+        .attributes
+        .iter()
+        .filter(|a| a.key == "extmap")
+        .filter_map(|a| a.value.as_deref())
+        .find_map(|value| {
+            let mut parts = value.split_whitespace();
+            let id = parts.next()?;
+            let uri = parts.next()?;
+            // An extension restricted to `inactive` is not in use (RFC 8285 section 7).
+            let (id, direction) = id.split_once('/').unwrap_or((id, ""));
+            (uri == ::sdp::extmap::TRANSPORT_CC_URI && direction != "inactive")
+                .then(|| id.parse::<u8>().ok())
+                .flatten()
+                .filter(|id| (1..=14).contains(id))
+        });
+    FecSessionFeedback {
+        transport_cc_extension: extension.filter(|_| has("transport-cc")),
+        ccfb: has("ack ccfb"),
+    }
 }
 
 /// The FEC sessions of a description: each `a=group:FEC-FR` / `a=group:FEC` line that names
@@ -202,6 +246,28 @@ pub(crate) fn add_fec_media_section(
             },
         )
         .with_property_attribute(params.section.direction.to_string());
+    // The FEC session is an RTP session on a transport of its own, with a congestion
+    // controller of its own: its packets carry the transport-wide sequence number and are
+    // reported on, as the media's are.
+    let feedback = format.feedback;
+    if let Some(id) = feedback.transport_cc_extension {
+        media = media
+            .with_extmap(sdp::extmap::ExtMap {
+                value: u16::from(id),
+                uri: url::Url::parse(::sdp::extmap::TRANSPORT_CC_URI).ok(),
+                ..Default::default()
+            })
+            .with_value_attribute(
+                "rtcp-fb".to_owned(),
+                format!("{} transport-cc", format.payload_type),
+            );
+    }
+    if feedback.ccfb {
+        media = media.with_value_attribute(
+            "rtcp-fb".to_owned(),
+            format!("{} ack ccfb", format.payload_type),
+        );
+    }
     for fingerprint in dtls_fingerprints {
         media = media.with_fingerprint(
             fingerprint.algorithm.clone(),
@@ -277,9 +343,67 @@ mod tests {
                         payload_type: 100,
                         clock_rate: 90_000,
                         one_level_only: true,
+                        feedback: FecSessionFeedback::default(),
                     },
                 }]
             );
+        }
+    }
+
+    /// The per-packet feedback a FEC section states: the transport-wide sequence number
+    /// extension counts only with `transport-cc` feedback for the format (or for `*`), an
+    /// `inactive` one not at all, and `ack ccfb` on its own.
+    #[test]
+    fn the_congestion_feedback_of_a_fec_section_is_read() {
+        let twcc = ::sdp::extmap::TRANSPORT_CC_URI;
+        for (lines, expected) in [
+            (String::new(), FecSessionFeedback::default()),
+            (
+                format!("a=extmap:3 {twcc}\na=rtcp-fb:100 transport-cc\n"),
+                FecSessionFeedback {
+                    transport_cc_extension: Some(3),
+                    ccfb: false,
+                },
+            ),
+            (
+                format!("a=extmap:3 {twcc}\na=rtcp-fb:* transport-cc\na=rtcp-fb:100 ack ccfb\n"),
+                FecSessionFeedback {
+                    transport_cc_extension: Some(3),
+                    ccfb: true,
+                },
+            ),
+            (
+                format!("a=extmap:3 {twcc}\n"),
+                FecSessionFeedback::default(),
+            ),
+            (
+                format!("a=extmap:3/inactive {twcc}\na=rtcp-fb:100 transport-cc\n"),
+                FecSessionFeedback::default(),
+            ),
+            (
+                format!("a=extmap:3 {twcc}\na=rtcp-fb:101 transport-cc\n"),
+                FecSessionFeedback::default(),
+            ),
+            (
+                "a=rtcp-fb:100 ack ccfb\n".to_owned(),
+                FecSessionFeedback {
+                    transport_cc_extension: None,
+                    ccfb: true,
+                },
+            ),
+        ] {
+            let desc = offer(
+                "a=group:FEC-FR 0 1\n",
+                &media(
+                    "1",
+                    9,
+                    "100",
+                    &format!("a=rtpmap:100 ulpfec/90000\n{lines}"),
+                ),
+            );
+            let sessions = fec_sessions(&desc);
+            assert_eq!(sessions.len(), 1, "{lines}");
+            assert_eq!(sessions[0].format.feedback, expected, "{lines}");
         }
     }
 

@@ -30,10 +30,16 @@ impl CandidateHostConfig {
                 determine_network_type(&self.base_config.network, &ip)?,
             )
         } else {
-            (
-                SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0),
-                NetworkType::Udp4,
-            )
+            // An mDNS name (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.4): the family is
+            // known only once the name resolves (`set_ip`), but the transport is the
+            // candidate's own. A TCP candidate under a name stays TCP (RFC 6544 section 4.5),
+            // or it would be signalled, and paired, as UDP on the TCP port.
+            let network_type = if self.base_config.network.to_lowercase().starts_with("tcp") {
+                NetworkType::Tcp4
+            } else {
+                NetworkType::Udp4
+            };
+            (SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0), network_type)
         };
 
         Ok(Candidate {
