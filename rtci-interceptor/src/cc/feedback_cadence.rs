@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 /// RFC 3550 section 6.2 recommends for RTCP.
 pub(crate) const FEEDBACK_SHARE: f64 = 0.05;
 /// The share of the session bandwidth the congestion control feedback of the endpoints that
-/// send it may take in the RTCP budget form ([`FeedbackCadence::with_rtcp_budget`]): RFC 3550
-/// section 6.2's 5% for RTCP, of which "1/4 of the RTCP bandwidth be dedicated to participants
-/// that are sending data": the receivers, who send the feedback, have the other three
-/// quarters.
+/// send it may take in the RTCP budget form
+/// ([`TwccReceiverBuilder::with_rtcp_budget`](crate::TwccReceiverBuilder::with_rtcp_budget)):
+/// RFC 3550 section 6.2's 5% for RTCP, of which "1/4 of the RTCP bandwidth be dedicated to
+/// participants that are sending data": the receivers, who send the feedback, have the other
+/// three quarters.
 pub const RTCP_BUDGET_FEEDBACK_SHARE: f64 = 0.0375;
 /// The window the received media bit rate is measured over.
 const RATE_WINDOW: Duration = Duration::from_secs(2);
