@@ -20,11 +20,17 @@ pub(crate) const BAD_PORTS: [u16; 83] = [
 /// Whether a remote candidate is administratively prohibited: its port is a bad port, or,
 /// under the "relay" policy, its address needs external resolution (an mDNS `.local` name or
 /// another DNS name: anything that is not an IP literal).
+///
+/// An active TCP candidate is never connected to: its port is the placeholder 9 (RFC 6544
+/// section 4.5), and the connection comes from it. Its port is not a destination, so the bad
+/// ports do not apply to it (two lite agents pair it, RFC 6544 section 6.1).
 pub(crate) fn is_administratively_prohibited(
     candidate: &Candidate,
     policy: RTCIceTransportPolicy,
 ) -> bool {
-    if BAD_PORTS.contains(&candidate.port()) {
+    if candidate.tcp_type() != ice::tcp_type::TcpType::Active
+        && BAD_PORTS.contains(&candidate.port())
+    {
         return true;
     }
     policy == RTCIceTransportPolicy::Relay && candidate.address().parse::<IpAddr>().is_err()
@@ -71,5 +77,22 @@ mod tests {
             &candidate(mdns, 50000),
             relay
         ));
+    }
+
+    /// RFC 6544 section 4.5: an active TCP candidate is signalled with port 9 and never
+    /// connected to, so the bad ports (9 among them) do not prohibit it; a passive one on a
+    /// bad port is a destination and is prohibited.
+    #[test]
+    fn an_active_tcp_candidate_on_port_9_is_not_prohibited() {
+        let all = RTCIceTransportPolicy::All;
+        let tcp = |port, tcp_type| {
+            unmarshal_candidate(&format!(
+                "1 1 tcp 2105524479 192.0.2.1 {port} typ host tcptype {tcp_type}"
+            ))
+            .expect("a candidate")
+        };
+        assert!(!is_administratively_prohibited(&tcp(9, "active"), all));
+        assert!(is_administratively_prohibited(&tcp(9, "passive"), all));
+        assert!(is_administratively_prohibited(&tcp(9, "so"), all));
     }
 }
