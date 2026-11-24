@@ -265,6 +265,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (acknowledged, so lost for good). The fork had the fix without a test: b91196d7 (the read of
   a closed stream ends its data, not the pass) and e9b19fa3 (a stream the application stopped
   reading drops what arrives on it). No behaviour change.
+- **rtp** (up-336): the H.264 / H.265 Annex B splitter (`annex_b_nal_units`, used by
+  `H264Payloader` and `HevcPayloader`) finds start codes with `memchr::memmem` instead of a byte
+  at a time; the NAL units are the same (test
+  `h264_test::annex_b_nal_units_are_those_a_byte_scan_finds`). Measured on a GitHub-hosted
+  ubuntu runner, release build, best of 15: a 30 KB one-slice frame 14.0 us to 0.57 us, a 1 MB
+  eight-slice frame 500 us to 27 us, SPS + PPS + a 100 B slice 106 ns to 92 ns; 1000 NAL units
+  of 5 B each 19.8 us to 21.5 us (+8%). Same change as webrtc-rs/rtc#336 by @g4lb.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
