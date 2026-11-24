@@ -69,9 +69,11 @@ const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
 const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
 /// A probe after a drop asks for this share of the rate before it.
 const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
-/// How long the target has to stay below [`LARGE_DROP_SHARE`] of the high before a drop for
-/// recovery probing to remember that high.
+/// How long the target has to stay below [`LARGE_DROP_SHARE`] of its high for recovery
+/// probing to remember that high.
 const RECOVERY_LASTING: Duration = Duration::from_secs(2);
+/// How far back the high recovery probing compares the target with reaches.
+const RECOVERY_HIGH_WINDOW: Duration = Duration::from_secs(10);
 /// Recovery probes go out once this long has passed since the last probe.
 pub const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// And only when the target has not fallen for this long.
@@ -212,8 +214,10 @@ pub struct ProbeController {
     /// Whether the high before a lasting drop is probed for until the target is back (see
     /// [`with_recovery_probing`](Self::with_recovery_probing)).
     recovery_probing: bool,
-    /// A large drop that may last: the high before it and when it happened.
-    recovery_candidate: Option<(f64, Instant)>,
+    /// The target's high of the last [`RECOVERY_HIGH_WINDOW`] and when it was, and since
+    /// when the target has been below [`LARGE_DROP_SHARE`] of it.
+    recovery_peak: Option<(f64, Instant)>,
+    below_since: Option<Instant>,
     /// The high before a drop that lasted, while the target is below it.
     recovery_high: Option<f64>,
     /// When the target last fell.
@@ -246,7 +250,8 @@ impl ProbeController {
             drop_probe: false,
             polled_at: None,
             recovery_probing: false,
-            recovery_candidate: None,
+            recovery_peak: None,
+            below_since: None,
             recovery_high: None,
             fell_at: None,
             last_target: None,
@@ -271,8 +276,9 @@ impl ProbeController {
     /// requirement 4a). libwebrtc probes a sender at its target only in application-limited
     /// periods (`probe_controller.cc` `TimeForAlrProbe`) or with a network-state estimate.
     ///
-    /// With this, a drop of the target below two thirds of its high of the last two seconds
-    /// that is still below it two seconds later makes the controller remember that high.
+    /// With this, a target that has stayed below two thirds of its high of the last ten
+    /// seconds for two seconds makes the controller remember that high (a sudden drop and a
+    /// back-off in steps alike).
     /// While the target is below 85 % of it and has not fallen for a second, a cluster at
     /// twice the target (at most the high) is asked for once five seconds have passed since
     /// the last probe; a confirming result allows further probes as at the start. The high
@@ -323,7 +329,7 @@ impl ProbeController {
         if !media_flowing {
             return None;
         }
-        if self.after_drop || self.recovery_probing {
+        if self.after_drop {
             self.track_drops(now, target);
         }
         if self.recovery_probing {
@@ -426,28 +432,26 @@ impl ProbeController {
         }
     }
 
-    /// Follows the target for recovery probing: a large drop (noted by
-    /// [`track_drops`](Self::track_drops)) that lasts makes its high the one to come back to.
+    /// Follows the target for recovery probing: a target that stays well under its recent
+    /// high makes that high the one to come back to.
     fn track_recovery(&mut self, now: Instant, target: f64) {
         if self.last_target.is_some_and(|last| target < last) {
             self.fell_at = Some(now);
         }
         self.last_target = Some(target);
-        if let Some((before, at)) = self.drop
-            && now == at
-        {
-            let before = self
-                .recovery_candidate
-                .map_or(before, |(earlier, _)| earlier.max(before));
-            self.recovery_candidate = Some((before, at));
+        match self.recovery_peak {
+            Some((peak, at))
+                if target < peak && now.saturating_duration_since(at) <= RECOVERY_HIGH_WINDOW => {}
+            _ => self.recovery_peak = Some((target, now)),
         }
-        if let Some((high, at)) = self.recovery_candidate {
-            if target >= LARGE_DROP_SHARE * high {
-                self.recovery_candidate = None;
-            } else if now.saturating_duration_since(at) >= RECOVERY_LASTING {
-                self.recovery_high = Some(self.recovery_high.map_or(high, |h| h.max(high)));
-                self.recovery_candidate = None;
+        let (peak, _) = self.recovery_peak.expect("set above");
+        if target < LARGE_DROP_SHARE * peak {
+            let since = *self.below_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= RECOVERY_LASTING {
+                self.recovery_high = Some(self.recovery_high.map_or(peak, |high| high.max(peak)));
             }
+        } else {
+            self.below_since = None;
         }
         if self
             .recovery_high
@@ -479,6 +483,8 @@ impl ProbeController {
             && estimate < target
         {
             self.recovery_high = None;
+            self.recovery_peak = self.last_target.zip(self.polled_at);
+            self.below_since = None;
         }
         if !drop_probe && estimate >= FURTHER_PROBE_THRESHOLD * rate && self.initial.is_empty() {
             let next = estimate * FURTHER_PROBE;
@@ -526,7 +532,7 @@ impl ProbeController {
         let recovery = self
             .recovery_high
             .map(|_| last + RECOVERY_PROBE_INTERVAL)
-            .or_else(|| self.recovery_candidate.map(|(_, at)| at + RECOVERY_LASTING));
+            .or_else(|| self.below_since.map(|since| since + RECOVERY_LASTING));
         let second = match (after_drop, recovery) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
