@@ -829,36 +829,38 @@ fn a_flow_far_above_the_tcp_rate_over_a_lossy_link_is_ceased() -> Result<()> {
 /// section 4.3's TCP throughput. The breaker's default takes s over the reporting intervals
 /// the sending rate is measured over instead, so that both describe the same packets. A
 /// talking call (400 ms of 750-byte frames, 600 ms of 11-byte silence frames) over a link that
-/// holds every datagram back by up to 100 ms and loses 1 % or 5 % of them: with section 3's s
+/// holds every datagram back by up to 40 or 100 ms and loses 5 % of them: with section 3's s
 /// the last four frames are often silence, ten times TCP for 23-byte packets falls under the
-/// talkspurts' rate, and the breaker ceases the call; the default keeps it running in both
-/// (the congestion controller's pacer holds the flow to its target, nowhere near ten times
-/// TCP). Measured (60 s runs of the sweep, cb-2): section 3's s ceased the call at 1 % after
-/// 1.5 s and at 5 % after 3.8 s, at 20 and 30 % at every reordering; the default in none of
-/// the 120 cells.
+/// talkspurts' rate, and the breaker ceases the call; the default keeps it running (the
+/// congestion controller's pacer holds the flow to its target, nowhere near ten times TCP).
+/// Measured (the sweep, speech, 60 s each, hosted run 45409132256): section 3's s ceased the
+/// call in 14 of 24 cells (jitter 0 / 10 / 40 / 100 ms x loss 0 / 1 / 2 / 5 / 20 / 30 %): at 1 %
+/// with 100 ms after 32.7 s, at 2 % with 40 and 100 ms after 10.7 and 9.8 s, at 5 % after 5.0
+/// and 3.8 s, at 20 and 30 % at every jitter after 1.5 to 13.5 s; the default in none.
 #[test]
 fn the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps() -> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
-    for loss in [0.01, 0.05] {
+    for jitter in [40, 100] {
+        let loss = 0.05;
         let default = run(
             RtpCodecKind::Audio,
             Shape::Talkspurts,
-            Link::jittered(100, loss),
-            20,
+            Link::jittered(jitter, loss),
+            15,
             11,
         )?;
         LAST_FRAMES.with(|l| l.set(true));
         let last_frames = run(
             RtpCodecKind::Audio,
             Shape::Talkspurts,
-            Link::jittered(100, loss),
-            20,
+            Link::jittered(jitter, loss),
+            15,
             11,
         );
         LAST_FRAMES.with(|l| l.set(false));
         let last_frames = last_frames?;
         println!(
-            "{:.0} % loss: default ceased {:?} at {:?}; last 4 * G frames ceased {:?} at {:?}",
+            "{jitter} ms, {:.0} % loss: default ceased {:?} at {:?}; last 4 * G frames ceased {:?} at {:?}",
             loss * 100.0,
             default.ceased,
             default.ceased_at,
