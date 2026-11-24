@@ -5,9 +5,15 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtci::interceptor::{FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot};
+use rtci::interceptor::{
+    FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Interceptor, Packet, Registry, Slot, StreamInfo,
+    TaggedPacket,
+};
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
-use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::interceptor_registry::{
+    DefaultInterceptorOptions, register_default_interceptors,
+    register_default_interceptors_with_options,
+};
 use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
@@ -20,17 +26,26 @@ use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
 use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::goodbye::Goodbye;
 use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtcp::receiver_report::ReceiverReport;
+use rtci::rtcp::reception_report::ReceptionReport;
+use rtci::rtcp::sender_report::SenderReport;
 use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
 use rtci::rtp_transceiver::{
-    RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
+    RTCRtpReceiverId, RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId,
+    RTCRtpTransceiverInit,
 };
 use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::time::SystemInstant;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
@@ -47,6 +62,130 @@ fn codec(mime_type: &str, sdp_fmtp_line: &str) -> RTCRtpCodec {
         sdp_fmtp_line: sdp_fmtp_line.to_owned(),
         rtcp_feedback: vec![],
     }
+}
+
+/// What a peer's RTCP session handed on towards the wire, in the order it left the session.
+enum Left {
+    /// An RTP packet, by its SSRC.
+    Rtp(u32),
+    /// The packets of one RTCP datagram, before SRTCP.
+    Rtcp(Vec<Box<dyn rtci::rtcp::Packet>>),
+}
+
+type Tap = Arc<Mutex<Vec<Left>>>;
+
+/// Wire-ward of the RTCP session ([`Slot::Custom`] below [`Slot::RtcpSession`]): it sees every
+/// RTP packet after the session counted it and every compound packet the session wrote, whole.
+/// On the wire SRTCP leaves only the first eight octets of a datagram in the clear, and a
+/// compound packet carries the reports of several of the endpoint's SSRCs (RFC 8108 5.3.2).
+struct TapInterceptor {
+    tap: Tap,
+    read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for TapInterceptor {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+        self.read_queue.push_back(msg);
+        Ok(())
+    }
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read_queue.pop_front()
+    }
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+        match &msg.message.packet {
+            Packet::Rtp(packet) => self
+                .tap
+                .lock()
+                .expect("tap")
+                .push(Left::Rtp(packet.header.ssrc)),
+            Packet::Rtcp(packets) if !packets.is_empty() => self
+                .tap
+                .lock()
+                .expect("tap")
+                .push(Left::Rtcp(packets.clone())),
+            _ => {}
+        }
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write_queue.pop_front()
+    }
+}
+
+impl Interceptor for TapInterceptor {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
+/// An SR or RR a peer's session wrote.
+#[derive(Debug, Clone)]
+struct Report {
+    /// Where its datagram is in the tap.
+    at: usize,
+    ssrc: u32,
+    /// A sender report (RFC 3550 6.4.1); a receiver report (6.4.2) otherwise.
+    sender: bool,
+    blocks: Vec<ReceptionReport>,
+}
+
+/// The SR and RR packets in what a peer's session wrote, in order.
+fn reports(tap: &Tap) -> Vec<Report> {
+    let tap = tap.lock().expect("tap");
+    let mut reports = vec![];
+    for (at, left) in tap.iter().enumerate() {
+        let Left::Rtcp(packets) = left else {
+            continue;
+        };
+        for packet in packets {
+            let any = packet.as_any();
+            if let Some(sr) = any.downcast_ref::<SenderReport>() {
+                reports.push(Report {
+                    at,
+                    ssrc: sr.ssrc,
+                    sender: true,
+                    blocks: sr.reports.clone(),
+                });
+            } else if let Some(rr) = any.downcast_ref::<ReceiverReport>() {
+                reports.push(Report {
+                    at,
+                    ssrc: rr.ssrc,
+                    sender: false,
+                    blocks: rr.reports.clone(),
+                });
+            }
+        }
+    }
+    reports
+}
+
+/// The SSRCs that said BYE in what a peer's session wrote.
+fn goodbyes(tap: &Tap) -> Vec<u32> {
+    let tap = tap.lock().expect("tap");
+    tap.iter()
+        .filter_map(|left| match left {
+            Left::Rtcp(packets) => Some(packets),
+            Left::Rtp(_) => None,
+        })
+        .flatten()
+        .filter_map(|packet| packet.as_any().downcast_ref::<Goodbye>())
+        .flat_map(|goodbye| goodbye.sources.clone())
+        .collect()
+}
+
+/// Where the first RTP packet with `ssrc` is in the tap, from `from` on.
+fn first_rtp(tap: &Tap, ssrc: u32, from: usize) -> Option<usize> {
+    let tap = tap.lock().expect("tap");
+    (from..tap.len()).find(|&at| matches!(tap[at], Left::Rtp(sent) if sent == ssrc))
 }
 
 struct Peer {
@@ -104,6 +243,43 @@ impl Peer {
             registry,
             SettingEngineBuilder::new().build(),
         )
+    }
+
+    /// A peer as [`new`](Self::new) (no FEC) with a tap below its RTCP session, its report
+    /// blocks carried by every SSRC when `every_ssrc`
+    /// (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, RFC 8108 5.1), and its NTP
+    /// times on a wall clock of its own: RFC 7164 5.1 replaces a sender report by a receiver
+    /// report in the two seconds around the end of a month, and the process's clock would
+    /// make what the tap shows depend on when the test runs.
+    fn tapped(addr: &str, every_ssrc: bool) -> Result<(Self, Tap)> {
+        let mut media_engine = Self::media_engine(false)?;
+        let mut options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
+        options.rtcp_report_from_every_ssrc = every_ssrc;
+        options.wall_clock = Some(SystemInstant::at(
+            Instant::now(),
+            Duration::from_secs(1_700_000_000),
+        ));
+        let (registry, _handles) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )?;
+        let tap = Tap::default();
+        let registry = registry.with(
+            Slot::Custom(100),
+            TapInterceptor {
+                tap: tap.clone(),
+                read_queue: VecDeque::new(),
+                write_queue: VecDeque::new(),
+            },
+        );
+        let peer = Self::built(
+            addr,
+            media_engine,
+            registry,
+            SettingEngineBuilder::new().build(),
+        )?;
+        Ok((peer, tap))
     }
 
     /// A peer with VP8 and RTX and an empty interceptor registry; with `omit_session`, the
@@ -542,6 +718,71 @@ impl World {
             self.run_until(now + Duration::from_millis(20))?;
         }
         Ok(())
+    }
+
+    /// The answerer's receiving transceiver is set to send as well: its sender.
+    fn answerer_sender(&mut self) -> Result<RTCRtpSenderId> {
+        let receiver = *self.peers[1].opened.first().expect("the track opened");
+        let mut handle = self.peers[1]
+            .pc
+            .rtp_transceiver(RTCRtpTransceiverId::from(receiver))
+            .expect("transceiver");
+        handle.set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+        Ok(handle.sender().expect("a sender"))
+    }
+
+    /// The answerer offers what [`answerer_sender`](Self::answerer_sender) set up, and the
+    /// offerer, whose `sender`'s transceiver receives too from now on, answers.
+    fn renegotiate_from_answerer(&mut self, sender: RTCRtpSenderId) -> Result<()> {
+        let now = self.now;
+        let offer = self.peers[1].pc.create_offer(None)?;
+        self.peers[1].pc.set_local_description(now, offer.clone())?;
+        self.peers[0].pc.set_remote_description(now, offer)?;
+        self.peers[0]
+            .pc
+            .rtp_transceiver(RTCRtpTransceiverId::from(sender))
+            .expect("transceiver")
+            .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
+        let answer = self.peers[0].pc.create_answer(None)?;
+        self.peers[0]
+            .pc
+            .set_local_description(now, answer.clone())?;
+        self.peers[1].pc.set_remote_description(now, answer)?;
+        self.pump()
+    }
+
+    /// Writes one RTP packet from the answerer's sender `back`, and 20 ms pass.
+    fn send_back(&mut self, back: RTCRtpSenderId, sequence_number: u16) -> Result<()> {
+        let now = self.now;
+        let mut sender = self.peers[1].pc.rtp_sender(back).expect("sender");
+        let parameters = sender.get_parameters();
+        let payload_type = parameters
+            .rtp_parameters
+            .codecs
+            .first()
+            .expect("a negotiated codec")
+            .payload_type;
+        let ssrc = parameters.encodings[0]
+            .rtp_coding_parameters
+            .ssrc
+            .expect("an SSRC");
+        sender.write_rtp(
+            now,
+            rtci::rtp::Packet {
+                header: rtci::rtp::header::Header {
+                    version: 2,
+                    payload_type,
+                    sequence_number,
+                    timestamp: u32::from(sequence_number) * 1800,
+                    ssrc,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: Bytes::from(vec![0x10u8; 200]),
+            },
+        )?;
+        self.pump()?;
+        self.run_until(now + Duration::from_millis(20))
     }
 }
 
@@ -1360,98 +1601,86 @@ fn a_key_frame_request_reaches_an_application_with_an_empty_registry() -> Result
 /// that it uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it
 /// is RECOMMENDED that it use its existing SSRC for that stream, since otherwise the
 /// participant count in the RTP session will be unnecessarily increased". The receiving peer
-/// reports from one SSRC; when its transceiver starts sending, the stream is sent on that
-/// SSRC, whose reports become sender reports: every compound packet the peer sends, before
-/// and after, is headed by that one SSRC.
+/// reports from one SSRC, with receiver reports; when its transceiver starts sending, the
+/// stream is sent on that SSRC, which goes on as the same participant:
+///
+/// - from the stream's first packet on, and for as long as it sends, every report of that SSRC
+///   is a sender report (RFC 3550 6.4: "The sender report is issued if a site has sent any
+///   data packets during the interval since issuing the last report or the previous one,
+///   otherwise the receiver report is issued");
+/// - no SSRC says BYE, and none reports but that SSRC and the stream's RTX SSRC (a participant
+///   of its own once it sends, RFC 4588 6.1: here the congestion controller's padding).
+///
+/// The reports are read below the session, whole: with the RTX SSRC in the session a compound
+/// packet carries both SSRCs' reports, led by the one whose timer expired (RFC 8108 5.3.2),
+/// so the first packet of a datagram, all SRTCP leaves readable on the wire, says nothing
+/// about the other SSRC's report.
 #[test]
 fn a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from() -> Result<()> {
-    use rtci::rtp_transceiver::RTCRtpTransceiverId;
-    const SR: u8 = 200;
-    const RR: u8 = 201;
-    let (mut world, sender) = World::connected()?;
+    let (answerer, tap) = Peer::tapped("10.0.0.2:5000", false)?;
+    let (mut world, sender) =
+        World::connected_peers([Peer::new("10.0.0.1:5000", false)?, answerer])?;
     world.send_media(sender, FIRST_SEQ, 50)?;
     let until = world.now + Duration::from_secs(3);
     world.run_until(until)?;
-    let leaders = world.peers[1].rtcp_leaders.clone();
-    assert!(!leaders.is_empty(), "the receiver reports");
-    let reporting = leaders[0].1;
-    assert!(leaders.contains(&(RR, reporting)));
+    let before = reports(&tap);
+    assert!(!before.is_empty(), "the receiver reports");
+    let reporting = before[0].ssrc;
     assert!(
-        leaders.iter().all(|&(_, leader)| leader == reporting),
-        "the receiver reports from one SSRC: {leaders:?}"
+        before
+            .iter()
+            .all(|report| report.ssrc == reporting && !report.sender),
+        "the receiver sends receiver reports from one SSRC: {before:?}"
+    );
+    let leaders = world.peers[1].rtcp_leaders.clone();
+    assert!(
+        !leaders.is_empty() && leaders.iter().all(|&(_, leader)| leader == reporting),
+        "that SSRC heads every datagram on the wire: {leaders:?}"
     );
 
     // The receiving transceiver starts sending, and the receiver offers it.
-    let receiver = *world.peers[1].opened.first().expect("the track opened");
-    let transceiver = RTCRtpTransceiverId::from(receiver);
-    let back = {
-        let mut handle = world.peers[1]
-            .pc
-            .rtp_transceiver(transceiver)
-            .expect("transceiver");
-        handle.set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
-        handle.sender().expect("a sender")
-    };
+    let back = world.answerer_sender()?;
     assert_eq!(
         reporting,
         encoding_ssrcs(&mut world, 1, back).0,
         "the new stream's SSRC is the reporting SSRC"
     );
-    let now = world.now;
-    let offer = world.peers[1].pc.create_offer(None)?;
-    world.peers[1]
-        .pc
-        .set_local_description(now, offer.clone())?;
-    world.peers[0].pc.set_remote_description(now, offer)?;
-    // The sending side receives too now.
-    world.peers[0]
-        .pc
-        .rtp_transceiver(RTCRtpTransceiverId::from(sender))
-        .expect("transceiver")
-        .set_direction(RTCRtpTransceiverDirection::Sendrecv)?;
-    let answer = world.peers[0].pc.create_answer(None)?;
-    world.peers[0]
-        .pc
-        .set_local_description(now, answer.clone())?;
-    world.peers[1].pc.set_remote_description(now, answer)?;
-    world.pump()?;
-
+    world.renegotiate_from_answerer(sender)?;
     let (ssrc, rtx) = encoding_ssrcs(&mut world, 1, back);
     assert_eq!(reporting, ssrc);
-    let pt = world.peers[1]
-        .pc
-        .rtp_sender(back)
-        .expect("sender")
-        .get_parameters()
-        .rtp_parameters
-        .codecs
-        .first()
-        .expect("a negotiated codec")
-        .payload_type;
-    for n in 0..100u16 {
-        let now = world.now;
-        world.peers[1]
-            .pc
-            .rtp_sender(back)
-            .expect("sender")
-            .write_rtp(
-                now,
-                rtci::rtp::Packet {
-                    header: rtci::rtp::header::Header {
-                        version: 2,
-                        payload_type: pt,
-                        sequence_number: 100 + n,
-                        timestamp: u32::from(n) * 1800,
-                        ssrc,
-                        marker: true,
-                        ..Default::default()
-                    },
-                    payload: Bytes::from(vec![0x10u8; 200]),
-                },
-            )?;
-        world.pump()?;
-        world.run_until(now + Duration::from_millis(20))?;
+
+    // The stream sends, a packet every 20 ms, until its SSRC has reported twice since its
+    // first packet left: regular reports are a randomised interval apart (RFC 3550 6.3.1,
+    // and at least half of `T_rr_interval`, RFC 4585 3.5.3), so a fixed number of packets
+    // would hold a number of reports that varies from run to run. Twenty seconds is many
+    // intervals.
+    let renegotiated = tap.lock().expect("tap").len();
+    let since_the_first_packet = |tap: &Tap| -> Vec<Report> {
+        let Some(first) = first_rtp(tap, reporting, renegotiated) else {
+            return vec![];
+        };
+        reports(tap)
+            .into_iter()
+            .filter(|report| report.at > first && report.ssrc == reporting)
+            .collect()
+    };
+    let deadline = world.now + Duration::from_secs(20);
+    let mut sequence_number = 100u16;
+    while world.now < deadline && since_the_first_packet(&tap).len() < 2 {
+        world.send_back(back, sequence_number)?;
+        sequence_number += 1;
     }
+    let while_sending = since_the_first_packet(&tap);
+    assert!(
+        while_sending.len() >= 2,
+        "the stream's SSRC reports while it sends: {while_sending:?}"
+    );
+    assert!(
+        while_sending.iter().all(|report| report.sender),
+        "a report of the SSRC that is not a sender report while the stream sends: {while_sending:?}"
+    );
+
+    // The stream stops; the session runs on.
     let until = world.now + Duration::from_secs(3);
     world.run_until(until)?;
 
@@ -1459,18 +1688,135 @@ fn a_receiver_that_starts_sending_sends_on_the_ssrc_it_reported_from() -> Result
         world.peers[0].read_rtp.iter().any(|(s, _)| *s == reporting),
         "the media arrives on the reporting SSRC"
     );
-    let leaders = &world.peers[1].rtcp_leaders;
-    assert!(
-        leaders.contains(&(SR, reporting)),
-        "the reporting SSRC sends sender reports: {leaders:?}"
+    assert_eq!(
+        Vec::<u32>::new(),
+        goodbyes(&tap),
+        "the SSRC goes on as the same participant: nothing says BYE"
     );
     // The stream's RTX SSRC is a participant of its own once it sends (RFC 4588 6.1); no
     // other SSRC is.
+    let all = reports(&tap);
+    assert!(
+        all.iter()
+            .all(|report| report.ssrc == reporting || Some(report.ssrc) == rtx),
+        "an SSRC reports that is neither the reporting SSRC nor the stream's RTX one ({rtx:?}): {all:?}"
+    );
+    let leaders = &world.peers[1].rtcp_leaders;
     assert!(
         leaders
             .iter()
             .all(|&(_, leader)| leader == reporting || Some(leader) == rtx),
         "one SSRC heads every compound packet but the stream's RTX one ({rtx:?}): {leaders:?}"
     );
+    Ok(())
+}
+
+/// RFC 8108 section 5.1: "each SSRC will send RTCP reports for all other SSRCs, including
+/// those co-located at the same endpoint". An endpoint sends a stream and its RTX stream (two
+/// SSRCs) and receives one. With `DefaultInterceptorOptions::rtcp_report_from_every_ssrc` each
+/// of its two SSRCs reports, in every regular compound packet, on the remote SSRC and on the
+/// other of the two; without it (the default) the reception report blocks are carried once,
+/// by the stream's SSRC, the RTX SSRC's report has none, and nothing reports on a co-located
+/// SSRC.
+#[test]
+fn every_ssrc_reports_on_the_others_with_the_setting_and_the_blocks_go_once_without() -> Result<()>
+{
+    for every in [true, false] {
+        let (offerer, tap) = Peer::tapped("10.0.0.1:5000", every)?;
+        let (mut world, sender) =
+            World::connected_peers([offerer, Peer::new("10.0.0.2:5000", false)?])?;
+        let (media, rtx, _) = world.sender_stream(sender);
+        let rtx = rtx.expect("RTX is negotiated");
+        // The answerer sends too: the offerer has a remote SSRC to report on.
+        let back = world.answerer_sender()?;
+        world.renegotiate_from_answerer(sender)?;
+        let remote = encoding_ssrcs(&mut world, 1, back).0;
+        // One of the offerer's packets is lost and asked for again: its RTX SSRC sends.
+        world.drop_once = Some((media, FIRST_SEQ + 5));
+
+        // The regular compound packets: those with a report of both of the offerer's SSRCs
+        // (RFC 8108 5.3.2; a packet that only carries feedback has one report and no blocks,
+        // RFC 4585 3.1), from the first one that reports on the remote SSRC.
+        let regular = |tap: &Tap| -> Vec<Vec<Report>> {
+            let all = reports(tap);
+            let mut packets: Vec<Vec<Report>> = vec![];
+            for report in all {
+                match packets.last_mut() {
+                    Some(packet) if packet[0].at == report.at => packet.push(report),
+                    _ => packets.push(vec![report]),
+                }
+            }
+            let names = |packet: &Vec<Report>, ssrc: u32| {
+                packet
+                    .iter()
+                    .any(|report| report.blocks.iter().any(|block| block.ssrc == ssrc))
+            };
+            packets
+                .into_iter()
+                .skip_while(|packet| !names(packet, remote))
+                .filter(|packet| {
+                    [media, rtx]
+                        .iter()
+                        .all(|ssrc| packet.iter().any(|report| report.ssrc == *ssrc))
+                })
+                .collect()
+        };
+        // Both send until the offerer has made three such packets (a randomised interval
+        // apart: thirty seconds is many intervals).
+        let deadline = world.now + Duration::from_secs(30);
+        let mut n = 0u16;
+        while world.now < deadline && regular(&tap).len() < 3 {
+            world.send_media(sender, FIRST_SEQ + n, 1)?;
+            world.send_back(back, 100 + n)?;
+            n += 1;
+        }
+        assert!(
+            first_rtp(&tap, rtx, 0).is_some(),
+            "every {every}: the RTX SSRC sent"
+        );
+        let regular = regular(&tap);
+        assert!(
+            regular.len() >= 3,
+            "every {every}: regular reports of both SSRCs ({media}, {rtx}): {:?}",
+            reports(&tap)
+        );
+        for packet in &regular {
+            let blocks_of = |ssrc: u32| -> Vec<u32> {
+                packet
+                    .iter()
+                    .filter(|report| report.ssrc == ssrc)
+                    .flat_map(|report| report.blocks.iter().map(|block| block.ssrc))
+                    .collect()
+            };
+            let (of_media, of_rtx) = (blocks_of(media), blocks_of(rtx));
+            if every {
+                assert!(
+                    of_media.contains(&remote) && of_media.contains(&rtx),
+                    "the stream's SSRC {media} reports on the remote SSRC {remote} and on its RTX SSRC {rtx}: {packet:?}"
+                );
+                assert!(
+                    of_rtx.contains(&remote) && of_rtx.contains(&media),
+                    "the RTX SSRC {rtx} reports on the remote SSRC {remote} and on the stream's SSRC {media}: {packet:?}"
+                );
+                assert!(
+                    !of_media.contains(&media) && !of_rtx.contains(&rtx),
+                    "an SSRC reports on itself: {packet:?}"
+                );
+            } else {
+                assert!(
+                    of_media.contains(&remote),
+                    "the stream's SSRC {media} reports on the remote SSRC {remote}: {packet:?}"
+                );
+                assert!(
+                    of_rtx.is_empty(),
+                    "the RTX SSRC {rtx} carries report blocks: {packet:?}"
+                );
+                assert!(
+                    !of_media.contains(&media) && !of_media.contains(&rtx),
+                    "a co-located SSRC is reported on: {packet:?}"
+                );
+            }
+        }
+    }
     Ok(())
 }
