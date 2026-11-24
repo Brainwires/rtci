@@ -704,10 +704,11 @@ fn run(scenario: Scenario) -> Result<Outcome> {
             world.on_signal(to, signal)?;
             continue;
         }
-        if first.is_some() && world.now >= next_packet {
-            if sent == packets {
-                break;
-            }
+        // Done once every packet is sent and the path has delivered what it still carries.
+        if first.is_some() && sent == packets && world.delayed.is_empty() {
+            break;
+        }
+        if first.is_some() && sent < packets && world.now >= next_packet {
             sent += 1;
             next_packet = world.now + PACKET_INTERVAL;
             for i in 0..2 {
@@ -750,7 +751,7 @@ fn run(scenario: Scenario) -> Result<Outcome> {
         .flatten()
         .min()
         .unwrap_or(world.now + PACKET_INTERVAL);
-        if first.is_some() {
+        if first.is_some() && sent < packets {
             next = next.min(next_packet);
         }
         world.now = next.max(world.now);
