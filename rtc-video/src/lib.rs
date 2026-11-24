@@ -1,6 +1,6 @@
 //! A sans-I/O video pipeline for the `rtc` WebRTC engine.
 //!
-//! Phase one is the receive side, codec-agnostic: RTP packets in, frames that a decoder can
+//! The receive side, codec-agnostic: RTP packets in, frames that a decoder can
 //! decode out, in decode order, at the time they are due, with key-frame requests when the
 //! picture is lost and the W3C `RTCInboundRtpStreamStats` video members measured on the way.
 //!
@@ -15,6 +15,19 @@
 //!                                                    │
 //!                                          render::RenderStats (freezes, pauses)
 //! ```
+//!
+//! The send side ([`send::SendPipeline`], phase 3): pictures in, RTP packets out, following
+//! the engine's congestion signals.
+//!
+//! ```text
+//!  picture ─▶ pause? ─▶ frame-rate step ─▶ scale (resolution step) ─▶ encoder::VideoEncoder ─▶ payloader ─▶ RTP
+//!               ▲ target 0      ▲ degradation preference                ▲ rate, key frames
+//!               └──── set_target_bitrate (RTCRtpSender::target_bitrates) │
+//!                                       request_key_frame (PLI, FIR, OnPacerDiscard; RFC 5104 3.5.1 limit)
+//! ```
+//!
+//! [`engine::VideoReceiver`] and [`engine::VideoSender`] connect the two pipelines to the `rtc`
+//! peer connection (feature `engine`).
 //!
 //! Like the engine, nothing here reads a clock, opens a device or starts a thread: the caller
 //! passes the time in. Decoding is the application's: the pipeline hands out

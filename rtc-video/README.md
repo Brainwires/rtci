@@ -10,6 +10,16 @@ extrapolator and timing model); key frames asked for (PLI) when the picture is l
 video statistics (`framesDecoded`, `freezeCount`, `jitterBufferDelay`, ...) measured and handed
 to the engine's `getStats()`. Decoding is the application's, behind the `VideoDecoder` trait.
 
+The send side (phase three, `send::SendPipeline`, `engine::VideoSender`): pictures in, RTP
+packets out. It follows the engine's target (`RTCRtpSender::target_bitrates`: the estimate less
+the retransmission reserve) with the encoder's own minimum respected, stops encoding while the
+target is 0 (the pacer's pause) and starts again with a key frame, serves key-frame requests
+(PLI, FIR, the pacer's discards) at most once per two round trips of the last key frame (RFC
+5104 3.5.1), and lowers resolution or frame rate when the target falls under what the format
+needs, as the W3C `degradationPreference` says (default `balanced`). `SendConfig::chrome()`
+has libwebrtc's choices where they differ. Simulcast, SVC and the rate allocators are not built
+yet.
+
 Codecs (phase two), all opt-in; the default build decodes no video:
 
 - `vp8`: VP8 decode and encode in pure Rust (`vp8-decoder` / `vp8-encoder`, pinned to `=0.1.3`;

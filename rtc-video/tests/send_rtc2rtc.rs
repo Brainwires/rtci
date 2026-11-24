@@ -1117,3 +1117,18 @@ fn the_glue_turns_pacer_discards_and_key_frame_requests_into_key_frames() -> Res
     );
     Ok(())
 }
+
+/// The capacity call on the seeds `RTC_SEND_SEEDS` names (comma-separated; 1 to 6 by default),
+/// default configuration: prints each outcome, asserts nothing.
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_capacity_cap_over_seeds() -> Result<()> {
+    let seeds = std::env::var("RTC_SEND_SEEDS").unwrap_or_else(|_| "1,2,3,4,5,6".to_owned());
+    for seed in seeds
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+    {
+        cap_run(seed, SendConfig::default(), "seeds")?;
+    }
+    Ok(())
+}
