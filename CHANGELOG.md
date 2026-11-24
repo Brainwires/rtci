@@ -624,7 +624,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`circuit_breaker_reordering_rtc2rtc`, `gcc_rate_limited_link_rtc2rtc`) anchor each run at
   its start. `the_same_seed_gives_the_same_bytes_after_a_pause` runs one seed twice, 1.5 s of
   real time apart, and compares every RTP and RTCP packet both peers' chains hand to SRTP,
-  byte for byte; with the process-wide anchor it fails.
+  byte for byte (the SRTP datagrams themselves are keyed by DTLS ephemeral keys no seed reaches;
+  the CNAME, the media and RTX SSRCs and the RTX sequence numbers, which the engine draws from
+  `rand`, are fixed or masked); with the process-wide anchor 473 of the sender's 482 packets
+  differ.
 
 ### Bug Fixes
 
