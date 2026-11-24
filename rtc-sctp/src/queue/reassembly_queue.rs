@@ -416,6 +416,9 @@ pub(crate) struct ReassemblyQueue {
     partial: Option<Partial>,
     /// A partial delivery that ended without its last part, until the association reports it.
     partial_aborted: Option<PartialAbort>,
+    /// Fragments dropped because they could never be part of a complete message
+    /// ([`discard_orphans`](Self::discard_orphans)).
+    pub(crate) orphans_dropped: usize,
 }
 
 impl ReassemblyQueue {
@@ -440,6 +443,7 @@ impl ReassemblyQueue {
             unordered_partial: vec![],
             partial: None,
             partial_aborted: None,
+            orphans_dropped: 0,
         }
     }
 
@@ -486,6 +490,45 @@ impl ReassemblyQueue {
         }
         self.n_bytes += len;
         set.is_complete()
+    }
+
+    /// Whether `chunk`, which no message in partial delivery takes, does not begin a message
+    /// while the fragment that would come before it in its message has been received (every
+    /// TSN up to `cum` has) and is not held with it: the start of its message went somewhere
+    /// else, and nothing that can still arrive completes it.
+    fn is_orphan(&self, chunk: &ChunkPayloadData, cum: u32) -> bool {
+        if chunk.beginning_fragment || !sna32lte(chunk.tsn.wrapping_sub(1), cum) {
+            return false;
+        }
+        let before = chunk.tsn.wrapping_sub(1);
+        if self.interleaved {
+            // A fragment of a message of which nothing is held: its earlier fragments, the
+            // first included, have TSNs below its own, all received, and none is here.
+            let mid = chunk.mid;
+            return if chunk.unordered {
+                !self.unordered_partial.iter().any(|s| s.mid == mid)
+            } else {
+                !self.ordered.iter().any(|s| s.mid == mid)
+            };
+        }
+        if chunk.unordered {
+            let idx = self
+                .unordered_chunks
+                .partition_point(|c| sna32lt(c.tsn, before));
+            return self
+                .unordered_chunks
+                .get(idx)
+                .is_none_or(|c| c.tsn != before);
+        }
+        let ssn = chunk.stream_sequence_number;
+        let idx = self.ordered.partition_point(|s| sna16lt(s.ssn, ssn));
+        match self.ordered.get(idx) {
+            Some(s) if s.ssn == ssn => {
+                let i = s.chunks.partition_point(|c| sna32lt(c.tsn, before));
+                s.chunks.get(i).is_none_or(|c| c.tsn != before)
+            }
+            _ => true,
+        }
     }
 
     /// Whether an ordered message is the next one to deliver, or one before it.
@@ -542,12 +585,29 @@ impl ReassemblyQueue {
     }
 
     pub(crate) fn push(&mut self, chunk: ChunkPayloadData) -> bool {
+        self.push_received(chunk, None)
+    }
+
+    /// As [`push`](Self::push), with the receiver's cumulative TSN before `chunk`: a fragment
+    /// that can never be part of a complete message (see
+    /// [`discard_orphans`](Self::discard_orphans)) is dropped instead of being held.
+    pub(crate) fn push_received(
+        &mut self,
+        chunk: ChunkPayloadData,
+        cumulative_tsn: Option<u32>,
+    ) -> bool {
         if chunk.stream_identifier != self.si {
             return false;
         }
         let Some(chunk) = self.push_to_partial(chunk) else {
             return false;
         };
+        if let Some(cum) = cumulative_tsn
+            && self.is_orphan(&chunk, cum)
+        {
+            self.orphans_dropped += 1;
+            return false;
+        }
         if self.interleaved {
             return self.push_interleaved(chunk);
         }
@@ -903,6 +963,126 @@ impl ReassemblyQueue {
         self.subtract_num_bytes(dropped);
         self.next_ssn = 0;
         self.next_mid = 0;
+    }
+
+    /// Drops the fragments that can never be part of a complete message, `cumulative_tsn`
+    /// being the receiver's cumulative TSN, and returns how many fragments were dropped.
+    ///
+    /// A message's first fragment has the B bit and the lowest TSN of the message: with DATA
+    /// its fragments take consecutive TSNs (RFC 9260 6.9, step 2), with I-DATA they are sent in
+    /// Fragment Sequence Number order, each with a TSN above the one before (RFC 8260 2.1).
+    /// So a fragment that does not begin a message, when every TSN below it has been received
+    /// and none of them is held with it, belongs to a message whose start went somewhere else:
+    /// nothing that can still arrive completes it. A peer that resets a stream before the
+    /// message it is sending on it has all its TSNs sends exactly that: the rest of the message
+    /// comes after the reset's Sender's Last Assigned TSN, and RFC 6525 5.2.2 E2/E4 makes it
+    /// data of the stream as it is after the reset. Kept, such fragments would sit in front of
+    /// the messages of whatever uses the stream next: the next message with the same Stream
+    /// Sequence Number (or Message Identifier) would be put together with them and never
+    /// complete, and every ordered message after it would wait behind it for good, all of
+    /// them acknowledged.
+    ///
+    /// The message in partial delivery is not looked at: its earlier fragments were read.
+    pub(crate) fn discard_orphans(&mut self, cumulative_tsn: u32) -> usize {
+        // Every TSN below `tsn` has been received (or skipped by a FORWARD TSN).
+        let below_received = |tsn: u32| sna32lte(tsn.wrapping_sub(1), cumulative_tsn);
+        let mut dropped_bytes = 0;
+        let mut dropped = 0;
+
+        if self.interleaved {
+            // One set is one message (one Message Identifier): its fragment with the lowest
+            // FSN is the earliest sent of those held. Without the B bit, and with every TSN
+            // below it received, the first fragment went elsewhere.
+            let orphaned = |s: &Chunks| {
+                s.next_part.is_none()
+                    && s.chunks
+                        .first()
+                        .is_some_and(|c| !c.beginning_fragment && below_received(c.tsn))
+            };
+            self.unordered_partial.retain(|s| {
+                let keep = !orphaned(s);
+                if !keep {
+                    dropped += s.chunks.len();
+                    dropped_bytes += s.len();
+                }
+                keep
+            });
+            self.ordered.retain(|s| {
+                let keep = !orphaned(s);
+                if !keep {
+                    dropped += s.chunks.len();
+                    dropped_bytes += s.len();
+                }
+                keep
+            });
+        } else {
+            // Ordered: a set holds the fragments with one Stream Sequence Number, and may hold
+            // the orphaned rest of an earlier message that had the same number in front of a
+            // later message's fragments. Its leading fragments up to the first B bit go when
+            // the TSN before the first of them has been received: it is not in the set.
+            for set in self.ordered.iter_mut() {
+                if set.next_part.is_some() {
+                    continue;
+                }
+                let Some(first) = set.chunks.first() else {
+                    continue;
+                };
+                if first.beginning_fragment || !below_received(first.tsn) {
+                    continue;
+                }
+                let n = set
+                    .chunks
+                    .iter()
+                    .position(|c| c.beginning_fragment)
+                    .unwrap_or(set.chunks.len());
+                for c in set.chunks.drain(..n) {
+                    dropped += 1;
+                    dropped_bytes += c.user_data.len();
+                }
+                if let Some(c) = set.chunks.first() {
+                    // What is left is another message: its own protocol identifier.
+                    set.ppi = c.payload_type;
+                    set.ppid = c.ppid();
+                }
+            }
+            self.ordered.retain(|s| !s.chunks.is_empty());
+
+            // Unordered: a fragment without the B bit whose TSN before it was received and is
+            // not held here, or was itself dropped as an orphan, and the fragments that follow
+            // it without a gap or a B bit.
+            let mut prev_kept: Option<u32> = None;
+            let mut prev_dropped: Option<u32> = None;
+            let mut drop_tsns = vec![];
+            for c in &self.unordered_chunks {
+                let before = c.tsn.wrapping_sub(1);
+                let orphan = !c.beginning_fragment
+                    && (prev_dropped == Some(before)
+                        || (prev_kept != Some(before) && below_received(c.tsn)));
+                if orphan {
+                    drop_tsns.push(c.tsn);
+                    prev_dropped = Some(c.tsn);
+                } else {
+                    prev_kept = Some(c.tsn);
+                }
+            }
+            if !drop_tsns.is_empty() {
+                let mut i = 0;
+                self.unordered_chunks.retain(|c| {
+                    if drop_tsns.get(i) == Some(&c.tsn) {
+                        i += 1;
+                        dropped += 1;
+                        dropped_bytes += c.user_data.len();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                self.unordered_ends.retain(|t| !drop_tsns.contains(t));
+            }
+        }
+        self.subtract_num_bytes(dropped_bytes);
+        self.orphans_dropped += dropped;
+        dropped
     }
 
     pub(crate) fn subtract_num_bytes(&mut self, n_bytes: usize) {

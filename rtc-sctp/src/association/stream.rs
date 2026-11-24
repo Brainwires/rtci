@@ -695,6 +695,14 @@ impl StreamState {
         self.reassembly_queue.push(pd.clone())
     }
 
+    /// Queues a received DATA chunk for reassembly. `cumulative_tsn` is the receiver's
+    /// cumulative TSN before it, which tells a fragment that can never be part of a complete
+    /// message (`ReassemblyQueue::discard_orphans`).
+    pub(crate) fn handle_received(&mut self, pd: &ChunkPayloadData, cumulative_tsn: u32) -> bool {
+        self.reassembly_queue
+            .push_received(pd.clone(), Some(cumulative_tsn))
+    }
+
     /// RFC 3758 3.6: what the peer's FORWARD TSN says is applied whatever this side's own
     /// setting for the stream: `unordered` is how this side sends, not how the peer does.
     pub(crate) fn handle_forward_tsn_for_ordered(&mut self, ssn: u16) {
