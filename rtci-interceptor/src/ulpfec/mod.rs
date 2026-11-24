@@ -158,3 +158,32 @@ mod tests {
         assert!(!one_level_only_from_fmtp("xonelevelonly=1"));
     }
 }
+
+/// The header extensions whose values libwebrtc writes after its FEC was computed, and zeroes
+/// in its receiver's copies (`RtpPacket::ZeroMutableExtensions`): the transport-wide sequence
+/// number, abs-send-time and toffset (RFC 5450).
+pub(crate) const MUTABLE_EXTENSION_URIS: [&str; 3] = [
+    "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+    "urn:ietf:params:rtp-hdrext:toffset",
+];
+
+/// The ids `info` negotiated [`MUTABLE_EXTENSION_URIS`] under.
+pub(crate) fn mutable_extension_ids(info: &crate::StreamInfo) -> Vec<u8> {
+    info.rtp_header_extensions
+        .iter()
+        .filter(|extension| MUTABLE_EXTENSION_URIS.contains(&extension.uri.as_str()))
+        .filter_map(|extension| u8::try_from(extension.id).ok())
+        .collect()
+}
+
+/// `packet` with the values of the extensions `ids` zeroed (their lengths kept).
+pub(crate) fn with_extensions_zeroed(packet: &rtp::Packet, ids: &[u8]) -> rtp::Packet {
+    let mut copy = packet.clone();
+    for extension in copy.header.extensions.iter_mut() {
+        if ids.contains(&extension.id) {
+            extension.payload = bytes::Bytes::from(vec![0u8; extension.payload.len()]);
+        }
+    }
+    copy
+}

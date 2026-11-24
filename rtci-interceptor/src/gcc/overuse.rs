@@ -341,12 +341,12 @@ mod tests {
     /// `del_var_th(i) = del_var_th(i-1) + (t(i)-t(i-1)) * K(i) * (|m(i)| - del_var_th(i-1))`,
     /// t(i) the arrival time of group i, the step not capped. Two groups 300 ms apart on the
     /// receiver's clock, read 1 ms apart: the threshold moves by K_u * 300 ms * (20 - 12.5)
-    /// = 22.5 ms. The default (`Departure`) takes libwebrtc's step, here the 1 ms between the
-    /// readings.
+    /// = 22.5 ms. It is the default. `Departure` (a setting) takes the sender's step, here the
+    /// 1 ms between the readings.
     #[test]
     fn the_drafts_threshold_adapts_over_the_uncapped_arrival_gap() {
         let epoch = Instant::now();
-        let mut draft = OveruseDetector::new().with_threshold_time_base(ThresholdTimeBase::Arrival);
+        let mut draft = OveruseDetector::new();
         draft.update_with_arrival(epoch, Duration::ZERO, 20.0);
         draft.update_with_arrival(
             epoch + Duration::from_millis(1),
@@ -359,17 +359,18 @@ mod tests {
             draft.threshold_ms()
         );
 
-        let mut default = OveruseDetector::new();
-        default.update_with_arrival(epoch, Duration::ZERO, 20.0);
-        default.update_with_arrival(
+        let mut departure =
+            OveruseDetector::new().with_threshold_time_base(ThresholdTimeBase::Departure);
+        departure.update_with_arrival(epoch, Duration::ZERO, 20.0);
+        departure.update_with_arrival(
             epoch + Duration::from_millis(1),
             Duration::from_millis(300),
             20.0,
         );
         assert!(
-            (default.threshold_ms() - 12.575).abs() < 1e-9,
+            (departure.threshold_ms() - 12.575).abs() < 1e-9,
             "{}",
-            default.threshold_ms()
+            departure.threshold_ms()
         );
     }
 }
