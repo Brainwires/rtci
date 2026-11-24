@@ -783,7 +783,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   some 10 kbit/s lower; an earlier form of this change (a 100 ms window rather than a
   bucket, which also held the rate under the limit whenever a tenth of the allowance was not
   a whole number of packets) showed the oldest picture up to 0.4 s older (3.08 to 3.60 s), which
-  the bucket does not. The paced chain after an outage and an ICE restart still shows no
+  the bucket does not. The recovery after the cap, as the mean target 15 to 25 s after it (six
+  seeds on three wall clocks, hosted runs 45362786375, 45362777973 against 45362799862,
+  45362793290): without a pacer 1143 to 1256 kbit/s (1118 to 1255), the default chain 800 to
+  2500 (1026 to 2500), higher on average in both; one cell of the default chain (seed 4, the
+  first wall clock) is lower over the whole window, 800 kbit/s on average against 1266 (529 to
+  1142 against 837 to 1808), at the test's 800 kbit/s bound, and is not explained yet. The paced chain after an outage and an ICE restart still shows no
   usable frame to the end of the measured ten seconds (a known limit, under investigation).
 
 - **interceptors (NACK responder, TWCC sender), repeat repairs follow the feedback**
