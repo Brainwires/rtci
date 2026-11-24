@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A video RED format is not negotiated without ULPFEC (RFC 5109 section 14.3).** "In
+  cases in which the redundancy payload format is used with FEC as the only secondary codec,
+  when the FEC stream is rejected the redundant encoding payload type SHOULD also be
+  removed": a `video/red` format without an fmtp line (it names no encodings, so ULPFEC is
+  the only thing it can carry) is left out of the negotiated formats when no `ulpfec` format
+  of its rate is negotiated, and the RTX format that names it goes too. This changes the
+  answer of an application that registered `video/red` and not `ulpfec`; the default codecs
+  register neither, and audio RED is untouched.
 - A new m= section that an offer keeps outside every BUNDLE group although the offer has
   groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
   answer did not have) gets a transport of its own, as the method's documentation says; it
