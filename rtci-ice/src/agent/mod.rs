@@ -1004,13 +1004,21 @@ impl Agent {
 
         // RFC 8445 Section 5.2: a lite implementation has only host candidates, "zero or one
         // candidate per IP address": another type, or a second candidate on an address it
-        // already has a candidate on, is not taken.
+        // already has a candidate on, is not taken. RFC 6544 Section 4.4 adds TCP to it: "In
+        // the lite mode, for TCP candidates, only passive host candidates are gathered, unless
+        // active candidates are needed as the default candidates. Otherwise, the procedures
+        // described for lite mode ... also apply to TCP candidates": one candidate per IP
+        // address for each of UDP, passive TCP and active TCP (the active one is what the
+        // offerer of two lite agents connects from, RFC 6544 Section 6.1); no
+        // simultaneous-open candidate.
         if self.lite
             && (c.candidate_type() != CandidateType::Host
-                || self
-                    .local_candidates
-                    .iter()
-                    .any(|cand| cand.addr().ip() == c.addr().ip()))
+                || c.tcp_type() == crate::tcp_type::TcpType::SimultaneousOpen
+                || self.local_candidates.iter().any(|cand| {
+                    cand.addr().ip() == c.addr().ip()
+                        && cand.network_type().is_tcp() == c.network_type().is_tcp()
+                        && cand.tcp_type() == c.tcp_type()
+                }))
         {
             warn!(
                 "[{}]: ignoring local candidate {}: a lite agent has one host candidate per IP address",
