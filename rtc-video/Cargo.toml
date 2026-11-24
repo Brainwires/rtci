@@ -14,7 +14,7 @@ readme = "README.md"
 publish = false
 
 [package.metadata.docs.rs]
-features = ["engine"]
+features = ["engine", "vp8", "av1"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
 # none. Codec backends arrive as features in later phases (docs/video-pipeline.md).
@@ -23,6 +23,13 @@ default = ["engine"]
 # The glue that connects the receive pipeline to an `RTCRtpReceiver` of the `rtc` peer
 # connection. Without it the crate has no dependency on the engine.
 engine = ["dep:rtc"]
+# VP8 decode and encode in pure Rust (`vp8-decoder` / `vp8-encoder`, pinned to an exact version:
+# docs/video-pipeline.md 4.6 has the evaluation and the supply-chain note).
+vp8 = ["dep:vp8-decoder", "dep:vp8-encoder"]
+# AV1 decode (`rav1d`) and encode (`rav1e`) in pure Rust, without their assembly (which needs
+# NASM): slower than the browsers' decoders, see docs/video-pipeline.md 4.6 for what runs in
+# real time.
+av1 = ["dep:rav1d", "dep:rav1e", "dep:libc"]
 
 [dependencies]
 rtp.workspace = true
@@ -34,10 +41,22 @@ thiserror.workspace = true
 # The engine with its default crypto backend (ring); `rtc` has no build without one.
 rtc = { version = "0.22.0", path = "..", optional = true }
 
+vp8-decoder = { version = "=0.1.3", optional = true }
+vp8-encoder = { version = "=0.1.3", optional = true }
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8"], optional = true }
+rav1e = { version = "0.8.1", default-features = false, optional = true }
+# The errno values rav1d's C API returns (bindings only, no C code).
+libc = { version = "0.2", optional = true }
+
 [dev-dependencies]
 rtc = { version = "0.22.0", path = ".." }
 media.workspace = true
 anyhow.workspace = true
+
+[[example]]
+name = "codec_check"
+path = "examples/codec_check.rs"
+required-features = ["vp8", "av1"]
 
 [[test]]
 name = "receive_rtc2rtc"

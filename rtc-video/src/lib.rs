@@ -25,15 +25,20 @@
 //! libwebrtc and the specifications, and the phases.
 
 #![warn(missing_docs)]
+// The only `unsafe` code is the AV1 decoder's calls into rav1d's C API (`codec::av1`).
+#![deny(unsafe_code)]
 
 pub mod assembly;
 pub mod buffer;
+pub mod codec;
 pub mod decoder;
+pub mod encoder;
 #[cfg(feature = "engine")]
 pub mod engine;
 pub mod frame;
 pub mod keyframe;
 pub mod payload;
+pub mod picture;
 pub mod receive;
 pub mod reference;
 pub mod render;

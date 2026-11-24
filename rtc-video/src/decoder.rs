@@ -35,6 +35,12 @@ pub trait VideoDecoder: Send {
     /// a frame that updates references and shows nothing.
     fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<DecodedPicture>, DecodeError>;
 
+    /// The last picture decoded, while it is the decoder's latest output (`None` for a
+    /// decoder that keeps no pixels, as the reference-checking one, or after an error).
+    fn picture(&self) -> Option<crate::picture::I420<'_>> {
+        None
+    }
+
     /// The implementation's name (W3C `decoderImplementation`).
     fn implementation_name(&self) -> &str;
 
