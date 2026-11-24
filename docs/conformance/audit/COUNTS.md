@@ -44,6 +44,10 @@ API is the default and tested too (`RULES.md`).
 | MAY | 445 | 0 | 0 | 20 | 34 | 108 | 0 | 171 | 778 |
 | PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
 | all | 6401 | 25 | 7 | 37 | 104 | 153 | 4 | 1164 | 7895 |
+| SHOULD | 855 | 0 | 0 | 14 | 54 | 41 | 4 | 326 | 1294 |
+| MAY | 445 | 0 | 0 | 20 | 34 | 108 | 0 | 171 | 778 |
+| PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
+| all | 6400 | 25 | 7 | 37 | 103 | 155 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -61,6 +65,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | MUST | 5080 | 5065 | 99.7 | 5032 | 99.1 |
 | SHOULD | 968 | 853 | 88.1 | 853 | 88.1 |
 | SHOULD | 968 | 856 | 88.4 | 856 | 88.4 |
+| SHOULD | 968 | 855 | 88.3 | 855 | 88.3 |
 | MAY | 607 | 445 | 73.3 | 445 | 73.3 |
 | MAY | 607 | 446 | 73.5 | 446 | 73.5 |
 | SHOULD | 968 | 855 | 88.3 | 855 | 88.3 |
@@ -103,7 +108,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc3550.md` | SHOULD | 31 | 0 | 0 | 0 | 2 | 0 | 0 | 7 | 40 |
 | `rfc3550.md` | MAY | 11 | 0 | 0 | 0 | 2 | 0 | 0 | 1 | 14 |
 | `rfc3551.md` | MUST | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 8 | 17 |
-| `rfc3551.md` | SHOULD | 10 | 0 | 0 | 0 | 1 | 0 | 0 | 3 | 14 |
+| `rfc3551.md` | SHOULD | 11 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 14 |
 | `rfc3551.md` | MAY | 3 | 0 | 0 | 0 | 0 | 1 | 0 | 2 | 6 |
 | `rfc3611.md` | MUST | 51 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 51 |
 | `rfc3611.md` | SHOULD | 13 | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 19 |
@@ -121,7 +126,7 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc4585.md` | SHOULD | 6 | 0 | 0 | 0 | 1 | 0 | 0 | 5 | 12 |
 | `rfc4585.md` | MAY | 12 | 0 | 0 | 1 | 1 | 1 | 0 | 0 | 15 |
 | `rfc4588.md` | MUST | 26 | 0 | 0 | 0 | 0 | 0 | 0 | 12 | 38 |
-| `rfc4588.md` | SHOULD | 8 | 0 | 0 | 0 | 2 | 1 | 0 | 2 | 13 |
+| `rfc4588.md` | SHOULD | 8 | 0 | 0 | 0 | 3 | 0 | 0 | 2 | 13 |
 | `rfc4588.md` | MAY | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 6 |
 | `rfc4733.md` | MUST | 23 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 26 |
 | `rfc4733.md` | SHOULD | 8 | 0 | 0 | 0 | 0 | 3 | 0 | 6 | 17 |
