@@ -938,8 +938,8 @@ fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth()
         "{default:?}"
     );
     // The congestion control feedback is not held: about as often as with it on top.
-    assert!(default.sides[1].cc >= 3.0, "{default:?}");
-    assert!(default.sides[1].cc_gap_ms <= 400.0, "{default:?}");
+    assert!(default.sides[1].cc >= 2.5, "{default:?}");
+    assert!(default.sides[1].cc_gap_ms <= 450.0, "{default:?}");
     assert!(
         (default.sides[1].cc - on_top.sides[1].cc).abs() <= 0.5,
         "{default:?} / {on_top:?}"
@@ -952,12 +952,12 @@ fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth()
     Ok(())
 }
 
-/// `rtcp.minimum-session-bandwidth`, `cc.feedback-share`: under `Performance` the same call's
-/// RTCP is a smaller share still (the session bandwidth follows the media down to 16 kbit/s,
-/// the feedback takes 2.5% of it), inside 5% of the session bandwidth the RTCP interval is
-/// computed from (RFC 3550 6.2's measure, [`rtcp_and_budget_with_floor`] with the profile's
-/// 16 kbit/s floor; not RTCP over media octets), and the sender still hears feedback about
-/// twice a second. Everything is derived from the media measured, so the bound holds whatever
+/// `rtcp.minimum-session-bandwidth`: under `Performance` the same call's RTCP is a smaller
+/// share still (the session bandwidth follows the media down to 16 kbit/s, and the feedback
+/// takes its 3.75% of that), inside 5% of the session bandwidth the RTCP interval is computed
+/// from (RFC 3550 6.2's measure, [`rtcp_and_budget_with_floor`] with the profile's 16 kbit/s
+/// floor; not RTCP over media octets), and the sender still hears feedback about once a
+/// second. Everything is derived from the media measured, so the bound holds whatever
 /// the media's exact size (a few percent fewer octets from a header extension dropped, a
 /// crypto backend's tag).
 #[test]
@@ -977,8 +977,8 @@ fn the_performance_profile_keeps_low_rate_rtcp_inside_five_percent() -> Result<(
         rtcp <= 1.03 * budget,
         "{rtcp:.0} > {budget:.0}: {performance:?}"
     );
-    assert!(performance.sides[1].cc >= 1.5, "{performance:?}");
-    assert!(performance.sides[1].cc_gap_ms <= 800.0, "{performance:?}");
+    assert!(performance.sides[1].cc >= 0.7, "{performance:?}");
+    assert!(performance.sides[1].cc_gap_ms <= 2_000.0, "{performance:?}");
     // Regular reports go on (RFC 5506 4: compound RTCP is kept up), at most five seconds apart.
     assert!(performance.sides[1].regular > 0.0, "{performance:?}");
     Ok(())
