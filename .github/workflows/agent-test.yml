@@ -84,7 +84,9 @@ jobs:
             echo "::error::the mutation survived: the command passed"
             exit 1
           fi
-          if grep -qE '^test .* \.\.\. FAILED|^test result: FAILED' agent-test.log; then
+          # A failed test: cargo's lines, or Playwright's summary ("  1 failed") for a browser
+          # cell run through scripts/test-env/hosted-cell.sh.
+          if grep -qE '^test .* \.\.\. FAILED|^test result: FAILED|^ +[0-9]+ failed$' agent-test.log; then
             echo "the mutation was caught: a test failed, as expected" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -96,7 +98,7 @@ jobs:
         run: |
           awk '/^test result:/ { for (i = 1; i <= NF; i++) { if ($(i+1) ~ /^passed/) p += $i; if ($(i+1) ~ /^failed/) f += $i; if ($(i+1) ~ /^ignored/) g += $i } n++ }
                END { printf "test binaries %d, passed %d, failed %d, ignored %d\n", n, p, f, g }' agent-test.log | tee -a "$GITHUB_STEP_SUMMARY"
-          grep -E '^test .* \.\.\. FAILED|^---- .* stdout ----|panicked at' agent-test.log | head -60 || true
+          grep -E '^test .* \.\.\. FAILED|^---- .* stdout ----|panicked at|^ +[0-9]+ failed$|✘' agent-test.log | head -60 || true
       - name: Disk left after the build
         if: always()
         shell: bash
