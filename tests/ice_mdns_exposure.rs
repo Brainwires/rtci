@@ -194,12 +194,22 @@ fn an_address_the_stun_server_shows_public_is_unwrapped_after_the_ice_restart() 
             .any(|c| c.contains(&format!("{PUBLIC_IP} 50000 typ host"))),
         "{second:?}"
     );
+    // The private address stays behind its name: in what is signalled, in the transport's
+    // candidates and in the next description.
+    let held: Vec<String> = pc
+        .dtls_transports()
+        .iter()
+        .flat_map(|t| t.ice_transport().get_local_candidates())
+        .map(|c| format!("{}:{}", c.address, c.port))
+        .collect();
+    assert!(held.iter().any(|c| c.ends_with(".local:50002")), "{held:?}");
+    assert!(held.contains(&PUBLIC.to_owned()), "{held:?}");
+    let sdp = pc.create_offer(None)?.sdp;
     assert!(
-        second_hosts
-            .iter()
-            .any(|c| c.contains(".local 50002 typ host")),
-        "{second:?}"
+        sdp.contains(&format!("{PUBLIC_IP} 50000 typ host")),
+        "{sdp}"
     );
+    assert!(!sdp.contains("192.168.77.20"), "{sdp}");
     assert!(
         second.iter().all(|c| !c.contains("192.168.77.20")),
         "{second:?}"
