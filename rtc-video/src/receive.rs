@@ -123,7 +123,8 @@ pub struct ReceivePipeline {
     keyframes: KeyFramePolicy,
     render: RenderStats,
     stats: ReceiveStats,
-    newest: Option<(i64, Instant)>,
+    /// Arrival times of the recent packets, by extended sequence number.
+    arrivals: BTreeMap<i64, Instant>,
     pending: BTreeMap<u64, Pending>,
     next_token: u64,
     decoded_at: VecDeque<Instant>,
@@ -147,7 +148,7 @@ impl ReceivePipeline {
             keyframes: KeyFramePolicy::new(now, waits_for(config.rtx_time)),
             render: RenderStats::new(config.min_freeze_samples),
             stats: ReceiveStats::default(),
-            newest: None,
+            arrivals: BTreeMap::new(),
             pending: BTreeMap::new(),
             next_token: 0,
             decoded_at: VecDeque::new(),
@@ -220,15 +221,17 @@ impl ReceivePipeline {
     pub fn insert_packet(&mut self, mut packet: VideoPacket) {
         let now = packet.arrival;
         let seq = self.packets.peek_sequence(packet.sequence_number);
-        if let (Some(lateness), Some((newest, at))) =
-            (self.config.retransmission_lateness, self.newest)
-            && seq < newest
-            && now.saturating_duration_since(at) >= lateness
+        // The gap this packet fills became visible when the first packet after it arrived: a
+        // packet that comes `retransmission_lateness` after that was asked for again.
+        if let Some(lateness) = self.config.retransmission_lateness
+            && let Some((_, seen)) = self.arrivals.range(seq + 1..).next()
+            && now.saturating_duration_since(*seen) >= lateness
         {
             packet.retransmitted = true;
         }
-        if self.newest.is_none_or(|(n, _)| seq > n) {
-            self.newest = Some((seq, now));
+        self.arrivals.insert(seq, now);
+        while self.arrivals.len() > 2048 {
+            self.arrivals.pop_first();
         }
         if packet.retransmitted {
             self.stats.packets_retransmitted += 1;

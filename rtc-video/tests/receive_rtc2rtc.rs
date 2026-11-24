@@ -617,7 +617,7 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
     println!(
         "MEASURE {name}: decoded {} received {} dropped {} freezes {} ({:.3} s) longest {:.0} ms \
          jitter buffer mean {:.1} ms target {:.1} ms emitted {} key frame requests {:?} PLIs at \
-         sender {} corrupt {} decoder errors {}",
+         sender {} corrupt {} decoder errors {} retransmitted packets {}",
         s.frames_decoded,
         s.frames_received,
         s.frames_dropped,
@@ -631,6 +631,7 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
         call.sender.plis,
         call.receiver.corrupt,
         call.receiver.decoder.errors,
+        s.packets_retransmitted,
     );
     s
 }
@@ -698,10 +699,14 @@ fn the_jitter_buffer_holds_about_the_network_jitter() -> Result<()> {
     call.run_for(Duration::from_secs(20))?;
     let s = report("clean, 25 ms + 0..40 ms jitter", &mut call);
     let mean = 1000.0 * s.jitter_buffer_delay / s.jitter_buffer_emitted_count as f64;
+    // libwebrtc's estimate for uniform 0..40 ms jitter is about 20 ms (2.33 sigma - 30 ms
+    // + 10 ms, sigma = 40 / sqrt(6)); the buffer holds what that leaves of each frame's
+    // lateness. No frame is lost to it and none freezes.
     assert!(
-        (30.0..=90.0).contains(&mean),
+        (10.0..=60.0).contains(&mean),
         "mean jitter buffer delay {mean:.1} ms"
     );
     assert_eq!(s.freeze_count, 0);
+    assert_eq!(s.frames_dropped, 0);
     Ok(())
 }
