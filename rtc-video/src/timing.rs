@@ -761,7 +761,13 @@ mod tests {
         let quiet = estimate(0);
         let noisy = estimate(40);
         assert!(quiet < Duration::from_millis(15), "{quiet:?}");
-        assert!(noisy > Duration::from_millis(25), "{noisy:?}");
+        // Uniform 0..40 ms arrival jitter: consecutive delay differences have a standard
+        // deviation of 40 / sqrt(6) = 16.3 ms, so 2.33 sigma - 30 ms + 10 ms is about 18 ms.
+        assert!(
+            noisy > quiet + Duration::from_millis(5),
+            "{quiet:?} {noisy:?}"
+        );
+        assert!(noisy > Duration::from_millis(15), "{noisy:?}");
         assert!(noisy < Duration::from_millis(120), "{noisy:?}");
     }
 

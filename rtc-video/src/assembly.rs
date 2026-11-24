@@ -215,7 +215,8 @@ impl PacketBuffer {
             return starts;
         }
         // H.264 / H.265: a frame starts after a frame completed, a padding packet, or a packet
-        // of another timestamp; the stream's first frame at a key frame's first packet.
+        // of another timestamp; the stream's first frame at the first packet held, when it
+        // begins a NAL unit.
         if self.frame_ends.contains(&(seq - 1)) {
             return true;
         }
@@ -223,7 +224,6 @@ impl PacketBuffer {
             Some(prev) => prev.is_padding() || prev.timestamp != p.timestamp,
             None => {
                 !self.emitted_any
-                    && position.keyframe
                     && self.packets.range(..seq).next().is_none()
                     && h26x_starts_nal(self.codec, &p.payload)
             }

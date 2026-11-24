@@ -375,7 +375,7 @@ impl Call {
         call.receiver.pc.add_remote_candidate(candidate(sa)?)?;
         call.receiver.pc.add_local_candidate(candidate(ra)?)?;
         call.sender.pc.add_remote_candidate(candidate(ra)?)?;
-        while !(call.connected[0] && call.connected[1] && call.receiver.video.is_some()) {
+        while !(call.connected[0] && call.connected[1]) {
             if call.now.duration_since(now) > Duration::from_secs(10) {
                 bail!("not connected");
             }
