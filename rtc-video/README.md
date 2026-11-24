@@ -20,8 +20,9 @@ Codecs (phase two), all opt-in; the default build decodes no video:
   files.
 - `av1`: AV1 (`rav1d` / `rav1e` without assembly): decode real time to 720p30, encode not real
   time. **With rav1d 1.1.0 a malformed AV1 frame aborts the whole process** (a panic inside
-  rav1d's C API that nothing can catch; rav1d issue 1497, fixed upstream but unreleased). Use it
-  only for trusted senders, or with `isolation`.
+  rav1d's C API that nothing can catch; rav1d issue 1497, fixed upstream but unreleased), and it
+  leaks about 50 to 100 bytes a frame (rav1d issue 1522). Use it only for trusted senders, or
+  with `isolation`.
 - `isolation`: runs a decoder in a child process, so a decoder that aborts, crashes or hangs
   costs one frame instead of the application.
 

@@ -33,7 +33,8 @@ vp8 = ["dep:vp8-decoder", "dep:vp8-encoder"]
 # NASM). WARNING: with rav1d 1.1.0 a malformed AV1 frame from the peer aborts the whole process
 # (a panic inside rav1d's C API, which no caller can catch; memorysafety/rav1d issue 1497, fixed
 # on its main branch, not released). Enable it only for senders you trust, or decode in a
-# separate process. rav1e is not real time without assembly. docs/video-pipeline.md 4.6.
+# separate process. rav1d 1.1.0 also leaks about 50 to 100 bytes a frame (rav1d issue 1522).
+# rav1e is not real time without assembly. docs/video-pipeline.md 4.6, 4.8.
 av1 = ["dep:rav1d", "dep:rav1e", "dep:libc"]
 # `codec::isolated`: runs a decoder in a child process, so that a decoder that crashes, aborts
 # or hangs on a hostile frame costs that frame, not the application. No dependency; it is the

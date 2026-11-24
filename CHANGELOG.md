@@ -878,9 +878,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of `vp8-decoder` / `vp8-encoder` 0.1.3 (publisher, contents against the tagged commit,
     `unsafe`, build-time code, licences, prior art) with a recommendation for the owner;
     `scripts/check-video-codec-pins.py` fails on any other version or checksum.
-  - `codec::av1`: the 96-byte leak found by fuzzing was the wrapper's (a temporal unit's
-    `Dav1dData` not released when taking out a waiting picture failed); now released on every
-    path. The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
+  - `codec::av1`: the 96-byte leak found by fuzzing is rav1d 1.1.0's (memorysafety/rav1d#1522:
+    every `dav1d_picture_unref` and every empty `dav1d_get_picture` leaves a 48-byte `Arc`;
+    about 50 to 100 bytes a frame), documented on the feature. Separately, a temporal unit's
+    `Dav1dData` is now released when taking out a waiting picture fails (found by reading).
+    The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
     main branch, unreleased), documented on the feature in plain words; reproducer in
     `rtc-video/tests/data/rav1d-abort.ivf`.
   - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process

@@ -620,12 +620,23 @@ costs one frame and the next key frame decodes to the same picture; a hung child
 contains the C backends' crashes too (libvpx, dav1d, OpenH264), which no in-process mechanism
 can.
 
-**The 96-byte leak** (found by phase 2's fuzz run) was this crate's wrapper, not rav1d: when the
-decoder answered "try again" (a picture waiting) and taking that picture out failed (for example
-a picture in a format the wrapper does not convert, as a hostile sequence header can announce),
-`decode_bytes` returned through `?` before releasing the temporal unit's `Dav1dData`. The buffer
-is now owned by a guard that releases it on every path (`codec::av1`, `OwnedData`). Fuzz runs
-before and after: section 6.4.
+**The 96-byte leak** (found by phase 2's fuzz run) is rav1d's, and it is not specific to
+hostile input. Replayed under LeakSanitizer with symbols (run 45326503227), the two 48-byte
+blocks are allocated inside `dav1d_picture_unref` (`src/lib.rs:830`, the `mem::take` of the
+picture, whose derived `Default` allocates a fresh `Arc` for the ITU-T T.35 metadata,
+`include/dav1d/picture.rs:425`), called from this crate's `take_picture`. The function writes
+that new `Arc` back into the caller's C struct, where no public function can free it; a
+`dav1d_get_picture` that returns no picture (every "try again") does the same. Upstream:
+memorysafety/rav1d#1522 (open since 2026-11-21, by reading; the same code is on `main`). This
+decoder unrefs a picture and polls once more on every frame, so it leaks about 50 to 100 bytes
+a frame, some 5 to 10 MB an hour at 30 fps; libFuzzer reported it only a few times because it
+checks for leaks only on inputs that add coverage. Nothing in the wrapper can avoid it through
+the C API; a decoder in a child process (`codec::isolated`) can be restarted to give it back.
+A first attribution in this branch blamed the wrapper and was wrong: the same input leaks the
+same 96 bytes with the wrapper changed (run 45324307021). The change made then stays because it
+closes a real path by reading: when taking a waiting picture out failed, `decode_bytes`
+returned through `?` before releasing the temporal unit's `Dav1dData`; a guard (`OwnedData`) now
+releases it on every path.
 
 **rav1d 1.1.0 (decode) and rav1e 0.8.1 (encode), without assembly**
 
@@ -633,7 +644,7 @@ before and after: section 6.4.
 |---|---|
 | rav1d against dav1d (libaom's AV1 vectors: sizes, intra, CDF update, motion vectors, SVC L1T2 / L2T1 / L2T2) | 10 of 10 byte-identical (with `all_layers = 0`: the highest spatial layer, as a WebRTC receiver renders) |
 | rav1d speed | 360p: 136 to 182 fps; 720p: 37 to 43 fps (one thread) |
-| rav1d on hostile input | **aborts the process**: a seeded mutation of a rav1e stream panicked in `rav1d/src/decode.rs:4997`; the panic crosses rav1d's `extern "C"` API, which cannot unwind, so the process aborts whatever catches it (run 45316346260; 711 of 19,352 single-bit flips of a key frame do it, rav1d issue 1497, section 4.8). The fuzz run found a 96-byte leak within minutes: this crate's wrapper (4.8) |
+| rav1d on hostile input | **aborts the process**: a seeded mutation of a rav1e stream panicked in `rav1d/src/decode.rs:4997`; the panic crosses rav1d's `extern "C"` API, which cannot unwind, so the process aborts whatever catches it (run 45316346260; 711 of 19,352 single-bit flips of a key frame do it, rav1d issue 1497, section 4.8). The fuzz run found a 96-byte leak within minutes: rav1d's, about 50 to 100 bytes on every frame (rav1d issue 1522, 4.8) |
 | rav1e speed, speed preset 10 | 360p camera: 4.8 to 6.3 fps; 360p synthetic: 7.8 to 10.2 fps; 720p camera: 1.4 to 1.8 fps; presets 8 and 6 slower (2.0 to 2.6, 1.2 to 1.6 fps at 360p) |
 | rav1e latency | holds 4 pictures back even in low-latency mode (`keyframe_lookahead_distance` = reordering latency + 1, plus one picture of RDO look-ahead): 133 ms at 30 fps before the first output |
 | rav1e rate and quality | synthetic 640x360: 612 to 655 kbit/s for 600, 39.6 to 40.2 dB; the camera clip overshoots in 60 pictures (1572 kbit/s at 360p) |
@@ -689,7 +700,7 @@ prompt; none runs in CI.
 |---|---|---|
 | Default (pure Rust) | nothing (the pipeline receives, assembles and times every payload format; no decoder) | nothing |
 | `vp8` (pure Rust, opt-in until the owner decides, 4.7) | VP8 (`vp8-decoder`, real time to 720p and beyond) | VP8 (`vp8-encoder`, real time to 720p on one core) |
-| `av1` (pure Rust, opt-in) | AV1 (`rav1d`, real time to 720p30 on one core; a hostile frame aborts the process, 4.8) | AV1 (`rav1e`, not real time: 5 to 8 fps at 360p) |
+| `av1` (pure Rust, opt-in) | AV1 (`rav1d`, real time to 720p30 on one core; a hostile frame aborts the process, and it leaks about 50 to 100 bytes a frame, 4.8) | AV1 (`rav1e`, not real time: 5 to 8 fps at 360p) |
 | `isolation` (opt-in) | any of these in a child process: a crash costs a frame (4.8) | - |
 | `libvpx` | VP8, VP9 | VP8, VP9 (SVC included) |
 | `dav1d` | AV1 at browser speed | - |
@@ -950,7 +961,27 @@ panic (pure Rust: it unwinds) and replaces the decoder; `codec::isolated` (featu
 `pipeline` scenario is behind the `pipeline` feature of the new `rtc-video-interop` package,
 which compiles the same `examples/interop-peer/interop-peer.rs`.
 
-MEASUREMENTS_6_4
+Measured on GitHub-hosted runners (ubuntu-latest, 4 vCPUs):
+
+| Check | Result |
+|---|---|
+| `cargo test -p rtc-video`, default features, then `--features vp8,av1,isolation` (run 45324314829, `e5e73d6a`) | 10 test binaries, 118 passed, 0 failed, 2 ignored |
+| isolation (`tests/isolated.rs`) | the reproducer decoded in process: `signal: 6 (SIGABRT)`; through `IsolatedDecoder`: `Err(Corrupt("decoder process ended (signal: 6 (SIGABRT) ...)"))`, then the key frame decodes in a new child to the same picture; a child that never answers is killed after 501 ms |
+| reproducer search (run 45322103402) | 711 of 19,352 single-bit flips of a key frame abort rav1d 1.1.0; 193 of 750 of phase 2's mutations (4.8) |
+| AV1 fuzz, 15 min each, fork mode, AddressSanitizer + LeakSanitizer (runs 45322108334, 45324307021) | before and after the wrapper change: 1 crash artifact, 3 and 4 leak artifacts, 1 and 0 timeout artifacts; the leak input replayed leaks the same 96 bytes with either wrapper (runs 45324302343, 45324307021), from `dav1d_picture_unref` (symbolised, run 45326503227): rav1d issue 1522 (4.8) |
+| `cargo test --workspace --no-run`, fresh target directory | before (`conf/vp-5-codecs`, runs 45322132676 and 45324331617): 257 s and 233 s, 384 crates, rav1d / rav1e / vp8-* among them; after (run 45324323050): 228 s, 344 crates, no codec crate |
+| `cargo test --no-run` at the root (cargo.yml's first test job) | before: 190 s and 179 s, 360 crates with the four codec crates; after: 175 s, 312 crates, none |
+| `cargo build -p rtc-video-interop --features pipeline` after that | 56 s, 145 crates (the codecs and the video interop peer) |
+
+The build-time gain in wall-clock terms is small and within the runners' spread (the two
+"before" runs differ by 24 s): on 4 vCPUs the codec crates compile in parallel with the rest
+and are not on the critical path. What changed is that 40 to 48 crates, among them the two
+largest of the dependency graph (rav1e, rav1d), are no longer built at all by any job that
+does not test video, and only the browser stage (which tests video) pays the 56 s. A CI job
+that tests the codecs is proposed to the train, not added: `cargo test -p rtc-video
+--features vp8,av1,isolation` (pure Rust, no system library), plus `python3
+scripts/check-video-codec-pins.py` after any build. `cargo check --workspace --all-features`
+(cargo.yml) still compiles the codecs, by definition of `--all-features`.
 
 ### Phase 3: the send pipeline (`conf/vp-7-send`)
 

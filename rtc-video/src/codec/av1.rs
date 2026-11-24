@@ -17,8 +17,17 @@
 //! release yet (issue 1521 asks for one).
 //!
 //! So: enable `av1` only for streams from a sender you trust, or run [`Av1Decoder`] in a
-//! separate process whose death you can survive. docs/video-pipeline.md 4.6 has the reproducer
-//! and what containment exists.
+//! separate process whose death you can survive (`codec::isolated`, feature `isolation`).
+//! docs/video-pipeline.md 4.8 has the reproducer and what containment exists.
+//!
+//! # It leaks memory on every frame
+//!
+//! rav1d 1.1.0 also leaks a small allocation (48 bytes) on every `dav1d_picture_unref` and on
+//! every `dav1d_get_picture` that returns no picture (memorysafety/rav1d issue 1522, open,
+//! unfixed on its main branch); this decoder makes those calls for every frame, so a long call
+//! grows by about 50 to 100 bytes a frame (some 5 to 10 MB an hour at 30 frames a second). No
+//! caller of its C API can free them. A decoder in a child process (`codec::isolated`) can be
+//! restarted to give the memory back.
 
 use std::ptr::NonNull;
 
@@ -145,9 +154,8 @@ impl Av1Decoder {
         let mut picture: Option<DecodedPicture> = None;
         let mut status = 0;
         // Send the data; when the decoder answers "again", take a picture out and retry. An
-        // early return here releases what the decoder has not taken (`OwnedData`'s drop):
-        // returning past it once leaked the data of every temporal unit whose picture could
-        // not be copied out (found by fuzzing, docs/video-pipeline.md 4.6).
+        // early return here (taking the picture out failed) releases what the decoder has not
+        // taken, through `OwnedData`'s drop; it used to return past the release.
         for _ in 0..4 {
             // SAFETY: `ctx` is open (not closed until drop) and `buf.0` is valid to read and
             // write.
