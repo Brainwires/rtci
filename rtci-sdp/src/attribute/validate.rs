@@ -179,7 +179,7 @@ fn check_attributes(attributes: &[Attribute], media: bool) -> Result<()> {
 fn check_media(media: &MediaDescription, session_has_connection: bool) -> Result<()> {
     // RFC 8866 section 5.7: "A session description MUST contain either at least one 'c='
     // line in each media description or a single 'c=' line at the session level."
-    if media.connection_information.is_none() && !session_has_connection {
+    if media.connection_information.is_empty() && !session_has_connection {
         return Err(Error::SdpInvalidSyntax(format!(
             "the `m={}` section has no `c=` line and the session has none",
             media.media_name.media

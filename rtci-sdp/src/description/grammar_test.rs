@@ -324,18 +324,30 @@ fn unordered_media_lines_is_the_only_leniency_about_order() {
 }
 
 #[test]
-fn several_connection_lines_in_a_media_description_keep_the_last() {
-    // RFC 8866 section 9: `*connection-field` in a media description (layered multicast).
-    let sdp = media("c=IN IP4 233.252.0.1/127\r\nc=IN IP4 233.252.0.2/127\r\n");
+fn several_connection_lines_in_a_media_description_are_all_kept() {
+    // RFC 8866 section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media
+    // basis" (layered multicast); section 9: `*connection-field` in a media description. Each
+    // line is kept in order and written back, the address ranges too.
+    let sdp =
+        media("c=IN IP4 233.252.0.1/127\r\nc=IN IP4 233.252.0.2/127/2\r\nc=IN IP6 ff15::101/3\r\n");
     let parsed = strict(&sdp).unwrap();
+    let addresses: Vec<_> = parsed.media_descriptions[0]
+        .connection_information
+        .iter()
+        .map(|c| {
+            let a = c.address.as_ref().unwrap();
+            (a.address.as_str(), a.ttl, a.range)
+        })
+        .collect();
     assert_eq!(
-        parsed.media_descriptions[0]
-            .connection_information
-            .as_ref()
-            .and_then(|c| c.address.as_ref())
-            .map(|a| a.address.as_str()),
-        Some("233.252.0.2")
+        vec![
+            ("233.252.0.1", Some(127), None),
+            ("233.252.0.2", Some(127), Some(2)),
+            ("ff15::101", None, Some(3)),
+        ],
+        addresses
     );
+    assert_eq!(sdp, parsed.marshal());
 }
 
 // --- v= ---------------------------------------------------------------------------------------

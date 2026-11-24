@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
   6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
 
+### Breaking changes
+
+- **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
+  `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
+  section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media basis", for
+  layered multicast). The parser kept only the last one. RFC8866-5.7-7 is `tested`
+  (`grammar_test::several_connection_lines_in_a_media_description_are_all_kept`). Generated
+  SDP is unchanged (one `c=` line per section).
+  **Migration**: `connection_information: Some(c)` becomes `vec![c]`, `None` becomes
+  `vec![]`; read `connection_information.first()` where one address was read, and
+  `is_empty()` for `is_none()`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /

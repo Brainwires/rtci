@@ -216,7 +216,7 @@ mod rejected_mline_tests {
         assert_eq!(desc.media_name.port.value, 0);
         assert_eq!(desc.media_name.protos, vec!["UDP", "TLS", "RTP", "SAVPF"]);
         assert_eq!(desc.media_name.formats, vec!["0"]);
-        assert!(desc.connection_information.is_some());
+        assert!(!desc.connection_information.is_empty());
     }
 
     #[test]
@@ -1212,7 +1212,7 @@ pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::Ip
         range: None,
     };
     let address_type = if ip.is_ipv4() { "IP4" } else { "IP6" };
-    m.connection_information = Some(ConnectionInformation {
+    m.connection_information = vec![ConnectionInformation {
         network_type: "IN".to_owned(),
         address_type: address_type.to_owned(),
         address: Some(Address {
@@ -1220,7 +1220,7 @@ pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::Ip
             ttl: None,
             range: None,
         }),
-    });
+    }];
     for a in &mut m.attributes {
         if a.key == ATTR_KEY_RTCP {
             a.value = Some(format!("{port} IN {address_type} {ip}"));
@@ -1247,7 +1247,7 @@ pub(crate) fn share_bundle_destination(d: &mut SessionDescription) {
         };
         let Some(ip) = carrier
             .connection_information
-            .as_ref()
+            .first()
             .and_then(|c| c.address.as_ref())
             .and_then(|a| a.address.parse::<std::net::IpAddr>().ok())
         else {
@@ -1363,7 +1363,7 @@ pub(crate) fn add_data_media_section(
             formats: vec!["webrtc-datachannel".to_owned()],
         },
         media_title: None,
-        connection_information: Some(ConnectionInformation {
+        connection_information: vec![ConnectionInformation {
             network_type: "IN".to_owned(),
             address_type: "IP4".to_owned(),
             address: Some(Address {
@@ -1371,7 +1371,7 @@ pub(crate) fn add_data_media_section(
                 ttl: None,
                 range: None,
             }),
-        }),
+        }],
         bandwidth: vec![],
         encryption_key: None,
         attributes: vec![],
@@ -1804,7 +1804,7 @@ impl RTCPeerConnection {
                     // parse the SDP with an error like:
                     // SIPCC Failed to parse SDP: SDP Parse Error on line 50:  c= connection line not specified for every media level, validation failed.
                     // In addition this makes our SDP compliant with RFC 4566 Section 5.7: https://datatracker.ietf.org/doc/html/rfc4566#section-5.7
-                    connection_information: Some(ConnectionInformation {
+                    connection_information: vec![ConnectionInformation {
                         network_type: "IN".to_owned(),
                         address_type: "IP4".to_owned(),
                         address: Some(Address {
@@ -1812,7 +1812,7 @@ impl RTCPeerConnection {
                             ttl: None,
                             range: None,
                         }),
-                    }),
+                    }],
                     bandwidth: vec![],
                     encryption_key: None,
                     attributes: vec![],
@@ -2835,7 +2835,7 @@ impl RTCPeerConnection {
                             formats: rejected_formats,
                         },
                         media_title: None,
-                        connection_information: Some(ConnectionInformation {
+                        connection_information: vec![ConnectionInformation {
                             network_type: "IN".to_owned(),
                             address_type: "IP4".to_owned(),
                             address: Some(Address {
@@ -2843,7 +2843,7 @@ impl RTCPeerConnection {
                                 ttl: None,
                                 range: None,
                             }),
-                        }),
+                        }],
                         bandwidth: vec![],
                         encryption_key: None,
                         attributes: vec![],

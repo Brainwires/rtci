@@ -2598,7 +2598,7 @@ impl RTCPeerConnection {
         for (index, media) in parsed.media_descriptions.iter().enumerate() {
             // RFC 8866 section 5.7: "A session description MUST contain either at least one
             // 'c=' line in each media description or a single 'c=' line at the session level."
-            if media.connection_information.is_none() && parsed.connection_information.is_none() {
+            if media.connection_information.is_empty() && parsed.connection_information.is_none() {
                 return Err(Error::SdpInvalidValue(format!(
                     "m= section {index} has no c= line and the session has none (RFC 8866 \
                      section 5.7)"
