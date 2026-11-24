@@ -1756,17 +1756,24 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// packets are lost before the first feedback about the capped link can arrive and while
 /// the received rate's 500 ms window still holds what arrived before the cap (about forty
 /// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
-/// that much longer; a third of the repairs are sent into a queue that is still full and
-/// are dropped. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
+/// that much longer. Traced repair by repair (hosted runs 45341865225, 45342290711): 20 to
+/// 22 of the drops are repairs made 0.42 to 0.62 s after their original, in the first 0.2 s
+/// after the first NACKs, into the link's queue still full of media sent at the old rate;
+/// and 24 to 28 of the retransmissions repeat a packet whose first repair was still in the
+/// queue when the receiver asked again, sent after that repair arrived and, oldest packet
+/// first, ahead of first repairs of newer gaps. The release before (v0.22.0+brainwires.6, whose estimator met the cap at
 /// 1.38 Mbit/s; the same port, run 45331840230): freeze 0.98 to 1.23 s, the oldest picture
 /// 4.24 to 4.39 s, 62 to 67 retransmissions (11 to 12 dropped), 199 to 206 kbit/s under the
 /// cap, 473 to 1501 kbit/s twenty seconds after it. So at this rate the freeze is 0.1 to
 /// 0.3 s longer than it was, the picture up to 0.3 s older and the retransmissions half
 /// again as many, while the capped link carries 45 to 50 kbit/s more and the recovery has
 /// no slow seed (473 and 737 kbit/s on two of six before). What shortens it is not in the
-/// estimator: giving up a repair backlog that has gone stale and sending a key frame
-/// instead, and a delay-based detector that reads a queue filling within a feedback
-/// interval (both planned).
+/// estimator: no repeat repair of a packet whose first repair transport-wide feedback
+/// reports received (planned), and a delay-based detector that reads a queue filling within
+/// a feedback interval (a known limit). Giving up repairs older than 1 s and asking for a key
+/// frame instead was measured (hosted run 45342372315): frozen 8.36 to 8.49 s, the oldest
+/// picture 7.55 to 7.77 s, because this receiver (the sample builder without a time bound)
+/// holds the gap for its whole packet window and the key frame waits behind it.
 #[test]
 fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Result<()> {
     for seed in seed_range(1, 6) {
@@ -1953,16 +1960,28 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // 2500 kbit/s twenty seconds after the cap, and the oldest picture shown 5.59 to
         // 9.84 s old (with one decrease per round trip, run 45332800112: 1.38 to 1.86 s, 946
         // to 2500 kbit/s, 6.46 to 8.87 s; run 45315529565, six seeds on three wall clocks:
-        // 1.38 to 1.90 s, 902 to 1484 kbit/s, 5.95 to 8.56 s). That last figure is the known cost of this chain at a
-        // sudden drop: some hundred full-sized packets the path lost while the source was at
-        // 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s, of which the
-        // audio takes 76, at about 17 packets a second, under every retransmission rule (the
-        // pacer holds repairs to the estimate; without one they leave in a burst while the
-        // estimate is still falling). The bound here guards it from growing.
+        // 1.38 to 1.90 s, 902 to 1484 kbit/s, 5.95 to 8.56 s). That last figure is the known
+        // cost of this chain at a sudden drop: the 55 to 62 video packets the path lost while
+        // the source was at 2.5 Mbit/s are repaired inside an estimate of 100 to 250 kbit/s,
+        // of which the audio takes 76, under every retransmission rule (the pacer holds
+        // repairs to the estimate; without one they leave in a burst while the estimate is
+        // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
+        // still in flight when the receiver asked again (hosted traces 45341865225,
+        // 45342290711). The bound here guards it from growing.
         assert!(
             outcome.lag <= Duration::from_secs(10),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
+        );
+        // The retransmissions, apart from the probe clusters' padding on the RTX stream
+        // (154 to 330 packets, which this test counted with them until it told them apart):
+        // 90 to 103 on six seeds, none dropped at the link (hosted run 45343885944). The bound
+        // (as the cap after 20 s without a pacer: some 30 % over the most measured) guards
+        // them from growing, and fails if the padding is counted with them again.
+        assert!(
+            outcome.rtx_sent <= 130,
+            "seed {seed}: {} retransmissions: {outcome:?}",
+            outcome.rtx_sent
         );
         assert!(
             outcome.recovery[3] >= 800_000,
