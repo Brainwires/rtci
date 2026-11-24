@@ -712,33 +712,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both under 2 s; the picture's age by up to 0.3 s; half again as many retransmissions) and
   two are ahead. Cause: for some 0.45 s (the path's 300 ms of queue, its delay and a feedback
   interval) nothing can tell the sender; the first cuts follow the received rate, whose
-  500 ms window still holds what arrived before the drop (803, then 461, then 252 kbit/s);
-  and with the estimate at 250 kbit/s the retransmissions have room and leave into a queue
-  that is still full. The earlier estimator cut its own estimate to the floor within a
-  second and a half and sent less into that queue, at the price of 200 kbit/s under the cap
-  and a recovery that depended on where the estimate stood when the capacity came back.
-  The same drop met at 1 Mbit/s: 0.56 to 1.26 s, 1.68 to 2.48 s, 39 to 47 retransmissions.
-  Planned: the sender gives up a repair backlog that has gone stale and asks for a key frame
-  (below), and a delay-based detector that reads a queue filling within one feedback
-  interval.
+  500 ms window still holds what arrived before the drop (803, then 461, then 252 kbit/s).
+  The earlier estimator cut its own estimate to the floor within a second and a half and
+  sent less into that queue, at the price of 200 kbit/s under the cap and a recovery that
+  depended on where the estimate stood when the capacity came back. The same drop met at
+  1 Mbit/s: 0.56 to 1.26 s, 1.68 to 2.48 s, 39 to 47 retransmissions. Traced repair by
+  repair (hosted runs 45341865225, 45342290711, six seeds), the extra retransmissions have
+  two causes. (1) Fresh repairs sent into a queue that is still full: 20 to 22 of the 23 to
+  32 dropped are repairs made 0.42 to 0.62 s after their original, in the first 0.2 s after
+  the first NACKs, while the path's queue still holds media sent at the old rate (the
+  delay-based detector does not read the queue filling within a feedback interval; a known
+  limit of its own). (2) Duplicate repairs: 24 to 28 of the 92 to 101 retransmissions repeat
+  a packet whose first repair was still in flight when the receiver asked again (it waits up
+  to 300 ms in the path's queue); the request waits for room in the rate limit and is
+  answered 0.01 to 0.8 s after that first repair arrived, and, oldest packet first, ahead of
+  first repairs of newer gaps. Giving up old repairs and asking for a key frame instead does
+  NOT help a receiver that plays in order (this test's, the engine's `SampleBuilder` without
+  a time bound): measured with repairs older than 1 s declined and a key frame asked for
+  (hosted run 45342372315), the video froze for 8.36 to 8.49 s and the oldest picture was
+  7.55 to 7.77 s old, because the receiver holds the gap for its whole packet window and the
+  key frame waits behind it. Planned after this release: no repeat repair of a packet whose
+  first repair transport-wide feedback reports received, and first repairs ahead of repeats.
 - **interceptors (pacer), a sudden drop of the path's capacity**: with the default
   interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
   after a sudden drop, though it never stops for more than 2 s. Measured in
   `tests/capacity_cap_video_rtc2rtc.rs` (a call at 2.5 Mbit/s whose path drops to 300 kbit/s;
   six seeds on three wall clocks): longest time without a usable frame 1.38 to 1.90 s, oldest
   picture shown 5.95 to 8.56 s (without a pacer: 0.83 to 1.24 s and 2.26 to 3.21 s). Cause:
-  the path drops about a hundred full-sized packets before the estimate has followed it; they
-  are retransmitted inside the estimate (100 to 250 kbit/s, of which the audio takes 76), about
-  17 packets a second, ahead of the media the paused source left in the pacer, and a receiver
+  the path drops video packets before the estimate has followed it (55 to 62 are asked for
+  on six seeds); they are retransmitted inside the estimate (100 to 250 kbit/s, of which the
+  audio takes 76), ahead of the media the paused source left in the pacer, and a receiver
   that plays in order shows each repaired frame as it completes. It is the same under every
   retransmission rule: the pacer holds repairs to the estimate, where a chain without one
   lets them leave in a burst while the estimate is still falling. (With over-use lowering
   the estimate on every update, the default since: 0.97 to 1.91 s and 5.59 to 9.84 s on six
-  seeds.) Planned after this
-  release: when a stream's repair backlog cannot leave within about 2 s at the target, the
-  sender drops it and asks the application for a key frame; a receiver must then skip the
-  gap in time (`SampleBuilder::with_max_gap_wait`), because one that waits by packet count
-  freezes for its whole packet window on a gap that is never filled.
+  seeds.) Traced repair by repair (hosted runs 45341865225, 45342290711): 90 to 103
+  retransmissions, none dropped at the path, of which 35 to 41 repeat a packet whose first
+  repair had already arrived (answered 0.01 to 1.1 s after it; the request was made while
+  that repair was still in flight), and these share the estimate with the first repairs of
+  newer gaps. The figure the test printed as retransmissions in this chain (250 to 420) also
+  counted the probe clusters' padding on the RTX stream (154 to 330 packets); the test now
+  counts the two apart. Giving up old repairs and asking for a key frame instead makes it
+  worse for a receiver that plays in order (measured, hosted run 45342372315: frozen 8.03 to
+  8.53 s, oldest picture 7.15 to 7.53 s; the receiver holds the gap for its whole packet
+  window). Planned after this release: no repeat repair of a packet whose first repair
+  transport-wide feedback reports received, and first repairs ahead of repeats.
 
 ### Behaviour changes
 
@@ -1142,6 +1160,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **stream-driver**: a TCP connection from a socket to itself is a failed connection
+  (`conf/flake-3-self-connect`). Connecting from an ephemeral port to a loopback port nothing
+  listens on, Linux can choose that very port as the source, and simultaneous open (RFC 9293
+  section 3.5) connects the socket to itself; the driver reported `Connected` (seen in
+  `a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer`, `Connected { local:
+  127.0.0.1:45149 }` to 127.0.0.1:45149). Every stream the driver connects (ICE-TCP active and
+  simultaneous-open candidates, TURN and STUN over TCP and TLS) goes through one connect path,
+  which now closes such a socket and reports `ConnectFailed`. The test's closed port is now
+  the local end of an established connection: refused on Linux, macOS and Windows (a bound,
+  not listening socket is dropped silently on macOS), and no client can take it as its source
+  port. `a_socket_connected_to_itself_is_a_failed_connection` connects 127.0.0.1:P to itself.
 - **stream-driver** (`conf/deps-1-hickory`, security): the optional `dns-records` feature
   takes hickory-resolver 0.26.2 or later instead of 0.25, whose hickory-proto 0.25.2 and
   hickory-resolver 0.25.2 carried 17 RustSec advisories. One is reachable from the driver's
