@@ -164,6 +164,7 @@ mod rejected_mline_tests {
             bundle: BundleMode::initial_offer(),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: true,
+            rtcp_mux_only_renegotiated: false,
             bundle_policy: RTCBundlePolicy::MaxCompat,
             initial_offer: false,
             bundle_attributes_in_tagged_section_only: false,
@@ -1437,6 +1438,9 @@ pub(crate) struct AddTransceiverSdpParams {
     is_offer: bool,
     /// The RTCP mux policy is "require".
     rtcp_mux_only: bool,
+    /// `SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers`: a section a subsequent
+    /// offer carries over says `a=rtcp-mux-only` again (RFC 8858 section 4.5).
+    rtcp_mux_only_renegotiated: bool,
     /// `SettingEngineBuilder::with_ecn` with the initiation it prefers, unless ECN is used
     /// without signalling (`with_ecn_without_signalling`): `a=ecn-capable-rtp` is written.
     ecn: Option<interceptor::EcnInitiation>,
@@ -1487,11 +1491,16 @@ impl RTCPeerConnection {
                 .with_property_attribute(ATTR_KEY_RTCPMUX.to_owned());
         // Under the mux policy "require" a new m= section of an offer says this endpoint only
         // multiplexes (RFC 9429 sections 4.1.1 and 5.2.1, RFC 8858 section 4.2); a section
-        // negotiated before does not get the line (RFC 9429 section 5.2.2). An answer does
-        // not carry it (RFC 8858 section 4.3), but for the answerer-tagged section of a
-        // BUNDLE group whose offer had it (RFC 9143 section 9.3.1.2), which `populate_sdp`
-        // adds.
-        if is_offer && params.rtcp_mux_only && !media_section.renegotiated {
+        // negotiated before does not get the line (RFC 9429 section 5.2.2: "The
+        // 'a=rtcp-mux-only' line MUST NOT be added"), unless the application asked for RFC
+        // 8858 section 4.5's form ("the offerer SHOULD associate an SDP 'rtcp-mux-only' with
+        // the corresponding SDP media description"). An answer does not carry it (RFC 8858
+        // section 4.3), but for the answerer-tagged section of a BUNDLE group whose offer had
+        // it (RFC 9143 section 9.3.1.2), which `populate_sdp` adds.
+        if is_offer
+            && params.rtcp_mux_only
+            && (!media_section.renegotiated || params.rtcp_mux_only_renegotiated)
+        {
             media = media.with_property_attribute(ATTR_KEY_RTCP_MUX_ONLY.to_owned());
         }
         // RFC 9429 section 5.2.1: an offer's new section has "An "a=rtcp" line ... containing
@@ -2336,6 +2345,22 @@ pub(crate) struct RepairFlows {
     pub(crate) fec: bool,
 }
 
+/// Rejects a section of an answer that was written in full: port zero, and no `a=candidate`
+/// lines (RFC 8839 section 4.2.1.6: with the port set to zero "the agent SHOULD NOT include
+/// ICE-related SDP "candidate" attributes in that "m=" section"), nor `a=end-of-candidates`.
+/// Whether it took candidates out: the next section written takes them then.
+fn reject_written_section(media: &mut MediaDescription) -> bool {
+    media.media_name.port = RangedPort {
+        value: 0,
+        range: None,
+    };
+    let before = media.attributes.len();
+    media
+        .attributes
+        .retain(|a| a.key != "candidate" && a.key != "end-of-candidates");
+    media.attributes.len() != before
+}
+
 /// Makes a section of an initial offer bundle-only (RFC 9143 sections 6 and 7.2.1): port
 /// zero, `a=bundle-only`, and none of the BUNDLE attributes (the IDENTICAL and TRANSPORT
 /// categories of RFC 8859), which "the offerer MUST NOT include ... in bundle-only 'm='
@@ -2661,6 +2686,9 @@ pub(crate) struct PopulateSdpParams {
     /// The RTCP mux policy is "require" (the default): new m= sections of an offer say
     /// `a=rtcp-mux-only`.
     pub(crate) rtcp_mux_only: bool,
+    /// `SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers`: under the "require"
+    /// policy the sections a subsequent offer carries over say `a=rtcp-mux-only` too.
+    pub(crate) rtcp_mux_only_renegotiated: bool,
     /// The bundle policy (RFC 9429 section 4.1.1), `Unspecified` being the default,
     /// `balanced`. It decides which m= sections of an initial offer are bundle-only, and which
     /// sections of an offer without a BUNDLE group an answer accepts.
@@ -2906,6 +2934,7 @@ impl RTCPeerConnection {
                     write_ssrc_attributes_for_simulcast: params.write_ssrc_attributes_for_simulcast,
                     is_offer: params.bundle.is_offer(),
                     rtcp_mux_only: params.rtcp_mux_only,
+                    rtcp_mux_only_renegotiated: params.rtcp_mux_only_renegotiated,
                     ecn: params.ecn,
                     answer_payload_types: answer_payload_types.clone(),
                 };
@@ -3029,11 +3058,10 @@ impl RTCPeerConnection {
                     BundleMode::Answer(offered) if !offered.is_empty() => {
                         // Outside the offered group under `must-bundle`: no transport but the
                         // BUNDLE one (RFC 9429 section 4.1.1).
-                        if let Some(desc) = d.media_descriptions.last_mut() {
-                            desc.media_name.port = RangedPort {
-                                value: 0,
-                                range: None,
-                            }
+                        if let Some(desc) = d.media_descriptions.last_mut()
+                            && reject_written_section(desc)
+                        {
+                            candidates_added = false;
                         }
                     }
                     // No BUNDLE group offered: every accepted section is a transport of its
@@ -3042,11 +3070,10 @@ impl RTCPeerConnection {
                     // type", must-bundle "any 'm=' sections other than the first").
                     BundleMode::Answer(_) => {
                         if without_transport {
-                            if let Some(desc) = d.media_descriptions.last_mut() {
-                                desc.media_name.port = RangedPort {
-                                    value: 0,
-                                    range: None,
-                                }
+                            if let Some(desc) = d.media_descriptions.last_mut()
+                                && reject_written_section(desc)
+                            {
+                                candidates_added = false;
                             }
                         } else {
                             with_transport.push(media_type);
@@ -4009,6 +4036,13 @@ pub(crate) fn discard_stray_bundle_only(desc: &mut SessionDescription, answers: 
 /// `a=rtcp-fb` without parameters with a space, against RFC 4585 section 4.2's
 /// `rtcp-fb-param`; Pion did before v4.1.5).
 pub(crate) fn check_attribute_lines(desc: &SessionDescription, strict: bool) -> Result<()> {
+    // RFC 8866 section 6.7: "At most one occurrence of "a=recvonly", "a=sendrecv",
+    // "a=sendonly", or "a=inactive" MAY appear at session level, and at most one MAY appear
+    // in each media description": a level with two is ambiguous, and refused.
+    desc.direction()?;
+    for media in &desc.media_descriptions {
+        media.direction()?;
+    }
     let lines = desc.attributes.iter().chain(
         desc.media_descriptions
             .iter()
@@ -4145,6 +4179,54 @@ pub(crate) fn decoding_dependencies(
         }
     }
     out
+}
+
+/// The tokens of an `a=group` line (its semantics first), `None` for another attribute.
+fn group_tokens(a: &sdp::description::common::Attribute) -> Option<Vec<&str>> {
+    (a.key == ATTR_KEY_GROUP).then(|| {
+        a.value
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect()
+    })
+}
+
+/// The `a=group` semantics this endpoint acts on: BUNDLE (RFC 9143), lip synchronization
+/// (RFC 5888 section 7) and decoding dependency (RFC 5583).
+const UNDERSTOOD_GROUP_SEMANTICS: [&str; 3] = ["BUNDLE", "LS", "DDP"];
+
+/// RFC 5888 section 9.3: "If a server receives an offer that contains empty "a=group" lines,
+/// it SHOULD add its capabilities also in the form of empty "a=group" lines to its answer."
+/// An offer with an `a=group` line that names no identification-tag is answered with an empty
+/// `a=group` line for each semantics this endpoint understands and the answer does not use.
+pub(crate) fn answer_group_capabilities(
+    offer: &SessionDescription,
+    answer: &mut SessionDescription,
+) {
+    let offered_empty = offer
+        .attributes
+        .iter()
+        .filter_map(group_tokens)
+        .any(|tokens| tokens.len() == 1);
+    if !offered_empty {
+        return;
+    }
+    for semantics in UNDERSTOOD_GROUP_SEMANTICS {
+        let used = answer
+            .attributes
+            .iter()
+            .filter_map(group_tokens)
+            .any(|tokens| tokens.first() == Some(&semantics));
+        if !used {
+            answer
+                .attributes
+                .push(sdp::description::common::Attribute::new(
+                    ATTR_KEY_GROUP.to_owned(),
+                    Some(semantics.to_owned()),
+                ));
+        }
+    }
 }
 
 /// RFC 5583 section 6.1 (with RFC 5888 section 9.2, which it follows) in an answer to
@@ -5812,31 +5894,52 @@ fn reoffered_header_extensions_adds_listed_extensions_back() {
     );
 }
 
+/// The `o=` line of a peer connection's descriptions (RFC 9429 section 5.2.1), drawn once
+/// when the peer connection is built: `<sess-id>` from `random` (the crypto provider's, so a
+/// seeded provider makes it the same in every run), 63 bits and "less than (2^63)-1";
+/// `<sess-version>` the wall-clock time `since_unix_epoch` in seconds since 1900 (RFC 8866
+/// section 5.2: "it is RECOMMENDED that a timestamp be used"), from which each later
+/// description that differs counts up by one ([`update_sdp_origin`]).
+pub(crate) fn jsep_origin(
+    random: &dyn crypto::RTCRandom,
+    since_unix_epoch: std::time::Duration,
+) -> Origin {
+    let mut bytes = [0u8; 8];
+    let drawn = match random.fill(&mut bytes) {
+        Ok(()) => u64::from_be_bytes(bytes),
+        // The id needs uniqueness, not a particular source.
+        Err(_) => rand::random(),
+    };
+    Origin::jsep(
+        drawn % (u64::MAX >> 1),
+        since_unix_epoch.as_secs() + NTP_UNIX_EPOCH_OFFSET_SECS,
+    )
+}
+
 /// Gives a generated description the session's `o=` line (RFC 9429 sections 5.2.2 and 5.3.2:
 /// "The 'o=' line MUST stay the same except for the <session-version> field, which MUST
 /// increment by one on each call ... if the offer might differ from the output of the
 /// previous call"; RFC 3264 section 8: "the version in the origin field MUST increment by one
 /// from the previous SDP").
 ///
-/// The first description generated sets the session's origin (`origin`). Each later one gets
-/// that origin, with the version one higher than the previous description's when it differs
-/// from it (`last_generated`, the text of the previous one) and the same version when it is
-/// the same text. Offers and answers are one sequence: they describe one session.
+/// `origin` is the session's, drawn when the peer connection was built ([`jsep_origin`]). The
+/// first description generated gets it as it is; each later one gets it with the version one
+/// higher than the previous description's when it differs from it (`last_generated`, the
+/// text of the previous one) and the same version when it is the same text. Offers and
+/// answers are one sequence: they describe one session.
 pub(crate) fn update_sdp_origin(
     origin: &mut Origin,
     last_generated: &mut String,
     d: &mut SessionDescription,
 ) {
-    if last_generated.is_empty() {
-        *origin = d.origin.clone();
-    } else {
-        d.origin = origin.clone();
-        if d.marshal() == *last_generated {
-            return;
-        }
-        origin.session_version = origin.session_version.incremented();
-        d.origin.session_version = origin.session_version.clone();
+    d.origin = origin.clone();
+    let text = d.marshal();
+    if last_generated.is_empty() || text == *last_generated {
+        *last_generated = text;
+        return;
     }
+    origin.session_version = origin.session_version.incremented();
+    d.origin.session_version = origin.session_version.clone();
     *last_generated = d.marshal();
 }
 

@@ -280,6 +280,14 @@ impl RTCPeerConnection {
         // Record the resolution so `SettingEngine::crypto_provider` reports the provider this
         // connection actually uses, not merely what was requested.
         setting_engine.crypto_provider = Some(crypto_provider.clone());
+        // The `o=` line of every description this peer connection generates (RFC 9429 section
+        // 5.2.1): its version the time the peer connection is built, on the wall clock the
+        // application gave or the system's, read here once.
+        let built_at = setting_engine
+            .wall_clock
+            .unwrap_or_else(|| shared::time::SystemInstant::now(now))
+            .unix(now);
+        let sdp_origin = super::sdp::jsep_origin(crypto_provider.random(), built_at);
 
         let agent_config = ice_agent_config(&configuration, &setting_engine)?;
         let engine_srflx = super::srflx::EngineSrflx::new(
@@ -378,7 +386,8 @@ impl RTCPeerConnection {
             sctp_handler_context,
             datachannel_handler_context: DataChannelHandlerContext::new(now),
             interceptor_handler_context: InterceptorHandlerContext::default()
-                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track),
+                .with_source_departure_ending_tracks(setting_engine.source_departure_ends_track)
+                .with_wall_clock(setting_engine.wall_clock),
             endpoint_handler_context: EndpointHandlerContext::default(),
             media_read_outs: VecDeque::new(),
             data_read_outs: VecDeque::new(),
@@ -448,7 +457,7 @@ impl RTCPeerConnection {
             removed_transceivers: Vec::new(),
             default_remote_stream_id: None,
             greater_mid: -1,
-            sdp_origin: Origin::default(),
+            sdp_origin,
             last_generated_sdp: String::new(),
             last_offer: String::new(),
             last_answer: String::new(),
@@ -773,7 +782,8 @@ impl RTCPeerConnection {
     /// generate_unmatched_sdp generates an SDP that doesn't take remote state into account
     /// This is used for the initial call for CreateOffer
     pub(super) fn generate_unmatched_sdp(&mut self) -> Result<SessionDescription> {
-        let d = SessionDescription::new_jsep_session_description(false);
+        let d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
         let candidates = self.offered_local_candidates(true)?;
@@ -855,6 +865,7 @@ impl RTCPeerConnection {
             bundle: BundleMode::initial_offer().with_requests(&fec_mids, &[]),
             offered_tag_rtcp_mux_only: false,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             bundle_policy: self.effective_bundle_policy(),
             initial_offer: true,
             bundle_attributes_in_tagged_section_only: self
@@ -903,7 +914,8 @@ impl RTCPeerConnection {
         connection_role: ConnectionRole,
         ignore_rid_pause_for_recv: bool,
     ) -> Result<SessionDescription> {
-        let mut d = SessionDescription::new_jsep_session_description(false);
+        let mut d =
+            SessionDescription::new_jsep_session_description_with_origin(self.sdp_origin.clone());
         d = d.with_value_attribute(ATTR_KEY_MSID_SEMANTIC.to_owned(), "WMS *".to_owned());
 
         let ice_params = self.ice_transport().get_local_parameters()?;
@@ -1377,6 +1389,7 @@ impl RTCPeerConnection {
                 .setting_engine
                 .bundle_attributes_tagged_only,
             rtcp_mux_only: self.configuration.rtcp_mux_policy != RTCRtcpMuxPolicy::Negotiate,
+            rtcp_mux_only_renegotiated: self.setting_engine.rtcp_mux_only_in_subsequent_offers,
             offered_tag_rtcp_mux_only: !include_unmatched
                 && remote_parsed
                     .as_ref()
@@ -1433,6 +1446,9 @@ impl RTCPeerConnection {
             // RFC 5583 section 6.1: the offered decoding dependencies, kept for what the
             // answer accepts.
             crate::peer_connection::sdp::answer_decoding_dependencies(offer, &mut d);
+            // RFC 5888 section 9.3: empty `a=group` lines of the offer are answered with this
+            // endpoint's.
+            crate::peer_connection::sdp::answer_group_capabilities(offer, &mut d);
             // RFC 3264 section 6: "The 't=' line in the answer MUST be equal to the ones in
             // the offer" (a WebRTC offer says `t=0 0`, which the answer has already).
             if !offer.time_descriptions.is_empty() {
@@ -1464,7 +1480,17 @@ impl RTCPeerConnection {
             };
 
             if !parsed.media_descriptions.is_empty() {
-                let mut m = parsed.media_descriptions.remove(0);
+                // The first section the description does not reject: a section with port
+                // zero carries no candidates (RFC 8839 section 4.2.1.6). A bundle-only
+                // section has port zero too and is never first (RFC 9143 section 7.2.1).
+                let Some(at) = parsed
+                    .media_descriptions
+                    .iter()
+                    .position(|m| m.media_name.port.value != 0)
+                else {
+                    return Some(sd.clone());
+                };
+                let mut m = parsed.media_descriptions.remove(at);
                 m = match add_candidates_to_media_descriptions(
                     &candidates,
                     m,
@@ -1473,7 +1499,7 @@ impl RTCPeerConnection {
                     Ok(m) => m,
                     Err(_) => return Some(sd.clone()),
                 };
-                parsed.media_descriptions.insert(0, m);
+                parsed.media_descriptions.insert(at, m);
                 share_bundle_destination(&mut parsed);
                 self.populate_other_transports_candidates(&mut parsed);
             }

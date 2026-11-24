@@ -36,6 +36,7 @@
 //! | `setup` | [`Setup`](crate::attribute::Setup) | RFC 4145, RFC 8842 |
 //! | `tls-id` | [`TlsId`](crate::attribute::TlsId) | RFC 8842 |
 //! | `identity` | [`Identity`](crate::attribute::Identity) | RFC 8827 |
+//! | `tool`, `type`, `orient`, `quality` | [`Tool`](crate::attribute::Tool), [`ConferenceType`](crate::attribute::ConferenceType), [`Orient`](crate::attribute::Orient), [`Quality`](crate::attribute::Quality) | RFC 8866 |
 //! | `sctp-port`, `max-message-size`, `sctpmap` | [`SctpPort`](crate::attribute::SctpPort), [`MaxMessageSize`](crate::attribute::MaxMessageSize), [`SctpMap`](crate::attribute::SctpMap) | RFC 8841 |
 //!
 //! Attributes without a value (`rtcp-mux`, `rtcp-mux-only`, `rtcp-rsize`, `ice-lite`,
@@ -53,6 +54,7 @@ use crate::description::common::Attribute;
 
 mod grouping;
 mod ice;
+mod informational;
 pub mod mux;
 mod rtcp;
 mod rtp;
@@ -69,6 +71,7 @@ pub use grouping::{Depend, Dependency, DependencyType, Group, Mid, Msid, MsidSem
 pub use ice::{
     Candidate, IceOptions, IcePacing, IcePwd, IceUfrag, RemoteCandidate, RemoteCandidates,
 };
+pub use informational::{ConferenceType, Orient, Quality, Tool};
 pub use rtcp::{
     Rtcp, RtcpAddress, RtcpFb, RtcpFbKind, RtcpFbPayloadType, RtcpXr, RtcpXrFormat, RtcpXrRttMode,
     RtcpXrStatFlag,
@@ -318,6 +321,18 @@ macro_rules! session_accessors {
             self.typed()
         }
 
+        /// `a=tool` (RFC 8866 section 6.3).
+        pub fn tool(&self) -> shared::error::Result<Option<$crate::attribute::Tool>> {
+            self.typed()
+        }
+
+        /// `a=type`, the conference type (RFC 8866 section 6.9).
+        pub fn conference_type(
+            &self,
+        ) -> shared::error::Result<Option<$crate::attribute::ConferenceType>> {
+            self.typed()
+        }
+
         /// `a=msid-semantic` (draft-ietf-mmusic-msid; browsers still write it).
         pub fn msid_semantic(
             &self,
@@ -452,6 +467,16 @@ macro_rules! media_accessors {
 
         /// `a=sctpmap`, the form `a=sctp-port` replaced (draft-ietf-mmusic-sctp-sdp-05).
         pub fn sctpmap(&self) -> shared::error::Result<Option<$crate::attribute::SctpMap>> {
+            self.typed()
+        }
+
+        /// `a=orient` (RFC 8866 section 6.8).
+        pub fn orient(&self) -> shared::error::Result<Option<$crate::attribute::Orient>> {
+            self.typed()
+        }
+
+        /// `a=quality` (RFC 8866 section 6.14).
+        pub fn quality(&self) -> shared::error::Result<Option<$crate::attribute::Quality>> {
             self.typed()
         }
 

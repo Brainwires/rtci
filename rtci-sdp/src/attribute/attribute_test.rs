@@ -980,6 +980,81 @@ fn ptime_maxptime_and_framerate_are_non_zero_integers_or_reals() {
     assert_eq!(Ptime::parse("2.5").unwrap().value(), 2.5);
 }
 
+// --- RFC 8866 sections 6.3, 6.8, 6.9, 6.14: tool, orient, type, quality ----------------------
+
+#[test]
+fn the_informational_attributes_follow_the_rfc_8866_grammar() {
+    // 6.3: `tool-value = text`, a byte-string.
+    check::<Tool>(&["foobar V3.2", "rtci", " spaced  out "], &[""]);
+    // 6.9: five case-sensitive values.
+    check::<ConferenceType>(
+        &["broadcast", "meeting", "moderated", "test", "H332"],
+        &[
+            "",
+            "Moderated",
+            "h332",
+            "conference",
+            "test ",
+            "meeting,test",
+        ],
+    );
+    // 6.8: three case-sensitive values.
+    check::<Orient>(
+        &["portrait", "landscape", "seascape"],
+        &["", "Portrait", "upside-down", "landscape "],
+    );
+    // 6.14: `zero-based-integer = "0" / integer`.
+    check::<Quality>(&["0", "5", "10"], &["", "05", "-1", "5.5", "ten", " 5"]);
+    assert_eq!(Quality::parse("10").unwrap().value(), 10);
+}
+
+/// The examples of RFC 8866 sections 6.3, 6.8, 6.9 and 6.14 are read at their levels, written
+/// back unchanged and pass `validate`; each at the other level, or malformed, does not.
+#[test]
+fn the_informational_attributes_are_read_at_their_level_and_round_trip() {
+    let text = format!(
+        "{HEAD}a=tool:foobar V3.2\r\na=type:moderated\r\n\
+         m=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\na=orient:portrait\r\na=quality:10\r\n"
+    );
+    let parsed = parse(&text);
+    assert_eq!(parsed.marshal(), text);
+    assert_eq!(parsed.tool().unwrap().unwrap().as_str(), "foobar V3.2");
+    assert_eq!(
+        parsed.conference_type().unwrap().unwrap().as_str(),
+        "moderated"
+    );
+    let media = &parsed.media_descriptions[0];
+    assert_eq!(media.orient().unwrap().unwrap().as_str(), "portrait");
+    assert_eq!(media.quality().unwrap().unwrap().value(), 10);
+    parsed.validate().unwrap();
+
+    // Written from the typed values.
+    let built = SessionDescription::new_jsep_session_description(false)
+        .with_typed(&Tool::new("foobar V3.2").unwrap())
+        .with_typed(&ConferenceType::new("test").unwrap());
+    let written = built.marshal();
+    assert!(
+        written.contains("\r\na=tool:foobar V3.2\r\na=type:test\r\n"),
+        "{written}"
+    );
+
+    for wrong in [
+        // The other level.
+        format!("{HEAD}a=orient:portrait\r\nm=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\n"),
+        format!("{HEAD}a=quality:5\r\nm=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\n"),
+        format!("{HEAD}m=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\na=tool:foobar\r\n"),
+        format!("{HEAD}m=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\na=type:test\r\n"),
+        // Malformed.
+        format!("{HEAD}a=type:Moderated\r\nm=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\n"),
+        format!("{HEAD}m=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\na=orient:upside-down\r\n"),
+        format!("{HEAD}m=video 9 RTP/AVP 31\r\nc=IN IP4 0.0.0.0\r\na=quality:05\r\n"),
+    ] {
+        assert!(parse(&wrong).validate().is_err(), "{wrong}");
+    }
+    let malformed = parse(&format!("{HEAD}a=type:Moderated\r\n"));
+    assert!(malformed.conference_type().is_err());
+}
+
 // --- RFC 6236: imageattr ------------------------------------------------------------------
 
 #[test]
