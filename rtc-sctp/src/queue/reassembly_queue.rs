@@ -478,6 +478,17 @@ impl ReassemblyQueue {
         if sna32lt(mid, self.next_mid) {
             return false;
         }
+        if chunk.beginning_fragment {
+            self.drop_superseded(chunk.tsn, |set| {
+                if set.mid == mid {
+                    std::cmp::Ordering::Equal
+                } else if sna32gt(set.mid, mid) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            });
+        }
         let idx = self.ordered.partition_point(|s| sna32lt(s.mid, mid));
         if self.ordered.get(idx).is_none_or(|s| s.mid != mid) {
             self.ordered
@@ -490,6 +501,53 @@ impl ReassemblyQueue {
         }
         self.n_bytes += len;
         set.is_complete()
+    }
+
+    /// The first fragment of an ordered message has arrived, with TSN `tsn`: drops what is held
+    /// in front of it that a sender could not have sent. A sender transmits the ordered
+    /// messages of a stream in the order of their numbers, each from its first fragment on, so
+    /// within one use of a stream a message numbered after this one has TSNs above `tsn`, and
+    /// this message has none below it. What is held against that came before a reset of the
+    /// stream from a peer that sent queued data after its Sender's Last Assigned TSN with the
+    /// stream's old numbers (RFC 6525 5.2.2 E2/E4 make it data of the stream as reset): kept,
+    /// a message of it would be delivered in place of the next use's message with the same
+    /// number, or be put together with it and never complete. `place` says where a set's
+    /// number is against this message's: `Equal` for its own, `Greater` after it.
+    fn drop_superseded(&mut self, tsn: u32, place: impl Fn(&Chunks) -> std::cmp::Ordering) {
+        use std::cmp::Ordering::{Equal, Greater};
+        let lowest = |set: &Chunks| {
+            set.chunks
+                .iter()
+                .map(|c| c.tsn)
+                .reduce(|a, b| if sna32lt(b, a) { b } else { a })
+        };
+        let (mut dropped, mut dropped_bytes) = (0, 0);
+        for set in self.ordered.iter_mut() {
+            if set.next_part.is_some() {
+                continue;
+            }
+            match place(set) {
+                Greater if lowest(set).is_some_and(|t| sna32lt(t, tsn)) => {
+                    dropped += set.chunks.len();
+                    dropped_bytes += set.len();
+                    set.chunks.clear();
+                }
+                Equal => set.chunks.retain(|c| {
+                    let stale = sna32lt(c.tsn, tsn);
+                    if stale {
+                        dropped += 1;
+                        dropped_bytes += c.user_data.len();
+                    }
+                    !stale
+                }),
+                _ => {}
+            }
+        }
+        if dropped > 0 {
+            self.ordered.retain(|s| !s.chunks.is_empty());
+            self.subtract_num_bytes(dropped_bytes);
+            self.orphans_dropped += dropped;
+        }
     }
 
     /// Whether `chunk`, which no message in partial delivery takes, does not begin a message
@@ -644,6 +702,19 @@ impl ReassemblyQueue {
             // This is an ordered chunk
             if sna16lt(chunk.stream_sequence_number, self.next_ssn) {
                 return false;
+            }
+
+            if chunk.beginning_fragment {
+                let ssn = chunk.stream_sequence_number;
+                self.drop_superseded(chunk.tsn, |set| {
+                    if set.ssn == ssn {
+                        std::cmp::Ordering::Equal
+                    } else if sna16gt(set.ssn, ssn) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                });
             }
 
             self.n_bytes += chunk.user_data.len();

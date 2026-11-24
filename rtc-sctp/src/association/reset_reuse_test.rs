@@ -506,7 +506,12 @@ fn whole(tag: u8, count: u32) -> Bytes {
 /// RFC 9260 6.9 (a message's fragments take consecutive TSNs, the first with the B bit) and
 /// RFC 8260 2.1 (I-DATA fragments in FSN order), with RFC 6525 5.2.2 E2/E4: a peer resets the
 /// stream while a message on it is half sent, and sends the rest of it after the reset with
-/// its old Stream Sequence Number (Message Identifier), as this engine's sender did. Those
+/// its old Stream Sequence Number (Message Identifier), as this engine's sender did, and as
+/// webrtc 0.17's does (`tests/data_channels_reopen_interop.rs`); on an ordered stream also the
+/// whole messages it had queued behind it, numbered after it. Those whole messages were sent
+/// before the next channel's first message, numbered 0: a sender sends a stream's ordered
+/// messages in the order of their numbers, so they are not the next channel's, and they are
+/// dropped when its first message arrives. Those
 /// fragments can never be part of a complete message: the TSNs before them have all arrived,
 /// their message's start among them, and went to the stream as it was. They are dropped, and
 /// the next channel on the stream gets each of its messages, the one with that same number
@@ -554,19 +559,35 @@ fn fragments_sent_after_a_reset_with_the_old_numbers_do_not_hold_the_next_channe
                     a.handle_data(&f(t(5), 1, 3, 4, 0xa1))?;
                 }
                 assert_eq!(t(5), a.peer_last_tsn, "{what}: all acknowledged");
+                // Then a whole message that was queued behind it, numbered 2, and on an
+                // ordered stream one numbered 1 as well (two fragments). An unordered message
+                // has no number to tell it from the next channel's: not sent in that case.
+                let mut n = 6;
+                if !unordered {
+                    a.handle_data(&f(t(6), 2, 0, 1, 0xa2))?;
+                    a.handle_data(&f(t(7), 3, 0, 2, 0xa3))?;
+                    a.handle_data(&f(t(8), 3, 1, 2, 0xa3))?;
+                    n = 9;
+                }
 
-                // The next channel on the stream: its messages 0, 1 (three fragments) and 2.
+                // The next channel on the stream: its messages 0, 1 (three fragments), 2 and 3.
                 match a.open_stream(STREAM, PPI) {
                     Ok(_) | Err(Error::ErrStreamAlreadyExist) => {}
                     Err(e) => return Err(e),
                 }
-                a.handle_data(&f(t(6), 0, 0, 1, 0xb0))?;
+                a.handle_data(&f(t(n), 0, 0, 1, 0xb0))?;
                 for i in 0..3 {
-                    a.handle_data(&f(t(7 + i), 1, i, 3, 0xb1))?;
+                    a.handle_data(&f(t(n + 1 + i), 1, i, 3, 0xb1))?;
                 }
-                a.handle_data(&f(t(10), 2, 0, 1, 0xb2))?;
+                a.handle_data(&f(t(n + 4), 2, 0, 1, 0xb2))?;
+                a.handle_data(&f(t(n + 5), 3, 0, 1, 0xb3))?;
                 let mut got = read_all(&mut a, STREAM);
-                let mut want = vec![whole(0xb0, 1), whole(0xb1, 3), whole(0xb2, 1)];
+                let mut want = vec![
+                    whole(0xb0, 1),
+                    whole(0xb1, 3),
+                    whole(0xb2, 1),
+                    whole(0xb3, 1),
+                ];
                 if unordered {
                     got.sort();
                     want.sort();

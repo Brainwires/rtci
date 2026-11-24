@@ -3710,10 +3710,24 @@ impl Association {
                     id: s.stream_identifier,
                 }));
             }
-            let orphan = s.reassembly_queue.orphans_dropped != orphans_before;
+            let dropped = s.reassembly_queue.orphans_dropped - orphans_before;
             self.reindex_stream(d.stream_identifier, bytes_before);
-            if orphan {
+            if dropped == 0 {
+                // Nothing dropped.
+            } else if !d.beginning_fragment {
+                // The chunk itself: the rest of a message whose start went elsewhere.
                 self.note_orphan(d);
+            } else {
+                // Held fragments the message this chunk begins supersedes.
+                self.orphans_dropped += dropped;
+                self.last_orphan_tsn = None;
+                warn!(
+                    "[{}] dropped {dropped} DATA fragments of stream {} held ahead of the \
+                     message starting at tsn={}: sent before it with later numbers, they are \
+                     from before a reset of the stream (a peer that sent data queued on the \
+                     stream after its Sender's Last Assigned TSN, RFC 6525 5.1.2 A3)",
+                    self.side, d.stream_identifier, d.tsn
+                );
             }
         }
     }
@@ -3763,11 +3777,11 @@ impl Association {
         self.orphans_dropped += 1;
         if self.last_orphan_tsn != Some(d.tsn.wrapping_sub(1)) {
             warn!(
-                "[{}] dropping DATA tsn={} of stream {} (ssn={} mid={}): the start of its \
-                 message went before it to another stream, so it can never be completed (a \
-                 peer that reset the stream before the message had all its TSNs, RFC 6525 \
-                 5.1.2)",
-                self.side, d.tsn, d.stream_identifier, d.stream_sequence_number, d.mid
+                "[{}] dropping DATA of stream {} at tsn={} (ssn={} mid={}): it can never be \
+                 delivered in its place, being the rest of a message from before a reset of the \
+                 stream (a peer that sent data queued on the stream after its Sender's Last \
+                 Assigned TSN, RFC 6525 5.1.2 A3)",
+                self.side, d.stream_identifier, d.tsn, d.stream_sequence_number, d.mid
             );
         }
         self.last_orphan_tsn = Some(d.tsn);

@@ -869,6 +869,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **sctp, data channels** (RFC 6525 5.1.2 A3, 5.2.2 E2/E4; RFC 8831 6.7;
+  `conf/sctp-16-delivery-stall`): a data channel opened right after another one was closed in
+  the middle of a transfer stalled: its messages up to one Stream Sequence Number arrived and
+  none after, all acknowledged (ParolNet `file_tamper`, about 1 run in 10). The peer asked to
+  reset the stream answered with the reset of its own direction at once, bundled with the
+  response, with a Sender's Last Assigned TSN of its next TSN minus 1, while the rest of a
+  message written to the stream before it (and any message after it) was still in its send
+  queue. That data then went out above the Sender's Last Assigned TSN with the stream's old
+  numbers; the receiver, as RFC 6525 5.2.2 E2/E4 says, took it for data of the stream after
+  the reset, and the next channel, which takes the lowest free id and so the same stream, had
+  its message with that number put together with it, never complete, every message after it
+  waiting behind. Three changes:
+  - Sender: the answering reset leaves with the response only when nothing written to the
+    stream waits in the send queue; otherwise it waits behind that data, as a reset this side
+    asks for itself does (`the_answering_reset_covers_the_message_half_sent_on_the_stream`).
+  - Receiver: a fragment that does not begin a message, when every TSN below it has arrived
+    and none of them is held with it, can never be part of a complete message (RFC 9260 6.9
+    step 2; RFC 8260 2.1 for I-DATA). It is dropped (as it arrives, or when the cumulative TSN
+    passes the TSN it lacked), stays acknowledged, makes no stream, and is logged once per
+    run; data held for a deferred reset is released in TSN order. A peer with the old sender
+    no longer stalls the next channel on the stream with the rest of a half-sent message
+    (`fragments_sent_after_a_reset_with_the_old_numbers_do_not_hold_the_next_channel`,
+    `fragments_out_of_order_are_not_taken_for_orphans`). Whole messages such a peer sends
+    after its reset with the old numbers cannot be told from the next channel's own and are
+    not caught.
+  - Receiver: a complete message on a stream this side has closed (`Stream::close`, the close
+    of a data channel) no longer holds the peer's reset "In progress": nothing can read it, so
+    the close never completed, the stream id was never freed and its bytes never left the
+    window. It is abandoned with the stream (RFC 8831 6.7, "delivered (or abandoned)").
+  - Tests: the reported run pinned (`a_channel_reopened_on_a_reset_stream_gets_every_message`),
+    a 96-run close/reopen sweep (where the close falls, DATA or I-DATA, ordered or unordered,
+    whole or in parts, send backlog, clean or lossy and reordering link;
+    `closing_and_reopening_a_channel_on_its_stream_never_stalls`), the same through two peer
+    connections (`tests/data_channel_reopen_rtc2rtc.rs`) and against webrtc 0.17 sending
+    (`tests/data_channels_reopen_interop.rs`, a 23rd interop target). A class guard on the SCTP
+    sweeps: once the link is quiet and the application has drained, neither side may hold
+    anything acknowledged and undelivered (`Association::undelivered`, test-only; on the
+    672-run zero window sweep and the close/reopen sweep).
+
 - **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
   dropped the local candidates (a new DTLS association on new ports), the side that selected
   the new pair first dropped the packets the peer still sent on the previous pair before its
