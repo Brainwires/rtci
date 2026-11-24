@@ -483,7 +483,11 @@ fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
     let mut chain = Registry::new()
         .with(
             Slot::Pacer,
-            PacerBuilder::new().with_target_bitrate(12_000.0).build(),
+            // A source that ignores the pause: its media meets the queue time bound.
+            PacerBuilder::new()
+                .with_target_bitrate(12_000.0)
+                .with_source_pause(false)
+                .build(),
         )
         .with(Slot::NackResponder, NackResponderBuilder::new().build())
         .build();

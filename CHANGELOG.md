@@ -147,29 +147,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment's case on the virtual clock (three seeds, 500 to 590 kbit/s held; 100 kbit/s with
   `Drain`). `PacerInterceptor::forced` now also counts the overdue packets `Drain` releases.
 
-- **pacer**: with `PacerQueueOverflow::Drop` (the default) the pacer discards whole frames
-  instead of single packets (`conf/gcc-2-frame-discard`). New media that waited the 2 s queue
-  time bound, or the oldest of a full queue, goes with every queued frame of its stream (a frame:
-  one SSRC, one RTP timestamp; nothing on the write path marks a key frame, so none is kept), and
-  the rest of the newest discarded frame when the application writes it later. Retransmissions
-  are still dropped one at a time; audio, audio retransmissions and padding never.
-  `PacerInterceptor::discarded_frames` counts the frames, `dropped` still the packets. Each
-  discard rides the read leg as `PacerDiscard` (exported; stream, sequence numbers, frames,
-  octets, the target then): the NACK responder takes those packets out of its retransmission
-  buffer, its waiting requests and its count of original packets, so a NACK for them is answered
-  by nothing (RFC 4588 section 7), and the peer connection emits the new
-  `RTCPeerConnectionEvent::OnPacerDiscard` ("the source is above the target"). A media stream
-  also gets a Picture Loss Indication (sender SSRC 0) delivered to the application
-  (`RTCMessage::RtcpPacket`, `OnKeyFrameRequest`), so an application that answers PLI writes a
-  key frame at the new target. The pacer's order of service is documented: audio, audio
-  retransmissions, video retransmissions, video and FEC, padding. Measured
-  (`tests/capacity_cap_video_rtc2rtc.rs`, default chain, six seeds, run 45300292535): one discard
-  of 120 to 202 frames per seed and freezes of 4.3 to 10.3 s, worse than the 2.1 to 3.0 s with
-  per-packet drops that the responder resent: the receiver's sample builder waits 256 sequence
-  numbers past a gap nothing fills. Resending the discarded packets after all gives 1.8 to 2.8 s
-  (run 45300304592). libwebrtc discards nothing in its pacer: past an expected queue time of 2 s
-  it pauses the encoder and drains the queue (`control_handler.cc`, `pacing_controller.h`
-  `kMaxExpectedQueueLength`).
+- **pacer**: a source above the target is told to pause, and what still has to go is discarded
+  whole frames at a time (`conf/gcc-2-frame-discard`).
+  - **Pause.** When the media queued would take half the queue time bound (1 s of 2 s) or more
+    to leave at the target (`PacerInterceptor::expected_queue_time`), every
+    `TargetBitrateChanged` the pacer hands application-ward carries **zero**, so
+    `RTCRtpSender::target_bitrates` and the outbound `targetBitrate` read zero: produce nothing
+    until the next target. The controller's target rides along as `PacerPause` (exported): the
+    NACK responder holds its retransmissions to it, and `availableOutgoingBitrate` stays that
+    estimate. The real target is announced again when 100 ms is left. libwebrtc does the same
+    (`control_handler.cc`: encoder target zero while the pacer's expected queue time exceeds
+    `kMaxExpectedQueueLength`). Resuming needs no key frame: libwebrtc encodes the pending or a
+    refreshed frame (`video_stream_encoder.cc`, `OnBitrateUpdated`). What the source wrote
+    before the pause, and in its first 250 ms, is drained above the target rather than
+    discarded (libwebrtc's `drain_large_queues`). `PacerBuilder::with_source_pause(false)`
+    turns it off; `PacerInterceptor::pauses`, `paused`.
+  - **Discard.** With `PacerQueueOverflow::Drop` (the default), other media that waited the 2 s
+    bound, or the oldest of a full queue, goes with every queued frame of its stream (a frame:
+    one SSRC, one RTP timestamp; nothing on the write path marks a key frame), and the rest of
+    the newest discarded frame when it is written later. Retransmissions are still dropped one
+    at a time; audio, audio retransmissions and padding never.
+    `PacerInterceptor::discarded_frames`. Each discard rides the read leg as `PacerDiscard`
+    (exported): the NACK responder takes those packets out of its retransmission buffer, its
+    waiting requests and its count of original packets (a NACK for them is answered by
+    nothing, RFC 4588 section 7), the peer connection emits the new
+    `RTCPeerConnectionEvent::OnPacerDiscard`, and a media stream gets a Picture Loss Indication
+    (sender SSRC 0) delivered to the application (`RTCMessage::RtcpPacket`,
+    `OnKeyFrameRequest`).
+  - **Retransmissions.** One whose packet already has a retransmission queued is not queued
+    again (`PacerInterceptor::duplicate_retransmissions`), and each that leaves or is dropped
+    is reported application-ward (`RetransmissionsLeft`, exported): the NACK responder makes no
+    other while one waits in the pacer and counts the resend interval from its departure
+    (libwebrtc's `rtp_packet_history.cc`, `pending_transmission_`).
+  - Order of service documented: audio, audio retransmissions, video retransmissions, video
+    and FEC, padding.
+  - Measured (`tests/capacity_cap_video_rtc2rtc.rs`, default chain, six seeds): discards alone
+    froze the video 4.3 to 10.3 s (the gap a discard leaves holds the receiver's sample
+    builder for 256 sequence numbers); with the pause and the drained backlog a source that
+    follows the target loses nothing at the pacer, and the longest freeze is 1.5 to 4.4 s (run
+    45475928885), against 2.1 to 3.0 s with single packets dropped and resent before, and 1.3
+    to 1.5 s in ParolNet's chain without a pacer.
+  - `tests/gcc_rate_limited_link_rtc2rtc.rs` and `testenv_impairment` read GCC's target from
+    `availableOutgoingBitrate`: the stream's `targetBitrate` is zero while their source, above
+    the target, is paused.
 
 - **interceptors**: the NACK generator asks for a lost packet while it is missing (a round trip
   between requests) instead of giving it up after ten requests or two seconds

@@ -114,6 +114,27 @@ impl Harness {
 
     /// [`Harness::with`] with a queue of `queue_limit` packets.
     fn with_queue(burst_bits: f64, overflow: QueueOverflow, queue_limit: usize) -> Self {
+        Self::with_options(burst_bits, overflow, queue_limit, true)
+    }
+
+    /// The default pacer of [`Harness::new`] that never pauses the source: a source that
+    /// ignores the pause, whose media meets the queue time bound.
+    fn without_pause() -> Self {
+        Self::with_options(
+            PACKET_BITS,
+            QueueOverflow::default(),
+            rtc_interceptor::PACER_DEFAULT_QUEUE_LIMIT,
+            false,
+        )
+    }
+
+    /// [`Harness::with_queue`], pausing the source or not.
+    fn with_options(
+        burst_bits: f64,
+        overflow: QueueOverflow,
+        queue_limit: usize,
+        pause: bool,
+    ) -> Self {
         let epoch = Instant::now();
         let released = Arc::new(Mutex::new(Vec::new()));
         let marker_released = Arc::clone(&released);
@@ -136,6 +157,7 @@ impl Harness {
                     .with_burst_bits(burst_bits)
                     .with_queue_overflow(overflow)
                     .with_queue_limit(queue_limit)
+                    .with_source_pause(pause)
                     .build(),
             )
             .build();
@@ -907,7 +929,7 @@ const SLOW: f64 = 12_000.0;
 /// and stream 9's frame written at 0.7 s is another stream's and leaves after the discard.
 #[test]
 fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits() {
-    let mut harness = Harness::new();
+    let mut harness = Harness::without_pause();
     harness.retarget(SLOW);
     harness
         .chain
@@ -949,7 +971,7 @@ fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits
 /// SSRC) has no key frame to ask for: its discard is announced, no key frame is asked for.
 #[test]
 fn a_discard_asks_the_application_for_a_key_frame_of_a_media_stream_only() {
-    let mut harness = Harness::new();
+    let mut harness = Harness::without_pause();
     harness.retarget(SLOW);
     harness
         .chain
@@ -984,7 +1006,7 @@ fn a_discard_asks_the_application_for_a_key_frame_of_a_media_stream_only() {
 /// (4) leaves when it is written.
 #[test]
 fn the_rest_of_a_discarded_frame_is_discarded_when_it_is_written() {
-    let mut harness = Harness::new();
+    let mut harness = Harness::without_pause();
     harness.retarget(SLOW);
     harness.send_of(ms(0), 1, 0, 0);
     harness.send_of(ms(0), 1, 1, 3000);
@@ -1009,7 +1031,7 @@ fn the_rest_of_a_discarded_frame_is_discarded_when_it_is_written() {
 /// a queue of three (at 0.5 s), stream 9's packets 2 and 4 leave, one a second.
 #[test]
 fn a_full_queue_discards_the_oldest_frame_with_its_stream() {
-    let mut harness = Harness::with_queue(PACKET_BITS, QueueOverflow::default(), 3);
+    let mut harness = Harness::with_options(PACKET_BITS, QueueOverflow::default(), 3, false);
     harness.retarget(SLOW);
     harness.send_of(ms(0), 1, 0, 0);
     harness.send_of(ms(0), 1, 1, 3000);

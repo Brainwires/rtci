@@ -73,6 +73,7 @@ pub struct PacerBuilder {
     queue_time_limit: Option<Duration>,
     queue_overflow: QueueOverflow,
     immediate_release: bool,
+    pause_source: bool,
 }
 
 impl Default for PacerBuilder {
@@ -84,6 +85,7 @@ impl Default for PacerBuilder {
             queue_time_limit: Some(DEFAULT_QUEUE_TIME_LIMIT),
             queue_overflow: QueueOverflow::default(),
             immediate_release: true,
+            pause_source: true,
         }
     }
 }
@@ -135,6 +137,16 @@ impl PacerBuilder {
         self
     }
 
+    /// Whether the application is told to pause (a target of zero) while the media queued
+    /// would take half the queue time bound or more to leave, and the backlog written before
+    /// the pause is drained rather than discarded (see "Pausing the source" on
+    /// [`PacerInterceptor`]). On by default; `false` leaves the target as the congestion
+    /// controller set it and the queue time bound to [`QueueOverflow`] alone.
+    pub fn with_source_pause(mut self, pause_source: bool) -> Self {
+        self.pause_source = pause_source;
+        self
+    }
+
     /// Whether a packet the budget already covers leaves when it is written, with nothing
     /// queued ahead of it. On by default.
     ///
@@ -160,6 +172,7 @@ impl PacerBuilder {
         };
         let mut pacer = PacerInterceptor::new(bucket, self.queue_limit);
         pacer.immediate_release = self.immediate_release;
+        pacer.pause_source = self.pause_source;
         pacer.queue_time_limit = self.queue_time_limit;
         pacer.queue_overflow = self.queue_overflow;
         pacer
@@ -339,6 +352,8 @@ pub struct PacerInterceptor {
     discarded_frame: HashMap<u32, u32>,
     /// Whether the application is told to pause (see "Pausing the source").
     paused: bool,
+    /// See [`PacerBuilder::with_source_pause`].
+    pause_source: bool,
     /// When the last pause began, plus [`PAUSE_GRACE`]: media written before it is what the
     /// source wrote before it could stop, drained rather than discarded, during the pause and
     /// after it (see "Pausing the source").
@@ -383,6 +398,7 @@ impl PacerInterceptor {
             repair_flows: HashSet::new(),
             discarded_frame: HashMap::new(),
             paused: false,
+            pause_source: true,
             drain_before: None,
             pauses: 0,
             duplicate_retransmissions: 0,
@@ -654,6 +670,7 @@ impl PacerInterceptor {
     fn update_pause(&mut self, now: Instant) -> bool {
         let expected = self.expected_queue_time();
         let change = match self.queue_time_limit {
+            _ if !self.pause_source => self.paused,
             Some(limit) if !self.paused => expected >= limit.mul_f64(PAUSE_AT),
             Some(limit) => expected <= limit.mul_f64(RESUME_AT),
             None => self.paused,
