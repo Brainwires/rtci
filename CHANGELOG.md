@@ -258,6 +258,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (and `receive_stats(ssrc)`); every packet a ULPFEC or FlexFEC encoder puts FEC into carries
   a `FecSent` mark. An application that drives a chain itself sees the carriers (empty RTCP
   packets with that attribute) on the read leg.
+- **data channel** (up-340, test only): `tests/data_channel_close_sibling_rtc2rtc.rs` holds the
+  reproduction of webrtc-rs/rtc#340 by @schiapellone. A channel closed by the receiver while
+  the peer still sends on it, beside a healthy channel, used to make the read of its stream
+  fail mid-pass and drop the messages already read from the other streams in that pass
+  (acknowledged, so lost for good). The fork had the fix without a test: b91196d7 (the read of
+  a closed stream ends its data, not the pass) and e9b19fa3 (a stream the application stopped
+  reading drops what arrives on it). No behaviour change.
+
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
   the payload type of `ulpfec` in the FEC session's m= section, `onelevelonly`) says that a
