@@ -470,8 +470,24 @@ async fn connect(
     let socket = new_socket(local, reuse_address)?;
     socket.bind(local)?;
     let stream = socket.connect(remote).await?;
+    // A connection whose two ends are the same address is the socket connected to itself, not
+    // to a peer: connecting from an ephemeral port to a loopback port nothing listens on, the
+    // system can pick that very port as the source, and TCP's simultaneous open (RFC 9293
+    // section 3.5) then "connects" the socket to itself. It is a failed connection (an ICE-TCP
+    // check toward a dead loopback candidate would otherwise succeed against its own echo).
+    if is_self_connection(stream.local_addr()?, stream.peer_addr()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("{remote}: the socket connected to itself"),
+        ));
+    }
     stream.set_nodelay(true)?;
     Ok(stream)
+}
+
+/// Whether a connection runs from an address to that same address.
+fn is_self_connection(local: SocketAddr, peer: SocketAddr) -> bool {
+    local == peer
 }
 
 async fn accept_loop(
@@ -797,5 +813,21 @@ mod dns {
                 )]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod self_connection_tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_is_to_itself_only_when_both_ends_are_the_same_address() {
+        let a: SocketAddr = "127.0.0.1:45149".parse().unwrap();
+        assert!(is_self_connection(a, a));
+        assert!(!is_self_connection(a, "127.0.0.1:45150".parse().unwrap()));
+        assert!(!is_self_connection(a, "127.0.0.2:45149".parse().unwrap()));
+        let v6: SocketAddr = "[::1]:45149".parse().unwrap();
+        assert!(is_self_connection(v6, v6));
+        assert!(!is_self_connection(v6, "[::1]:9".parse().unwrap()));
     }
 }

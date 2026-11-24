@@ -180,11 +180,13 @@ async fn framed_messages_cross_real_sockets_both_ways_and_the_connection_closes(
 #[tokio::test]
 async fn a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer() {
     let mut client = Side::new(StreamConfig::default());
-    // Find a free port and close it again: nothing listens there.
-    let closed = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
+    // A port held bound for the whole connect, never listening: a SYN to it is refused (RST)
+    // on Linux, macOS and Windows alike, and while it is bound no other socket on 127.0.0.1
+    // can be given it, so the client cannot pick it as its own source port and connect to
+    // itself (a port found free and closed again could be: seen on Linux).
+    let held = tokio::net::TcpSocket::new_v4().unwrap();
+    held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = held.local_addr().unwrap();
     let failed = client
         .table
         .connect(
@@ -210,6 +212,7 @@ async fn a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer() {
         "{:?}",
         client.notices
     );
+    drop(held);
 
     // A reset from one side is a reset on the other.
     let mut server = Side::new(StreamConfig::default());
@@ -268,4 +271,39 @@ async fn a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer() {
         "the server saw a reset: {:?}",
         server.notices
     );
+}
+
+/// A socket connected to itself is not a connection: a connect from 127.0.0.1:P to 127.0.0.1:P
+/// (simultaneous open with itself, RFC 9293 section 3.5: what Linux does when nothing listens
+/// on P) is reported as `ConnectFailed`, as the refusal other systems give is.
+#[tokio::test]
+async fn a_socket_connected_to_itself_is_a_failed_connection() {
+    let mut client = Side::new(StreamConfig::default());
+    for _ in 0..5 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        client.notices.clear();
+        let id = client
+            .table
+            .connect(addr, addr, Framing::Rfc4571, 0, false, None)
+            .unwrap();
+        for _ in 0..400 {
+            client.step(Duration::from_millis(10)).await;
+            if !client.notices.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                client.notices.first(),
+                Some(StreamNotice::ConnectFailed { id: failed, .. }) if *failed == id
+            ),
+            "{addr}: {:?}",
+            client.notices
+        );
+    }
 }

@@ -1061,6 +1061,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **stream-driver**: a TCP connection from a socket to itself is a failed connection
+  (`conf/flake-3-self-connect`). Connecting from an ephemeral port to a loopback port nothing
+  listens on, Linux can choose that very port as the source, and simultaneous open (RFC 9293
+  section 3.5) connects the socket to itself; the driver reported `Connected` (seen in
+  `a_connection_to_a_closed_port_fails_and_a_reset_reaches_the_peer`, `Connected { local:
+  127.0.0.1:45149 }` to 127.0.0.1:45149). Every stream the driver connects (ICE-TCP active and
+  simultaneous-open candidates, TURN and STUN over TCP and TLS) goes through one connect path,
+  which now closes such a socket and reports `ConnectFailed`. The test holds its closed port
+  bound (never listening) so no client can take it as its source port, and
+  `a_socket_connected_to_itself_is_a_failed_connection` connects 127.0.0.1:P to itself.
 - **stream-driver** (`conf/deps-1-hickory`, security): the optional `dns-records` feature
   takes hickory-resolver 0.26.2 or later instead of 0.25, whose hickory-proto 0.25.2 and
   hickory-resolver 0.25.2 carried 17 RustSec advisories. One is reachable from the driver's
