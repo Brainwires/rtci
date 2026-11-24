@@ -1029,6 +1029,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Test environment and documentation
 
+- **test-env** (`conf/ffi-mp-5`): the `audio pipeline` interop cell. Chromium decoded Rust's
+  Opus normally in train 13 round 5 (251 packets, 0 lost, NetEq emitting 5 s) but reported
+  `audioLevel` and `totalAudioEnergy` 0: the received track played through a muted `<audio>`
+  element, and Chromium hands a muted element's volume to libwebrtc as the remote source's
+  volume, which scales the decoded audio before those statistics are measured
+  (`WebRtcAudioRenderer::UpdateSourceVolume`, `ChannelReceive::GetAudioFrameWithInfo`). The
+  cell now plays it unmuted (`Interop.sink(stream, { muted: false })`). Firefox's packets
+  decoded on the Rust side to an RMS of 2.66e-6, what libopus's digital silence decodes to:
+  Firefox sent silence. The tone's AudioContext is now kept referenced and awaited
+  (`Interop.audioReady`), the cell measures the browser's own source (`sourceRms`) before it
+  judges Rust's decoding, and the interop peer reports what arrived (payload sizes and types,
+  the browser's RFC 6464 levels, the first payloads) and the encoder's bitrate; all of it is
+  the cell's `pipeline-diagnostics` annotation.
 - **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
   `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
   `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base
@@ -1141,6 +1154,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **ffi** (`conf/ffi-mp-5`): `rtc-ffi`'s `driven` and `c_loopback` tests declare
+  `required-features = ["driver"]`. The workspace's crypto-baseline, provider-matrix and
+  coverage jobs build with `--no-default-features`, where the library has no `rtc_driven_*` /
+  `rtc_mux_*` symbols, and `tests/driven.rs` did not link (`rust-lld: undefined symbol:
+  rtc_driven_call`); cargo now skips both tests there.
+- **ffi** (`conf/ffi-mp-5`): `c_loopback` compares the C program's output line by line. On
+  windows-latest the program exited 0 after printing its whole transcript, and the test failed
+  at `stdout.ends_with("ok\n")`: the MSVC C runtime writes `"\n"` as `"\r\n"` to a text-mode
+  stdout. The library was not at fault.
+- **audio** (`conf/ffi-mp-5`): opus-rs against the reference libopus, both ways
+  (`rtc-audio/src/codec/libopus.rs`, `opus_interop`): every packet one encodes decodes in the
+  other with the same final range-coder state (RFC 6716's conformance criterion), for opus-rs
+  from 16 to 510 kbit/s and libopus in its VoIP and audio modes with and without FEC. The send
+  pipeline at the congestion controller's share the interop peer reached (343.2 kbit/s, CELT,
+  ~860-byte packets) decodes in libopus with the tone's level, and libopus's digital silence
+  decodes in opus-rs to an RMS of 2.7e-6. A new `cargo.yml` job, `rtc-audio against libopus`,
+  runs these with the `libopus` feature (CMake; installed from PyPI where the runner has none).
+- **ci** (`conf/ffi-mp-5`): `audit.yml`'s whole-workspace advisory check and its licences /
+  bans / sources check pass `--workspace`, so they read every member's dependency graph (they
+  read the root package's alone, without `rtc-audio`, `rtc-devices` or `rtc-ffi`). The
+  library advisory check (`.github/deny-library.toml`) keeps the root package's graph: with
+  `--workspace` it reaches hickory-resolver 0.25 through `rtc-stream-driver`'s optional
+  `dns-records` feature and fails on its advisories, which are left to the owner.
 - **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
   no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's
   windows-latest ("TCP pairs were checked too"): the `stream_net` peers were built at
