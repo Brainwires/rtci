@@ -837,3 +837,47 @@ fn a_tcp_host_candidate_on_a_teredo_address_is_ranked_as_udp_tunnelled() -> Resu
     assert!(!is_teredo("2001:1::1".parse()?) && !is_teredo("192.0.2.1".parse()?));
     Ok(())
 }
+
+/// RFC 6544 section 4.5 and draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.4: a TCP host
+/// candidate whose address is an mDNS name is signalled with transport `tcp` (and its
+/// `tcptype`), and the line parses back as a TCP candidate, which resolves to a TCP address.
+#[test]
+fn test_tcp_host_candidate_under_an_mdns_name_is_signalled_as_tcp() -> Result<()> {
+    let name = "1f4712db-ea17-4bcf-a596-105139dfd8bf.local";
+    let candidate = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "tcp".to_owned(),
+            address: name.to_owned(),
+            port: 9,
+            component: 1,
+            ..Default::default()
+        },
+        tcp_type: TcpType::Passive,
+    }
+    .new_candidate_host()?;
+    assert!(
+        candidate.network_type().is_tcp(),
+        "{:?}",
+        candidate.network_type()
+    );
+    let line = candidate.marshal();
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(fields[2], "tcp", "{line}");
+    assert_eq!(fields[4], name, "{line}");
+    assert!(line.ends_with("typ host tcptype passive"), "{line}");
+
+    let mut parsed = unmarshal_candidate(&line)?;
+    assert!(
+        parsed.network_type().is_tcp(),
+        "{:?}",
+        parsed.network_type()
+    );
+    assert_eq!(parsed.tcp_type(), TcpType::Passive);
+    assert_eq!(parsed.marshal(), line);
+    parsed.set_ip(&"192.168.1.7".parse().unwrap())?;
+    assert_eq!(parsed.network_type(), NetworkType::Tcp4);
+
+    let udp = unmarshal_candidate(&format!("1 1 udp 2130706431 {name} 5000 typ host"))?;
+    assert_eq!(udp.network_type(), NetworkType::Udp4, "a UDP one stays UDP");
+    Ok(())
+}
