@@ -673,7 +673,11 @@ impl Peer {
             force_key: true,
             keyframes_sent: Vec::new(),
             video_receiver: None,
-            builder: SampleBuilder::new(256, Vp8Packet::default(), 90_000),
+            builder: match std::env::var("RTC_CAP_GAP_WAIT_MS").ok().and_then(|v| v.parse().ok()) {
+                Some(ms) => SampleBuilder::new(256, Vp8Packet::default(), 90_000)
+                    .with_max_gap_wait(Duration::from_millis(ms)),
+                None => SampleBuilder::new(256, Vp8Packet::default(), 90_000),
+            },
             decoder: ModelDecoder::default(),
             usable_at: Vec::new(),
             usable_lag: Vec::new(),
@@ -1046,6 +1050,10 @@ impl World {
                     }
                     // A decoder without its reference asks for a key frame, at most once a
                     // second (ParolNet's receive path).
+                    let gap_given_up = peer.builder.take_key_frame_request();
+                    if gap_given_up {
+                        peer.decoder.last = None;
+                    }
                     if peer.decoder.last.is_none()
                         && peer
                             .last_keyframe_request
