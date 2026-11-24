@@ -960,6 +960,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **interceptors** (RFC 3550 section 6.4.1, RFC 8083 section 4.3,
+  `conf/gcc-4-rr-pacer-drops`): media the pacer discarded (`PacerQueueOverflow::Drop`, the
+  default) was taken for path loss. Those packets were numbered by the application's
+  packetizer before the pacer dropped them, so the receiver counts them as lost in its receiver
+  reports, and two interceptors wire-ward of the pacer read those reports: the congestion
+  controller gave the fraction lost to the loss-based controller while there is no per-packet
+  feedback (`Gcc` backs off on it), and the circuit breaker averaged it, with the cumulative
+  count, into the congestion breaker's loss event rate (a sender above the target could be
+  ceased for its own discards). Each now keeps, per local SSRC, the sequence numbers it never
+  saw leave (the gaps in what it wrote toward the wire; a number that leaves later, a
+  retransmission without RTX, is sent after all; RTX and FEC SSRCs are their own sequence
+  spaces), and takes them out of the loss of the interval a report covers (from the previous
+  report's extended highest sequence number to this one's): the loss less the numbers never
+  sent, over the packets that left. Bounded: what a report covered is forgotten, at most 8192
+  numbers are kept per stream, and a jump of 3000 or more (RFC 3550 A.1's MAX_DROPOUT) is not
+  recorded. TWCC and RFC 8888 feedback, which never name a packet that did not leave, are
+  unchanged
+  (`sequence_numbers_the_pacer_discarded_are_not_loss_to_the_loss_based_controller`,
+  `sequence_numbers_discarded_across_the_wrap_are_not_loss_to_the_loss_based_controller`,
+  `gcc_does_not_back_off_on_reported_loss_of_numbers_the_pacer_discarded`,
+  `reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker`,
+  `reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker`,
+  and the `never_sent` unit tests).
+
 - **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
   dropped the local candidates (a new DTLS association on new ports), the side that selected
   the new pair first dropped the packets the peer still sent on the previous pair before its

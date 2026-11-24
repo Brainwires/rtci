@@ -21,6 +21,7 @@
 //! before the interval that tripped it has passed again.
 
 use crate::Interceptor;
+use crate::never_sent::NeverSent;
 use crate::stream_info::StreamInfo;
 use crate::twcc::flow_ssrcs;
 use crate::{Packet, TaggedPacket};
@@ -404,6 +405,9 @@ struct Flow {
     /// The previous report's cumulative number lost and extended highest sequence number,
     /// as reported (for the net loss of the next interval).
     previous_report: Option<(i32, u32)>,
+    /// The sequence numbers the flow jumped over on its way out: the packets the pacer
+    /// discarded, which the receiver counts as lost.
+    never_sent: NeverSent,
     /// Consecutive reports that showed no progress while media was being sent.
     stalled_reports: u32,
     media_timeout: u32,
@@ -432,6 +436,7 @@ impl Flow {
             receiver_interval: None,
             highest_sequence: None,
             previous_report: None,
+            never_sent: NeverSent::default(),
             stalled_reports: 0,
             media_timeout: 0,
             losses: VecDeque::new(),
@@ -467,8 +472,16 @@ impl Flow {
         (packets > 0).then(|| bytes as f64 / packets as f64)
     }
 
-    fn on_departure(&mut self, now: Instant, timestamp: u32, size: usize, frames_kept: usize) {
+    fn on_departure(
+        &mut self,
+        now: Instant,
+        sequence_number: u16,
+        timestamp: u32,
+        size: usize,
+        frames_kept: usize,
+    ) {
         self.last_departure = Some(now);
+        self.never_sent.on_sent(sequence_number);
         self.packets_since_report += 1;
         self.bytes_since_report += size as u64;
 
@@ -756,16 +769,29 @@ impl CircuitBreakerInterceptor {
 
         // The interval's net loss by the cumulative count (RFC 3550 6.4.1, A.3).
         let cumulative = report.cumulative_lost();
+        // The receiver counts every sequence number it did not receive as lost, the ones the
+        // pacer discarded before they left included. Those are not the path's loss: over the
+        // interval the report covers they come out of the count, and out of the packets
+        // expected, and the fraction lost is that of the packets that left.
+        let interval = flow
+            .never_sent
+            .on_report(report.last_sequence_number, cumulative)
+            .filter(|interval| interval.never_sent() > 0);
+        let never_sent = interval.map_or(0, |interval| interval.never_sent());
         let (net_lost, net_expected) = match flow
             .previous_report
             .replace((cumulative, report.last_sequence_number))
         {
             Some((previous_lost, previous_highest)) => (
-                i64::from(cumulative) - i64::from(previous_lost),
-                i64::from(report.last_sequence_number.wrapping_sub(previous_highest) as i32),
+                i64::from(cumulative) - i64::from(previous_lost) - never_sent,
+                i64::from(report.last_sequence_number.wrapping_sub(previous_highest) as i32)
+                    - never_sent,
             ),
             None => (0, 0),
         };
+        let fraction_lost = interval.map_or(f64::from(report.fraction_lost) / 256.0, |interval| {
+            interval.fraction_lost()
+        });
 
         // --- Congestion (section 4.3) ---
         let cb_tdr = config.t_rr_interval.map_or(tdr, |t_rr| t_rr.max(tdr));
@@ -793,7 +819,7 @@ impl CircuitBreakerInterceptor {
             };
             if enough {
                 flow.losses.push_back(LossSample {
-                    fraction_lost: f64::from(report.fraction_lost) / 256.0,
+                    fraction_lost,
                     duration,
                     bytes_sent: sent_bytes,
                     packets_sent: sent_packets,
@@ -949,6 +975,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for CircuitBreakerInterceptor {
                     }
                     flow.on_departure(
                         msg.now,
+                        rtp_packet.header.sequence_number,
                         rtp_packet.header.timestamp,
                         rtp_packet.marshal_size(),
                         frames_kept,

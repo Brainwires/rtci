@@ -563,6 +563,79 @@ fn reordering_that_the_cumulative_count_takes_back_does_not_trip_the_congestion_
     );
 }
 
+/// Six seconds of 500 sequence numbers a second on VIDEO from `first + 1`, each second reported
+/// with 100 of them lost (51/256, the cumulative count 100 up) and a 100 ms round trip. With
+/// `discards`, numbers 201 to 300 of each second are numbered and never leave, as after a
+/// pacer discard application-ward of the breaker (`PacerQueueOverflow::Drop`): taken as path
+/// loss, the 400 packets that leave (480 kB/s) are more than ten times the 40 kB/s TCP would
+/// get at the 13.3% the cumulative count shows over CB_INTERVAL.
+fn reports_of_loss_that_was_never_sent(first: u16, discards: bool) -> Option<CircuitBreakerState> {
+    let mut harness = Harness::new(CircuitBreakerBuilder::new());
+    harness.handle.report_round_trip_time(ms(100));
+    harness.sequence = first;
+    let mut highest = u32::from(first);
+    for second in 0..6u64 {
+        let start = ms(second * 1000);
+        if discards {
+            harness.send_for(start, start + ms(500), VIDEO, 400);
+            harness.sequence = harness.sequence.wrapping_add(100);
+            harness.send_for(start + ms(500), start + ms(1000), VIDEO, 400);
+        } else {
+            harness.send_for(start, start + ms(1000), VIDEO, 500);
+        }
+        highest += 500;
+        let lost = (second as i32 + 1) * 100;
+        harness.report_counts(start + ms(999), VIDEO, 51, highest, lost);
+    }
+    harness.handle.state(VIDEO)
+}
+
+/// Section 4.3 takes the loss from the receiver's reports, and the receiver counts every
+/// sequence number it did not receive as lost (RFC 3550 section 6.4.1), the ones the pacer
+/// discarded before they left included. The breaker sees exactly the packets that left: over
+/// the interval a report covers, the numbers it never saw leave come out of the loss and out
+/// of the packets expected. Reports whose loss is all such numbers do not trip the congestion
+/// breaker; the same reports for a stream that left whole do.
+#[test]
+fn reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker() {
+    assert_eq!(
+        Some(CircuitBreakerState::Running),
+        reports_of_loss_that_was_never_sent(0, true)
+    );
+    assert!(
+        matches!(
+            reports_of_loss_that_was_never_sent(0, false),
+            Some(CircuitBreakerState::Ceased {
+                reason: CircuitBreakerReason::Congestion,
+                ..
+            })
+        ),
+        "the same reports for a stream that left whole"
+    );
+}
+
+/// The same with the numbers never sent across the wrap of the 16-bit sequence number: the
+/// first second's 65531 to 65535 and 0 to 94, reported against an extended highest sequence
+/// number one cycle on.
+#[test]
+fn reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker()
+ {
+    assert_eq!(
+        Some(CircuitBreakerState::Running),
+        reports_of_loss_that_was_never_sent(65_330, true)
+    );
+    assert!(
+        matches!(
+            reports_of_loss_that_was_never_sent(65_330, false),
+            Some(CircuitBreakerState::Ceased {
+                reason: CircuitBreakerReason::Congestion,
+                ..
+            })
+        ),
+        "the same reports for a stream that left whole"
+    );
+}
+
 /// RFC 8083 section 4.3 compares the sending rate with ten times X = s / (Tr * sqrt(2p/3)).
 /// By default s is the mean size of the packets sent over the reporting intervals the rate is
 /// measured over (bytes sent / packets sent there), so both describe the same packets. A
