@@ -1606,7 +1606,16 @@ fn a_sender_ignoring_the_target_has_whole_frames_discarded_and_is_asked_for_key_
     println!("default chain, target ignored, seed 1: {outcome:?}");
     let announced: usize = outcome.pacer_discards.iter().map(|d| d.2).sum();
     assert!(announced > 0, "{outcome:?}");
-    assert_eq!(outcome.pacer_dropped_late, announced, "{outcome:?}");
+    // Every packet announced never left, and every packet that never left was announced or
+    // still waited in the pacer when the run ended (at most its 2 s of queue). This source
+    // writes 1.4 Mbit/s from the first frame, so the discards begin in the first second,
+    // before there is an estimate.
+    assert!(announced <= outcome.pacer_dropped, "{outcome:?}");
+    assert!(
+        outcome.pacer_dropped - announced <= 300,
+        "{} packets never left and were not announced: {outcome:?}",
+        outcome.pacer_dropped - announced
+    );
     let with_frames = outcome.pacer_discards.iter().filter(|d| d.1 > 0).count();
     assert!(
         outcome.key_requests_received as usize >= 2 + with_frames,
