@@ -36,7 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/circuit_breaker_reordering_rtc2rtc.rs::the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps`
   and the sweep, hosted run 45409132256): a talking call over a jittered link is ceased with
   section 3's form in 14 of 24 cells (5 % loss: after 3.8 to 5.0 s), with the default in none.
-  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`.
+  Audit: RFC8083-3-3 is `setting` (measured); it was `partial`. Returned in
+  `conf/ccrows-8r-cb-last-frames-test` after train 24 took it out: with the RTP/RTCP family
+  (rtp-1, -2, -3, -5, -6, -8) its test, then one seed's first 15 s, saw no trip. The breaker
+  read every report as before (each block matched to the flow, same report rate); the link's
+  seeded loss is drawn per SRTP and SRTCP datagram, so the changed RTCP moved where the losses
+  fell. The test now states the measurement's requirement: a 60 s call, seeds 11, 1 and 2 at
+  40 and 100 ms jitter, ceased with section 3's s every time, never with the default (on the
+  train's tree, seeds 1 to 10: ceased after 1.5 to 12.6 s, hosted run 45455917556).
 
 - **ice**: a TCP host candidate on a Teredo address (2001::/32) is ranked as the UDP-tunnelled
   candidate it is (RFC 6544 section 5.4): type preference 75 (section 4.2,

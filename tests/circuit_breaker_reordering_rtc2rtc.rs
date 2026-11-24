@@ -843,48 +843,58 @@ fn a_flow_far_above_the_tcp_rate_over_a_lossy_link_is_ceased() -> Result<()> {
 /// the last four frames are often silence, ten times TCP for 23-byte packets falls under the
 /// talkspurts' rate, and the breaker ceases the call; the default keeps it running (the
 /// congestion controller's pacer holds the flow to its target, nowhere near ten times TCP).
-/// Measured (the sweep, speech, 60 s each, hosted run 45409132256): section 3's s ceased the
-/// call in 14 of 24 cells (jitter 0 / 10 / 40 / 100 ms x loss 0 / 1 / 2 / 5 / 20 / 30 %): at 1 %
-/// with 100 ms after 32.7 s, at 2 % with 40 and 100 ms after 10.7 and 9.8 s, at 5 % after 5.0
-/// and 3.8 s, at 20 and 30 % at every jitter after 1.5 to 13.5 s; the default in none.
+///
+/// The trip needs a report to come while the last four frames are silence and the loss over
+/// CB_INTERVAL is high (about 7 % or more at 5 % loss), so when it comes depends on where the
+/// seeded loss falls; the link draws its random numbers for every SRTP and SRTCP datagram, so
+/// any change to what RTCP is sent, or when, moves the losses (train 24: the RTP/RTCP family
+/// moved seed 11's first trip past 15 s, the breaker reading every report as before). The
+/// requirement is the measurement's: over a 60 s call, for several seeds, section 3's s
+/// ceases the call and the default never does. Measured on that tree, seeds 1 to 10 x 40 / 100
+/// ms (hosted run 45455917556): ceased after 1.5 to 12.6 s every time, the default never;
+/// before the family 1.5 to 28.8 s (45455924356). The sweep (speech, 60 s each, hosted run
+/// 45409132256): section 3's s ceased the call in 14 of 24 cells (jitter 0 / 10 / 40 / 100 ms x
+/// loss 0 / 1 / 2 / 5 / 20 / 30 %), the default in none.
 #[test]
 fn the_last_frames_packet_size_ceases_a_talking_call_the_default_keeps() -> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
+    let loss = 0.05;
     for jitter in [40, 100] {
-        let loss = 0.05;
-        let default = run(
-            RtpCodecKind::Audio,
-            Shape::Talkspurts,
-            Link::jittered(jitter, loss),
-            15,
-            11,
-        )?;
-        LAST_FRAMES.with(|l| l.set(true));
-        let last_frames = run(
-            RtpCodecKind::Audio,
-            Shape::Talkspurts,
-            Link::jittered(jitter, loss),
-            15,
-            11,
-        );
-        LAST_FRAMES.with(|l| l.set(false));
-        let last_frames = last_frames?;
-        println!(
-            "{jitter} ms, {:.0} % loss: default ceased {:?} at {:?}; last 4 * G frames ceased {:?} at {:?}",
-            loss * 100.0,
-            default.ceased,
-            default.ceased_at,
-            last_frames.ceased,
-            last_frames.ceased_at
-        );
-        assert!(default.ceased.is_empty(), "{default:?}");
-        assert!(
-            last_frames
-                .ceased
-                .iter()
-                .any(|(_, reason)| reason == "Congestion"),
-            "{last_frames:?}"
-        );
+        for seed in [11, 1, 2] {
+            let default = run(
+                RtpCodecKind::Audio,
+                Shape::Talkspurts,
+                Link::jittered(jitter, loss),
+                60,
+                seed,
+            )?;
+            LAST_FRAMES.with(|l| l.set(true));
+            let last_frames = run(
+                RtpCodecKind::Audio,
+                Shape::Talkspurts,
+                Link::jittered(jitter, loss),
+                60,
+                seed,
+            );
+            LAST_FRAMES.with(|l| l.set(false));
+            let last_frames = last_frames?;
+            println!(
+                "{jitter} ms, {:.0} % loss, seed {seed}: default ceased {:?} at {:?}; last 4 * G frames ceased {:?} at {:?}",
+                loss * 100.0,
+                default.ceased,
+                default.ceased_at,
+                last_frames.ceased,
+                last_frames.ceased_at
+            );
+            assert!(default.ceased.is_empty(), "seed {seed}: {default:?}");
+            assert!(
+                last_frames
+                    .ceased
+                    .iter()
+                    .any(|(_, reason)| reason == "Congestion"),
+                "seed {seed}: {last_frames:?}"
+            );
+        }
     }
     Ok(())
 }
