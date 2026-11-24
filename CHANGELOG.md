@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
+  9260 8.1: "report the failure to the upper layer and optionally report back all
+  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
+  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
+  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
+  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
+  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
+- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
+  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
+  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
+  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
+  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
+  the outbound queues of an ended association are emptied into the undelivered list.
 - **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
   what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
   the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
@@ -18,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
   (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
   test.
+
 ### Changed
 
 - **conformance** (sctp-20): nine RFC 9260 rows the code had already caught up with are closed
