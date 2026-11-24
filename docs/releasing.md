@@ -117,23 +117,12 @@ What a tag starts:
 No workflow builds or uploads binaries. `semver.yml` compares later changes with the latest
 tag (`cargo semver-checks --baseline-rev`).
 
-### Known issues to carry into the 0.1.0 release notes
+### History
 
-The known issues of `v0.22.0+brainwires.6`'s release page, and where each stands on `master`
-(the CHANGELOG's `[Unreleased]` section as of 2026-11-23). Carry the open ones into the 0.1.0
-release text; list the fixed ones under its summary as fixed since brainwires.6.
-
-| Known issue (brainwires.6) | State | Where |
-|---|---|---|
-| Pacer: no time bound on its queue; at 4096 packets it refused numbered packets, seen as loss | fixed | `conf/pacer-1-queue-time` (queue time bounded at 2 s), `conf/pacer-2-combined` (media over the target is dropped by default, `QueueOverflow::Drop`; libwebrtc's `Drain` is a setting) |
-| RTP circuit breaker: with RTCP reports more frequent than media frames, no verdict for video flows | fixed | `conf/pacer-1-queue-time` (92ad1e7a): the congestion breaker's "at least one RTP packet every max(Tdr, Tr)" is the sender's rate, not each report's (RFC 8083 section 4.3; CHANGELOG entry inside the pacer entry); `conf/cb-1-false-trip` and `conf/cb-2-breaker-packet-size` fixed the false trips on reordering and speech |
-| Congestion control: on a reordering, lossless path the estimate settles well below capacity | partly fixed | the loss-based half (`conf/pacer-1-queue-time`: a packet only overtaken is not a loss); the delay-based grouping is a proposal in `docs/gcc-reordering.md`, not changed |
-| Simulcast receive: SSRCs declared in a section with `a=rid`, packets without RID or MID, discarded | fixed | `conf/demux-1-declared-ssrc-in-rid-section` (RFC9143-9.2-7) |
-| Call quality after a capacity drop (regression from brainwires.5): video freezes for seconds | fixed | `conf/gcc-1-cap-recovery` (the NACK generator no longer gives up after ten requests or 2 s), and the NACK responder's retransmissions held to the congestion controller's target; `tests/capacity_cap_video_rtc2rtc.rs` |
-| STUN SOFTWARE: no peer-connection setting to stop it | fixed | `SettingEngineBuilder::with_ice_software` |
-| Clock-rate switch on one SSRC: sender reports used the previous rate | fixed | `conf/media-25-payload-rows` (per-payload-type rates, RFC 7160 3.2 and 4.2) |
-
-Add to the 0.1.0 text the rename: the migration table of `docs/rename.md` ("For dependents").
+The known issues on `v0.22.0+brainwires.6`'s release page were carried into 0.1.0: the
+CHANGELOG's `[0.1.0]` summary lists the ones fixed since brainwires.6 and its "Known limits" the
+ones still open, and the 0.1.0 release text carries the migration table of `docs/rename.md`
+("For dependents"). Later releases take their open issues from the CHANGELOG's known limits.
 
 ## Dry runs
 
