@@ -408,3 +408,133 @@ fn test_external_signing_key_is_invoked_for_signing() -> Result<()> {
 
     Ok(())
 }
+
+/// An RSA-2048 certificate (its key `dtls13/testdata/rsa-2048.pkcs8.pem`) and an
+/// RSASSA-PKCS1-v1_5 SHA-256 signature over `message` made with the raw private operation
+/// over the EMSA-PKCS1-v1_5 encoding whose DigestInfo starts `digest_info_prefix` (RFC 8017
+/// section 9.2), so that the test chooses the DigestInfo form the providers' signers do not.
+fn rsa_certificate_and_raw_signature(
+    message: &[u8],
+    digest_info_prefix: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    use der_parser::num_bigint::BigUint;
+    let key_pair = rcgen::KeyPair::from_pem(include_str!("../dtls13/testdata/rsa-2048.pkcs8.pem"))
+        .map_err(|e| Error::Other(e.to_string()))?;
+    let certificate = rcgen::CertificateParams::new(vec!["rsa-digest-info".to_owned()])
+        .map_err(|e| Error::Other(e.to_string()))?
+        .self_signed(&key_pair)
+        .map_err(|e| Error::Other(e.to_string()))?;
+    // PKCS#8 PrivateKeyInfo { version, algorithm, OCTET STRING RSAPrivateKey { version, n, e,
+    // d, ... } } (RFC 5208, RFC 8017 appendix A.1.2).
+    let pkcs8 = key_pair.serialize_der();
+    let bad = |e: der_parser::error::BerError| Error::Other(e.to_string());
+    let (_, info) = der_parser::parse_der(&pkcs8).map_err(|e| Error::Other(e.to_string()))?;
+    let private_key = info.as_sequence().map_err(bad)?[2]
+        .as_slice()
+        .map_err(bad)?;
+    let (_, rsa) = der_parser::parse_der(private_key).map_err(|e| Error::Other(e.to_string()))?;
+    let rsa = rsa.as_sequence().map_err(bad)?;
+    let n = rsa[1].as_biguint().map_err(bad)?;
+    let d = rsa[3].as_biguint().map_err(bad)?;
+    let k = n.bits().div_ceil(8) as usize;
+    let provider = crypto::default_provider().map_err(crypto_error)?;
+    let digest = provider
+        .crypto()
+        .hash(crypto::HashAlgorithm::Sha256, message)
+        .map_err(crypto_error)?;
+    let t_len = digest_info_prefix.len() + digest.len();
+    let mut em = vec![0x00, 0x01];
+    em.resize(k - t_len - 1, 0xff);
+    em.push(0x00);
+    em.extend_from_slice(digest_info_prefix);
+    em.extend_from_slice(&digest);
+    let s = BigUint::from_bytes_be(&em).modpow(&d, &n).to_bytes_be();
+    let mut signature = vec![0u8; k - s.len()];
+    signature.extend_from_slice(&s);
+    Ok((certificate.der().to_vec(), signature))
+}
+
+/// The SHA-256 DigestInfo prefixes: with NULL parameters (what every signer writes), and
+/// without parameters.
+const SHA256_DIGEST_INFO_NULL: &[u8] = &[
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
+];
+const SHA256_DIGEST_INFO_ABSENT: &[u8] = &[
+    0x30, 0x2f, 0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x04,
+    0x20,
+];
+
+/// RFC 5246 section 4.7: "the DigestInfo.AlgorithmIdentifier.parameters field MUST be NULL,
+/// but implementations MUST accept both without parameters and with NULL parameters." A
+/// ServerKeyExchange signature in either form verifies; a changed signature or message, and a
+/// DigestInfo of another hash, does not.
+#[test]
+fn rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted() -> Result<()> {
+    let provider = crypto::default_provider().map_err(crypto_error)?;
+    let algorithm = SignatureHashAlgorithm {
+        hash: HashAlgorithm::Sha256,
+        signature: SignatureAlgorithm::Rsa,
+    };
+    let message = b"server key exchange params";
+    for (form, prefix) in [
+        ("NULL parameters", SHA256_DIGEST_INFO_NULL),
+        ("no parameters", SHA256_DIGEST_INFO_ABSENT),
+    ] {
+        let (certificate, signature) = rsa_certificate_and_raw_signature(message, prefix)?;
+        let raw_certificates = vec![certificate];
+        verify_key_signature(
+            provider.crypto(),
+            message,
+            &algorithm,
+            &signature,
+            &raw_certificates,
+            false,
+        )
+        .unwrap_or_else(|e| panic!("{form}: {e}"));
+        assert!(
+            verify_key_signature(
+                provider.crypto(),
+                b"another message",
+                &algorithm,
+                &signature,
+                &raw_certificates,
+                false,
+            )
+            .is_err(),
+            "{form}: another message"
+        );
+        let mut changed = signature.clone();
+        changed[100] ^= 1;
+        assert!(
+            verify_key_signature(
+                provider.crypto(),
+                message,
+                &algorithm,
+                &changed,
+                &raw_certificates,
+                false,
+            )
+            .is_err(),
+            "{form}: a changed signature"
+        );
+    }
+    // The DigestInfo names SHA-256: as a SHA-384 signature it is refused in both forms.
+    let (certificate, signature) =
+        rsa_certificate_and_raw_signature(message, SHA256_DIGEST_INFO_ABSENT)?;
+    assert!(
+        verify_key_signature(
+            provider.crypto(),
+            message,
+            &SignatureHashAlgorithm {
+                hash: HashAlgorithm::Sha384,
+                signature: SignatureAlgorithm::Rsa,
+            },
+            &signature,
+            &[certificate],
+            false,
+        )
+        .is_err()
+    );
+    Ok(())
+}

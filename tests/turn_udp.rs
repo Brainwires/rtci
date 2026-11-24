@@ -62,6 +62,11 @@ struct Server {
     requests: Vec<(SocketAddr, Message)>,
     /// ChannelData the engine sent: (to, data).
     channel_data: Vec<(SocketAddr, Vec<u8>)>,
+    /// The engine's base each of `requests` came from.
+    sources: Vec<SocketAddr>,
+    /// Each base gets an allocation on a relayed address of its own: the relayed port is
+    /// `RELAYED`'s plus the base's port less 4000 (`HOST`'s).
+    relay_per_base: bool,
     /// Addresses whose requests are held unanswered until `release`.
     silent: HashSet<SocketAddr>,
     held: Vec<(SocketAddr, SocketAddr, Message)>,
@@ -82,6 +87,8 @@ impl Server {
             key,
             open: false,
             requests: vec![],
+            sources: vec![],
+            relay_per_base: false,
             channel_data: vec![],
             silent: HashSet::new(),
             held: vec![],
@@ -133,7 +140,10 @@ impl Server {
         }
         let attrs: Vec<Box<dyn Setter>> = match request.typ.method {
             METHOD_ALLOCATE => {
-                let relay = a(if to == a(SERVER6) { RELAYED6 } else { RELAYED });
+                let mut relay = a(if to == a(SERVER6) { RELAYED6 } else { RELAYED });
+                if self.relay_per_base {
+                    relay.set_port(relay.port() + from.port().saturating_sub(4000));
+                }
                 vec![
                     Box::new(RelayedAddress {
                         ip: relay.ip(),
@@ -165,6 +175,7 @@ impl Server {
         let mut m = Message::new();
         m.unmarshal_binary(data)?;
         self.requests.push((to, m.clone()));
+        self.sources.push(from);
         if m.typ.class != CLASS_REQUEST {
             return Ok(());
         }
@@ -769,6 +780,76 @@ fn an_allocation_the_losing_family_made_is_deleted_with_lifetime_zero() -> Resul
     assert!(
         relayed[0].0.contains("50000"),
         "the IPv4 allocation is kept"
+    );
+    Ok(())
+}
+
+/// RFC 8842 section 5.1 with the engine's TURN client (`RelayGathering::Engine`, the
+/// default): "the offerer MUST allocate a new 3-tuple for the offer" of a new DTLS
+/// association, the relayed one included. `renew_dtls_association` and the offer that asks
+/// for the new association: the engine deletes its allocation (RFC 8656 section 8: a Refresh
+/// with a LIFETIME of 0, from the base it was made from) when the offer is applied, and once
+/// the application gathers on a new port (the previous one is refused for the new
+/// association) it allocates again from that base and announces the relayed candidate of the
+/// new allocation, on its new relayed address.
+#[test]
+fn a_new_dtls_association_deletes_the_engine_allocation_and_allocates_again() -> Result<()> {
+    let mut h = Harness::new(&format!("turn:{SERVER}"))?;
+    h.server.relay_per_base = true;
+    h.add_host(HOST)?;
+    h.run(h.now + Duration::from_secs(5))?;
+    let relayed = h.relayed();
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert!(
+        relayed[0]
+            .0
+            .contains("192.0.2.20 50000 typ relay raddr 10.0.0.1 rport 4000"),
+        "{relayed:?}"
+    );
+    let from_base = |h: &Harness, method, base: &str| {
+        h.server
+            .requests
+            .iter()
+            .zip(&h.server.sources)
+            .filter(|((_, m), from)| {
+                m.typ.method == method && m.typ.class == CLASS_REQUEST && **from == a(base)
+            })
+            .map(|((_, m), _)| m.clone())
+            .collect::<Vec<Message>>()
+    };
+    let deleted = |h: &Harness| {
+        from_base(h, METHOD_REFRESH, HOST).iter().any(|m| {
+            let mut lifetime = Lifetime::default();
+            lifetime.get_from(m).is_ok() && lifetime.0 == Duration::ZERO
+        })
+    };
+    assert!(!deleted(&h), "the allocation is in use");
+
+    h.pc.renew_dtls_association();
+    let offer = h.pc.create_offer(None)?;
+    h.pc.set_local_description(h.now, offer)?;
+    h.run(h.now + Duration::from_secs(1))?;
+    assert!(deleted(&h), "the previous allocation is deleted");
+
+    assert!(
+        h.add_host(HOST).is_err(),
+        "the previous base is refused for the new association"
+    );
+    let new_host = "10.0.0.1:4001";
+    h.add_host(new_host)?;
+    h.run(h.now + Duration::from_secs(5))?;
+    let allocates = from_base(&h, METHOD_ALLOCATE, new_host);
+    assert!(
+        allocates.iter().any(|m| m.contains(ATTR_MESSAGE_INTEGRITY)),
+        "a new allocation from the new base"
+    );
+    let relayed = h.relayed();
+    assert_eq!(relayed.len(), 2, "{relayed:?}");
+    assert!(
+        relayed[1]
+            .0
+            .contains("192.0.2.20 50001 typ relay raddr 10.0.0.1 rport 4001"),
+        "the new allocation's relayed address: {relayed:?}"
     );
     Ok(())
 }

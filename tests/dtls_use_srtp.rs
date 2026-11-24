@@ -142,6 +142,8 @@ fn media_added_to_a_data_channel_session_gets_an_association_with_use_srtp() -> 
                 Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
             )?;
             let (offer, answer) = world.exchange(offering)?;
+            // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+            assert!(world.regather()?, "{what}: new candidates");
             // The port is the default candidate's once candidates exist (RFC 9429 section
             // 5.2.2), 9 before: only the section matters here.
             assert!(

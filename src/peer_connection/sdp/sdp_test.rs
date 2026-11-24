@@ -103,6 +103,7 @@ fn params(
         ignore_rid_pause_for_recv: false,
         write_ssrc_attributes_for_simulcast: false,
         ice_pacing: None,
+        ice_options_in_media_sections: false,
         ls_groups: vec![],
         selected_destination: None,
         remote_candidates: vec![],

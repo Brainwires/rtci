@@ -406,6 +406,62 @@ Each claim above, with its specification section, where it is implemented and th
 [docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
 I-DATA, a TURN server and others).
 
+## Behaviour profiles
+
+The defaults follow the RFCs, MUST and SHOULD alike, except where a named browser or deployed peer cannot
+interoperate with the RFC form. Every place where the engine and an RFC, or the engine and libwebrtc (Chrome), choose
+differently is a setting, and a `BehaviourProfile` sets all of them in one call:
+
+```rust,no_run
+use rtc::interceptor::Registry;
+use rtc::peer_connection::configuration::BehaviourProfile;
+use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Chosen at run time, here by name ("rfc", "chrome", "strict-rfc", "performance"), or
+    // written as BehaviourProfile::Chrome.
+    let profile = BehaviourProfile::from_name("chrome").unwrap_or_default();
+    let setting_engine = SettingEngineBuilder::new()
+        .with_behaviour_profile(profile)
+        // A setting given after the profile overrides it.
+        .with_sctp_message_size_limit_without_interleaving(true)
+        .build();
+    let mut media_engine = MediaEngine::for_profile(profile);
+    media_engine.register_default_codecs()?;
+    // The interceptors take the media engine's profile.
+    let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+    let _ = (setting_engine, registry);
+    Ok(())
+}
+```
+
+- `Rfc`: the engine's defaults, unchanged: the RFC form, and the interoperable one only where a named browser or
+  deployed peer cannot take the RFC's.
+- `Chrome`: libwebrtc's choice wherever both do a thing and choose differently (a timer, an order, a form on the wire,
+  a lenient or strict acceptance rule). Capabilities the engine has and Chrome lacks stay on (SCTP interleaving,
+  RFC 8888 feedback, FlexFEC, ...), so its offers are a superset of Chrome's.
+- `StrictRfc`: the RFC form even where the default is the interoperable one; for conformance testing, it **does not
+  interoperate with browsers**.
+- `Performance`: the defaults, with each behaviour where an RFC permits a cheaper form that does the same thing set to
+  it (RTCP `T_rr_interval` 1 s, congestion control feedback and reports inside RFC 3550's 5%), each value with its
+  measured saving and cost. It never turns a capability off or leaves what the RFCs permit.
+
+**At run time**, `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
+`DefaultInterceptorOptions::for_profile` select a profile for one peer connection; `BehaviourProfile::from_name` reads
+one from configuration. **At build time**, two cargo features of `rtc` change `BehaviourProfile::default()`, and with it
+every `Default` / `new()` of those objects: `chrome-defaults` makes it `Chrome`, `performance-defaults` makes it
+`Performance`. With both on, `chrome-defaults` wins and the build prints a deprecation warning naming both.
+**Cargo unifies features: one crate of a build that turns a feature on changes the defaults of every user of `rtc` in
+that build.** Prefer the explicit call; `BehaviourProfile::compiled_default()` says which default a build has.
+
+[docs/behaviour-profiles.md](docs/behaviour-profiles.md), generated from the table in the code and checked by CI, lists
+every governed behaviour: the setting, the clause, its value in each profile and the source of each Chrome value
+(observed in the recorded Chromium descriptions and the browser matrix, or read in libwebrtc's source at a pinned
+revision, with the file and line); the settings no profile changes, with the reason; and what Chrome does that the
+engine cannot express.
+
 ## Examples
 
 The repository has examples for the common cases (they are not part of the published crate):

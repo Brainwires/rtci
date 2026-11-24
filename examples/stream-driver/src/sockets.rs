@@ -67,20 +67,47 @@ fn exhausted(range: PortRange) -> io::Error {
     )
 }
 
-/// A UDP socket on `ip`, on a free port of `range`.
+/// The first of `ports` that `bind` succeeds on. A port in use is skipped, and so is a port the
+/// host refuses to applications (`PermissionDenied`): on Windows a port inside an excluded port
+/// range (Hyper-V, WinNAT and other reservations; `netsh interface ipv4 show
+/// excludedportrange`) fails with WSAEACCES, and elsewhere a privileged port does; the next
+/// port of the range can still be free. Any other error is the same for every port of the range
+/// (an address that is not local, ...) and comes back at once.
 ///
-/// # Errors
-///
-/// `AddrInUse` when every port of the range is taken; another bind error as it came.
-pub fn bind_udp_in_range(ip: IpAddr, range: PortRange) -> io::Result<std::net::UdpSocket> {
-    for port in range.ports() {
-        match std::net::UdpSocket::bind(SocketAddr::new(ip, port)) {
+/// When no port could be bound: `AddrInUse` if some port was in use (the range is full), else
+/// the refusal (no port of the range is usable on this host).
+fn bind_first<T>(
+    range: PortRange,
+    ports: impl Iterator<Item = u16>,
+    mut bind: impl FnMut(u16) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut in_use = false;
+    let mut refused = None;
+    for port in ports {
+        match bind(port) {
             Ok(socket) => return Ok(socket),
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => in_use = true,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => refused = Some(e),
             Err(e) => return Err(e),
         }
     }
-    Err(exhausted(range))
+    match refused {
+        Some(e) if !in_use => Err(e),
+        _ => Err(exhausted(range)),
+    }
+}
+
+/// A UDP socket on `ip`, on a free port of `range`. Ports the host refuses (an excluded port
+/// range on Windows, a privileged port) are skipped like ports in use.
+///
+/// # Errors
+///
+/// `AddrInUse` when every usable port of the range is taken; `PermissionDenied` when the host
+/// refuses every port of it; another bind error as it came.
+pub fn bind_udp_in_range(ip: IpAddr, range: PortRange) -> io::Result<std::net::UdpSocket> {
+    bind_first(range, range.ports(), |port| {
+        std::net::UdpSocket::bind(SocketAddr::new(ip, port))
+    })
 }
 
 /// A TCP listener on `ip`, on a free port of `range`.
@@ -93,14 +120,9 @@ pub fn bind_tcp_listener_in_range(
     range: PortRange,
     reuse_address: bool,
 ) -> io::Result<TcpListener> {
-    for port in range.ports() {
-        match crate::bind_listener(SocketAddr::new(ip, port), reuse_address) {
-            Ok(listener) => return Ok(listener),
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(exhausted(range))
+    bind_first(range, range.ports(), |port| {
+        crate::bind_listener(SocketAddr::new(ip, port), reuse_address)
+    })
 }
 
 /// Keeps an interface by name.
@@ -420,6 +442,61 @@ mod tests {
         let mut ports: Vec<u16> = range.ports().collect();
         ports.sort();
         assert_eq!(ports, vec![40000, 40001, 40002, 40003]);
+    }
+
+    /// A stand-in for the host: ports in use, and ports it refuses (Windows' excluded port
+    /// ranges answer WSAEACCES, which std reports as `PermissionDenied`).
+    struct Host {
+        in_use: Vec<u16>,
+        refused: Vec<u16>,
+    }
+
+    impl Host {
+        fn bind(&mut self, port: u16) -> io::Result<u16> {
+            if self.refused.contains(&port) {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else if self.in_use.contains(&port) {
+                Err(io::Error::from(io::ErrorKind::AddrInUse))
+            } else {
+                self.in_use.push(port);
+                Ok(port)
+            }
+        }
+    }
+
+    #[test]
+    fn a_port_the_host_refuses_inside_the_range_is_skipped_like_one_in_use() {
+        let range = PortRange::new(40000, 40003).unwrap();
+        let mut host = Host {
+            in_use: vec![],
+            refused: vec![40000, 40001],
+        };
+        // Starting at a refused port, then another: the free ports after them are used.
+        let order = || [40000, 40001, 40002, 40003].into_iter();
+        assert_eq!(bind_first(range, order(), |p| host.bind(p)).unwrap(), 40002);
+        assert_eq!(bind_first(range, order(), |p| host.bind(p)).unwrap(), 40003);
+        // Every usable port taken: the range is full.
+        let full = bind_first(range, order(), |p| host.bind(p)).unwrap_err();
+        assert_eq!(full.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn a_range_the_host_refuses_entirely_says_so_rather_than_full() {
+        let range = PortRange::new(40000, 40001).unwrap();
+        let mut host = Host {
+            in_use: vec![],
+            refused: vec![40000, 40001],
+        };
+        let err = bind_first(range, range.ports(), |p| host.bind(p)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        // Another error is the same for every port and is not retried.
+        let mut tried = 0;
+        let err = bind_first(range, range.ports(), |_| -> io::Result<()> {
+            tried += 1;
+            Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+        })
+        .unwrap_err();
+        assert_eq!((err.kind(), tried), (io::ErrorKind::AddrNotAvailable, 1));
     }
 
     #[test]

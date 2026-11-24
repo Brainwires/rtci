@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import re
-import ssl
 import struct
 import sys
 import time
@@ -191,18 +190,9 @@ class Peer:
             pass
         if self.cfg.get("caFile"):
             # OpenSSL's default verify paths read SSL_CERT_FILE: the TURN-over-TLS server's CA.
+            # aioice's TLS goes through asyncio's default context: TLS 1.3 and 1.2, which
+            # the environment's coturn settles on 1.3.
             os.environ["SSL_CERT_FILE"] = self.cfg["caFile"]
-            # The environment's coturn answers every TLS 1.3 ClientHello with a
-            # handshake_failure (tests/testenv/mod.rs); aioice's TLS goes through asyncio's
-            # default context, so that context offers TLS 1.2 at most.
-            orig = ssl.create_default_context
-
-            def tls12(*a, **k):
-                c = orig(*a, **k)
-                c.maximum_version = ssl.TLSVersion.TLSv1_2
-                return c
-
-            ssl.create_default_context = tls12
         servers = [
             RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential"))
             for s in self.cfg.get("iceServers") or []

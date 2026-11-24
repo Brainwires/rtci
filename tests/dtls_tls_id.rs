@@ -223,6 +223,8 @@ fn a_new_association_gets_new_tls_ids() -> Result<()> {
     let first_try = tls_id(&world.peers[0].pc.create_offer(None)?.sdp);
     assert_ne!(first_try, ids[0], "the offer asks for a new association");
     let (offer, answer) = world.exchange(0)?;
+    // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+    world.regather()?;
     assert_eq!(
         tls_id(&offer),
         first_try,

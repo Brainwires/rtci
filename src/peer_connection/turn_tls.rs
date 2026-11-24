@@ -26,8 +26,10 @@ pub struct TurnTlsConfig {
     /// Use the `webpki-roots` (Mozilla) roots when neither of the above is given. Needs the
     /// `turn-tls-webpki-roots` feature.
     pub webpki_roots: bool,
-    /// TLS 1.2 is offered besides TLS 1.3 (RFC 8656 section 3.1 allows both; servers such as
-    /// coturn 4.6 refuse TLS 1.3). On by default.
+    /// TLS 1.2 is offered besides TLS 1.3 (RFC 8656 section 3.1 allows both). On by default:
+    /// deployed servers still need it, such as coturn 4.6.1 (what Ubuntu 24.04 and Debian 13
+    /// ship), which refuses a ClientHello that offers TLS 1.3 alone and settles on TLS 1.2 when
+    /// both are offered (fixed in coturn 4.6.2).
     pub disable_tls12: bool,
 }
 

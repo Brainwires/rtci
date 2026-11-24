@@ -401,21 +401,37 @@ fn verify_signature(
         _ => hash_algorithm.crypto_scheme()?,
     };
 
-    crypto
-        .verify_signature(
-            scheme,
-            PublicKey {
-                encoding,
-                bytes: &certificate
-                    .tbs_certificate
-                    .subject_pki
-                    .subject_public_key
-                    .data,
-            },
-            message,
-            remote_key_signature,
-        )
-        .map_err(signature_verification_error)
+    let public_key = &certificate
+        .tbs_certificate
+        .subject_pki
+        .subject_public_key
+        .data;
+    let verified = crypto.verify_signature(
+        scheme,
+        PublicKey {
+            encoding,
+            bytes: public_key,
+        },
+        message,
+        remote_key_signature,
+    );
+    // RFC 5246 section 4.7: the DigestInfo of an RSASSA-PKCS1-v1_5 signature "MUST be NULL,
+    // but implementations MUST accept both without parameters and with NULL parameters". The
+    // providers verify the NULL form only; the form without parameters is checked by the
+    // provider-independent RSA public operation of `rtc-crypto`.
+    match (verified, crypto::rsa_pkcs1_hash(scheme)) {
+        (Err(_), Some(hash)) if hash_algorithm.signature == SignatureAlgorithm::Rsa => {
+            let digest = crypto.hash(hash, message).map_err(crypto_error)?;
+            crypto::verify_rsa_pkcs1_without_digest_parameters(
+                scheme,
+                public_key,
+                &digest,
+                remote_key_signature,
+            )
+            .map_err(signature_verification_error)
+        }
+        (verified, _) => verified.map_err(signature_verification_error),
+    }
 }
 
 pub(crate) fn verify_key_signature(

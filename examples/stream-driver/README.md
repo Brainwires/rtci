@@ -29,6 +29,15 @@ Feature `dns-records` adds SRV / NAPTR lookups and per-family answers through
 hickory-resolver; without it, records are answered as none and names through the system
 resolver.
 
+## A whole peer connection
+
+`peer::PeerDriver` (feature `peer`, on by default, which depends on `rtc`) drives an `rtc`
+peer connection over sockets it owns, its UDP host sockets included: it gathers when a
+transport begins gathering, and again by itself when the engine says a transport needs new
+local candidates (`OnLocalCandidatesNeeded`: a new DTLS association runs on a new 3-tuple,
+RFC 8842 section 5.1), binding new ports in its range and closing the previous sockets once a
+pair on the new ones is selected. The application only signals.
+
 ## I/O
 
 Unlike the other crates of the workspace this one does I/O: it is the tokio side of the
