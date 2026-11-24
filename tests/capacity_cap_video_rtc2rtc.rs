@@ -18,8 +18,8 @@ use bytes::Bytes;
 use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
 use rtci::interceptor::{
     GccHandle, GccInterceptorBuilder, Interceptor as _, NackGeneratorBuilder, NackResponderBuilder,
-    PassThroughInterceptor, Registry, RetransmissionRateLimit, RtcpRandom, RtcpSessionBuilder,
-    Slot,
+    PassThroughInterceptor, ReceivedRateBound, Registry, RetransmissionRateLimit, RtcpRandom,
+    RtcpSessionBuilder, Slot,
 };
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
@@ -154,6 +154,9 @@ struct Setup {
     /// Whether each peer (caller, callee) has a video track from the first offer on. One
     /// without gains it by renegotiation ([`World::set_video`]).
     video: [bool; 2],
+    /// What the estimator's bound by the received rate does (draft-ietf-rmcat-gcc-02 5.5);
+    /// the engine's default when `None`.
+    received_rate_bound: Option<ReceivedRateBound>,
 }
 
 impl Setup {
@@ -166,7 +169,14 @@ impl Setup {
             cap: Duration::from_secs(20),
             cap_at_target: None,
             video: [true, true],
+            received_rate_bound: None,
         }
+    }
+
+    /// The estimator's bound by the received rate set to `bound` in either chain.
+    fn received_rate_bound(mut self, bound: ReceivedRateBound) -> Self {
+        self.received_rate_bound = Some(bound);
+        self
     }
 
     /// A call that starts with audio alone, either way.
@@ -558,6 +568,9 @@ impl Peer {
             if let Some(rate_limit) = rate_limit {
                 options.nack_retransmission_rate_limit = rate_limit;
             }
+            if let Some(bound) = setup.received_rate_bound {
+                options.gcc_received_rate_bound = bound;
+            }
             let (mut registry, handles) = register_default_interceptors_with_options(
                 Registry::new(),
                 &mut media_engine,
@@ -609,6 +622,10 @@ impl Peer {
         configure_receiver_reference_time(&mut media_engine);
         let registry = configure_key_frame_requests(registry);
         let (gcc, handle) = GccInterceptorBuilder::new();
+        let gcc = match setup.received_rate_bound {
+            Some(bound) => gcc.with_received_rate_bound(bound),
+            None => gcc,
+        };
         let registry = configure_twcc(registry, &mut media_engine)?.with(
             Slot::CongestionControl,
             PassThroughInterceptor::new().with(
@@ -2584,6 +2601,45 @@ fn an_estimate_is_held_while_only_audio_is_sent_in_the_default_chain() -> Result
         let outcome = camera_run(&setup)?;
         println!("camera, default chain seed {seed}: {outcome:?}");
         assert_the_estimate_is_held(&setup, &outcome);
+    }
+    Ok(())
+}
+
+/// draft-ietf-rmcat-gcc-02 5.5's `A_hat(i) < 1.5 * R_hat(i)` read as a clamp
+/// (`ReceivedRateBound::Clamps`, the `StrictRfc` profile's form, GCC-5.5-11) on the camera call
+/// of `an_estimate_is_held_while_only_audio_is_sent_and_video_resumes_from_it`, in both chains:
+/// with audio alone the estimate is pulled down to 1.5 times what is sent, under the start
+/// rate, where the default keeps it. The measurement behind the default (`LimitsIncrease`).
+#[test]
+fn the_received_rate_bound_as_a_clamp_pulls_an_audio_only_estimate_down() -> Result<()> {
+    for chain in [Chain::ParolNet, Chain::Default] {
+        let seed = 2;
+        let default = camera_run(&Setup::new(seed, None).chain(chain).anchor(ANCHORS[0]))?;
+        let clamp = camera_run(
+            &Setup::new(seed, None)
+                .chain(chain)
+                .anchor(ANCHORS[0])
+                .received_rate_bound(ReceivedRateBound::Clamps),
+        )?;
+        println!(
+            "{chain:?}: default lowest {:?}, at off {:?}, on again {:?}; clamp lowest {:?}, at off {:?}, on again {:?}",
+            default.lowest,
+            default.at_off,
+            default.at_on_again,
+            clamp.lowest,
+            clamp.at_off,
+            clamp.at_on_again
+        );
+        for i in 0..2 {
+            assert!(
+                default.lowest[i].is_some_and(|lowest| lowest >= 300_000),
+                "{chain:?}: {default:?}"
+            );
+            assert!(
+                clamp.lowest[i].is_some_and(|lowest| lowest < 300_000),
+                "{chain:?}: {clamp:?}"
+            );
+        }
     }
     Ok(())
 }
