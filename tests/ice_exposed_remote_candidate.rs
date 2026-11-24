@@ -9,13 +9,13 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::transport::RTCIceCandidateType;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::transport::RTCIceCandidateType;
 
 const A: &str = "10.0.0.1:5000";
 const B: &str = "10.0.0.2:5000";
 
-fn selected_remote(peer: &Peer) -> rtc::peer_connection::transport::RTCIceCandidate {
+fn selected_remote(peer: &Peer) -> rtci::peer_connection::transport::RTCIceCandidate {
     peer.pc
         .sctp()
         .expect("the data channel's transport")

@@ -61,7 +61,7 @@
 //! ## Working with ICE Candidates
 //!
 //! ```
-//! use rtc::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateType, RTCIceProtocol};
+//! use rtci::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateType, RTCIceProtocol};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Example candidate from ICE gathering
@@ -84,7 +84,7 @@
 //! ## Checking Transport States
 //!
 //! ```
-//! use rtc::peer_connection::transport::{
+//! use rtci::peer_connection::transport::{
 //!     RTCIceTransportState, RTCDtlsTransportState, RTCSctpTransportState
 //! };
 //!
@@ -106,7 +106,7 @@
 //! ## Candidate Type Classification
 //!
 //! ```
-//! use rtc::peer_connection::transport::RTCIceCandidateType;
+//! use rtci::peer_connection::transport::RTCIceCandidateType;
 //!
 //! fn requires_stun_server(candidate_type: RTCIceCandidateType) -> bool {
 //!     matches!(candidate_type, RTCIceCandidateType::Srflx)
@@ -124,7 +124,7 @@
 //! ## DTLS Role Determination
 //!
 //! ```
-//! use rtc::peer_connection::transport::RTCDtlsRole;
+//! use rtci::peer_connection::transport::RTCDtlsRole;
 //!
 //! // Offerer uses Auto (actpass in SDP)
 //! let offerer_role = RTCDtlsRole::Auto;

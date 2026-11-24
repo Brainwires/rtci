@@ -10,7 +10,7 @@ header = ""
 body = """
 {%- set max = 15 -%}
 {%- set max_breaking = 30 -%}
-{%- set repo = "https://github.com/Brainwires/webrtc-rs-rtc" -%}
+{%- set repo = "https://github.com/Brainwires/rtci" -%}
 {%- if version -%}
     {%- set changelog = repo ~ "/blob/" ~ version ~ "/CHANGELOG.md" -%}
 {%- else -%}

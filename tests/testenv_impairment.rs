@@ -9,25 +9,25 @@ mod common;
 mod testenv;
 
 use bytes::{Bytes, BytesMut};
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::interceptor::{Gcc, JitterBufferBuilder, Registry, Slot};
-use rtc::media::io::Writer;
-use rtc::media::io::ivf_reader::IVFReader;
-use rtc::media::io::ivf_writer::IVFWriter;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::interceptor::{Gcc, JitterBufferBuilder, Registry, Slot};
+use rtci::media::io::Writer;
+use rtci::media::io::ivf_reader::IVFReader;
+use rtci::media::io::ivf_writer::IVFWriter;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control, configure_nack,
 };
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::RTCRtpSenderId;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::RTCRtpSenderId;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::statistics::StatsSelector;
+use rtci::statistics::StatsSelector;
 use std::collections::HashSet;
 use std::process::Command;
 use std::sync::Mutex;
@@ -92,7 +92,7 @@ fn plain_pc() -> RTCPeerConnection {
         .unwrap()
 }
 
-fn dc_open_id(p: &EnvPeer) -> Option<rtc::data_channel::RTCDataChannelId> {
+fn dc_open_id(p: &EnvPeer) -> Option<rtci::data_channel::RTCDataChannelId> {
     p.events.iter().find_map(|e| match e {
         RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => Some(*id),
         _ => None,
@@ -390,7 +390,7 @@ fn negotiated_pt(pc: &mut RTCPeerConnection, id: RTCRtpSenderId) -> u8 {
         .unwrap_or(VP8_PT)
 }
 
-fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtc::rtp::Packet> {
+fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtci::rtp::Packet> {
     p.reads.iter().filter_map(|m| match &m.message {
         RTCMessage::RtpPacket(_, pkt) => Some(pkt),
         _ => None,
@@ -407,7 +407,7 @@ fn rtp_received(p: &EnvPeer) -> impl Iterator<Item = &rtc::rtp::Packet> {
 /// before the first it receives: a Generic NACK names packets missing between ones it saw
 /// (RFC 4585 section 6.2.1), and there is no gap before the first. With 5% loss the stream's
 /// first packet is lost in one run of twenty, so those packets are not counted either (as in
-/// the virtual-clock twin, `rtc-interceptor/tests/nack_recovery_under_loss.rs`).
+/// the virtual-clock twin, `rtci-interceptor/tests/nack_recovery_under_loss.rs`).
 fn rtp_delivery(chain: Chain, count: u16) -> f64 {
     const TAIL: u16 = 20;
     let total = count + TAIL;
@@ -432,8 +432,8 @@ fn rtp_delivery(chain: Chain, count: u16) -> f64 {
             let seq = start_seq.wrapping_add(sent);
             let _ = s.write_rtp(
                 Instant::now(),
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: pt,
                         sequence_number: seq,
@@ -564,17 +564,17 @@ fn vp8_file_through_nack_and_jitter_buffer() {
         {
             let pt = negotiated_pt(&mut p[0].pc, sender);
             let pk = packetizer.get_or_insert_with(|| {
-                rtc::rtp::packetizer::new_packetizer(
+                rtci::rtp::packetizer::new_packetizer(
                     Instant::now(),
                     1200,
                     pt,
                     ssrc,
                     vp8_codec().payloader().unwrap(),
-                    Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                    Box::new(rtci::rtp::sequence::new_random_sequencer()),
                     90000,
                 )
             });
-            use rtc::rtp::packetizer::Packetizer;
+            use rtci::rtp::packetizer::Packetizer;
             let packets = pk.packetize(Instant::now(), &frames[next], 3000).unwrap();
             let mut s = p[0].pc.rtp_sender(sender).unwrap();
             for pkt in packets {
@@ -675,8 +675,8 @@ fn gcc_follows_a_rate_limited_link() {
                 let mut s = p[0].pc.rtp_sender(sender).unwrap();
                 let _ = s.write_rtp(
                     Instant::now(),
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: pt,
                             sequence_number: seq,

@@ -1,4 +1,4 @@
-//! rtc-dtls against dimpl 0.9.0 (str0m's DTLS, an independent implementation), DTLS 1.2
+//! rtci-dtls against dimpl 0.9.0 (str0m's DTLS, an independent implementation), DTLS 1.2
 //! (RFC 6347) and 1.3 (RFC 9147), each stack in each role, in memory with virtual time:
 //! the handshake, the DTLS-SRTP exporter (RFC 5764 4.2) giving both sides the same keys and
 //! profile, application data both ways, close_notify (RFC 5246 7.2.1), the stateless cookie
@@ -54,7 +54,7 @@ struct Pair {
     dimpl_keys: Option<(Vec<u8>, SrtpProfile)>,
     dimpl_data: Vec<Vec<u8>>,
     dimpl_close_notify: bool,
-    /// rtc-dtls closed: its endpoint has dropped the association (Endpoint::close), so the
+    /// rtci-dtls closed: its endpoint has dropped the association (Endpoint::close), so the
     /// close_notify the peer answers with (RFC 5246 7.2.1) finds none, and is dropped.
     rtc_closed: bool,
     // the wire, each datagram in order, and which to drop (by index in its direction)
@@ -65,7 +65,7 @@ struct Pair {
 }
 
 impl Pair {
-    /// `rtc_client`: rtc-dtls is the client. `rtc_cookie` / `dimpl_cookie`: the server's
+    /// `rtc_client`: rtci-dtls is the client. `rtc_cookie` / `dimpl_cookie`: the server's
     /// stateless cookie exchange.
     fn new(version: Version, rtc_client: bool, rtc_cookie: bool, dimpl_cookie: bool) -> R<Pair> {
         let provider = crypto::default_provider()?;
@@ -202,7 +202,7 @@ impl Pair {
                         {
                             Ok(events) => self.rtc_events(events),
                             // The initiator need not wait for the answering close_notify
-                            // (RFC 5246 7.2.1): after rtc-dtls closed, its read is refused.
+                            // (RFC 5246 7.2.1): after rtci-dtls closed, its read is refused.
                             Err(_) if self.rtc_closed => {}
                             Err(e) => return Err(e.into()),
                         }
@@ -253,7 +253,7 @@ impl Pair {
         Ok(self
             .rtc
             .get_connection_state(self.dimpl_addr)
-            .ok_or("rtc-dtls has no connection")?)
+            .ok_or("rtci-dtls has no connection")?)
     }
 }
 
@@ -306,12 +306,12 @@ fn handshake_keys_data_close(version: Version, rtc_client: bool) -> R {
         "the DTLS-SRTP exporter differs"
     );
 
-    p.rtc.write(p.now, p.dimpl_addr, b"from rtc-dtls")?;
+    p.rtc.write(p.now, p.dimpl_addr, b"from rtci-dtls")?;
     p.dimpl.send_application_data(b"from dimpl")?;
     p.run_until("application data both ways", |p| {
         !p.rtc_data.is_empty() && !p.dimpl_data.is_empty()
     })?;
-    assert_eq!(p.dimpl_data, vec![b"from rtc-dtls".to_vec()]);
+    assert_eq!(p.dimpl_data, vec![b"from rtci-dtls".to_vec()]);
     assert_eq!(p.rtc_data, vec![b"from dimpl".to_vec()]);
 
     if rtc_client {
@@ -320,14 +320,14 @@ fn handshake_keys_data_close(version: Version, rtc_client: bool) -> R {
         p.run_until("dimpl to see close_notify", |p| p.dimpl_close_notify)?;
     } else {
         p.dimpl.close()?;
-        p.run_until("rtc-dtls to see close_notify", |p| p.rtc_peer_closed)?;
+        p.run_until("rtci-dtls to see close_notify", |p| p.rtc_peer_closed)?;
     }
     Ok(())
 }
 
 /// The server's stateless cookie round trip, then the full handshake.
 fn cookie_exchange(version: Version, rtc_client: bool) -> R {
-    // The server under test sends the cookie: dimpl when rtc-dtls is the client.
+    // The server under test sends the cookie: dimpl when rtci-dtls is the client.
     let mut p = Pair::new(version, rtc_client, !rtc_client, rtc_client)?;
     p.handshake()?;
     let from_server = if rtc_client { &p.to_rtc } else { &p.to_dimpl };

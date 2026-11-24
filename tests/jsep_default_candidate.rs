@@ -5,9 +5,9 @@
 mod jsep_common;
 
 use jsep_common::{TestResult, default_peer, exchange, media_sections, mid_of, port_of};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn add_candidate(pc: &mut RTCPeerConnection, candidate: &str) -> TestResult {
     pc.add_local_candidate(RTCIceCandidateInit {

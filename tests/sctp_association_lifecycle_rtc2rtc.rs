@@ -6,9 +6,9 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::Pair;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCSctpTransportState};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCSctpTransportState};
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use std::time::Duration;
 
 /// The `a=sctp-port` of the data section of `sdp`.
@@ -170,7 +170,7 @@ fn a_data_channel_added_to_a_connected_session_gets_its_association() -> Result<
         let mut pair = Pair::new(answerer_role)?;
         pair.offerer.pc.add_transceiver_from_kind(
             RtpCodecKind::Video,
-            Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+            Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
         )?;
         pair.negotiate()?;
         assert!(

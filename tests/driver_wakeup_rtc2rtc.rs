@@ -13,14 +13,14 @@ mod wakeup_common;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::Registry;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::interceptor::Registry;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use std::collections::BTreeMap;
@@ -40,7 +40,7 @@ fn peer(addr: &str, now: Instant) -> Result<Peer> {
     Ok(Peer::new(addr, pc))
 }
 
-fn candidate(peer: &Peer) -> Result<rtc::peer_connection::transport::RTCIceCandidateInit> {
+fn candidate(peer: &Peer) -> Result<rtci::peer_connection::transport::RTCIceCandidateInit> {
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
             network: "udp".to_owned(),
@@ -80,7 +80,7 @@ fn nothing_written_while_serving_events_or_reads_waits_for_a_later_wake() -> Res
     ))?;
     run.peers[0].pc.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     run.peers[0].pc.create_data_channel("data", None)?;
     let offer = run.peers[0].pc.create_offer(None)?;
@@ -129,8 +129,8 @@ fn nothing_written_while_serving_events_or_reads_waits_for_a_later_wake() -> Res
             .expect("the sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
+                rtci::rtp::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: vp8,
                         sequence_number: n,

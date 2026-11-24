@@ -1,6 +1,6 @@
 #!/bin/bash -eu
 #
-# OSS-Fuzz build script for webrtc-rs-rtc
+# OSS-Fuzz build script for rtci
 # https://google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/
 #
 # This script is run inside the OSS-Fuzz Docker container.
@@ -8,33 +8,33 @@
 # $LIB_FUZZING_ENGINE is the fuzzing engine flags.
 # $CFLAGS / $CXXFLAGS / $RUSTFLAGS are set by the base image.
 
-cd "$SRC/webrtc-rs-rtc"
+cd "$SRC/rtci"
 
 # Build all fuzz targets for each crate.
 # cargo-fuzz compiles with --release and links libFuzzer automatically
 # when RUSTFLAGS contains the libfuzzer flags provided by oss-fuzz.
 
 FUZZ_CRATES=(
-    rtc-dtls
-    rtc-sctp
-    rtc-rtcp
-    rtc-sdp
-    rtc-stun
-    rtc-rtp
-    rtc-srtp
-    rtc-ice
-    rtc-turn
-    rtc-mdns
-    rtc-datachannel
-    rtc-media
-    rtc-shared
-    rtc-sframe
-    rtc
+    rtci-dtls
+    rtci-sctp
+    rtci-rtcp
+    rtci-sdp
+    rtci-stun
+    rtci-rtp
+    rtci-srtp
+    rtci-ice
+    rtci-turn
+    rtci-mdns
+    rtci-datachannel
+    rtci-media
+    rtci-shared
+    rtci-sframe
+    rtci
 )
 
 for CRATE in "${FUZZ_CRATES[@]}"; do
-    # The `rtc` crate is the workspace root, so its fuzz crate is ./fuzz.
-    if [ "$CRATE" = rtc ]; then
+    # The `rtci` crate is the workspace root, so its fuzz crate is ./fuzz.
+    if [ "$CRATE" = rtci ]; then
         pushd fuzz
     else
         pushd "$CRATE/fuzz"

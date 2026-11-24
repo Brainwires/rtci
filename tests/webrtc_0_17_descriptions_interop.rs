@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio::time::timeout;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -95,7 +95,7 @@ fn record(scenario: &str, n: usize, kind: &str, sdp: &str) {
     }
 }
 
-fn rtc_peer() -> Result<rtc::peer_connection::RTCPeerConnection> {
+fn rtc_peer() -> Result<rtci::peer_connection::RTCPeerConnection> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     Ok(RTCPeerConnectionBuilder::new()

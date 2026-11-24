@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// ## Creating Different SDP Types
 ///
 /// ```
-/// use rtc::peer_connection::sdp::RTCSdpType;
+/// use rtci::peer_connection::sdp::RTCSdpType;
 ///
 /// // Create an offer type
 /// let offer_type = RTCSdpType::Offer;
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// ## Checking SDP Type
 ///
 /// ```no_run
-/// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
+/// use rtci::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let description = RTCSessionDescription::offer("v=0...".to_string())?;
@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 /// ## Serialization
 ///
 /// ```
-/// use rtc::peer_connection::sdp::RTCSdpType;
+/// use rtci::peer_connection::sdp::RTCSdpType;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Serialize to JSON

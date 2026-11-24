@@ -5,7 +5,7 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer};
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 /// Section 6: "The 't=' line in the answer MUST be equal to the ones in the offer". An offer
 /// with a bounded session time gets an answer with the same `t=` line, which also applies.

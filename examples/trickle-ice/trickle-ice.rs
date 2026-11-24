@@ -21,26 +21,26 @@ use ice::candidate::candidate_host::CandidateHostConfig;
 use ice::candidate::candidate_relay::CandidateRelayConfig;
 use ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
 use log::{error, info, trace, warn};
-use rtc::crypto;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCIceConnectionState;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::agent::StunEvent;
-use rtc::stun::{client::*, message::*, xoraddr::*};
-use rtc::turn::client::{
+use rtci::crypto;
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCIceConnectionState;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, RTCIceCandidate};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::agent::StunEvent;
+use rtci::stun::{client::*, message::*, xoraddr::*};
+use rtci::turn::client::{
     Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,
 };
 use signal::http::Body;
@@ -233,7 +233,7 @@ async fn run_main_loop(cli: Cli) -> Result<()> {
                 transport_context.peer_addr,
                 TransportProtocol::UDP,
             )?;
-            let mut msg = rtc::stun::message::Message::new();
+            let mut msg = rtci::stun::message::Message::new();
             msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
 
             stun_client = Some(client);

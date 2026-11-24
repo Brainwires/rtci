@@ -10,7 +10,7 @@ Trickle ICE isn't mandatory to use, but highly recommended.
 ## Instructions
 
 ### Run trickle-ice-host
-From the `rtc` directory, execute:
+From the `rtci` directory, execute:
 
 ```
 cargo run --example trickle-ice-host

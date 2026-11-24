@@ -10,14 +10,14 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use jsep_common::{TestResult, default_peer, media_sections};
-use rtc::interceptor::{
+use rtci::interceptor::{
     AttributedPacket, AudioRedundancy, Interceptor, Packet, RedAudioBuilder, StreamInfo,
     TaggedPacket,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
-use rtc::shared::TransportContext;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
+use rtci::shared::TransportContext;
 
 const CHROMIUM: &str =
     include_str!("fixtures/browser-sdp/chromium--reflect-audio-opus--1-offer.sdp");
@@ -169,8 +169,8 @@ fn sent_with(info: &StreamInfo, policy: AudioRedundancy) -> u8 {
     red.handle_write(TaggedPacket {
         now: Instant::now(),
         transport: TransportContext::default(),
-        message: AttributedPacket::new(Packet::Rtp(rtc::rtp::Packet {
-            header: rtc::rtp::header::Header {
+        message: AttributedPacket::new(Packet::Rtp(rtci::rtp::Packet {
+            header: rtci::rtp::header::Header {
                 version: 2,
                 ssrc: info.ssrc,
                 payload_type: info.payload_type,

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::RTCSdpSemantics;
+/// use rtci::peer_connection::configuration::RTCSdpSemantics;
 ///
 /// // This library only supports Unified Plan
 /// let semantics = RTCSdpSemantics::UnifiedPlan;

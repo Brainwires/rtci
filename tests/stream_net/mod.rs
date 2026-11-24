@@ -1,4 +1,4 @@
-//! An in-memory network for `rtc` peers that drive their TCP through the stream interface
+//! An in-memory network for `rtci` peers that drive their TCP through the stream interface
 //! (`poll_stream_command` / `poll_stream_transmit` / `handle_stream_*`), on a virtual clock.
 //!
 //! It plays the driver of every peer: listeners bind (port 0 gets a port from 5000 up),
@@ -11,15 +11,15 @@
 #![allow(dead_code)]
 
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId};
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{ListenerId, StreamCommand, StreamEvent, StreamId};
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -145,7 +145,7 @@ pub struct Net {
     /// Connection requests to a listener that is not bound with reuse (a passive one) are
     /// refused.
     pub refuse_plain_listeners: bool,
-    /// Every passive listener asked for on port 0 gets this port, as `rtc-stream-driver`'s
+    /// Every passive listener asked for on port 0 gets this port, as `rtci-stream-driver`'s
     /// shared passive port: the last one asked for is the listener accepts are reported on.
     pub shared_passive_port: Option<u16>,
     pub rng: XorShift,

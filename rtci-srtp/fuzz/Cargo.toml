@@ -1,0 +1,32 @@
+[package]
+name = "rtci-srtp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rtci-srtp]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "context_decrypt"
+path = "fuzz_targets/context_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "context_decrypt_cryptex"
+path = "fuzz_targets/context_decrypt_cryptex.rs"
+test = false
+doc = false
+bench = false

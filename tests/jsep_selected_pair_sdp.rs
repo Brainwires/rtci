@@ -1,20 +1,20 @@
-//! What later descriptions say of the candidate pair ICE selected, between two `rtc` peers on
+//! What later descriptions say of the candidate pair ICE selected, between two `rtci` peers on
 //! a simulated UDP network in virtual time (RFC 8839 sections 4.2.1.2, 4.3.4, 4.4.1.2.2,
 //! 4.4.1.3, 4.4.2, 5.1 and 5.2; RFC 8445 section 8.2).
 
 use anyhow::{Result, bail};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, CandidateServerReflexiveConfig, RTCIceCandidate,
     RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -441,7 +441,7 @@ fn a_later_offer_lists_the_selected_candidate_alone_when_asked() -> Result<()> {
 /// it the controlled one.
 #[test]
 fn a_lite_agent_offered_remote_candidates_becomes_controlled() -> Result<()> {
-    use rtc::peer_connection::transport::RTCIceRole;
+    use rtci::peer_connection::transport::RTCIceRole;
     let mut world = World {
         peers: vec![
             Peer::new(&["10.0.0.1:5000"], true)?,
@@ -595,7 +595,7 @@ fn a_lite_agent_adds_no_host_candidate_without_an_ice_restart() -> Result<()> {
             assert!(added.is_ok(), "a full agent: {added:?}");
             continue;
         }
-        assert_eq!(added, Err(rtc::shared::error::Error::InvalidStateError));
+        assert_eq!(added, Err(rtci::shared::error::Error::InvalidStateError));
         world.peers[0].pc.restart_ice();
         world.peers[0].pc.add_local_candidate(another)?;
     }

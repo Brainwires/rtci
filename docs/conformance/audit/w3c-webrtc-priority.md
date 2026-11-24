@@ -36,4 +36,4 @@ Totals:
 
 ## Bugs found
 
-None. (`rtc-sctp` has `Stream::set_priority` and a weighted scheduler, `a_higher_priority_stream_gets_the_larger_share`; whether the peer connection sets it from the channel's priority was not traced.)
+None. (`rtci-sctp` has `Stream::set_priority` and a weighted scheduler, `a_higher_priority_stream_gets_the_larger_share`; whether the peer connection sets it from the channel's priority was not traced.)

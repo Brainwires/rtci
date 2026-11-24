@@ -13,7 +13,7 @@ Trickle ICE isn't mandatory to use, but highly recommended.
 
 ### Run trickle-ice-srflx
 
-From the `rtc` directory, execute:
+From the `rtci` directory, execute:
 
 ```
 cargo run --example trickle-ice-srflx

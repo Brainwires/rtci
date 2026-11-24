@@ -9,9 +9,9 @@
 //! The visible consequence with Chrome is a VP8-then-VP9 offer coming back VP9-first, at which
 //! point Chrome switches to single-stream SVC and every simulcast encoding collapses.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use std::time::Instant;
 
 fn codec(mime: &str, payload_type: u8, fmtp: &str) -> RTCRtpCodecParameters {
@@ -70,7 +70,7 @@ fn test_answer_preserves_offer_codec_order() -> Result<(), Box<dyn std::error::E
 
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     let offer = offerer.create_offer(None)?;

@@ -4,13 +4,13 @@
 //! `[[LastStableStateSctpTransport]]`; a data channel that can be given no id is closed and
 //! gets an `error` event with `data-channel-failure` (the errorList).
 
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCSctpTransportState;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCSctpTransportState;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use sansio::Protocol;
 use std::time::Instant;
 
@@ -173,7 +173,10 @@ fn create_data_channel_without_an_available_id_is_refused_and_leaves_nothing() -
 
     let refused = a.create_data_channel("late", None).map(|dc| dc.id());
     assert!(
-        matches!(refused, Err(rtc::shared::error::Error::ErrMaxDataChannelID)),
+        matches!(
+            refused,
+            Err(rtci::shared::error::Error::ErrMaxDataChannelID)
+        ),
         "{refused:?}"
     );
     assert_eq!(a.data_channel_ids().len(), before, "nothing was added");

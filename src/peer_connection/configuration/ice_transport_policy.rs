@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// ## Standard Configuration (All Candidates)
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Use all candidates for best connectivity (default)
@@ -32,8 +32,8 @@ use serde::{Deserialize, Serialize};
 /// ## Privacy Mode (Relay Only)
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
-/// use rtc::peer_connection::configuration::RTCIceServer;
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+/// use rtci::peer_connection::configuration::RTCIceServer;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Only use TURN relays to hide IP addresses

@@ -19,11 +19,11 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::{Pair, Peer};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCSctpTransportState};
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCSctpTransportState};
+use rtci::statistics::StatsSelector;
 
 const A: &str = "127.0.0.1:50010";
 const B: &str = "127.0.0.1:50011";

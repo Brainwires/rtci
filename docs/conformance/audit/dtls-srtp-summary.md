@@ -32,7 +32,7 @@ Clause-level audit of 18 specifications against fork master 8916bc3, read-only (
 Sizes: S under a day, M a few days, L one to two weeks, XL more.
 
 1. **The DTLS server never verifies the client's Finished (S).** RFC5246-7.4.9-2,
-   `rtc-dtls/src/flight/flight4.rs:467`. The one check that confirms the handshake transcript to the
+   `rtci-dtls/src/flight/flight4.rs:467`. The one check that confirms the handshake transcript to the
    server is absent; the client side has it but no negative test.
 2. **Unauthenticated datagrams can end a handshake (S).** A plaintext application-data record
    (`conn/mod.rs:1025`) or a ClientHello with a wrong cookie (`flight2.rs:86`) fails the
@@ -84,7 +84,7 @@ construction and need a negative test each.
 | TLS renegotiation | RFC 5246, RFC 5746 3.5 / 3.7 | L | no |
 | Stateless cookie; new association on a live 5-tuple | RFC 6347 4.2.1, 4.2.8 | M | no |
 | MKI, key derivation rate, AES-f8, NULL cipher, AES-192 | RFC 3711, RFC 6188 | M | MKI only |
-| AES-256-CM profiles in `use_srtp` | RFC 6188 (implemented in `rtc-srtp`, not negotiable) | S | no |
+| AES-256-CM profiles in `use_srtp` | RFC 6188 (implemented in `rtci-srtp`, not negotiable) | S | no |
 
 Each of these is `missing` and counted in its file. To reach a literal 100% the list above is the
 bulk of the work; to reach "every claim made is proven" the table needs the rows marked "no" added
@@ -133,18 +133,18 @@ DTLS-SRTP, SDP and demultiplexing (`rfc5764.md`, `rfc8842.md`, `rfc8122.md`, `rf
 24. ServerHello `use_srtp` with an MKI or several profiles is accepted (`flight3.rs:186`,
     `extension_use_srtp.rs:100`).
 25. Datagrams with an out-of-range first byte reach the ICE agent, refresh a candidate's
-    last-received time and log a warning each (`rtc-ice/src/agent/mod.rs:1848`).
+    last-received time and log a warning each (`rtci-ice/src/agent/mod.rs:1848`).
 
 SRTP (`rfc3711.md`, `rfc7714.md`, `rfc9335.md`):
 
-26. SRTCP index wraps to 0 after 2^31 - 1 under the same key (`rtc-srtp/src/context/srtcp.rs:69`).
-27. The receiver follows a ROC wrap (`rtc-srtp/src/context/srtp.rs:34`).
+26. SRTCP index wraps to 0 after 2^31 - 1 under the same key (`rtci-srtp/src/context/srtcp.rs:69`).
+27. The receiver follows a ROC wrap (`rtci-srtp/src/context/srtp.rs:34`).
 28. Valid E=0 AEAD SRTCP is rejected (`cipher_aead_aes_gcm.rs:181`, `:345`).
 29. `Context::new` with `None` options accepts replays, against its doc comment
-    (`rtc-srtp/src/config.rs:32`); replay windows below 64 are accepted.
+    (`rtci-srtp/src/config.rs:32`); replay windows below 64 are accepted.
 30. First SRTCP packet carries index 1, not 0 (matches libsrtp and pion; pinned by a test).
 31. Cryptex `Require` on send lets a packet with a non-RFC-8285 extension profile out in the clear
-    (`rtc-srtp/src/cryptex.rs:107`); not reachable from the engine's own packetizer.
+    (`rtci-srtp/src/cryptex.rs:107`); not reachable from the engine's own packetizer.
 
 ## Coverage and limits of this audit
 

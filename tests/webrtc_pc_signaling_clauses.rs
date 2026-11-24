@@ -12,23 +12,23 @@ use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, mid_of,
     video_track,
 };
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::certificate::RTCCertificate;
-use rtc::peer_connection::configuration::RTCBundlePolicy;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::RTCRtcpMuxPolicy;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCSignalingState;
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::certificate::RTCCertificate;
+use rtci::peer_connection::configuration::RTCBundlePolicy;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::RTCRtcpMuxPolicy;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCSignalingState;
+use rtci::peer_connection::transport::{
     RTCIceCandidateInit, RTCIceCandidateType, RTCIceRole, RTCIceTcpCandidateType,
 };
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 
 fn events(pc: &mut RTCPeerConnection) -> Vec<RTCPeerConnectionEvent> {
     let mut events = vec![];
@@ -106,11 +106,11 @@ fn an_offer_without_ice_restart_keeps_the_current_credentials() -> TestResult {
 /// the past makes construction fail (InvalidAccessError), and `setConfiguration` too.
 #[test]
 fn an_expired_certificate_is_refused() -> TestResult {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let issued = SystemTime::now() - Duration::from_secs(60 * 24 * 3600);
     let expired = RTCCertificate::generate_certificate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         Some(Duration::from_secs(24 * 3600)),
         issued,
     )?;
@@ -128,7 +128,7 @@ fn an_expired_certificate_is_refused() -> TestResult {
     );
     let valid = RTCCertificate::generate_certificate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         None,
         SystemTime::now(),
     )?;
@@ -147,7 +147,7 @@ fn an_expired_certificate_is_refused() -> TestResult {
 /// same error, or accepted by both, and both keep at most 32 ICE servers.
 #[test]
 fn the_constructor_validates_the_configuration_as_set_configuration_does() -> TestResult {
-    use rtc::peer_connection::configuration::RTCIceServer;
+    use rtci::peer_connection::configuration::RTCIceServer;
     let server = |urls: &[&str], username: &str, credential: &str| RTCIceServer {
         urls: urls.iter().map(|url| (*url).to_owned()).collect(),
         username: username.to_owned(),
@@ -367,7 +367,7 @@ fn a_remote_offer_sets_the_ice_role_and_it_then_stays() -> TestResult {
 fn sender_and_receiver_transports_follow_the_descriptions() -> TestResult {
     let mut pc = default_peer()?;
     let sender = pc.add_track(video_track("v", 0x0404_0404))?;
-    let transceiver = rtc::rtp_transceiver::RTCRtpTransceiverId::from(sender);
+    let transceiver = rtci::rtp_transceiver::RTCRtpTransceiverId::from(sender);
     let has_transports = |pc: &mut RTCPeerConnection| {
         let s = pc.rtp_sender(sender).expect("sender").transport().is_some();
         let r = pc
@@ -718,8 +718,8 @@ fn init_streams_and_directions_are_what_the_offer_signals() -> TestResult {
 /// W3C 5.2.10 / 5.2.11: the static capabilities list the header extensions by URI.
 #[test]
 fn capabilities_list_header_extensions_by_uri() -> TestResult {
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     media_engine.register_header_extension(
@@ -759,7 +759,7 @@ fn capabilities_list_header_extensions_by_uri() -> TestResult {
 /// W3C 9.3.1: a remote track's getCapabilities is the empty set.
 #[test]
 fn a_remote_track_has_no_capabilities() -> TestResult {
-    use rtc::media_stream::MediaTrackCapabilities;
+    use rtci::media_stream::MediaTrackCapabilities;
     let mut offerer = default_peer()?;
     let mut answerer = default_peer()?;
     offerer.add_track(video_track("v", 0x0707_0707))?;
@@ -1010,7 +1010,7 @@ fn set_local_description_without_a_type_or_sdp_creates_the_description() -> Test
     let answer = answerer.current_local_description().expect("an answer");
     assert_eq!(
         answer.sdp_type,
-        rtc::peer_connection::sdp::RTCSdpType::Answer
+        rtci::peer_connection::sdp::RTCSdpType::Answer
     );
 
     offerer.set_remote_description(Instant::now(), answer)?;
@@ -1137,7 +1137,7 @@ fn answer_options_leave_the_answer_unchanged() -> TestResult {
     answerer.set_remote_description(Instant::now(), offer)?;
     let plain = answerer.create_answer(None)?;
     let with_vad = answerer.create_answer(Some(
-        rtc::peer_connection::configuration::RTCAnswerOptions {
+        rtci::peer_connection::configuration::RTCAnswerOptions {
             // W3C 4.2.6: the dictionary has no members. The one this API has is RFC 9429
             // section 5.3.3.1's, and left unset (the empty dictionary) it changes nothing; set,
             // it asks for silence suppression (`tests/jsep_voice_activity_detection.rs`).
@@ -1156,16 +1156,16 @@ fn answer_options_leave_the_answer_unchanged() -> TestResult {
 /// offer as it is.
 #[test]
 fn the_peer_identity_member_changes_no_offer() -> TestResult {
-    let provider = rtc::crypto::default_provider()?;
+    let provider = rtci::crypto::default_provider()?;
     let certificate = RTCCertificate::generate_certificate(
         provider.crypto(),
-        rtc::crypto::SignatureScheme::EcdsaP256Sha256,
+        rtci::crypto::SignatureScheme::EcdsaP256Sha256,
         None,
         SystemTime::now(),
     )?;
     let peer = |identity: Option<&str>| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
         let mut media_engine =
-            rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+            rtci::peer_connection::configuration::media_engine::MediaEngine::default();
         media_engine.register_default_codecs()?;
         let mut configuration =
             RTCConfigurationBuilder::new().with_certificates(vec![certificate.clone()]);
@@ -1227,7 +1227,7 @@ fn only_descriptions_and_candidates_change_the_description_slots() -> TestResult
     let configuration = offerer.get_configuration().clone();
     offerer.set_configuration(configuration)?;
     offerer.restart_ice();
-    offerer.get_stats(Instant::now(), rtc::statistics::StatsSelector::None);
+    offerer.get_stats(Instant::now(), rtci::statistics::StatsSelector::None);
     offerer.create_offer(None)?;
     assert_eq!(slots(&offerer), before, "no slot changed");
 
@@ -1302,7 +1302,7 @@ fn sender_fmtp_follows_the_remote_description_and_receiver_fmtp_the_local() -> T
         .replace(&opus_fmtp, &format!("{opus_fmtp};stereo=1"));
     offerer.set_remote_description(now, RTCSessionDescription::answer(munged)?)?;
 
-    let opus = |codecs: &[rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters]| {
+    let opus = |codecs: &[rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters]| {
         codecs
             .iter()
             .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))

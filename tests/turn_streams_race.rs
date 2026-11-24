@@ -3,10 +3,10 @@
 //! engine's `Resolve` and `Connect` commands itself, on a virtual clock.
 
 use anyhow::Result;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::shared::stream::{StreamCommand, StreamEvent, StreamId};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::shared::stream::{StreamCommand, StreamEvent, StreamId};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ fn connects(commands: &[StreamCommand]) -> Vec<(StreamId, SocketAddr)> {
         .collect()
 }
 
-fn drain(pc: &mut rtc::peer_connection::RTCPeerConnection) -> Vec<StreamCommand> {
+fn drain(pc: &mut rtci::peer_connection::RTCPeerConnection) -> Vec<StreamCommand> {
     let mut out = vec![];
     while let Some(command) = pc.poll_stream_command() {
         out.push(command);

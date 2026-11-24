@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rtc::fuzzing::data_channel_handle_dcep;
+use rtci::fuzzing::data_channel_handle_dcep;
 use std::sync::OnceLock;
 use std::time::Instant;
 

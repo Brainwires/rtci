@@ -14,9 +14,9 @@
 
 use anyhow::Result;
 use bytes::BytesMut;
-use rtc::data_channel::{RTCDataChannelInit, RTCDataChannelState};
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::shared::error::Error;
+use rtci::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::shared::error::Error;
 use std::time::Instant;
 
 #[test]

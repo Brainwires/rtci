@@ -22,16 +22,16 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCIceConnectionState;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCIceConnectionState;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -72,7 +72,7 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
 }
 
 /// Create sansio RTC peer configuration (no STUN - local only)
-fn create_rtc_peer_config(is_answerer: bool) -> Result<rtc::peer_connection::RTCPeerConnection> {
+fn create_rtc_peer_config(is_answerer: bool) -> Result<rtci::peer_connection::RTCPeerConnection> {
     let mut builder = SettingEngineBuilder::new()
         // The webrtc 0.17 peer fails its DTLS transport when no SRTP profile was negotiated
         // (pion lineage: `ErrNoSRTPProtectionProfile`), data channels only or not. The rtc peer
@@ -175,7 +175,7 @@ async fn test_trickle_ice_webrtc_offerer_rtc_answerer() -> Result<()> {
     log::info!("Created RTC peer connection");
 
     // Set remote description (offer) on RTC - no candidates in SDP yet (trickle ICE demo)
-    let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp)?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp)?;
     rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
     log::info!("RTC set remote description (offer without candidates)");
 
@@ -235,7 +235,7 @@ async fn test_trickle_ice_webrtc_offerer_rtc_answerer() -> Result<()> {
                 && line.contains(" udp ")
             {
                 let candidate_str = line.strip_prefix("a=").unwrap_or(line);
-                let remote_candidate = rtc::peer_connection::transport::RTCIceCandidateInit {
+                let remote_candidate = rtci::peer_connection::transport::RTCIceCandidateInit {
                     candidate: candidate_str.to_string(),
                     sdp_mid: Some("0".to_string()),
                     sdp_mline_index: Some(0),
@@ -481,7 +481,7 @@ async fn test_trickle_ice_rtc_offerer_webrtc_answerer() -> Result<()> {
     log::info!("WebRTC created and set answer");
 
     // Set answer on RTC
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp.clone())?;
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(answer.sdp.clone())?;
     rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
     log::info!("RTC set remote description (answer)");
 
@@ -530,7 +530,7 @@ async fn test_trickle_ice_rtc_offerer_webrtc_answerer() -> Result<()> {
                 && line.contains(" udp ")
             {
                 let candidate_str = line.strip_prefix("a=").unwrap_or(line);
-                let remote_candidate = rtc::peer_connection::transport::RTCIceCandidateInit {
+                let remote_candidate = rtci::peer_connection::transport::RTCIceCandidateInit {
                     candidate: candidate_str.to_string(),
                     sdp_mid: Some("0".to_string()),
                     sdp_mline_index: Some(0),

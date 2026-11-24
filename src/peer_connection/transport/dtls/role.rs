@@ -31,7 +31,7 @@ use shared::error::{Error, Result};
 /// ## Standard Offer/Answer
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsRole;
+/// use rtci::peer_connection::transport::RTCDtlsRole;
 ///
 /// // Offerer uses Auto (actpass)
 /// let offerer_role = RTCDtlsRole::Auto;
@@ -47,7 +47,7 @@ use shared::error::{Error, Result};
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsRole;
+/// use rtci::peer_connection::transport::RTCDtlsRole;
 ///
 /// let role = RTCDtlsRole::Client;
 /// assert_eq!(role.to_string(), "client");
@@ -59,7 +59,7 @@ use shared::error::{Error, Result};
 /// ## Checking Role
 ///
 /// ```
-/// use rtc::peer_connection::transport::RTCDtlsRole;
+/// use rtci::peer_connection::transport::RTCDtlsRole;
 ///
 /// fn will_initiate_handshake(role: RTCDtlsRole) -> bool {
 ///     matches!(role, RTCDtlsRole::Client)

@@ -56,10 +56,10 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::interceptor::Registry;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::interceptor::Registry;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut media_engine = MediaEngine::default();
@@ -84,10 +84,10 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::interceptor::Registry;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::interceptor_registry::{configure_nack, configure_twcc};
-//! use rtc::peer_connection::configuration::media_engine::MediaEngine;
+//! use rtci::interceptor::Registry;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::interceptor_registry::{configure_nack, configure_twcc};
+//! use rtci::peer_connection::configuration::media_engine::MediaEngine;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut media_engine = MediaEngine::default();
@@ -154,7 +154,7 @@ use std::time::Duration;
 /// The chain registry these helpers take and return, and the positions they place interceptors at.
 ///
 /// Re-exported so the helpers and the type they operate on can be named from one path — every
-/// example here reaches for both, and the definitions live in `rtc-interceptor` because the chain
+/// example here reaches for both, and the definitions live in `rtci-interceptor` because the chain
 /// does.
 pub use interceptor::{Registry, Slot};
 use shared::error::Result;
@@ -206,9 +206,9 @@ use shared::error::Result;
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -314,11 +314,11 @@ impl TransportHandles {
 /// the other value is the behaviour of a browser or of an earlier version of this crate.
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::{
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::{
 ///     CongestionFeedback, DefaultInterceptorOptions, register_default_interceptors_with_options,
 /// };
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -1111,8 +1111,8 @@ pub fn configure_circuit_breaker(registry: Registry) -> (Registry, CircuitBreake
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_key_frame_requests;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_key_frame_requests;
 ///
 /// let registry = configure_key_frame_requests(Registry::new());
 /// ```
@@ -1141,9 +1141,9 @@ pub fn configure_key_frame_requests(registry: Registry) -> Registry {
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_nack;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_nack;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// let mut media_engine = MediaEngine::default();
 /// let registry = Registry::new();
@@ -1224,7 +1224,7 @@ fn configure_nack_with(
 /// [`RtcpSessionBuilder`] when the chain is built by hand:
 ///
 /// ```
-/// use rtc::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
+/// use rtci::interceptor::{Registry, RtcpBandwidth, RtcpSessionBuilder, Slot};
 /// use std::time::Duration;
 ///
 /// let registry = Registry::new().with(
@@ -1246,8 +1246,8 @@ fn configure_nack_with(
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_rtcp_reports;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_rtcp_reports;
 ///
 /// let registry = Registry::new();
 /// let registry = configure_rtcp_reports(registry);
@@ -1309,8 +1309,8 @@ impl interceptor::RtcpRandom for ProviderRtcpRandom {
 /// ([`RTCP_SESSION_DEFAULT_T_RR_INTERVAL`](interceptor::RTCP_SESSION_DEFAULT_T_RR_INTERVAL)):
 ///
 /// ```
-/// use rtc::interceptor::{Registry, RtcpSessionBuilder};
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_rtcp_reports_with;
+/// use rtci::interceptor::{Registry, RtcpSessionBuilder};
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_rtcp_reports_with;
 ///
 /// // Regular reports at most once a second, as browsers send them.
 /// let registry = configure_rtcp_reports_with(Registry::new(), RtcpSessionBuilder::new());
@@ -1338,8 +1338,8 @@ pub fn configure_rtcp_reports_with(registry: Registry, session: RtcpSessionBuild
 /// gets none. Part of [`register_default_interceptors`].
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_extended_reports;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_extended_reports;
 ///
 /// let registry = configure_extended_reports(Registry::new());
 /// # let _ = registry;
@@ -1371,9 +1371,9 @@ pub fn configure_tradeoff_notifications(registry: Registry) -> Registry {
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_pause_resume;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_pause_resume;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// let mut media_engine = MediaEngine::default();
 /// let (registry, handle) = configure_pause_resume(Registry::new(), &mut media_engine);
@@ -1428,8 +1428,8 @@ pub fn configure_pause_resume_with(
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_receiver_reference_time;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_receiver_reference_time;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// let mut media_engine = MediaEngine::default();
 /// configure_receiver_reference_time(&mut media_engine);
@@ -1464,8 +1464,8 @@ pub fn configure_receiver_reference_time(media_engine: &mut MediaEngine) {
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_simulcast_extension_headers;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_simulcast_extension_headers;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -1535,9 +1535,9 @@ pub fn configure_simulcast_extension_headers(media_engine: &mut MediaEngine) -> 
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_twcc;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_twcc;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -1611,9 +1611,9 @@ pub fn configure_twcc(registry: Registry, media_engine: &mut MediaEngine) -> Res
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_twcc_sender_only;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_twcc_sender_only;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -1689,9 +1689,9 @@ pub fn configure_twcc_sender_only(
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_twcc_receiver_only;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_twcc_receiver_only;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -1771,9 +1771,9 @@ fn register_ccfb_feedback(media_engine: &mut MediaEngine, kind: RtpCodecKind) {
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Registry;
-/// use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::interceptor::Registry;
+/// use rtci::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// let mut media_engine = MediaEngine::default();
 /// let registry = configure_congestion_control_feedback(Registry::new(), &mut media_engine);
@@ -1853,11 +1853,11 @@ impl CongestionFeedback {
 /// # Examples
 ///
 /// ```
-/// use rtc::interceptor::Gcc;
-/// use rtc::peer_connection::configuration::interceptor_registry::{
+/// use rtci::interceptor::Gcc;
+/// use rtci::peer_connection::configuration::interceptor_registry::{
 ///     CongestionFeedback, Registry, configure_congestion_control,
 /// };
-/// use rtc::peer_connection::configuration::media_engine::MediaEngine;
+/// use rtci::peer_connection::configuration::media_engine::MediaEngine;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut media_engine = MediaEngine::default();
@@ -2437,7 +2437,7 @@ mod slot_order_tests {
     /// RFC 8888 section 6: an offer may name RFC 8888 beside another congestion control
     /// feedback mechanism, so the standard set offers `ack ccfb` and `transport-cc` on every
     /// codec and carries a recorder for each. Which one reports a stream is decided per stream
-    /// (`a_stream_is_reported_in_one_feedback_format` in `rtc-interceptor`).
+    /// (`a_stream_is_reported_in_one_feedback_format` in `rtci-interceptor`).
     #[test]
     fn the_default_set_offers_rfc8888_beside_transport_cc() {
         let mut media_engine = MediaEngine::default();

@@ -13,22 +13,22 @@
 //! rolls back its own offer via `set_local_description`, and an already-applied remote offer is
 //! rolled back via `set_remote_description`.
 
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 fn media_pc() -> RTCPeerConnection {
     let mut me = MediaEngine::default();
     me.register_default_codecs().unwrap();
-    rtc::peer_connection::RTCPeerConnectionBuilder::new()
+    rtci::peer_connection::RTCPeerConnectionBuilder::new()
         .with_media_engine(me)
         .build(Instant::now())
         .unwrap()

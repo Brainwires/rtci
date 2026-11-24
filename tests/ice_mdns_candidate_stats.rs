@@ -9,18 +9,18 @@
 //! exactly this: the report had a `host` remote candidate with a null address, because the
 //! candidate got its statistics object only when it resolved, as one "learned from a check".
 //!
-//! No sockets and no wall clock: the name's owner is played by an `rtc-mdns` responder.
+//! No sockets and no wall clock: the name's owner is played by an `rtci-mdns` responder.
 
 use anyhow::Result;
-use rtc::mdns::{Mdns, MdnsConfig};
-use rtc::peer_connection::transport::{
+use rtci::mdns::{Mdns, MdnsConfig};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidateType,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -225,7 +225,7 @@ fn a_learned_candidate_that_a_resolved_name_replaces_shows_the_name() -> Result<
     let succeeded_pair = |pc: &mut RTCPeerConnection, now: Instant| {
         pc.get_stats(now, StatsSelector::None)
             .candidate_pairs()
-            .filter(|p| p.state == rtc::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState::Succeeded)
+            .filter(|p| p.state == rtci::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState::Succeeded)
             .map(|p| p.remote_candidate_id.clone())
             .collect::<Vec<_>>()
     };
@@ -321,7 +321,7 @@ fn a_learned_candidate_that_a_resolved_name_replaces_shows_the_name() -> Result<
 /// stale one is recognised), and `to_json` hands it on.
 #[test]
 fn an_announced_local_candidate_names_its_ice_generation() -> Result<()> {
-    use rtc::peer_connection::event::RTCPeerConnectionEvent;
+    use rtci::peer_connection::event::RTCPeerConnectionEvent;
 
     let now = Instant::now();
     let mut pc = RTCPeerConnectionBuilder::new().build(now)?;

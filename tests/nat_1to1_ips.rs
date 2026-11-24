@@ -1,12 +1,12 @@
 //! `SettingEngineBuilder::with_nat_1to1_ips`: the host candidates the application adds are
 //! announced on the 1:1 NAT's public address.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidateType};
-use rtc::sansio::Protocol;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidateType};
+use rtci::sansio::Protocol;
 use std::time::Instant;
 
 fn announced(candidate_type: RTCIceCandidateType) -> Vec<RTCIceCandidate> {
@@ -61,7 +61,7 @@ fn nat_1to1_srflx_announces_a_server_reflexive_candidate_beside_the_host() {
 fn nat_1to1_with_mdns_host_names_is_refused() {
     let setting_engine = SettingEngineBuilder::new()
         .with_nat_1to1_ips(vec!["203.0.113.7".to_owned()], RTCIceCandidateType::Host)
-        .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::QueryAndGather)
+        .with_multicast_dns_mode(rtci::ice::mdns::MulticastDnsMode::QueryAndGather)
         .build();
     let pc = RTCPeerConnectionBuilder::new()
         .with_configuration(RTCConfigurationBuilder::new().build())

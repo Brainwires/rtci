@@ -11,12 +11,12 @@
 
 #![allow(dead_code)]
 
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ pub struct Peer {
     pub pc: RTCPeerConnection,
     pub addr: SocketAddr,
     pub states: Vec<RTCPeerConnectionState>,
-    pub channel: Option<rtc::data_channel::RTCDataChannelId>,
+    pub channel: Option<rtci::data_channel::RTCDataChannelId>,
     pub received: usize,
     pub rtp: usize,
 }

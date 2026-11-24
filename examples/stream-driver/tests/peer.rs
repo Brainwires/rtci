@@ -6,22 +6,22 @@
 //! 3-tuple, RFC 8842 section 5.1).
 
 use bytes::Bytes;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{
     RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent,
 };
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
-use rtc::peer_connection::transport::{RTCDtlsTransportState, RTCIceCandidateInit};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::{RTCPeerConnectionState, RTCSignalingState};
+use rtci::peer_connection::transport::{RTCDtlsTransportState, RTCIceCandidateInit};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc_stream_driver::peer::{PeerDriver, PeerDriverConfig};
+use rtci::sansio::Protocol;
+use rtci_stream_driver::peer::{PeerDriver, PeerDriverConfig};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -201,8 +201,8 @@ fn write_audio(side: &mut Side, transceiver: RTCRtpTransceiverId, seq: u16) -> R
         .payload_type;
     sender.write_rtp(
         Instant::now(),
-        rtc::rtp::Packet {
-            header: rtc::rtp::header::Header {
+        rtci::rtp::Packet {
+            header: rtci::rtp::header::Header {
                 version: 2,
                 payload_type,
                 sequence_number: seq,
@@ -319,7 +319,7 @@ async fn stop_all_then_add_carries_media_on_new_sockets() -> Result<()> {
 #[tokio::test]
 async fn automatic_srtp_re_keying_carries_every_packet_onto_new_sockets() -> Result<()> {
     const PACKETS: u16 = 1100;
-    let lifetime = Some(rtc::srtp::keying::KeyLifetime {
+    let lifetime = Some(rtci::srtp::keying::KeyLifetime {
         srtp_packets: 960,
         srtcp_packets: 1 << 31,
     });
@@ -466,7 +466,7 @@ async fn crossing_re_keying_offers_are_rolled_back_and_carry_every_packet() -> R
     const PACKETS: u16 = 1100;
     let settings = || {
         SettingEngineBuilder::new()
-            .with_srtp_key_lifetime(Some(rtc::srtp::keying::KeyLifetime {
+            .with_srtp_key_lifetime(Some(rtci::srtp::keying::KeyLifetime {
                 srtp_packets: 960,
                 srtcp_packets: 1 << 31,
             }))
@@ -567,7 +567,7 @@ fn collide(polite: &mut Side, impolite: &mut Side) -> Result<()> {
     let pc = polite.driver.pc_mut();
     pc.set_local_description(
         now,
-        rtc::peer_connection::sdp::RTCSessionDescription::rollback(None)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::rollback(None)?,
     )?;
     pc.set_remote_description(now, offer)?;
     let answer = pc.create_answer(None)?;

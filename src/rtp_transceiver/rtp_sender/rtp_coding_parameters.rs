@@ -18,7 +18,7 @@ use crate::rtp_transceiver::{PayloadType, RtpStreamId, SSRC};
 /// # Examples
 ///
 /// ```
-/// use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
+/// use rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
 ///
 /// // Basic parameters without retransmission or FEC
 /// let params = RTCRtpCodingParameters {
@@ -31,7 +31,7 @@ use crate::rtp_transceiver::{PayloadType, RtpStreamId, SSRC};
 /// ```
 ///
 /// ```
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpRtxParameters};
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpRtxParameters};
 ///
 /// // Simulcast layer with retransmission
 /// let params = RTCRtpCodingParameters {
@@ -83,7 +83,7 @@ pub struct RTCRtpCodingParameters {
 /// # Examples
 ///
 /// ```
-/// use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpRidRestrictions};
+/// use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpRidRestrictions};
 ///
 /// // `a=rid:q send max-width=320;max-height=180;max-fps=15`
 /// let quarter = RTCRtpCodingParameters {
@@ -138,7 +138,7 @@ impl RTCRtpRidRestrictions {
 /// # Examples
 ///
 /// ```
-/// use rtc::rtp_transceiver::rtp_sender::RTCRtpRtxParameters;
+/// use rtci::rtp_transceiver::rtp_sender::RTCRtpRtxParameters;
 ///
 /// let rtx = RTCRtpRtxParameters {
 ///     ssrc: 67890,  // Different from the main stream's SSRC
@@ -164,7 +164,7 @@ pub struct RTCRtpRtxParameters {
 /// # Examples
 ///
 /// ```
-/// use rtc::rtp_transceiver::rtp_sender::RTCRtpFecParameters;
+/// use rtci::rtp_transceiver::rtp_sender::RTCRtpFecParameters;
 ///
 /// let fec = RTCRtpFecParameters {
 ///     ssrc: 99999,  // Different from the main stream's SSRC

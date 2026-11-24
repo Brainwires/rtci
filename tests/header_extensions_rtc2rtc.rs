@@ -1,28 +1,28 @@
-//! Header extensions on the wire between two `rtc` peer connections, in virtual time: the
+//! Header extensions on the wire between two `rtci` peer connections, in virtual time: the
 //! one-byte / two-byte form of a stream as `a=extmap-allow-mixed` was negotiated (RFC 8285
 //! sections 4.1.2 and 6), and RFC 6904 header extension encryption once an extension is
 //! negotiated in its encrypted form.
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::{ExtensionForm, Header};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::{ExtensionForm, Header};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -44,8 +44,8 @@ impl Peer {
         media_engine.register_default_codecs()?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
         media_engine.register_header_extension(
-            rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
-                uri: rtc::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
+            rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability {
+                uri: rtci::rtp::extension::ABS_CAPTURE_TIME_URI.to_owned(),
             },
             RtpCodecKind::Video,
             None,
@@ -225,7 +225,7 @@ impl World {
             // asks for Cryptex (whose default policy, "negotiate", would encrypt them).
             peer.pc
                 .set_rtp_header_encryption_policy(
-                    rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
+                    rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy::Disable,
                 )
                 .expect("before any description");
             prepare(&mut peer.pc);
@@ -315,7 +315,7 @@ impl World {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header,
                     payload: Bytes::from(vec![0x10u8; 100]),
                 },
@@ -444,7 +444,7 @@ fn the_absolute_capture_time_reaches_the_receivers_synchronization_source() -> R
             parameters.rtp_parameters.codecs[0].payload_type,
         )
     };
-    let packet = |seq: u16, timestamp: u32| rtc::rtp::Packet {
+    let packet = |seq: u16, timestamp: u32| rtci::rtp::Packet {
         header: Header {
             version: 2,
             payload_type: pt,
@@ -601,7 +601,7 @@ fn an_element_with_an_id_that_is_not_negotiated_is_not_sent() -> Result<()> {
 /// time, which its synchronization source reports.
 #[test]
 fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear() -> Result<()> {
-    use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+    use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
     let (mut world, sender) = World::connected_prepared(
         RtpCodecKind::Video,
         |sdp| sdp,
@@ -632,7 +632,7 @@ fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear()
         .expect("sender")
         .write_rtp_with_capture_time(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header: Header {
                     version: 2,
                     payload_type: pt,
@@ -703,7 +703,7 @@ fn with_cryptex_the_extensions_are_encrypted_on_the_wire_and_read_in_the_clear()
         .expect("sender")
         .write_rtp_with_capture_time(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header: Header {
                     version: 2,
                     payload_type: pt,
@@ -757,7 +757,7 @@ fn extmap_id(sdp: &str, uri: &str) -> Option<u8> {
 /// element: the sender only sends what was negotiated.
 #[test]
 fn every_video_orientation_is_sent_when_the_peer_indicates_support() -> Result<()> {
-    use rtc::rtp::extension::video_orientation_extension::{
+    use rtci::rtp::extension::video_orientation_extension::{
         CameraDirection, VideoOrientationExtension, VideoRotation,
     };
     let orientations: Vec<VideoOrientationExtension> = [
@@ -815,7 +815,7 @@ fn every_video_orientation_is_sent_when_the_peer_indicates_support() -> Result<(
                 .expect("sender")
                 .write_rtp_with_video_orientation(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,

@@ -15,8 +15,8 @@
 //! # Examples
 //!
 //! ```
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::statistics::StatsSelector;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::statistics::StatsSelector;
 //! use std::time::Instant;
 //!
 //! # fn example(peer_connection: &mut RTCPeerConnection) {

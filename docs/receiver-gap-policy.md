@@ -2,7 +2,7 @@
 
 The engine repairs losses (NACK and RTX, RFC 4588; FEC where negotiated), but it does not
 assemble frames or decide when to give up on one: that is the receiving application's video
-pipeline (with `rtc-media`'s `SampleBuilder`, or its own). This page is the rule such a pipeline
+pipeline (with `rtci-media`'s `SampleBuilder`, or its own). This page is the rule such a pipeline
 should follow, and why. Nothing here changes engine behaviour.
 
 ## The rule
@@ -31,7 +31,7 @@ libwebrtc's receiver follows the same idea in its own terms: when its NACK list 
 clearing NACK list and requesting keyframe."), and it forgets packets older than 10 000
 sequence numbers (`kMaxPacketAge`, line 34).
 
-## With `rtc-media`'s `SampleBuilder`
+## With `rtci-media`'s `SampleBuilder`
 
 - `SampleBuilder::new(max_late, ..)` bounds the wait in packets (`max_late`).
   `with_max_time_delay(duration)` adds a bound in media time: a sample is given up once the

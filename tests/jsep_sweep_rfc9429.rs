@@ -9,9 +9,9 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, exchange, media_sections, video_track,
 };
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
 
 fn gather(pc: &mut RTCPeerConnection, address: &str) -> TestResult {
     pc.add_local_candidate(RTCIceCandidateInit {
@@ -60,7 +60,7 @@ fn candidates_and_end_of_candidates_are_in_the_tagged_section_only() -> TestResu
 
 /// A remote offer of one video section with `transport` (ICE and DTLS lines) at session
 /// level and `media` lines in the section.
-fn offer(session: &str, media: &str) -> Result<RTCSessionDescription, rtc::shared::error::Error> {
+fn offer(session: &str, media: &str) -> Result<RTCSessionDescription, rtci::shared::error::Error> {
     RTCSessionDescription::offer(crlf(&format!(
         "{SESSION}{session}a=group:BUNDLE 0\nm=video 9 UDP/TLS/RTP/SAVPF 96\nc=IN IP4 0.0.0.0\n\
          {media}a=mid:0\na=sendrecv\na=rtcp-mux\na=rtpmap:96 VP8/90000\n"
@@ -114,9 +114,9 @@ fn mandatory_values_may_be_inherited_from_the_session_and_must_be_somewhere() ->
 /// the host address behind it shows nowhere in the description.
 #[test]
 fn the_relay_policy_exposes_no_local_address_not_even_as_a_related_address() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceTransportPolicy};
 
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
@@ -270,7 +270,7 @@ fn a_malformed_attribute_refuses_the_description_unless_its_specification_ignore
 /// Baseline (`profile-level-id` 42e0xx).
 #[test]
 fn an_offer_has_the_mandatory_audio_and_video_formats() -> TestResult {
-    use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+    use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
     let mut pc = default_peer()?;
     pc.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
     pc.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
@@ -306,16 +306,16 @@ fn an_offer_has_the_mandatory_audio_and_video_formats() -> TestResult {
 
 /// Section 5.8 with a deployed stack: webrtc-rs 0.17.x writes a feedback without parameters
 /// as `a=rtcp-fb:96 goog-remb ` (a trailing space, which RFC 4585 section 4.2's
-/// `rtcp-fb-param` does not allow; fixed on webrtc-rs's default branch, `rtc` commit 718d405,
+/// `rtcp-fb-param` does not allow; fixed on webrtc-rs's default branch, `rtci` commit 718d405,
 /// and in Pion v4.1.5, pion/webrtc#3207). By default white space at the end of a value is not
 /// held against it, so its offers are answered;
 /// `with_strict_sdp_attribute_grammar(true)` is the strict RFC reading, which refuses it. A
 /// value that is malformed otherwise is refused either way.
 #[test]
 fn trailing_white_space_in_a_value_is_refused_only_when_asked() -> TestResult {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::MediaEngine;
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::MediaEngine;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
     let peer = |strict: bool| -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;

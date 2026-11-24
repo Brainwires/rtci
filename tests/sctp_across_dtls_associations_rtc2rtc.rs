@@ -19,12 +19,12 @@ mod dc_common;
 
 use anyhow::Result;
 use dc_common::{Pair, Peer};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCSctpTransportState};
-use rtc::sansio::Protocol;
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState, RTCSctpTransportState};
+use rtci::sansio::Protocol;
+use rtci::statistics::StatsSelector;
 use std::time::Instant;
 
 /// The value of the first `a=<key>:` line of `sdp`.
@@ -116,8 +116,8 @@ fn connected(
     answerer_role: RTCDtlsRole,
 ) -> Result<(
     Pair,
-    rtc::data_channel::RTCDataChannelId,
-    rtc::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
+    rtci::data_channel::RTCDataChannelId,
 )> {
     // The exchanges below replace the DTLS association on the ICE session they have: RFC
     // 8842 section 3.1 alone, which a peer connection accepts only with this setting (RFC
@@ -157,8 +157,8 @@ fn connected(
 /// handshake ran arrived, and data crosses in both directions.
 fn assert_the_association_went_on(
     pair: &mut Pair,
-    local: rtc::data_channel::RTCDataChannelId,
-    remote: rtc::data_channel::RTCDataChannelId,
+    local: rtci::data_channel::RTCDataChannelId,
+    remote: rtci::data_channel::RTCDataChannelId,
     events_before: (usize, usize),
     what: &str,
 ) -> Result<()> {

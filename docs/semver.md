@@ -1,6 +1,6 @@
 # API stability policy
 
-This document records how `rtc` and the protocol subcrates keep their public API extensible,
+This document records how `rtci` and the protocol subcrates keep their public API extensible,
 and the specific decisions taken before 1.0. It exists because `#[non_exhaustive]` and trait
 sealing **cannot be introduced after 1.0** — adding either is itself a breaking change, so
 the window closes when the major version lands.
@@ -21,14 +21,14 @@ that crate's examples, integration tests, and benchmarks, which are separate com
 units. It also blocks downstream struct-literal construction of a non-exhaustive variant, and
 makes an irrefutable `let` destructure of a single-variant enum illegal.
 
-Because `rtc` re-exports all 15 protocol subcrates wholesale —
+Because `rtci` re-exports all 15 protocol subcrates wholesale —
 
 ```rust
 pub use {datachannel, dtls, ice, interceptor, mdns, media, rtcp, rtp,
          sansio, sctp, sdp, shared, srtp, stun, turn};
 ```
 
-— their entire public surface is part of `rtc`'s public API and is frozen at 1.0 alongside it.
+— their entire public surface is part of `rtci`'s public API and is frozen at 1.0 alongside it.
 The subcrates are in scope for this policy, not an afterthought.
 
 ## Inventory
@@ -54,29 +54,29 @@ is worth more to callers than room for a variant we have no way to add.
 
 | Crate | Enum | Why it cannot grow |
 |---|---|---|
-| `rtc-dtls` | `ExtendedMasterSecretType` | Request / Require / Disable — a complete policy triple. |
-| `rtc-dtls` | `CryptoCcmTagLen` | CCM tag is 8 or 16 bytes. |
-| `rtc-dtls` | `DtlsPadding` | Padding scheme marker. |
-| `rtc-ice` | `Role` | Controlling / Controlled (RFC 8445). |
-| `rtc-shared` | `EcnCodepoint` | Exactly four values in a two-bit field (RFC 3168). |
-| `rtc-rtcp` | `ChunkType` | One-bit RLE discriminator. |
-| `rtc-rtcp` | `TTLorHopLimitType` | Two-bit field. |
-| `rtc-rtcp` | `StatusChunkTypeTcc` | One-bit field. |
-| `rtc-rtcp` | `SymbolTypeTcc` | Two-bit field. |
-| `rtc-rtcp` | `SymbolSizeTypeTcc` | One-bit field. |
-| `rtc-rtcp` | `PacketStatusChunk` | Closed by its one-bit discriminator. |
-| `rtc-media` | `Deinterleaved`, `Interleaved` | Buffer-layout markers. |
-| `rtc-sctp` | `Side` | Client / Server. |
-| `rtc-datachannel` | `DataChannelThreshold` | Low / High. |
-| `rtc-rtp` | `CameraDirection` | Front / Back. |
-| `rtc-rtp` | `VideoRotation` | 0° / 90° / 180° / 270°. |
-| `rtc-rtp` | `DecodeTargetIndication` | The four values of the Dependency Descriptor's two-bit DTI field. |
-| `rtc-rtp` | `ExtensionForm` | One-byte / two-byte / anything else: a partition of the 16-bit "defined by profile" field (RFC 8285). |
-| `rtc-rtp` | `MtapKind` | MTAP16 / MTAP24: the two NAL types RFC 6184 defines. |
-| `rtc-rtp` | `SsrcForClockRate` | Keep / new / new after BYE: the three outcomes of RFC 7160 section 4.1. |
-| `rtc-sdp` | `Direction` | sendrecv / sendonly / recvonly / inactive (RFC 4566). |
-| `rtc-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
-| `rtc-interceptor` | `FlexFecProtected`, `FlexFecLayout` | Flexible mask or fixed L/D: the one F bit of the RFC 8627 FEC header. |
+| `rtci-dtls` | `ExtendedMasterSecretType` | Request / Require / Disable — a complete policy triple. |
+| `rtci-dtls` | `CryptoCcmTagLen` | CCM tag is 8 or 16 bytes. |
+| `rtci-dtls` | `DtlsPadding` | Padding scheme marker. |
+| `rtci-ice` | `Role` | Controlling / Controlled (RFC 8445). |
+| `rtci-shared` | `EcnCodepoint` | Exactly four values in a two-bit field (RFC 3168). |
+| `rtci-rtcp` | `ChunkType` | One-bit RLE discriminator. |
+| `rtci-rtcp` | `TTLorHopLimitType` | Two-bit field. |
+| `rtci-rtcp` | `StatusChunkTypeTcc` | One-bit field. |
+| `rtci-rtcp` | `SymbolTypeTcc` | Two-bit field. |
+| `rtci-rtcp` | `SymbolSizeTypeTcc` | One-bit field. |
+| `rtci-rtcp` | `PacketStatusChunk` | Closed by its one-bit discriminator. |
+| `rtci-media` | `Deinterleaved`, `Interleaved` | Buffer-layout markers. |
+| `rtci-sctp` | `Side` | Client / Server. |
+| `rtci-datachannel` | `DataChannelThreshold` | Low / High. |
+| `rtci-rtp` | `CameraDirection` | Front / Back. |
+| `rtci-rtp` | `VideoRotation` | 0° / 90° / 180° / 270°. |
+| `rtci-rtp` | `DecodeTargetIndication` | The four values of the Dependency Descriptor's two-bit DTI field. |
+| `rtci-rtp` | `ExtensionForm` | One-byte / two-byte / anything else: a partition of the 16-bit "defined by profile" field (RFC 8285). |
+| `rtci-rtp` | `MtapKind` | MTAP16 / MTAP24: the two NAL types RFC 6184 defines. |
+| `rtci-rtp` | `SsrcForClockRate` | Keep / new / new after BYE: the three outcomes of RFC 7160 section 4.1. |
+| `rtci-sdp` | `Direction` | sendrecv / sendonly / recvonly / inactive (RFC 4566). |
+| `rtci-sdp` | `ConnectionRole` | active / passive / actpass / holdconn (RFC 4145). |
+| `rtci-interceptor` | `FlexFecProtected`, `FlexFecLayout` | Flexible mask or fixed L/D: the one F bit of the RFC 8627 FEC header. |
 
 ### Protocol subcrates — marked (82)
 
@@ -103,7 +103,7 @@ Also marked: wire sum types that gain arms when the protocol does — `Content`,
 `IvfCodec`, `OggHeaderType`, `MulticastDnsMode`, `ClientAuthType`, `CipherSuiteHash`,
 `FlexFecHeader` (R=1 F=1 is reserved for a future variant), `FlexFecProtection`,
 `MarkerRule` (payload formats define their own marker rules), and the
-Windows interface-info enums in `rtc-shared::ifaces`.
+Windows interface-info enums in `rtci-shared::ifaces`.
 
 ## When adding a new public item
 
@@ -112,5 +112,5 @@ Windows interface-info enums in `rtc-shared::ifaces`.
 - **New variant on a `#[non_exhaustive]` enum**: minor release, no breakage.
 - **New variant on an exhaustive enum**: major release. Reconsider the classification first.
 - Matching a `#[non_exhaustive]` enum from another crate in this workspace — including from
-  `rtc` onto a subcrate enum — requires a `_` arm. Prefer a fallback that degrades safely
+  `rtci` onto a subcrate enum — requires a `_` arm. Prefer a fallback that degrades safely
   (skip the packet, return `Unspecified`) over `unreachable!()`.

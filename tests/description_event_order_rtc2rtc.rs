@@ -25,22 +25,22 @@
 //! in the order they were created; the SCTP transport's `statechange` after its channels.
 
 use anyhow::Result;
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::rtc_error::RTCErrorDetailType;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
+use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
     RTCSctpTransportState,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -206,7 +206,7 @@ fn run_for(
 /// Writes one Opus packet on the transceiver's sender.
 fn write_audio(
     peer: &mut Peer,
-    transceiver: rtc::rtp_transceiver::RTCRtpTransceiverId,
+    transceiver: rtci::rtp_transceiver::RTCRtpTransceiverId,
     seq: u16,
     now: Instant,
 ) -> Result<()> {
@@ -230,8 +230,8 @@ fn write_audio(
         .payload_type;
     sender.write_rtp(
         now,
-        rtc::rtp::Packet {
-            header: rtc::rtp::header::Header {
+        rtci::rtp::Packet {
+            header: rtci::rtp::header::Header {
                 version: 2,
                 payload_type,
                 sequence_number: seq,

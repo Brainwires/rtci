@@ -1,36 +1,36 @@
-//! Audio formats that ride an audio stream, between two `rtc` peer connections in virtual
+//! Audio formats that ride an audio stream, between two `rtci` peer connections in virtual
 //! time: comfort noise (RFC 3389) is sent only when its format was negotiated.
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AudioRedundancy, Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket,
 };
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtcp::goodbye::Goodbye;
-use rtc::rtcp::sender_report::SenderReport;
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::goodbye::Goodbye;
+use rtci::rtcp::sender_report::SenderReport;
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 /// when, and the local streams bound and unbound.
 #[derive(Default)]
 struct Tapped {
-    rtcp: Vec<(Instant, Vec<Box<dyn rtc::rtcp::Packet>>)>,
+    rtcp: Vec<(Instant, Vec<Box<dyn rtci::rtcp::Packet>>)>,
     bound: Vec<(u32, u32)>,
     unbound: Vec<u32>,
 }
@@ -411,7 +411,7 @@ impl World {
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header,
                     payload: Bytes::from(vec![0x10u8; size]),
                 },

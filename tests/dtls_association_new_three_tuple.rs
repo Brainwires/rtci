@@ -25,19 +25,19 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::event::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::event::{
     RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCPeerConnectionEvent,
 };
-use rtc::peer_connection::state::RTCIceGatheringState;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::message::{BINDING_REQUEST, BINDING_SUCCESS, Message, Setter};
-use rtc::stun::xoraddr::XorMappedAddress;
+use rtci::peer_connection::state::RTCIceGatheringState;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::message::{BINDING_REQUEST, BINDING_SUCCESS, Message, Setter};
+use rtci::stun::xoraddr::XorMappedAddress;
 use std::net::SocketAddr;
 use std::time::Duration;
 

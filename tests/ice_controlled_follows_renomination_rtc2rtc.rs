@@ -1,5 +1,5 @@
 //! The controlling agent uses another pair mid-session and data keeps flowing, between two
-//! `rtc` peers on a simulated network: by default as RFC 8445 has it (data is received on any
+//! `rtci` peers on a simulated network: by default as RFC 8445 has it (data is received on any
 //! valid pair, Section 12.2, and the controlled agent uses the nominated pair with the highest
 //! priority, Section 8.1.1), and with `NominationAcceptance::Latest` as libwebrtc does it
 //! (the controlled agent follows the latest nomination, here to a pair of lower priority, and
@@ -13,7 +13,7 @@
 //! controlled agent took only the first nomination, so it kept sending on the abandoned pair
 //! and dropped the peer's DTLS / SCTP from the new one: data stopped both ways.
 //!
-//! `rtc`'s own controlling agent nominates once, so the test plays libwebrtc's part on the
+//! `rtci`'s own controlling agent nominates once, so the test plays libwebrtc's part on the
 //! wire: the offerer has two addresses; once connected, the network moves the offerer's
 //! traffic from the address it used to its other one and drops anything still sent to the old
 //! one, and the offerer's USE-CANDIDATE on the new pair is injected, signed with the answerer's
@@ -21,28 +21,28 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::ice::NominationAcceptance;
-use rtc::ice::attributes::control::AttrControlling;
-use rtc::ice::attributes::priority::PriorityAttr;
-use rtc::ice::attributes::use_candidate::UseCandidateAttr;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::ice::NominationAcceptance;
+use rtci::ice::attributes::control::AttrControlling;
+use rtci::ice::attributes::priority::PriorityAttr;
+use rtci::ice::attributes::use_candidate::UseCandidateAttr;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::attributes::ATTR_USERNAME;
-use rtc::stun::fingerprint::FINGERPRINT;
-use rtc::stun::integrity::MessageIntegrity;
-use rtc::stun::message::{BINDING_REQUEST, Message, TransactionId};
-use rtc::stun::textattrs::Username;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::attributes::ATTR_USERNAME;
+use rtci::stun::fingerprint::FINGERPRINT;
+use rtci::stun::integrity::MessageIntegrity;
+use rtci::stun::message::{BINDING_REQUEST, Message, TransactionId};
+use rtci::stun::textattrs::Username;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -255,7 +255,7 @@ impl World {
         let answerer_ufrag = self.peers[1].sdp_attribute("ice-ufrag");
         let answerer_pwd = self.peers[1].sdp_attribute("ice-pwd");
         let offerer_ufrag = self.peers[0].sdp_attribute("ice-ufrag");
-        let provider = rtc::crypto::default_provider()
+        let provider = rtci::crypto::default_provider()
             .expect("a built-in crypto provider must be enabled for tests");
         let mut m = Message::new();
         m.build(&[

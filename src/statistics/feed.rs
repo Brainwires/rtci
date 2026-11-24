@@ -13,8 +13,8 @@
 //! # Examples
 //!
 //! ```
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::statistics::DecoderStatsUpdate;
+//! use rtci::peer_connection::RTCPeerConnection;
+//! use rtci::statistics::DecoderStatsUpdate;
 //!
 //! # fn example(pc: &mut RTCPeerConnection, ssrc: u32) {
 //! // The frame assembler completed a frame made of 3 packets in 2 ms.
