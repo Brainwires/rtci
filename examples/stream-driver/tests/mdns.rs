@@ -54,6 +54,7 @@ struct Side {
 
 impl Side {
     fn new(ip: IpAddr, limit: Option<MdnsRateLimit>) -> Result<Self> {
+        let _ = env_logger::builder().is_test(true).try_init();
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let settings =
@@ -172,7 +173,18 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
         a.driver.mdns_datagrams_sent(),
         b.driver.mdns_datagrams_sent()
     );
-    assert!(up, "connected over the resolved .local candidates");
+    for (who, side) in [("a", &a), ("b", &b)] {
+        assert!(
+            side.driver.mdns_datagrams_received() > 0,
+            "{who}: the driver's mDNS sockets received the group's datagrams"
+        );
+    }
+    assert!(
+        up,
+        "connected over the resolved .local candidates: a {:?} / b {:?}",
+        a.driver.pc().connection_state(),
+        b.driver.pc().connection_state()
+    );
     Ok(())
 }
 

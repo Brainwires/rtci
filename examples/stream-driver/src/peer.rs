@@ -181,6 +181,8 @@ pub struct PeerDriver {
     mdns_sockets: Option<MdnsSockets>,
     /// mDNS datagrams sent ([`Self::mdns_datagrams_sent`]).
     mdns_sent: u64,
+    /// mDNS datagrams received ([`Self::mdns_datagrams_received`]).
+    mdns_received: u64,
 }
 
 impl PeerDriver {
@@ -200,6 +202,7 @@ impl PeerDriver {
             mdns_egress: MdnsEgress::new(config.mdns_rate_limit()),
             mdns_sockets: None,
             mdns_sent: 0,
+            mdns_received: 0,
             config,
         }
     }
@@ -233,6 +236,12 @@ impl PeerDriver {
     /// announcements, answers, goodbyes), after the budget let them go.
     pub fn mdns_datagrams_sent(&self) -> u64 {
         self.mdns_sent
+    }
+
+    /// How many datagrams the driver's mDNS sockets received and handed to the connection
+    /// (its own looped back by the host included).
+    pub fn mdns_datagrams_received(&self) -> u64 {
+        self.mdns_received
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -312,6 +321,13 @@ impl PeerDriver {
     }
 
     fn feed(&mut self, local: SocketAddr, peer: SocketAddr, data: Vec<u8>) {
+        if self.mdns_sockets.as_ref().is_some_and(|m| {
+            [&m.v4, &m.v6]
+                .iter()
+                .any(|s| s.as_ref().is_some_and(|(_, at)| *at == local))
+        }) {
+            self.mdns_received += 1;
+        }
         // A datagram the engine cannot take (a stray, a late one) is its business, not the
         // driver's: it goes on.
         let _ = self.pc.handle_read(TaggedBytesMut {
