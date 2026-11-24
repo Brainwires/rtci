@@ -52,7 +52,8 @@ use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 use rtc::sansio::Protocol;
 use rtc::shared::time::SystemInstant;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use std::collections::BTreeSet;
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -107,6 +108,12 @@ impl RtcpRandom for SeededRtcpRandom {
     fn next_u32(&mut self) -> u32 {
         (self.0.next_u64() >> 32) as u32
     }
+}
+
+thread_local! {
+    /// Whether the next `World`'s caller ignores the target: its video stays at the rate it
+    /// had before the cap and does not pause.
+    static IGNORE_TARGET: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Which interceptor chain the peers of a run use.
@@ -354,6 +361,10 @@ struct Peer {
     /// number): the difference never reached the wire (dropped by a pacer).
     video_written: BTreeSet<u16>,
     video_left: BTreeSet<u16>,
+    /// The video packets written from 1 s on (the first key frame, written as the connection
+    /// comes up, is not the pacer's to lose), and the call's time at the current write.
+    video_written_late: BTreeMap<u16, Duration>,
+    media_elapsed: Duration,
     audio: RTCRtpSenderId,
     video: RTCRtpSenderId,
     audio_packetizer: Option<Box<dyn Packetizer>>,
@@ -373,6 +384,10 @@ struct Peer {
     unusable: u64,
     last_keyframe_request: Option<Instant>,
     keyframe_requests: Vec<Duration>,
+    /// The sending side: every `OnPacerDiscard` (time, frames, packets), and the key-frame
+    /// requests (PLI / FIR) it was handed.
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
     /// When the application was told of a selected candidate pair, with the estimate then.
     pair_changes: Vec<(Duration, Option<u32>)>,
 }
@@ -583,6 +598,8 @@ impl Peer {
             handles,
             video_written: BTreeSet::new(),
             video_left: BTreeSet::new(),
+            video_written_late: BTreeMap::new(),
+            media_elapsed: Duration::ZERO,
             audio,
             video,
             audio_packetizer: None,
@@ -599,6 +616,8 @@ impl Peer {
             unusable: 0,
             last_keyframe_request: None,
             keyframe_requests: Vec::new(),
+            pacer_discards: Vec::new(),
+            key_requests_received: 0,
             pair_changes: Vec::new(),
         })
     }
@@ -661,6 +680,10 @@ impl Peer {
         for packet in packetizer.packetize(now, &Bytes::copy_from_slice(data), samples)? {
             if video {
                 self.video_written.insert(packet.header.sequence_number);
+                if self.media_elapsed >= Duration::from_secs(1) {
+                    self.video_written_late
+                        .insert(packet.header.sequence_number, self.media_elapsed);
+                }
             }
             sender.write_rtp(now, packet)?;
         }
@@ -674,16 +697,16 @@ impl Peer {
             return gcc.target_bitrate_bps();
         }
         let mut total = 0.0;
+        let mut shares = 0;
         for id in [self.audio, self.video] {
             if let Some(sender) = self.pc.rtp_sender(id) {
-                total += sender
-                    .target_bitrates()
-                    .iter()
-                    .map(|(_, bps)| bps)
-                    .sum::<f64>();
+                let targets = sender.target_bitrates();
+                shares += targets.len();
+                total += targets.iter().map(|(_, bps)| bps).sum::<f64>();
             }
         }
-        (total > 0.0).then_some(total as u32)
+        // Zero is a target too: the pacer's pause.
+        (shares > 0).then_some(total as u32)
     }
 
     /// The fraction of packets the default chain's congestion controller counts as lost
@@ -868,6 +891,9 @@ impl World {
                         peer.request_keyframe(now)?;
                     }
                 }
+                RTCPeerConnectionEvent::OnPacerDiscard {
+                    frames, packets, ..
+                } => peer.pacer_discards.push((at, frames, packets)),
                 _ => {}
             }
         }
@@ -902,6 +928,7 @@ impl World {
                     }) =>
                 {
                     peer.force_key = true;
+                    peer.key_requests_received += 1;
                 }
                 _ => {}
             }
@@ -924,11 +951,19 @@ impl World {
             self.frame += 1;
             self.next_video =
                 self.start + Duration::from_micros(self.frame * 1_000_000 / u64::from(VIDEO_FPS));
-            for peer in self.peers.iter_mut() {
+            let ignore = IGNORE_TARGET.with(|i| i.get());
+            for (i, peer) in self.peers.iter_mut().enumerate() {
+                peer.media_elapsed = at;
+                // A target of zero is the pacer's pause: no frame is produced until the next
+                // target (a source that ignores the target, the caller under IGNORE_TARGET,
+                // carries on at its rate before the cap).
+                let ignoring = ignore && i == 0;
+                if peer.target_bps == 0 && !ignoring {
+                    continue;
+                }
+                let bitrate = if ignoring { 1_400_000 } else { peer.target_bps };
                 let key = std::mem::take(&mut peer.force_key);
-                let frame = peer
-                    .model
-                    .next_frame(video_bitrate_for(peer.target_bps), key);
+                let frame = peer.model.next_frame(video_bitrate_for(bitrate), key);
                 if key {
                     peer.keyframes_sent.push(at);
                 }
@@ -1135,8 +1170,18 @@ struct Outcome {
     rtx_dropped: u64,
     /// Opus packets dropped at the capped link's queue.
     audio_dropped: u64,
-    /// Video packets the caller's application wrote that never left its host.
+    /// Video packets the caller's application wrote that never left its host, and those of
+    /// them written from 1 s on.
     pacer_dropped: usize,
+    pacer_dropped_late: usize,
+    /// The caller's `OnPacerDiscard` events (time, frames, packets), and the key-frame requests
+    /// it was handed (the callee's and the pacer's).
+    pacer_discards: Vec<(Duration, u32, usize)>,
+    key_requests_received: u32,
+    /// The caller's pauses (target zero, as its application read it every 100 ms): start and
+    /// end, and how long after each end the callee had its next usable frame.
+    pauses: Vec<(Duration, Duration)>,
+    resumed_after: Vec<Duration>,
     unusable: u64,
 }
 
@@ -1186,6 +1231,15 @@ fn run(setup: &Setup) -> Result<Outcome> {
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
     let caller = &world.peers[0];
     let pacer_dropped = caller.video_written.difference(&caller.video_left).count();
+    // Written from 1 s on and at least 1 s before the end (the last frames may still wait in
+    // a pacer when the run stops).
+    let pacer_dropped_late = caller
+        .video_written_late
+        .iter()
+        .filter(|(seq, at)| {
+            **at + Duration::from_secs(1) <= end && !caller.video_left.contains(seq)
+        })
+        .count();
     if std::env::var("RTC_CAP_TRACE").is_ok() {
         for line in &world.trace {
             println!("TRACE {:?} seed {seed} {line}", setup.chain);
@@ -1193,6 +1247,31 @@ fn run(setup: &Setup) -> Result<Outcome> {
     }
     let callee = &world.peers[1];
     let (freeze, freeze_at) = longest_gap(&callee.usable_at, Duration::from_secs(2), end);
+    let mut pauses = Vec::new();
+    let mut started = None;
+    for &(at, bps) in &caller.targets {
+        match (started, bps) {
+            (None, 0) => started = Some(at),
+            (Some(from), bps) if bps > 0 => {
+                pauses.push((from, at));
+                started = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = started {
+        pauses.push((from, end));
+    }
+    let resumed_after = pauses
+        .iter()
+        .map(|(_, until)| {
+            callee
+                .usable_at
+                .iter()
+                .find(|at| **at >= *until)
+                .map_or(end.saturating_sub(*until), |at| *at - *until)
+        })
+        .collect();
     Ok(Outcome {
         before,
         reacted,
@@ -1211,6 +1290,11 @@ fn run(setup: &Setup) -> Result<Outcome> {
         rtx_dropped: world.uplinks[0].rtx_dropped,
         audio_dropped: world.uplinks[0].audio_dropped,
         pacer_dropped,
+        pacer_dropped_late,
+        pacer_discards: caller.pacer_discards.clone(),
+        key_requests_received: caller.key_requests_received,
+        pauses,
+        resumed_after,
         unusable: callee.unusable,
     })
 }
@@ -1331,7 +1415,7 @@ fn measure_the_capacity_cap() -> Result<()> {
                         setup.cap = Duration::from_secs(seconds.parse()?);
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | freeze {:.2} at {:.1} | rtx {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
                                 o.freeze.as_secs_f64(),
                                 o.freeze_at.as_secs_f64(),
                                 o.rtx_sent,
@@ -1339,6 +1423,9 @@ fn measure_the_capacity_cap() -> Result<()> {
                                 o.queue_drops,
                                 o.audio_dropped,
                                 o.pacer_dropped,
+                                o.pacer_dropped_late,
+                                o.pacer_discards.len(),
+                                o.pauses.len(),
                                 o.keyframe_requests.len(),
                                 o.under / 1000,
                                 o.estimate_at_lift / 1000,
@@ -1360,12 +1447,15 @@ fn measure_the_capacity_cap() -> Result<()> {
 /// The same call through the engine's default interceptors (the pacer with its default
 /// `PacerQueueOverflow::Drop`, GCC on transport-wide feedback, the NACK pair with the RFC 4588
 /// section 7 default), the video following the target the senders are given
-/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait):
-/// an application that follows the target never has a packet dropped by the pacer, on three
-/// seeds, and the video does not freeze for more than 2 s.
+/// (`RTCRtpSender::target_bitrates`, lowered by the retransmission reserve while repairs wait),
+/// on six seeds. When the cap comes the pacer holds video written at the old rate; once it
+/// would take half its 2 s bound to send, the target the application reads is zero (the pause)
+/// until the queue has drained, and the video produces nothing meanwhile. So nothing is
+/// discarded (no video packet written that never left, no `OnPacerDiscard`), the video
+/// resumes within a second of each pause's end, and it does not freeze for more than 2 s.
 #[test]
-fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<()> {
-    let outcomes: Result<Vec<_>> = (1..=3)
+fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> Result<()> {
+    let outcomes: Result<Vec<_>> = (1..=6)
         .map(|seed| {
             let outcome = run(&Setup::new(seed, None).chain(Chain::Default))?;
             println!("default chain seed {seed}: {outcome:?}");
@@ -1374,13 +1464,50 @@ fn a_sender_following_the_lowered_target_loses_nothing_at_the_pacer() -> Result<
         .collect();
     let outcomes = outcomes?;
     for (seed, outcome) in &outcomes {
-        assert_eq!(0, outcome.pacer_dropped, "seed {seed}: {outcome:?}");
+        assert_eq!(0, outcome.pacer_dropped_late, "seed {seed}: {outcome:?}");
+        assert!(
+            outcome.pacer_discards.is_empty(),
+            "seed {seed}: {outcome:?}"
+        );
+        assert!(
+            !outcome.pauses.is_empty(),
+            "seed {seed}: never paused: {outcome:?}"
+        );
+        for after in &outcome.resumed_after {
+            assert!(
+                *after <= Duration::from_secs(1),
+                "seed {seed}: no usable frame {after:?} after a pause ended: {outcome:?}"
+            );
+        }
         assert!(
             outcome.freeze <= Duration::from_secs(2),
             "seed {seed}: the video froze for {:?}: {outcome:?}",
             outcome.freeze
         );
     }
+    Ok(())
+}
+
+/// The default chain with a caller that ignores the target (its video stays at 1.4 Mbit/s
+/// through the cap and through the pause): what waits the pacer's 2 s bound is discarded whole
+/// frames at a time, every video packet that never left was announced (`OnPacerDiscard`), and
+/// each discard came with a key-frame request.
+#[test]
+fn a_sender_ignoring_the_target_has_whole_frames_discarded_and_is_asked_for_key_frames()
+-> Result<()> {
+    IGNORE_TARGET.with(|i| i.set(true));
+    let outcome = run(&Setup::new(1, None).chain(Chain::Default));
+    IGNORE_TARGET.with(|i| i.set(false));
+    let outcome = outcome?;
+    println!("default chain, target ignored, seed 1: {outcome:?}");
+    let announced: usize = outcome.pacer_discards.iter().map(|d| d.2).sum();
+    assert!(announced > 0, "{outcome:?}");
+    assert_eq!(outcome.pacer_dropped_late, announced, "{outcome:?}");
+    let with_frames = outcome.pacer_discards.iter().filter(|d| d.1 > 0).count();
+    assert!(
+        outcome.key_requests_received as usize >= 2 + with_frames,
+        "a key frame asked for with each discard: {outcome:?}"
+    );
     Ok(())
 }
 

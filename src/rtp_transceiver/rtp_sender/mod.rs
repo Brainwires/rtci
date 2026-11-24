@@ -435,6 +435,12 @@ impl RTCRtpSender<'_> {
     /// others. Empty until the congestion controller (the default interceptors) set a target,
     /// and for a sender that does not send. Each outbound stream's `targetBitrate` statistic
     /// reports the same share.
+    ///
+    /// Zero means **pause**: the default chain's pacer holds more than its queue can send in
+    /// half its queue time bound (1 s by default), and the encoder is to produce nothing until
+    /// the target comes back. It resumes then without a key frame (nothing it encoded was
+    /// lost). Media written anyway may be discarded whole frames at a time
+    /// (`RTCPeerConnectionEvent::OnPacerDiscard`, with a key-frame request).
     pub fn target_bitrates(&self) -> Vec<(crate::rtp_transceiver::SSRC, f64)> {
         self.sender().allocated_bitrates().to_vec()
     }
