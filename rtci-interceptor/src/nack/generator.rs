@@ -4,7 +4,7 @@ use super::receive_log::ReceiveLog;
 use super::stream_supports_nack;
 use crate::Interceptor;
 use crate::stream_info::StreamInfo;
-use crate::{AttributedPacket, Packet, TaggedPacket};
+use crate::{Attribute, AttributedPacket, Packet, TaggedPacket};
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::error::Error;
@@ -75,6 +75,7 @@ struct Reordering {
 }
 
 impl Reordering {
+    /// `asked_for`: the packet is (or may be) a retransmission of one asked for.
     fn on_packet(&mut self, now: Instant, seq: u16, asked_for: bool) {
         let newer = |a: u16, b: u16| (1..0x8000).contains(&a.wrapping_sub(b));
         match self.highest {
@@ -151,7 +152,10 @@ impl NackGeneratorBuilder {
         self
     }
 
-    /// Set the interval between NACK generation cycles.
+    /// Set the interval between NACK generation cycles: the cycle asks again for packets
+    /// still missing a round trip after their last request. A first request does not wait
+    /// for a cycle: it is made when the packet after the gap arrives, or when the stream's
+    /// reordering allowance has passed since ([`Self::with_reorder_delay`]).
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
@@ -209,7 +213,14 @@ impl NackGeneratorBuilder {
     /// On top of it the generator learns each stream's reordering: a first request also
     /// waits for as long as the stream's out-of-order packets arrived late in the last ten
     /// seconds (a quarter more, at most 500 ms), so a path that reorders does not have every
-    /// overtaken packet asked for and retransmitted.
+    /// overtaken packet asked for and retransmitted. A packet is missing from when the packet
+    /// after it arrives; with no delay and no reordering it is asked for then (RFC 4588 6.3:
+    /// "in environments where packet reordering is rare or does not take place ... the delay
+    /// may be extremely low or even take the value zero"), and otherwise when the delay has
+    /// passed, not at the next generation cycle. A retransmission teaches nothing about
+    /// reordering: one that arrived as RTX is marked (`Attribute::Retransmitted`), and on a
+    /// stream without RTX a packet asked for counts as one unless it came sooner than half a
+    /// measured round trip after the request.
     pub fn with_reorder_delay(mut self, reorder_delay: Duration) -> Self {
         self.reorder_delay = reorder_delay;
         self
@@ -341,6 +352,7 @@ impl NackGeneratorInterceptor {
                     let request = requests.entry(*sequence_number).or_insert(Request {
                         missing_since: now,
                         last_asked: None,
+                        first_asked: None,
                         asked: 0,
                     });
                     // Give up: asked often enough, or too old to be of use.
@@ -360,6 +372,7 @@ impl NackGeneratorInterceptor {
                             .is_none_or(|rtt| now.saturating_duration_since(last_asked) >= rtt),
                     };
                     if due {
+                        request.first_asked.get_or_insert(now);
                         request.last_asked = Some(now);
                         request.asked = request.asked.saturating_add(1);
                     }
@@ -389,11 +402,40 @@ impl NackGeneratorInterceptor {
     }
 }
 
+impl NackGeneratorInterceptor {
+    /// How long a first request for a packet of `ssrc` waits after it went missing: the set
+    /// reordering delay or the stream's learned allowance, the longer.
+    fn first_request_delay(&self, ssrc: u32, now: Instant) -> Duration {
+        self.reorder_delay.max(
+            self.reordering
+                .get(&ssrc)
+                .map_or(Duration::ZERO, |reordering| reordering.allowance(now)),
+        )
+    }
+
+    /// When the earliest packet not yet asked for is due its first request.
+    fn next_first_request(&self, now: Instant) -> Option<Instant> {
+        self.requests
+            .iter()
+            .flat_map(|(ssrc, requests)| {
+                let delay = self.first_request_delay(*ssrc, now);
+                requests
+                    .values()
+                    .filter(|request| request.last_asked.is_none())
+                    .map(move |request| request.missing_since + delay)
+            })
+            .filter(|due| *due > now)
+            .min()
+    }
+}
+
 /// A missing packet and what has been done about it.
 struct Request {
-    /// When the generator first found it missing.
+    /// When the generator found it missing: the arrival of the packet after it (or the
+    /// cycle that found it, for a gap the arrivals did not show).
     missing_since: Instant,
-    /// When it was last asked for.
+    /// When it was first and last asked for.
+    first_asked: Option<Instant>,
     last_asked: Option<Instant>,
     /// How often it has been asked for.
     asked: u16,
@@ -439,15 +481,62 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
             receive_log.add(rtp_packet.header.sequence_number);
             let ssrc = rtp_packet.header.ssrc;
             let seq = rtp_packet.header.sequence_number;
-            let asked_for = self
-                .requests
-                .get(&ssrc)
-                .and_then(|requests| requests.get(&seq))
-                .is_some_and(|request| request.last_asked.is_some());
-            self.reordering
-                .entry(ssrc)
-                .or_default()
-                .on_packet(msg.now, seq, asked_for);
+            let now = msg.now;
+            // Whether this is a retransmission, which says nothing about the path's reordering.
+            // One that arrived as RTX says so (`Attribute::Retransmitted`); on a stream with
+            // RTX anything else is the original, however late. Without RTX a retransmission
+            // is the original packet again: a packet asked for may be it, unless it came
+            // sooner after the request than one could (half a measured round trip).
+            let retransmitted = msg
+                .message
+                .get(&Attribute::Retransmitted {
+                    ssrc: 0,
+                    sequence_number: 0,
+                })
+                .is_some();
+            let round_trip_time = self.round_trip_time;
+            let asked_for = retransmitted
+                || (!self.rtx_payload_types.contains_key(&ssrc)
+                    && self
+                        .requests
+                        .get(&ssrc)
+                        .and_then(|requests| requests.get(&seq))
+                        .and_then(|request| request.first_asked)
+                        .is_some_and(|asked| {
+                            round_trip_time
+                                .is_none_or(|rtt| now.saturating_duration_since(asked) >= rtt / 2)
+                        }));
+            let reordering = self.reordering.entry(ssrc).or_default();
+            let highest = reordering.highest;
+            reordering.on_packet(now, seq, asked_for);
+            // The packets this one shows missing are missing from now (RFC 4588 6.3: the
+            // first request waits only for the reordering allowance).
+            let gap = highest.map_or(0, |highest| {
+                let ahead = seq.wrapping_sub(highest);
+                if (2..0x8000).contains(&ahead) {
+                    (ahead - 1).min(self.size)
+                } else {
+                    0
+                }
+            });
+            if gap > 0 {
+                let requests = self.requests.entry(ssrc).or_default();
+                for back in 1..=gap {
+                    requests.entry(seq.wrapping_sub(back)).or_insert(Request {
+                        missing_since: now,
+                        last_asked: None,
+                        first_asked: None,
+                        asked: 0,
+                    });
+                }
+                let delay = self.first_request_delay(ssrc, now);
+                if delay.is_zero() {
+                    self.generate_nacks(now);
+                } else {
+                    let due = now + delay;
+                    self.next_timeout = Some(self.next_timeout.map_or(due, |next| next.min(due)));
+                }
+            }
 
             // Arm the NACK timer from the first tracked packet's instant. `None` means nothing is
             // scheduled, so the interceptor asks for no wake-up until a stream is actually flowing.
@@ -492,8 +581,12 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackGeneratorInterceptor {
         if let Some(next_timeout) = self.next_timeout
             && now >= next_timeout
         {
-            self.next_timeout = Some(now + self.interval);
             self.generate_nacks(now);
+            let cycle = now + self.interval;
+            self.next_timeout = Some(
+                self.next_first_request(now)
+                    .map_or(cycle, |first| first.min(cycle)),
+            );
         }
         Ok(())
     }
