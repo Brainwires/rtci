@@ -1509,6 +1509,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 8833 ALPN (`webrtc`, `c-webrtc`) in the DTLS handshake, on in every profile; a peer that answers none connects as `webrtc` (RFC 8833 2). libwebrtc's DTLS has none: rtc_base/openssl_stream_adapter.cc @ a222406d sets no ALPN; its only ALPN is TLS, rtc_base/openssl_adapter.cc::OpenSSLAdapter::SetAlpnProtocols (line 228)",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_dtls_session_resumption",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 5764 3 (SHOULD): the transports of unbundled sections share one DTLS session, the others waiting for the first and resuming it (DTLS 1.3 tickets with psk_dhe_ke, DTLS 1.2 tickets or session ids), on in every profile. A bundled connection, Chrome's in every bundle policy, has one transport and is unchanged; a peer that issues or accepts no ticket gets full handshakes",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_dtls_connection_id",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 9146 / RFC 9147 9 connection ids, asked for only when the application gives a length (`None`, the extension asking for none, in every profile). No connection id code in the fetched libwebrtc sources (rtc_base/openssl_stream_adapter.cc, p2p/dtls/ @ a222406d); not checked further",
