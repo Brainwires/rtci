@@ -352,10 +352,18 @@ impl<'a> dyn AsyncUdpSocket + 'a {
         std::future::poll_fn(|cx| self.poll_send(cx, &transmit)).await
     }
 
-    /// Sends `transmit` if the socket can take it now; `false` when it cannot (or failed).
-    pub fn try_send(&self, transmit: &Transmit<'_>) -> bool {
+    /// Sends `transmit` if the socket can take it now: how many bytes, or the system's error
+    /// (`WouldBlock` when the socket cannot take it now).
+    ///
+    /// # Errors
+    ///
+    /// The send failed, or would block.
+    pub fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<usize> {
         let mut cx = Context::from_waker(std::task::Waker::noop());
-        matches!(self.poll_send(&mut cx, transmit), Poll::Ready(Ok(_)))
+        match self.poll_send(&mut cx, transmit) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
     }
 }
 

@@ -40,6 +40,16 @@
 //! on the IPv6 group (and on the IPv4 group of the same interface where the driver has an IPv4
 //! address there), and a query once on each interface.
 //!
+//! Where mDNS cannot be sent (a socket that cannot be bound, or a system that refuses every
+//! send to the group: no multicast route, or a Mac application without the Local Network
+//! permission) the driver tells the application with
+//! [`PeerDriverEvent::MdnsUnavailable`] ([`PeerDriver::poll_driver_event`]), with the system's
+//! error, counts it ([`PeerDriver::mdns_send_failures`], [`PeerDriver::mdns_bind_failures`]),
+//! and tells the connection that the family's names cannot be published. It tries again at the
+//! next gathering and, while mDNS datagrams wait, after a back-off; the first send that works
+//! is reported as [`PeerDriverEvent::MdnsAvailable`]. The connection itself goes on over its
+//! other candidates, or fails as ICE does.
+//!
 //! With `QueryAndGather` the driver binds the mDNS sockets before it adds the first host
 //! candidates and tells the connection for which address families it has one
 //! (`RTCPeerConnection::set_multicast_dns_publishing`): a host address of a family without one
@@ -95,6 +105,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -151,15 +162,118 @@ impl PeerDriverConfig {
     }
 }
 
+/// Why the driver's mDNS of one address family stopped: what [`PeerDriverEvent::MdnsUnavailable`]
+/// tells the application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdnsFailure {
+    /// The family: IPv6 (`true`) or IPv4.
+    pub ipv6: bool,
+    /// What failed.
+    pub stage: MdnsStage,
+    /// The operating system's error.
+    pub kind: io::ErrorKind,
+    /// Its code, where it has one (`EHOSTUNREACH`, `WSAENETUNREACH`, ...).
+    pub os_error: Option<i32>,
+    /// Its text.
+    pub message: String,
+}
+
+impl MdnsFailure {
+    fn new(ipv6: bool, stage: MdnsStage, error: &io::Error) -> Self {
+        Self {
+            ipv6,
+            stage,
+            kind: error.kind(),
+            os_error: error.raw_os_error(),
+            message: error.to_string(),
+        }
+    }
+}
+
+/// What failed in a [`MdnsFailure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdnsStage {
+    /// The mDNS socket could not be bound or joined to the group.
+    Bind,
+    /// The socket is bound but the system refuses to send to the group (no multicast route;
+    /// on a Mac, an application without the Local Network permission).
+    Send,
+}
+
+/// Something the driver itself reports to the application ([`PeerDriver::poll_driver_event`]),
+/// beside the connection's own events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerDriverEvent {
+    /// The driver cannot send mDNS for a family: the socket could not be bound, or the system
+    /// refused its sends. Told once until it works again. Its names are no longer published
+    /// (`RTCPeerConnection::set_multicast_dns_publishing`) for the candidates gathered next,
+    /// and the peer's `.local` names of that family will not resolve: the connection goes on
+    /// over its other candidates, or fails as ICE does. The driver tries again at the next
+    /// gathering and, while datagrams wait, after a back-off (1 s, doubling to 60 s).
+    MdnsUnavailable(MdnsFailure),
+    /// mDNS of the family works again (a datagram was sent after a failure).
+    MdnsAvailable {
+        /// The family: IPv6 (`true`) or IPv4.
+        ipv6: bool,
+    },
+}
+
+/// The first wait before the driver tries an mDNS socket again after a failure.
+const MDNS_RETRY_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait between two tries.
+const MDNS_RETRY_MAX: Duration = Duration::from_secs(60);
+/// How many sends in a row may fail before the family is declared unavailable (an error that
+/// says there is no route, or no permission, does it at once).
+const MDNS_FAILURES_BEFORE_UNAVAILABLE: u32 = 3;
+/// How many received mDNS datagrams wait for the driver at most; past it the oldest is
+/// dropped ([`PeerDriver::mdns_datagrams_dropped`]): any host on the link can send mDNS, and a
+/// driver that is not stepped must not grow with it.
+const MAX_QUEUED_MDNS_RECEIVED: usize = 256;
+
+/// One family's mDNS socket, and what the driver knows of it.
+struct MdnsFamily {
+    socket: Option<(Arc<dyn AsyncUdpSocket>, Box<dyn JoinHandle>)>,
+    /// One configured address per interface: what a message that names no address of its
+    /// own (a query) leaves from, once on each interface (RFC 6762 section 14).
+    links: Vec<IpAddr>,
+    /// Sends that failed in a row.
+    failures: u32,
+    /// Reported unavailable ([`PeerDriverEvent::MdnsUnavailable`]) and not yet working again.
+    unavailable: bool,
+    /// Not tried again before.
+    retry_at: Option<Instant>,
+    backoff: Duration,
+}
+
+impl MdnsFamily {
+    fn new(links: Vec<IpAddr>) -> Self {
+        Self {
+            socket: None,
+            links,
+            failures: 0,
+            unavailable: false,
+            retry_at: None,
+            backoff: MDNS_RETRY_FIRST,
+        }
+    }
+
+    fn close(&mut self) {
+        if let Some((_, reader)) = self.socket.take() {
+            reader.abort();
+        }
+    }
+}
+
+impl Drop for MdnsFamily {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// The host's mDNS sockets of a driver, bound at the connection's first mDNS datagram.
 struct MdnsSockets {
-    v4: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
-    v6: Option<(Arc<dyn AsyncUdpSocket>, SocketAddr)>,
-    readers: Vec<Box<dyn JoinHandle>>,
-    /// One configured address per interface, by family: what a message that names no address
-    /// of its own (a query) leaves from, once on each interface (RFC 6762 section 14).
-    links_v4: Vec<IpAddr>,
-    links_v6: Vec<IpAddr>,
+    v4: MdnsFamily,
+    v6: MdnsFamily,
     /// For an IPv6 address, the configured IPv4 address of the same interface: an IPv6
     /// record's messages also leave on the IPv4 group of its own interface.
     companions: Vec<(IpAddr, IpAddr)>,
@@ -182,8 +296,8 @@ impl MdnsSockets {
             return vec![(to, source)];
         }
         if from.is_unspecified() {
-            let routes: Vec<_> = (self.links_v4.iter().map(|ip| (group_v4, Some(*ip))))
-                .chain(self.links_v6.iter().map(|ip| (group_v6, Some(*ip))))
+            let routes: Vec<_> = (self.v4.links.iter().map(|ip| (group_v4, Some(*ip))))
+                .chain(self.v6.links.iter().map(|ip| (group_v6, Some(*ip))))
                 .collect();
             if routes.is_empty() {
                 return vec![(to, None)];
@@ -214,14 +328,6 @@ fn one_per_interface(addresses: &[IpAddr], ipv4: bool) -> Vec<IpAddr> {
         .filter(|ip| ip.is_ipv4() == ipv4 && !ip.is_unspecified())
         .filter(|ip| seen.insert(runtime::interface_name(*ip).unwrap_or_else(|| ip.to_string())))
         .collect()
-}
-
-impl Drop for MdnsSockets {
-    fn drop(&mut self) {
-        for reader in &self.readers {
-            reader.abort();
-        }
-    }
 }
 
 /// One UDP socket of the connection, with the reader that hands its datagrams to the driver.
@@ -256,6 +362,17 @@ pub struct PeerDriver {
     sockets: Vec<HostSocket>,
     datagrams_tx: async_channel::Sender<Received>,
     datagrams: async_channel::Receiver<Received>,
+    /// What the mDNS sockets received: bounded, the oldest dropped.
+    mdns_tx: async_channel::Sender<Received>,
+    mdns_rx: async_channel::Receiver<Received>,
+    /// Received mDNS datagrams dropped from a full queue ([`Self::mdns_datagrams_dropped`]).
+    mdns_dropped: Arc<AtomicU64>,
+    /// The driver's own events ([`Self::poll_driver_event`]).
+    driver_events: VecDeque<PeerDriverEvent>,
+    /// mDNS sends the system refused ([`Self::mdns_send_failures`]).
+    mdns_send_failures: u64,
+    /// mDNS socket binds that failed ([`Self::mdns_bind_failures`]).
+    mdns_bind_failures: u64,
     /// The engine's events, for the application, after the driver had its look.
     events: VecDeque<RTCPeerConnectionEvent>,
     /// The transports whose generation the driver gathered for on an
@@ -268,8 +385,8 @@ pub struct PeerDriver {
     /// `None` until the connection writes its first mDNS datagram, or, with
     /// `QueryAndGather`, until it gathers.
     mdns_sockets: Option<MdnsSockets>,
-    /// The connection was told for which families its names can be published.
-    mdns_publishing_told: bool,
+    /// What the connection was last told about the families its names can be published for.
+    mdns_publishing_told: Option<MulticastDnsPublishing>,
     /// mDNS datagrams sent ([`Self::mdns_datagrams_sent`]).
     mdns_sent: u64,
     /// mDNS datagrams received ([`Self::mdns_datagrams_received`]).
@@ -298,6 +415,7 @@ impl PeerDriver {
         config: PeerDriverConfig,
     ) -> Self {
         let (datagrams_tx, datagrams) = async_channel::unbounded();
+        let (mdns_tx, mdns_rx) = async_channel::bounded(MAX_QUEUED_MDNS_RECEIVED);
         Self {
             streams: StreamDriver::with_runtime(runtime.clone(), config.streams),
             runtime,
@@ -305,12 +423,18 @@ impl PeerDriver {
             sockets: Vec::new(),
             datagrams_tx,
             datagrams,
+            mdns_tx,
+            mdns_rx,
+            mdns_dropped: Arc::new(AtomicU64::new(0)),
+            driver_events: VecDeque::new(),
+            mdns_send_failures: 0,
+            mdns_bind_failures: 0,
             events: VecDeque::new(),
             gathered: HashSet::new(),
             unsent: 0,
             mdns_egress: MdnsEgress::new(config.mdns_rate_limit()),
             mdns_sockets: None,
-            mdns_publishing_told: false,
+            mdns_publishing_told: None,
             mdns_sent: 0,
             mdns_received: 0,
             config,
@@ -359,6 +483,37 @@ impl PeerDriver {
     /// (its own looped back by the host included).
     pub fn mdns_datagrams_received(&self) -> u64 {
         self.mdns_received
+    }
+
+    /// How many mDNS sends the system refused (to a group or an asker): a host without a
+    /// multicast route, a Mac application without the Local Network permission.
+    pub fn mdns_send_failures(&self) -> u64 {
+        self.mdns_send_failures
+    }
+
+    /// How many times an mDNS socket could not be bound or joined.
+    pub fn mdns_bind_failures(&self) -> u64 {
+        self.mdns_bind_failures
+    }
+
+    /// How many received mDNS datagrams were dropped because the driver was not stepped fast
+    /// enough (the oldest go first; at most 256 wait).
+    pub fn mdns_datagrams_dropped(&self) -> u64 {
+        self.mdns_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Whether the driver can send mDNS for a family now: its socket is bound and its sends
+    /// have not been refused since (see [`PeerDriverEvent::MdnsUnavailable`]).
+    pub fn mdns_available(&self, ipv6: bool) -> bool {
+        self.mdns_sockets.as_ref().is_some_and(|m| {
+            let family = if ipv6 { &m.v6 } else { &m.v4 };
+            family.socket.is_some() && !family.unavailable
+        })
+    }
+
+    /// The next event of the driver itself (mDNS that cannot be sent, and that works again).
+    pub fn poll_driver_event(&mut self) -> Option<PeerDriverEvent> {
+        self.driver_events.pop_front()
     }
 
     /// How many sockets the platform refused a TOS / Traffic Class on: their datagrams leave
@@ -442,11 +597,15 @@ impl PeerDriver {
             .max(now);
         let woke = {
             let mut datagram = std::pin::pin!(self.datagrams.recv());
+            let mut mdns = std::pin::pin!(self.mdns_rx.recv());
             let mut input = std::pin::pin!(self.streams.next());
             let mut timer = self.runtime.sleep_until(deadline);
             std::future::poll_fn(|cx| {
                 if let Poll::Ready(Ok(received)) = datagram.as_mut().poll(cx) {
                     return Poll::Ready(Woke::Datagram(received));
+                }
+                if let Poll::Ready(Ok(received)) = mdns.as_mut().poll(cx) {
+                    return Poll::Ready(Woke::Mdns(received));
                 }
                 if let Poll::Ready(input) = input.as_mut().poll(cx) {
                     return Poll::Ready(Woke::Stream(input));
@@ -462,6 +621,14 @@ impl PeerDriver {
                     self.feed(local, peer, data);
                 }
             }
+            Woke::Mdns((local, peer, data)) => {
+                self.mdns_received += 1;
+                self.feed(local, peer, data);
+                while let Ok((local, peer, data)) = self.mdns_rx.try_recv() {
+                    self.mdns_received += 1;
+                    self.feed(local, peer, data);
+                }
+            }
             Woke::Stream(input) => self.feed_stream(input),
             Woke::Timer => {}
         }
@@ -474,13 +641,6 @@ impl PeerDriver {
     }
 
     fn feed(&mut self, local: SocketAddr, peer: SocketAddr, data: Vec<u8>) {
-        if self.mdns_sockets.as_ref().is_some_and(|m| {
-            [&m.v4, &m.v6]
-                .iter()
-                .any(|s| s.as_ref().is_some_and(|(_, at)| *at == local))
-        }) {
-            self.mdns_received += 1;
-        }
         // A datagram the engine cannot take (a stray, a late one) is its business, not the
         // driver's: it goes on.
         let _ = self.pc.handle_read(TaggedBytesMut {
@@ -538,13 +698,16 @@ impl PeerDriver {
             return;
         };
         // UDP: a datagram the socket cannot take now is lost, as on the wire.
-        let sent = host.socket.try_send(&Transmit {
-            destination: datagram.transport.peer_addr,
-            contents: &datagram.message,
-            traffic_class,
-            segment_size: None,
-            source: None,
-        });
+        let sent = host
+            .socket
+            .try_send(&Transmit {
+                destination: datagram.transport.peer_addr,
+                contents: &datagram.message,
+                traffic_class,
+                segment_size: None,
+                source: None,
+            })
+            .is_ok();
         // The platform does not mark (RFC 8835 4.2: "appropriate to depart ... on platforms
         // where QoS marking is not implemented"): counted once per socket.
         let unmarked = host.socket.unmarked();
@@ -562,29 +725,40 @@ impl PeerDriver {
 
     /// Sends the held mDNS datagrams the budget lets go at `now`, binding the mDNS sockets at
     /// the first, each on the interface of the address the engine names for it
-    /// ([`MdnsSockets::routes`]). A datagram no socket could send is unsent.
+    /// ([`MdnsSockets::routes`]). A datagram no socket could send is unsent; a send the system
+    /// refuses counts against its family ([`Self::mdns_send_result`]).
     fn send_mdns(&mut self, now: Instant) {
         while let Some(datagram) = self.mdns_egress.pop_ready(now) {
-            let sockets = self.mdns_sockets();
+            self.ensure_mdns(now, false);
+            let Some(sockets) = self.mdns_sockets.as_ref() else {
+                self.unsent += 1;
+                continue;
+            };
             let routes = sockets.routes(
                 datagram.transport.local_addr.ip(),
                 datagram.transport.peer_addr,
             );
-            let mut sent = false;
+            let mut results = Vec::new();
             for (destination, source) in routes {
-                let socket = match destination {
-                    SocketAddr::V4(_) => &sockets.v4,
-                    SocketAddr::V6(_) => &sockets.v6,
+                let family = if destination.is_ipv6() {
+                    &sockets.v6
+                } else {
+                    &sockets.v4
                 };
-                if let Some((socket, _)) = socket {
-                    sent |= socket.try_send(&Transmit {
+                if let Some((socket, _)) = &family.socket {
+                    let result = socket.try_send(&Transmit {
                         destination,
                         contents: &datagram.message,
                         traffic_class: 0,
                         segment_size: None,
                         source,
                     });
+                    results.push((destination.is_ipv6(), result));
                 }
+            }
+            let mut sent = false;
+            for (ipv6, result) in results {
+                sent |= self.mdns_send_result(ipv6, result, now);
             }
             if sent {
                 self.mdns_sent += 1;
@@ -594,82 +768,191 @@ impl PeerDriver {
         }
     }
 
-    /// The host's mDNS sockets, bound at the first call (none with
-    /// [`PeerDriverConfig::mdns_sockets`] off, or where the host refuses them), each joined to
-    /// its group on the interface of every configured address of its family (RFC 6762
-    /// section 14: a name is answered, and a peer's asked for, on the link of its address).
-    fn mdns_sockets(&mut self) -> &MdnsSockets {
-        let bind = self.config.mdns_sockets;
-        let runtime = &self.runtime;
-        let datagrams_tx = &self.datagrams_tx;
-        let addresses = &self.config.addresses;
-        self.mdns_sockets.get_or_insert_with(|| {
-            let mut readers = Vec::new();
-            let mut open = |config: runtime::MulticastConfig| {
-                if !bind {
-                    return None;
+    /// Books one mDNS send of a family: a success makes the family available again (told
+    /// once); a refusal counts, and declares the family unavailable at once when the error
+    /// says there is no route or no permission, or after a few in a row. A full send buffer
+    /// (`WouldBlock`) is a lost datagram, as on the wire, not a failure.
+    fn mdns_send_result(&mut self, ipv6: bool, result: io::Result<usize>, now: Instant) -> bool {
+        let Some(sockets) = self.mdns_sockets.as_mut() else {
+            return false;
+        };
+        let family = if ipv6 {
+            &mut sockets.v6
+        } else {
+            &mut sockets.v4
+        };
+        match result {
+            Ok(_) => {
+                family.failures = 0;
+                if family.unavailable {
+                    family.unavailable = false;
+                    family.backoff = MDNS_RETRY_FIRST;
+                    self.driver_events
+                        .push_back(PeerDriverEvent::MdnsAvailable { ipv6 });
+                    self.refresh_mdns_publishing();
                 }
-                let socket = runtime.bind_udp_multicast(&config).ok()?;
-                let local = socket.local_addr().ok()?;
-                readers.push(runtime.spawn(Box::pin(read_loop(
-                    socket.clone(),
-                    local,
-                    datagrams_tx.clone(),
-                    MDNS_MAX_DATAGRAM,
-                ))));
-                Some((socket, local))
-            };
-            let v4 = open(mdns_v4(addresses.clone()));
-            let v6 = open(mdns_v6(addresses.clone()));
-            let links_v4 = if v4.is_some() {
-                one_per_interface(addresses, true)
-            } else {
-                Vec::new()
-            };
-            let links_v6 = if v6.is_some() {
-                one_per_interface(addresses, false)
-            } else {
-                Vec::new()
-            };
-            let companions = links_v6
-                .iter()
-                .filter_map(|v6| {
-                    let name = runtime::interface_name(*v6)?;
-                    let v4 = links_v4
-                        .iter()
-                        .find(|v4| runtime::interface_name(**v4).as_deref() == Some(&name))?;
-                    Some((*v6, *v4))
-                })
-                .collect();
-            MdnsSockets {
-                v4,
-                v6,
-                readers,
-                links_v4,
-                links_v6,
-                companions,
+                true
             }
-        })
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(e) => {
+                self.mdns_send_failures += 1;
+                family.failures += 1;
+                if decisive(&e) || family.failures >= MDNS_FAILURES_BEFORE_UNAVAILABLE {
+                    self.mdns_unavailable(ipv6, MdnsStage::Send, &e, now);
+                }
+                false
+            }
+        }
     }
 
-    /// Before the connection's first host candidates, with `QueryAndGather`: binds the mDNS
-    /// sockets and tells the connection for which address families its names can be
-    /// published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step 4).
-    fn prepare_mdns_publishing(&mut self) {
-        if self.mdns_publishing_told
-            || self.pc.multicast_dns_mode() != MulticastDnsMode::QueryAndGather
-        {
+    /// A family's mDNS cannot be used: its socket is closed (bound again at the next try),
+    /// the next try waits a back-off, the application is told (once until it works again),
+    /// and the connection learns that the family's names cannot be published.
+    fn mdns_unavailable(&mut self, ipv6: bool, stage: MdnsStage, error: &io::Error, now: Instant) {
+        let Some(sockets) = self.mdns_sockets.as_mut() else {
+            return;
+        };
+        let family = if ipv6 {
+            &mut sockets.v6
+        } else {
+            &mut sockets.v4
+        };
+        family.close();
+        family.failures = 0;
+        family.retry_at = Some(now + family.backoff);
+        family.backoff = (family.backoff * 2).min(MDNS_RETRY_MAX);
+        if !family.unavailable {
+            family.unavailable = true;
+            self.driver_events
+                .push_back(PeerDriverEvent::MdnsUnavailable(MdnsFailure::new(
+                    ipv6, stage, error,
+                )));
+        }
+        self.refresh_mdns_publishing();
+    }
+
+    /// The host's mDNS sockets (none with [`PeerDriverConfig::mdns_sockets`] off): each family
+    /// without a socket is bound now when it never was, when `force` (a gathering), or when
+    /// its back-off has passed. Each socket is joined to its group on the interface of every
+    /// configured address of its family (RFC 6762 section 14: a name is answered, and a peer's
+    /// asked for, on the link of its address). A bind that fails is reported
+    /// ([`PeerDriverEvent::MdnsUnavailable`]) and tried again later.
+    fn ensure_mdns(&mut self, now: Instant, force: bool) {
+        if self.mdns_sockets.is_none() {
+            let addresses = &self.config.addresses;
+            let v4 = MdnsFamily::new(one_per_interface(addresses, true));
+            let v6 = MdnsFamily::new(one_per_interface(addresses, false));
+            let companions = v6
+                .links
+                .iter()
+                .filter_map(|ip6| {
+                    let name = runtime::interface_name(*ip6)?;
+                    let ip4 = v4
+                        .links
+                        .iter()
+                        .find(|ip4| runtime::interface_name(**ip4).as_deref() == Some(&name))?;
+                    Some((*ip6, *ip4))
+                })
+                .collect();
+            self.mdns_sockets = Some(MdnsSockets { v4, v6, companions });
+        }
+        if !self.config.mdns_sockets {
             return;
         }
-        self.mdns_publishing_told = true;
-        let sockets = self.mdns_sockets();
-        // What is actually sent: an IPv4 record's messages need the IPv4 socket; an IPv6
-        // record's leave on the IPv6 group, or on the IPv4 group of its interface.
-        let publishing = MulticastDnsPublishing {
-            ipv4: sockets.v4.is_some(),
-            ipv6: sockets.v6.is_some() || !sockets.companions.is_empty(),
+        for ipv6 in [false, true] {
+            let Some(sockets) = self.mdns_sockets.as_ref() else {
+                return;
+            };
+            let family = if ipv6 { &sockets.v6 } else { &sockets.v4 };
+            if family.socket.is_some() || !(force || family.retry_at.is_none_or(|at| now >= at)) {
+                continue;
+            }
+            let config = if ipv6 {
+                mdns_v6(self.config.addresses.clone())
+            } else {
+                mdns_v4(self.config.addresses.clone())
+            };
+            let bound = self
+                .runtime
+                .bind_udp_multicast(&config)
+                .and_then(|socket| Ok((socket.local_addr()?, socket)));
+            match bound {
+                Ok((local, socket)) => {
+                    let tx = self.mdns_tx.clone();
+                    let dropped = self.mdns_dropped.clone();
+                    let reader = self.runtime.spawn(Box::pin(read_loop(
+                        socket.clone(),
+                        local,
+                        move |received| match tx.force_send(received) {
+                            Ok(None) => true,
+                            Ok(Some(_)) => {
+                                dropped.fetch_add(1, Ordering::Relaxed);
+                                true
+                            }
+                            Err(_) => false,
+                        },
+                        MDNS_MAX_DATAGRAM,
+                    )));
+                    if let Some(sockets) = self.mdns_sockets.as_mut() {
+                        let family = if ipv6 {
+                            &mut sockets.v6
+                        } else {
+                            &mut sockets.v4
+                        };
+                        family.socket = Some((socket, reader));
+                    }
+                }
+                Err(e) => {
+                    self.mdns_bind_failures += 1;
+                    self.mdns_unavailable(ipv6, MdnsStage::Bind, &e, now);
+                }
+            }
+        }
+        self.refresh_mdns_publishing();
+    }
+
+    /// Before the connection's host candidates, with `QueryAndGather`: binds the mDNS sockets
+    /// (again, for a family that failed) and tells the connection for which address families
+    /// its names can be published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step 4).
+    fn prepare_mdns_publishing(&mut self) {
+        if self.pc.multicast_dns_mode() != MulticastDnsMode::QueryAndGather {
+            return;
+        }
+        let now = self.runtime.now();
+        self.ensure_mdns(now, true);
+        if self.mdns_publishing_told.is_none() {
+            let publishing = self.mdns_publishing();
+            self.mdns_publishing_told = Some(publishing);
+            self.pc.set_multicast_dns_publishing(publishing);
+        }
+    }
+
+    /// What is actually sent: an IPv4 record's messages need the IPv4 socket; an IPv6 record's
+    /// leave on the IPv6 group, or on the IPv4 group of its interface.
+    fn mdns_publishing(&self) -> MulticastDnsPublishing {
+        let usable = |f: &MdnsFamily| f.socket.is_some() && !f.unavailable;
+        self.mdns_sockets.as_ref().map_or(
+            MulticastDnsPublishing {
+                ipv4: false,
+                ipv6: false,
+            },
+            |m| MulticastDnsPublishing {
+                ipv4: usable(&m.v4),
+                ipv6: usable(&m.v6) || (usable(&m.v4) && !m.companions.is_empty()),
+            },
+        )
+    }
+
+    /// Tells the connection again when what can be published changed, once it was told.
+    fn refresh_mdns_publishing(&mut self) {
+        let Some(told) = self.mdns_publishing_told else {
+            return;
         };
-        self.pc.set_multicast_dns_publishing(publishing);
+        let now = self.mdns_publishing();
+        if now != told {
+            self.mdns_publishing_told = Some(now);
+            self.pc.set_multicast_dns_publishing(now);
+        }
     }
 
     fn on_event(&mut self, event: &RTCPeerConnectionEvent) -> Result<()> {
@@ -839,10 +1122,11 @@ impl PeerDriver {
         self.prepare_mdns_publishing();
         for ip in self.config.addresses.clone() {
             let (socket, local) = self.bind_unique_port(ip).map_err(io_error)?;
+            let tx = self.datagrams_tx.clone();
             let reader = self.runtime.spawn(Box::pin(read_loop(
                 socket.clone(),
                 local,
-                self.datagrams_tx.clone(),
+                move |received| tx.try_send(received).is_ok(),
                 2048,
             )));
             self.sockets.push(HostSocket {
@@ -959,21 +1243,36 @@ fn host_candidate(local: SocketAddr, mid: &str, index: Option<u16>) -> Result<RT
 /// What woke a [`PeerDriver::step`].
 enum Woke {
     Datagram(Received),
+    Mdns(Received),
     Stream(DriverInput),
     Timer,
 }
 
+/// Whether an mDNS send error says sending cannot work (no route to the group, no
+/// permission): the family is unavailable at once, without waiting for more failures.
+fn decisive(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::AddrNotAvailable
+            | io::ErrorKind::NetworkDown
+    )
+}
+
+/// Reads `socket` and hands each datagram to `deliver` (`false`: the driver is gone).
 async fn read_loop(
     socket: Arc<dyn AsyncUdpSocket>,
     local: SocketAddr,
-    tx: async_channel::Sender<Received>,
+    mut deliver: impl FnMut(Received) -> bool + Send + 'static,
     max_datagram: usize,
 ) {
     let mut buf = vec![0u8; max_datagram];
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((n, peer)) => {
-                if tx.try_send((local, peer, buf[..n].to_vec())).is_err() {
+                if !deliver((local, peer, buf[..n].to_vec())) {
                     return;
                 }
             }

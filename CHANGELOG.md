@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a literal sets `interfaces: vec![interface.into()]` for `interface_v4`, or the address of
   the interface for `interface_v6`; a third-party socket adds a `MulticastInterfaceSelector`
   and calls `apply` before each send.
+- **stream-driver** (`conf/mdns-8-send-failures`): `<dyn AsyncUdpSocket>::try_send` returns
+  `io::Result<usize>` (the system's error, `WouldBlock` when the socket cannot take the
+  datagram now) instead of `bool`, and `runtime::mock::Fate` has a new variant, `SendError`.
+  Migration: `socket.try_send(&t)` used as a `bool` becomes `socket.try_send(&t).is_ok()`; a
+  `match` on `Fate` adds an arm for `Fate::SendError`.
 
 ### Behaviour changes
 
@@ -328,6 +333,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`MockNet::set_default_multicast_interface`). Engine behaviour change (rtci-mdns: the source
   address of an IPv6 record's messages; IPv6 records of different addresses are no longer
   aggregated into one message, as IPv4 records already were not).
+- **stream-driver** (`conf/mdns-8-send-failures`, review F2, F10, F11): where mDNS cannot be
+  sent (the socket binds but every send to the group fails, as on GitHub's macOS image or in a
+  Mac application without the Local Network permission), two publishing `PeerDriver`s sat in
+  Connecting for ever and the application was told nothing; a bind failure was kept for the
+  life of the connection. Now a refused send (at once for "no route" / "no permission", else
+  after three in a row) or a failed bind is reported as `PeerDriverEvent::MdnsUnavailable`
+  (`PeerDriver::poll_driver_event`, with the OS error), counted (`mdns_send_failures`,
+  `mdns_bind_failures`, `mdns_available`), and fed to the connection as a family it cannot
+  publish for (`set_multicast_dns_publishing`, so `with_multicast_dns_fail_closed` applies to
+  the candidates gathered next); the socket is bound again at the next gathering and after a
+  back-off (1 s doubling to 60 s), and the first send that works is reported as
+  `PeerDriverEvent::MdnsAvailable`. What the mDNS sockets receive waits in a bounded queue
+  (256, oldest dropped, `mdns_datagrams_dropped`). Tests `tests/mdns_failures.rs` (virtual
+  time, every platform; the mock network refuses sends with `MockNet::set_send_error`) and
+  `tests/mdns_unavailable.rs` (real network, `--ignored`, run on hosted runners). Not an engine
+  change.
 
 ### Changed
 

@@ -568,6 +568,9 @@ pub enum Fate {
     Lost,
     /// Dropped by the filter.
     Filtered,
+    /// The sending socket's system refused it ([`MockNet::set_send_error`]): the send
+    /// returned the error.
+    SendError,
 }
 
 /// One datagram of the [`MockNet::log`].
@@ -649,6 +652,21 @@ impl MockNet {
         interfaces.push(ip);
     }
 
+    /// Every send to `to` (an address, a multicast group included) fails with `error`, as
+    /// when the system has no route there (`HostUnreachable`) or refuses the application
+    /// (`PermissionDenied`); `None` lets them through again.
+    pub fn set_send_error(&self, to: IpAddr, error: Option<io::ErrorKind>) {
+        let mut state = lock(&self.shared.state);
+        match error {
+            Some(kind) => {
+                state.net.send_errors.insert(to, kind);
+            }
+            None => {
+                state.net.send_errors.remove(&to);
+            }
+        }
+    }
+
     /// Every datagram sent so far, in order.
     pub fn log(&self) -> Vec<DatagramRecord> {
         lock(&self.shared.state).net.log.clone()
@@ -659,6 +677,7 @@ struct Net {
     udp: HashMap<SocketAddr, Weak<UdpEndpoint>>,
     multicast: Vec<(SocketAddr, Weak<UdpEndpoint>)>,
     default_multicast_interfaces: Vec<IpAddr>,
+    send_errors: HashMap<IpAddr, io::ErrorKind>,
     listeners: HashMap<SocketAddr, Weak<ListenerEndpoint>>,
     tcp_ports: HashMap<SocketAddr, usize>,
     /// The next ephemeral port of each address: each address has its own ports, as on a real
@@ -678,6 +697,7 @@ impl Net {
             udp: HashMap::new(),
             multicast: Vec::new(),
             default_multicast_interfaces: Vec::new(),
+            send_errors: HashMap::new(),
             listeners: HashMap::new(),
             tcp_ports: HashMap::new(),
             next_port: HashMap::new(),
@@ -873,6 +893,17 @@ impl AsyncUdpSocket for MockUdp {
         {
             let mut state = lock(&self.runtime.shared.state);
             let net = &mut state.net;
+            if let Some(kind) = net.send_errors.get(&to.ip()).copied() {
+                net.log.push(DatagramRecord {
+                    at: now,
+                    from,
+                    to,
+                    len: transmit.contents.len(),
+                    traffic_class: transmit.traffic_class,
+                    fate: Fate::SendError,
+                });
+                return Poll::Ready(Err(kind.into()));
+            }
             let link = net.link(from.ip(), to.ip());
             delay = link.delay;
             let receivers = net.receivers(from.ip(), to);
