@@ -87,6 +87,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets on the TCP connection (RFC 8837 section 5: one per TCP connection, the highest-priority
   flow's). Code that builds a `StreamTransmit` with a struct literal adds `dscp: 0`.
 - **ice / jsep / stream-driver** (mdns-4): new public fields `AgentConfig::multicast_dns_fail_closed` and `AgentConfig::multicast_dns_publishing`, `MulticastDNS::fail_closed` (the setting engine's mDNS settings) and `PeerDriverConfig::mdns_sockets` (see "Added"). Migration: a struct literal of `AgentConfig` or `MulticastDNS` adds `..Default::default()` (or `multicast_dns_fail_closed: false, multicast_dns_publishing: Default::default()` / `fail_closed: false`); one of `PeerDriverConfig` adds `mdns_sockets: true`, or builds on `..PeerDriverConfig::on(addresses)`.
+- **stream-driver** (`conf/mdns-6-regression-test`): `runtime::Transmit` has a new public
+  field, `source: Option<IpAddr>`, the address a datagram is to leave from (the engine names
+  one for each mDNS datagram, RFC 6762 section 14). Migration: a struct literal of `Transmit`
+  adds `source: None`; a third-party `AsyncUdpSocket` may ignore it where it sends from a bound
+  address.
+- **stream-driver** (`conf/mdns-7-per-interface`): `runtime::MulticastConfig` replaces
+  `interface_v4: Ipv4Addr` and `interface_v6: u32` with `interfaces: Vec<IpAddr>` (one group
+  membership per interface holding one of the addresses; empty: the default interface), and
+  `MulticastConfig::mdns` takes them as a second argument. A runtime's `AsyncUdpSocket` is
+  expected to honour `Transmit::source` for a multicast destination
+  (`runtime::MulticastInterfaceSelector` does it for a socket with a descriptor).
+  Migration: `MulticastConfig::mdns(group)` becomes `MulticastConfig::mdns(group, vec![])`;
+  a literal sets `interfaces: vec![interface.into()]` for `interface_v4`, or the address of
+  the interface for `interface_v6`; a third-party socket adds a `MulticastInterfaceSelector`
+  and calls `apply` before each send.
 
 ### Behaviour changes
 
@@ -299,6 +314,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+- **stream-driver, mdns** (`conf/mdns-7-per-interface`, review F1, F7, F8): `PeerDriver`
+  took part in mDNS on the system's default multicast interface only, with one socket, and
+  ignored the address the engine names for each mDNS datagram: names of addresses on any other
+  interface (loopback included) never resolved, and every name was announced on the default
+  link (RFC 6762 section 14: "addresses ... MUST be valid for use on the interface on which the
+  response is being sent"). Now its mDNS sockets join the groups on the interface of every
+  configured address, and each message leaves by the interface of its source
+  (`IP_MULTICAST_IF` / `IPV6_MULTICAST_IF`, set per send by the tokio, smol and custom-runtime
+  sockets, honoured by the mock); a query leaves once from each interface, on both families'
+  groups. `rtci-mdns` names an IPv6 record's own address as the source of its messages (it named
+  0.0.0.0), and the driver sends them on ff02::fb (and on 224.0.0.251 from the IPv4 address of
+  the same interface, where it has one): an IPv6-only link gets mDNS, and the per-family
+  publishing report (`set_multicast_dns_publishing`) says what is actually sent. Under
+  `QueryAndGather` no two UDP sockets of a driver share a port (a `.local` candidate names its
+  socket by port only); a range with no such port left falls back to a shared one. Tests:
+  `mdns_virtual_time.rs::drivers_whose_link_is_not_the_default_multicast_interface_resolve_each_other`,
+  `a_multi_homed_driver_answers_for_each_name_on_the_interface_of_its_address`,
+  `a_publishing_driver_gives_each_of_its_sockets_a_port_of_its_own`,
+  `mdns.rs::drivers_on_loopback_resolve_each_other_on_the_loopback_interface`. The mock
+  network gives each address its own ephemeral ports and has a default multicast interface
+  (`MockNet::set_default_multicast_interface`). Engine behaviour change (rtci-mdns: the source
+  address of an IPv6 record's messages; IPv6 records of different addresses are no longer
+  aggregated into one message, as IPv4 records already were not).
 
 ### Changed
 
@@ -720,6 +758,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The paced test's recovery is measured from the lowest target of the first second after the
   lift; its ordinary seeds are 1 and 4 (the ensemble's medians; seed 2 was among its mildest),
   and it reports every failing seed, not the first.
+- **stream-driver** (`conf/mdns-6-regression-test`): a return of 0.1.0's `PeerDriver`
+  defect (the UDP sockets of `.local` candidates closed when the signalling state returns to
+  stable) was caught on Linux only. `tests/mdns_virtual_time.rs` connects two publishing
+  drivers on the mock runtime (whose multicast sockets now send from the address a transmit
+  names, as the engine asks for mDNS) and runs on Linux, macOS and Windows in CI;
+  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux.
 
 ## [0.1.0] - 2026-11-24
 

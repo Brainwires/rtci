@@ -403,7 +403,23 @@ impl Runtime for MockRuntime {
         let group = SocketAddr::new(config.group, config.port);
         let mut state = lock(&self.shared.state);
         let local = SocketAddr::new(unspecified(config.group), config.port);
-        let endpoint = Arc::new(UdpEndpoint::new(local));
+        // Joined on the interfaces named, or on the network's default multicast interface of
+        // the family (every interface when none is set).
+        let mut joined: Vec<IpAddr> = config.interfaces_of_family().collect();
+        if joined.is_empty() {
+            joined.extend(
+                state
+                    .net
+                    .default_multicast_interfaces
+                    .iter()
+                    .copied()
+                    .filter(|ip| ip.is_ipv4() == config.group.is_ipv4()),
+            );
+        }
+        let endpoint = Arc::new(UdpEndpoint {
+            joined,
+            ..UdpEndpoint::new(local)
+        });
         state.net.multicast.push((group, Arc::downgrade(&endpoint)));
         Ok(Arc::new(MockUdp {
             runtime: self.clone(),
@@ -621,6 +637,18 @@ impl MockNet {
             .insert(name.to_owned(), ips);
     }
 
+    /// The interface a multicast socket of `ip`'s family joins on, and sends from, when it
+    /// is bound without interfaces ([`MulticastConfig::interfaces`] empty): the host's default
+    /// multicast interface. Without one, such a socket is joined on every interface. A
+    /// multicast datagram reaches a socket joined on an interface whose link from the sender's
+    /// address is not blocked ([`set_link`](Self::set_link)).
+    pub fn set_default_multicast_interface(&self, ip: IpAddr) {
+        let mut state = lock(&self.shared.state);
+        let interfaces = &mut state.net.default_multicast_interfaces;
+        interfaces.retain(|other| other.is_ipv4() != ip.is_ipv4());
+        interfaces.push(ip);
+    }
+
     /// Every datagram sent so far, in order.
     pub fn log(&self) -> Vec<DatagramRecord> {
         lock(&self.shared.state).net.log.clone()
@@ -630,9 +658,12 @@ impl MockNet {
 struct Net {
     udp: HashMap<SocketAddr, Weak<UdpEndpoint>>,
     multicast: Vec<(SocketAddr, Weak<UdpEndpoint>)>,
+    default_multicast_interfaces: Vec<IpAddr>,
     listeners: HashMap<SocketAddr, Weak<ListenerEndpoint>>,
     tcp_ports: HashMap<SocketAddr, usize>,
-    next_port: u16,
+    /// The next ephemeral port of each address: each address has its own ports, as on a real
+    /// host, so two addresses can be given the same port.
+    next_port: HashMap<IpAddr, u16>,
     default_link: LinkConfig,
     links: HashMap<(IpAddr, IpAddr), LinkConfig>,
     filter: Option<DatagramFilter>,
@@ -646,9 +677,10 @@ impl Net {
         Self {
             udp: HashMap::new(),
             multicast: Vec::new(),
+            default_multicast_interfaces: Vec::new(),
             listeners: HashMap::new(),
             tcp_ports: HashMap::new(),
-            next_port: 49152,
+            next_port: HashMap::new(),
             default_link: LinkConfig::default(),
             links: HashMap::new(),
             filter: None,
@@ -682,7 +714,7 @@ impl Net {
         let port = match local.port() {
             0 => {
                 let udp = &self.udp;
-                free_port(&mut self.next_port, |p| {
+                free_port(self.next_port.entry(ip).or_insert(49152), |p| {
                     udp.contains_key(&SocketAddr::new(ip, p))
                 })?
             }
@@ -702,7 +734,7 @@ impl Net {
             0 => {
                 let listeners = &self.listeners;
                 let ports = &self.tcp_ports;
-                free_port(&mut self.next_port, |p| {
+                free_port(self.next_port.entry(ip).or_insert(49152), |p| {
                     let addr = SocketAddr::new(ip, p);
                     listeners.contains_key(&addr) || ports.contains_key(&addr)
                 })?
@@ -728,13 +760,19 @@ impl Net {
     }
 
     /// The sockets a datagram to `to` reaches.
-    fn receivers(&self, to: SocketAddr) -> Vec<Arc<UdpEndpoint>> {
+    fn receivers(&self, from: IpAddr, to: SocketAddr) -> Vec<Arc<UdpEndpoint>> {
         if to.ip().is_multicast() {
             return self
                 .multicast
                 .iter()
                 .filter(|(group, _)| *group == to)
                 .filter_map(|(_, e)| e.upgrade())
+                .filter(|e| {
+                    e.joined.is_empty()
+                        || e.joined
+                            .iter()
+                            .any(|interface| !self.link(from, *interface).blocked)
+                })
                 .collect();
         }
         self.udp
@@ -766,6 +804,8 @@ type Received = (SocketAddr, Vec<u8>);
 
 struct UdpEndpoint {
     local: SocketAddr,
+    /// A multicast socket's interfaces (their addresses); empty: every one.
+    joined: Vec<IpAddr>,
     inbox: Mutex<(VecDeque<Received>, Option<Waker>)>,
     traffic_class: AtomicU8,
 }
@@ -774,6 +814,7 @@ impl UdpEndpoint {
     fn new(local: SocketAddr) -> Self {
         Self {
             local,
+            joined: Vec::new(),
             inbox: Mutex::new((VecDeque::new(), None)),
             traffic_class: AtomicU8::new(0),
         }
@@ -811,7 +852,21 @@ impl AsyncUdpSocket for MockUdp {
             .traffic_class
             .store(transmit.traffic_class, Ordering::Relaxed);
         let now = self.runtime.now();
-        let from = self.endpoint.local;
+        // A socket bound to the unspecified address (the mDNS sockets) sends from the address
+        // the transmit names, as a real one does from its interface's address, or else from the
+        // first interface it joined.
+        let local = self.endpoint.local;
+        let from = match transmit.source {
+            Some(ip) if local.ip().is_unspecified() && ip.is_ipv4() == local.is_ipv4() => {
+                SocketAddr::new(ip, local.port())
+            }
+            _ if local.ip().is_unspecified() => self
+                .endpoint
+                .joined
+                .first()
+                .map_or(local, |ip| SocketAddr::new(*ip, local.port())),
+            _ => local,
+        };
         let to = transmit.destination;
         let mut deliveries = Vec::new();
         let delay;
@@ -820,7 +875,7 @@ impl AsyncUdpSocket for MockUdp {
             let net = &mut state.net;
             let link = net.link(from.ip(), to.ip());
             delay = link.delay;
-            let receivers = net.receivers(to);
+            let receivers = net.receivers(from.ip(), to);
             let fate = if link.blocked {
                 Fate::Blocked
             } else if link.loss > 0.0 && net.draw() < link.loss {
