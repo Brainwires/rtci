@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
+  the slice's aggregation packet when the slice does not fit the packet being filled and they
+  fit one together, instead of leaving them with the units before them (RFC 7798 section 5).
+  Conformance row RFC7798-5-5 is `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
