@@ -145,8 +145,11 @@ impl RTCPeerConnection {
         let nonce: u64 = rand::rng().random();
         let ice_transport_id = RTCTransportId::new(nonce, TransportKind::Ice);
         let dtls_transport_id = RTCTransportId::new(nonce, TransportKind::Dtls);
-        let ice_transport =
+        let mut ice_transport =
             IceTransport::new(now, agent_config, crypto_provider.clone(), ice_transport_id)?;
+        ice_transport
+            .agent
+            .set_temporary_ipv6_addresses(self.temporary_ipv6_addresses.clone());
         let certificates = self.dtls_transport().certificates.clone();
         let dtls_transport = internal::new_dtls_transport(
             &self.setting_engine,
@@ -956,6 +959,26 @@ impl RTCPeerConnection {
                 .agent
                 .set_multicast_dns_publishing(publishing);
         }
+    }
+
+    /// Marks which local addresses are RFC 4941 temporary IPv6 addresses (replacing what was
+    /// marked before); only the operating system knows, the engine cannot tell from the
+    /// bits. With
+    /// [`with_multicast_dns_expose_temporary_ipv6_addresses`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses)
+    /// and `QueryAndGather`, the host candidates added afterwards on a marked global unicast
+    /// address keep their address (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3);
+    /// otherwise it changes nothing. Call it before adding the host candidates; it holds for
+    /// every transport, those made later included. `rtci-stream-driver`'s `PeerDriver` calls
+    /// it from the interface list where the operating system reports the flag.
+    pub fn set_temporary_ipv6_addresses(&mut self, addresses: Vec<std::net::Ipv6Addr>) {
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_temporary_ipv6_addresses(addresses.clone());
+        }
+        self.temporary_ipv6_addresses = addresses;
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,
