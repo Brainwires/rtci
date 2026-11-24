@@ -907,6 +907,16 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             let Some(state) = self.probe_clusters.remove(&cluster) else {
                 continue;
             };
+            crate::probe_trace(
+                now,
+                format_args!(
+                    "cluster {cluster} complete sent {} reports {} arrived {} estimate {:?}",
+                    state.sent,
+                    state.reports.len(),
+                    state.reports.iter().filter(|r| r.arrived).count(),
+                    probe_estimate(&state.reports).map(|e| e as u64)
+                ),
+            );
             if let Some(estimate) = probe_estimate(&state.reports)
                 && let Some(probing) = self.probing.as_mut()
                 && let Some(estimate) = probing.on_result(cluster, estimate)
@@ -915,6 +925,18 @@ impl<E: BandwidthEstimator> CongestionControlInterceptor<E> {
             }
         }
         // A cluster whose packets were never all reported is forgotten with its packets.
+        for (cluster, state) in &self.probe_clusters {
+            if now.saturating_duration_since(state.last_sent) >= PROBE_FORGET {
+                crate::probe_trace(
+                    now,
+                    format_args!(
+                        "cluster {cluster} forgotten sent {} reports {}",
+                        state.sent,
+                        state.reports.len()
+                    ),
+                );
+            }
+        }
         self.probe_clusters
             .retain(|_, state| now.saturating_duration_since(state.last_sent) < PROBE_FORGET);
         if self.probe_clusters.is_empty() {

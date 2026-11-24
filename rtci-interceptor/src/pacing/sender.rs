@@ -610,6 +610,13 @@ impl PacerInterceptor {
         if let Some(probe) = self.probe.as_mut() {
             probe.bucket.refill(now);
             if now.saturating_duration_since(probe.started) > PROBE_CLUSTER_TIMEOUT {
+                crate::probe_trace(
+                    now,
+                    format_args!(
+                        "pacer cluster {} timed out, {:.0} bits unsent",
+                        probe.cluster, probe.remaining_bits
+                    ),
+                );
                 self.probe = None;
             }
         }
@@ -629,6 +636,10 @@ impl PacerInterceptor {
             })));
             probe.remaining_bits -= bits;
             if probe.remaining_bits <= 0.0 {
+                crate::probe_trace(
+                    packet.now,
+                    format_args!("pacer cluster {} filled", probe.cluster),
+                );
                 self.probe = None;
             }
         }
@@ -976,6 +987,19 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             let mut bucket = LeakyBucket::new(request.bits_per_second)
                 .with_burst_bits(crate::pacing::pacer::MIN_BURST_BITS);
             bucket.refill(msg.now);
+            crate::probe_trace(
+                msg.now,
+                format_args!(
+                    "pacer cluster {} start rate {:.0} octets {} queue {} padding {} paused {} raised {:?}",
+                    request.cluster,
+                    request.bits_per_second,
+                    request.octets,
+                    self.queue.len(),
+                    self.padding.len(),
+                    self.paused,
+                    self.raised_from
+                ),
+            );
             self.probe = Some(ActiveProbe {
                 cluster: request.cluster,
                 bucket,

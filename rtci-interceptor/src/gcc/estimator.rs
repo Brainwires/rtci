@@ -484,6 +484,13 @@ impl BandwidthEstimator for Gcc {
     }
 
     fn on_probe_result(&mut self, now: Instant, bits_per_second: f64) {
+        crate::probe_trace(
+            now,
+            format_args!(
+                "result {:.0} against target {:.0}",
+                bits_per_second, self.target
+            ),
+        );
         if !bits_per_second.is_finite() || bits_per_second <= 0.0 {
             return;
         }

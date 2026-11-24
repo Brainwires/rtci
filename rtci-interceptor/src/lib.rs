@@ -257,6 +257,21 @@ pub(crate) mod ulpfec;
 pub(crate) mod wire_image;
 pub(crate) mod xr;
 
+/// Throwaway probe trace (never merged): set to the harness's start to print.
+#[doc(hidden)]
+pub static PROBE_TRACE_EPOCH: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+/// Throwaway probe trace line.
+#[doc(hidden)]
+pub fn probe_trace(now: std::time::Instant, what: std::fmt::Arguments<'_>) {
+    if let Some(epoch) = *PROBE_TRACE_EPOCH.lock().unwrap() {
+        println!(
+            "PRB {:7.2} {what}",
+            now.saturating_duration_since(epoch).as_secs_f64()
+        );
+    }
+}
+
 // Fork additions kept over upstream (see FORK.md): the TWCC-driven GCC interceptor with its
 // shared bitrate handle, and the adaptive (RFC 3550 jitter + playout-delay extension) jitter buffer.
 pub use adaptive_jitter_buffer::{
