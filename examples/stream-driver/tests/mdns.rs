@@ -189,13 +189,13 @@ async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() ->
 }
 
 /// draft-ietf-mmusic-mdns-ice-candidates section 7.1: one rate limit over all mDNS queries and
-/// responses. Two connections whose drivers share a small budget (4 at once, then 2 a second)
+/// responses. Two connections whose drivers share a small budget (1 at once, then 1 a second)
 /// send together no more than it allows over the whole exchange (probes, announcements,
 /// queries and answers of both), and still connect: what the budget refused waited.
 #[tokio::test]
 async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Result<()> {
-    const BURST: u32 = 4;
-    const PER_SECOND: u32 = 2;
+    const BURST: u32 = 1;
+    const PER_SECOND: u32 = 1;
     let _group = MDNS_GROUP_IN_USE.lock().await;
     let Some(ip) = mdns_egress_ip() else {
         panic!("this test needs an interface that carries multicast to the mDNS group");
