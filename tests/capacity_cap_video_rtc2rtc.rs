@@ -1795,12 +1795,13 @@ fn video_keeps_playing_through_a_capacity_cap_of_any_length_with_retransmissions
 /// estimate recovers as at the lower rate; what the higher rate costs is the picture's age
 /// and the retransmissions, held here to what was measured so that they do not grow.
 ///
-/// Measured (hosted run 45348355656, six seeds): freeze 1.28 to 1.29 s, the oldest picture
-/// 2.90 to 3.20 s, 58 to 64 retransmissions (20 to 25 dropped at the link's queue), 239 to
-/// 245 kbit/s under the cap, 1095 to 1229 kbit/s twenty seconds after it; the bounds below
-/// are some 30 % over the most measured (4.2 s, 85). Before a repair the feedback reports
-/// received was no longer sent again (run 45334499296): 1.28 to 1.32 s, 4.40 to 4.51 s, 92 to
-/// 101 retransmissions (23 to 32 dropped), 246 to 254 and 1086 to 1361 kbit/s. Some sixty video
+/// Measured (hosted run 45408404348, six seeds on three wall clocks, rtci 0.1.0's wire
+/// sizes): freeze 1.28 to 1.29 s, the oldest picture 2.90 to 3.15 s, 57 to 64
+/// retransmissions (21 to 25 dropped at the link's queue), 242 to 250 kbit/s under the cap,
+/// 1089 to 1230 kbit/s on average 15 to 25 s after it; the bounds below are the most measured
+/// and some 15 % (3.6 s, 74). Before a repair the feedback reports received was no longer
+/// sent again (rtci 0.1.0, run 45407054812): 1.28 to 1.32 s, 4.35 to 4.51 s, 89 to 97
+/// retransmissions (23 to 29 dropped), 246 to 252 and 1060 to 1363 kbit/s. Some sixty video
 /// packets are lost before the first feedback about the capped link can arrive and while
 /// the received rate's 500 ms window still holds what arrived before the cap (about forty
 /// at 1 Mbit/s), and repairing them inside 250 kbit/s, of which the audio takes 76, takes
@@ -1839,12 +1840,12 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.freeze
         );
         assert!(
-            outcome.lag <= Duration::from_millis(4_200),
+            outcome.lag <= Duration::from_millis(3_600),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         assert!(
-            outcome.rtx_sent <= 85,
+            outcome.rtx_sent <= 74,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
@@ -2038,23 +2039,25 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
         // still falling), and 35 to 41 of the repairs repeat a packet whose first repair was
         // still in flight when the receiver asked again (hosted traces 45341865225,
         // 45342290711). With the RFC 8888 feedback on each retransmission those are no longer
-        // sent (hosted run 45348355656): freeze 0.75 to 1.13 s, the oldest picture 4.14 to
-        // 6.58 s. The seeded figures follow the wire's packet sizes (one SOFTWARE text length
+        // sent. The seeded figures follow the wire's packet sizes (one SOFTWARE text length
         // moves a seed by some hundreds of milliseconds: hosted runs 45370399055 and
-        // 45370404660), so the bound is set from six seeds on three wall clocks.
+        // 45370404660), so the bound is set from six seeds on three wall clocks: rtci 0.1.0
+        // gave freeze 0.97 to 1.91 s and the oldest picture 5.56 to 10.23 s (hosted run
+        // 45407054812), with the repeat repairs gone 0.75 to 1.13 s and 4.14 to 7.13 s (run
+        // 45408404348). The bound is that most and some 15 % (8.2 s).
         assert!(
-            outcome.lag <= Duration::from_millis(8_500),
+            outcome.lag <= Duration::from_millis(8_200),
             "seed {seed}: a picture {:?} old: {outcome:?}",
             outcome.lag
         );
         // The retransmissions, apart from the probe clusters' padding on the RTX stream
         // (154 to 330 packets, which this test counted with them until it told them apart):
-        // 59 to 80 on six seeds, none dropped at the link (hosted run 45348355656; 90 to 103
-        // while repairs the feedback reported received were sent again, run 45343885944). The
-        // bound (some 30 % over the most measured) guards them from growing, and fails if the
-        // padding is counted with them again.
+        // 59 to 80 on six seeds and three wall clocks, none dropped at the link (hosted run
+        // 45408404348; 90 to 104 while repairs the feedback reported received were sent again,
+        // run 45407054812). The bound (the most measured and some 15 %) guards them from
+        // growing, and fails if the padding is counted with them again.
         assert!(
-            outcome.rtx_sent <= 105,
+            outcome.rtx_sent <= 92,
             "seed {seed}: {} retransmissions: {outcome:?}",
             outcome.rtx_sent
         );
