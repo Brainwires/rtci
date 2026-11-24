@@ -72,6 +72,40 @@ impl RtpSessionAssignment {
     }
 }
 
+/// A control message: the transport moved to another selected candidate pair (an ICE restart,
+/// a switch to another pair, a move to another network), after its first one. The peer
+/// connection reads it into the chain on the read leg, as an empty RTCP packet
+/// ([`PathChanged::into_packet`]), so it passes the congestion controllers first: they sit
+/// wire-most. Each starts its estimate over and forgets what it sent before (RFC 8836
+/// section 2, requirement 1: a congestion controller reacts to a change of the path; as
+/// libwebrtc's `RtpTransportControllerSend::OnNetworkRouteChanged` restarts the bandwidth
+/// estimate and has its feedback adapter report only the packets sent on the new route).
+///
+/// The congestion controllers also follow the addresses inbound packets arrive between, which
+/// shows most changes; this one is told also when the addresses do not change (a TURN relay
+/// that keeps them, or an application that hands every datagram over with one placeholder
+/// address pair). With several transports it is tagged with the session ([`RtpSession`]) of
+/// the transport whose pair changed, and reaches only that session's instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathChanged;
+
+impl PathChanged {
+    /// The packet that carries this into the chain's read leg at `now`, tagged with
+    /// `session` when the peer connection runs several transports.
+    pub fn into_packet(self, now: Instant, session: Option<usize>) -> TaggedPacket {
+        let mut message =
+            AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(self)));
+        if let Some(session) = session {
+            message.add(RtpSession(session).attribute());
+        }
+        TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message,
+        }
+    }
+}
+
 /// Marks a copy of a broadcast control message given to a session other than the first:
 /// whatever of it comes out again is dropped, so the message leaves the wrapper once. The
 /// mark goes on last: what an instance attaches after it is its own and leaves on a carrier

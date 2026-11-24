@@ -313,6 +313,7 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
     world.limited = true;
     let begin = world.now;
     let mut samples = Vec::new();
+    let mut last_target = 0.0;
     for n in 0..7500u32 {
         let now = begin + Duration::from_millis(4 * u64::from(n));
         world.advance(now)?;
@@ -341,7 +342,13 @@ fn targets(seed: u64) -> Result<Vec<f64>> {
                 .find(|o| o.sent_rtp_stream_stats.rtp_stream_stats.ssrc == SSRC)
                 .and_then(|o| o.target_bitrate)
                 .unwrap_or(0.0);
-            samples.push(target);
+            // This source writes above the target whatever it is told, so the pacer tells it
+            // to pause again and again (a target of zero): the controller's target is the
+            // last one read that was not a pause.
+            if target > 0.0 {
+                last_target = target;
+            }
+            samples.push(last_target);
         }
     }
     eprintln!(

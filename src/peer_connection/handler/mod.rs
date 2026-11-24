@@ -858,6 +858,8 @@ impl RTCPeerConnection {
         if raised {
             self.sync_rtcp_sessions(self.pipeline_context.now);
         }
+        // A pair selected since: a comparison per transport, not work, when none was.
+        self.tell_chain_of_path_changes(self.pipeline_context.now);
         // The SCTP transport's state follows its association, which any event may have moved;
         // the selected pair is the agent's, whose change event the DTLS handler consumes.
         self.announce_transport_states();
@@ -866,6 +868,40 @@ impl RTCPeerConnection {
         }
 
         raised
+    }
+
+    /// Tells the interceptor chain of each transport whose ICE agent selected another candidate
+    /// pair after its first ([`::interceptor::PathChanged`], on the read leg, so the congestion
+    /// controllers, which sit wire-most, see it first): a new path, on which the bandwidth
+    /// estimate starts over and the packets sent into the old one are not counted as lost
+    /// (RFC 8836 section 2, requirement 1; libwebrtc's
+    /// `RtpTransportControllerSend::OnNetworkRouteChanged`, which leaves the first connection
+    /// alone: "No need to reset BWE if this is the first time the network connects"). The
+    /// controllers also follow the addresses inbound packets arrive between, but those do not
+    /// change when a TURN relay keeps them or the application hands every datagram over with
+    /// one placeholder pair. With several transports the carrier names the RTP session of the
+    /// transport whose pair changed.
+    fn tell_chain_of_path_changes(&mut self, now: Instant) {
+        let several = self.pipeline_context.transports.len() > 1;
+        let mut changed = Vec::new();
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            let ice = &mut bundle.ice_handler_context;
+            if ice.selected_pair_changes != ice.selected_pair_changes_told_chain {
+                ice.selected_pair_changes_told_chain = ice.selected_pair_changes;
+                if ice.selected_pair_changes > 1 {
+                    changed.push(bundle.id.0);
+                }
+            }
+        }
+        use sansio::Protocol;
+        for session in changed {
+            let carrier = ::interceptor::PathChanged.into_packet(now, several.then_some(session));
+            if let Err(err) = self.interceptor.handle_read(carrier) {
+                warn!(
+                    "the path change of transport {session} did not reach the interceptors: {err}"
+                );
+            }
+        }
     }
 
     fn pump_events_on_active(&mut self) -> bool {

@@ -33,6 +33,8 @@ pub struct NackResponderBuilder {
     max_packet_age: Option<Duration>,
     /// How retransmissions are held to the congestion controller's target.
     rate_limit: RetransmissionRateLimit,
+    /// The most of the target the retransmission reserve takes.
+    max_reserve_fraction: f64,
 }
 
 impl Default for NackResponderBuilder {
@@ -41,6 +43,7 @@ impl Default for NackResponderBuilder {
             size: 1024,
             max_packet_age: None,
             rate_limit: RetransmissionRateLimit::default(),
+            max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
         }
     }
 }
@@ -51,29 +54,73 @@ impl Default for NackResponderBuilder {
 /// held back.
 ///
 /// The rate is counted over the last [`RETRANSMISSION_RATE_WINDOW`]. A NACKed packet that
-/// does not fit is not retransmitted (section 7: the sender "MAY selectively retransmit only
-/// the packets that it deems important and ignore NACK messages for other packets in order to
-/// limit the bitrate"); the receiver asks again a round trip later.
-///
-/// The default is libwebrtc's rule, [`UpToTarget`](Self::UpToTarget), not the RFC's
-/// [`WithinTarget`](Self::WithinTarget), measured in `tests/capacity_cap_video_rtc2rtc.rs` (a
-/// video call whose path drops to 300 kbit/s, six seeds): with the RFC's rule the sender, its
-/// encoder at the controller's floor, had almost nothing left to repair with and the picture
-/// froze for 2.7 to 3.1 s; with retransmissions up to the target it froze for at most 1.2 s,
-/// and without any limit the retransmissions (about 300, five times the link) filled the 300 ms
-/// queue, three in four were dropped there, and it froze for up to 1.6 s.
+/// does not fit now waits, oldest request first, and leaves when the window has room for it
+/// ([`poll_timeout`](sansio::Protocol::poll_timeout) is that instant), for as long as the
+/// receiver keeps asking for it ([`PENDING_REQUEST_LIFETIME`]). Section 7 lets the sender
+/// "selectively retransmit only the packets that it deems important and ignore NACK messages
+/// for other packets in order to limit the bitrate": a packet still asked for is the one
+/// deemed important, one the receiver stopped asking for is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RetransmissionRateLimit {
-    /// RFC 4588 section 7: "the acceptable packet rate and bitrate include both the original
-    /// and retransmitted data". Retransmissions take what the original packets of every local
-    /// stream leave of the target.
-    WithinTarget,
-    /// libwebrtc's rule (`RateLimiter` on the retransmissions, its maximum the target): the
-    /// retransmissions alone stay under the target, whatever the original packets take. A
-    /// sender whose encoder sits at or above the target (at the congestion controller's
-    /// floor, or with a codec's minimum rate) still repairs at up to the target.
+    /// RFC 4588 section 7, both halves: "the acceptable packet rate and bitrate include both
+    /// the original and retransmitted data", and "the sender SHOULD NOT send retransmission
+    /// packets without reducing the packet rate and bitrate of the original stream (for
+    /// example, by encoding the data at a lower rate)".
+    ///
+    /// Retransmissions take what the original packets of every local stream leave of the
+    /// target. While retransmissions wait or were sent within the window, the target reported
+    /// for the original media is the congestion controller's less a **retransmission
+    /// reserve**: on the read leg [`Attribute::TargetBitrateChanged`] is lowered by it on its
+    /// way to the application, and [`RetransmissionReserve`] rides down the write leg to the
+    /// congestion controller, whose handle (`GccHandle::target_bitrate_bps`,
+    /// `CongestionControlHandle::target_bitrate`) reports the lowered target and keeps the
+    /// estimate itself readable (`estimate_bps`, `estimate_bitrate`). An encoder that follows
+    /// the target leaves the reserve free, so the repairs have room.
+    ///
+    /// The reserve is what the waiting requests need to leave within about one round trip
+    /// (their octets over the round-trip time the RTCP session measured, at most
+    /// [`RETRANSMISSION_RATE_WINDOW`]), or the retransmission rate of the window when that is
+    /// more, and never more than [`MAX_RETRANSMISSION_RESERVE`] of the target
+    /// ([`NackResponderBuilder::with_max_reserve_fraction`]). It is released as the requests
+    /// are served and the retransmissions leave the window: with nothing waiting and nothing
+    /// retransmitted within the last window it is zero.
+    ///
+    /// **At the congestion controller's floor.** The controller's minimum bit rate is this
+    /// engine's setting, not the RFC's, and the controller announces it with its target
+    /// ([`MinimumTarget`]). The original media is never told less than that minimum (the least
+    /// the application set its media to need). When lowering the original media by the reserve
+    /// would take it under that floor (target − reserve < minimum), it cannot make the room:
+    /// an encoder at its own minimum already fills the floor (in the capacity-cap test, 30
+    /// kbit/s of video and 80 kbit/s of audio against a 100 kbit/s target), and the rule above
+    /// would leave the repairs nothing for as long as the estimate stays near the floor. There
+    /// the retransmissions of packets still asked for take the window's room first: they may
+    /// send up to the target within the window, whatever the original packets took, and the
+    /// original media is told the target less the reserve. Section 7 lets the sender
+    /// "selectively retransmit only the packets that it deems important"; a packet still asked
+    /// for is the one deemed important. An application at its minimum adds its own excess
+    /// over the floor; the retransmissions never go over the target.
+    ///
+    /// What holds the sum on the wire when the application ignores the lowered target: with
+    /// a pacer in the chain (the default interceptor set) the pacer sends at the controller's
+    /// target, retransmissions and media alike; without one (a chain of NACK, TWCC and GCC
+    /// alone) it is this rule: above the floor the retransmissions take only what the
+    /// original packets leave, so the engine never adds to an application's excess; near the
+    /// floor (target under the minimum plus the reserve, at most twice the minimum with the
+    /// default reserve) they take at most the target.
     #[default]
+    WithinTarget,
+    /// A rate limiter on the retransmissions alone, its maximum the target (the form of
+    /// libwebrtc's `RtpSender` when it is given a `retransmission_rate_limiter`,
+    /// `modules/rtp_rtcp/source/rtp_sender.cc`): the retransmissions stay under the target
+    /// whatever the original packets take, and the target reported for the original media is
+    /// not lowered, so the sum may reach twice the target. A setting in no behaviour profile:
+    /// libwebrtc gives its video senders no such limiter (`call/rtp_video_sender.cc:292-354`
+    /// at a222406d; `rtp_rtcp_interface.h:92` defaults it to null) and lowers the encoder
+    /// target by the protection share instead. Measured in
+    /// `tests/capacity_cap_video_rtc2rtc.rs` against the default: longest freeze 0.84 to
+    /// 1.29 s against 0.83 to 1.24 s, 17 to 27 retransmissions dropped at the capped link
+    /// against 14 to 17.
     UpToTarget,
     /// No limit beyond the per-stream budget (one retransmission per original packet sent): the
     /// fork's behaviour before. Retransmissions are then not congestion controlled.
@@ -84,10 +131,89 @@ pub enum RetransmissionRateLimit {
 /// `kRetransmitWindowSizeMs`).
 pub const RETRANSMISSION_RATE_WINDOW: Duration = Duration::from_secs(1);
 
+/// The most of the congestion controller's target the retransmission reserve of
+/// [`RetransmissionRateLimit::WithinTarget`] takes, by default: half.
+pub const MAX_RETRANSMISSION_RESERVE: f64 = 0.5;
+
+/// A request that waits for room is dropped when the receiver has not asked for the packet
+/// again within this long, or within two round trips when that is longer: a receiver asks
+/// again every round trip while the packet is missing, so one that stopped asking has the
+/// packet or no longer wants it.
+pub const PENDING_REQUEST_LIFETIME: Duration = Duration::from_secs(1);
+
+/// The shortest round trip the reserve spreads the waiting requests over.
+const MIN_RESERVE_HORIZON: Duration = Duration::from_millis(10);
+
+/// The retransmission reserve of [`RetransmissionRateLimit::WithinTarget`], in bits per
+/// second: the part of the congestion controller's target kept for retransmissions, which the
+/// target reported for the original media leaves out.
+///
+/// The NACK responder sends it down the write leg (on a packet of its own, an empty RTCP
+/// carrier, when it changes), so a congestion controller wire-ward of it reports the lowered
+/// target through its handle. Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetransmissionReserve {
+    /// The reserve, bits per second.
+    pub bits_per_second: f64,
+}
+
+/// Rides with [`Attribute::TargetBitrateChanged`]: the congestion controller's minimum bit
+/// rate, the floor its target never goes under. Where lowering the original media by the
+/// retransmission reserve would take it under this floor the NACK responder lets the
+/// retransmissions take the window's room first ([`RetransmissionRateLimit::WithinTarget`]).
+/// Read with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumTarget {
+    /// The minimum, bits per second.
+    pub bits_per_second: f64,
+}
+
+/// The target for the original media: the controller's `target` less the `reserve`, never
+/// under the controller's `minimum` (the least the application set its media to need; near it
+/// the retransmissions take the room first instead, see [`RetransmissionRateLimit::WithinTarget`]).
+fn media_target(target: f64, reserve: f64, minimum: f64) -> f64 {
+    (target - reserve).max(minimum.min(target)).max(0.0)
+}
+
+/// How much the reported reserve may move before a new one is announced: 5 % of the target,
+/// at least 5 kbit/s, and any change to or from zero.
+fn reserve_moved(announced: f64, reserve: f64, target_bps: f64) -> bool {
+    (announced == 0.0) != (reserve == 0.0)
+        || (reserve - announced).abs() >= (0.05 * target_bps).max(5_000.0)
+}
+
 /// Octets sent within the last [`RETRANSMISSION_RATE_WINDOW`].
 #[derive(Default)]
 struct RateWindow {
     sent: VecDeque<(Instant, usize)>,
+    octets: usize,
+}
+
+/// The instant at which the entries of `windows` leaving [`RETRANSMISSION_RATE_WINDOW`] have
+/// freed `deficit` octets, oldest first; `None` if all of them together free less.
+fn freed_at(windows: &[&RateWindow], deficit: usize) -> Option<Instant> {
+    let mut cursors = vec![0usize; windows.len()];
+    let mut freed = 0usize;
+    loop {
+        let (index, &(at, octets)) = windows
+            .iter()
+            .zip(&cursors)
+            .enumerate()
+            .filter_map(|(index, (window, &cursor))| window.sent.get(cursor).map(|e| (index, e)))
+            .min_by_key(|(_, (at, _))| *at)?;
+        cursors[index] += 1;
+        freed += octets;
+        if freed >= deficit {
+            return Some(at + RETRANSMISSION_RATE_WINDOW);
+        }
+    }
+}
+
+/// A NACKed packet waiting for room in the rate limit.
+struct PendingRetransmission {
+    ssrc: u32,
+    sequence_number: u16,
+    /// The size its retransmission has on the wire.
     octets: usize,
 }
 
@@ -105,6 +231,19 @@ impl RateWindow {
     fn add(&mut self, now: Instant, octets: usize) {
         self.sent.push_back((now, octets));
         self.octets += octets;
+    }
+
+    /// Takes back `octets` added at `at`, if the entry is still in the window.
+    fn forget(&mut self, at: Instant, octets: usize) {
+        if let Some(entry) = self
+            .sent
+            .iter_mut()
+            .rev()
+            .find(|(sent, size)| *sent == at && *size == octets)
+        {
+            entry.1 = 0;
+            self.octets -= octets;
+        }
     }
 }
 
@@ -133,10 +272,23 @@ impl NackResponderBuilder {
     }
 
     /// Set how retransmissions are held to the congestion controller's target (RFC 4588
-    /// section 7). Default: [`RetransmissionRateLimit::UpToTarget`];
-    /// [`RetransmissionRateLimit::WithinTarget`] is the RFC's form.
+    /// section 7). Default: [`RetransmissionRateLimit::WithinTarget`], the RFC's form;
+    /// [`RetransmissionRateLimit::UpToTarget`] is the limiter libwebrtc's `RtpSender` has
+    /// when it is given one.
     pub fn with_rate_limit(mut self, rate_limit: RetransmissionRateLimit) -> Self {
         self.rate_limit = rate_limit;
+        self
+    }
+
+    /// Set the most of the congestion controller's target the retransmission reserve of
+    /// [`RetransmissionRateLimit::WithinTarget`] takes, from 0 (no reserve: the target is
+    /// never lowered) to 1. Default: [`MAX_RETRANSMISSION_RESERVE`].
+    pub fn with_max_reserve_fraction(mut self, fraction: f64) -> Self {
+        self.max_reserve_fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            MAX_RETRANSMISSION_RESERVE
+        };
         self
     }
 
@@ -145,6 +297,7 @@ impl NackResponderBuilder {
         let mut interceptor = NackResponderInterceptor::new(self.size);
         interceptor.max_packet_age = self.max_packet_age;
         interceptor.rate_limit = self.rate_limit;
+        interceptor.max_reserve_fraction = self.max_reserve_fraction;
         interceptor
     }
 }
@@ -208,6 +361,23 @@ pub const PROBE_PADDING_OCTETS: u8 = 255;
 /// us resend the same packets as fast as it can send RTCP (an amplifier).
 pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long after its retransmission a packet is not retransmitted again however often it is
+/// asked for: [`MIN_RETRANSMIT_INTERVAL`]. libwebrtc waits a round trip
+/// (`modules/rtp_rtcp/source/rtp_packet_history.cc`, `VerifyRtt`); measured here that loses
+/// repairs: when a retransmission is itself lost, the receiver's next request can fall inside
+/// that round trip and be ignored, and the one after waits for RFC 4585's early-feedback hold
+/// (`tests/vp8_nack_jitter_buffer_rtc2rtc.rs`, seed 4: packet 1272 retransmitted again 1.42 s
+/// after the lost copy, after the 2 s jitter buffer had played past it). A request that
+/// crossed a repair in flight costs one duplicate instead.
+fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
+    let _ = round_trip_time;
+    MIN_RETRANSMIT_INTERVAL
+}
+
+/// How long a retransmission is taken to wait in the pacer at most: longer than the pacer's
+/// queue time bound (2 s by default), past which the pacer drops it and says so.
+const IN_PACER_LIFETIME: Duration = Duration::from_secs(4);
+
 /// Most retransmissions queued and not yet taken by `poll_write`. Past it further NACKed
 /// packets are not queued until the queue drains.
 pub const MAX_QUEUED_RETRANSMISSIONS: usize = 1024;
@@ -255,9 +425,35 @@ pub struct NackResponderInterceptor {
     rate_limit: RetransmissionRateLimit,
     /// The congestion controller's latest target, bits per second.
     target_bps: Option<f64>,
+    /// The controller's minimum ([`MinimumTarget`]), bits per second.
+    minimum_bps: Option<f64>,
     /// The original packets of the local streams, and the retransmissions, sent lately.
     originals: RateWindow,
     retransmitted: RateWindow,
+    /// See [`NackResponderBuilder::with_max_reserve_fraction`].
+    max_reserve_fraction: f64,
+    /// The round trip the RTCP session measured last.
+    round_trip_time: Option<Duration>,
+    /// NACKed packets waiting for room, oldest request first.
+    pending: VecDeque<PendingRetransmission>,
+    /// When each waiting packet was last asked for.
+    pending_asked: HashMap<(u32, u16), Instant>,
+    /// The octets of `pending`.
+    pending_octets: usize,
+    /// The reserve last announced, bits per second.
+    announced_reserve: f64,
+    /// When the next waiting retransmission can leave, worked out since the last change:
+    /// `None` when it has to be worked out again.
+    release_at: Option<Option<Instant>>,
+    /// Retransmissions made and still waiting in the pacer, by (media SSRC, sequence number),
+    /// with when they were made: a NACK for one is not answered again
+    /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)).
+    in_pacer: HashMap<(u32, u16), Instant>,
+    /// Whether a pacer wire-ward reports its retransmissions' departures (it has once).
+    pacer_reports: bool,
+    /// Whether the pacer tells the source to pause ([`PacerPause`](crate::PacerPause)): the
+    /// target the application reads is zero.
+    paused: bool,
 }
 
 impl NackResponderInterceptor {
@@ -274,9 +470,25 @@ impl NackResponderInterceptor {
             sessions: HashMap::new(),
             rate_limit: RetransmissionRateLimit::default(),
             target_bps: None,
+            minimum_bps: None,
             originals: RateWindow::default(),
             retransmitted: RateWindow::default(),
+            max_reserve_fraction: MAX_RETRANSMISSION_RESERVE,
+            round_trip_time: None,
+            pending: VecDeque::new(),
+            pending_asked: HashMap::new(),
+            pending_octets: 0,
+            announced_reserve: 0.0,
+            release_at: None,
+            in_pacer: HashMap::new(),
+            pacer_reports: false,
+            paused: false,
         }
+    }
+
+    /// Octets at `bits_per_second` over the window.
+    fn window_octets(bits_per_second: f64) -> usize {
+        (bits_per_second / 8.0 * RETRANSMISSION_RATE_WINDOW.as_secs_f64()) as usize
     }
 
     /// The octets retransmissions may still take within the window, `None` for no limit.
@@ -284,13 +496,329 @@ impl NackResponderInterceptor {
         let target_bps = self.target_bps?;
         self.originals.expire(now);
         self.retransmitted.expire(now);
-        let target = (target_bps / 8.0 * RETRANSMISSION_RATE_WINDOW.as_secs_f64()) as usize;
+        let target = Self::window_octets(target_bps);
         let limit = match self.rate_limit {
-            RetransmissionRateLimit::WithinTarget => target.saturating_sub(self.originals.octets),
+            RetransmissionRateLimit::WithinTarget => {
+                if self.at_floor() {
+                    // Near the floor the retransmissions take the window's room first.
+                    target
+                } else {
+                    // What the originals leave, or the reserve the original media has already
+                    // been lowered by, whichever is more.
+                    target
+                        .saturating_sub(self.originals.octets)
+                        .max(Self::window_octets(self.announced_reserve))
+                }
+            }
             RetransmissionRateLimit::UpToTarget => target,
             RetransmissionRateLimit::Unlimited => return None,
         };
         Some(limit.saturating_sub(self.retransmitted.octets))
+    }
+
+    /// Whether lowering the original media by the reserve would take it under the
+    /// controller's minimum (see [`RetransmissionRateLimit::WithinTarget`]).
+    fn at_floor(&self) -> bool {
+        self.rate_limit == RetransmissionRateLimit::WithinTarget
+            && self.announced_reserve > 0.0
+            && match (self.target_bps, self.minimum_bps) {
+                (Some(target), Some(minimum)) => target - self.announced_reserve < minimum,
+                _ => false,
+            }
+    }
+
+    /// The retransmission reserve at `now`, bits per second (see
+    /// [`RetransmissionRateLimit::WithinTarget`]); zero under the other rules.
+    fn reserve(&mut self, now: Instant) -> f64 {
+        let Some(target_bps) = self.target_bps else {
+            return 0.0;
+        };
+        if self.rate_limit != RetransmissionRateLimit::WithinTarget {
+            return 0.0;
+        }
+        self.retransmitted.expire(now);
+        if self.pending.is_empty() && self.retransmitted.octets == 0 {
+            return 0.0;
+        }
+        let horizon = self
+            .round_trip_time
+            .unwrap_or(RETRANSMISSION_RATE_WINDOW)
+            .clamp(MIN_RESERVE_HORIZON, RETRANSMISSION_RATE_WINDOW);
+        let needed = self.pending_octets as f64 * 8.0 / horizon.as_secs_f64();
+        let in_use =
+            self.retransmitted.octets as f64 * 8.0 / RETRANSMISSION_RATE_WINDOW.as_secs_f64();
+        needed
+            .max(in_use)
+            .min(self.max_reserve_fraction * target_bps)
+    }
+
+    /// How long a waiting request stays without being asked for again.
+    fn pending_lifetime(&self) -> Duration {
+        self.round_trip_time
+            .map_or(PENDING_REQUEST_LIFETIME, |rtt| {
+                (rtt * 2).max(PENDING_REQUEST_LIFETIME)
+            })
+    }
+
+    /// Drops the waiting requests nobody asked for again within their lifetime.
+    fn expire_pending(&mut self, now: Instant) {
+        let lifetime = self.pending_lifetime();
+        let before = self.pending.len();
+        let asked = &mut self.pending_asked;
+        let octets = &mut self.pending_octets;
+        self.pending.retain(|entry| {
+            let key = (entry.ssrc, entry.sequence_number);
+            let fresh = asked
+                .get(&key)
+                .is_some_and(|at| now.saturating_duration_since(*at) <= lifetime);
+            if !fresh {
+                asked.remove(&key);
+                *octets -= entry.octets;
+            }
+            fresh
+        });
+        if self.pending.len() != before {
+            self.release_at = None;
+        }
+    }
+
+    /// The wire size of the retransmission of `packet` on `stream`.
+    fn retransmission_size(stream: &LocalStream, packet: &rtp::Packet) -> usize {
+        packet.marshal_size()
+            + if stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some() {
+                2
+            } else {
+                0
+            }
+    }
+
+    /// Whether `seq` of `stream` may be retransmitted at `now` (it is still held, not older
+    /// than the `rtx-time`), and its retransmission's size.
+    fn retransmittable(&self, stream: &LocalStream, seq: u16, now: Instant) -> Option<usize> {
+        let original_packet = stream.send_buffer.get(seq)?;
+        // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long. What
+        // the session description announced for the stream's retransmission format is
+        // the value; without one, the configured age.
+        if let Some(max_packet_age) = stream
+            .payload_type_rtx
+            .and_then(|payload_type_rtx| self.local_rtx_times.get(&payload_type_rtx))
+            .copied()
+            .or(self.max_packet_age)
+            && let Some((_, sent)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
+                .filter(|(sequence_number, _)| *sequence_number == seq)
+            && now.saturating_duration_since(sent) > max_packet_age
+        {
+            return None;
+        }
+        Some(Self::retransmission_size(stream, original_packet))
+    }
+
+    /// Sends the waiting retransmissions the rate limit has room for, oldest request first.
+    fn release(&mut self, now: Instant) {
+        let mut allowance = self.retransmission_allowance(now);
+        let resend_interval = resend_interval(self.round_trip_time);
+        while let Some(entry) = self.pending.front() {
+            if self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
+                break;
+            }
+            let (ssrc, seq) = (entry.ssrc, entry.sequence_number);
+            let current = self.streams.get(&ssrc).and_then(|stream| {
+                let recently = stream
+                    .last_retransmit
+                    .get(&seq)
+                    .is_some_and(|at| now.saturating_duration_since(*at) < resend_interval)
+                    || self.in_pacer.contains_key(&(ssrc, seq));
+                if recently {
+                    None
+                } else {
+                    self.retransmittable(stream, seq, now)
+                        .map(|size| (size, stream.retransmit_budget))
+                }
+            });
+            let Some((size, budget)) = current else {
+                // Gone from the buffer, too old, its stream unbound, or just sent.
+                self.pop_pending();
+                continue;
+            };
+            if budget == 0 {
+                // Waits for the next original packet, which adds to the budget.
+                break;
+            }
+            if let Some(left) = allowance.as_mut() {
+                if size > *left {
+                    break;
+                }
+                *left -= size;
+            }
+            self.pop_pending();
+            self.retransmit(now, ssrc, seq, size);
+        }
+    }
+
+    fn pop_pending(&mut self) {
+        if let Some(entry) = self.pending.pop_front() {
+            self.pending_asked
+                .remove(&(entry.ssrc, entry.sequence_number));
+            self.pending_octets -= entry.octets;
+            self.release_at = None;
+        }
+    }
+
+    /// Queues the retransmission of `seq` of the stream `ssrc`.
+    fn retransmit(&mut self, now: Instant, ssrc: u32, seq: u16, size: usize) {
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
+            return;
+        };
+        let Some(original_packet) = stream.send_buffer.get(seq) else {
+            return;
+        };
+        stream.last_retransmit.insert(seq, now);
+        if self.pacer_reports {
+            self.in_pacer.insert((ssrc, seq), now);
+        }
+        stream.retransmit_budget -= 1;
+        self.retransmissions_queued += 1;
+
+        let packet =
+            if let (Some(ssrc_rtx), Some(pt_rtx)) = (stream.ssrc_rtx, stream.payload_type_rtx) {
+                rtx_packet(
+                    &mut stream.rtx_sequence_number,
+                    (stream.rid_extension_id, stream.repaired_rid_extension_id),
+                    original_packet,
+                    ssrc_rtx,
+                    pt_rtx,
+                )
+            } else {
+                // No RTX: retransmit original packet as-is
+                original_packet.clone()
+            };
+        self.retransmitted.add(now, size);
+        self.release_at = None;
+
+        // Tagged so a send history downstream counts it as new bytes on the wire rather
+        // than as the original transmission. A bandwidth estimator that cannot tell the two
+        // apart under-counts exactly when the path is lossy — it sees fewer bytes than are
+        // really being sent, infers headroom, and raises the target during loss.
+        self.write_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission),
+        });
+    }
+
+    /// When the oldest waiting retransmission fits the rate limit: the instant enough of the
+    /// window's packets have left it. `None` with nothing waiting, without a target to wait
+    /// for, or while the stream's budget waits for an original packet (the write of that
+    /// packet tries again).
+    pub fn next_release(&mut self) -> Option<Instant> {
+        if let Some(at) = self.release_at {
+            return at;
+        }
+        let at = self.work_out_release();
+        self.release_at = Some(at);
+        at
+    }
+
+    fn work_out_release(&self) -> Option<Instant> {
+        let target_bps = self.target_bps?;
+        // With nothing waiting, the reserve falls to zero when the last retransmission leaves
+        // the window.
+        let Some(entry) = self.pending.front() else {
+            return (self.announced_reserve > 0.0)
+                .then(|| self.retransmitted.sent.back())
+                .flatten()
+                .map(|(at, _)| *at + RETRANSMISSION_RATE_WINDOW);
+        };
+        // The lifetime of the oldest request ends: due then, to drop it.
+        let lifetime = self.pending_lifetime();
+        let stale = self
+            .pending
+            .iter()
+            .filter_map(|entry| self.pending_asked.get(&(entry.ssrc, entry.sequence_number)))
+            .min()
+            .map(|asked| *asked + lifetime + Duration::from_micros(1));
+        if self
+            .streams
+            .get(&entry.ssrc)
+            .is_none_or(|stream| stream.retransmit_budget == 0)
+        {
+            return stale;
+        }
+        let size = entry.octets;
+        let target = Self::window_octets(target_bps);
+        let (originals, retransmitted) = (self.originals.octets, self.retransmitted.octets);
+        let fits = match self.rate_limit {
+            RetransmissionRateLimit::WithinTarget if !self.at_floor() => {
+                let by_share = freed_at(
+                    &[&self.originals, &self.retransmitted],
+                    (originals + retransmitted + size)
+                        .saturating_sub(target)
+                        .max(1),
+                )
+                .filter(|_| size <= target);
+                // The reserve frees as the retransmissions leave the window.
+                let reserve = Self::window_octets(self.announced_reserve);
+                let by_reserve = freed_at(
+                    &[&self.retransmitted],
+                    (retransmitted + size).saturating_sub(reserve).max(1),
+                )
+                .filter(|_| size <= reserve);
+                by_share.into_iter().chain(by_reserve).min()
+            }
+            // Near the floor the room is the retransmissions' first: only they leaving the
+            // window frees it.
+            RetransmissionRateLimit::WithinTarget | RetransmissionRateLimit::UpToTarget => {
+                freed_at(
+                    &[&self.retransmitted],
+                    (retransmitted + size).saturating_sub(target).max(1),
+                )
+                .filter(|_| size <= target)
+            }
+            RetransmissionRateLimit::Unlimited => None,
+        };
+        fits.into_iter().chain(stale).min()
+    }
+
+    /// Announces a reserve that moved: down the write leg for the congestion controller, and
+    /// up the read leg as the lowered target for the application.
+    fn announce_reserve(&mut self, now: Instant, carrier: bool) {
+        let Some(target_bps) = self.target_bps else {
+            return;
+        };
+        let reserve = self.reserve(now);
+        if !reserve_moved(self.announced_reserve, reserve, target_bps) {
+            return;
+        }
+        self.announced_reserve = reserve;
+        self.release_at = None;
+        self.write_queue.push_back(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(
+                std::sync::Arc::new(RetransmissionReserve {
+                    bits_per_second: reserve,
+                }),
+            )),
+        });
+        if carrier {
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
+                    Attribute::TargetBitrateChanged {
+                        bits_per_second: if self.paused {
+                            0.0
+                        } else {
+                            media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0))
+                        },
+                    },
+                ),
+            });
+        }
+        if self.at_floor() {
+            // Near the floor the window's room is the retransmissions': use it now.
+            self.release(now);
+        }
     }
 
     /// Fills a probe cluster ([`ProbeRequest`]) with padding-only packets on the RTX stream of
@@ -363,6 +891,82 @@ impl NackResponderInterceptor {
         }
     }
 
+    /// Forgets the packets the pacer discarded ([`PacerDiscard`](crate::PacerDiscard)): out of
+    /// the retransmission buffer, so a NACK for one is answered by nothing (RFC 4588 section 7:
+    /// the sender "MAY selectively retransmit only the packets that it deems important"; a frame
+    /// the pacer gave up is not), out of the requests waiting, and out of the original packets
+    /// counted against the target, since they never used the link.
+    fn forget_discarded(&mut self, discard: &crate::PacerDiscard) {
+        if let Some(stream) = self.streams.get_mut(&discard.ssrc) {
+            for &seq in &discard.sequence_numbers {
+                let Some(packet) = stream.send_buffer.remove(seq) else {
+                    continue;
+                };
+                let slot = usize::from(seq) % stream.sent_at.len();
+                if let Some((sequence_number, at)) = stream.sent_at[slot]
+                    && sequence_number == seq
+                {
+                    self.originals.forget(at, packet.marshal_size());
+                    stream.sent_at[slot] = None;
+                }
+            }
+        }
+        let before = self.pending.len();
+        let asked = &mut self.pending_asked;
+        let octets = &mut self.pending_octets;
+        self.pending.retain(|entry| {
+            let discarded = entry.ssrc == discard.ssrc
+                && discard.sequence_numbers.contains(&entry.sequence_number);
+            if discarded {
+                asked.remove(&(entry.ssrc, entry.sequence_number));
+                *octets -= entry.octets;
+            }
+            !discarded
+        });
+        if self.pending.len() != before {
+            self.release_at = None;
+        }
+    }
+
+    /// The pacer's report of retransmissions that left it or were dropped
+    /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)): no longer on their way. One that
+    /// left counts its resend interval from now, the instant it went toward the wire, not from
+    /// when it was made (libwebrtc's `RtpPacketHistory` sets the send time when the pacer sends
+    /// it); one that was dropped may be asked for again.
+    fn retransmissions_left(&mut self, now: Instant, notice: &crate::RetransmissionsLeft) {
+        self.pacer_reports = true;
+        let media_ssrc = |streams: &HashMap<u32, LocalStream>, ssrc: u32| {
+            if streams.contains_key(&ssrc) {
+                Some(ssrc)
+            } else {
+                streams
+                    .iter()
+                    .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
+                    .map(|(media, _)| *media)
+            }
+        };
+        for &(ssrc, seq) in &notice.departed {
+            let Some(media) = media_ssrc(&self.streams, ssrc) else {
+                continue;
+            };
+            if self.in_pacer.remove(&(media, seq)).is_some()
+                && let Some(stream) = self.streams.get_mut(&media)
+            {
+                stream.last_retransmit.insert(seq, now);
+            }
+        }
+        for &(ssrc, seq) in &notice.dropped {
+            if let Some(media) = media_ssrc(&self.streams, ssrc) {
+                self.in_pacer.remove(&(media, seq));
+            }
+        }
+        // A pacer drops what waited its queue time bound and says so; anything older than
+        // that is no longer there.
+        self.in_pacer
+            .retain(|_, made| now.saturating_duration_since(*made) < IN_PACER_LIFETIME);
+        self.release_at = None;
+    }
+
     /// Handle a NACK request by queuing retransmissions.
     fn handle_nack(
         &mut self,
@@ -385,8 +989,9 @@ impl NackResponderInterceptor {
             }
         }
 
-        let mut allowance = self.retransmission_allowance(now);
-        let Some(stream) = self.streams.get_mut(&nack.media_ssrc) else {
+        let ssrc = nack.media_ssrc;
+        let resend_interval = resend_interval(self.round_trip_time);
+        let Some(stream) = self.streams.get_mut(&ssrc) else {
             return;
         };
 
@@ -396,81 +1001,62 @@ impl NackResponderInterceptor {
         // Forget suppression entries old enough not to matter.
         stream
             .last_retransmit
-            .retain(|_, at| now.saturating_duration_since(*at) < MIN_RETRANSMIT_INTERVAL);
+            .retain(|_, at| now.saturating_duration_since(*at) < resend_interval);
 
-        // Queue retransmissions
+        // Every packet asked for joins the requests waiting, oldest request first (one asked
+        // for again keeps its place and is asked for afresh), and leaves as the rate limit has
+        // room (RFC 4588 section 7): what does not fit now leaves when the window has room.
         for seq in seqs_to_retransmit {
-            if self.retransmissions_queued >= MAX_QUEUED_RETRANSMISSIONS {
-                break;
-            }
-            if stream.last_retransmit.contains_key(&seq) {
-                continue;
-            }
-            if stream.retransmit_budget == 0 {
-                break;
-            }
-            let Some(original_packet) = stream.send_buffer.get(seq) else {
-                continue;
+            let Some(stream) = self.streams.get(&ssrc) else {
+                return;
             };
-            // RFC 4588 8.1 (`rtx-time`): a packet is kept for retransmission that long. What
-            // the session description announced for the stream's retransmission format is
-            // the value; without one, the configured age.
-            if let Some(max_packet_age) = stream
-                .payload_type_rtx
-                .and_then(|payload_type_rtx| self.local_rtx_times.get(&payload_type_rtx))
-                .copied()
-                .or(self.max_packet_age)
-                && let Some((_, sent)) = stream.sent_at[usize::from(seq) % stream.sent_at.len()]
-                    .filter(|(sequence_number, _)| *sequence_number == seq)
-                && now.saturating_duration_since(sent) > max_packet_age
+            if stream.last_retransmit.contains_key(&seq) || self.in_pacer.contains_key(&(ssrc, seq))
             {
                 continue;
             }
-            // RFC 4588 section 7: the retransmissions stay within the congestion controller's
-            // rate. Asked for oldest first, so what does not fit now is the newest; the
-            // receiver asks for it again a round trip later.
-            let size = original_packet.marshal_size()
-                + if stream.ssrc_rtx.is_some() && stream.payload_type_rtx.is_some() {
-                    2
-                } else {
-                    0
-                };
-            if let Some(left) = allowance.as_mut() {
-                if size > *left {
-                    break;
+            let Some(octets) = self.retransmittable(stream, seq, now) else {
+                continue;
+            };
+            let budget = stream.retransmit_budget;
+            match self.pending_asked.get_mut(&(ssrc, seq)) {
+                Some(asked) => *asked = now,
+                None => {
+                    // The budget (one retransmission per original sent) refuses it: not
+                    // kept, the receiver asks again. Only the rate limit makes a request wait.
+                    if budget == 0 || self.pending.len() >= MAX_QUEUED_RETRANSMISSIONS {
+                        break;
+                    }
+                    self.pending_asked.insert((ssrc, seq), now);
+                    // A stream's oldest packet first, whenever it was asked for: a receiver
+                    // that plays in order waits for its oldest gap, and a packet asked for
+                    // again (its repair was lost) would otherwise wait behind every newer one.
+                    let at = self
+                        .pending
+                        .iter()
+                        .position(|waiting| {
+                            waiting.ssrc == ssrc
+                                && waiting.sequence_number.wrapping_sub(seq) < 0x8000
+                        })
+                        .unwrap_or(self.pending.len());
+                    self.pending.insert(
+                        at,
+                        PendingRetransmission {
+                            ssrc,
+                            sequence_number: seq,
+                            octets,
+                        },
+                    );
+                    self.pending_octets += octets;
                 }
-                *left -= size;
             }
-            stream.last_retransmit.insert(seq, now);
-            stream.retransmit_budget -= 1;
-            self.retransmissions_queued += 1;
-
-            let packet = if let (Some(ssrc_rtx), Some(pt_rtx)) =
-                (stream.ssrc_rtx, stream.payload_type_rtx)
-            {
-                rtx_packet(
-                    &mut stream.rtx_sequence_number,
-                    (stream.rid_extension_id, stream.repaired_rid_extension_id),
-                    original_packet,
-                    ssrc_rtx,
-                    pt_rtx,
-                )
-            } else {
-                // No RTX: retransmit original packet as-is
-                original_packet.clone()
-            };
-            self.retransmitted.add(now, size);
-
-            // Tagged so a send history downstream counts it as new bytes on the wire rather
-            // than as the original transmission. A bandwidth estimator that cannot tell the two
-            // apart under-counts exactly when the path is lossy — it sees fewer bytes than are
-            // really being sent, infers headroom, and raises the target during loss.
-            self.write_queue.push_back(TaggedPacket {
-                now,
-                transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtp(packet)).with(Attribute::Retransmission),
-            });
         }
+        self.release_at = None;
+        self.expire_pending(now);
+        // The original media is lowered by the reserve before any of these is sent (RFC 4588
+        // section 7: "the sender SHOULD NOT send retransmission packets without reducing the
+        // packet rate and bitrate of the original stream"); the retransmissions may then use it.
+        self.announce_reserve(now, false);
+        self.release(now);
     }
 }
 
@@ -554,22 +1140,65 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        let now = msg.now;
+        let announced_before = self.announced_reserve;
         // The congestion controller's target, which the retransmissions are held to.
-        if let Some(Attribute::TargetBitrateChanged { bits_per_second }) =
+        let carries_target = if let Some(Attribute::TargetBitrateChanged { bits_per_second }) =
             msg.message.get(&Attribute::TargetBitrateChanged {
                 bits_per_second: 0.0,
-            })
-            && bits_per_second.is_finite()
-            && *bits_per_second >= 0.0
+            }) {
+            if bits_per_second.is_finite() && *bits_per_second >= 0.0 {
+                self.target_bps = Some(*bits_per_second);
+                self.minimum_bps = msg
+                    .message
+                    .custom::<MinimumTarget>()
+                    .map(|minimum| minimum.bits_per_second)
+                    .filter(|minimum| minimum.is_finite());
+                self.release_at = None;
+            }
+            true
+        } else {
+            false
+        };
+
+        // The round trip the RTCP session measured: the reserve's horizon.
+        if let Some(crate::RtcpSessionEvent::RoundTripTime { rtt, .. }) =
+            msg.message.custom::<crate::RtcpSessionEvent>()
         {
-            self.target_bps = Some(*bits_per_second);
+            self.round_trip_time = Some(*rtt);
+            self.release_at = None;
+        }
+
+        // While the pacer tells the source to pause, the target on the packet is zero and the
+        // congestion controller's rides with it: the rate the retransmissions are held to.
+        if carries_target {
+            let pause = msg.message.custom::<crate::PacerPause>().copied();
+            self.paused = pause.is_some();
+            if let Some(pause) = pause
+                && pause.target_bits_per_second.is_finite()
+                && pause.target_bits_per_second >= 0.0
+            {
+                self.target_bps = Some(pause.target_bits_per_second);
+            }
+        }
+
+        // Retransmissions that left the pacer (or were dropped there).
+        if let Some(notice) = msg.message.custom::<crate::RetransmissionsLeft>() {
+            let notice = notice.clone();
+            self.retransmissions_left(now, &notice);
+        }
+
+        // Packets the pacer (wire-ward of here) discarded: never resent.
+        if let Some(discard) = msg.message.custom::<crate::PacerDiscard>() {
+            let discard = discard.clone();
+            self.forget_discarded(&discard);
         }
 
         // A probe cluster the congestion controller asks for: fill it.
         if let Some(request) = msg.message.custom::<ProbeRequest>().copied() {
             let session = crate::RtpSession::of(&msg.message);
-            self.fill_probe(msg.now, &request, session);
+            self.fill_probe(now, &request, session);
         }
 
         // Process NACK packets
@@ -579,7 +1208,47 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
                     .as_any()
                     .downcast_ref::<rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>()
                 {
-                    self.handle_nack(msg.now, nack);
+                    self.handle_nack(now, nack);
+                }
+            }
+        }
+        if carries_target {
+            // A new target may leave room for what waits.
+            self.release(now);
+        }
+
+        // The application's target is the controller's less the reserve (RFC 4588 section
+        // 7): lowered on the packet that carries it, or announced on a carrier of its own when
+        // only the reserve moved.
+        if !carries_target
+            && self.announced_reserve != announced_before
+            && let Some(target_bps) = self.target_bps
+        {
+            // Moved while the NACK was read: the application hears of it here.
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
+                    Attribute::TargetBitrateChanged {
+                        bits_per_second: if self.paused {
+                            0.0
+                        } else {
+                            media_target(
+                                target_bps,
+                                self.announced_reserve,
+                                self.minimum_bps.unwrap_or(0.0),
+                            )
+                        },
+                    },
+                ),
+            });
+        }
+        self.announce_reserve(now, !carries_target);
+        if carries_target && self.announced_reserve > 0.0 {
+            let (reserve, minimum) = (self.announced_reserve, self.minimum_bps.unwrap_or(0.0));
+            for attribute in &mut msg.message.attributes {
+                if let Attribute::TargetBitrateChanged { bits_per_second } = attribute {
+                    *bits_per_second = media_target(*bits_per_second, reserve, minimum);
                 }
             }
         }
@@ -628,6 +1297,16 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             stream.retransmit_budget =
                 (stream.retransmit_budget + 1).min(stream.retransmit_budget_max);
         }
+        if matches!(msg.message.packet, Packet::Rtp(_)) {
+            self.release_at = None;
+            if !self.pending.is_empty() {
+                // The budget may have room again.
+                self.release(msg.now);
+            }
+            if !self.pending.is_empty() || self.announced_reserve > 0.0 {
+                self.announce_reserve(msg.now, true);
+            }
+        }
 
         self.write_queue.push_back(msg);
 
@@ -643,7 +1322,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
         Some(packet)
     }
 
-    fn handle_timeout(&mut self, _now: Instant) -> Result<(), Self::Error> {
+    fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        if !self.pending.is_empty() || self.announced_reserve > 0.0 {
+            // Worked out afresh: a deadline that passed without a change must not be handed
+            // back again (a driver would spin on it).
+            self.release_at = None;
+            self.expire_pending(now);
+            self.release(now);
+            self.announce_reserve(now, true);
+        }
         Ok(())
     }
 
@@ -655,8 +1342,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
     /// long time on a connection with little traffic. The deadline is the instant they were
     /// made, so the driver's `handle_timeout` and the `poll_write` after it take them out at
     /// once; it is gone when the queue is drained.
+    ///
+    /// A retransmission the rate limit holds back is not in the write queue: its deadline is
+    /// the instant the limit next has room for it ([`Self::next_release`]), never earlier (a
+    /// driver woken at once would spin), and the same for a waiting request running out and
+    /// the reserve falling back to zero.
     fn poll_timeout(&mut self) -> Option<Self::Time> {
-        self.write_queue.front().map(|packet| packet.now)
+        let queued = self.write_queue.front().map(|packet| packet.now);
+        queued.into_iter().chain(self.next_release()).min()
     }
 }
 

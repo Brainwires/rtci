@@ -238,6 +238,7 @@ pub(crate) mod intervalpli;
 pub(crate) mod jitterbuffer;
 pub(crate) mod keyframe;
 pub(crate) mod nack;
+pub(crate) mod never_sent;
 pub(crate) mod ntp_timestamp;
 pub(crate) mod pacing;
 pub(crate) mod packet;
@@ -366,8 +367,9 @@ pub use nack::generator::{
     SUGGESTED_MAX_PACKET_AGE as NACK_SUGGESTED_MAX_PACKET_AGE,
 };
 pub use nack::responder::{
-    NackResponderBuilder, NackResponderInterceptor, PROBE_PADDING_OCTETS,
-    RETRANSMISSION_RATE_WINDOW, RetransmissionRateLimit,
+    MAX_RETRANSMISSION_RESERVE, MinimumTarget, NackResponderBuilder, NackResponderInterceptor,
+    PENDING_REQUEST_LIFETIME, PROBE_PADDING_OCTETS, RETRANSMISSION_RATE_WINDOW,
+    RetransmissionRateLimit, RetransmissionReserve,
 };
 pub use noop::NoopInterceptor;
 pub use ntp_timestamp::{
@@ -379,8 +381,8 @@ pub use pacing::pacer::{
 };
 pub use pacing::sender::{
     DEFAULT_BITRATE as PACER_DEFAULT_BITRATE, DEFAULT_QUEUE_LIMIT as PACER_DEFAULT_QUEUE_LIMIT,
-    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerInterceptor,
-    QueueOverflow as PacerQueueOverflow,
+    DEFAULT_QUEUE_TIME_LIMIT as PACER_DEFAULT_QUEUE_TIME_LIMIT, PacerBuilder, PacerDiscard,
+    PacerInterceptor, PacerPause, QueueOverflow as PacerQueueOverflow, RetransmissionsLeft,
 };
 pub use packet::{Attribute, AttributedPacket, Packet, TaggedPacket};
 pub use pass_through::PassThroughInterceptor;
@@ -409,7 +411,7 @@ pub use rtcp_session::{
     RepeatInRegularReports, RtcpBandwidth, RtcpProfile, RtcpSessionBuilder, RtcpSessionControl,
     RtcpSessionEvent, RtcpSessionInterceptor,
 };
-pub use rtp_session::{PerRtpSession, RtpSession, RtpSessionAssignment};
+pub use rtp_session::{PathChanged, PerRtpSession, RtpSession, RtpSessionAssignment};
 pub use rtpfb::acknowledgement::{Acknowledgement, PacketReport, Report};
 pub use rtpfb::convert::{FeedbackTimeline, convert_ccfb, convert_twcc};
 pub use rtpfb::history::History;
