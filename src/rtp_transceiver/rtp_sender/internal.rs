@@ -196,6 +196,8 @@ pub(crate) struct FecSessionBinding {
     /// The remote side signalled `onelevelonly=1` (RFC 5109 sections 13, 14.3: what the
     /// receiver accepts).
     pub(crate) one_level_only: bool,
+    /// The per-packet congestion feedback negotiated for the session.
+    pub(crate) feedback: crate::rtp_transceiver::internal::FecSessionFeedback,
 }
 
 impl RTCRtpSenderInternal {
@@ -1234,11 +1236,19 @@ impl RTCRtpSenderInternal {
             .iter()
             .filter_map(|info| {
                 let session = info.fec_session?;
+                // Numbered and reported on the session's own transport, for its own
+                // congestion controller.
+                let (rtp_header_extensions, rtcp_feedback) = self
+                    .fec_session
+                    .map(|binding| binding.feedback.stream_info())
+                    .unwrap_or_default();
                 Some(StreamInfo {
                     ssrc: session.ssrc,
                     payload_type: session.payload_type,
                     mime_type: format!("{}/ulpfec", self.kind()),
                     clock_rate: info.clock_rate,
+                    rtp_header_extensions,
+                    rtcp_feedback,
                     ..Default::default()
                 })
             })

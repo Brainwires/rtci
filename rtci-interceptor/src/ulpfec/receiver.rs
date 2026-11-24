@@ -93,6 +93,7 @@ pub struct UlpfecReceiveBuilder {
     forward_repair: bool,
     decode_every_stream: bool,
     filter: StreamFilter,
+    zero_mutable_extensions: bool,
 }
 
 impl UlpfecReceiveBuilder {
@@ -103,6 +104,7 @@ impl UlpfecReceiveBuilder {
             forward_repair: true,
             decode_every_stream: false,
             filter: video_streams(),
+            zero_mutable_extensions: false,
         }
     }
 
@@ -157,6 +159,18 @@ impl UlpfecReceiveBuilder {
         self
     }
 
+    /// Recover with the values of the transport-wide sequence number, abs-send-time and toffset
+    /// extensions zeroed in this receiver's copy of each media packet, as libwebrtc's receiver
+    /// does (`UlpfecReceiver::ProcessReceivedFec`, `RtpPacket::ZeroMutableExtensions` at
+    /// a222406d): its sender protects them as zeros, since it writes them after its FEC was
+    /// computed (see `UlpfecSendBuilder::with_mutable_extensions_zeroed`). A packet rebuilt
+    /// from such FEC then has every octet as sent and those values zero, instead of XOR noise
+    /// there. `false` by default (RFC 5109 section 8: the FEC covers the packet as sent).
+    pub fn with_mutable_extensions_zeroed(mut self, zero: bool) -> Self {
+        self.zero_mutable_extensions = zero;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> UlpfecReceiveInterceptor {
         UlpfecReceiveInterceptor {
@@ -165,6 +179,8 @@ impl UlpfecReceiveBuilder {
             forward_repair: self.forward_repair,
             decode_every_stream: self.decode_every_stream,
             filter: self.filter,
+            zero_mutable_extensions: self.zero_mutable_extensions,
+            zeroed_extensions: HashMap::new(),
             decoders: HashMap::new(),
             carriages: HashMap::new(),
             in_red: HashMap::new(),
@@ -201,6 +217,10 @@ pub struct UlpfecReceiveInterceptor {
     forward_repair: bool,
     decode_every_stream: bool,
     filter: StreamFilter,
+    /// See [`UlpfecReceiveBuilder::with_mutable_extensions_zeroed`].
+    zero_mutable_extensions: bool,
+    /// With it: the ids of each protected stream's extensions zeroed in the decoder's copies.
+    zeroed_extensions: HashMap<u32, Vec<u8>>,
     /// Decoders keyed by the media SSRC they protect.
     decoders: HashMap<u32, UlpfecDecoder>,
     /// How each protected stream's FEC travels, with the payload types its section
@@ -390,7 +410,13 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for UlpfecReceiveInterceptor {
         }
 
         // A media packet: the decoder needs it to rebuild its neighbours, and it carries on.
-        recovered.extend(decoder.push_media(rtp_packet));
+        match self.zeroed_extensions.get(&ssrc) {
+            Some(ids) => {
+                recovered
+                    .extend(decoder.push_media(&super::with_extensions_zeroed(rtp_packet, ids)));
+            }
+            None => recovered.extend(decoder.push_media(rtp_packet)),
+        }
         self.media_transport.insert(ssrc, transport);
         self.read_queue.push_back(msg);
         self.queue_recovered(now, transport, recovered);
@@ -443,6 +469,10 @@ impl Interceptor for UlpfecReceiveInterceptor {
             }
             _ => None,
         };
+        if self.zero_mutable_extensions {
+            self.zeroed_extensions
+                .insert(info.ssrc, super::mutable_extension_ids(info));
+        }
         if let Some((ssrc_fec, payload_type_fec)) = separate {
             self.repair_to_media
                 .insert(ssrc_fec, (info.ssrc, payload_type_fec));
@@ -485,6 +515,7 @@ impl Interceptor for UlpfecReceiveInterceptor {
         self.in_red.remove(&info.ssrc);
         self.reported.remove(&info.ssrc);
         self.media_transport.remove(&info.ssrc);
+        self.zeroed_extensions.remove(&info.ssrc);
         self.repair_to_media
             .retain(|_, (media, _)| *media != info.ssrc);
     }
