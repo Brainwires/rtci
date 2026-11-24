@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **sdp / jsep**: a remote description with two direction attributes at one level is refused
+  (RFC 8866 section 6.7: at most one at session level and one per media description); the
+  first was taken before. The informational attributes `a=tool`, `a=type`, `a=orient` and
+  `a=quality` (RFC 8866 sections 6.3, 6.9, 6.8, 6.14) now have their grammar checked, so a
+  remote description with a malformed one, or one at the wrong level, is refused (RFC 9429
+  section 5.8) (`conf/jsep-78-sdp-informational`). Browsers send neither.
+
+### Features
+
+- **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
+  `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
+  (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
+  6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
