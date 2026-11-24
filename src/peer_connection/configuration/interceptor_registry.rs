@@ -568,7 +568,7 @@ impl DefaultInterceptorOptions {
             rtcp_immediate_congestion_feedback: true,
             rtcp_report_from_every_ssrc: false,
             twcc_rereport_received: false,
-            gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
+            gcc_threshold_time_base: interceptor::ThresholdTimeBase::Arrival,
             gcc_one_decrease_per_round_trip: false,
             gcc_received_rate_bound: interceptor::ReceivedRateBound::LimitsIncrease,
             abs_send_time_on_audio: false,
