@@ -11,7 +11,7 @@
 //! rate behind a drop-tail queue of 300 ms.
 //!
 //! What it measures is what the call's user sees: the longest time without a usable frame on
-//! the receiving side, and the estimate twenty seconds after the cap went.
+//! the receiving side, and the estimate after the cap went (its mean from 15 to 25 s after).
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
@@ -1382,6 +1382,11 @@ struct Outcome {
     /// later.
     estimate_at_lift: u32,
     recovery: [u32; 4],
+    /// The target the encoder followed from 15 to 25 s after the cap went, read every 100 ms:
+    /// its lowest, mean and highest. The estimate climbs in a sawtooth (probes, loss cuts), so
+    /// a single reading is the phase of the tooth it falls on; the mean over ten seconds is
+    /// the level.
+    recovery_window: (u32, u32, u32),
     /// The longest freeze of the callee's video, and when it began.
     freeze: Duration,
     freeze_at: Duration,
@@ -1422,7 +1427,7 @@ struct Outcome {
 
 /// The call: open for 20 s (or until the caller's target reaches `Setup::cap_at_target`),
 /// the caller's uplink capped at 300 kbit/s until `Setup::cap` (20 s) after its estimate went
-/// under 400 kbit/s, then open again for 20 s.
+/// under 400 kbit/s, then open again for 25 s.
 fn run(setup: &Setup) -> Result<Outcome> {
     let seed = setup.seed;
     let mut world = World::connected(setup)?;
@@ -1475,6 +1480,22 @@ fn run(setup: &Setup) -> Result<Outcome> {
         world.advance(t)?;
         *after = target_at(&world.peers[0].targets, world.elapsed());
     }
+    // On to 25 s after the cap went, for the window from 15 to 25 s.
+    let t = world.now + Duration::from_secs(5);
+    world.advance(t)?;
+    let window: Vec<u32> = (150..=250)
+        .map(|tenths| {
+            target_at(
+                &world.peers[0].targets,
+                opened_at + Duration::from_millis(tenths * 100),
+            )
+        })
+        .collect();
+    let recovery_window = (
+        window.iter().copied().min().unwrap_or(0),
+        (window.iter().map(|bps| u64::from(*bps)).sum::<u64>() / window.len() as u64) as u32,
+        window.iter().copied().max().unwrap_or(0),
+    );
     let end = world.elapsed();
     let after = target_at(&world.peers[0].targets, end);
     let estimate_after = world.peers[0].estimate().unwrap_or(0);
@@ -1537,6 +1558,7 @@ fn run(setup: &Setup) -> Result<Outcome> {
         estimate_after,
         estimate_at_lift,
         recovery,
+        recovery_window,
         freeze,
         freeze_at,
         lag,
@@ -1632,7 +1654,10 @@ fn seeds(
 ///   through the cap (the rules held to the target send 42 to 54, 13 to 17 of them dropped at
 ///   the link's queue; without a limit 54 to 105 were sent and more than half dropped);
 /// - the capped link used: the median target under the cap at least 200 kbit/s of the 300;
-/// - the estimate recovered: at least 800 kbit/s twenty seconds after the cap went.
+/// - the estimate recovered: at least 800 kbit/s on average from 15 to 25 s after the cap
+///   went (a single reading is the phase of the estimate's sawtooth: the +20 s target of one
+///   seed moved from 777 to 1074 kbit/s with nothing but the wall clock's phase, runs
+///   45360145995).
 fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
     for (cap, seed, outcome) in outcomes {
         assert!(
@@ -1656,9 +1681,9 @@ fn assert_the_call_holds(outcomes: &[(u64, u64, Outcome)], lag: Duration) {
             outcome.under
         );
         assert!(
-            outcome.recovery[3] >= 800_000,
-            "cap {cap} s seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
-            outcome.recovery[3]
+            outcome.recovery_window.1 >= 800_000,
+            "cap {cap} s seed {seed}: {} bit/s on average 15 to 25 s after the cap: {outcome:?}",
+            outcome.recovery_window.1
         );
     }
 }
@@ -1809,9 +1834,9 @@ fn a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture() -> Resu
             outcome.under
         );
         assert!(
-            outcome.recovery[3] >= 800_000,
-            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
-            outcome.recovery[3]
+            outcome.recovery_window.1 >= 800_000,
+            "seed {seed}: {} bit/s on average 15 to 25 s after the cap: {outcome:?}",
+            outcome.recovery_window.1
         );
     }
     Ok(())
@@ -1871,7 +1896,7 @@ fn measure_the_capacity_cap() -> Result<()> {
                         }
                         match run(&setup) {
                             Ok(o) => println!(
-                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} | estimate after {}",
+                                "ROW chain {chain} rule {rule} cap {seconds} seed {seed} anchor {anchor} | before {} at {:.1} | freeze {:.2} at {:.1} lag {:.2} | rtx {}/{} dropped | padding {}/{} dropped | queue drops {} audio {} | pacer dropped {} late {} discards {} pauses {} | pli {} | under {} lift {} recovery {:?} window {}/{}/{} | estimate after {}",
                                 o.before / 1000,
                                 o.capped_at.as_secs_f64(),
                                 o.freeze.as_secs_f64(),
@@ -1891,6 +1916,9 @@ fn measure_the_capacity_cap() -> Result<()> {
                                 o.under / 1000,
                                 o.estimate_at_lift / 1000,
                                 o.recovery.map(|bps| bps / 1000),
+                                o.recovery_window.0 / 1000,
+                                o.recovery_window.1 / 1000,
+                                o.recovery_window.2 / 1000,
                                 o.estimate_after / 1000,
                             ),
                             Err(error) => println!(
@@ -1992,9 +2020,9 @@ fn a_sender_following_the_target_is_paused_and_loses_nothing_at_the_pacer() -> R
             outcome.rtx_sent
         );
         assert!(
-            outcome.recovery[3] >= 800_000,
-            "seed {seed}: {} bit/s twenty seconds after the cap: {outcome:?}",
-            outcome.recovery[3]
+            outcome.recovery_window.1 >= 800_000,
+            "seed {seed}: {} bit/s on average 15 to 25 s after the cap: {outcome:?}",
+            outcome.recovery_window.1
         );
     }
     Ok(())
