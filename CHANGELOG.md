@@ -644,7 +644,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stable) was caught on Linux only. `tests/mdns_virtual_time.rs` connects two publishing
   drivers on the mock runtime (whose multicast sockets now send from the address a transmit
   names, as the engine asks for mDNS) and runs on Linux, macOS and Windows in CI;
-  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux.
+  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux (on a Windows host with no
+  interface that carries multicast to the group, as some hosted images, its two tests on the
+  default interface print why and skip).
 
 ## [0.1.0] - 2026-11-24
 
