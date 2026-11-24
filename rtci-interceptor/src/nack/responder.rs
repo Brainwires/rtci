@@ -2060,10 +2060,11 @@ mod tests {
         let size = usize::from(SIZE);
         let mut now = base;
         let mut most = 0;
-        // Reports come and a pacer is there, so every state is in use. For the second half
-        // the pacer says nothing more: its retransmissions stay "in the pacer", the one
-        // state kept for whatever packet has the number.
-        for step in 0..20_000u32 {
+        // Reports come and a pacer is there, so every state is in use. From step 10 000 the
+        // pacer says nothing more, and from step 20 000 no report comes either: every
+        // retransmission then stays "in the pacer", the one state kept for whatever packet has
+        // the number, for four seconds (8 000 steps) while the buffer turns over every 64.
+        for step in 0..30_000u32 {
             now = base + Duration::from_micros(500) * step;
             let sequence_number = step as u16;
             original(&mut responder, now, sequence_number);
@@ -2114,7 +2115,9 @@ mod tests {
                     dropped: vec![(RTX_SSRC, sequence_number)],
                 })));
             }
-            responder.handle_read(tagged(now, message)).unwrap();
+            if step < 20_000 {
+                responder.handle_read(tagged(now, message)).unwrap();
+            }
             while responder.poll_write().is_some() {}
             while responder.poll_read().is_some() {}
             let [repairs, by_rtx, order, pending, asked] = remembered(&responder);

@@ -1112,3 +1112,73 @@ fn the_arrival_of_an_earlier_retransmission_counts_for_the_packet() {
         "the packet arrived with its first retransmission"
     );
 }
+
+/// A request that waits for room in the rate limit is a request for its packet. Behind
+/// another stream's request that does not fit, it is not looked at while its own stream
+/// sends on; when that stream's sequence numbers have come round (65536 packets in 0.66 s
+/// here) and room is made, the new packet that has the number asked for is not
+/// retransmitted: nobody asked for it.
+#[test]
+fn a_waiting_request_is_not_answered_with_the_packet_that_has_its_number_a_cycle_later() {
+    const OTHER: u32 = 0x2222;
+    let base = Instant::now();
+    let mut chain = chain_with(true, RetransmissionRateLimit::UpToTarget);
+    chain.bind_local_stream(&StreamInfo {
+        ssrc: OTHER,
+        ssrc_rtx: Some(0x3333),
+        ..stream_info(true)
+    });
+    let target = |chain: &mut dyn Interceptor, now: Instant, bits_per_second: f64| {
+        read(
+            chain,
+            now,
+            AttributedPacket::new(Packet::Rtcp(vec![]))
+                .with(Attribute::TargetBitrateChanged { bits_per_second }),
+        );
+    };
+    // 2 kbit/s: 250 octets a second, less than one retransmission (514 octets).
+    target(&mut chain, base, 2_000.0);
+    drain(&mut chain);
+    send_originals(&mut chain, base);
+    chain
+        .handle_write(TaggedPacket {
+            now: base,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number: 50,
+                    ssrc: OTHER,
+                    ..Default::default()
+                },
+                payload: vec![0u8; 500].into(),
+            })),
+        })
+        .unwrap();
+    drain(&mut chain);
+    // The other stream's request first: it does not fit and stays at the head.
+    read(
+        &mut chain,
+        ms(base, 300),
+        AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerNack {
+            sender_ssrc: 1,
+            media_ssrc: OTHER,
+            nacks: nack_pairs_from_sequence_numbers(&[50]),
+        })])),
+    );
+    assert!(drain(&mut chain).is_empty());
+    assert!(
+        nack(&mut chain, ms(base, 301), &[3]).is_empty(),
+        "no room: the request waits behind the other stream's"
+    );
+    let now = a_cycle_of_originals(&mut chain, ms(base, 310), Duration::from_micros(10));
+    assert!(now < ms(base, 1_000), "within the requests' lifetime (1 s)");
+    // Room for everything.
+    target(&mut chain, ms(base, 1_000), 10_000_000.0);
+    let left = drain(&mut chain);
+    assert!(
+        left.is_empty(),
+        "the new packet 3 was retransmitted for a request made for the old one: {left:?}"
+    );
+}
