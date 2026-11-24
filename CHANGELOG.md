@@ -173,6 +173,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5.1, 5.1.5; the test now checks the one packet). Supported Address Types in INIT (5.1.2) is
   `n/a`: RFC 8261 6.1 forbids it over DTLS. Engine behaviour change: no.
 
+- **A video RED format is not negotiated without ULPFEC (RFC 5109 section 14.3).** "In
+  cases in which the redundancy payload format is used with FEC as the only secondary codec,
+  when the FEC stream is rejected the redundant encoding payload type SHOULD also be
+  removed": a `video/red` format without an fmtp line (it names no encodings, so ULPFEC is
+  the only thing it can carry) is left out of the negotiated formats when no `ulpfec` format
+  of its rate is negotiated, and the RTX format that names it goes too. This changes the
+  answer of an application that registered `video/red` and not `ulpfec`; the default codecs
+  register neither, and audio RED is untouched.
+- A new m= section that an offer keeps outside every BUNDLE group although the offer has
+  groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
+  answer did not have) gets a transport of its own, as the method's documentation says; it
+  was put on the BUNDLE transport. A section a description leaves outside every group is
+  never written `a=bundle-only`.
+
+- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
+  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
+  Retransmit found in messages whose retransmission budget was spent and abandoned instead
+  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
+  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
+  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
+  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
+- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
+  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
+  protocol events: no DATA of the channel sent twice, every lost message abandoned and
+  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
+  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
+  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
+  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
+  behaviour change: no (counters only).
+
+- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
+  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
+  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
+  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
+  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
+  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
+  stale cookie; a counter).
+- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
+  9260 8.1: "report the failure to the upper layer and optionally report back all
+  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
+  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
+  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
+  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
+  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
+- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
+  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
+  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
+  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
+  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
+  the outbound queues of an ended association are emptied into the undelivered list.
+- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
+  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
+  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
+  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
+  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
+  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
+  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
+  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
+  test.
+
 ### Features
 
 - **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
@@ -324,68 +384,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   congestion controller has no per-packet feedback and stays at its start estimate; FEC for a
   stream whose SSRC the description does not declare is used from that stream's first media
   packet on.
-
-### Changed
-
-- **A video RED format is not negotiated without ULPFEC (RFC 5109 section 14.3).** "In
-  cases in which the redundancy payload format is used with FEC as the only secondary codec,
-  when the FEC stream is rejected the redundant encoding payload type SHOULD also be
-  removed": a `video/red` format without an fmtp line (it names no encodings, so ULPFEC is
-  the only thing it can carry) is left out of the negotiated formats when no `ulpfec` format
-  of its rate is negotiated, and the RTX format that names it goes too. This changes the
-  answer of an application that registered `video/red` and not `ulpfec`; the default codecs
-  register neither, and audio RED is untouched.
-- A new m= section that an offer keeps outside every BUNDLE group although the offer has
-  groups (`RTCRtpTransceiver::set_bundle_request(Some(false))` on a transceiver the last
-  answer did not have) gets a transport of its own, as the method's documentation says; it
-  was put on the BUNDLE transport. A section a description leaves outside every group is
-  never written `a=bundle-only`.
-
-- **sctp** (sctp-18): `AssociationStats` counts DATA chunks sent again
-  (`get_num_retransmissions`), messages abandoned (`get_num_abandoned_messages`), losses Fast
-  Retransmit found in messages whose retransmission budget was spent and abandoned instead
-  (`get_num_fast_retrans_abandoned`), FORWARD TSN chunks sent (`get_num_forward_tsns`) and the
-  time T3-rtx expiries waited (`get_t3_wait`, the RTO at each expiry); `RTCSctpTransport::
-  association_stats` gives them for the live association (a diagnostic, not a W3C member). The
-  documentation of `get_num_datas` said "sent"; it counts DATA chunks received.
-- **tests** (sctp-18): the test environment's 1000-message unreliable channel at 10 % loss
-  (`testenv_impairment::unreliable_channel_loses_without_retransmitting`) asserts on counted
-  protocol events: no DATA of the channel sent twice, every lost message abandoned and
-  skipped with FORWARD TSN, at least 45 % of the losses found by Fast Retransmit, T3-rtx
-  expiries at most 3/4 of the losses and their mean wait at most 3 s, and the time not spent
-  waiting for T3-rtx under 40 s; the wall time is a 120 s ceiling only (was the assertion, at
-  90 s). It prints the T3-rtx expiries and their wait beside the drain figure. Engine
-  behaviour change: no (counters only).
-
-- **sctp** (sctp-24, pass2): the INIT sent after a Stale Cookie ERROR carries a Cookie
-  Preservative (RFC 9260 3.3.2.1.3, 5.2.6) asking for what the cookie was late by, at least
-  the round trip of the COOKIE ECHO / ERROR exchange and at most a second beyond it (the 5.2.6
-  SHOULD); `AssociationStats::get_num_sack_losses` counts SACKs found lost from Duplicate TSN
-  reports of timer retransmissions (6.2 MAY). RFC9260-3.3.2.1.3-1, 5.2.6-3, 6.2-25 are
-  `tested`. Engine behaviour change: yes, small (a 8-byte parameter in an INIT that follows a
-  stale cookie; a counter).
-- **sctp** (sctp-23, pass2): an association that ends with user messages it did not deliver reports them (RFC
-  9260 8.1: "report the failure to the upper layer and optionally report back all
-  outstanding user data"): one `Event::SendFailure { unsent, unacknowledged }` (11.2.2)
-  before `AssociationClosed`, and `Association::take_undelivered_messages()` hands back each
-  message (`UndeliveredMessage`: stream, SSN, PPI, unordered, mode `Unsent` /
-  `Unacknowledged`, partial flag, the bytes not acknowledged) as Receive Unsent / Receive
-  Unacknowledged Message do (11.1.14, 11.1.15). A graceful shutdown leaves none.
-- **sctp** (sctp-23, pass2): `Event::CommunicationError { causes }` for each ERROR chunk the peer sends (11.2.5),
-  `ErrorCauseCode::value()`; `Association::request_heartbeat(now)` (11.1.10, also with
-  heartbeats disabled); `Association::status()` (`AssociationStatus`, 11.1.8) and
-  `peer_receive_window()`. RFC9260-8.1-5, 11.1-2, 11.1-3, 11.1-5, 11.2-2 are `tested`.
-  Engine behaviour change: new events only (both `Event` variants under `#[non_exhaustive]`);
-  the outbound queues of an ended association are emptied into the undelivered list.
-- **sctp** (sctp-19): three optional behaviours of RFC 9260. A SHUTDOWN goes with a SACK when
-  what was received has gaps, which the SHUTDOWN's Cumulative TSN Ack cannot report (3.3.8);
-  the last DATA chunk sent in SHUTDOWN-PENDING carries the I bit, so the receiver acknowledges
-  it without the SACK delay the SHUTDOWN waits for (3.3.1, RFC 7053); and
-  `TransportConfig::with_fragmentation(false)` turns fragmentation off, refusing a message
-  larger than one DATA chunk of a full-sized packet with `ErrOutboundPacketTooLarge` (6.9; on
-  by default). Engine behaviour change (shutdown packets): yes. The answer to a refused INIT
-  (an ABORT to its Initiate Tag, 3.3.2) was already there; its audit row is closed with its
-  test.
 
 ### Fixed
 
