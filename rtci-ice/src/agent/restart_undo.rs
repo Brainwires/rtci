@@ -29,6 +29,9 @@ pub(crate) struct RestartUndo {
     consent_unanswered_since: Option<Instant>,
     checking_duration: Instant,
     last_checking_time: Instant,
+    tie_breaker: u64,
+    ice_generation: u64,
+    mdns_known_public: KnownPublicAddresses,
 }
 
 impl Agent {
@@ -66,6 +69,9 @@ impl Agent {
                 consent_unanswered_since: self.consent_unanswered_since,
                 checking_duration: self.checking_duration,
                 last_checking_time: self.last_checking_time,
+                tie_breaker: self.tie_breaker,
+                ice_generation: self.ice_generation,
+                mdns_known_public: self.mdns_known_public.clone(),
             }),
         };
         self.apply_restart(now, keep_local_candidates)?;
@@ -125,6 +131,9 @@ impl Agent {
         self.early_requests = undo.early_requests;
         self.triggered_queue = undo.triggered_queue;
         self.remote_end_of_candidates = undo.remote_end_of_candidates;
+        // The generation taken back is gone: what its gathering showed public with it.
+        self.ice_generation = undo.ice_generation;
+        self.mdns_known_public = undo.mdns_known_public;
         self.local_gathering_complete = undo.local_gathering_complete;
         self.lite_update_raised = undo.lite_update_raised;
         self.next_check_at = undo.next_check_at.max(now);
@@ -132,6 +141,7 @@ impl Agent {
         self.consent_unanswered_since = undo.consent_unanswered_since;
         self.checking_duration = undo.checking_duration;
         self.last_checking_time = undo.last_checking_time;
+        self.tie_breaker = undo.tie_breaker;
 
         if let (Some(pair_index), Some((last_consent, next_consent_at))) =
             (self.selected_pair, kept_consent)

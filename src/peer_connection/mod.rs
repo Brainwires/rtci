@@ -260,6 +260,7 @@ mod prohibited;
 mod remote_tracks;
 pub mod rtc_error;
 /// Server-reflexive candidates the engine gathers (RFC 8445 section 5.1.1.2).
+pub(crate) mod servers_in_force;
 pub mod srflx;
 mod states_events;
 pub(crate) mod streams;
@@ -922,6 +923,14 @@ pub struct RTCPeerConnection {
     /// descriptions `restart_ice` was called with. Offers restart ICE while the current local
     /// description still has one of them (`ice_restart_pending`).
     pub(crate) ice_credentials_to_replace: Vec<String>,
+    /// For which address families the application can send mDNS
+    /// ([`Self::set_multicast_dns_publishing`]); given to every transport's agent, those made
+    /// later included.
+    pub(crate) mdns_publishing: ice::mdns::MulticastDnsPublishing,
+    /// The local addresses the application marked as RFC 4941 temporary
+    /// ([`Self::set_temporary_ipv6_addresses`]); given to every transport's agent, those made
+    /// later included.
+    pub(crate) temporary_ipv6_addresses: Vec<std::net::Ipv6Addr>,
     /// Every SSRC a local description of this connection has described for a local stream
     /// (RFC 5576 section 5: an SSRC is not reused for another source, "SHOULD NOT" ever; and
     /// section 8: an updated offer's new SSRCs differ from any used before): new SSRCs are
@@ -956,6 +965,9 @@ pub struct RTCPeerConnection {
     /// The data channels' DSCP as last seen (RFC 8837 section 5: a change resets the SCTP
     /// congestion control; `priority.rs`).
     pub(crate) last_data_dscp: Option<u8>,
+    /// The marked media flows watched for blocking, and those turned back to Default
+    /// Forwarding (RFC 8835 section 4.2; `priority.rs`).
+    pub(crate) dscp_fallback: priority::DscpFallback,
     /// The engine's stream transports: its ICE-TCP candidates and their connections.
     pub(crate) streams: streams::EngineStreams,
 }
@@ -4221,6 +4233,28 @@ impl RTCPeerConnection {
         }
         self.configuration.ice_transport_policy = configuration.ice_transport_policy;
         self.configuration.ice_candidate_pool_size = configuration.ice_candidate_pool_size;
+        // The agents learn the new set of servers: one that differs discards what their
+        // gatherings showed about public addresses (draft-ietf-mmusic-mdns-ice-candidates
+        // section 3.1.2.2).
+        let mut urls = vec![];
+        for server in &configuration.ice_servers {
+            urls.extend(server.urls()?);
+        }
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_ice_servers(urls.clone());
+        }
+        // W3C "set the configuration": "Set the ICE Agent's ICE servers list to iceServers.
+        // As defined in [RFC9429], if a new list of servers replaces the ICE Agent's existing
+        // ICE servers list, no action will be taken until the next gathering phase." The
+        // engine's own STUN and TURN gathering take the new list for the generations that
+        // begin from now on (an ICE restart, a new transport); one already gathering keeps
+        // its list.
+        self.streams.srflx.set_servers(&urls);
+        self.streams.turn.set_servers(&urls);
         self.configuration.ice_servers = configuration.ice_servers;
 
         Ok(())

@@ -124,6 +124,7 @@ impl RTCPeerConnection {
         let now = self.pipeline_context.now;
         let mut agent_config =
             internal::ice_agent_config(&self.configuration, &self.setting_engine)?;
+        agent_config.multicast_dns_publishing = self.mdns_publishing;
         // A transport's credentials are the first transport's, as the browsers have them,
         // unless each transport is to have its own (RFC 9429 section 5.2.1;
         // `with_unique_transport_credentials`). Fixed ones from the settings are the first
@@ -144,8 +145,11 @@ impl RTCPeerConnection {
         let nonce: u64 = rand::rng().random();
         let ice_transport_id = RTCTransportId::new(nonce, TransportKind::Ice);
         let dtls_transport_id = RTCTransportId::new(nonce, TransportKind::Dtls);
-        let ice_transport =
+        let mut ice_transport =
             IceTransport::new(now, agent_config, crypto_provider.clone(), ice_transport_id)?;
+        ice_transport
+            .agent
+            .set_temporary_ipv6_addresses(self.temporary_ipv6_addresses.clone());
         let certificates = self.dtls_transport().certificates.clone();
         let dtls_transport = internal::new_dtls_transport(
             &self.setting_engine,
@@ -927,6 +931,54 @@ impl RTCPeerConnection {
     /// description as it is read (`populate_local_candidates`).
     pub(crate) fn populate_other_transports_candidates(&self, d: &mut SessionDescription) {
         self.write_transport_attributes(d, None);
+    }
+
+    /// The connection's mDNS mode (`SettingEngineBuilder::with_multicast_dns_mode`): with
+    /// `QueryAndGather` its host candidates go out under `.local` names, which an application
+    /// with sockets of its own needs mDNS sockets for (see
+    /// [`set_multicast_dns_publishing`](Self::set_multicast_dns_publishing)).
+    pub fn multicast_dns_mode(&self) -> ice::mdns::MulticastDnsMode {
+        self.setting_engine.multicast_dns.mode
+    }
+
+    /// Tells the connection for which address families the application can send mDNS: an
+    /// mDNS socket (port 5353, joined to 224.0.0.251 or ff02::fb) is open for it. Both, until
+    /// this is called. With `QueryAndGather` the host candidates added afterwards on an
+    /// address of a family it cannot send on get no published name
+    /// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1 step 4 fails): they go out under a
+    /// `.local` name that is not published, or, with
+    /// [`with_multicast_dns_fail_closed`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_multicast_dns_fail_closed),
+    /// not at all. Call it before adding the host candidates; it holds for every transport,
+    /// those made later included, and names registered before stay.
+    pub fn set_multicast_dns_publishing(&mut self, publishing: ice::mdns::MulticastDnsPublishing) {
+        self.mdns_publishing = publishing;
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_multicast_dns_publishing(publishing);
+        }
+    }
+
+    /// Marks which local addresses are RFC 4941 temporary IPv6 addresses (replacing what was
+    /// marked before); only the operating system knows, the engine cannot tell from the
+    /// bits. With
+    /// [`with_multicast_dns_expose_temporary_ipv6_addresses`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_multicast_dns_expose_temporary_ipv6_addresses)
+    /// and `QueryAndGather`, the host candidates added afterwards on a marked global unicast
+    /// address keep their address (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3);
+    /// otherwise it changes nothing. Call it before adding the host candidates; it holds for
+    /// every transport, those made later included. `rtci-stream-driver`'s `PeerDriver` calls
+    /// it from the interface list where the operating system reports the flag.
+    pub fn set_temporary_ipv6_addresses(&mut self, addresses: Vec<std::net::Ipv6Addr>) {
+        for bundle in self.pipeline_context.transports.iter_mut() {
+            bundle
+                .ice_handler_context
+                .ice_transport
+                .agent
+                .set_temporary_ipv6_addresses(addresses.clone());
+        }
+        self.temporary_ipv6_addresses = addresses;
     }
 
     /// The connection's transports: for each, the mid and m= line index of its first section,

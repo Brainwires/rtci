@@ -15,6 +15,8 @@ mod agent_checklist_test;
 #[cfg(test)]
 mod agent_consent_test;
 #[cfg(test)]
+mod agent_mdns_exposure_test;
+#[cfg(test)]
 mod agent_nat_1to1_test;
 #[cfg(test)]
 mod agent_nomination_test;
@@ -56,7 +58,7 @@ use log::{debug, error, info, trace, warn};
 use mdns::{Mdns, QueryId};
 use sansio::Protocol;
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use stun::attributes::*;
@@ -70,9 +72,10 @@ use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
 use crate::external_ip_mapper::ExternalIpMapper;
+use crate::mdns::exposure::KnownPublicAddresses;
 use crate::mdns::{
-    MdnsOptions, MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name,
-    is_ice_mdns_name, is_valid_local_mdns_name,
+    MdnsOptions, MulticastDnsMode, MulticastDnsPublishing, create_multicast_dns,
+    generate_multicast_dns_name, is_ice_mdns_name, is_valid_local_mdns_name,
 };
 use crate::network_type::NetworkType;
 use crate::rand::*;
@@ -364,6 +367,8 @@ pub enum DataPath<'a> {
 pub struct Agent {
     pub(crate) crypto_provider: Arc<dyn RTCCryptoProvider>,
     pub(crate) tie_breaker: u64,
+    /// [`AgentConfig::new_tie_breaker_on_restart`].
+    pub(crate) new_tie_breaker_on_restart: bool,
     pub(crate) is_controlling: bool,
     pub(crate) lite: bool,
 
@@ -463,6 +468,30 @@ pub struct Agent {
     /// `QueryAndGather` without a fixed `mdns_local_ip`: the `<uuid>.local` name each local
     /// address is published under, one per address, made when its first host candidate is added.
     pub(crate) mdns_local_names: Vec<(IpAddr, String)>,
+    /// `QueryAndGather`: the `<uuid>.local` name each local address whose name could not be
+    /// registered goes out under (never published), reused for its other candidates.
+    pub(crate) mdns_unpublished_names: Vec<(IpAddr, String)>,
+    /// [`AgentConfig::multicast_dns_fail_closed`].
+    pub(crate) mdns_fail_closed: bool,
+    /// [`AgentConfig::multicast_dns_publishing`], or what [`Agent::set_multicast_dns_publishing`]
+    /// set since.
+    pub(crate) mdns_publishing: MulticastDnsPublishing,
+    /// `QueryAndGather` with [`AgentConfig::multicast_dns_fail_closed`]: the local addresses
+    /// whose host candidates the agent withheld (their name could not be registered).
+    pub(crate) mdns_withheld: Vec<IpAddr>,
+    /// [`AgentConfig::multicast_dns_expose_known_public_addresses`].
+    pub(crate) mdns_expose_known_public: bool,
+    /// The local addresses gatherings showed to be public (draft Section 3.1.2.2), for
+    /// `mdns_expose_known_public`.
+    pub(crate) mdns_known_public: KnownPublicAddresses,
+    /// [`AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`].
+    pub(crate) mdns_expose_temporary_ipv6: bool,
+    /// The addresses the application marked as RFC 4941 temporary
+    /// ([`Agent::set_temporary_ipv6_addresses`]).
+    pub(crate) temporary_ipv6_addresses: Vec<Ipv6Addr>,
+    /// Which ICE generation the agent is in: one more at each applied restart (the first one
+    /// made by `new`).
+    pub(crate) ice_generation: u64,
 
     pub(crate) candidate_types: Vec<CandidateType>,
     pub(crate) network_types: Vec<NetworkType>,
@@ -520,9 +549,13 @@ enum MdnsHostName {
     Hide(String),
     /// Keep its address.
     Literal,
-    /// Too many names are published already: the candidate takes this name, which is not
-    /// published, and so keeps its address private.
+    /// The name cannot be registered (no mDNS for the address's family, or too many names
+    /// are published already): the candidate takes this name, which is not published, and so
+    /// keeps its address private.
     Unpublished(String),
+    /// The name cannot be registered and the agent fails closed
+    /// ([`AgentConfig::multicast_dns_fail_closed`]): no candidate.
+    Withhold,
 }
 
 /// RFC 8839 section 5.4: `ice-ufrag` is 4 to 256 `ice-char`s and `ice-pwd` 22 to 256, with
@@ -625,6 +658,9 @@ impl Agent {
         let mut agent = Self {
             crypto_provider,
             tie_breaker,
+            // Set once the first `restart` below has initialised the agent: that one is not
+            // an ICE restart, and the configured tiebreaker must survive it.
+            new_tie_breaker_on_restart: false,
             is_controlling: config.is_controlling,
             lite: config.lite,
 
@@ -730,6 +766,15 @@ impl Agent {
             mdns_local_name,
             mdns_local_ip: config.multicast_dns_local_ip,
             mdns_local_names: Vec::new(),
+            mdns_unpublished_names: Vec::new(),
+            mdns_fail_closed: config.multicast_dns_fail_closed,
+            mdns_publishing: config.multicast_dns_publishing,
+            mdns_withheld: Vec::new(),
+            mdns_expose_known_public: config.multicast_dns_expose_known_public_addresses,
+            mdns_known_public: KnownPublicAddresses::default(),
+            mdns_expose_temporary_ipv6: config.multicast_dns_expose_temporary_ipv6_addresses,
+            temporary_ipv6_addresses: Vec::new(),
+            ice_generation: 0,
 
             ufrag_pwd: UfragPwd::default(),
 
@@ -796,6 +841,7 @@ impl Agent {
             let _ = agent.close();
             return Err(err);
         }
+        agent.new_tie_breaker_on_restart = config.new_tie_breaker_on_restart;
 
         Ok(agent)
     }
@@ -899,7 +945,199 @@ impl Agent {
         self.request_connectivity_check();
     }
 
-    fn add_gathered_local_candidate(&mut self, mut c: Candidate, unconveyed: bool) -> Result<bool> {
+    fn add_gathered_local_candidate(&mut self, c: Candidate, unconveyed: bool) -> Result<bool> {
+        self.note_public_address(&c);
+        self.take_local_candidate(c, unconveyed)
+    }
+
+    /// The ICE generation a local candidate added now belongs to: the next one while a
+    /// restart is staged (see `add_gathered_local_candidate`'s `staged`).
+    fn local_candidate_generation(&self) -> u64 {
+        self.ice_generation + u64::from(self.has_pending_restart())
+    }
+
+    /// draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2: "If the STUN response returns
+    /// the same value as the local IP address, this indicates the address is in fact public".
+    /// With [`AgentConfig::multicast_dns_expose_known_public_addresses`] in `QueryAndGather`,
+    /// a server-reflexive candidate the application adds whose address is its base's records
+    /// that base as public for this generation, when the base is the address of a host
+    /// candidate the agent holds (its own interface: a STUN server cannot name another) and
+    /// a global unicast address.
+    fn note_public_address(&mut self, c: &Candidate) {
+        if !self.mdns_expose_known_public
+            || self.mdns_mode != MulticastDnsMode::QueryAndGather
+            || c.candidate_type() != CandidateType::ServerReflexive
+        {
+            return;
+        }
+        let Some(base) = c
+            .related_address()
+            .and_then(|related| related.address.parse::<IpAddr>().ok())
+        else {
+            return;
+        };
+        if c.addr().ip() != base || !crate::mdns::is_global_unicast(base) {
+            return;
+        }
+        let own_interface = self
+            .local_candidates
+            .iter()
+            .any(|h| h.candidate_type() == CandidateType::Host && h.addr().ip() == base);
+        if !own_interface {
+            return;
+        }
+        let generation = self.local_candidate_generation();
+        debug!(
+            "[{}]: {} shown public by a server-reflexive candidate (generation {})",
+            self.get_name(),
+            base,
+            generation
+        );
+        self.mdns_known_public.record(base, generation);
+    }
+
+    /// draft-ietf-mmusic-mdns-ice-candidates Section 3.1.1 step 1: whether the host candidate
+    /// `c` is "safe to expose" under one of the two opt-in settings, and so keeps its
+    /// address in `QueryAndGather`: a global unicast address (never anything
+    /// [`crate::mdns::is_global_unicast`] refuses) that the gathering before this generation
+    /// showed public ([`AgentConfig::multicast_dns_expose_known_public_addresses`]), or that
+    /// the application marked as an RFC 4941 temporary IPv6 address
+    /// ([`AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`]).
+    fn exposes_host_address(&self, c: &Candidate) -> bool {
+        self.exposes_address(c.addr().ip(), self.local_candidate_generation())
+    }
+
+    /// [`Agent::exposes_host_address`] for an address and a generation.
+    fn exposes_address(&self, ip: IpAddr, generation: u64) -> bool {
+        if !crate::mdns::is_global_unicast(ip) {
+            return false;
+        }
+        let known_public =
+            self.mdns_expose_known_public && self.mdns_known_public.exposes(ip, generation);
+        let temporary = self.mdns_expose_temporary_ipv6
+            && matches!(ip, IpAddr::V6(v6) if self.temporary_ipv6_addresses.contains(&v6));
+        known_public || temporary
+    }
+
+    /// A restart that keeps the local candidates hands them to the new generation, which is
+    /// a new gathering phase (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2): with
+    /// one of the exposure settings in `QueryAndGather`, each kept host candidate takes the
+    /// form the new generation gives its address (its address, or its name again), as one
+    /// gathered anew would. A kept server-reflexive candidate that becomes redundant with an
+    /// unwrapped host candidate (RFC 8445 Section 5.1.3), or a kept candidate equal to one
+    /// gathered while the restart was staged, is dropped; one whose name can no longer be
+    /// registered under `multicast_dns_fail_closed` is withheld.
+    fn reevaluate_kept_host_candidates(&mut self) {
+        if self.mdns_mode != MulticastDnsMode::QueryAndGather
+            || !(self.mdns_expose_known_public || self.mdns_expose_temporary_ipv6)
+        {
+            return;
+        }
+        let generation = self.ice_generation;
+        let mut index = 0;
+        while index < self.local_candidates.len() {
+            let c = &self.local_candidates[index];
+            if c.candidate_type() != CandidateType::Host {
+                index += 1;
+                continue;
+            }
+            let (ip, network_type) = (c.addr().ip(), c.network_type());
+            let named = c.address().ends_with(".local");
+            let address = if self.exposes_address(ip, generation) {
+                (named).then(|| ip.to_string())
+            } else if !named {
+                match self.mdns_name_for(ip, network_type) {
+                    MdnsHostName::Hide(name) | MdnsHostName::Unpublished(name) => Some(name),
+                    MdnsHostName::Literal => None,
+                    MdnsHostName::Withhold => {
+                        if !self.mdns_withheld.contains(&ip) {
+                            self.mdns_withheld.push(ip);
+                        }
+                        self.local_candidates.remove(index);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let Some(address) = address else {
+                index += 1;
+                continue;
+            };
+            self.local_candidates[index].address = address;
+            let c = &self.local_candidates[index];
+            let duplicate = self
+                .local_candidates
+                .iter()
+                .enumerate()
+                .any(|(other, o)| other != index && o.equal(c));
+            if duplicate {
+                self.local_candidates.remove(index);
+                continue;
+            }
+            if !c.address().ends_with(".local") {
+                let (addr, tcp_type) = (c.addr(), c.tcp_type());
+                let redundant = |o: &Candidate| {
+                    o.candidate_type() == CandidateType::ServerReflexive
+                        && o.network_type() == network_type
+                        && o.tcp_type() == tcp_type
+                        && o.addr() == addr
+                        && o.base_addr() == addr
+                };
+                let before = self.local_candidates[..index]
+                    .iter()
+                    .filter(|o| redundant(o))
+                    .count();
+                self.local_candidates.retain(|o| !redundant(o));
+                index -= before;
+            }
+            index += 1;
+        }
+    }
+
+    /// Marks the local addresses that are RFC 4941 temporary IPv6 addresses (replacing what
+    /// was marked before). The operating system knows which they are, the engine cannot tell
+    /// from the bits: the application (`rtci-stream-driver`'s `PeerDriver` does it from the
+    /// interface list) says so before it adds their host candidates. Only with
+    /// [`AgentConfig::multicast_dns_expose_temporary_ipv6_addresses`] in `QueryAndGather`
+    /// does it change anything: host candidates added afterwards on a marked address that is
+    /// a global unicast address keep the address (draft-ietf-mmusic-mdns-ice-candidates
+    /// Section 3.1.2.3). Candidates added before keep their form.
+    pub fn set_temporary_ipv6_addresses(&mut self, addresses: Vec<Ipv6Addr>) {
+        self.temporary_ipv6_addresses = addresses;
+    }
+
+    /// The STUN / TURN servers the application gathers with now (`AgentConfig::urls` at
+    /// first). When the set differs from the one before (credentials aside), what gatherings
+    /// showed about public addresses is discarded (draft-ietf-mmusic-mdns-ice-candidates
+    /// Section 3.1.2.2: "if the set of STUN servers changes, any cached information SHOULD be
+    /// discarded, as the new set may return different results").
+    pub fn set_ice_servers(&mut self, urls: Vec<Url>) {
+        fn key(url: &Url) -> (String, String, u16, String) {
+            (
+                url.scheme.to_string(),
+                url.host.to_ascii_lowercase(),
+                url.port,
+                url.proto.to_string(),
+            )
+        }
+        let mut before: Vec<_> = self.urls.iter().map(key).collect();
+        let mut after: Vec<_> = urls.iter().map(key).collect();
+        before.sort();
+        before.dedup();
+        after.sort();
+        after.dedup();
+        if before != after && !self.mdns_known_public.is_empty() {
+            debug!(
+                "[{}]: the STUN / TURN servers changed: public addresses forgotten",
+                self.get_name()
+            );
+            self.mdns_known_public.clear();
+        }
+        self.urls = urls;
+    }
+
+    fn take_local_candidate(&mut self, mut c: Candidate, unconveyed: bool) -> Result<bool> {
         // Filter by network type if network_types is configured
         if !self.network_types.is_empty() {
             let candidate_network_type = c.network_type();
@@ -938,6 +1176,7 @@ impl Agent {
         if c.candidate_type() == CandidateType::Host
             && self.mdns_mode == MulticastDnsMode::QueryAndGather
             && !c.address.ends_with(".local")
+            && !self.exposes_host_address(&c)
         {
             match self.mdns_name_for(c.addr().ip(), c.network_type()) {
                 MdnsHostName::Hide(name) => {
@@ -952,12 +1191,26 @@ impl Agent {
                     // that is never published (it does not resolve), so neither its address
                     // nor the failure shows.
                     warn!(
-                        "[{}]: local host candidate {} goes out under an unpublished mDNS name: {} names already published (the cap)",
+                        "[{}]: local host candidate {} goes out under an unpublished mDNS name: no mDNS for its address family, or {} names already published (the cap)",
                         self.get_name(),
                         c.address,
                         mdns::MAX_LOCAL_NAMES
                     );
                     c.address = name;
+                }
+                MdnsHostName::Withhold => {
+                    // `multicast_dns_fail_closed`: the address is never written, and no
+                    // candidate the peer cannot resolve is offered either.
+                    warn!(
+                        "[{}]: local host candidate {} withheld: its mDNS name cannot be registered (fail closed)",
+                        self.get_name(),
+                        c.address
+                    );
+                    let ip = c.addr().ip();
+                    if !self.mdns_withheld.contains(&ip) {
+                        self.mdns_withheld.push(ip);
+                    }
+                    return Ok(false);
                 }
             }
         }
@@ -1076,7 +1329,7 @@ impl Agent {
         self.pair_local_candidate(local_index);
 
         if let Some(srflx) = nat_srflx {
-            self.add_gathered_local_candidate(srflx, unconveyed)?;
+            self.take_local_candidate(srflx, unconveyed)?;
         }
 
         Ok(true)
@@ -1241,15 +1494,44 @@ impl Agent {
         if let Some((_, name)) = self.mdns_local_names.iter().find(|(i, _)| *i == ip) {
             return MdnsHostName::Hide(name.clone());
         }
-        let Some(mdns_conn) = &mut self.mdns else {
-            return MdnsHostName::Literal;
-        };
         let name = generate_multicast_dns_name();
-        if !mdns_conn.add_local_name(&name, ip) {
-            return MdnsHostName::Unpublished(name);
+        // Section 3.1.1 step 4, register the name: on the network only where the application
+        // can send mDNS for the address's family, in a responder that has room for it.
+        let registered = self.mdns_publishing.covers(ip)
+            && self
+                .mdns
+                .as_mut()
+                .is_some_and(|mdns_conn| mdns_conn.add_local_name(&name, ip));
+        if registered {
+            self.mdns_local_names.push((ip, name.clone()));
+            return MdnsHostName::Hide(name);
         }
-        self.mdns_local_names.push((ip, name.clone()));
-        MdnsHostName::Hide(name)
+        if self.mdns_fail_closed {
+            return MdnsHostName::Withhold;
+        }
+        if let Some((_, name)) = self.mdns_unpublished_names.iter().find(|(i, _)| *i == ip) {
+            return MdnsHostName::Unpublished(name.clone());
+        }
+        self.mdns_unpublished_names.push((ip, name.clone()));
+        MdnsHostName::Unpublished(name)
+    }
+
+    /// Tells the agent for which address families the application can send mDNS (an mDNS
+    /// socket is open; both by default, [`AgentConfig::multicast_dns_publishing`]). In
+    /// `QueryAndGather`, the name of a host candidate added afterwards on an address of a
+    /// family it cannot send on is not registered (draft-ietf-mmusic-mdns-ice-candidates
+    /// Section 3.1.1 step 4 fails): the candidate goes out under an unpublished name, or not
+    /// at all with [`AgentConfig::multicast_dns_fail_closed`]. Names registered before stay.
+    pub fn set_multicast_dns_publishing(&mut self, publishing: MulticastDnsPublishing) {
+        self.mdns_publishing = publishing;
+    }
+
+    /// Whether the agent withheld the host candidates of `ip` because their mDNS name could
+    /// not be registered ([`AgentConfig::multicast_dns_fail_closed`]). The application may
+    /// still gather server-reflexive and relayed candidates from that address: they do not
+    /// carry it (Section 3.1.2.2).
+    pub fn multicast_dns_withholds(&self, ip: IpAddr) -> bool {
+        self.mdns_withheld.contains(&ip)
     }
 
     /// Adds a new remote candidate.
@@ -2292,6 +2574,15 @@ impl Agent {
         }
         // A restart that is not revertible commits an earlier one.
         self.restart_undo = None;
+        // RFC 8445 Section 16.1: "The agent MAY change the number when an ICE restart
+        // occurs", when the application asked for it.
+        if self.new_tie_breaker_on_restart {
+            self.tie_breaker = generate_tie_breaker(self.crypto_provider.random())?;
+        }
+        // A new generation: what the gathering just before showed public is what it unwraps
+        // (draft-ietf-mmusic-mdns-ice-candidates Section 3.1.2.2).
+        self.ice_generation += 1;
+        self.mdns_known_public.restarted(self.ice_generation);
         // Data keeps the path it has until the new generation selects a pair (RFC 8445
         // Section 9), whether or not the local candidates are kept: discarding them forgets
         // what was signalled, not the socket the path's packets leave from. An application
@@ -2351,6 +2642,7 @@ impl Agent {
             c.restart_generation = false;
             c.awaiting_restart = false;
         }
+        self.reevaluate_kept_host_candidates();
         self.previous_media_path = previous_media_path;
         self.previous_generation = previous_media_path.and(previous_generation);
         self.start(now);

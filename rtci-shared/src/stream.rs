@@ -298,6 +298,11 @@ pub struct StreamTransmit {
     pub id: StreamId,
     /// The bytes, framed (and encrypted, over TLS).
     pub data: Vec<u8>,
+    /// The Differentiated Services codepoint to send the connection's packets with (the upper
+    /// six bits of `IP_TOS` / `IPV6_TCLASS`): every packet on one TCP connection carries the
+    /// same one (RFC 8837 section 5, RFC 8835 section 4.2), that of the highest-priority flow
+    /// the engine has. The driver sets it on the connection's socket when it changes.
+    pub dscp: u8,
 }
 
 /// How messages are delimited on a connection.
@@ -1165,7 +1170,7 @@ impl StreamTable {
         if connection.state == StreamState::Closing && connection.queue.is_empty() {
             self.issue_closes();
         }
-        Some(StreamTransmit { id, data })
+        Some(StreamTransmit { id, data, dscp: 0 })
     }
 
     /// A connection's description, while the table knows it.
