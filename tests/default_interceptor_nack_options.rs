@@ -10,7 +10,7 @@
 use bytes::Bytes;
 use rtc::interceptor::{
     AttributedPacket, Interceptor, PacerQueueOverflow, Packet, RTCPFeedback, Registry,
-    RetransmissionRateLimit, StreamInfo, TaggedPacket,
+    RetransmissionRateLimit, RtcpSessionControl, RtpSession, StreamInfo, TaggedPacket,
 };
 use rtc::peer_connection::configuration::interceptor_registry::{
     DefaultInterceptorOptions, register_default_interceptors_with_options,
@@ -222,8 +222,9 @@ const LOST: u16 = 5;
 /// The remote sends a video stream with NACK, a packet every 50 ms for eight seconds, and
 /// packet [`LOST`] never arrives. Returns how many NACKs that leave the chain ask for it. The
 /// generator looks for gaps every 100 ms and, with no round trip measured, asks again each
-/// time; the RTCP session merges the requests waiting for one compound packet into one NACK,
-/// so the count is that of the compound packets that carry a request for it.
+/// time; the RTCP session (joined at the start) merges the requests waiting for one compound
+/// packet into one NACK, so the count is that of the compound packets that carry a request
+/// for it.
 fn requests_for_a_lost_packet(max_nacks_per_packet: u16) -> usize {
     let mut options = DefaultInterceptorOptions::default();
     options.nack_max_nacks_per_packet = max_nacks_per_packet;
@@ -232,6 +233,12 @@ fn requests_for_a_lost_packet(max_nacks_per_packet: u16) -> usize {
     chain.bind_remote_stream(&stream_info(REMOTE_SSRC, None));
 
     let start = Instant::now();
+    // The default RTCP session sends nothing until it is told to join, as the peer connection
+    // does when the transport has its keys.
+    let mut join = RtcpSessionControl::Start.into_packet(start);
+    join.message.add(RtpSession(0).attribute());
+    chain.handle_write(join).expect("join");
+
     let mut now = start;
     let mut requests = 0usize;
     let mut on_write = |packet: &Packet| {
