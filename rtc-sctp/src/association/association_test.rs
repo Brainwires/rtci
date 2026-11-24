@@ -2277,5 +2277,9 @@ mod zero_checksum_test;
 
 #[path = "cookie_ack_loss_test.rs"]
 mod cookie_ack_loss_test;
+
 #[path = "zero_window_progress_test.rs"]
 mod zero_window_progress_test;
+
+#[path = "partial_delivery_test.rs"]
+mod partial_delivery_test;

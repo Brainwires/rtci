@@ -460,7 +460,8 @@ fn ipv6_and_dual_allocations_on_coturn() {
     if addrs.len() == 1 {
         // ADDITIONAL-ADDRESS-FAMILY is comprehension-optional (0x8000, RFC 8656 18.11): a
         // server that does not implement it ignores it and allocates as if it were absent.
-        // coturn 4.6.1 does: the allocation is the IPv4 address alone, and it works.
+        // coturn 4.6 does (4.6.1 and 4.6.3): the allocation is the IPv4 address alone, and it
+        // works.
         eprintln!("TURN client: the server ignored ADDITIONAL-ADDRESS-FAMILY; one address");
         assert!(addrs[0].is_ipv4(), "{addrs:?}");
         assert_eq!(addrs[0], first);

@@ -9,6 +9,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **peer connection, interceptors**: the `Performance` behaviour profile and the
+  `performance-defaults` cargo feature (`conf/rtcp-1-rate`). The defaults are unchanged (the
+  RFC values); `Performance` takes, for each governed behaviour, the cheaper form an RFC itself
+  offers, never turns a capability off and never leaves what the RFCs permit (a libwebrtc value
+  outside an RFC stays in `Chrome`). Measured with `tests/rtcp_rate_trace_rtc2rtc.rs` (two rtc
+  peer connections, virtual time, 30 s):
+  - `rtcp.t-rr-interval` 1 s (RFC 4585 3.4 / 3.5.3; RFC 5506 3.3 names `trr-int` as the remedy;
+    kept local, not announced): at 1 Mbit/s one way the sender's regular reports fall from 13.2
+    to 1.4 a second (27.3 to 3.8 SR/s) and RTCP from 4.20% to 1.45% of the media; both ways
+    4.91% to 1.44%. Cost: report blocks reach the sender 1.2 times a second instead of 12.2
+    (longest gap 1.36 s instead of 214 ms), which slows the RTP circuit breaker and RR-based
+    RTT; NACK and congestion control feedback are untouched (120 ms to the NACK either way).
+  - `rtcp.congestion-feedback-in-budget`, `rtcp.minimum-session-bandwidth` 16 kbit/s,
+    `cc.feedback-share` 2.5%, `cc.feedback-max-interval` 500 ms: congestion control feedback and
+    regular reports share RFC 3550's 5%. 24 kbit/s audio: 12.15% to 4.49% of the media (6.06%
+    without `a=rtcp-rsize`); 100 kbit/s audio and video: 5.96% to 2.75%. Cost: at those rates
+    feedback every 500 / 400 ms instead of 250 / 137 ms (Gcc settles 0.5 s either way at
+    150 kbit/s, 6.0 s against 5.5 s at 500 kbit/s; a Gcc sender with probing fed by a
+    `Performance` receiver reaches 2 Mbit/s in 0.62 s against 0.49 s), and a regular report
+    only every 5 s at 24 kbit/s.
+  - New settings: `RtcpSessionBuilder::with_congestion_feedback_in_budget`,
+    `with_minimum_session_bandwidth`; `TwccReceiverBuilder` / `Rfc8888Builder`
+    `with_feedback_share`, `with_max_adaptive_interval`; `DefaultInterceptorOptions` fields
+    `rtcp_congestion_feedback_in_budget`, `rtcp_minimum_session_bandwidth`,
+    `congestion_feedback_share`, `congestion_feedback_max_interval`. `BehaviourProfile` gains
+    `Performance` (the enum is `#[non_exhaustive]`; `ALL` has four entries).
+  - Cargo feature `performance-defaults`: `BehaviourProfile::default()` is `Performance`. With
+    `chrome-defaults` also on, `Chrome` wins and the build prints a deprecation warning naming
+    both. CI: a `performance_defaults` job like `chrome_defaults`.
+  - Audit: RFC4585-3.5.4-2 is `partial` (was `tested`: the congestion control feedback sent at
+    once is not added to `avg_rtcp_size`); RFC5506-4.2.1-1's note names the feedback that does
+    travel reduced-size (transport-cc and RFC 8888 included).
+  - Test environment: the RTCP cell logs the media rate it ran at (a few hundred kbit/s, not a
+    video call's) and no longer claims the stacks report every second; the Pion peer counts each
+    RTCP datagram once (its SRTCP session hands one datagram to every stream it names, which
+    counted SRs several times).
+  - The merge with master: `rtp.ssrc-per-clock-rate` follows master's default (one SSRC across
+    clock rates, `Rfc` `false`, `StrictRfc` `true`); `circuit_breaker_packet_size` is listed as
+    engine-only.
+
+- **peer connection**: behaviour profile values verified against libwebrtc's source
+  (`conf/profile-2-verified-values`). The 26 unverified Chrome values were read in libwebrtc's
+  public source (`main` at `a222406d49ec`, 2026-11-23; Chromium's glue at `8dafa8bce175`,
+  BoringSSL at `289645a45072`); each row now cites the file, the symbol and the revision. 40
+  governed behaviours (was 35): 11 observed, 29 from the source, 0 unverified; 11 not
+  expressible (was 10).
+  - Wrong Chrome values corrected: `sctp.rto` is 500 ms / 400 ms / 3 s (was 500 / 220 ms / 60 s:
+    dcsctp's `rto_min` is 400 ms, 220 ms is `min_rtt_variance`, and libwebrtc caps the timer
+    backoff at 3 s); `gcc.threshold-time-base` is the new `ThresholdTimeBase::ArrivalCapped`
+    (libwebrtc's `TrendlineEstimator::UpdateThreshold` steps over the arrival gaps, capped at
+    100 ms, not the departure gaps).
+  - New governed behaviours: `dtls.srtp-profile-order` (libwebrtc offers AES_CM_128_HMAC_SHA1_80
+    before GCM; the engine GCM first), `sctp.max-retransmissions` (libwebrtc never gives up on
+    retransmissions), and three new settings: `SettingEngineBuilder::with_ice_options_in_media_sections`
+    (`a=ice-options` in each section, as Chromium), `with_default_ice_pacing_stated` (no
+    `a=ice-pacing` for the default Ta, as Chromium), `with_dtls_flight_interval(DtlsFlightInterval)`
+    (`Rfc9147`, the default, or libwebrtc's two round trips within 50 ms and 3 s). Also
+    `without_sctp_max_retransmissions`. The `Chrome` profile's offers now place `a=ice-options` and
+    leave out `a=ice-pacing` as Chromium's do; `tests/behaviour_profiles.rs` no longer accepts
+    session-level `a=ice-options` or an extra `a=ice-pacing` under `Chrome`.
+  - Breaking: `ThresholdTimeBase` (rtc-interceptor) has a third variant, `ArrivalCapped`; its
+    `Departure` doc no longer calls it libwebrtc's.
+  - Corrected notes: libwebrtc does not retransmit ICE connectivity checks at all (each is sent once,
+    the 250 ms RTO is for server requests); DTLS 1.3 is not engine-only (libwebrtc's factory default is
+    DTLS 1.3); flexfec-03 and RFC 8888 are behind field trials in Chromium; the doc of
+    `with_unique_transport_credentials` now gives libwebrtc's rule for offers and answers (credentials
+    per transport, shared within a BUNDLE group; its offers bundle every section whatever the
+    policy).
+
+- **peer connection**: behaviour profiles (`conf/profile-1-behaviour-profiles`).
+  - `BehaviourProfile { Rfc, Chrome, StrictRfc }` (`rtc::peer_connection::configuration`), applied by
+    `SettingEngineBuilder::with_behaviour_profile`, `MediaEngine::for_profile` and
+    `DefaultInterceptorOptions::for_profile`; `register_default_interceptors` (and `_with_handles`,
+    `_without_congestion_control`, `configure_congestion_control`) take the options of the media
+    engine's profile, and the RTCP session a peer connection installs follows the setting engine's.
+    `Rfc` is the defaults unchanged. `docs/behaviour-profiles.md` (rendered by
+    `scripts/behaviour-profiles.py`, a Python gate with `--check`) lists 35 governed behaviours with
+    their clause, each profile's value and the source of each Chrome value (9 observed in the recorded
+    Chromium descriptions or the browser matrix, 26 unverified), the settings left alone with their
+    class, and 10 Chrome behaviours the engine cannot express.
+  - Cargo feature `chrome-defaults`: `BehaviourProfile::default()`, and with it every
+    `SettingEngine::default()`, `SettingEngineBuilder::new()`, `MediaEngine::default()` and
+    `DefaultInterceptorOptions::default()`, is `Chrome`. Cargo unifies features: one crate of a build
+    that turns it on changes the defaults of every user of `rtc` in that build.
+    `BehaviourProfile::compiled_default()` reports it. CI: one job checks the workspace and runs the
+    profile's tests with it.
+  - New settings: `SettingEngineBuilder::with_ice_software` (the SOFTWARE attribute of ICE checks,
+    RFC 8489 16.1.2), `without_sctp_rto`; `DefaultInterceptorOptions` fields `rtcp_t_rr_interval`,
+    `rtcp_immediate_congestion_feedback`, `rtcp_report_from_every_ssrc`, `twcc_rereport_received`,
+    `gcc_threshold_time_base`, `gcc_one_decrease_per_round_trip`, `abs_send_time_on_audio`,
+    `receiver_reference_time_on_audio` (the struct is `#[non_exhaustive]`; the last two put Chromium's
+    audio abs-send-time and `a=rtcp-xr:rcvr-rtt=all` in the `Chrome` profile's offers).
+    `SettingEngine::behaviour_profile`, `MediaEngine::behaviour_profile`.
+  - Breaking: `SettingEngine`, `MediaEngine` and `DefaultInterceptorOptions` implement `Default` by
+    hand (the build's default profile) instead of deriving it; `SctpMaxMessageSize` derives `Debug`,
+    `PartialEq` and `Eq`.
+  - Seven Chromium descriptions of the train 9 test environment are fixtures
+    (`tests/fixtures/browser-sdp/chromium--*.sdp`). One of them corrects the doc of
+    `with_unique_transport_credentials`: a Chromium answer without BUNDLE gives each transport
+    credentials of its own, so the `Chrome` profile does too.
+  - The browser matrix has five cells with the Rust peer under `Chrome`
+    (`scripts/test-env/interop/profile.spec.mjs`; `examples/interop-peer` takes `?profile=`).
+
+- **dtls, ice**: a new DTLS association runs on a new 3-tuple (RFC 8842 section 5.1: "a new
+  3-tuple ... MUST be allocated by at least one of the endpoints"; section 6: "a completely new
+  set of ICE candidates that were not recently used for any other DTLS association"). The ICE
+  restart that comes with a new association (`renew_dtls_association` and the automatic
+  re-keying that calls it, a data-only association replaced for SRTP, and the answer to an
+  offer that asks for one) now drops the local candidates, and so does the new transport that
+  replaces one an answer closed (every m= section rejected): it keeps none of the closed
+  one's candidates, even without `with_discard_local_candidates_during_ice_restart`, and
+  `add_local_candidate` refuses a UDP candidate on one of their transport addresses with the new
+  `Error::ErrICECandidateAddressOfPreviousDtlsAssociation` until the next ICE restart that is not
+  for a new association. The answer to such an offer lists only the candidates given for the
+  restart, and engine-run TURN links delete their allocation and allocate again. An application
+  gathers on new ports for the new generation. New
+  `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)` keeps the
+  candidates and the addresses, for an application with one fixed socket. Rows RFC8842-5.1-1,
+  -2, -3 `tested` (`tests/dtls_association_new_three_tuple.rs`). The tests that set up a new
+  association gather on new ports (`World::regather`, `Pair::regather`), with several
+  transports too (`renewing_the_dtls_association_renews_every_transport`).
+
 - **pacer**: media the congestion controller's target has no room for is dropped by default
   (`conf/pacer-2-combined`, `QueueOverflow::Drop`). `conf/pacer-1-queue-time` raised the pacing
   rate above the target to keep the queue under 2 s and released the oldest packet of a full
@@ -208,6 +330,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numbers, which stays the default). Not covered: `configure_ulpfec` takes one RED and one
   ULPFEC payload type for both directions, and an `a=rid` `pt=` list is compared by number with
   this endpoint's formats. Row RFC3264-5.1-8 `tested`; RFC3264-6.1-23 now has a test that sends.
+- **sctp** (sctp-15): `TransportConfig::with_strict_zero_window_drop` and
+  `strict_zero_window_drop` are removed. The RFC 9260 6.2 drop they selected is the default
+  for every association; `with_zero_window_overcommit(true)` is the escape for applications
+  that read whole messages only. `Stream::read_part` (partial delivery) is how a buffer full
+  of incomplete messages empties under it.
 
 - **cryptex**: `a=cryptex` under BUNDLE is read from the BUNDLE-tagged section
   (`conf/cryptex-1-bundle-reading`). RFC 9335 section 4's "MUST be present for all RTP-based
@@ -471,63 +598,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     5.3), and a repair packet that precedes its stream is dropped without being reported as
     unassociated media. An RTX packet on an undeclared SSRC no longer establishes a stream
     of codec `video/rtx` (at any time).
-- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
-  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
-  1.3 (it was `handshake_failure` / `certificate_required`). New
-  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
-  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
-  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
-- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
-  engine change; new tests, each checked by mutation in the container.
-  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
-    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
-    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
-    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
-    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
-    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
-    dependency structure (RFC 5583 section 5.2.1).
-  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
-    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
-    received gracefully, SRTP re-keying, PR-SCTP).
-  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
-    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
-    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
-    `n/a`: it binds the script-facing API.
-  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
-
-- **interceptors**: a packet only overtaken is not a loss for congestion control
-  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
-  received" as lost at once and forgot it, so the later feedback reporting it received matched
-  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
-  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
-  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
-  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
-  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
-  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
-
-- **interceptors**: the pacer bounds its queue time and never refuses a packet
-  (`conf/pacer-1-queue-time`).
-  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
-    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
-    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
-    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
-    replaced by `forced`.
-  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
-    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
-    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
-    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
-    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
-    25 s; now 2 s. The application sees that its source is above the target in the target
-    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
-  - Audio streams are not queued behind video: their packets leave when written and are
-    charged to the budget.
-  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
-    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
-    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
-  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
-    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
-    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
-    every time. Without it they come from `rand`, as before.
 
 ### Behaviour changes
 
@@ -560,6 +630,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and with the restart but the old send times kept it falls to 153 kbit/s (45300201020). The
   default chain counts no loss after the switch; with its history kept, a smoothed 18 %
   (45300207507).
+
+- **peer connection, interceptors**: behaviour profiles after the train-12 and train-13
+  (sctp-15, mt-9) merges (`conf/profile-3-on-master`). Each setting master added is classified, its libwebrtc value
+  read at `a222406d` (file and lines in `docs/behaviour-profiles.md`):
+  - `pacer.queue-overflow` (`DefaultInterceptorOptions::pacer_queue_overflow`): `Drop` in `Rfc`,
+    `StrictRfc` and `Performance`, `Drain` in `Chrome` (libwebrtc's
+    `PacingController::MaybeUpdateMediaRateDueToLongQueue` raises the rate to empty the queue
+    within 2 s and drops nothing).
+  - `nack.max-requests-per-packet`: new field `DefaultInterceptorOptions::nack_max_nacks_per_packet`
+    (0, unlimited, by default), passed to `NackGeneratorBuilder::with_max_nacks_per_packet`;
+    `Chrome` 100 (`kMaxNackRetries` in `modules/video_coding/nack_requester.cc`, not 10 as
+    `SUGGESTED_MAX_NACKS_PER_PACKET` says). libwebrtc's limits counted in packets (a NACK age of
+    10,000 sequence numbers, a list of at most 1000) are listed as not expressible: the
+    generator's age limit is a time.
+  - New field `DefaultInterceptorOptions::nack_retransmission_rate_limit`, passed to
+    `NackResponderBuilder::with_rate_limit`; `UpToTarget` in every profile until
+    `conf/gcc-2-rfc-retransmission` changes the RFC default.
+  - `ice.software-attribute` follows master's `with_ice_software` (an `Option<Option<String>>`
+    field): `Rfc` / `StrictRfc` / `Performance` send `rtc-ice` / `rtc-turn` and their versions,
+    `Chrome` sends no SOFTWARE in the ICE checks and responses and in the TURN requests either
+    (none in libwebrtc's `Connection::BuildPingRequest`, `SendStunBindingResponse` or its TURN
+    requests).
+  - Left alone, with the reason: `with_audio_redundancy` (`WhenPreferred`, libwebrtc's rule
+    too), `with_own_payload_types_in_answers` (off: libwebrtc answers with the offer's numbers),
+    `rtcp_random` (an injected source), `with_sctp_inbound_reassembly_limit` (train 13's sctp-15:
+    libwebrtc's dcSCTP has no partial delivery to bound; it reassembles inside its 5 MiB receive
+    window and aborts the association when that fills with no message complete),
+    `with_dtls_new_association_on_previous_addresses` (train 13's mt-9: off in every profile;
+    libwebrtc gathers each ICE generation on new sockets too).
+  - `DefaultInterceptorOptions` has a hand-written `Debug` (master's, for `rtcp_random`) listing
+    every field; `rtcp_random` reaches the RTCP session through `register_default_interceptors_with_options`
+    as on master.
+  - README: the "Behaviour profiles" section says how to choose a profile at run time
+    (`from_name`, `for_profile`) and by cargo feature, and which wins when both features are on.
 
 - **interceptors, peer connection**: audio RED is sent only when the remote side prefers it
   (`conf/red-1-send-policy`). jsep17 sent every Opus packet as RED, with a copy of the one
@@ -667,8 +771,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the association is up, and a change of ICE selected pair switches to a fresh one.
 - **peer_connection**: `renew_dtls_association()` (and the automatic re-keying) renews the
   association of every transport of the connection, not only the first.
+- **sctp** (sctp-15, RFC 9260 6.9, 6.2, 11.1.7; RFC 6458 3.1.4, 6.1.7, 8.1.21; RFC 8260):
+  partial delivery. New `Stream::read_part` returns a `MessagePart` (`chunks`, `unordered`,
+  `first`, `end_of_record`): a complete message whole, as one part with the end of record;
+  the in-order leading fragments of a message that has not all arrived once they reach the
+  partial delivery point (new `TransportConfig::with_partial_delivery_point`, default half
+  the receive buffer, at most the buffer), or whatever their size when the receive buffer is
+  out of space with nothing readable whole (RFC 9260 6.9: "it SHOULD dispatch part of its
+  inbound message through a partial delivery API"). One message per stream at a time, an
+  ordered one only when it is due, nothing else of the stream read until its last part;
+  several streams at once with I-DATA (RFC 8260 4.3.1). What is read leaves the receive
+  window at once. New `Stream::in_partial_delivery`. A FORWARD TSN or I-FORWARD-TSN that
+  skips the rest of a message in partial delivery raises the new
+  `StreamEvent::PartialDeliveryAborted { id, unordered, sequence }` (`StreamEvent` is
+  `#[non_exhaustive]`). `read_sctp` is unchanged: whole messages only.
+  - The RFC 9260 6.2 drop (once a_rwnd 0 is advertised, new DATA above the largest TSN is
+    dropped) is the default for every association again: an I-DATA association no longer
+    takes the chunk that unblocks reassembly through a closed window. With partial delivery
+    the drop deadlocks nothing (sctp-14's measurements, now read in parts: six interleaved
+    16 KiB messages into a 16 KiB buffer, 24 of 24 in 2.1 s, 0 of 24 for a reader of whole
+    messages; one 64 KiB message through a 16 KiB buffer, 230 ms; the zero window sweep, 672
+    runs, 0 stalls). `with_zero_window_overcommit` stays, for applications that read whole
+    messages only.
+  - A window the sender sees as too small for a full chunk (the last a_rwnd less what it
+    sent since) is announced by a SACK as soon as a read opens it (RFC 9260 6.2, "When the
+    window opens up, an SCTP receiver SHOULD send additional SACK chunks"); it was only for
+    a window advertised as 0. On the wire: extra window-update SACKs toward a sender that a
+    small receive buffer blocks; none while the sender still sees room for a chunk.
+- **peer_connection** (sctp-15, RFC 9260 6.9, RFC 8841 6.1, RFC 8831 6.6): data channels read
+  SCTP in parts and put messages together above the association, so the SCTP window reopens
+  while a message is still incomplete; the application still gets whole messages (W3C). The
+  zero window overcommit is no longer set when the advertised `max-message-size` is larger
+  than the receive buffer. A message larger than the advertised maximum is dropped as
+  before. A conforming peer has at most one message in progress per stream (RFC 8260
+  2.2.2), each at most that maximum, and the handler holds at most one per stream; over
+  that product the bytes of incomplete messages held for an association have a ceiling,
+  new `SettingEngineBuilder::with_sctp_inbound_reassembly_limit` (64 MiB by default, never
+  below the advertised `max-message-size`; worst case per association: the receive buffer
+  plus the ceiling, 65 MiB with the defaults). A part that would go over fails only its
+  data channel (`OnError`, `data-channel-failure`, the message naming the limit) and resets
+  its stream once the rest of the message has been read and dropped. 16 and 64 concurrent
+  64 KiB messages over I-DATA all arrive under the default. The receive window a peer sees is the same as before
+  for messages that fit half the buffer; a message larger, or interleaved messages that fill
+  it, keep it open instead of closing it.
 
 ### Features
+
+- **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
+  (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
+  set of local candidates, on transport addresses the previous DTLS association did not use
+  (RFC 8842 section 5.1). It names the transport (ICE and DTLS transport ids, the mids of its
+  sections, the first one's `sdpMLineIndex`), the reason (`NewDtlsAssociation`,
+  `SrtpRekeying` on the side whose key neared its lifetime, `TransportReplaced` for the
+  transport set up after an answer rejected every m= section, `DiscardedBySetting` for an ICE
+  restart with `with_discard_local_candidates_during_ice_restart(true)`) and the refused
+  addresses. It fires when the description that begins the transport's gathering is set
+  locally, right before its `gatheringstatechange` to "gathering"; not with
+  `with_dtls_new_association_on_previous_addresses(true)`. Crate documentation: section
+  "Gathering". Every route of `add_local_candidate` (the default transport, another one by
+  `sdp_mid`) returns `ErrICECandidateAddressOfPreviousDtlsAssociation` unchanged for a refused
+  address (tests below).
+- **rtc-stream-driver**: new `peer` module (feature `peer`, on by default; depends on `rtc`):
+  `PeerDriver` drives a whole peer connection over sockets it owns, its UDP host sockets
+  included (`PeerDriverConfig`: addresses, UDP port range, the TCP driver's settings). It
+  gathers when a transport begins gathering, and on `OnLocalCandidatesNeeded` binds new UDP
+  ports in its range, adds their candidates for the event's section and ends the generation
+  by itself; the previous sockets stay open until a pair on a new one is selected for that
+  transport and then for `retired_socket_linger` (5 s by default: the peer may still send to
+  the previous address until its own selection switches; closing at once lost a packet on
+  macOS), or until the transport closes. With the opt-out it keeps its sockets and gives their
+  candidates to each new generation. Tests (`examples/stream-driver/tests/peer.rs`, no
+  gathering in test code): `stop_all_then_add_carries_media_on_new_sockets`,
+  `automatic_srtp_re_keying_carries_every_packet_onto_new_sockets`,
+  `with_the_opt_out_the_driver_keeps_its_sockets`.
+- **interop-peer**: gathers on a new UDP socket on `OnLocalCandidatesNeeded` and trickles the
+  candidate to the browser; `?previous_addresses=1` builds it with
+  `with_dtls_new_association_on_previous_addresses(true)`. Browser cells "transceiver stop,
+  then a new transceiver reuses or keeps the m-line" (the default: Rust's answer lists none of
+  the previous candidates) and its twin with the opt-out (the answer lists them again).
+
+- **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
+  (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
+  RFC6544-9.2-1 `tested`.
+
+- **dtls**: an RSASSA-PKCS1-v1_5 signature (ServerKeyExchange, CertificateVerify) whose
+  DigestInfo has no hash parameters is accepted, as RFC 5246 section 4.7 requires ("MUST accept
+  both without parameters and with NULL parameters"); only the NULL form was before. The
+  providers (ring, AWS-LC) verify the NULL form and give no raw RSA public operation, so when
+  one refuses such a signature, `rtc-crypto` checks the other form itself: `s^e mod n` with
+  `num-bigint` (public values only; already in the graph through `der-parser`) and a whole
+  comparison with the EMSA-PKCS1-v1_5 encoding, built, never parsed. New public functions
+  `rtc_crypto::verify_rsa_pkcs1_without_digest_parameters` and `rtc_crypto::rsa_pkcs1_hash`.
+  Row RFC5246-4.7-1 `tested`
+  (`crypto_test.rs::rsa_pkcs1_signatures_with_and_without_null_digest_parameters_are_accepted`).
+
+- **dtls**: RFC 8122 section 6.2 (`conf/audit-4-small-c`). A peer connection's DTLS server
+  ends a handshake whose client sends no certificate with `bad_certificate`, under DTLS 1.2 and
+  1.3 (it was `handshake_failure` / `certificate_required`). New
+  `ConfigBuilder::with_bad_certificate_for_a_missing_client_certificate` (default `false`: the
+  RFC 5246 7.4.6 / RFC 8446 4.4.2.4 alerts stay `rtc-dtls`'s default) and
+  `HandshakeConfig::bad_certificate_for_a_missing_client_certificate`. Closes RFC8122-6.2-5.
+- **audit**: open MUST rows of classes B, E and F closed (`conf/audit-3-close-f-b`). No
+  engine change; new tests, each checked by mutation in the container.
+  - Tests: no RFC 3550 encryption prefix under SRTCP (RFC 5124 section 2); a changed
+    RtpStreamId fails SRTP authentication (RFC 8852 section 5); Cryptex encrypts and
+    authenticates the CSRCs and extension elements like the payload (RFC 7941 section 6);
+    later offers and answers keep `a=cryptex`, and the `appbits` identifier 256 is never
+    negotiated (RFC 9335 sections 4 and 5); TCP and UDP pairs share one checklist, paced one
+    per Ta (RFC 6544 sections 4.1 and 7); every format of a layered section keeps one
+    dependency structure (RFC 5583 section 5.2.1).
+  - Stale notes corrected where a test already held the behaviour (MID and RID stamping,
+    the mandatory video codecs, the SAVPF profile, `a=sframe` signalling, telephone events
+    received gracefully, SRTP re-keying, PR-SCTP).
+  - RFC5124-3.3.1-6 was the audit's one `violated` MUST row: it is `n/a`, RFC 9429 section
+    5.1.2 requiring a JSEP endpoint to accept the RTP profiles RFC 5124 would reject (DTLS-SRTP
+    is judged by `a=fingerprint`, other profiles are rejected, both tested). RFC8826-4.3-3 is
+    `n/a`: it binds the script-facing API.
+  - `OPEN-MUST.md` lists the rows closed since they were classified, with their class.
+
+- **interceptors**: a packet only overtaken is not a loss for congestion control
+  (`conf/pacer-1-queue-time`). The feedback history counted a packet a feedback reported "not
+  received" as lost at once and forgot it, so the later feedback reporting it received matched
+  nothing: 500 kbit/s video over a lossless link with 40 ms of reordering had 8.2 % of its
+  packets counted lost, and the loss-based half held the target at 100 to 190 kbit/s. A
+  reported loss is now held for one more feedback, as libwebrtc's `TransportFeedbackAdapter`
+  keeps it ("they might be reported as received by a later feedback"); `History::recovered`
+  counts the packets that were. Lost packets reach the estimator one feedback later. Measured
+  in `docs/gcc-reordering.md`, with a proposal for the delay-based grouping.
+
+- **interceptors**: the pacer bounds its queue time and never refuses a packet
+  (`conf/pacer-1-queue-time`).
+  - A packet arriving at a full queue (4096) was refused. The packets there are numbered, so
+    each refusal was a hole in the stream that no path lost: a 2 Mbit/s source above a
+    sub-1 Mbit/s target ended with 4419 packets "lost" on a lossless link. A full queue now
+    releases its oldest packet over the budget instead; `PacerInterceptor::dropped` is
+    replaced by `forced`.
+  - The queue time is bounded, as in libwebrtc (`PacingController`, `queue_time_limit` 2 s,
+    `drain_large_queues`): with `q` bits queued and the oldest packet having waited `w`, the
+    pacing rate is max(target, q / (limit - w)), and a packet that has waited the limit leaves.
+    `PacerBuilder::with_queue_time_limit` (`DEFAULT_QUEUE_TIME_LIMIT`, `None` for none);
+    `PacerInterceptor::queue_time`. The same source above the target was queued for up to
+    25 s; now 2 s. The application sees that its source is above the target in the target
+    itself (`TargetBitrateChanged`, `RTCRtpSender::target_bitrates`).
+  - Audio streams are not queued behind video: their packets leave when written and are
+    charged to the budget.
+  - RFC 8083 section 4.3: the congestion breaker's "at least one RTP packet every max(Tdr,
+    Tr)" is the sender's rate, not each report's. Reports every 10 ms against a frame every
+    20 ms cleared the samples at every other report, so the breaker never judged a video flow.
+  - `DefaultInterceptorOptions::rtcp_random`: the RTCP sessions of the default set draw their
+    random numbers (report interval variation, early-feedback dither, SSRC, CNAME) from a
+    crypto provider's `random()`; with the setting engine's seeded provider a run is the same
+    every time. Without it they come from `rand`, as before.
 
 - **peer connection**: `SettingEngineBuilder::with_ice_software(Option<String>)` sets the
   SOFTWARE attribute (RFC 8489 section 14.14) of every STUN message the peer connection sends:
@@ -679,11 +932,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the SOFTWARE attribute a configurable option"); `Some(text)` sends `text`. Without the call
   nothing changes: `rtc-ice <version>` from ICE, `rtc-turn <version>` from TURN. A text of 128
   characters or more fails building the peer connection with `ErrAttributeSizeOverflow`. The
+  server-reflexive Binding requests of the engine's gatherer carry the ICE agent's SOFTWARE
+  too (RFC 8489 sections 6.1 and 14.14: requests SHOULD; they carried none before), under the
+  same setting. New public field
+
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
+- **interceptors, peer connection**: a wall-clock anchor per peer connection
+  (`conf/det-1-wall-clock`). Every interceptor that writes NTP times takes
+  `with_wall_clock(SystemInstant)`: `RtcpSessionBuilder` (sender reports, XR receiver reference
+  times), `SenderReportBuilder`, `ReceiverReportBuilder`, `Rfc8888Builder` (report timestamps)
+  and `NtpTimestampBuilder` (the RFC 6051 header extension); `DefaultInterceptorOptions::wall_clock`
+  gives one anchor to all of them in the default set. Without it nothing changes: the
+  process-wide `SystemInstant::shared`, taken at its first use, which is right for a process with
+  one clock. Under virtual time it is not: a second run in the same process mapped its instants
+  to NTP times later by the real time since the first run, with different fractions of a
+  second, so two runs of one seed could differ (`circuit_breaker_reordering_rtc2rtc::the_same_seed_gives_the_same_run`
+  failed 3 of 6 times on a branch whose NACK retransmission rule is sensitive to the round trip
+  the reports give; with a per-run anchor 6 of 6 passed). The seeded harnesses
+  (`circuit_breaker_reordering_rtc2rtc`, `gcc_rate_limited_link_rtc2rtc`) anchor each run at
+  its start. `the_same_seed_gives_the_same_bytes_after_a_pause` runs one seed twice, 1.5 s of
+  real time apart, and compares every RTP and RTCP packet both peers' chains hand to SRTP,
+  byte for byte (the SRTP datagrams themselves are keyed by DTLS ephemeral keys no seed reaches;
+  the CNAME, the media and RTX SSRCs and the RTX sequence numbers, which the engine draws from
+  `rand`, are fixed or masked); with the process-wide anchor 473 of the sender's 482 packets
+  differ.
 
 ### Bug Fixes
 
+- **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
+  dropped the local candidates (a new DTLS association on new ports), the side that selected
+  the new pair first dropped the packets the peer still sent on the previous pair before its
+  own selection switched (the controlled side selects at the nomination request, the
+  controlling one at its response): one packet lost at each renewal, seen through
+  `rtc-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
+  after the new pair is selected (`Agent::retired_media_path`, `RETIRED_MEDIA_PATH_GRACE`),
+  and routed to its transport (`on_address`)
+  (`data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received`).
+
+- **rtc** (engine-run server-reflexive gathering, RFC 8842 section 5.1): after a new DTLS
+  association, the probe from a refused UDP base went on; a late answer to it would have been
+  announced as a server-reflexive candidate of the new generation whose base is the previous
+  association's socket. The probes of the refused bases now end with the restart (and with the
+  replacement of a closed transport); the new host candidates the application adds start
+  their own (`after_a_new_association_the_engine_gathers_server_reflexive_candidates_from_the_new_port`).
+
+- **rtc** (multi-transport ICE restart, `conf/mt-9-restart-drops-candidates`): with several
+  transports (sections outside a BUNDLE group, several BUNDLE groups), a transport other than
+  the default one wrote every local candidate its agent held into an offer or answer that
+  restarts ICE on it, where the default transport lists none in the offer and, in the answer,
+  only those of the new generation. After a restart that drops the local candidates
+  (`with_discard_local_candidates_during_ice_restart`, or a new DTLS association: RFC 8842
+  section 6, "a completely new set of ICE candidates that were not recently used for any other
+  DTLS association") the peer's agent of that transport took the dead candidate into the new
+  generation, checked it first and kept the pair of the new candidates, of the same
+  foundation, frozen behind it: the transport selected no pair within 10 s. Each transport now
+  lists the candidates the restart rule gives it (`restart_offered_local_candidates`, used by
+  `offered_local_candidates` and `write_transport_attributes`). Tests:
+  `tests/multi_transport_rtc2rtc.rs::a_restart_that_drops_the_local_candidates_reconnects_every_transport`
+  (two and three transports, shared and unique credentials),
+  `a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbundled_sections`,
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`, and
+  `renewing_the_dtls_association_renews_every_transport`, which now gathers on new ports.
+
+- **rtc** (multi-transport routing during an ICE restart): a datagram is routed to the
+  transport that gathered on its local address; one on an address no transport holds a
+  candidate on went to the default transport. After a restart that dropped the local
+  candidates the previous selected pair still carries the data until the new generation
+  selects a pair (RFC 8445 section 9; RFC 8839 section 4.4.3.1.1: "The agent will continue to
+  send media using this pair"), so the data of another transport's previous path went to the
+  default transport and was lost: two RTP packets per renewal in
+  `automatic_srtp_re_keying_renews_every_transport_on_new_addresses`. The local address of a
+  transport's media path now counts as one it is on (`transport_set.rs`, `on_address`).
+
+- **rtc** (engine-run TURN, RFC 8842 section 5.1): after a new DTLS association deleted the
+  engine's allocation, the TURN link allocated again from the transport's first UDP base, the
+  host candidate of the association it replaced, whose address the new association refuses.
+  It now starts only from a base the new association may use, the one the application gathers
+  for it. Test: `tests/turn_udp.rs::a_new_dtls_association_deletes_the_engine_allocation_and_allocates_again`.
+
+- **stream-driver**: a port range skips the ports the host refuses (`conf/flake-2-socket-range`).
+  `bind_udp_in_range` and `bind_tcp_listener_in_range` (and the driver's `tcp_port_range`)
+  gave up on the first bind error other than `AddrInUse`. On Windows, a port inside an
+  excluded port range (Hyper-V, WinNAT and other reservations, `netsh interface ipv4 show
+  excludedportrange`) fails with WSAEACCES (`PermissionDenied`), so a configured range that
+  reaches into one failed whenever the rotating start landed on such a port, though other
+  ports of the range were free. Such a port is now skipped like one in use; when every port is
+  refused the error says so (`PermissionDenied`), and `AddrInUse` still means the range is
+  full. Found by `sockets_bind_inside_their_port_range_until_it_is_full`, which failed on
+  GitHub's windows-latest: the test took the ports above an ephemeral port, and Windows
+  hands out ephemeral ports in sequence up to the start of an excluded range (54704 to 54903
+  for UDP on the traced runner). The tests now choose a block of ports they have verified
+  bindable, and `on_windows_a_range_reaching_into_an_excluded_range_uses_its_other_ports`
+  checks the skip against a real excluded range.
 - **rtc**: a stream whose SSRC the remote description declares for an m= section with
   `a=rid` / `a=simulcast` is received when its packets carry no RID
   (`conf/demux-1-declared-ssrc-in-rid-section`). Pion v4.2.29 offers simulcast by RID and also
@@ -758,6 +1099,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `poll_write`: before the fix 30 RTP packets of the sender waited (probe padding), and the
   ICE, DTLS and SCTP handlers left nothing waiting.
 
+### Test environment and documentation
+
+- **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
+  `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
+  `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base
+  image's 4.6.1 package, whose TLS listener picks its SSL context by the ClientHello's
+  `legacy_version`: a client offering TLS 1.3 alone got `handshake_failure`, one offering 1.3
+  and 1.2 got 1.2 (fixed in coturn 4.6.2, coturn/coturn#989). The TLS 1.2 clamps of the
+  environment's own TURN-over-TLS client (`tests/testenv/mod.rs`) and of the aiortc peer are
+  gone: they negotiate TLS 1.3. Both versions are covered on purpose:
+  `testenv_turn_streams::the_engine_relays_through_turn_over_tls_1_3` (the engine offering TLS
+  1.3 alone) and `the_engine_relays_through_turn_over_tls_1_2_to_a_server_without_tls_1_3`
+  (the default offer to a fourth coturn, port 5350, whose libssl stops at TLS 1.2), each
+  checking first what its server settles on. TURN over DTLS stays DTLS 1.2 (coturn's OpenSSL
+  DTLS). The engine keeps TLS 1.2 for TURN over TLS (`rustls` feature `tls12`, on by default
+  in `TurnTlsConfig`): deployed servers need it, coturn 4.6.1 being what Ubuntu 24.04 and
+  Debian 13 ship; the comments now say so.
+- **test-env**: the aiortc peer runs aiortc built from upstream main at commit 0ee2bd29
+  (source archive by SHA-256 `9f2a6308e53813eb62fb604e38619178df72f5cfd4ccdc3dbca5b7f0b2c86ca7`,
+  built offline with setuptools 84.2.1 pinned by hash) instead of `sdp.py` and `rtp.py` from the
+  fork `Brainwires/aiortc` over the 1.16.0 wheel: upstream fixed both bugs, 6a76d5e0 (`a=extmap`
+  extension attributes, aiortc/aiortc#1492) and 0ee2bd29 (RTCP SDES chunk alignment,
+  aiortc/aiortc#1496), in no release yet. The whole package comes from the commit (the extmap
+  fix also changes `rtcpeerconnection.py`); to be dropped for the first release with both. The
+  overlay files and `LICENSE.aiortc` are removed.
+- **docs**: the trailing space webrtc-rs 0.17.x writes in `a=rtcp-fb` without parameters breaks
+  RFC 4585 section 4.2's `rtcp-fb-param` (cited now); Pion fixed it in v4.1.5 (pion/webrtc#3207,
+  PR #3218) and webrtc-rs on its default branch (`rtc` 718d405), so the notes name 0.17.x
+  alone. RFC9429-5.8-1 keeps its verdict (`setting`); its note cites the grammar. The mDNS
+  one-name-per-address rule is cited as draft-ietf-mmusic-mdns-ice-candidates-03 section 3.1.1
+  (expired). `docs/conformance/w6.md` and `docs/interop.md` link the upstream reports:
+  algesten/str0m#1184 (TCP pairing by tcptype), webrtc-rs/rtc#339 (`a=msid` without appdata),
+  aiortc #1492 and #1496 (closed as fixed), coturn #989.
+
 ### Publishing readiness (crates.io)
 
 - **Manifests**: every publishable crate has a one-line description of what it implements,
@@ -814,6 +1189,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes for integrators
 
+- **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
+  section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
+  automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
+  rejected every m= section) drops the transport's local candidates and refuses their UDP
+  addresses. An application that does not gather again loses connectivity on that transport;
+  the browser cell "transceiver stop, then a new transceiver" failed that way with the
+  workspace's own interop peer. Handle `OnLocalCandidatesNeeded`: bind new UDP ports, add a
+  host candidate for each with `sdp_mid` = the event's first mid, signal the candidates, end
+  the generation with an empty candidate for that mid, and keep the previous sockets open
+  until a pair on a new one is selected (`SelectedCandidatePairChange` on that transport) or
+  the transport closes. Engine-run STUN and TURN gathering follow the new host candidates by
+  themselves; the ICE-TCP listener is kept. `rtc_stream_driver::peer::PeerDriver` does all of
+  it. An application with one fixed socket sets
+  `with_dtls_new_association_on_previous_addresses(true)` instead (no event; the candidates
+  and addresses are kept). W3C gathering states: a restarting transport goes to "gathering"
+  when the description is set and to "complete" at the application's end-of-candidates; the
+  transport that replaced a closed one starts "new" (a new `RTCIceTransport`) and does the
+  same. A rolled-back local offer takes its restart back (the previous candidates and
+  addresses are in use again): sockets bound for it may be closed.
+- **Publishing order**: `rtc-stream-driver` now depends on `rtc` (feature `peer`), and the root
+  crate's dev-dependency on it has no version, so `rtc` is published before
+  `rtc-stream-driver` (docs/releasing.md).
+
 - **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the
   restart offer is applied (`set_remote_description`); they need not be added again after
   `set_local_description(answer)`, whether or not
@@ -821,6 +1219,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidates are discarded by that setting. `RTCIceCandidateInit::username_fragment` is not
   read by `add_local_candidate`: a candidate added while a restart is staged is the staged
   generation's, otherwise the current one's.
+
+### Testing
+
+- **rtc** (`conf/mt-10-gather-anew`): rtc-to-rtc tests driven by `OnLocalCandidatesNeeded`:
+  `transport_close_rtc2rtc.rs::the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering`
+  (stop all, then a new transceiver; the twin of the browser cell) and
+  `with_the_opt_out_the_new_transport_carries_media_on_the_previous_addresses`;
+  `dtls_association_new_three_tuple.rs::a_new_association_tells_the_application_to_gather_on_new_addresses`,
+  `a_restart_that_discards_the_candidates_asks_for_candidates_on_any_address`, and the opt-out
+  test now asserts no event; `multi_transport_rtc2rtc.rs::automatic_srtp_re_keying_renews_every_transport_on_new_addresses`
+  gathers from the events alone (reasons `SrtpRekeying` / `NewDtlsAssociation`, every
+  transport, the refused address offered through the section's mid).
+- **ci**: `scripts/check-nested-locks.py` in the inventory job: `cargo metadata --locked` on
+  each nested workspace with a committed `Cargo.lock` (`scripts/test-env/peers/layers`,
+  `scripts/test-env/peers/str0m`), so a stale lock fails early.
+
+- **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
+  no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's
+  windows-latest ("TCP pairs were checked too"): the `stream_net` peers were built at
+  `Instant::now()` while the network's virtual clock starts at `Net::new()`, so each ICE
+  agent's Ta grid began as much later on the virtual clock as building it took. With the
+  second peer built 11 to 40 ms after the first (a preempted thread on a loaded runner), its
+  second Ta slot, where the controlled peer checks the TCP pair, came after the nomination of
+  the UDP pair, which removes the other pairs (RFC 8445 section 8.1.2), and no TCP connection
+  was opened to prove closed. The engine is right (section 8.1.1 leaves the stopping criterion
+  to the agent); the peers are now built at the virtual start, and
+  `the_course_of_a_run_does_not_depend_on_the_real_time_building_the_peers_took` builds them
+  20 ms apart to hold it.
+- **interceptor**: the netem test `vp8_file_through_nack_and_jitter_buffer` asserts what NACK
+  and the jitter buffer guarantee instead of a share of frames (`conf/flake-1-icetcp-vp8`).
+  It asked for 98 % of the frames behind a 250 ms jitter buffer and failed now and then (292
+  and 240 of 300). Its virtual-time twin, `tests/vp8_nack_jitter_buffer_rtc2rtc.rs` (the same
+  netem link, driver loop and fixture shape, seeded), traced why: at 250 ms only about 45 % of
+  the lost packets come back in time. About half the late retransmissions had their NACK held
+  by RFC 4585 section 3.5.2 step 6 (after an Early RTCP packet, feedback waits for the next
+  Regular one, up to about 750 ms at this stream's RTCP bandwidth). The other half were asked
+  for promptly, but detection, the reordering allowance on the generator's 100 ms tick and a
+  round trip took longer than 250 ms. 43 of seeds 1 to 400 played under 98 %. With a 2 s
+  buffer every loss the receiver can detect was repaired (1162 of 1162 over 200 seeds); the
+  rest were the stream's first or last packet, which no receiver can detect. The netem test
+  now uses 2 s and asserts that every frame is played whole and in order, from the first key
+  frame read, apart from an undetectable last one. The twin asserts the same at 2 s, and at
+  250 ms that what is played is whole and in order, that every detectable loss is
+  retransmitted, and that every packet read before the buffer played past its place is
+  played.
 
 ## [0.22.0+brainwires.6] - 2026-11-23
 

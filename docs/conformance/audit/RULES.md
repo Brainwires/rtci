@@ -29,6 +29,8 @@ states something true and checkable.
 | `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it. |
 | `conflict` | Two specifications conflict for this endpoint: the clause's behaviour is implemented and has a test that fails without it, selected by the named setting; the other specification's form, which governs this endpoint (a W3C specification of the JavaScript API the engine is under, or RFC 9429 for a JSEP endpoint), is the default and has a test of its own. |
 | `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it, or because a named test of the repository measured it worse ("measured", below). |
+| `setting` | The clause's behaviour is implemented and has a test that fails without it; it is selected by the named setting; the default differs because the named browser cell or deployed peer cannot interoperate with it, or because a named test of the repository measured it worse ("measured", below). |
+| `conflict` | Two specifications conflict for this endpoint: the clause's behaviour is implemented and has a test that fails without it, selected by the named setting; the other specification's form, which governs this endpoint (a W3C specification of the JavaScript API the engine is under, or RFC 9429 for a JSEP endpoint), is the default and has a test of its own. |
 | `untested` | Implemented, no such test (or the test is hollow: it asserts constants or mocks the unit). |
 | `partial` | Some of it is implemented; the note says what is missing. |
 | `missing` | Not implemented. A clause listed as "Not implemented, on purpose" is still `missing`. |
@@ -74,6 +76,14 @@ reason is interoperability is `setting`; one where the clause simply does not bi
 
 `COUNTS.md` reports two figures per level, over the rows that apply (all but `n/a`): "RFC
 behaviour tested" (`tested` + `setting` + `conflict`) and "tested as the default" (`tested`).
+
+A `setting` row's setting is governed by the behaviour profiles (`docs/behaviour-profiles.md`):
+`BehaviourProfile::StrictRfc` turns every such setting to the RFC form at once (with the RFC
+SHOULDs the default departs from for the same reason), while `Rfc`, the default, keeps the
+interoperable form. A new `setting` row's setting needs a `StrictRfc` value in
+`src/peer_connection/configuration/behaviour_profile.rs`: the profile's completeness test fails a
+setting that has no entry there. `StrictRfc` does not interoperate with browsers; it exists to run
+the RFC forms together.
 
 ## Classes of the open MUST rows
 

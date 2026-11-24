@@ -74,6 +74,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use trendline::TrendlineFilter;
 
+/// Which packets' feedback counts toward the loss fraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathStart {
+    /// Every packet reported (no path change yet).
+    Always,
+    /// The path changed and nothing has been sent on the new one yet: none.
+    Awaiting,
+    /// The packets from this transport-wide sequence number on.
+    From(u16),
+}
+
+impl PathStart {
+    fn counts(self, seq: u16) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Awaiting => false,
+            Self::From(start) => seq.wrapping_sub(start) < 0x8000,
+        }
+    }
+}
+
 /// A path: local address, remote address, transport protocol.
 type PathKey = (
     std::net::SocketAddr,
@@ -205,6 +226,7 @@ impl<P> GccInterceptorBuilder<P> {
             max_bitrate_bps: self.max_bitrate_bps,
             path: None,
             path_candidate: None,
+            path_start: PathStart::Always,
             shared: self.shared,
         }
     }
@@ -248,6 +270,9 @@ pub struct GccInterceptor<P> {
     /// new one seen on the packets since, with how many: see [`PATH_CHANGE_PACKETS`].
     path: Option<PathKey>,
     path_candidate: Option<(PathKey, u8)>,
+    /// From which transport-wide sequence number feedback counts toward the loss fraction: every
+    /// packet until a path change, then the packets sent on the new path.
+    path_start: PathStart,
 
     /// Shared state — written here, read via [`GccHandle`].
     shared: Arc<Mutex<GccShared>>,
@@ -277,6 +302,9 @@ impl<P: Interceptor> GccInterceptor<P> {
             let mut buf = ext_bytes.clone();
             if let Ok(tcc_ext) = TransportCcExtension::unmarshal(&mut buf) {
                 let seq = tcc_ext.transport_sequence;
+                if self.path_start == PathStart::Awaiting {
+                    self.path_start = PathStart::From(seq);
+                }
                 let start_time = *self.start_time.get_or_insert(msg.now);
                 let send_ms = msg.now.saturating_duration_since(start_time).as_secs_f64() * 1000.0;
                 self.send_times.insert(seq, send_ms);
@@ -403,6 +431,7 @@ impl<P: Interceptor> GccInterceptor<P> {
     /// route are reported), the estimate starts over from its start rate and the packets sent
     /// before the change no longer count, as received or lost.
     fn restart(&mut self) {
+        self.path_start = PathStart::Awaiting;
         self.send_times.clear();
         self.trendline = TrendlineFilter::new();
         self.rate_controller =
@@ -423,10 +452,10 @@ impl<P: Interceptor> GccInterceptor<P> {
             return;
         }
 
-        // Only the packets this sender still knows it sent count: those sent into a path that
-        // was left behind are not this path's loss.
-        let send_times = &self.send_times;
-        let loss = loss_fraction(fb, |seq| send_times.contains_key(&seq));
+        // Every packet reported counts (retransmissions too: they are packets on the path),
+        // except those sent before a path change, which were lost on the old path.
+        let path_start = self.path_start;
+        let loss = loss_fraction(fb, |seq| path_start.counts(seq));
 
         for (send_ms, recv_ms) in pairs {
             self.trendline.update(send_ms, recv_ms);

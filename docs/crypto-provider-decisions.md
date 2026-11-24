@@ -70,9 +70,14 @@ recorded with OpenSSL in `rtc-dtls`.
 RFC 5246 section 4.7 (and RFC 8017 section 9.2, note 1) has a verifier of an RSASSA-PKCS1-v1_5
 signature accept the DigestInfo whose AlgorithmIdentifier parameters are NULL and the one
 where they are absent. Both providers accept the NULL form only, and neither exposes the raw
-public operation that would let the engine check the other form itself, so RFC5246-4.7-1 is
-`partial`. The `rsa` crate is not an option (RUSTSEC-2023-0071, Marvin). Text the owner could
-file upstream (ring, and aws-lc-rs / AWS-LC):
+public operation. Since audit-6 `rtc-crypto` checks the other form itself
+(`verify_rsa_pkcs1_without_digest_parameters`, called by the DTLS 1.2 verifier when the
+provider refuses an RSASSA-PKCS1-v1_5 signature): `s^e mod n` with `num-bigint` (public values
+only, so no constant-time arithmetic is needed; the crate was already in the graph through
+`der-parser`), then a byte-for-byte comparison with the EMSA-PKCS1-v1_5 encoding of the
+DigestInfo without parameters. RFC5246-4.7-1 is `tested`. The `rsa` crate stays out
+(RUSTSEC-2023-0071, Marvin). The upstream request below would let the provider do it instead
+(ring, and aws-lc-rs / AWS-LC):
 
 > RSA PKCS#1 v1.5 verification accepts only the DigestInfo encoding with NULL parameters.
 > RFC 8017 section 9.2 note 1 and RFC 5246 section 4.7 ask verifiers to accept the encoding

@@ -41,6 +41,10 @@ pub(crate) struct FeedbackCadence {
     /// The fixed interval, when not adaptive.
     floor: Duration,
     adaptive: bool,
+    /// The share of the media received the feedback may take ([`FEEDBACK_SHARE`] unless set).
+    share: f64,
+    /// The longest adaptive interval ([`MAX_ADAPTIVE_INTERVAL`] unless set).
+    max_interval: Duration,
     /// `b=` lines of the session, as the RTCP session is told them.
     negotiated: RtcpBandwidth,
     /// Whether reduced-size RTCP was negotiated (RFC 5506): a report can leave on its own.
@@ -56,12 +60,22 @@ impl FeedbackCadence {
         Self {
             floor,
             adaptive,
+            share: FEEDBACK_SHARE,
+            max_interval: MAX_ADAPTIVE_INTERVAL,
             negotiated: RtcpBandwidth::default(),
             reduced_size: false,
             buckets: VecDeque::new(),
             first_media: None,
             feedback_octets: INITIAL_FEEDBACK_OCTETS,
         }
+    }
+
+    /// The share of the media received the feedback may take, and the longest adaptive
+    /// interval (`TwccReceiverBuilder::with_feedback_share`, `with_max_adaptive_interval`).
+    pub(crate) fn with_limits(mut self, share: f64, max_interval: Duration) -> Self {
+        self.share = share.clamp(0.001, 1.0);
+        self.max_interval = max_interval.max(MIN_ADAPTIVE_INTERVAL);
+        self
     }
 
     /// Whether no interval was configured at all: the generator is off.
@@ -134,10 +148,10 @@ impl FeedbackCadence {
         }
         let share = match self.negotiated.rr {
             Some(rr) => rr as f64,
-            None => FEEDBACK_SHARE * self.media_bits_per_second(now),
+            None => self.share * self.media_bits_per_second(now),
         };
         if share <= 0.0 {
-            return MAX_ADAPTIVE_INTERVAL;
+            return self.max_interval;
         }
         let packet_octets = self.feedback_octets
             + LOWER_LAYER_OCTETS
@@ -147,7 +161,7 @@ impl FeedbackCadence {
                 COMPOUND_OCTETS
             };
         Duration::from_secs_f64(packet_octets * 8.0 / share)
-            .clamp(MIN_ADAPTIVE_INTERVAL, MAX_ADAPTIVE_INTERVAL)
+            .clamp(MIN_ADAPTIVE_INTERVAL, self.max_interval)
     }
 }
 
@@ -249,6 +263,28 @@ mod tests {
             MAX_ADAPTIVE_INTERVAL,
             cadence.interval(now + Duration::from_secs(1))
         );
+    }
+
+    /// A smaller share and a longer ceiling (the `Performance` profile's 2.5% and 500 ms):
+    /// at 32 kbit/s of media a 40-octet report with its lower layers (68 octets) fits 2.5%
+    /// once every 0.68 s, held to 500 ms; the default holds it to 250 ms.
+    #[test]
+    fn a_smaller_share_lengthens_the_interval_up_to_its_ceiling() {
+        let mut cadence = FeedbackCadence::new(Duration::from_millis(100), true)
+            .with_limits(0.025, Duration::from_millis(500));
+        let now = after_media(&mut cadence, 32_000.0);
+        cadence.on_write(&RtcpSessionControl::ReducedSize(true).into_packet(now));
+        assert_eq!(Duration::from_millis(500), cadence.interval(now));
+        let mut default = FeedbackCadence::new(Duration::from_millis(100), true);
+        let then = after_media(&mut default, 32_000.0);
+        assert_eq!(MAX_ADAPTIVE_INTERVAL, default.interval(then));
+        // At 300 kbit/s the share, not the ceiling, sets it: 68 * 8 / 7500 = 72 ms.
+        let mut faster = FeedbackCadence::new(Duration::from_millis(100), true)
+            .with_limits(0.025, Duration::from_millis(500));
+        let now = after_media(&mut faster, 300_000.0);
+        faster.on_write(&RtcpSessionControl::ReducedSize(true).into_packet(now));
+        let interval = faster.interval(now).as_secs_f64();
+        assert!((0.065..=0.08).contains(&interval), "{interval}");
     }
 
     /// The fixed setting ignores all of it.

@@ -745,6 +745,30 @@ impl<'a>
                 }
             }
 
+            RTCEventInternal::SCTPInboundReassemblyLimit(_association_handle, stream_id, limit) => {
+                if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)
+                    && !dc.close_emitted
+                    && !dc.failed
+                {
+                    dc.failed = true;
+                    let channel_id = dc.id;
+                    Self::push_channel_error(
+                        &mut self.ctx.event_outs,
+                        self.data_channels,
+                        now,
+                        channel_id,
+                        RTCError::new(
+                            RTCErrorDetailType::DataChannelFailure,
+                            format!(
+                                "the peer's incomplete messages would exceed the inbound \
+                                 reassembly limit of {limit} bytes \
+                                 (SettingEngineBuilder::with_sctp_inbound_reassembly_limit)"
+                            ),
+                        ),
+                    );
+                }
+            }
+
             RTCEventInternal::SCTPStreamFailed(_association_handle, stream_id) => {
                 let error = self.sctp_failure();
                 if let Some(dc) = self.data_channels.get_by_stream_mut(&stream_id)
@@ -1497,6 +1521,40 @@ mod tests {
         assert_eq!(
             channel_events(&ctx),
             vec![RTCDataChannelEvent::OnClose(handles[0])]
+        );
+    }
+
+    /// RFC 8831 6.6 for the inbound reassembly limit: the channel whose message would take the
+    /// association past it fails with `data-channel-failure`, the error naming the limit and
+    /// the setting; the close follows when its stream reset completes.
+    #[test]
+    fn the_inbound_reassembly_limit_fails_the_channel_with_an_error_naming_it() {
+        let mut ctx = DataChannelHandlerContext::new(Instant::now());
+        let mut dc = negotiated_channel(5);
+        dc.ready_state = RTCDataChannelState::Open;
+        let (mut data_channels, handles) = registry(vec![dc]);
+        feed(
+            &mut ctx,
+            &mut data_channels,
+            vec![
+                RTCEventInternal::SCTPInboundReassemblyLimit(0, 5, 65536),
+                RTCEventInternal::SCTPStreamClosed(0, 5),
+            ],
+        );
+        assert_eq!(
+            channel_events(&ctx),
+            vec![
+                RTCDataChannelEvent::OnError(handles[0]),
+                RTCDataChannelEvent::OnClose(handles[0]),
+            ]
+        );
+        let error = data_channels.error(handles[0]).expect("the error");
+        assert_eq!(error.error_detail, RTCErrorDetailType::DataChannelFailure);
+        assert!(
+            error.message.contains("65536")
+                && error.message.contains("with_sctp_inbound_reassembly_limit"),
+            "{}",
+            error.message
         );
     }
 

@@ -129,6 +129,7 @@
 //! - [RFC 3550](https://datatracker.ietf.org/doc/html/rfc3550) - RTP (SR/RR)
 //! - [draft-holmer-rmcat-transport-wide-cc](https://datatracker.ietf.org/doc/html/draft-holmer-rmcat-transport-wide-cc-extensions-01) - TWCC
 
+use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::configuration::remote_bitrate_limit::{
     REMOTE_BITRATE_LIMIT_SLOT, RemoteBitrateLimitInterceptor,
@@ -368,6 +369,40 @@ pub struct DefaultInterceptorOptions {
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
     /// 5.2.1 recommends the extensions. RTCP-SR-REQ is answered with an Early SR either way.
     pub rapid_synchronisation: bool,
+    /// `T_rr_interval` of the RTCP session (RFC 4585 section 3.4): the least time between two
+    /// regular reports. Zero by default, RFC 4585 section 4.2's value when `trr-int` is not
+    /// negotiated; a negotiated `trr-int` replaces it. See
+    /// [`RtcpSessionBuilder::with_t_rr_interval`](interceptor::RtcpSessionBuilder::with_t_rr_interval).
+    pub rtcp_t_rr_interval: Duration,
+    /// Whether congestion control feedback leaves as soon as it is built (`true`, the default)
+    /// or waits its turn under RFC 4585 section 3.5.2 like other feedback. See
+    /// [`RtcpSessionBuilder::with_immediate_congestion_feedback`](interceptor::RtcpSessionBuilder::with_immediate_congestion_feedback).
+    pub rtcp_immediate_congestion_feedback: bool,
+    /// Whether every local SSRC carries a report block for every remote SSRC (RFC 8108
+    /// section 5.1 to the letter). `false` by default. See
+    /// [`RtcpSessionBuilder::with_report_from_every_ssrc`](interceptor::RtcpSessionBuilder::with_report_from_every_ssrc).
+    pub rtcp_report_from_every_ssrc: bool,
+    /// Whether transport-wide feedback reports a packet received again when the base sequence
+    /// number moves back over it, as libwebrtc does. `false` by default. See
+    /// [`TwccReceiverBuilder::with_rereport_received`](interceptor::TwccReceiverBuilder::with_rereport_received).
+    pub twcc_rereport_received: bool,
+    /// The time step of the congestion controller's adaptive threshold
+    /// (draft-ietf-rmcat-gcc-02 section 5.4). See
+    /// [`Gcc::with_threshold_time_base`](interceptor::Gcc::with_threshold_time_base).
+    pub gcc_threshold_time_base: interceptor::ThresholdTimeBase,
+    /// Whether over-use lowers the estimate at most once per round trip (`true`, the default)
+    /// or on every update (draft-ietf-rmcat-gcc-02 section 5.5). See
+    /// [`Gcc::with_one_decrease_per_round_trip`](interceptor::Gcc::with_one_decrease_per_round_trip).
+    pub gcc_one_decrease_per_round_trip: bool,
+    /// Whether the abs-send-time header extension is offered on audio as well as on video
+    /// ([`configure_abs_send_time`]). `false` by default: it serves the receive-side estimate
+    /// (REMB), which runs on video; Chromium offers it on audio too.
+    pub abs_send_time_on_audio: bool,
+    /// Whether receiver reference times (`a=rtcp-fb:<pt> rrtr`, written as
+    /// `a=rtcp-xr:rcvr-rtt=all`, RFC 3611 section 4.4) are negotiated on audio as well as on
+    /// video ([`configure_receiver_reference_time`]). `false` by default; Chromium offers them
+    /// on audio too.
+    pub receiver_reference_time_on_audio: bool,
     /// How the RTP circuit breaker takes s, the packet size of RFC 8083 section 4.3's TCP
     /// throughput equation: by default the mean size of the packets sent over the reporting
     /// intervals the sending rate is measured over;
@@ -375,6 +410,23 @@ pub struct DefaultInterceptorOptions {
     /// is section 3's "last 4 * G frames". See
     /// [`CircuitBreakerBuilder::with_packet_size`](interceptor::CircuitBreakerBuilder::with_packet_size).
     pub circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize,
+    /// Whether congestion control feedback that leaves at once counts against the RTCP
+    /// bandwidth of the regular reports, which then space out to keep both inside it. `false`
+    /// by default. See
+    /// [`RtcpSessionBuilder::with_congestion_feedback_in_budget`](interceptor::RtcpSessionBuilder::with_congestion_feedback_in_budget).
+    pub rtcp_congestion_feedback_in_budget: bool,
+    /// The least session bandwidth, bits per second, the RTCP bandwidth is computed from when
+    /// the media is measured. 64 kbit/s by default. See
+    /// [`RtcpSessionBuilder::with_minimum_session_bandwidth`](interceptor::RtcpSessionBuilder::with_minimum_session_bandwidth).
+    pub rtcp_minimum_session_bandwidth: u64,
+    /// The share of the media received that congestion control feedback (transport-wide and
+    /// RFC 8888) is sized to. 0.05 by default. See
+    /// [`TwccReceiverBuilder::with_feedback_share`](interceptor::TwccReceiverBuilder::with_feedback_share).
+    pub congestion_feedback_share: f64,
+    /// The longest interval between two congestion control feedback packets while media
+    /// arrives. 250 ms by default. See
+    /// [`TwccReceiverBuilder::with_max_adaptive_interval`](interceptor::TwccReceiverBuilder::with_max_adaptive_interval).
+    pub congestion_feedback_max_interval: Duration,
     /// Where the RTCP sessions draw their random numbers from (the report interval's
     /// variation, RFC 3550 section 6.3.1; the dither of early feedback, RFC 4585 section
     /// 3.5.2; their SSRC and CNAME): the provider's `random()` when one is given, as ICE, DTLS
@@ -383,6 +435,24 @@ pub struct DefaultInterceptorOptions {
     /// for a run that a seeded provider makes the same every time (without it the report
     /// times, and with them everything the reports drive, differ from run to run).
     pub rtcp_random: Option<std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+    /// How many times the NACK generator asks for one missing packet. 0 by default:
+    /// unlimited, a packet is asked for again a round trip after each request for as long as
+    /// it is missing (RFC 4588 section 6.3, Appendix A gives no number). See
+    /// [`NackGeneratorBuilder::with_max_nacks_per_packet`](interceptor::NackGeneratorBuilder::with_max_nacks_per_packet).
+    pub nack_max_nacks_per_packet: u16,
+    /// How the NACK responder's retransmissions are held to the congestion controller's
+    /// target (RFC 4588 section 7). See
+    /// [`NackResponderBuilder::with_rate_limit`](interceptor::NackResponderBuilder::with_rate_limit).
+    pub nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit,
+    /// The wall-clock anchor the NTP times of the interceptors derive from (the RTCP sessions'
+    /// sender reports and receiver reference times, the RFC 8888 report timestamps, the RFC
+    /// 6051 NTP timestamp header extension): the process-wide
+    /// [`SystemInstant::shared`](shared::time::SystemInstant::shared) when none is given,
+    /// which is right for a process with one clock. Give one per peer connection for a run
+    /// under virtual time that is the same every time: two runs in one process otherwise map
+    /// the same instants to NTP times as far apart as the real time between the runs, and the
+    /// fractions of a second that differ reach the wire and what the reports drive.
+    pub wall_clock: Option<shared::time::SystemInstant>,
 }
 
 impl std::fmt::Debug for DefaultInterceptorOptions {
@@ -394,20 +464,60 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("pacer_queue_overflow", &self.pacer_queue_overflow)
             .field("bandwidth_probing", &self.bandwidth_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
+            .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
+            .field(
+                "rtcp_immediate_congestion_feedback",
+                &self.rtcp_immediate_congestion_feedback,
+            )
+            .field(
+                "rtcp_report_from_every_ssrc",
+                &self.rtcp_report_from_every_ssrc,
+            )
+            .field("twcc_rereport_received", &self.twcc_rereport_received)
+            .field("gcc_threshold_time_base", &self.gcc_threshold_time_base)
+            .field(
+                "gcc_one_decrease_per_round_trip",
+                &self.gcc_one_decrease_per_round_trip,
+            )
+            .field("abs_send_time_on_audio", &self.abs_send_time_on_audio)
+            .field(
+                "receiver_reference_time_on_audio",
+                &self.receiver_reference_time_on_audio,
+            )
             .field(
                 "circuit_breaker_packet_size",
                 &self.circuit_breaker_packet_size,
             )
             .field(
+                "rtcp_congestion_feedback_in_budget",
+                &self.rtcp_congestion_feedback_in_budget,
+            )
+            .field(
+                "rtcp_minimum_session_bandwidth",
+                &self.rtcp_minimum_session_bandwidth,
+            )
+            .field("congestion_feedback_share", &self.congestion_feedback_share)
+            .field(
+                "congestion_feedback_max_interval",
+                &self.congestion_feedback_max_interval,
+            )
+            .field("nack_max_nacks_per_packet", &self.nack_max_nacks_per_packet)
+            .field(
+                "nack_retransmission_rate_limit",
+                &self.nack_retransmission_rate_limit,
+            )
+            .field(
                 "rtcp_random",
                 &self.rtcp_random.as_ref().map(|provider| provider.name()),
             )
+            .field("wall_clock", &self.wall_clock)
             .finish()
     }
 }
 
-impl Default for DefaultInterceptorOptions {
-    fn default() -> Self {
+impl DefaultInterceptorOptions {
+    /// The engine's own defaults, whatever the build's default profile.
+    pub(crate) fn rfc_base() -> Self {
         Self {
             congestion_feedback: CongestionFeedback::default(),
             unnegotiated_tmmbr: false,
@@ -415,9 +525,85 @@ impl Default for DefaultInterceptorOptions {
             pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             bandwidth_probing: true,
             rapid_synchronisation: true,
+            rtcp_t_rr_interval: Duration::ZERO,
+            rtcp_immediate_congestion_feedback: true,
+            rtcp_report_from_every_ssrc: false,
+            twcc_rereport_received: false,
+            gcc_threshold_time_base: interceptor::ThresholdTimeBase::Departure,
+            gcc_one_decrease_per_round_trip: true,
+            abs_send_time_on_audio: false,
+            receiver_reference_time_on_audio: false,
             circuit_breaker_packet_size: interceptor::CircuitBreakerPacketSize::default(),
+            rtcp_congestion_feedback_in_budget: false,
+            rtcp_minimum_session_bandwidth: interceptor::RTCP_SESSION_MIN_BANDWIDTH,
+            congestion_feedback_share: 0.05,
+            congestion_feedback_max_interval: Duration::from_millis(250),
             rtcp_random: None,
+            nack_max_nacks_per_packet: 0,
+            nack_retransmission_rate_limit: interceptor::RetransmissionRateLimit::default(),
+            wall_clock: None,
         }
+    }
+
+    /// What these options register on the media engine beyond the video defaults.
+    fn register_audio_extras(&self, media_engine: &mut MediaEngine) -> Result<()> {
+        if self.receiver_reference_time_on_audio {
+            media_engine.register_feedback(
+                RTCPFeedback {
+                    typ: interceptor::RTCP_FB_RRTR.to_owned(),
+                    parameter: "".to_owned(),
+                },
+                RtpCodecKind::Audio,
+            );
+        }
+        if self.abs_send_time_on_audio {
+            media_engine.register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: sdp::extmap::ABS_SEND_TIME_URI.to_owned(),
+                },
+                RtpCodecKind::Audio,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The options a [`BehaviourProfile`] gives (`docs/behaviour-profiles.md`); those it does
+    /// not govern at their defaults.
+    pub fn for_profile(profile: BehaviourProfile) -> Self {
+        let mut options = Self::rfc_base();
+        crate::peer_connection::configuration::behaviour_profile::apply_to_interceptor_options(
+            &mut options,
+            profile,
+        );
+        options
+    }
+
+    /// The RTCP session these options describe, drawing its random numbers from
+    /// [`Self::rtcp_random`] and its NTP times from [`Self::wall_clock`] when they are given.
+    fn rtcp_session(&self) -> RtcpSessionBuilder {
+        let session = RtcpSessionBuilder::new()
+            .with_t_rr_interval(self.rtcp_t_rr_interval)
+            .with_immediate_congestion_feedback(self.rtcp_immediate_congestion_feedback)
+            .with_report_from_every_ssrc(self.rtcp_report_from_every_ssrc)
+            .with_congestion_feedback_in_budget(self.rtcp_congestion_feedback_in_budget)
+            .with_minimum_session_bandwidth(self.rtcp_minimum_session_bandwidth);
+        let session = match self.wall_clock {
+            Some(anchor) => session.with_wall_clock(anchor),
+            None => session,
+        };
+        match &self.rtcp_random {
+            Some(provider) => session.with_random(ProviderRtcpRandom(provider.clone())),
+            None => session,
+        }
+    }
+}
+
+/// The options of [`BehaviourProfile::default()`]: the RFC defaults, or Chrome's with the
+/// `chrome-defaults` cargo feature.
+impl Default for DefaultInterceptorOptions {
+    fn default() -> Self {
+        Self::for_profile(BehaviourProfile::default())
     }
 }
 
@@ -431,11 +617,8 @@ pub fn register_default_interceptors_with_handles(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<(Registry, DefaultInterceptorHandles)> {
-    register_default_interceptors_with_options(
-        registry,
-        media_engine,
-        &DefaultInterceptorOptions::default(),
-    )
+    let options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
+    register_default_interceptors_with_options(registry, media_engine, &options)
 }
 
 /// [`register_default_interceptors_with_handles`] with settings other than the defaults.
@@ -450,7 +633,7 @@ pub fn register_default_interceptors_with_options(
 ) -> Result<(Registry, DefaultInterceptorHandles)> {
     // Order is not decided here — `Registry::build` decides it. These may be called in
     // any sequence.
-    let registry = configure_nack(registry, media_engine);
+    let registry = configure_nack_with(registry, media_engine, options);
 
     configure_simulcast_extension_headers(media_engine)?;
 
@@ -460,7 +643,8 @@ pub fn register_default_interceptors_with_options(
     // Per transport, with the congestion controller below: each transport numbers its
     // packets and is estimated on its own (the remote reports each transport's sequence).
     let registry = with_congestion_feedback_senders(registry, options.congestion_feedback, true);
-    let registry = with_congestion_feedback_recorders(registry, options.congestion_feedback);
+    let registry =
+        with_congestion_feedback_recorders(registry, options.congestion_feedback, options);
 
     // A media sender implements TMMBR (RFC 8834 section 5.1.6), and it is in use where the
     // session names it (RFC 5104 section 7.1).
@@ -499,8 +683,13 @@ pub fn register_default_interceptors_with_options(
         let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
+        let threshold_time_base = options.gcc_threshold_time_base;
+        let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         move |session: usize| {
-            CongestionControlBuilder::new(Gcc::default())
+            let estimator = Gcc::default()
+                .with_threshold_time_base(threshold_time_base)
+                .with_one_decrease_per_round_trip(one_decrease_per_round_trip);
+            CongestionControlBuilder::new(estimator)
                 .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
@@ -541,7 +730,7 @@ pub fn register_default_interceptors_with_options(
             }),
         );
 
-    let registry = configure_rtcp_reports_from(registry, options.rtcp_random.as_ref());
+    let registry = configure_rtcp_reports_with(registry, options.rtcp_session());
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
@@ -552,8 +741,9 @@ pub fn register_default_interceptors_with_options(
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
     configure_abs_send_time(media_engine)?;
+    options.register_audio_extras(media_engine)?;
     let registry = if options.rapid_synchronisation {
-        configure_rapid_synchronisation(registry, media_engine)?
+        configure_rapid_synchronisation_with(registry, media_engine, options.wall_clock)?
     } else {
         registry
     };
@@ -585,15 +775,16 @@ pub fn register_default_interceptors_without_congestion_control(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
-    let registry = configure_nack(registry, media_engine);
+    let options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
+    let registry = configure_nack_with(registry, media_engine, &options);
 
     configure_simulcast_extension_headers(media_engine)?;
 
-    let feedback = CongestionFeedback::default();
+    let feedback = options.congestion_feedback;
     register_congestion_feedback(media_engine, feedback)?;
-    let registry = with_congestion_feedback_recorders(registry, feedback);
+    let registry = with_congestion_feedback_recorders(registry, feedback, &options);
 
-    let registry = configure_rtcp_reports(registry);
+    let registry = configure_rtcp_reports_with(registry, options.rtcp_session());
     let registry = configure_extended_reports(registry);
     let registry = configure_tradeoff_notifications(registry);
     configure_receiver_reference_time(media_engine);
@@ -602,6 +793,7 @@ pub fn register_default_interceptors_without_congestion_control(
 
     // Last, so the ids of the extensions registered above stay what they were.
     configure_default_header_extensions(media_engine)?;
+    options.register_audio_extras(media_engine)?;
 
     Ok(registry)
 }
@@ -735,6 +927,16 @@ pub fn configure_rapid_synchronisation(
     registry: Registry,
     media_engine: &mut MediaEngine,
 ) -> Result<Registry> {
+    configure_rapid_synchronisation_with(registry, media_engine, None)
+}
+
+/// [`configure_rapid_synchronisation`] with the timestamps on `wall_clock` when one is given
+/// ([`DefaultInterceptorOptions::wall_clock`]).
+pub(crate) fn configure_rapid_synchronisation_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    wall_clock: Option<shared::time::SystemInstant>,
+) -> Result<Registry> {
     for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
         media_engine.register_header_extension(
             RTCRtpHeaderExtensionCapability {
@@ -744,9 +946,14 @@ pub fn configure_rapid_synchronisation(
             None,
         )?;
     }
+    let builder = interceptor::NtpTimestampBuilder::new();
+    let builder = match wall_clock {
+        Some(anchor) => builder.with_wall_clock(anchor),
+        None => builder,
+    };
     Ok(registry.with(
         Slot::Custom(interceptor::NTP_TIMESTAMP_SLOT),
-        interceptor::NtpTimestampInterceptor::new(),
+        builder.build(),
     ))
 }
 
@@ -823,16 +1030,30 @@ fn with_congestion_feedback_senders(
 /// What records the remote's packets and reports them. With both formats on offer both
 /// recorders are in the chain, and each stream is reported by exactly one of them: the one
 /// [`negotiated_congestion_feedback`](interceptor::negotiated_congestion_feedback) names.
+///
+/// The RFC 8888 report timestamps are on [`DefaultInterceptorOptions::wall_clock`] when it is
+/// given; on the process-wide anchor otherwise.
 fn with_congestion_feedback_recorders(
     registry: Registry,
     feedback: CongestionFeedback,
+    options: &DefaultInterceptorOptions,
 ) -> Registry {
+    let rereport_received = options.twcc_rereport_received;
+    let share = options.congestion_feedback_share;
+    let max_interval = options.congestion_feedback_max_interval;
+    let wall_clock = options.wall_clock;
     // Each transport's arrivals are reported on that transport (the remote numbers each
     // transport on its own).
     let registry = if feedback.offers_twcc() {
         registry.with_per_rtp_session(
             Slot::TwccReceiver,
-            PerRtpSession::new(|| TwccReceiverBuilder::new().build()),
+            PerRtpSession::new(move || {
+                TwccReceiverBuilder::new()
+                    .with_rereport_received(rereport_received)
+                    .with_feedback_share(share)
+                    .with_max_adaptive_interval(max_interval)
+                    .build()
+            }),
         )
     } else {
         registry
@@ -840,7 +1061,16 @@ fn with_congestion_feedback_recorders(
     if feedback.offers_rfc8888() {
         registry.with_per_rtp_session(
             Slot::Rfc8888,
-            PerRtpSession::new(|| Rfc8888Builder::new().build()),
+            PerRtpSession::new(move || {
+                let builder = Rfc8888Builder::new()
+                    .with_feedback_share(share)
+                    .with_max_adaptive_interval(max_interval);
+                match wall_clock {
+                    Some(anchor) => builder.with_wall_clock(anchor),
+                    None => builder,
+                }
+                .build()
+            }),
         )
     } else {
         registry
@@ -913,6 +1143,19 @@ pub fn configure_key_frame_requests(registry: Registry) -> Registry {
 ///
 /// - [RFC 4585](https://datatracker.ietf.org/doc/html/rfc4585) - Extended RTP Profile for RTCP-Based Feedback
 pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Registry {
+    configure_nack_with(
+        registry,
+        media_engine,
+        &DefaultInterceptorOptions::rfc_base(),
+    )
+}
+
+/// [`configure_nack`] with the NACK limits of `options`.
+fn configure_nack_with(
+    registry: Registry,
+    media_engine: &mut MediaEngine,
+    options: &DefaultInterceptorOptions,
+) -> Registry {
     media_engine.register_feedback(
         RTCPFeedback {
             typ: TYPE_RTCP_FB_NACK.to_owned(),
@@ -929,8 +1172,18 @@ pub fn configure_nack(registry: Registry, media_engine: &mut MediaEngine) -> Reg
     );
 
     registry
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
-        .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new()
+                .with_rate_limit(options.nack_retransmission_rate_limit)
+                .build(),
+        )
+        .with(
+            Slot::NackGenerator,
+            NackGeneratorBuilder::new()
+                .with_max_nacks_per_packet(options.nack_max_nacks_per_packet)
+                .build(),
+        )
 }
 
 /// Configures RTCP: the RTCP session of the connection.
@@ -1005,17 +1258,18 @@ pub fn configure_rtcp_reports(registry: Registry) -> Registry {
 /// the session draws its random numbers (the report interval's variation, RFC 3550 section
 /// 6.3.1; the dither of early feedback, RFC 4585 section 3.5.2; its SSRC and CNAME) from
 /// `provider`'s `random()`, as ICE, DTLS and SCTP do, so a seeded provider fixes when the
-/// reports go out. Without a provider, from `rand`.
+/// reports go out. Without a provider, from `rand`. Its NTP times derive from `wall_clock`
+/// when one is given ([`DefaultInterceptorOptions::wall_clock`]).
 pub(crate) fn configure_rtcp_reports_from(
     registry: Registry,
     provider: Option<&std::sync::Arc<dyn crate::crypto::RTCCryptoProvider>>,
+    profile: BehaviourProfile,
+    wall_clock: Option<shared::time::SystemInstant>,
 ) -> Registry {
-    let session = RtcpSessionBuilder::new().with_t_rr_interval(Duration::ZERO);
-    let session = match provider {
-        Some(provider) => session.with_random(ProviderRtcpRandom(provider.clone())),
-        None => session,
-    };
-    configure_rtcp_reports_with(registry, session)
+    let mut options = DefaultInterceptorOptions::for_profile(profile);
+    options.rtcp_random = provider.cloned();
+    options.wall_clock = wall_clock;
+    configure_rtcp_reports_with(registry, options.rtcp_session())
 }
 
 /// [`interceptor::RtcpRandom`] from a crypto provider's `random()`; from `rand` should the
@@ -1648,7 +1902,10 @@ pub fn configure_congestion_control<E: BandwidthEstimator + 'static>(
     // something to work with. A stream is reported by one recorder, never both.
     // One estimator for the connection (`estimator` is one instance), so one numbering.
     let registry = with_congestion_feedback_senders(registry, feedback, false);
-    Ok(with_congestion_feedback_recorders(registry, feedback))
+    let options = DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
+    Ok(with_congestion_feedback_recorders(
+        registry, feedback, &options,
+    ))
 }
 
 /// Creates a [`StreamInfo`](interceptor::StreamInfo) from RTC types for interceptor binding.

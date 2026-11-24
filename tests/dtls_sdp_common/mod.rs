@@ -194,6 +194,8 @@ pub struct World {
     pub now: Instant,
     /// Whether datagrams are delivered; `false` cuts the network.
     pub connected: bool,
+    /// The datagrams sent to an address no peer has (a STUN server, say): (from, to, data).
+    pub undelivered: Vec<(SocketAddr, SocketAddr, BytesMut)>,
 }
 
 impl World {
@@ -202,6 +204,7 @@ impl World {
             peers: vec![a, b],
             now: Instant::now(),
             connected: true,
+            undelivered: Vec::new(),
         }
     }
 
@@ -226,6 +229,7 @@ impl World {
                     continue;
                 }
                 let Some(peer) = self.peers.iter_mut().find(|p| p.addr == to) else {
+                    self.undelivered.push((from, to, data));
                     continue;
                 };
                 let _ = peer.pc.handle_read(TaggedBytesMut {
@@ -307,6 +311,32 @@ impl World {
             self.peers[1 - i].pc.add_remote_candidate(candidate)?;
         }
         Ok(())
+    }
+
+    /// The application's gathering after a new DTLS association: a peer whose ICE transport
+    /// holds no local candidate any more (the new association dropped them, RFC 8842 section
+    /// 5.1: it runs on a new 3-tuple) moves to the next port and gives that candidate to
+    /// itself and to the other peer. A peer that kept its candidates is left alone. Returns
+    /// whether any peer moved.
+    pub fn regather(&mut self) -> Result<bool> {
+        let mut moved = false;
+        for i in 0..2 {
+            let holds_none = self.peers[i]
+                .pc
+                .dtls_transports()
+                .iter()
+                .all(|t| t.ice_transport().get_local_candidates().is_empty());
+            if !holds_none {
+                continue;
+            }
+            let addr = self.peers[i].addr;
+            self.peers[i].addr = SocketAddr::new(addr.ip(), addr.port() + 1);
+            let candidate = self.peers[i].candidate()?;
+            self.peers[i].pc.add_local_candidate(candidate.clone())?;
+            self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+            moved = true;
+        }
+        Ok(moved)
     }
 
     /// One offer/answer exchange started by `offerer`; the offer and the answer go through

@@ -38,6 +38,10 @@ pub struct TwccReceiverBuilder {
     adaptive_interval: bool,
     /// Whether packets already reported received are reported again (libwebrtc).
     rereport_received: bool,
+    /// See [`Self::with_feedback_share`].
+    feedback_share: f64,
+    /// See [`Self::with_max_adaptive_interval`].
+    max_adaptive_interval: Duration,
     /// Whether the header extension alone, without `transport-cc` feedback, makes a stream
     /// reported.
     extension_alone: bool,
@@ -48,6 +52,8 @@ impl Default for TwccReceiverBuilder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
+            feedback_share: crate::cc::feedback_cadence::FEEDBACK_SHARE,
+            max_adaptive_interval: crate::cc::feedback_cadence::MAX_ADAPTIVE_INTERVAL,
             rereport_received: false,
             extension_alone: false,
         }
@@ -83,6 +89,27 @@ impl TwccReceiverBuilder {
         self
     }
 
+    /// The share of the media received that the feedback may take while the interval is
+    /// adaptive: the interval is the time in which this share holds one feedback packet (with
+    /// its lower layers, and the minimal compound packet around it without reduced-size
+    /// RTCP). Default 0.05, RFC 3550 section 6.2's 5% for all of RTCP. A smaller share leaves
+    /// room in the 5% for the regular reports (the `Performance` behaviour profile: 0.025).
+    pub fn with_feedback_share(mut self, share: f64) -> Self {
+        self.feedback_share = share;
+        self
+    }
+
+    /// The longest the adaptive interval stretches to while media flows. Default 250 ms.
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: "in cases of low uplink
+    /// bandwidth it is acceptable to send them less frequently, e.g., for instance once per
+    /// RTT"; RFC 8888 section 4 leaves the interval to the application ("Applications need to
+    /// negotiate an appropriate congestion control feedback interval ... based on ... the
+    /// acceptable feedback overhead"). The `Performance` behaviour profile takes 500 ms.
+    pub fn with_max_adaptive_interval(mut self, max_interval: Duration) -> Self {
+        self.max_adaptive_interval = max_interval;
+        self
+    }
+
     /// Whether a packet an earlier feedback message reported as received is reported as
     /// received again when a late packet moves the base sequence number back over it, as
     /// libwebrtc does. Off by default: draft-holmer-rmcat-transport-wide-cc-extensions-01
@@ -109,6 +136,8 @@ impl TwccReceiverBuilder {
     /// Build the interceptor.
     pub fn build(self) -> TwccReceiverInterceptor {
         let mut interceptor = TwccReceiverInterceptor::new(self.interval, self.adaptive_interval);
+        interceptor.cadence = FeedbackCadence::new(self.interval, self.adaptive_interval)
+            .with_limits(self.feedback_share, self.max_adaptive_interval);
         interceptor.rereport_received = self.rereport_received;
         interceptor.extension_alone = self.extension_alone;
         interceptor

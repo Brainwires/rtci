@@ -319,7 +319,8 @@ fn vp8_codec() -> RTCRtpCodec {
 #[derive(Clone, Copy, Default)]
 struct Chain {
     nack: bool,
-    jitter_buffer: bool,
+    /// A jitter buffer of this depth.
+    jitter_buffer: Option<Duration>,
     gcc: bool,
 }
 
@@ -337,12 +338,10 @@ fn video_pc(chain: Chain) -> RTCPeerConnection {
     if chain.nack {
         registry = configure_nack(registry, &mut me);
     }
-    if chain.jitter_buffer {
+    if let Some(depth) = chain.jitter_buffer {
         registry = registry.with(
             Slot::JitterBuffer,
-            JitterBufferBuilder::new()
-                .with_depth(Duration::from_millis(250))
-                .build(),
+            JitterBufferBuilder::new().with_depth(depth).build(),
         );
     }
     if chain.gcc {
@@ -513,6 +512,18 @@ fn nack_recovers_lost_rtp() {
 /// A VP8 stream GStreamer encoded (`run.sh`: videotestsrc ! vp8enc ! ivfmux) goes through
 /// loss, jitter and reordering with NACK and the jitter buffer; the receiver depacketizes it
 /// into an IVF file that `run.sh` then decodes with GStreamer.
+///
+/// Every loss the receiver can detect is repaired, because the jitter buffer (2 s) is deeper
+/// than the feedback delay on this link. It asked for 98 % of the frames behind a 250 ms
+/// buffer and failed now and then (292 and 240 of 300): there a retransmission often comes
+/// after the buffer has played past its frame. A NACK waits for the stream's reordering
+/// allowance and the generator's tick, and after one Early RTCP packet RFC 4585 section 3.5.2
+/// holds the next feedback for the next Regular packet (about 750 ms at this stream's RTCP
+/// bandwidth). How many frames 250 ms leaves is luck; the virtual-time twin
+/// (`tests/vp8_nack_jitter_buffer_rtc2rtc.rs`) traces it and tests what is guaranteed at that
+/// depth. Not repairable at any depth: the stream's first packet (RFC 4585 section 6.2.1: a
+/// NACK names packets missing between ones received), whose loss takes the frames up to the
+/// next key frame with it, and its last (nothing after it shows the loss).
 #[test]
 #[ignore = "needs the real-network test environment (netem, GStreamer fixtures): scripts/test-env/run.sh"]
 fn vp8_file_through_nack_and_jitter_buffer() {
@@ -531,7 +542,7 @@ fn vp8_file_through_nack_and_jitter_buffer() {
 
     let chain = Chain {
         nack: true,
-        jitter_buffer: true,
+        jitter_buffer: Some(Duration::from_secs(2)),
         gcc: false,
     };
     let (mut a, mut b) = pair(&env, video_pc(chain), video_pc(chain));
@@ -599,17 +610,36 @@ fn vp8_file_through_nack_and_jitter_buffer() {
         frames.len(),
         got.len()
     );
+    // Every frame played is a sent one, whole, in the order sent: each matches a sent frame
+    // after the one the frame before it matched.
+    let mut played: Vec<usize> = vec![];
+    for g in &got {
+        let from = played.last().map_or(0, |p| p + 1);
+        let at = (from..frames.len())
+            .find(|&i| frames[i] == *g)
+            .expect("a played frame that is no sent frame after the one before it");
+        played.push(at);
+    }
+    // From the first key frame the receiver read (frame 0, or the next key frame when the
+    // stream's first packet was lost), every frame, apart from the last when its packet was
+    // lost (two lost in a row at the end, 0.04 % of runs, would fail here). VP8 key frames
+    // have bit 0 of the frame tag clear (RFC 6386 section 9.1).
+    let key_frames: Vec<usize> = (0..frames.len())
+        .filter(|&i| frames[i][0] & 0x01 == 0)
+        .collect();
+    let first = *played.first().expect("no frame played");
     assert!(
-        got.len() as f64 >= frames.len() as f64 * 0.98,
-        "only {} of {} frames",
-        got.len(),
-        frames.len()
+        first == 0 || key_frames.get(1) == Some(&first),
+        "the first frame played is {first}: not frame 0 nor the key frame after it ({key_frames:?})"
     );
+    let expected: Vec<usize> = (first..frames.len()).collect();
     assert!(
-        exact as f64 >= got.len() as f64 * 0.98,
-        "{} of {} received frames match no sent frame",
-        got.len() - exact,
-        got.len()
+        played == expected || played == expected[..expected.len() - 1],
+        "frames missing after frame {first}: {:?}",
+        expected
+            .iter()
+            .filter(|i| !played.contains(i))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -624,7 +654,7 @@ fn gcc_follows_a_rate_limited_link() {
     let env = Env::get();
     let chain = Chain {
         nack: false,
-        jitter_buffer: false,
+        jitter_buffer: None,
         gcc: true,
     };
     let (mut a, mut b) = pair(&env, video_pc(chain), video_pc(chain));

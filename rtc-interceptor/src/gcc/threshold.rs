@@ -12,10 +12,19 @@ pub enum ThresholdTimeBase {
     /// The draft's: t(i) is the arrival time of group i on the receiver's clock (section 5.3),
     /// the step not capped.
     Arrival,
-    /// libwebrtc's: the gap between the groups' departures, capped at 100 ms.
+    /// The engine's default: the gap between the times the groups' readings are taken on the
+    /// sender's clock, capped at 100 ms.
     #[default]
     Departure,
+    /// libwebrtc's: the gap between the groups' arrival times on the receiver's clock, as the
+    /// draft's, capped at 100 ms (`TrendlineEstimator::UpdateThreshold`,
+    /// `modules/congestion_controller/goog_cc/trendline_estimator.cc`: `now_ms` is the
+    /// packet's `receive_time`, `kMaxTimeDeltaMs` 100).
+    ArrivalCapped,
 }
+
+/// The longest time step a capped threshold adaptation takes.
+pub(crate) const MAX_STEP: Duration = Duration::from_millis(100);
 
 /// A threshold that follows the trend it is judging.
 ///
@@ -77,7 +86,7 @@ impl AdaptiveThreshold {
             }
         };
         self.last_update = Some(now);
-        self.adapt(elapsed.min(Duration::from_millis(100)), estimate_ms)
+        self.adapt(elapsed.min(MAX_STEP), estimate_ms)
     }
 
     /// Moves the threshold towards `estimate_ms` over a time step of `elapsed` (t(i) - t(i-1)

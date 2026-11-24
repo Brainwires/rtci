@@ -117,6 +117,7 @@ use ice::mdns::MulticastDnsMode;
 use ice::network_type::NetworkType;
 use ice::{FailedNomination, NominationAcceptance, UnauthenticatedRequests};
 //TODO: use ice::udp_network::UDPNetwork;
+use crate::peer_connection::configuration::behaviour_profile::BehaviourProfile;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
 use std::time::Duration;
@@ -329,7 +330,7 @@ pub struct ReplayProtection {
 ///
 /// Controls the maximum size of messages that can be sent through data channels.
 /// Per [RFC 8841](https://datatracker.ietf.org/doc/html/rfc8841), the default is 64KB.
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SctpMaxMessageSize {
     /// Fixed maximum message size in bytes.
@@ -407,8 +408,11 @@ impl Default for SctpMaxMessageSize {
 ///
 /// - [W3C WebRTC Spec](https://www.w3.org/TR/webrtc/)
 /// - [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SettingEngine {
+    /// The profile the settings were last set to ([`SettingEngineBuilder::with_behaviour_profile`]);
+    /// settings changed after it keep their own values.
+    pub(crate) behaviour_profile: BehaviourProfile,
     pub(crate) crypto_provider: Option<Arc<dyn RTCCryptoProvider>>,
     pub(crate) timeout: Timeout,
     pub(crate) data_channel: DataChannel,
@@ -425,6 +429,10 @@ pub struct SettingEngine {
     /// 8842 section 3.1 read without its section 6); off by default (RFC 9429 sections 5.8.3
     /// and 5.11).
     pub(crate) dtls_new_association_without_ice_restart: bool,
+    /// A new DTLS association keeps the local candidates and may use the transport addresses
+    /// of the one it replaces (`with_dtls_new_association_on_previous_addresses`); off by
+    /// default (RFC 8842 sections 5.1 and 6).
+    pub(crate) dtls_new_association_on_previous_addresses: bool,
     /// RFC 8830 section 3: a section that lists no `a=msid` any more ends its track.
     pub(crate) msid_removal_ends_track: bool,
     /// RFC 8830 section 3: a new msid-appdata in a section is a new track: the receiver's
@@ -494,6 +502,9 @@ pub struct SettingEngine {
     pub(crate) sctp_zero_checksum: Option<bool>,
     /// [`SettingEngineBuilder::with_sctp_max_streams`]. `None` is the default, 65535.
     pub(crate) sctp_max_streams: Option<u16>,
+    /// [`SettingEngineBuilder::with_sctp_inbound_reassembly_limit`]. `None` is the default,
+    /// 64 MiB.
+    pub(crate) sctp_inbound_reassembly_limit: Option<usize>,
     /// [`SettingEngineBuilder::with_sctp_rto`]. `None` is RFC 9260's 1 / 1 / 60 seconds.
     pub(crate) sctp_rto: Option<sctp::RtoConfig>,
     /// [`SettingEngineBuilder::with_sctp_max_retransmissions`]. `None` is RFC 9260's 10.
@@ -570,6 +581,159 @@ pub struct SettingEngine {
     /// RTCP feedback the application writes is sent whether or not its section negotiated
     /// it ([`SettingEngineBuilder::with_unnegotiated_rtcp_feedback`]).
     pub(crate) unnegotiated_rtcp_feedback: bool,
+    /// `a=ice-options` in each media section instead of once at session level
+    /// ([`SettingEngineBuilder::with_ice_options_in_media_sections`]).
+    pub(crate) ice_options_in_media_sections: bool,
+    /// [`SettingEngineBuilder::with_default_ice_pacing_stated`]`(false)`: no `a=ice-pacing`
+    /// line while Ta is the default (inverted so that the derived default states it).
+    pub(crate) default_ice_pacing_omitted: bool,
+    /// How the DTLS client's retransmission timer starts
+    /// ([`SettingEngineBuilder::with_dtls_flight_interval`]).
+    pub(crate) dtls_flight_interval: DtlsFlightInterval,
+}
+
+/// How the first DTLS retransmission timer of a peer connection's handshake is chosen
+/// ([`SettingEngineBuilder::with_dtls_flight_interval`]). The timer doubles on each
+/// retransmission either way (RFC 9147 section 5.8.2, RFC 6347 section 4.2.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum DtlsFlightInterval {
+    /// RFC 9147 section 5.8.2 for DTLS-SRTP (the default): 400 ms, or, once ICE has measured
+    /// the round trip time of the selected pair, 1.5 times that and never under 100 ms.
+    #[default]
+    Rfc9147,
+    /// libwebrtc's `DtlsTransportInternalImpl::ConfigureHandshakeTimeout`
+    /// (`p2p/dtls/dtls_transport.cc`, `ComputeRetransmissionTimeout`): twice ICE's round
+    /// trip time, held between 50 ms and 3 s; 50 ms without a measured round trip time (the
+    /// initial value `OpenSSLStreamAdapter` gives BoringSSL).
+    Libwebrtc,
+}
+
+impl DtlsFlightInterval {
+    /// The first retransmission timer for a handshake started with `round_trip_time`, ICE's
+    /// measurement of the selected pair, if any.
+    pub fn initial(self, round_trip_time: Option<Duration>) -> Duration {
+        match (self, round_trip_time) {
+            (Self::Rfc9147, None) => {
+                crate::peer_connection::transport::dtls::DTLS_SRTP_FLIGHT_INTERVAL
+            }
+            (Self::Rfc9147, Some(rtt)) => (rtt + rtt / 2)
+                .max(crate::peer_connection::transport::dtls::MINIMUM_FLIGHT_INTERVAL),
+            (Self::Libwebrtc, None) => Duration::from_millis(50),
+            (Self::Libwebrtc, Some(rtt)) => {
+                (rtt * 2).clamp(Duration::from_millis(50), Duration::from_secs(3))
+            }
+        }
+    }
+}
+
+/// The engine's own defaults, [`BehaviourProfile::Rfc`], whatever the build's default profile.
+impl SettingEngine {
+    pub(crate) fn rfc_base() -> Self {
+        Self {
+            behaviour_profile: BehaviourProfile::Rfc,
+            crypto_provider: Default::default(),
+            timeout: Default::default(),
+            data_channel: Default::default(),
+            turn_allocation_refresh_interval_cap: Default::default(),
+            candidates: Default::default(),
+            ice: Default::default(),
+            multicast_dns: Default::default(),
+            replay_protection: Default::default(),
+            sdp_session_level_fingerprints: Default::default(),
+            disable_sdp_tls_id: Default::default(),
+            dtls_new_association_without_ice_restart: Default::default(),
+            msid_removal_ends_track: Default::default(),
+            stopping_transceiver_rejected_in_answer: Default::default(),
+            dtls_use_srtp_only_with_media: Default::default(),
+            accept_lowercase_fingerprints: Default::default(),
+            bundle_attributes_tagged_only: Default::default(),
+            max_bundle_ignored: Default::default(),
+            unique_transport_credentials: Default::default(),
+            explicit_rollback_only: Default::default(),
+            answering_dtls_role: Default::default(),
+            disable_certificate_fingerprint_verification: Default::default(),
+            allow_insecure_verification_algorithm: Default::default(),
+            disable_media_engine_copy: Default::default(),
+            disable_media_engine_multiple_codecs: Default::default(),
+            srtp_protection_profiles: Default::default(),
+            dtls_cipher_suites: Default::default(),
+            receive_mtu: Default::default(),
+            mid_generator: Default::default(),
+            sctp_max_message_size: Default::default(),
+            sctp_max_receive_buffer_size: Default::default(),
+            sctp_mtu: Default::default(),
+            sctp_path_mtu_discovery: Default::default(),
+            sctp_weighted_fair_queueing: Default::default(),
+            sctp_message_interleaving: Default::default(),
+            sctp_zero_checksum: Default::default(),
+            sctp_max_streams: Default::default(),
+            sctp_rto: Default::default(),
+            sctp_max_retransmissions: Default::default(),
+            sctp_message_size_limit_without_interleaving: Default::default(),
+            data_channel_max_buffer_size: Default::default(),
+            data_channel_send_before_ack: Default::default(),
+            non_interactive_video: Default::default(),
+            srtp_key_lifetime: Default::default(),
+            srtp_automatic_rekeying_off: Default::default(),
+            ignore_rid_pause_for_recv: Default::default(),
+            rid_pause_marks: Default::default(),
+            rollback_content_ignored: Default::default(),
+            strict_sdp_attribute_grammar: Default::default(),
+            w3c_simulcast_answer: Default::default(),
+            nominated_candidates_only: Default::default(),
+            msid_appdata_omitted: Default::default(),
+            video_receive_limits: Default::default(),
+            codec_video_receive_limits: Default::default(),
+            unnegotiated_header_extensions: Default::default(),
+            ssrc_per_clock_rate: Default::default(),
+            // Train 11's fields, at the value the derive gave them.
+            msid_appdata_change_renews_track: Default::default(),
+            source_departure_ends_track: Default::default(),
+            bundled_fingerprints_agree: Default::default(),
+            cryptex_required_on_every_bundled_section: Default::default(),
+            dtls_connection_id_length: Default::default(),
+            dtls_alpn_off: Default::default(),
+            write_ssrc_attributes_for_simulcast: Default::default(),
+            ecn: Default::default(),
+            ecn_initiation: Default::default(),
+            ecn_without_signalling: Default::default(),
+            streams: Default::default(),
+            turn_tls: Default::default(),
+            ecn_marking: Default::default(),
+            rtcp_session_omitted: Default::default(),
+            strict_rtcp_validity: Default::default(),
+            unnegotiated_rtcp_feedback: Default::default(),
+            ice_options_in_media_sections: Default::default(),
+            default_ice_pacing_omitted: Default::default(),
+            dtls_flight_interval: Default::default(),
+            // Master's fields of the train-12 merge, at the value the derive gave them.
+            own_payload_types_in_answers: Default::default(),
+            audio_redundancy: Default::default(),
+            // Train 13's field (sctp-15), at the value the derive gave it.
+            sctp_inbound_reassembly_limit: Default::default(),
+            // Train 13's field (mt-9), at the value the derive gave it.
+            dtls_new_association_on_previous_addresses: Default::default(),
+        }
+    }
+
+    /// The behaviour profile the settings were last set to: the build's default profile
+    /// ([`BehaviourProfile::compiled_default`]) unless
+    /// [`SettingEngineBuilder::with_behaviour_profile`] named another. Settings changed after it
+    /// keep their own values.
+    pub fn behaviour_profile(&self) -> BehaviourProfile {
+        self.behaviour_profile
+    }
+}
+
+/// Every setting at the default of [`BehaviourProfile::default()`]: the RFC defaults, or
+/// Chrome's with the `chrome-defaults` cargo feature (see [`BehaviourProfile`]).
+impl Default for SettingEngine {
+    fn default() -> Self {
+        SettingEngineBuilder(Self::rfc_base())
+            .with_behaviour_profile(BehaviourProfile::default())
+            .build()
+    }
 }
 
 impl SettingEngine {
@@ -613,6 +777,18 @@ impl SettingEngine {
             .software
             .as_ref()
             .map(|software| software.clone().unwrap_or_default())
+    }
+
+    /// The SOFTWARE of the server-reflexive Binding requests the engine's gatherer sends (RFC
+    /// 8489 section 14.14: a request SHOULD carry it), resolved: the ICE agent's default
+    /// ([`ice::agent::DEFAULT_SOFTWARE`]) unless [`SettingEngineBuilder::with_ice_software`]
+    /// says otherwise, and `None` (no attribute) for `with_ice_software(None)` or an empty text.
+    pub(crate) fn srflx_software(&self) -> Option<String> {
+        match &self.ice.software {
+            None => Some(ice::agent::DEFAULT_SOFTWARE.to_owned()),
+            Some(Some(software)) if !software.is_empty() => Some(software.clone()),
+            Some(_) => None,
+        }
     }
 
     /// The SOFTWARE of the requests of the TURN clients the engine runs, in the form of
@@ -671,9 +847,37 @@ impl SettingEngine {
 pub struct SettingEngineBuilder(SettingEngine);
 
 impl SettingEngineBuilder {
-    /// A registry with every setting at its default.
+    /// A registry with every setting at its default: that of [`BehaviourProfile::default()`],
+    /// the RFC defaults unless the `chrome-defaults` cargo feature is on in the build.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets every setting a [`BehaviourProfile`] governs to the profile's value, as the table
+    /// `docs/behaviour-profiles.md` lists them; settings the profile does not govern keep
+    /// theirs. A setting changed after this call keeps the value it is given.
+    ///
+    /// The same profile goes to [`MediaEngine::for_profile`](crate::peer_connection::configuration::media_engine::MediaEngine::for_profile),
+    /// from which
+    /// [`register_default_interceptors`](crate::peer_connection::configuration::interceptor_registry::register_default_interceptors)
+    /// takes it, so that the whole peer connection follows one profile.
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::BehaviourProfile;
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_behaviour_profile(BehaviourProfile::Chrome)
+    ///     .build();
+    /// assert_eq!(setting_engine.behaviour_profile(), BehaviourProfile::Chrome);
+    /// ```
+    pub fn with_behaviour_profile(self, profile: BehaviourProfile) -> Self {
+        let mut builder =
+            crate::peer_connection::configuration::behaviour_profile::apply_to_setting_engine(
+                self, profile,
+            );
+        builder.0.behaviour_profile = profile;
+        builder
     }
 
     /// Selects the cryptographic provider used by peer connections built with this setting engine.
@@ -1612,9 +1816,11 @@ impl SettingEngineBuilder {
 
     /// The SOFTWARE attribute (RFC 8489 section 14.14) of the STUN messages the peer
     /// connection sends: the ICE agent's connectivity checks (consent checks and nominations
-    /// included) and its success responses to the peer's, and the requests of the TURN
-    /// clients the engine runs for the configuration's `turn:` / `turns:` servers, over UDP,
-    /// TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind, ConnectionBind).
+    /// included) and its success responses to the peer's, the server-reflexive Binding
+    /// requests the engine's gatherer sends to the configuration's `stun:` / `stuns:` servers,
+    /// and the requests of the TURN clients the engine runs for its `turn:` / `turns:`
+    /// servers, over UDP, TCP, TLS and DTLS (Allocate, Refresh, CreatePermission, ChannelBind,
+    /// ConnectionBind).
     ///
     /// Without this call the ICE agent sends `rtc-ice` and its version
     /// ([`ice::agent::DEFAULT_SOFTWARE`]) and the TURN clients `rtc-turn` and its version
@@ -1622,8 +1828,8 @@ impl SettingEngineBuilder {
     /// responses "SHOULD" carry one. `Some(text)` sends `text` in all of them. `None` (or an
     /// empty text) sends no SOFTWARE attribute at all, for an application that must not put
     /// an implementation fingerprint on the wire (section 16.1.2: "Implementers SHOULD
-    /// make usage of the SOFTWARE attribute a configurable option"). The engine's server-reflexive Binding requests, the agent's error
-    /// responses, the consent checks it keeps up on the previous generation's path during a
+    /// make usage of the SOFTWARE attribute a configurable option"). The gatherer's Binding
+    /// requests carry the ICE agent's text. The agent's error responses, the consent checks it keeps up on the previous generation's path during a
     /// restart, keepalive indications and TURN Send indications carry none in any case.
     ///
     /// `text` is fewer than 128 characters and at most 509 bytes (section 14.14); building the
@@ -1639,6 +1845,14 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_ice_software(mut self, software: Option<String>) -> Self {
         self.0.ice.software = Some(software);
+        self
+    }
+
+    /// [`Self::with_ice_software`] with "never called" expressible: `None` restores each
+    /// stack's own SOFTWARE text, `Some(software)` is `with_ice_software(software)`. For the
+    /// behaviour profiles, whose `Rfc` value is the uncalled state.
+    pub(crate) fn ice_software_choice(mut self, software: Option<Option<String>>) -> Self {
+        self.0.ice.software = software;
         self
     }
 
@@ -1739,6 +1953,53 @@ impl SettingEngineBuilder {
     /// ```
     pub fn with_dtls_new_association_without_ice_restart(mut self, allowed: bool) -> Self {
         self.0.dtls_new_association_without_ice_restart = allowed;
+        self
+    }
+
+    /// Lets a new DTLS association run on the local transport addresses of the one it
+    /// replaces.
+    ///
+    /// By default (`false`) this side allocates a new 3-tuple for every new DTLS association
+    /// over UDP, as RFC 8842 section 5.1 asks of an offerer that needs one ("the offerer MUST
+    /// allocate a new 3-tuple for the offer in such a way that the offerer can disambiguate
+    /// any packets associated with the new DTLS association from any packets associated with
+    /// any other DTLS association") and of an answerer when the offerer did not (section 6:
+    /// "a completely new set of ICE candidates that were not recently used for any other DTLS
+    /// association"). The ICE restart that comes with the new association
+    /// (`renew_dtls_association`, a data-only association replaced for SRTP, or the answer to
+    /// a remote offer that asks for one) discards the local
+    /// candidates, even without
+    /// [`with_discard_local_candidates_during_ice_restart`](Self::with_discard_local_candidates_during_ice_restart),
+    /// and `add_local_candidate` refuses a UDP candidate on a transport address one of them
+    /// had, with `ErrICECandidateAddressOfPreviousDtlsAssociation`: the application gathers on
+    /// new ports. The engine-run TURN clients delete their allocations and allocate again.
+    /// The addresses stay refused until the next ICE restart that is not for a new
+    /// association.
+    ///
+    /// The answerer allocates whether or not the offerer did: with trickle ICE it cannot know
+    /// when it answers.
+    ///
+    /// `true` keeps the candidates (unless
+    /// `with_discard_local_candidates_during_ice_restart` is set) and accepts the previous
+    /// addresses, for an application with one fixed socket whose peer allocates the new
+    /// 3-tuple; packets of the previous association that arrive late then reach the new one,
+    /// which drops them as records it cannot decrypt.
+    ///
+    /// A new association without an ICE restart
+    /// ([`with_dtls_new_association_without_ice_restart`](Self::with_dtls_new_association_without_ice_restart))
+    /// runs on the ICE session it has, whatever this setting says.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_dtls_new_association_on_previous_addresses(true)
+    ///     .build();
+    /// ```
+    pub fn with_dtls_new_association_on_previous_addresses(mut self, allowed: bool) -> Self {
+        self.0.dtls_new_association_on_previous_addresses = allowed;
         self
     }
 
@@ -2001,19 +2262,62 @@ impl SettingEngineBuilder {
     /// restart gives them all one new pair. Each transport keeps its own candidates, DTLS
     /// association and SRTP keys.
     ///
-    /// The default is what the browsers write (Chrome and Firefox put one `ice-ufrag` /
-    /// `ice-pwd` pair in every m= section of a session, bundled or not) and RFC 8839 section
-    /// 5.4 allows ("If two data streams have identical "ice-ufrag"s, they MUST have identical
-    /// "ice-pwd"s"). Pion and webrtc-rs 0.17 refuse a description whose sections carry
-    /// different credentials (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so
-    /// the RFC 9429 form cannot reach them: with `true` an initial `balanced` offer with audio
-    /// and video, or media and a data channel, is refused by them.
+    /// The default is what Pion and webrtc-rs 0.17 can take, and RFC 8839 section 5.4 allows
+    /// it ("If two data streams have identical "ice-ufrag"s, they MUST have identical
+    /// "ice-pwd"s"): they refuse a description whose sections carry different credentials
+    /// (`ErrSessionDescriptionConflictingIceUfrag`), bundled or not, so with `true` an initial
+    /// `balanced` offer with audio and video, or media and a data channel, is refused by them.
+    ///
+    /// Chromium takes the RFC 9429 form, `true` (the `Chrome` behaviour profile's value):
+    /// libwebrtc makes a transport description with credentials of its own for each m= section
+    /// of an offer and of an answer (`TransportDescriptionFactory::CreateOffer` /
+    /// `CreateAnswer`, `p2p/base/transport_description_factory.cc`) and makes the sections of a
+    /// BUNDLE group share the first one's (`UpdateTransportInfoForBundle`,
+    /// `pc/media_session.cc`). Its offers bundle every section whatever the bundle policy
+    /// (`max-compat` included: `bundle_enabled` follows `use_rtp_mux`, `pc/sdp_offer_answer.cc`),
+    /// so they show one pair; its answer to an offer without BUNDLE gives each section its own
+    /// (fixture `chromium--balanced-rust-s-offer-has-a-transport-per-media-type-answered-without-bundle--1-answer.sdp`).
     ///
     /// With shared credentials the transports are told apart by their local addresses only:
     /// several transports on one local socket need `true`, since the ICE username of a STUN
     /// request is then the same for each.
     pub fn with_unique_transport_credentials(mut self, unique: bool) -> Self {
         self.0.unique_transport_credentials = unique;
+        self
+    }
+
+    /// Where `a=ice-options` (RFC 8839 section 5.6) is written: once at session level (the
+    /// default, `false`), or in each m= section that carries ICE credentials (`true`), after
+    /// its `a=ice-pwd`. Section 5.6 allows either ("session-level or media-level"); the options
+    /// are the same (`trickle ice2`, or `ice2` for a lite agent). Chromium writes them in every
+    /// section (`BuildIceOptions` from `BuildMediaDescription`, `api/webrtc_sdp.cc`), the
+    /// `Chrome` behaviour profile's value. Bundled sections that leave the BUNDLE attributes to
+    /// the tagged one ([`Self::with_bundle_attributes_repeated`]`(false)`) leave this one too.
+    pub fn with_ice_options_in_media_sections(mut self, in_media_sections: bool) -> Self {
+        self.0.ice_options_in_media_sections = in_media_sections;
+        self
+    }
+
+    /// Whether `a=ice-pacing` is written while Ta is the default 50 ms. The default is `true`:
+    /// RFC 8839 section 4.3.1 says a full agent "SHOULD include an 'ice-pacing' attribute" in
+    /// its offers and answers. With `false` no line is written for the default, which RFC 8445
+    /// section 14.2 lets a peer read as the default ("If an agent does not ... indicate a
+    /// value, the default value is used"); a Ta other than the default
+    /// ([`Self::with_ice_pacing`]) is written either way ("MUST indicate the proposed value").
+    /// libwebrtc writes no `a=ice-pacing` (`api/webrtc_sdp.cc` has none), the `Chrome`
+    /// behaviour profile's value.
+    pub fn with_default_ice_pacing_stated(mut self, stated: bool) -> Self {
+        self.0.default_ice_pacing_omitted = !stated;
+        self
+    }
+
+    /// How the first retransmission timer of the DTLS handshake is chosen; see
+    /// [`DtlsFlightInterval`]. The default is [`DtlsFlightInterval::Rfc9147`]; the `Chrome`
+    /// behaviour profile takes [`DtlsFlightInterval::Libwebrtc`]. RFC 9147 section 5.8.2's
+    /// 1000 ms is a SHOULD "unless implementations have deployment-specific and/or external
+    /// information about the round trip time", which ICE's measurement is.
+    pub fn with_dtls_flight_interval(mut self, interval: DtlsFlightInterval) -> Self {
+        self.0.dtls_flight_interval = interval;
         self
     }
 
@@ -2404,6 +2708,36 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// The most bytes of incomplete inbound messages a data channel association holds above
+    /// SCTP. SCTP gives a message it cannot hold whole out in parts (RFC 9260 section 6.9),
+    /// so its receive window reopens while the message is still arriving; the data channel
+    /// layer joins the parts, because a data channel delivers whole messages only.
+    ///
+    /// What a conforming peer can have in progress is bounded by the negotiated parameters:
+    /// at most one message per stream (RFC 8260 section 2.2.2, RFC 6458 section 3.1.4), each
+    /// at most the `max-message-size` this side advertised (RFC 8841 section 6.1; a larger one
+    /// is dropped, as before). The handler holds at most one incomplete message per stream,
+    /// so what it holds never exceeds (streams with a message in progress) ×
+    /// `max-message-size`. This setting is the ceiling over that product: a peer that would
+    /// take the association past it loses the data channel whose part would go over (W3C
+    /// `OnError` with `data-channel-failure`, the message naming this limit; RFC 8831
+    /// section 6.6: "the receiver SHOULD close the corresponding data channel"). The rest of
+    /// that message is read and dropped, then the channel's stream is reset; the other
+    /// channels go on.
+    ///
+    /// Unset, the default, is 64 MiB: 1024 concurrent messages of the default 64 KiB
+    /// `max-message-size`, or 256 of the largest this engine accepts (256 KiB), far more
+    /// than ordinary use keeps in flight at once, and a quarter of what a peer could pin
+    /// with 65535 streams of 1 KiB each. The worst case one association holds for inbound
+    /// data is then its SCTP receive buffer
+    /// ([`with_sctp_max_receive_buffer_size`](Self::with_sctp_max_receive_buffer_size), 1 MiB
+    /// by default) plus this limit: 65 MiB with the defaults. A value below the advertised
+    /// `max-message-size` is raised to it, so that a single message that size always fits.
+    pub fn with_sctp_inbound_reassembly_limit(mut self, bytes: usize) -> Self {
+        self.0.sctp_inbound_reassembly_limit = Some(bytes);
+        self
+    }
+
     /// RTO.Initial, RTO.Min and RTO.Max of the SCTP association (RFC 9260 sections 6.3.1 and
     /// 16): the retransmission timeout before a round trip is measured, and its bounds. Unset,
     /// the default, is the RFC's recommendation: 1, 1 and 60 seconds. A minimum or maximum of
@@ -2419,12 +2753,29 @@ impl SettingEngineBuilder {
         self
     }
 
+    /// Back to RFC 9260's RTO.Initial, RTO.Min and RTO.Max (1, 1 and 60 seconds), undoing
+    /// [`Self::with_sctp_rto`] (or a profile that set them).
+    pub fn without_sctp_rto(mut self) -> Self {
+        self.0.sctp_rto = None;
+        self
+    }
+
     /// Association.Max.Retrans (RFC 9260 sections 8.1 and 16): how many consecutive
     /// retransmission timeouts (an unanswered HEARTBEAT counts as one) the SCTP association
     /// takes before it declares the peer unreachable and fails. Unset, the default, is the
-    /// RFC's 10. See [`Self::with_sctp_rto`].
+    /// RFC's 10. See [`Self::with_sctp_rto`]. `usize::MAX` never gives up, which leaves the
+    /// failure of an unreachable peer to ICE consent (RFC 7675): what libwebrtc does
+    /// (`DcSctpTransport::CreateDcSctpOptions` sets `max_retransmissions` to none,
+    /// `media/sctp/dcsctp_transport.cc`), the `Chrome` behaviour profile's value.
     pub fn with_sctp_max_retransmissions(mut self, limit: usize) -> Self {
         self.0.sctp_max_retransmissions = Some(limit);
+        self
+    }
+
+    /// Back to RFC 9260's Association.Max.Retrans of 10, undoing
+    /// [`Self::with_sctp_max_retransmissions`] (or a profile that set it).
+    pub fn without_sctp_max_retransmissions(mut self) -> Self {
+        self.0.sctp_max_retransmissions = None;
         self
     }
 
@@ -2591,11 +2942,14 @@ impl SettingEngineBuilder {
     /// RFC 9429 section 5.8: a line that is not well formed rejects the description, even
     /// when its value is then ignored; every attribute is checked against its grammar either
     /// way. By default white space at the end of a value is not held against it: webrtc-rs
-    /// 0.17 (and Pion) write a feedback without parameters as `a=rtcp-fb:96 goog-remb ` (a
-    /// trailing space), which the strict reading refuses
+    /// 0.17.x writes a feedback without parameters as `a=rtcp-fb:96 goog-remb ` (a trailing
+    /// space, which RFC 4585 section 4.2's `rtcp-fb-param` does not allow: a space must be
+    /// followed by a token), and the strict reading refuses it
     /// (`tests/media_rejection_interop.rs::test_video_only_webrtc_offerer_rtc_answerer`:
     /// "a=rtcp-fb: `96 goog-remb `"), so an engine that reads them strictly cannot answer
-    /// their offers. `true` is the strict RFC form.
+    /// its offers. webrtc-rs fixed it on its default branch (`rtc` commit 718d405), as Pion
+    /// did in v4.1.5 (pion/webrtc#3207, PR #3218); 0.17.x still writes it. `true` is the
+    /// strict RFC form.
     pub fn with_strict_sdp_attribute_grammar(mut self, strict: bool) -> Self {
         self.0.strict_sdp_attribute_grammar = strict;
         self

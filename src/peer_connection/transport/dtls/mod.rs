@@ -138,6 +138,9 @@ pub(crate) struct DtlsTransport {
     /// The application asked for a new association (`RTCPeerConnection::renew_dtls_association`):
     /// the next offer carries a new `tls-id` (RFC 8842 section 5.5).
     pub(crate) renewal_requested: bool,
+    /// The renewal was asked for by the connection itself, for SRTP re-keying (an SRTP master
+    /// key neared its lifetime): what `OnLocalCandidatesNeeded` reports as its reason.
+    pub(crate) renewal_for_srtp_rekeying: bool,
 
     /// Whether the session has an RTP media section, which needs SRTP keys from the
     /// association (RFC 5764; RFC 8827 section 6.5: no media without SRTP).
@@ -148,6 +151,10 @@ pub(crate) struct DtlsTransport {
     /// The retransmission timer the client's handshake was started with: 400 ms, or 1.5
     /// times the round trip time ICE measured (RFC 9147 section 5.8.2).
     pub(crate) flight_interval: Option<std::time::Duration>,
+    /// How the client's first retransmission timer is chosen
+    /// (`SettingEngineBuilder::with_dtls_flight_interval`).
+    pub(crate) flight_interval_rule:
+        crate::peer_connection::configuration::setting_engine::DtlsFlightInterval,
 
     // From SettingEngine
     pub(crate) answering_dtls_role: RTCDtlsRole,
@@ -284,9 +291,11 @@ impl DtlsTransport {
             local_tls_id: generate_tls_id(&crypto_provider)?,
             staged_local_tls_id: None,
             renewal_requested: false,
+            renewal_for_srtp_rekeying: false,
             srtp_required: false,
             srtp_negotiated: None,
             flight_interval: None,
+            flight_interval_rule: Default::default(),
 
             answering_dtls_role,
             srtp_protection_profiles,
@@ -493,8 +502,9 @@ impl DtlsTransport {
                 .with_replay_protection_window(self.replay_protection.dtls)
                 // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
                 // for DTLS-SRTP. A client that knows the round trip time of the selected
-                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`).
-                .with_flight_interval(DTLS_SRTP_FLIGHT_INTERVAL)
+                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`); the
+                // libwebrtc rule (`DtlsFlightInterval`) from 50 ms, or twice the round trip.
+                .with_flight_interval(self.flight_interval_rule.initial(None))
                 // No session resumption, in either version (RFC 8446 section 2.2, RFC 5246
                 // section 7.3): WebRTC authenticates each association by the certificate
                 // fingerprints of its SDP (RFC 8827 section 6.5) and makes a new one per
@@ -676,6 +686,7 @@ impl DtlsTransport {
         self.srtp_negotiated = None;
         self.srtp_configured = self.offers_use_srtp();
         self.renewal_requested = false;
+        self.renewal_for_srtp_rekeying = false;
         Ok(DtlsAssociationUpdate::New)
     }
 
