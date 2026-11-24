@@ -220,7 +220,10 @@ test("ULPFEC in RED to the browser: Rust's FEC reaches the browser's decoder thr
     // Chromium's inbound-rtp for video has no FEC members (observed: this cell's log). With
     // 5% loss, no NACK and no FEC a VP8 stream loses frames until a key frame; with the FEC
     // they are rebuilt before the jitter buffer gives up on them.
-    expect(i.framesDecoded, JSON.stringify(i)).toBeGreaterThanOrEqual(0.97 * i.framesReceived);
+    const frames = r.report.sent.find((o) => /vp8/i.test(o.mime))?.frames ?? 0;
+    expect(frames, JSON.stringify(r.report.sent)).toBeGreaterThan(100);
+    // A few frames may still be on their way when the stats are read.
+    expect(i.framesDecoded, `decoded of ${frames} sent: ${JSON.stringify(i)}`).toBeGreaterThanOrEqual(0.95 * frames);
     expect(i.packetsLost, JSON.stringify(i)).toBeGreaterThan(0);
   }
 });
