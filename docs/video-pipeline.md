@@ -630,11 +630,45 @@ runner; all killed:
 | freeze margin 300 ms instead of 150 | `a_long_interval_after_steady_frames_is_a_freeze` |
 | retransmissions never detected | `a_packet_late_against_the_packet_after_its_gap_counts_as_a_retransmission` (added after the first round) |
 
-### Phase 1b: the engine boundary (`conf/vp-3-boundary`)
+### Phase 1b: the engine boundary (`conf/vp-4-engine-boundary`)
 
 `RTCRtpReceiver::set_nack_horizon` (2.6) and the four jitter-buffer members in
 `DecoderStatsUpdate` (2.9), each with a failing-first test. Acceptance: in the capacity
 scenario, retransmissions of packets older than the horizon = 0.
+
+#### 6.2 Phase 1b: what was built and measured
+
+- `NackControl::Horizon { media_ssrc, oldest_useful }` (rtc-interceptor) and
+  `RTCRtpReceiver::set_nack_horizon(now, ssrc, Option<u16>)` (rtc): the generator drops
+  missing sequence numbers older than the horizon, wrap-aware, and forgets their requests
+  (`rtc-interceptor/tests/nack_control_horizon.rs`; two peers:
+  `tests/rtcp_session_rtc2rtc.rs::a_receiver_stops_asking_for_packets_behind_its_nack_horizon`).
+  `VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
+  nack_horizon`, on by default and in `chrome()`: libwebrtc's `NackRequester::ClearUpTo`).
+- `DecoderStatsUpdate::{jitter_buffer_delay, jitter_buffer_target_delay,
+  jitter_buffer_minimum_delay, jitter_buffer_emitted_count}`, which win over the audio
+  update's (`statistics::feed_test::the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
+  `rtc-video` no longer calls `update_audio_receiver_stats`.
+- Tap interceptors in `rtc-video/tests/receive_rtc2rtc.rs` record every NACK as generated, as
+  it leaves and as it arrives, and every RTX as it leaves (by its original sequence number):
+  the per-packet repair trace is `docs/video-repair-latency.md` (the first NACK is made
+  157 ms after a gap on average; the rest of a repair is the link).
+
+Measured (hosted run 45314248391 at `134ce3a7`; NACKs for packets behind the horizon the
+pipeline had computed before the NACK was made):
+
+| Scenario | Sequence numbers asked for | Behind the horizon | Without the horizon (mutation, run 45314253623) |
+|---|---|---|---|
+| call, 2 % loss, 30 s | 26 | 0 | 26, 0 |
+| capacity 300 kbit/s, then open, 50 s | 157 | 0 | 157, 0 |
+| one packet lost for good (original and every RTX), 13 s | 11 | 0 | 84, **73** |
+
+In the loss and capacity scenarios every lost packet is repaired before playout reaches it,
+so the generator never had a reason to ask behind playout; the third scenario is where the
+horizon matters: the pipeline asks for a key frame after its repair window (one PLI, 1.1 s
+freeze, 31 frames dropped), plays on, and from the moment playout passed the lost packet
+(5.07 s into the call) the generator stops asking for it. Without the horizon it asked 73 more
+times. Phase 1's frame figures (6.1) are unchanged by the horizon (same runs, same numbers).
 
 ### Phase 2: codecs (`conf/vp-4-codecs`)
 
