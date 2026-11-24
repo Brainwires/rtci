@@ -502,6 +502,28 @@ fn test_assoc_negotiated_max_streams() -> Result<()> {
         "the smaller of 1001 outbound and 1002 inbound"
     );
 
+    // RFC 9260 5.1.1: the shortage is reported whichever direction is short. A peer that can
+    // receive on fewer streams (MIS 1001) than it sends on (OS 1002) limits this side's
+    // outbound streams.
+    let mut b = create_association(TransportConfig::default());
+    b.set_state(AssociationState::Closed);
+    let mut init = ChunkInit {
+        initial_tsn: 1234,
+        num_outbound_streams: 1002,
+        num_inbound_streams: 1001,
+        initiate_tag: 5678,
+        advertised_receiver_window_credit: 512 * 1024,
+        ..Default::default()
+    };
+    init.set_supported_extensions();
+    b.handle_init(&pkt, &init, Instant::now())?;
+    b.handshake_completed = true;
+    assert_eq!(
+        Some(1001),
+        b.negotiated_max_streams(),
+        "the peer's 1001 inbound streams limit this side's outbound"
+    );
+
     Ok(())
 }
 
