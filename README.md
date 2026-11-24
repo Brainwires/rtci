@@ -375,6 +375,10 @@ over SRTP and is subject to none of SCTP's flow control.
 - **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
 - **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
 - **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
+- **Video pipeline** (`rtci-video`, in development, not published) - the receive side beside the engine: frame
+  assembly for VP8, VP9, AV1, H.264 and H.265, the frame reference finder, a jitter buffer with libwebrtc's playout
+  timing, key-frame requests (PLI) and the W3C video statistics; decoders behind a trait. See
+  [docs/video-pipeline.md](docs/video-pipeline.md)
 - **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
@@ -526,7 +530,8 @@ The engine is the root crate, `rtci`; each protocol is a crate of its own, usabl
 | [`rtci-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
 
 These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
-`rtci-signal`, the examples' signalling helper; the fuzz crates, the benchmark and the test environment's peers.
+`rtci-signal`, the examples' signalling helper; `rtci-video`, the video pipeline (in development, not part of
+the 0.1.0 release); the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 
