@@ -150,9 +150,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
-- **stream-driver** (mdns-4): with mDNS `QueryAndGather` the driver binds the host's mDNS sockets when its connection begins gathering, before the first host candidates (before: at the first mDNS datagram), and tells the connection for which address families it has none (`RTCPeerConnection::set_multicast_dns_publishing`). The names of host addresses of such a family are not registered: their candidates go out under a `.local` name that is not published (draft-ietf-mmusic-mdns-ice-candidates section 3.1.1), or not at all with `with_multicast_dns_fail_closed(true)`. Before, the name was registered and announced into a socket that did not exist.
-- **ice** (mdns-4): a host candidate whose mDNS name cannot be registered keeps one unpublished name per address (its UDP and TCP candidates share it, section 3.1.1 steps 2 and 5); before, each candidate past the cap of 64 names got a name of its own. No `QueryAndGather` path writes the literal address any more except the fixed-IP mode's other addresses (the agent without an mDNS connection used to, a path that `Agent::new` never takes).
-- **stream-driver**: **`PeerDriver` carries a connection's mDNS, within one process-wide budget** (draft-ietf-mmusic-mdns-ice-candidates section 7.1, MDNSICE-7.1-1). At the connection's first mDNS datagram the driver binds the host's mDNS sockets (port 5353, joined to 224.0.0.251 and, where the host has IPv6, ff02::fb), sends the engine's queries, probes and answers there and hands back what arrives; before, those datagrams were counted as unsent. Every mDNS datagram of every driver of the process takes one message from one `MdnsRateLimit` (`peer::process_mdns_rate_limit`, 40 at once then 10 a second); one the budget refuses waits, in order. `PeerDriver::mdns_datagrams_sent` counts them. `MdnsRateLimit::take` and `ready_at` are public.
 - **`rtci-stream-driver` marks what it sends (RFC 8835 section 4.2 SHOULD, RFC 8837).**
   `PeerDriver` sets `IP_TOS` / `IPV6_TCLASS` on its UDP socket before each datagram whose byte
   differs from the last (the new `RTCPeerConnection::traffic_class`: the RFC 8837 DSCP with the
@@ -623,23 +620,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiebreaker stays for the agent's life, as before and as in libwebrtc. Test: `rtci-ice`
   `agent_rfc8445_test.rs::test_ice_restart_draws_a_new_tie_breaker_only_when_configured`.
   RFC8445-16.1-4 is `tested`.
-- **mDNS host candidates can fail closed (mdns-4, MDNSICE-3.1.1-6).** With mDNS
-  `QueryAndGather`, a host candidate whose name cannot be registered (the application has no
-  mDNS socket for its address family, or the agent holds the most names it can, 64) goes out,
-  by default, under a `.local` name that is not published: draft-ietf-mmusic-mdns-ice-candidates
-  section 3.1.1, "the ICE agent SHOULD still provide mDNS candidates in step 6 even if the
-  local network does not support mDNS or mDNS registration fails in step 4".
-  `SettingEngineBuilder::with_multicast_dns_fail_closed(true)` (`AgentConfig::multicast_dns_fail_closed`)
-  provides no host candidate for such an address instead, UDP or TCP, for an embedder that
-  must never offer a candidate its peer cannot resolve; its server-reflexive candidates are
-  still gathered (raddr `0.0.0.0` rport 9). The literal address is written in neither case.
-  An application with sockets of its own says which families it can send mDNS on with
-  `RTCPeerConnection::set_multicast_dns_publishing(MulticastDnsPublishing { ipv4, ipv6 })`
-  (`Agent::set_multicast_dns_publishing`) before it adds host candidates;
-  `RTCPeerConnection::multicast_dns_mode` reads the mode; `Agent::multicast_dns_withholds`
-  says whether an address's host candidates were withheld. `rtci-stream-driver`'s
-  `PeerDriver` does it by itself, and `PeerDriverConfig::mdns_sockets` (`true` by default)
-  turns its mDNS sockets off.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
