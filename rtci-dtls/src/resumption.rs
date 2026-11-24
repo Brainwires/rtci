@@ -278,8 +278,13 @@ fn acceptable(
         && cipher_suite_for_id(suite).is_ok_and(|cipher_suite| !cipher_suite.is_psk());
     let name_ok = session.server_name == state.server_name;
     // A configured peer-certificate check is run again on the session's certificates
-    // (`resume`): a session without any is not resumed, and the handshake is a full one.
-    let checkable = cfg.verify_peer_certificate.is_none() || !session.peer_certificates.is_empty();
+    // (`resume`). A server that asks its clients for a certificate resumes no session
+    // without one: the handshake is a full one, in which it asks again and the check runs on
+    // what comes. A server that asks for none (`NoClientCert`) had no client certificate in
+    // the full handshake either: there is nothing to check again, and the session resumes.
+    let checkable = cfg.verify_peer_certificate.is_none()
+        || cfg.client_auth == ClientAuthType::NoClientCert
+        || !session.peer_certificates.is_empty();
     let authentication_ok = checkable
         && match cfg.client_auth {
             ClientAuthType::NoClientCert | ClientAuthType::RequestClientCert => true,
@@ -296,15 +301,19 @@ fn acceptable(
 
 /// Server: takes `session` up for this handshake: its suite, master secret and the peer's
 /// certificates, keys from the new randoms. The configured peer-certificate check runs again
-/// on the client's certificates (`acceptable` resumes no session without any when a check
-/// is configured).
+/// on the client's certificates. A session without any reaches here only at a server that
+/// asks its clients for none (`acceptable`): the full handshake had no client certificate
+/// for the check either, and it is not called with an empty list.
 fn resume(
     state: &mut State,
     client_hello: &HandshakeMessageClientHello,
     cfg: &HandshakeConfig,
     session: Dtls12Session,
 ) -> Result<(), FlightError> {
-    if let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
+    let checked =
+        !session.peer_certificates.is_empty() || cfg.client_auth != ClientAuthType::NoClientCert;
+    if checked
+        && let Some(verify_peer_certificate) = &cfg.verify_peer_certificate
         && let Err(err) = verify_peer_certificate(&session.peer_certificates, &[])
     {
         return Err(fatal(AlertDescription::BadCertificate, err));
@@ -469,18 +478,23 @@ pub(crate) fn new_session_ticket(
     if let Some(ticket) = &state.pending_ticket {
         return Ok(ticket.clone());
     }
+    // A ServerHello that announced a ticket is followed by one; an empty ticket says there
+    // is none after all (RFC 5077 section 3.3): without an issuer or a clock, and from an
+    // issuer whose keys were wiped (`SessionTicketIssuer::retire`).
+    let none = HandshakeMessageNewSessionTicket {
+        ticket_lifetime_hint: 0,
+        ticket: vec![],
+    };
     let (Some(issuer), Some(now)) = (cfg.ticket_issuer.as_ref(), state.clock) else {
-        // A ServerHello that announced a ticket is followed by one; an empty ticket says
-        // there is none after all (RFC 5077 section 3.3).
-        return Ok(HandshakeMessageNewSessionTicket {
-            ticket_lifetime_hint: 0,
-            ticket: vec![],
-        });
+        return Ok(none);
     };
     let session = session_of(state, cfg, now);
-    let ticket = issuer
+    let Some(ticket) = issuer
         .seal_dtls12(cfg.provider().as_ref(), now, &session)
-        .map_err(|err| fatal(AlertDescription::InternalError, err))?;
+        .map_err(|err| fatal(AlertDescription::InternalError, err))?
+    else {
+        return Ok(none);
+    };
     // The ticket's id is its AEAD nonce, its first bytes.
     let mut id = [0u8; 12];
     id.copy_from_slice(&ticket[..12]);

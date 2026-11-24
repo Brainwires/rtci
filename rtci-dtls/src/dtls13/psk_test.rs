@@ -1071,16 +1071,20 @@ fn a_client_with_a_check_refuses_a_resumption_that_carries_no_certificate() -> R
     Ok(())
 }
 
-/// A server with a configured peer-certificate check resumes no ticket that carries no
-/// client certificate (one it issued to a client that sent none): the check could not run
-/// again, so the handshake is a full one, where a server without a check resumes.
+/// A server that asks its clients for a certificate and has a configured peer-certificate
+/// check resumes no ticket that carries no client certificate (one it issued to a client
+/// that sent none): the check could not run again, so the handshake is a full one, in which
+/// the server asks again; a server without a check resumes the same kind of ticket.
 #[test]
-fn a_server_with_a_check_resumes_no_ticket_that_carries_no_certificate() -> Result<()> {
+fn a_server_that_asks_for_a_certificate_resumes_no_ticket_without_one_for_its_check() -> Result<()>
+{
+    use crate::config::ClientAuthType;
     let store = store();
     let client = resuming_client(&store)?;
     let ((_, calls, _), check) = counting_check();
     let server = Arc::new(
         server_builder()
+            .with_client_auth(ClientAuthType::RequestClientCert)
             .with_verify_peer_certificate(Some(check))
             .with_session_tickets(2)
             .build(false, None)?,
@@ -1099,9 +1103,117 @@ fn a_server_with_a_check_resumes_no_ticket_that_carries_no_certificate() -> Resu
         "no client certificate, ever"
     );
 
-    let unchecked = ticket_server(2)?;
+    let unchecked = Arc::new(
+        server_builder()
+            .with_client_auth(ClientAuthType::RequestClientCert)
+            .with_session_tickets(2)
+            .build(false, None)?,
+    );
     let _ = Pair::with(client.clone(), unchecked.clone())?.complete();
     let pair = Pair::with(client, unchecked)?.complete();
     assert_eq!(resumed(&pair), (true, true));
+    Ok(())
+}
+
+/// A server that asks its clients for no certificate (`NoClientCert`, the default) resumes
+/// its tickets whether or not a peer-certificate check is configured: the first handshake
+/// had no client certificate for the check either, so there is nothing to check again
+/// (RFC 8446 section 4.6.1: the resumption carries over the authentication of the handshake
+/// the ticket came from). The check is not called.
+#[test]
+fn a_server_that_asks_for_no_certificate_resumes_with_a_check_configured() -> Result<()> {
+    let store = store();
+    let client = resuming_client(&store)?;
+    let ((_, calls, _), check) = counting_check();
+    let server = Arc::new(
+        server_builder()
+            .with_verify_peer_certificate(Some(check))
+            .with_session_tickets(2)
+            .build(false, None)?,
+    );
+    let _ = Pair::with(client.clone(), server.clone())?.complete();
+    assert_eq!(store.len(NAME), 2, "tickets without a client certificate");
+    let pair = Pair::with(client, server)?.complete();
+    assert_eq!(resumed(&pair), (true, true), "resumed");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no client certificate, ever: nothing for the check"
+    );
+    Ok(())
+}
+
+/// Whether an external-PSK handshake completes on each side when one side also has a
+/// peer-certificate check (for the handshakes that do carry a certificate). `client_checks`:
+/// the check is the client's, else the server's, which has `client_auth`. Also how often
+/// the check was called.
+fn external_psk_with_a_check(
+    client_checks: bool,
+    client_auth: crate::config::ClientAuthType,
+) -> Result<((bool, bool), usize)> {
+    let psk = ExternalPsk::new(b"device-7".to_vec(), vec![0x42; 32]);
+    let ((_, calls, _), check) = counting_check();
+    let mut client = client_builder().with_external_psks(vec![psk.clone()]);
+    let mut server = server_builder()
+        .with_external_psks(vec![psk])
+        .with_client_auth(client_auth);
+    if client_checks {
+        client = client.with_verify_peer_certificate(Some(check));
+    } else {
+        server = server.with_verify_peer_certificate(Some(check));
+    }
+    let mut pair = Pair::new(client, server)?;
+    pair.run();
+    assert_eq!(
+        resumed(&pair),
+        (pair.client_complete, pair.server_complete),
+        "a PSK handshake where it completed: {:?} {:?}",
+        pair.client_error,
+        pair.server_error
+    );
+    Ok((
+        (pair.client_complete, pair.server_complete),
+        calls.load(Ordering::SeqCst),
+    ))
+}
+
+/// RFC 8446 sections 2.2 and 4.2.11: an external PSK authenticates both sides by possession
+/// of the key; no certificate is sent with it. A client that also has a peer-certificate
+/// check (for its certificate handshakes) completes an external-PSK handshake, and the check
+/// is not called: the refusal of a resumption "that carries no certificate" is about
+/// tickets, not external PSKs (review 2, R1).
+#[test]
+fn an_external_psk_handshake_completes_for_a_client_with_a_certificate_check() -> Result<()> {
+    use crate::config::ClientAuthType;
+    assert_eq!(
+        external_psk_with_a_check(true, ClientAuthType::NoClientCert)?,
+        ((true, true), 0)
+    );
+    Ok(())
+}
+
+/// The same for a server with a peer-certificate check: it accepts the external PSK and
+/// neither aborts with bad_certificate nor calls the check (review 2, R1).
+#[test]
+fn an_external_psk_handshake_completes_for_a_server_with_a_certificate_check() -> Result<()> {
+    use crate::config::ClientAuthType;
+    assert_eq!(
+        external_psk_with_a_check(false, ClientAuthType::NoClientCert)?,
+        ((true, true), 0)
+    );
+    Ok(())
+}
+
+/// And for a server that otherwise requires a client certificate: an external PSK takes the
+/// place of the certificate exchange (RFC 8446 section 2.2), where one of this server's
+/// tickets without a certificate would get a full handshake.
+#[test]
+fn an_external_psk_handshake_completes_for_a_server_that_requires_client_certificates() -> Result<()>
+{
+    use crate::config::ClientAuthType;
+    assert_eq!(
+        external_psk_with_a_check(false, ClientAuthType::RequireAnyClientCert)?,
+        ((true, true), 0)
+    );
     Ok(())
 }

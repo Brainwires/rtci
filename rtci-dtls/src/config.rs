@@ -110,6 +110,36 @@ fn server_cert_verifier(
 
 /// Config is used to configure a DTLS client or server.
 /// After a Config is passed to a DTLS function it must not be modified.
+///
+/// # Session resumption and forward secrecy
+///
+/// Nothing is resumed unless the application configures it: a server issues tickets with
+/// [`Self::with_session_tickets`] (or shared keys, [`Self::with_session_ticket_issuer`]) and
+/// keeps DTLS 1.2 sessions with [`Self::with_session_cache`]; a client keeps what it is given
+/// with [`Self::with_session_store`]. Once any of these is set, **both** protocol versions
+/// resume by default, and they do not cost the same:
+///
+/// - **DTLS 1.3** resumes with `psk_dhe_ke` (RFC 8446 section 4.2.9): the ticket's PSK is
+///   combined with a new (EC)DHE exchange, so every association still has keys of its own
+///   and forward secrecy is kept. (`psk_ke`, which gives that up, is a separate opt-in:
+///   [`Self::with_psk_without_key_exchange`].)
+/// - **DTLS 1.2** resumes with the abbreviated handshake (RFC 5246 section 7.3, RFC 5077):
+///   **no key exchange is run**. The resumed association's keys come from the master secret
+///   of the association the session was made in and two public randoms. So there is **no
+///   forward secrecy against whatever holds that master secret**: the server's session
+///   cache, the client's store, and, with tickets, the server's ticket key, because an RFC
+///   5077 ticket is the master secret sealed under that key and it crosses the network in
+///   the clear part of the handshake. Whoever later obtains the ticket key (it lives as long
+///   as the configuration; a key is replaced every ticket lifetime and kept one lifetime
+///   more) and has recorded the traffic decrypts the association that got the ticket and
+///   every association resumed from it. Without resumption each DTLS 1.2 certificate
+///   handshake of this crate runs its own ephemeral ECDHE exchange and has none of this.
+///
+/// [`Self::with_dtls12_resumption`]`(false)` keeps DTLS 1.3 resumption and takes DTLS 1.2
+/// out of it; an application that turns tickets or a store on for DTLS 1.3 and does not need
+/// DTLS 1.2 resumption should set it. It is `true` by default for the applications that
+/// configured resumption before the switch existed. (The peer connection of the `rtci` crate
+/// sets it to `false` in every configuration.)
 #[derive(Clone)]
 pub struct ConfigBuilder {
     crypto_provider: Option<Arc<dyn RTCCryptoProvider>>,
@@ -470,7 +500,19 @@ impl ConfigBuilder {
     ///
     /// Any count above 0 also makes a DTLS 1.2 server issue and accept RFC 5077 session
     /// tickets, one per handshake to a client that asks for one, for sessions made with the
-    /// extended master secret.
+    /// extended master secret. That costs forward secrecy, which DTLS 1.3 tickets do not: a
+    /// DTLS 1.2 ticket is the association's master secret sealed under this server's ticket
+    /// key and sent in the clear part of the handshake, and a resumed DTLS 1.2 association
+    /// runs no key exchange, so whoever later obtains the ticket key decrypts the recorded
+    /// association the ticket came from and every one resumed from it (see
+    /// [the type's notes](Self#session-resumption-and-forward-secrecy)).
+    /// [`Self::with_dtls12_resumption`]`(false)` issues DTLS 1.3 tickets only.
+    ///
+    /// A server that also has a [peer-certificate check](Self::with_verify_peer_certificate)
+    /// runs it again on the client certificates a ticket carries. A ticket that carries none
+    /// is resumed only when the server asks its clients for no certificate
+    /// ([`ClientAuthType::NoClientCert`]: the first handshake had none to check either); a
+    /// server that asks for one runs a full handshake instead, and asks again.
     pub fn with_session_tickets(mut self, count: u8) -> Self {
         self.session_tickets = count;
         self
@@ -504,7 +546,11 @@ impl ConfigBuilder {
     /// A DTLS 1.2 client keeps its sessions there too (RFC 5246 section 7.3: by session id,
     /// or RFC 5077: by ticket, and it asks for a ticket in every ClientHello), when they were
     /// made with the extended master secret (RFC 7627 section 5.3), and offers the most recent
-    /// one again.
+    /// one again. A resumed DTLS 1.2 association runs no key exchange: its keys come from
+    /// the stored master secret, so what is in the store (and, for a ticket, the server's
+    /// ticket key) opens every association of that session, recorded ones included (see
+    /// [the type's notes](Self#session-resumption-and-forward-secrecy)).
+    /// [`Self::with_dtls12_resumption`]`(false)` keeps DTLS 1.3 tickets only.
     pub fn with_session_store(
         mut self,
         store: Option<Arc<dyn crate::session::SessionStore>>,
@@ -518,7 +564,10 @@ impl ConfigBuilder {
     /// secret makes a session with a new 32-byte session id, valid for
     /// [`Self::with_session_ticket_lifetime`]; a ClientHello that offers it gets the
     /// abbreviated handshake. `None`, the default, gives no session id and resumes by
-    /// session id nothing.
+    /// session id nothing. The cache holds master secrets, and a resumed association runs no
+    /// key exchange: there is no forward secrecy against the cache's contents for the
+    /// associations of a cached session (see
+    /// [the type's notes](Self#session-resumption-and-forward-secrecy)).
     pub fn with_session_cache(
         mut self,
         cache: Option<Arc<dyn crate::session::SessionCache>>,
@@ -535,9 +584,17 @@ impl ConfigBuilder {
     /// `false` leaves DTLS 1.3 resumption as configured and takes DTLS 1.2 out of it: a
     /// client asks for no ticket, offers no session id or ticket and keeps no DTLS 1.2
     /// session; a server gives no session id, issues no ticket and resumes nothing, so every
-    /// DTLS 1.2 handshake is a full one with its own (EC)DHE exchange. (A DTLS 1.2 ticket
-    /// carries the master secret of the association it came from, and a resumed DTLS 1.2
-    /// association runs no new key exchange.)
+    /// DTLS 1.2 handshake is a full one with its own (EC)DHE exchange.
+    ///
+    /// What `true` costs, once tickets, a cache or a store are configured: a resumed DTLS
+    /// 1.2 association runs no key exchange, and a DTLS 1.2 ticket is the master secret of
+    /// the association it came from, sealed under the server's ticket key and sent in the
+    /// clear part of the handshake. There is then no forward secrecy against the ticket key,
+    /// the session cache or the client's store: any of them, obtained later, decrypts the
+    /// recorded associations of the session. DTLS 1.3 resumption (`psk_dhe_ke`) has no such
+    /// cost. The default is `true` only so that configurations made before this switch
+    /// existed behave as they did; set `false` unless DTLS 1.2 resumption is wanted (see
+    /// [the type's notes](Self#session-resumption-and-forward-secrecy)).
     pub fn with_dtls12_resumption(mut self, resumption: bool) -> Self {
         self.dtls12_resumption = resumption;
         self
@@ -546,6 +603,15 @@ impl ConfigBuilder {
     /// DTLS 1.3: external pre-shared keys (RFC 8446 section 2.2). A client offers each of
     /// them; a server accepts one whose identity it has in place of a certificate exchange.
     /// The DTLS 1.2 PSK suites are configured with [`Self::with_psk`] instead.
+    ///
+    /// An external PSK authenticates both sides by possession of the key (RFC 8446 sections
+    /// 2.2 and 4.2.11): no certificate is sent in either direction, the association reports
+    /// no peer certificates, and a [peer-certificate check](Self::with_verify_peer_certificate)
+    /// is **not called** for that handshake, on a client or on a server, whatever the
+    /// server's [`Self::with_client_auth`] says. A configuration may have both: the check
+    /// then covers the handshakes that carry certificates (and resumptions of them), and the
+    /// PSK the ones made with it. An application that identifies its peer by certificate
+    /// alone must not configure an external PSK for that peer.
     pub fn with_external_psks(mut self, psks: Vec<crate::session::ExternalPsk>) -> Self {
         self.external_psks = psks;
         self
@@ -632,6 +698,25 @@ impl ConfigBuilder {
     /// setting insecure_skip_verify, or (for a server) when client_auth is
     /// RequestClientCert or RequireAnyClientCert, then this callback will
     /// be considered but the verifiedChains will always be nil.
+    ///
+    /// What it covers. The check is called with the certificates the peer presents in a
+    /// handshake, and it is called only when there are certificates:
+    ///
+    /// - A full handshake: on the server's chain (a client), on the client's chain (a
+    ///   server). A server is not called for a client that sends no certificate: one it
+    ///   never asks ([`ClientAuthType::NoClientCert`]) or one that answers a request with
+    ///   none where that is allowed (`RequestClientCert`, `VerifyClientCertIfGiven`).
+    /// - A resumption (a DTLS 1.3 ticket, a DTLS 1.2 session id or ticket): no certificate
+    ///   is sent, and the check runs again on the certificates stored with the ticket or
+    ///   session, those of the handshake that made it (with no verified chains). It fails
+    ///   closed where a certificate should be there: a client fails a resumption whose
+    ///   ticket or session carries none (`bad_certificate`), and a server that asks its
+    ///   clients for a certificate resumes no ticket or session without one (a full
+    ///   handshake runs instead). A server that asks for none resumes, without the check:
+    ///   the first handshake had no client certificate either.
+    /// - An external PSK handshake ([`Self::with_external_psks`], RFC 8446 sections 2.2 and
+    ///   4.2.11): **not called**. No certificate exists; the peer is authenticated by
+    ///   possession of the key, and by nothing this check sees.
     pub fn with_verify_peer_certificate(
         mut self,
         verify_peer_certificate: Option<VerifyPeerCertificateFn>,

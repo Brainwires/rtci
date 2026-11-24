@@ -483,7 +483,8 @@ fn an_unknown_session_or_ticket_gets_a_full_handshake() {
                 &[],
                 0,
             )
-            .unwrap(),
+            .unwrap()
+            .expect("an issuer with its keys"),
     );
     full(&store, dtls13, &server, "a DTLS 1.3 ticket");
 
@@ -1383,10 +1384,55 @@ fn the_server_runs_its_peer_certificate_check_again_on_a_resumed_client() {
     );
 }
 
-/// A server with a configured peer-certificate check resumes no session that carries no
-/// client certificate: the check could not run again, so the handshake is a full one.
+/// A server that asks its clients for a certificate and has a configured peer-certificate
+/// check resumes no session that carries no client certificate: the check could not run
+/// again, so the handshake is a full one, in which the server asks again.
 #[test]
-fn a_server_with_a_check_resumes_no_session_that_carries_no_certificate() {
+fn a_server_that_asks_for_a_certificate_resumes_no_session_without_one_for_its_check() {
+    use crate::config::ClientAuthType;
+    use std::sync::atomic::Ordering;
+    let certificate = self_signed();
+    let (store, cache) = (store(), cache());
+    let client = client_config(&store, builder());
+    let (_, calls, check) = flagged_check();
+    let checking = server_config(
+        Some(&cache),
+        false,
+        &certificate,
+        builder()
+            .with_client_auth(ClientAuthType::RequestClientCert)
+            .with_verify_peer_certificate(Some(check)),
+    );
+    assert!(handshake(&client, &checking).completed());
+    assert_eq!(cache.len(), 1, "a session without a client certificate");
+    let exchange = handshake(&client, &checking);
+    assert!(exchange.completed());
+    assert!(!exchange.server.connection_state().resumed(), "a full one");
+    assert!(types(&exchange.from_server).contains(&CERTIFICATE));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Without a check, the same kind of session resumes.
+    let open = server_config(
+        Some(&cache),
+        false,
+        &certificate,
+        builder().with_client_auth(ClientAuthType::RequestClientCert),
+    );
+    assert!(handshake(&client, &open).completed());
+    assert!(
+        handshake(&client, &open)
+            .server
+            .connection_state()
+            .resumed()
+    );
+}
+
+/// A server that asks its clients for no certificate (`NoClientCert`, the default) resumes
+/// its sessions whether or not a peer-certificate check is configured: the full handshake
+/// had no client certificate for the check either, so there is nothing to check again. The
+/// check is not called (`flagged_check` refuses an empty chain).
+#[test]
+fn a_server_that_asks_for_no_certificate_resumes_with_a_check_configured() {
     use std::sync::atomic::Ordering;
     let certificate = self_signed();
     let (store, cache) = (store(), cache());
@@ -1402,18 +1448,12 @@ fn a_server_with_a_check_resumes_no_session_that_carries_no_certificate() {
     assert_eq!(cache.len(), 1, "a session without a client certificate");
     let exchange = handshake(&client, &checking);
     assert!(exchange.completed());
-    assert!(!exchange.server.connection_state().resumed(), "a full one");
-    assert!(types(&exchange.from_server).contains(&CERTIFICATE));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-    // Without a check, the same kind of session resumes.
-    let open = server_config(Some(&cache), false, &certificate, builder());
-    assert!(handshake(&client, &open).completed());
-    assert!(
-        handshake(&client, &open)
-            .server
-            .connection_state()
-            .resumed()
+    assert!(exchange.server.connection_state().resumed(), "resumed");
+    assert!(!types(&exchange.from_server).contains(&CERTIFICATE));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no client certificate, ever: nothing for the check"
     );
 }
 

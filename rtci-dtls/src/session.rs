@@ -16,7 +16,16 @@
 //! of that handshake are carried with the ticket and are what the association reports, and the
 //! configured
 //! [`ConfigBuilder::with_verify_peer_certificate`](crate::config::ConfigBuilder::with_verify_peer_certificate)
-//! check runs on them again.
+//! check runs on them again. With a check configured, a ticket that carries no certificate
+//! where one should be is not resumed as if it had passed: a client fails the handshake
+//! (`bad_certificate`), and a server that asks its clients for a certificate runs a full
+//! handshake instead. A server that asks for none
+//! ([`ClientAuthType::NoClientCert`](crate::config::ClientAuthType::NoClientCert)) resumes
+//! such a ticket: the first handshake had no client certificate to check either.
+//!
+//! An external PSK ([`ExternalPsk`], RFC 8446 sections 2.2 and 4.2.11) is not a resumption:
+//! it was never made by a certificate handshake, carries no certificate, and authenticates
+//! both sides by possession of the key. The peer-certificate check is not called for it.
 //!
 //! Only the `psk_dhe_ke` mode is offered and accepted by default: the PSK is combined with a
 //! fresh (EC)DHE exchange, which keeps forward secrecy. `psk_ke` (the PSK alone) is an explicit
@@ -31,11 +40,22 @@
 //! the extended master secret are resumed (RFC 7627 section 5.3), with the master secret of
 //! the session and fresh randoms: no key exchange, no Certificate, no CertificateVerify. The
 //! certificates of the full handshake are what the association reports, and the configured
-//! peer-certificate checks run on them again; with a check configured, a resumption that
-//! carries no certificate is refused (a server runs a full handshake, a client fails it). A
-//! session is forgotten when an association that used it fails (RFC 5246 sections 7.2 and
-//! 7.2.2). [`ConfigBuilder::with_dtls12_resumption`](crate::config::ConfigBuilder::with_dtls12_resumption)
-//! takes DTLS 1.2 out of resumption and leaves DTLS 1.3's.
+//! peer-certificate checks run on them again, with the same rule for a session that carries
+//! no certificate as for a DTLS 1.3 ticket. A session is forgotten when an association that
+//! used it fails (RFC 5246 sections 7.2 and 7.2.2).
+//!
+//! **DTLS 1.2 resumption has no forward secrecy against what holds the session.** A resumed
+//! DTLS 1.2 association runs no key exchange: its keys are the session's master secret and
+//! two public randoms. The server's [`SessionCache`], the client's [`SessionStore`] and,
+//! for RFC 5077 tickets, the server's ticket key (the ticket is the master secret sealed
+//! under it, sent in the clear part of the handshake) each open, if obtained later, the
+//! recorded traffic of the association the session came from and of every one resumed from
+//! it. DTLS 1.3 resumption does not have this cost (`psk_dhe_ke`: a new (EC)DHE exchange
+//! every time). Both versions resume by default once tickets, a cache or a store are
+//! configured;
+//! [`ConfigBuilder::with_dtls12_resumption`](crate::config::ConfigBuilder::with_dtls12_resumption)`(false)`
+//! takes DTLS 1.2 out of resumption and leaves DTLS 1.3's, and is what an application that
+//! does not need DTLS 1.2 resumption should set.
 //!
 //! WebRTC authenticates every DTLS association by the certificate fingerprints its SDP carries.
 //! The peer connection of the `rtci` crate resumes only within one connection, when the
@@ -483,6 +503,7 @@ impl fmt::Debug for ExternalPsk {
 /// a ticket one of them issued is accepted, once, by any of them. A configuration given none
 /// makes keys of its own when it is built ([`ConfigBuilder::with_session_tickets`](crate::config::ConfigBuilder::with_session_tickets)),
 /// which no other configuration can open. Clones share the same keys.
+/// [`Self::retire`] wipes them before the last holder is dropped.
 #[derive(Clone)]
 pub struct SessionTicketIssuer(pub(crate) std::sync::Arc<crate::dtls13::psk::TicketIssuer>);
 
@@ -498,6 +519,21 @@ impl SessionTicketIssuer {
         Ok(Self(std::sync::Arc::new(
             crate::dtls13::psk::TicketIssuer::new(provider, count, lifetime)?,
         )))
+    }
+
+    /// Wipes the keys for good, in every clone and every configuration that shares them: the
+    /// key bytes are zeroized, no ticket is issued from now on, and none of the tickets
+    /// issued so far is accepted (a client that offers one gets a full handshake). For an
+    /// application that is done with the sessions these keys protect before the last
+    /// configuration holding them is dropped (the keys are also zeroized on drop).
+    /// Associations already established are not affected.
+    pub fn retire(&self) {
+        self.0.retire();
+    }
+
+    /// Whether the keys were wiped ([`Self::retire`]).
+    pub fn is_retired(&self) -> bool {
+        self.0.is_retired()
     }
 }
 
