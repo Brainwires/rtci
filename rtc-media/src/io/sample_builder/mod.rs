@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod sample_builder_frame_start_test;
 #[cfg(test)]
+mod sample_builder_gap_wait_test;
+#[cfg(test)]
 mod sample_builder_h26x_test;
 #[cfg(test)]
 mod sample_builder_test;
@@ -53,6 +55,20 @@ pub struct SampleBuilder<T: Depacketizer> {
     /// segment being built starts at the earliest packet that has arrived, not at the first
     /// one to arrive: packets of the first access unit may come out of order.
     consumed_any: bool,
+
+    /// How long a gap may stay missing before it is given up ([`Self::with_max_gap_wait`]);
+    /// `None`: no bound in time.
+    max_gap_wait: Option<Duration>,
+
+    /// When each buffered packet arrived, by sequence number: allocated only with a gap bound,
+    /// for when a gap became known (the arrival of the packet after it).
+    arrivals: Vec<Option<Instant>>,
+
+    /// Whether a gap was given up since the last [`Self::take_key_frame_request`].
+    key_frame_requested: bool,
+
+    /// How many gaps the time bound gave up.
+    skipped_gaps: u64,
 }
 
 impl<T: Depacketizer> SampleBuilder<T> {
@@ -76,6 +92,100 @@ impl<T: Depacketizer> SampleBuilder<T> {
             dropped_packets: 0,
             padding_packets: 0,
             consumed_any: false,
+            max_gap_wait: None,
+            arrivals: Vec::new(),
+            key_frame_requested: false,
+            skipped_gaps: 0,
+        }
+    }
+
+    /// Sets how long a missing packet is waited for, in wall-clock time, before the builder
+    /// gives up on it. Off by default: without it a gap is held until `max_late` packets (or
+    /// [`Self::with_max_time_delay`] of media time) have arrived behind it.
+    ///
+    /// A receiver without a time bound freezes for the length of its packet window on a gap
+    /// that never fills: the window is a time only at one bit rate, and 256 packets were 8.6 s
+    /// at 100 kbit/s in `tests/capacity_cap_video_rtc2rtc.rs`. Set this to about the repair
+    /// window (a few round-trip times, no more than the playout delay accepted); see
+    /// `docs/receiver-gap-policy.md`.
+    ///
+    /// The wait for the oldest missing packet runs from when the builder first knew of the gap:
+    /// the arrival of the first packet after it. Once it has lasted the bound, the gap is given
+    /// up as `max_late` gives it up: the samples complete before it are built, the incomplete
+    /// one and the missing packets are dropped, and building resumes at the next packet that
+    /// starts a sample ([`Depacketizer::is_partition_head`]). The [`Depacketizer`] cannot tell
+    /// a key frame from another, so that sample may be one that refers to what was lost: the
+    /// builder raises a key-frame request ([`Self::take_key_frame_request`]) for the
+    /// application to send (PLI, RFC 4585 section 6.3.1). The next sample counts the packets
+    /// skipped in [`Sample::prev_dropped_packets`]. A gap filled before the bound changes
+    /// nothing.
+    ///
+    /// The bound is checked when [`Self::push`] and [`Self::pop`] are called, with the `now`
+    /// they are given: nothing here reads a clock. While a gap waits, [`Self::poll_timeout`]
+    /// names the instant to call [`Self::pop`] at if no packet arrives first.
+    pub fn with_max_gap_wait(mut self, max_gap_wait: Duration) -> Self {
+        self.max_gap_wait = Some(max_gap_wait);
+        if self.arrivals.is_empty() {
+            self.arrivals = vec![None; u16::MAX as usize + 1];
+        }
+        self
+    }
+
+    /// Whether a gap was given up for the time bound ([`Self::with_max_gap_wait`]) since the
+    /// last call: the application should ask the sender for a key frame. Clears the request.
+    pub fn take_key_frame_request(&mut self) -> bool {
+        std::mem::take(&mut self.key_frame_requested)
+    }
+
+    /// How many gaps the time bound ([`Self::with_max_gap_wait`]) gave up.
+    pub fn skipped_gaps(&self) -> u64 {
+        self.skipped_gaps
+    }
+
+    /// When the oldest missing packet will have been waited for as long as
+    /// [`Self::with_max_gap_wait`] allows: the instant to call [`Self::pop`] at if nothing
+    /// arrives first. `None` without a bound or with no gap.
+    pub fn poll_timeout(&self) -> Option<Instant> {
+        let bound = self.max_gap_wait?;
+        self.oldest_gap().map(|(_, known)| known + bound)
+    }
+
+    /// The oldest missing packet among those buffered, and when the builder learned of it
+    /// (the arrival of the first packet after it). Only tracked with a gap bound.
+    fn oldest_gap(&self) -> Option<(u16, Instant)> {
+        if self.arrivals.is_empty() || !self.filled.has_data() {
+            return None;
+        }
+        let mut i = self.filled.head;
+        while i != self.filled.tail && self.buffer[i as usize].is_some() {
+            i = i.wrapping_add(1);
+        }
+        if i == self.filled.tail {
+            return None;
+        }
+        let missing = i;
+        while i != self.filled.tail && self.buffer[i as usize].is_none() {
+            i = i.wrapping_add(1);
+        }
+        // `filled.tail - 1` always holds the newest packet, so there is one after the gap.
+        let known = self.arrivals.get(i as usize).copied().flatten()?;
+        Some((missing, known))
+    }
+
+    /// Gives up every gap that has been missing for the bound at `now`, as `max_late` does.
+    fn give_up_gaps(&mut self, now: Instant) {
+        let Some(bound) = self.max_gap_wait else {
+            return;
+        };
+        while let Some((missing, known)) = self.oldest_gap() {
+            if now < known + bound {
+                break;
+            }
+            while self.filled.has_data() && self.filled.compare(missing) == Comparison::Inside {
+                self.drop_head(now);
+            }
+            self.skipped_gaps += 1;
+            self.key_frame_requested = true;
         }
     }
 
@@ -145,6 +255,9 @@ impl<T: Depacketizer> SampleBuilder<T> {
 
     fn release_packet(&mut self, i: u16) {
         self.buffer[i as usize] = None;
+        if let Some(arrival) = self.arrivals.get_mut(i as usize) {
+            *arrival = None;
+        }
     }
 
     /// Clears all buffers that have already been consumed by
@@ -181,32 +294,38 @@ impl<T: Depacketizer> SampleBuilder<T> {
         while (self.too_old(&self.filled) || (self.filled.count() > self.max_late))
             && self.filled.has_data()
         {
-            if self.active.empty() {
-                // refill the active based on the filled packets
-                self.active = self.filled;
-            }
-
-            if self.active.has_data() && (self.active.head == self.filled.head) {
-                // attempt to force the active packet to be consumed even though
-                // outstanding data may be pending arrival
-                let err = match self.build_sample(now, true) {
-                    Ok(_) => continue,
-                    Err(e) => e,
-                };
-
-                if !matches!(err, BuildError::InvalidPartition(_)) {
-                    // In the InvalidPartition case `build_sample` will have already adjusted `dropped_packets`.
-                    self.dropped_packets = self.dropped_packets.saturating_add(1);
-                }
-
-                // could not build the sample so drop it
-                self.consumed_any = true;
-                self.active.head = self.active.head.wrapping_add(1);
-            }
-
-            self.release_packet(self.filled.head);
-            self.filled.head = self.filled.head.wrapping_add(1);
+            self.drop_head(now);
         }
+    }
+
+    /// Consumes the oldest buffered position whatever is pending: builds the sample it starts
+    /// if that can be built now, otherwise drops it (counted in `dropped_packets`).
+    fn drop_head(&mut self, now: Instant) {
+        if self.active.empty() {
+            // refill the active based on the filled packets
+            self.active = self.filled;
+        }
+
+        if self.active.has_data() && (self.active.head == self.filled.head) {
+            // attempt to force the active packet to be consumed even though
+            // outstanding data may be pending arrival
+            let err = match self.build_sample(now, true) {
+                Ok(_) => return,
+                Err(e) => e,
+            };
+
+            if !matches!(err, BuildError::InvalidPartition(_)) {
+                // In the InvalidPartition case `build_sample` will have already adjusted `dropped_packets`.
+                self.dropped_packets = self.dropped_packets.saturating_add(1);
+            }
+
+            // could not build the sample so drop it
+            self.consumed_any = true;
+            self.active.head = self.active.head.wrapping_add(1);
+        }
+
+        self.release_packet(self.filled.head);
+        self.filled.head = self.filled.head.wrapping_add(1);
     }
 
     /// Adds an RTP Packet to self's buffer.
@@ -216,6 +335,9 @@ impl<T: Depacketizer> SampleBuilder<T> {
     pub fn push(&mut self, now: Instant, p: Packet) {
         let sequence_number = p.header.sequence_number;
         self.buffer[sequence_number as usize] = Some(p);
+        if let Some(arrival) = self.arrivals.get_mut(sequence_number as usize) {
+            *arrival = Some(now);
+        }
         match self.filled.compare(sequence_number) {
             Comparison::Void => {
                 self.filled.head = sequence_number;
@@ -237,6 +359,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
             _ => {}
         }
         self.purge_buffers(now);
+        self.give_up_gaps(now);
     }
 
     /// Creates a sample from a valid collection of RTP Packets by
@@ -410,6 +533,7 @@ impl<T: Depacketizer> SampleBuilder<T> {
     /// Compiles pushed RTP packets into media samples and then
     /// returns the next valid sample (or None if no sample is compiled).
     pub fn pop(&mut self, now: Instant) -> Option<Sample> {
+        self.give_up_gaps(now);
         let _ = self.build_sample(now, false);
 
         if self.prepared.empty() {
