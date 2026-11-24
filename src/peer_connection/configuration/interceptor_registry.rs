@@ -378,8 +378,9 @@ pub struct DefaultInterceptorOptions {
     /// or waits its turn under RFC 4585 section 3.5.2 like other feedback. See
     /// [`RtcpSessionBuilder::with_immediate_congestion_feedback`](interceptor::RtcpSessionBuilder::with_immediate_congestion_feedback).
     pub rtcp_immediate_congestion_feedback: bool,
-    /// Whether every local SSRC carries a report block for every remote SSRC (RFC 8108
-    /// section 5.1 to the letter). `false` by default. See
+    /// Whether every local SSRC carries a report block for every remote SSRC and for the
+    /// endpoint's other SSRCs (RFC 8108 section 5.1). `false` by default (measured, see the
+    /// setting), `true` in the `StrictRfc` behaviour profile. See
     /// [`RtcpSessionBuilder::with_report_from_every_ssrc`](interceptor::RtcpSessionBuilder::with_report_from_every_ssrc).
     pub rtcp_report_from_every_ssrc: bool,
     /// Whether transport-wide feedback reports a packet received again when the base sequence

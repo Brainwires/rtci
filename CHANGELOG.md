@@ -192,6 +192,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Engine behaviour change (report content on the wire, two seconds a month). Rows:
   RFC7164-5.1-1 to 5.1-5 (`missing` -> `tested`), 5-3 (`missing` -> `partial`: the RFC 8888
   report timestamp and the NTP header extensions are still written there).
+### Behaviour changes
+
+- **RFC 8108 section 5.1: the RFC form of `with_report_from_every_ssrc` reports on the
+  co-located SSRCs too.** With `RtcpSessionBuilder::with_report_from_every_ssrc(true)`
+  (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, the `StrictRfc` profile) each
+  local SSRC's SR or RR now also carries a block for each of the endpoint's other SSRCs that
+  has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
+  highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
+  libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
+  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
+  `setting`, measured).
 
 ## [0.1.0] - 2026-11-24
 
