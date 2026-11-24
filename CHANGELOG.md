@@ -7,6 +7,187 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **statistics** (`conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
+  fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
+  `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
+
+### Features
+
+- **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
+  6.5; built on `conf/gcc-5-app-limited`, merged in, for the pacer's pause and discards):
+  - `rtci_video::send::SendPipeline`: pictures in, RTP packets out (the negotiated codec's
+    payloader, timestamps from the capture time). The target (`RTCRtpSender::target_bitrates`,
+    the estimate less the retransmission reserve) sets the encoder's rate, never below the
+    encoder's minimum (pictures dropped in the ratio target / minimum instead); a target of 0
+    (the pacer's pause) stops the encoder, and the first picture after it is a key frame;
+    PLI, FIR and the pacer's discards ask for a key frame, not served within two round trips
+    of the last one (RFC 5104 3.5.1; 500 ms until a round trip is known, RFC 7728 8.1);
+    resolution and frame-rate steps when the target falls under what the format needs, in the
+    order of the W3C `degradationPreference` (default `balanced`), with a 5 s hold before a
+    step back up. `SendConfig::chrome()`: libwebrtc's choices (no key frame on resume, one
+    request served per 300 ms, `maintain-framerate`).
+  - `rtci_video::engine::VideoSender`: the glue to an `RTCRtpSender` (target, events, round
+    trip, `update_encoder_stats` with `qualityLimitation*`).
+  - `VideoEncoder::set_rates` and `min_bitrate_bps` (both with defaults), `EncoderFactory`,
+    `picture::scale_into`.
+  - Breaking for an exhaustive `match` (`rtci-video` is not published): `engine::Error` has a
+    new variant `Encode`.
+  - Measured with the VP8 backend in a two-peer call on the default interceptors (640x360,
+    30 fps): open link, encoded rate within 0.1 % of the target over 10 s windows; the capacity
+    test's 300 kbit/s cap on six seeds, longest freeze 1.19 to 1.71 s, 0 frames discarded by
+    the pacer, 0 pictures encoded in a pause, a key frame after each, 1186 to 1385 kbit/s 20 s
+    after the cap; known cost: the oldest picture shown is 10.2 to 11.7 s old after the cap
+    (the pacer's backlog of the 2.5 Mbit/s before the estimate fell); 2 % loss repaired by
+    NACK with no wait beyond the slowest repair. Each reaction mutation-checked.
+  - Not built yet: simulcast, temporal layers and SVC, the rate allocators, the encoder bitrate
+    adjuster, the zero-hertz cadence adapter.
+
+- **video pipeline: codec safety** (`conf/vp-6-codec-safety`, `docs/video-pipeline.md` 4.7,
+  4.8, 6.4):
+  - Breaking: `rtci-video`'s `vp8` feature is opt-in again (default features: `engine`). The
+    default build decodes no video until the application enables a codec. Supply-chain review
+    of `vp8-decoder` / `vp8-encoder` 0.1.3 (publisher, contents against the tagged commit,
+    `unsafe`, build-time code, licences, prior art) with a recommendation for the owner;
+    `scripts/check-video-codec-pins.py` fails on any other version or checksum.
+  - `codec::av1`: the 96-byte leak found by fuzzing is rav1d 1.1.0's (memorysafety/rav1d#1522:
+    every `dav1d_picture_unref` and every empty `dav1d_get_picture` leaves a 48-byte `Arc`;
+    about 50 to 100 bytes a frame), documented on the feature. Separately, a temporal unit's
+    `Dav1dData` is now released when taking out a waiting picture fails (found by reading).
+    The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
+    main branch, unreleased), documented on the feature in plain words; reproducer in
+    `rtci-video/tests/data/rav1d-abort.ivf`.
+  - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process
+    (`serve` on the child's side); a child that aborts, crashes or hangs costs that frame.
+  - `codec::vp8` catches a panic of the decoder and replaces it (`DecodeError::Corrupt`).
+  - Features `libvpx` (VP8 / VP9 decode and encode), `dav1d` (AV1 decode) and `openh264`
+    (H.264 decode and encode with Cisco's binary only, accepted by its published SHA-256): each
+    loads its library at run time, so building them needs no system library (`cargo check
+    --all-features` stays pure Rust). libvpx's decode of the VP8 fixture equals libvpx's
+    reference output; libdav1d survives every single-bit flip of a key frame (19,352) and 1500
+    seeded mutations that abort rav1d. The AV1 wrappers no longer refuse a key frame after an
+    accepted hostile delta frame (an error met while taking out a waiting picture is the
+    earlier unit's). A CI job installing the libraries is proposed, not added.
+  - The root crate no longer dev-depends on `rtci-video`: the interop peer's `pipeline`
+    scenario is built by the new `rtci-video-interop` package (feature `pipeline`, binary
+    `interop-peer-video`, which the browser stage now starts), so workspace builds compile no
+    codec.
+
+- **video pipeline, phase 2: codecs** (`conf/vp-5-codecs`, `docs/video-pipeline.md` 4.6):
+  - `rtci-video` feature `vp8` (default): VP8 decode and encode in pure Rust with
+    `vp8-decoder` / `vp8-encoder` pinned to `=0.1.3`. Checked on hosted runners: the WebM
+    project's 59 VP8 test vectors bit-exact, libvpx's decode of the same streams identical
+    (58 of 60; the two others change resolution, which the comparison tool rescales), every
+    encoded stream decoded identically by libvpx, 720p decode at 257 fps or more and encode at
+    53 fps or more on one core, 15 min of libFuzzer with no finding.
+  - Feature `av1` (opt-in): AV1 decode with `rav1d` and encode with `rav1e`, both without
+    assembly. rav1d matches dav1d on libaom's vectors (10 of 10) and decodes 720p at about
+    40 fps, but aborts the process on a hostile frame (a panic across its C API); rav1e makes
+    5 to 8 pictures a second at 360p (not real time) and holds 4 pictures back.
+  - `picture` (I420 view and buffer, PSNR, a synthetic source), the `encoder::VideoEncoder`
+    trait, `VideoDecoder::picture`, `codec::decoder_for`.
+  - Tests: PSNR at 640x360 and 600 kbit/s (VP8 39.5 dB), hostile VP8 frames (no panic), the
+    libvpx fixture's MD5, the VP8 fixture and a rav1e stream through loss decoded bit-exactly,
+    a two-peer call with the real VP8 codecs. `scripts/video-codec-check.sh` and
+    `rtci-video/examples/codec_check.rs` reproduce the evidence.
+  - interop-peer scenario `{"media":"pipeline","video":"VP8"|"AV1"}` and the browser cells
+    `pipeline receive VP8` / `AV1`; the root crate dev-depends on `rtci-video` (path only).
+  - `deny.toml`: libfuzzer-sys (NCSA, a permissive licence) allowed; it is a `cfg(fuzzing)`-only
+    dependency of rav1e. The dev profile optimises the codec crates (their tests code video).
+
+- **video pipeline, phase 1b: the engine boundary** (`conf/vp-4-engine-boundary`,
+  `docs/video-pipeline.md` 2.6, 2.9):
+  - `RTCRtpReceiver::set_nack_horizon(now, ssrc, oldest_useful)` and
+    `interceptor::NackControl::Horizon`: the receiving application tells the NACK generator the
+    oldest sequence number it can still use (RFC 4588 6.3: a retransmission is asked for only
+    while it "would still be useful"); the generator asks for no older missing packet and
+    forgets its requests for them (wrap-aware; `None` removes the horizon)
+    (`packets_older_than_the_horizon_are_not_asked_for`,
+    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). `rtci_video::engine::
+    VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
+    nack_horizon`, on by default, as libwebrtc's `NackRequester::ClearUpTo`).
+  - The jitter buffer members (`jitterBufferDelay`, `jitterBufferTargetDelay`,
+    `jitterBufferMinimumDelay`, `jitterBufferEmittedCount`) in `DecoderStatsUpdate`, winning over
+    the audio update's (`the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
+    `rtci-video` no longer goes through `update_audio_receiver_stats`.
+  - `rtci-video`'s two-peer tests trace every lost packet (gap seen, first NACK, RTX sent and
+    arrived) and count NACKs for packets behind the horizon (none, asserted in the capacity
+    scenario); `docs/video-repair-latency.md` holds the trace.
+
+- **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
+  `conf/vp-1-design`, `docs/video-pipeline.md`; on master by `conf/vp-3-on-master`). A new
+  crate, `rtci-video`, sans-I/O, pure Rust, no codec dependency, not published with 0.1.0
+  (`publish = false`):
+  - `assembly::PacketBuffer`: frames from RTP packets per payload format (VP8 S / PID, VP9
+    B / E, AV1 and the Dependency Descriptor's start / end of frame, H.264 / H.265 by RTP
+    timestamp and marker), key frames and key-frame sizes, duplicates, late packets, overflow
+    and backward jumps as libwebrtc's `packet_buffer.cc`.
+  - `reference::ReferenceFinder`: frame ids and references with libwebrtc's dispatch: VP8
+    temporal layers (TL0PICIDX, TID, Y), picture-id-only and sequence-number-only streams
+    (padding closes gaps), VP9 flexible mode with inter-layer dependency and non-flexible
+    picture groups, the Dependency Descriptor's fdiffs.
+  - `buffer::FrameBuffer`: decodable temporal units, dropping of frames passed over
+    (`framesDropped`, `packetsDiscarded`), libwebrtc's limits (800 frames, 8192 decoded ids).
+  - `timing`: ports of libwebrtc's jitter estimator (Kalman filter on frame delay variation
+    and size, noise threshold, retransmission term, frame-rate scaling), timestamp
+    extrapolator, decode-time percentile and render-time model, the playout-delay extension,
+    `jitterBufferTarget` and an A/V sync delay input; release at render time minus decode and
+    render time, late pictures skipped (`kMaxAllowedFrameDelay`), the low-latency path.
+  - `keyframe::KeyFramePolicy`: PLI on a first frame that is not a key frame, packet buffer
+    overflow, a missing Dependency Descriptor structure, the decode timeouts (200 ms / 3 s, or
+    from `rtx-time`), decoder errors, repeated every 200 ms until a key frame decodes, and a
+    repair window (5 RTT, at least 1 s) after which pictures stuck behind a gap ask for a key
+    frame (`ReceiveConfig::chrome()` keeps libwebrtc's decode timeout only).
+  - `render::RenderStats`: W3C `freezeCount`, `totalFreezesDuration`, `pauseCount`,
+    `totalPausesDuration`, `totalInterFrameDelay`, `totalSquaredInterFrameDelay`,
+    `framesRendered` (W3C definition; libwebrtc's 5-interval warm-up in `chrome()`).
+  - `decoder::VideoDecoder` trait and `ReferenceCheckingDecoder`; `engine::VideoReceiver`
+    (feature `engine`): one pipeline per SSRC of an `RTCRtpReceiver`, PLI through
+    `write_rtcp` when `nack pli` was negotiated, `report_received_frame`, the statistics
+    through `update_decoder_stats` (the jitter buffer members through
+    `update_audio_receiver_stats` for now).
+  - Tests: libvpx VP8 / VP9 IVF and H.264 / H.265 Annex B fixtures through 5 % loss with
+    0..40 ms reordering and retransmission (every picture byte-identical, in an order the
+    stream allows, no freeze); calls between two peer connections at 2 % and 10 % loss and a
+    300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
+    decode out of order).
+
+### Test environment and documentation
+
+- **docs**: `docs/video-pipeline.md`, the design of the video half of the media pipeline
+  (`conf/vp-1-design`): what the engine already gives video, what a complete receiver and
+  sender need beyond it, each element against libwebrtc (`a222406d`) and the RFCs / W3C
+  specifications, the codecs available under the licence and pure-Rust constraints (with the
+  H.264 / H.265 patent situation and Cisco's OpenH264 binary conditions,
+  `specs/openh264-BINARY_LICENSE.txt` quoted), the crate layout, threading and A/V sync, the
+  phases with their acceptance figures, and the decisions left to the owner.
+
+## [0.1.0] - 2026-11-24
+
+The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
+`rtci-*` (see "Crate rename" below and `docs/rename.md`), the repository is `Brainwires/rtci`,
+and the version line restarts at 0.1.0 (crates.io ignores the `+brainwires.N` build metadata of
+the `0.22.0+brainwires.N` line, whose tags stay). Since 0.22.0+brainwires.6: trains 11 to 19 of
+the clause-by-clause conformance work (the audit's open MUST rows down to 16, every one
+classified), behaviour profiles (`Rfc`, `StrictRfc`, `Chrome`, `Performance`) that govern 49
+settings, one draft-conforming congestion estimator with the RFC 4588 section 7 retransmission
+rule as the default, a pacer whose queue time is bounded and which pauses a source that follows
+the target, SRTP re-keying that keeps the call when both sides' offers cross and loses no
+packet, and data channels reopened on a just-closed stream that deliver every message.
+
+- **Breaking changes**: the crate rename, and the API changes listed below by area (the GCC
+  interceptor runs the default estimator behind the same `GccHandle`, retransmissions are held
+  within the target by default, and more).
+- **Known limits** (below): the cost of a capacity drop that meets the estimate at a higher rate
+  (about 1.4 Mbit/s), the picture's age after a sudden drop with the pacer, the delay-side
+  detector's blind interval after a sudden drop, and the margin a short SRTP key lifetime leaves
+  for a re-keying.
+- Fixed since brainwires.6's known issues: the pacer's unbounded queue, the circuit breaker's
+  missing verdict for video flows, simulcast packets without RID or MID on SSRCs declared in a
+  section with `a=rid`, video freezing for seconds after a capacity drop, STUN SOFTWARE that
+  could not be turned off, and sender reports after a clock-rate switch on one SSRC.
+
 ### Crate rename
 
 <!-- rtci-rename:start -->
@@ -15,9 +196,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-- **statistics** (`conf/vp-4-engine-boundary`): `DecoderStatsUpdate` has four new public
-  fields, `jitter_buffer_delay`, `jitter_buffer_target_delay`, `jitter_buffer_minimum_delay` and
-  `jitter_buffer_emitted_count`: a struct literal without `..Default::default()` needs them.
 - **interceptors (congestion control)**: one GCC estimator (`conf/gcc-4-release`). The
   TWCC-driven interceptor (`GccInterceptorBuilder`, `GccHandle`) had an estimator of its own
   that departed from draft-ietf-rmcat-gcc-02 in three places: the loss cut was applied to the
@@ -743,8 +921,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key frame waits behind it. Planned after this release: no repeat repair of a packet whose
   first repair transport-wide feedback reports received, and first repairs ahead of repeats.
 - **interceptors (pacer), a sudden drop of the path's capacity**: with the default
-  interceptors (the pacer) the receiver's picture can be 6 to 8.5 s old for a few seconds
-  after a sudden drop, though it never stops for more than 2 s. Measured in
+  interceptors (the pacer) the receiver's picture can be 5.6 to 10.2 s old for a few seconds
+  after a sudden drop, though it never stops for more than 2 s (the repair work planned for
+  0.1.x, `conf/rtx-1-duplicate-repairs`, brings it to about 4.1 to 6.6 s). Measured in
   `tests/capacity_cap_video_rtc2rtc.rs` (a call at 2.5 Mbit/s whose path drops to 300 kbit/s;
   six seeds on three wall clocks): longest time without a usable frame 1.38 to 1.90 s, oldest
   picture shown 5.95 to 8.56 s (without a pacer: 0.83 to 1.24 s and 2.26 to 3.21 s). Cause:
@@ -767,6 +946,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8.53 s, oldest picture 7.15 to 7.53 s; the receiver holds the gap for its whole packet
   window). Planned after this release: no repeat repair of a packet whose first repair
   transport-wide feedback reports received, and first repairs ahead of repeats.
+
+- **interceptors (congestion control), delay-side detection after a sudden drop**: the
+  delay-based over-use detector sees queue growth only through transport-wide feedback, so for
+  some 0.45 s after a sudden capacity drop (the path's queue, its delay and one feedback
+  interval) nothing tells the sender, and the first cuts follow the received rate, whose 500 ms
+  window still holds the old rate. Fresh repairs sent in that time meet a full queue (20 to 22 of
+  the 23 to 32 retransmissions dropped at the path in
+  `a_capacity_cap_that_arrives_at_a_higher_rate_costs_an_older_picture`). On a reordering,
+  lossless path the delay side still settles below capacity (the loss side no longer takes a
+  packet that is only overtaken for a loss; the delay-based grouping is a proposal,
+  `docs/gcc-reordering.md`).
+- **peer connection (SRTP re-keying), the margin a short key lifetime leaves**: the re-keying has
+  the last sixteenth of an SRTP key's lifetime to complete (an offer and its answer through the
+  application's signalling, ICE checks on new candidates and a DTLS handshake), and the margin is
+  counted in packets: a lifetime short enough that a sixteenth of it lasts less than the
+  re-keying at the stream's packet rate ends the session instead. Size a lifetime as at least
+  `16 x packet rate x re-keying time` (a 9600-packet lifetime at 188 packets a second leaves
+  3.2 s, and a re-keying through TURN takes about 2 s); the connection logs a warning when the
+  margin it has is under 2 s. The profiles' lifetimes are far longer; shorter ones are for tests
+  and constrained deployments (`conf/rekey-3-server-margin`).
 
 ### Behaviour changes
 
@@ -1168,144 +1367,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rand`, are fixed or masked); with the process-wide anchor 473 of the sender's 482 packets
   differ.
 
-- **video pipeline, phase 3: the send pipeline** (`conf/vp-7-send`, `docs/video-pipeline.md`
-  6.5; built on `conf/gcc-5-app-limited`, merged in, for the pacer's pause and discards):
-  - `rtci_video::send::SendPipeline`: pictures in, RTP packets out (the negotiated codec's
-    payloader, timestamps from the capture time). The target (`RTCRtpSender::target_bitrates`,
-    the estimate less the retransmission reserve) sets the encoder's rate, never below the
-    encoder's minimum (pictures dropped in the ratio target / minimum instead); a target of 0
-    (the pacer's pause) stops the encoder, and the first picture after it is a key frame;
-    PLI, FIR and the pacer's discards ask for a key frame, not served within two round trips
-    of the last one (RFC 5104 3.5.1; 500 ms until a round trip is known, RFC 7728 8.1);
-    resolution and frame-rate steps when the target falls under what the format needs, in the
-    order of the W3C `degradationPreference` (default `balanced`), with a 5 s hold before a
-    step back up. `SendConfig::chrome()`: libwebrtc's choices (no key frame on resume, one
-    request served per 300 ms, `maintain-framerate`).
-  - `rtci_video::engine::VideoSender`: the glue to an `RTCRtpSender` (target, events, round
-    trip, `update_encoder_stats` with `qualityLimitation*`).
-  - `VideoEncoder::set_rates` and `min_bitrate_bps` (both with defaults), `EncoderFactory`,
-    `picture::scale_into`.
-  - Breaking for an exhaustive `match` (`rtci-video` is not published): `engine::Error` has a
-    new variant `Encode`.
-  - Measured with the VP8 backend in a two-peer call on the default interceptors (640x360,
-    30 fps): open link, encoded rate within 0.1 % of the target over 10 s windows; the capacity
-    test's 300 kbit/s cap on six seeds, longest freeze 1.19 to 1.71 s, 0 frames discarded by
-    the pacer, 0 pictures encoded in a pause, a key frame after each, 1186 to 1385 kbit/s 20 s
-    after the cap; known cost: the oldest picture shown is 10.2 to 11.7 s old after the cap
-    (the pacer's backlog of the 2.5 Mbit/s before the estimate fell); 2 % loss repaired by
-    NACK with no wait beyond the slowest repair. Each reaction mutation-checked.
-  - Not built yet: simulcast, temporal layers and SVC, the rate allocators, the encoder bitrate
-    adjuster, the zero-hertz cadence adapter.
-
-- **video pipeline: codec safety** (`conf/vp-6-codec-safety`, `docs/video-pipeline.md` 4.7,
-  4.8, 6.4):
-  - Breaking: `rtci-video`'s `vp8` feature is opt-in again (default features: `engine`). The
-    default build decodes no video until the application enables a codec. Supply-chain review
-    of `vp8-decoder` / `vp8-encoder` 0.1.3 (publisher, contents against the tagged commit,
-    `unsafe`, build-time code, licences, prior art) with a recommendation for the owner;
-    `scripts/check-video-codec-pins.py` fails on any other version or checksum.
-  - `codec::av1`: the 96-byte leak found by fuzzing is rav1d 1.1.0's (memorysafety/rav1d#1522:
-    every `dav1d_picture_unref` and every empty `dav1d_get_picture` leaves a 48-byte `Arc`;
-    about 50 to 100 bytes a frame), documented on the feature. Separately, a temporal unit's
-    `Dav1dData` is now released when taking out a waiting picture fails (found by reading).
-    The abort on hostile input is rav1d 1.1.0's (memorysafety/rav1d#1497, fixed on its
-    main branch, unreleased), documented on the feature in plain words; reproducer in
-    `rtci-video/tests/data/rav1d-abort.ivf`.
-  - Feature `isolation`: `codec::isolated::IsolatedDecoder` runs any decoder in a child process
-    (`serve` on the child's side); a child that aborts, crashes or hangs costs that frame.
-  - `codec::vp8` catches a panic of the decoder and replaces it (`DecodeError::Corrupt`).
-  - Features `libvpx` (VP8 / VP9 decode and encode), `dav1d` (AV1 decode) and `openh264`
-    (H.264 decode and encode with Cisco's binary only, accepted by its published SHA-256): each
-    loads its library at run time, so building them needs no system library (`cargo check
-    --all-features` stays pure Rust). libvpx's decode of the VP8 fixture equals libvpx's
-    reference output; libdav1d survives every single-bit flip of a key frame (19,352) and 1500
-    seeded mutations that abort rav1d. The AV1 wrappers no longer refuse a key frame after an
-    accepted hostile delta frame (an error met while taking out a waiting picture is the
-    earlier unit's). A CI job installing the libraries is proposed, not added.
-  - The root crate no longer dev-depends on `rtci-video`: the interop peer's `pipeline`
-    scenario is built by the new `rtci-video-interop` package (feature `pipeline`, binary
-    `interop-peer-video`, which the browser stage now starts), so workspace builds compile no
-    codec.
-
-- **video pipeline, phase 2: codecs** (`conf/vp-5-codecs`, `docs/video-pipeline.md` 4.6):
-  - `rtci-video` feature `vp8` (default): VP8 decode and encode in pure Rust with
-    `vp8-decoder` / `vp8-encoder` pinned to `=0.1.3`. Checked on hosted runners: the WebM
-    project's 59 VP8 test vectors bit-exact, libvpx's decode of the same streams identical
-    (58 of 60; the two others change resolution, which the comparison tool rescales), every
-    encoded stream decoded identically by libvpx, 720p decode at 257 fps or more and encode at
-    53 fps or more on one core, 15 min of libFuzzer with no finding.
-  - Feature `av1` (opt-in): AV1 decode with `rav1d` and encode with `rav1e`, both without
-    assembly. rav1d matches dav1d on libaom's vectors (10 of 10) and decodes 720p at about
-    40 fps, but aborts the process on a hostile frame (a panic across its C API); rav1e makes
-    5 to 8 pictures a second at 360p (not real time) and holds 4 pictures back.
-  - `picture` (I420 view and buffer, PSNR, a synthetic source), the `encoder::VideoEncoder`
-    trait, `VideoDecoder::picture`, `codec::decoder_for`.
-  - Tests: PSNR at 640x360 and 600 kbit/s (VP8 39.5 dB), hostile VP8 frames (no panic), the
-    libvpx fixture's MD5, the VP8 fixture and a rav1e stream through loss decoded bit-exactly,
-    a two-peer call with the real VP8 codecs. `scripts/video-codec-check.sh` and
-    `rtci-video/examples/codec_check.rs` reproduce the evidence.
-  - interop-peer scenario `{"media":"pipeline","video":"VP8"|"AV1"}` and the browser cells
-    `pipeline receive VP8` / `AV1`; the root crate dev-depends on `rtci-video` (path only).
-  - `deny.toml`: libfuzzer-sys (NCSA, a permissive licence) allowed; it is a `cfg(fuzzing)`-only
-    dependency of rav1e. The dev profile optimises the codec crates (their tests code video).
-
-- **video pipeline, phase 1b: the engine boundary** (`conf/vp-4-engine-boundary`,
-  `docs/video-pipeline.md` 2.6, 2.9):
-  - `RTCRtpReceiver::set_nack_horizon(now, ssrc, oldest_useful)` and
-    `interceptor::NackControl::Horizon`: the receiving application tells the NACK generator the
-    oldest sequence number it can still use (RFC 4588 6.3: a retransmission is asked for only
-    while it "would still be useful"); the generator asks for no older missing packet and
-    forgets its requests for them (wrap-aware; `None` removes the horizon)
-    (`packets_older_than_the_horizon_are_not_asked_for`,
-    `a_receiver_stops_asking_for_packets_behind_its_nack_horizon`). `rtci_video::engine::
-    VideoReceiver::poll` moves it on after every released picture (`ReceiveConfig::
-    nack_horizon`, on by default, as libwebrtc's `NackRequester::ClearUpTo`).
-  - The jitter buffer members (`jitterBufferDelay`, `jitterBufferTargetDelay`,
-    `jitterBufferMinimumDelay`, `jitterBufferEmittedCount`) in `DecoderStatsUpdate`, winning over
-    the audio update's (`the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`);
-    `rtci-video` no longer goes through `update_audio_receiver_stats`.
-  - `rtci-video`'s two-peer tests trace every lost packet (gap seen, first NACK, RTX sent and
-    arrived) and count NACKs for packets behind the horizon (none, asserted in the capacity
-    scenario); `docs/video-repair-latency.md` holds the trace.
-
-- **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
-  `conf/vp-1-design`, `docs/video-pipeline.md`; on master by `conf/vp-3-on-master`). A new
-  crate, `rtci-video`, sans-I/O, pure Rust, no codec dependency, not published with 0.1.0
-  (`publish = false`):
-  - `assembly::PacketBuffer`: frames from RTP packets per payload format (VP8 S / PID, VP9
-    B / E, AV1 and the Dependency Descriptor's start / end of frame, H.264 / H.265 by RTP
-    timestamp and marker), key frames and key-frame sizes, duplicates, late packets, overflow
-    and backward jumps as libwebrtc's `packet_buffer.cc`.
-  - `reference::ReferenceFinder`: frame ids and references with libwebrtc's dispatch: VP8
-    temporal layers (TL0PICIDX, TID, Y), picture-id-only and sequence-number-only streams
-    (padding closes gaps), VP9 flexible mode with inter-layer dependency and non-flexible
-    picture groups, the Dependency Descriptor's fdiffs.
-  - `buffer::FrameBuffer`: decodable temporal units, dropping of frames passed over
-    (`framesDropped`, `packetsDiscarded`), libwebrtc's limits (800 frames, 8192 decoded ids).
-  - `timing`: ports of libwebrtc's jitter estimator (Kalman filter on frame delay variation
-    and size, noise threshold, retransmission term, frame-rate scaling), timestamp
-    extrapolator, decode-time percentile and render-time model, the playout-delay extension,
-    `jitterBufferTarget` and an A/V sync delay input; release at render time minus decode and
-    render time, late pictures skipped (`kMaxAllowedFrameDelay`), the low-latency path.
-  - `keyframe::KeyFramePolicy`: PLI on a first frame that is not a key frame, packet buffer
-    overflow, a missing Dependency Descriptor structure, the decode timeouts (200 ms / 3 s, or
-    from `rtx-time`), decoder errors, repeated every 200 ms until a key frame decodes, and a
-    repair window (5 RTT, at least 1 s) after which pictures stuck behind a gap ask for a key
-    frame (`ReceiveConfig::chrome()` keeps libwebrtc's decode timeout only).
-  - `render::RenderStats`: W3C `freezeCount`, `totalFreezesDuration`, `pauseCount`,
-    `totalPausesDuration`, `totalInterFrameDelay`, `totalSquaredInterFrameDelay`,
-    `framesRendered` (W3C definition; libwebrtc's 5-interval warm-up in `chrome()`).
-  - `decoder::VideoDecoder` trait and `ReferenceCheckingDecoder`; `engine::VideoReceiver`
-    (feature `engine`): one pipeline per SSRC of an `RTCRtpReceiver`, PLI through
-    `write_rtcp` when `nack pli` was negotiated, `report_received_frame`, the statistics
-    through `update_decoder_stats` (the jitter buffer members through
-    `update_audio_receiver_stats` for now).
-  - Tests: libvpx VP8 / VP9 IVF and H.264 / H.265 Annex B fixtures through 5 % loss with
-    0..40 ms reordering and retransmission (every picture byte-identical, in an order the
-    stream allows, no freeze); calls between two peer connections at 2 % and 10 % loss and a
-    300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
-    decode out of order).
-
 ### Bug Fixes
 
 - **stream-driver**: a TCP connection from a socket to itself is a failed connection
@@ -1419,6 +1480,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reported_loss_of_sequence_numbers_never_sent_does_not_trip_the_congestion_breaker`,
   `reported_loss_of_sequence_numbers_never_sent_across_the_wrap_does_not_trip_the_congestion_breaker`,
   and the `never_sent` unit tests).
+- **interceptors** (RFC 8083 section 4.4, `conf/gcc-4-release`): the media-usability circuit
+  breaker judged a flow by the loss its receiver reports, which counts the sequence numbers the
+  pacer discarded before they left (RFC 3550 section 6.4.1), so a sender above the target could
+  be ceased as unusable for its own discards. It now reads the same corrected loss as the
+  congestion breaker (the loss of the interval a report covers, less the numbers never sent).
+  Loss on the path ceases an unusable flow as before
+  (`reported_loss_of_sequence_numbers_never_sent_does_not_make_the_media_unusable`).
 - **sctp, data channels** (RFC 6525 5.1.2 A3, 5.2.2 E2/E4; RFC 8831 6.7;
   `conf/sctp-16-delivery-stall`): a data channel opened right after another one was closed in
   the middle of a transfer stalled: its messages up to one Stream Sequence Number arrived and
@@ -1603,13 +1671,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Test environment and documentation
 
-- **docs**: `docs/video-pipeline.md`, the design of the video half of the media pipeline
-  (`conf/vp-1-design`): what the engine already gives video, what a complete receiver and
-  sender need beyond it, each element against libwebrtc (`a222406d`) and the RFCs / W3C
-  specifications, the codecs available under the licence and pure-Rust constraints (with the
-  H.264 / H.265 patent situation and Cisco's OpenH264 binary conditions,
-  `specs/openh264-BINARY_LICENSE.txt` quoted), the crate layout, threading and A/V sync, the
-  phases with their acceptance figures, and the decisions left to the owner.
 - **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
   `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
   `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base
