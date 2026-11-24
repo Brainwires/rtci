@@ -34,10 +34,12 @@
 //! peer-certificate checks run on them again. A session is forgotten when an association that
 //! used it fails (RFC 5246 sections 7.2 and 7.2.2).
 //!
-//! WebRTC authenticates every DTLS association by the certificate fingerprints its SDP carries,
-//! and makes a new association per session: the peer connection of the `rtci` crate configures
-//! no tickets, no session cache and no session store, so it neither offers nor accepts a
-//! resumption in either version.
+//! WebRTC authenticates every DTLS association by the certificate fingerprints its SDP carries.
+//! The peer connection of the `rtci` crate resumes only within one connection (RFC 5764
+//! section 3: the transports of unbundled sections share the session of the first): it gives
+//! the first association of each such transport the connection's own store, session cache
+//! and ticket keys ([`SessionTicketIssuer`]), and every other association none, so that it
+//! neither offers nor accepts a resumption.
 
 use crate::cipher_suite::{CipherSuiteHash, CipherSuiteId};
 use crypto::SecretVec;
@@ -85,6 +87,12 @@ impl Tls13Session {
     /// The most early data the server said it would take with this ticket, 0 for none.
     pub fn max_early_data(&self) -> u32 {
         self.max_early_data
+    }
+
+    /// The server's certificate chain in the handshake the ticket came from: what a resumption
+    /// with it reports, and what the configured peer-certificate check runs on again.
+    pub fn peer_certificates(&self) -> &[Vec<u8>] {
+        &self.peer_certificates
     }
 
     /// The `obfuscated_ticket_age` of an offer made at `now` (RFC 8446 section 4.2.11.1): the
@@ -157,6 +165,12 @@ impl Dtls12Session {
     /// Whether the client holds a ticket (RFC 5077) for the session.
     pub fn has_ticket(&self) -> bool {
         self.ticket.is_some()
+    }
+
+    /// The peer's certificate chain in the full handshake: what a resumption of the session
+    /// reports, and what the configured peer-certificate check runs on again.
+    pub fn peer_certificates(&self) -> &[Vec<u8>] {
+        &self.peer_certificates
     }
 }
 
@@ -447,6 +461,40 @@ impl fmt::Debug for ExternalPsk {
         f.debug_struct("ExternalPsk")
             .field("identity", &self.identity)
             .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The keys a DTLS server seals its session tickets under (DTLS 1.3 tickets, RFC 8446 section
+/// 4.6.1, and DTLS 1.2 tickets, RFC 5077), with the record of the tickets already accepted,
+/// for several configurations to share
+/// ([`ConfigBuilder::with_session_ticket_issuer`](crate::config::ConfigBuilder::with_session_ticket_issuer)):
+/// a ticket one of them issued is accepted, once, by any of them. A configuration given none
+/// makes keys of its own when it is built ([`ConfigBuilder::with_session_tickets`](crate::config::ConfigBuilder::with_session_tickets)),
+/// which no other configuration can open. Clones share the same keys.
+#[derive(Clone)]
+pub struct SessionTicketIssuer(pub(crate) std::sync::Arc<crate::dtls13::psk::TicketIssuer>);
+
+impl SessionTicketIssuer {
+    /// New random keys, from `provider`'s random source: `count` DTLS 1.3 tickets after each
+    /// handshake (any count above 0 also issues DTLS 1.2 tickets, one per handshake to a client
+    /// that asks for one), each valid for `lifetime` (at most seven days).
+    pub fn new(
+        provider: &dyn crypto::RTCCryptoProvider,
+        count: u8,
+        lifetime: std::time::Duration,
+    ) -> shared::error::Result<Self> {
+        Ok(Self(std::sync::Arc::new(
+            crate::dtls13::psk::TicketIssuer::new(provider, count, lifetime)?,
+        )))
+    }
+}
+
+impl fmt::Debug for SessionTicketIssuer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionTicketIssuer")
+            .field("count", &self.0.count)
+            .field("lifetime", &self.0.lifetime)
             .finish_non_exhaustive()
     }
 }

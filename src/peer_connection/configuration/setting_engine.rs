@@ -532,6 +532,8 @@ pub struct SettingEngine {
     pub(crate) dtls_connection_id_length: Option<usize>,
     /// [`SettingEngineBuilder::with_dtls_alpn`]: `true` when it is turned off.
     pub(crate) dtls_alpn_off: bool,
+    /// [`SettingEngineBuilder::with_dtls_session_resumption`]: `true` when it is turned off.
+    pub(crate) dtls_session_resumption_off: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
     /// [`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`]: `true` when it is
@@ -709,6 +711,7 @@ impl SettingEngine {
             cryptex_required_on_every_bundled_section: Default::default(),
             dtls_connection_id_length: Default::default(),
             dtls_alpn_off: Default::default(),
+            dtls_session_resumption_off: Default::default(),
             write_ssrc_attributes_for_simulcast: Default::default(),
             ecn: Default::default(),
             ecn_initiation: Default::default(),
@@ -2967,6 +2970,37 @@ impl SettingEngineBuilder {
     /// gives what was selected. `false` leaves the extension out.
     pub fn with_dtls_alpn(mut self, alpn: bool) -> Self {
         self.0.dtls_alpn_off = !alpn;
+        self
+    }
+
+    /// Whether the DTLS transports of a connection share one DTLS session (RFC 5764 section
+    /// 3). The default is `true`.
+    ///
+    /// With sections that are not bundled a connection has a DTLS association per transport.
+    /// RFC 5764 section 3: "a single DTLS association is established, and all other DTLS
+    /// associations wait until that connection is established before proceeding with their
+    /// handshakes. This establishes a single session and all other associations can take
+    /// advantage of TLS session resumption" (SHOULD). The first client transport to start
+    /// runs a full handshake; every other one waits until it is connected and the peer's
+    /// ticket (DTLS 1.3, RFC 8446 section 4.6.1; DTLS 1.2, RFC 5077) or session id (RFC 5246
+    /// section 7.3) has come, then resumes with it. As the server, every transport accepts a
+    /// ticket or session another transport of the connection issued. A peer that issues none
+    /// gets full handshakes, as before, after at most two flight intervals of waiting.
+    ///
+    /// The certificate check is not weakened: only the first association of each transport,
+    /// set up by the negotiation that set up the transports, takes part, and only when its
+    /// section names the same remote fingerprints as the transport that made the session; and
+    /// the section's own fingerprints are checked against the certificates stored with the
+    /// session, so a resumption for a section that names another certificate fails with
+    /// `fingerprint-failure`, as a full handshake does. Nothing is shared between connections.
+    /// DTLS 1.3 resumes with `psk_dhe_ke` only: the PSK is combined with a fresh (EC)DHE
+    /// exchange. A later association (SRTP re-keying, RFC 5764 section 4.4; an ICE restart with
+    /// new DTLS parameters) is always a full handshake.
+    ///
+    /// `false`: every association runs a full handshake at once, and none offers or accepts
+    /// a resumption. Bundled connections (one transport) are the same either way.
+    pub fn with_dtls_session_resumption(mut self, resumption: bool) -> Self {
+        self.0.dtls_session_resumption_off = !resumption;
         self
     }
 

@@ -138,6 +138,7 @@ pub struct ConfigBuilder {
     psk: Option<PskCallback>,
     psk_identity_hint: Option<Vec<u8>>,
     session_tickets: u8,
+    session_ticket_issuer: Option<crate::session::SessionTicketIssuer>,
     session_ticket_lifetime: Duration,
     session_store: Option<Arc<dyn crate::session::SessionStore>>,
     session_cache: Option<Arc<dyn crate::session::SessionCache>>,
@@ -188,6 +189,7 @@ impl Default for ConfigBuilder {
             psk: None,
             psk_identity_hint: None,
             session_tickets: 0,
+            session_ticket_issuer: None,
             session_ticket_lifetime: crate::dtls13::psk::DEFAULT_TICKET_LIFETIME,
             session_store: None,
             session_cache: None,
@@ -469,6 +471,19 @@ impl ConfigBuilder {
     /// extended master secret.
     pub fn with_session_tickets(mut self, count: u8) -> Self {
         self.session_tickets = count;
+        self
+    }
+
+    /// Server: the keys to seal and open tickets with, shared with other configurations: a
+    /// ticket one of them issued is accepted (once) by any other. It takes the place of
+    /// [`Self::with_session_tickets`] and [`Self::with_session_ticket_lifetime`], whose count
+    /// and lifetime are the issuer's own. `None`, the default, has the configuration make keys
+    /// of its own when tickets are on. A client ignores it.
+    pub fn with_session_ticket_issuer(
+        mut self,
+        issuer: Option<crate::session::SessionTicketIssuer>,
+    ) -> Self {
+        self.session_ticket_issuer = issuer;
         self
     }
 
@@ -1040,7 +1055,11 @@ impl ConfigBuilder {
 
         // DTLS 1.3 pre-shared keys: a server's tickets, and the external PSKs (RFC 8446
         // section 4.2.11: an identity of at least one byte).
-        let ticket_issuer = if !is_client && self.session_tickets > 0 {
+        let ticket_issuer = if is_client {
+            None
+        } else if let Some(shared) = self.session_ticket_issuer.take() {
+            Some(shared.0)
+        } else if self.session_tickets > 0 {
             Some(Arc::new(crate::dtls13::psk::TicketIssuer::new(
                 crypto_provider.as_ref(),
                 self.session_tickets,

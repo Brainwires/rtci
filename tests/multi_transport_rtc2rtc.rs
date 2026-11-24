@@ -61,6 +61,8 @@ struct Peer {
     rtp: Vec<Header>,
     /// Every event the peer raised, in order.
     events: Vec<RTCPeerConnectionEvent>,
+    /// The `World::step` each of `events` was raised in.
+    event_steps: Vec<u64>,
     /// The handles of the default interceptors.
     handles: DefaultInterceptorHandles,
 }
@@ -116,6 +118,7 @@ impl Peer {
             received: vec![],
             rtp: vec![],
             events: vec![],
+            event_steps: vec![],
             handles,
         })
     }
@@ -161,6 +164,15 @@ struct World {
     srtp: Vec<(SocketAddr, u32, usize)>,
     /// The (from, to) addresses of every RTCP datagram written, delivered or lost.
     rtcp: Vec<(SocketAddr, SocketAddr)>,
+    /// How many steps ran.
+    steps: u64,
+    /// Every DTLS datagram written (RFC 7983: a first byte of 20..=63), delivered or lost,
+    /// with the step it was written in: (step, from, to, datagram).
+    dtls: Vec<(u64, SocketAddr, SocketAddr, BytesMut)>,
+    /// A peer connection that fails does not end the run.
+    tolerate_failure: bool,
+    /// DTLS datagrams are lost (recorded in `dtls`, not delivered).
+    drop_dtls: bool,
 }
 
 impl World {
@@ -202,6 +214,10 @@ impl World {
             trickling: vec![],
             srtp: vec![],
             rtcp: vec![],
+            steps: 0,
+            dtls: vec![],
+            tolerate_failure: false,
+            drop_dtls: false,
         })
     }
 
@@ -483,6 +499,7 @@ impl World {
     }
 
     fn step(&mut self) -> Result<bool> {
+        self.steps += 1;
         let now = self.now;
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.trickling)
             .into_iter()
@@ -507,6 +524,12 @@ impl World {
             // 192..=223 is RTCP.
             if data.len() >= 8 && (128..=191).contains(&data[0]) && (192..=223).contains(&data[1]) {
                 self.rtcp.push((from, to));
+            }
+            if data.first().is_some_and(|first| (20..=63).contains(first)) {
+                self.dtls.push((self.steps, from, to, data.clone()));
+                if self.drop_dtls {
+                    continue;
+                }
             }
             if self.blocked.contains(&from)
                 || self.blocked.contains(&to)
@@ -546,9 +569,10 @@ impl World {
         for peer in self.peers.iter_mut() {
             while let Some(event) = peer.pc.poll_event() {
                 peer.events.push(event.clone());
+                peer.event_steps.push(self.steps);
                 match event {
                     RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                        if state == RTCPeerConnectionState::Failed {
+                        if state == RTCPeerConnectionState::Failed && !self.tolerate_failure {
                             bail!("a peer's connection failed");
                         }
                         peer.connected = state == RTCPeerConnectionState::Connected;
@@ -656,6 +680,17 @@ impl World {
         data: bool,
         edit: impl Fn(String) -> String,
     ) -> Result<(Vec<RTCRtpSenderId>, String)> {
+        self.negotiate_media_and_answer(kinds, data, edit, |sdp| sdp)
+    }
+
+    /// `negotiate_media`, the answer going through `edit_answer` before peer 0 sees it.
+    fn negotiate_media_and_answer(
+        &mut self,
+        kinds: &[RtpCodecKind],
+        data: bool,
+        edit: impl Fn(String) -> String,
+        edit_answer: impl Fn(String) -> String,
+    ) -> Result<(Vec<RTCRtpSenderId>, String)> {
         let mut senders = vec![];
         for kind in kinds.iter().copied() {
             let transceiver = self.peers[0].pc.add_transceiver_from_kind(
@@ -690,7 +725,9 @@ impl World {
         self.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
-        self.peers[0].pc.set_remote_description(now, answer)?;
+        self.peers[0]
+            .pc
+            .set_remote_description(now, RTCSessionDescription::answer(edit_answer(answer.sdp))?)?;
         Ok((senders, offer.sdp))
     }
 
@@ -3561,4 +3598,545 @@ fn data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_receive
     world.run_traced("both on the new pair", |peers| {
         peers.iter().all(|p| selected_on_new_ports(p, 7000))
     })
+}
+
+/// One DTLS handshake as the wire showed it, from its plaintext messages: the client's
+/// address and the server's, the step of the client's first ClientHello, whether a ClientHello
+/// offered to resume (a DTLS 1.3 `pre_shared_key`, a DTLS 1.2 session id or ticket), whether
+/// the server answered with a ServerHello (not a HelloRetryRequest), and whether it resumed (its ServerHello selected the PSK in DTLS 1.3;
+/// in DTLS 1.2, no Certificate came from it).
+#[derive(Debug, Clone)]
+struct WireHandshake {
+    client: SocketAddr,
+    server: SocketAddr,
+    first_hello: u64,
+    offered: bool,
+    answered: bool,
+    resumed: bool,
+}
+
+/// The extension types of a hello's extensions block, from `at`.
+fn hello_extensions(body: &[u8], mut at: usize) -> Vec<(u16, Vec<u8>)> {
+    let mut extensions = vec![];
+    if at + 2 > body.len() {
+        return extensions;
+    }
+    let end = (at + 2 + usize::from(u16::from_be_bytes([body[at], body[at + 1]]))).min(body.len());
+    at += 2;
+    while at + 4 <= end {
+        let kind = u16::from_be_bytes([body[at], body[at + 1]]);
+        let len = usize::from(u16::from_be_bytes([body[at + 2], body[at + 3]]));
+        let data = body.get(at + 4..at + 4 + len).unwrap_or_default().to_vec();
+        extensions.push((kind, data));
+        at += 4 + len;
+    }
+    extensions
+}
+
+/// The DTLS handshakes of `world`'s wire, one per client address (its latest association
+/// when `latest_from` is given: only datagrams of steps from it count).
+fn wire_handshakes(world: &World, latest_from: u64) -> Vec<WireHandshake> {
+    use std::collections::HashMap;
+    const PRE_SHARED_KEY: u16 = 41;
+    const SUPPORTED_VERSIONS: u16 = 43;
+    const SESSION_TICKET: u16 = 35;
+    // (from, to, message_seq, type) -> (step, body, bytes received)
+    type Message = (u64, Vec<u8>, usize);
+    let mut messages: HashMap<(SocketAddr, SocketAddr, u16, u8), Message> = HashMap::new();
+    for (step, from, to, datagram) in &world.dtls {
+        if *step < latest_from {
+            continue;
+        }
+        let mut rest = &datagram[..];
+        // Plaintext records only (DTLSPlaintext, RFC 6347 4.1 / RFC 9147 4): a record of the
+        // unified header comes encrypted, and the datagram's records after it are its own.
+        while rest.len() >= 13 && (20..=23).contains(&rest[0]) && rest[1] == 0xfe {
+            let length = usize::from(u16::from_be_bytes([rest[11], rest[12]]));
+            let Some(record) = rest.get(13..13 + length) else {
+                break;
+            };
+            let epoch = u16::from_be_bytes([rest[3], rest[4]]);
+            if rest[0] == 22 && epoch == 0 {
+                let mut fragments = record;
+                while fragments.len() >= 12 {
+                    let u24 = |b: &[u8]| {
+                        (usize::from(b[0]) << 16) | (usize::from(b[1]) << 8) | usize::from(b[2])
+                    };
+                    let kind = fragments[0];
+                    let total = u24(&fragments[1..4]);
+                    let seq = u16::from_be_bytes([fragments[4], fragments[5]]);
+                    let offset = u24(&fragments[6..9]);
+                    let size = u24(&fragments[9..12]);
+                    let Some(bytes) = fragments.get(12..12 + size) else {
+                        break;
+                    };
+                    let entry = messages
+                        .entry((*from, *to, seq, kind))
+                        .or_insert_with(|| (*step, vec![0; total], 0));
+                    if offset + size <= entry.1.len() {
+                        entry.1[offset..offset + size].copy_from_slice(bytes);
+                        entry.2 += size;
+                    }
+                    fragments = &fragments[12 + size..];
+                }
+            }
+            rest = &rest[13 + length..];
+        }
+    }
+    let mut by_client: HashMap<SocketAddr, WireHandshake> = HashMap::new();
+    let mut certificates_from: HashSet<SocketAddr> = HashSet::new();
+    for ((from, to, _, kind), (step, body, received)) in &messages {
+        if *received < body.len() {
+            continue;
+        }
+        match kind {
+            1 => {
+                // ClientHello: version, random, session id, cookie, suites, compression.
+                let session_id = usize::from(body[34]);
+                let mut at = 35 + session_id;
+                at += 1 + usize::from(body[at]);
+                at += 2 + usize::from(u16::from_be_bytes([body[at], body[at + 1]]));
+                at += 1 + usize::from(body[at]);
+                let extensions = hello_extensions(body, at);
+                let offered = session_id > 0
+                    || extensions.iter().any(|(kind, data)| {
+                        *kind == PRE_SHARED_KEY || (*kind == SESSION_TICKET && !data.is_empty())
+                    });
+                let entry = by_client.entry(*from).or_insert(WireHandshake {
+                    client: *from,
+                    server: *to,
+                    first_hello: *step,
+                    offered: false,
+                    answered: false,
+                    resumed: false,
+                });
+                entry.first_hello = entry.first_hello.min(*step);
+                entry.offered |= offered;
+            }
+            11 => {
+                certificates_from.insert(*from);
+            }
+            _ => {}
+        }
+    }
+    for ((from, to, _, kind), (_, body, received)) in &messages {
+        if *kind != 2 || *received < body.len() {
+            continue;
+        }
+        // ServerHello: version, random, session id, suite, compression. A HelloRetryRequest
+        // (RFC 8446 section 4.1.3: the ServerHello with this random) answers nothing yet.
+        const HELLO_RETRY_REQUEST: [u8; 32] = [
+            0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65,
+            0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2,
+            0xc8, 0xa8, 0x33, 0x9c,
+        ];
+        if body.get(2..34) == Some(&HELLO_RETRY_REQUEST[..]) {
+            continue;
+        }
+        let at = 35 + usize::from(body[34]) + 3;
+        let extensions = hello_extensions(body, at);
+        let Some(handshake) = by_client.get_mut(to) else {
+            continue;
+        };
+        let dtls13 = extensions
+            .iter()
+            .any(|(kind, _)| *kind == SUPPORTED_VERSIONS);
+        handshake.answered = true;
+        handshake.resumed |= if dtls13 {
+            extensions.iter().any(|(kind, _)| *kind == PRE_SHARED_KEY)
+        } else {
+            !certificates_from.contains(from)
+        };
+    }
+    let mut handshakes: Vec<WireHandshake> = by_client.into_values().collect();
+    handshakes.sort_by_key(|h| (h.first_hello, h.client));
+    handshakes
+}
+
+/// The peer that sent the ClientHellos (the DTLS client of every transport).
+fn dtls_client(world: &World, handshakes: &[WireHandshake]) -> usize {
+    let client = handshakes.first().expect("a handshake").client;
+    usize::from(!world.peers[0].addrs.contains(&client))
+}
+
+/// The step at which `peer`'s DTLS transport whose selected pair has the local address
+/// `local` was first "connected" after `from`.
+fn connected_step(peer: &Peer, local: SocketAddr, from: u64) -> Option<u64> {
+    let id = peer
+        .pc
+        .dtls_transports()
+        .iter()
+        .find(|t| {
+            t.ice_transport()
+                .get_selected_candidate_pair()
+                .is_some_and(|pair| {
+                    pair.local().address == local.ip().to_string()
+                        && pair.local().port == local.port()
+                })
+        })?
+        .id();
+    peer.events
+        .iter()
+        .zip(&peer.event_steps)
+        .find_map(|(event, step)| match event {
+            RTCPeerConnectionEvent::OnTransportEvent(event)
+                if *step >= from
+                    && event.dtls_transport == id
+                    && matches!(
+                        event.event,
+                        RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Connected)
+                    ) =>
+            {
+                Some(*step)
+            }
+            _ => None,
+        })
+}
+
+/// Two peers under `max-compat`, answered without bundling (three transports: audio, video,
+/// data), with `with_dtls_session_resumption(resumption)` on both, connected.
+fn three_unbundled_transports(resumption: bool) -> Result<(World, Vec<RTCRtpSenderId>)> {
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new().with_dtls_session_resumption(resumption)
+    })?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    Ok((world, senders))
+}
+
+/// RFC 5764 section 3: "a single DTLS association is established, and all other DTLS
+/// associations wait until that connection is established before proceeding with their
+/// handshakes. This establishes a single session and all other associations can take
+/// advantage of TLS session resumption." Three transports: the first client transport runs a
+/// full handshake; each of the two others sends its first ClientHello only after the first
+/// is connected, offers the session's ticket, and the server resumes it. Media and data go on
+/// every transport.
+#[test]
+fn unbundled_transports_wait_for_the_first_and_resume_its_dtls_session() -> Result<()> {
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new().with_dtls_session_resumption(true)
+    })?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    // DTLS is lost until every transport has selected its pair: each could start its
+    // handshake by then, and only the first does.
+    world.drop_dtls = true;
+    world.run_traced("every transport selected a pair", |peers| {
+        peers.iter().all(|p| {
+            let transports = p.pc.dtls_transports();
+            transports.len() == 3
+                && transports
+                    .iter()
+                    .all(|t| t.ice_transport().get_selected_candidate_pair().is_some())
+        })
+    })?;
+    world.advance(Duration::from_millis(100))?;
+    world.drop_dtls = false;
+    world.run_traced("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    let handshakes = wire_handshakes(&world, 0);
+    assert_eq!(
+        handshakes.len(),
+        3,
+        "a handshake per transport: {handshakes:?}"
+    );
+    let client = dtls_client(&world, &handshakes);
+    let (leader, others) = handshakes.split_first().expect("handshakes");
+    assert!(
+        !leader.offered && leader.answered && !leader.resumed,
+        "the first is a full handshake: {leader:?}"
+    );
+    let leader_connected = connected_step(&world.peers[client], leader.client, 0)
+        .context("the first transport connected")?;
+    for handshake in others {
+        assert!(
+            handshake.first_hello > leader_connected,
+            "{handshake:?} started only after the first was connected (step {leader_connected})"
+        );
+        assert!(
+            handshake.offered && handshake.resumed,
+            "the others resume its session: {handshakes:?}"
+        );
+    }
+    media_and_data_arrive(&mut world, &senders, "the resumed associations")
+}
+
+/// `with_dtls_session_resumption(false)`: every transport runs a full handshake, none offers
+/// a session.
+#[test]
+fn without_dtls_session_resumption_every_transport_runs_a_full_handshake() -> Result<()> {
+    let (mut world, senders) = three_unbundled_transports(false)?;
+    let handshakes = wire_handshakes(&world, 0);
+    assert_eq!(handshakes.len(), 3, "{handshakes:?}");
+    for handshake in &handshakes {
+        assert!(
+            !handshake.offered && handshake.answered && !handshake.resumed,
+            "{handshakes:?}"
+        );
+    }
+    media_and_data_arrive(&mut world, &senders, "full handshakes")
+}
+
+/// RFC 5764 section 4.4 / RFC 8842: once the connection's transports have resumed its
+/// session, a new association of each (`renew_dtls_association`, what automatic SRTP re-keying
+/// calls) runs a full handshake with a fresh key exchange: no ClientHello offers a session and
+/// no server resumes one.
+#[test]
+fn a_new_dtls_association_after_a_resumed_one_is_a_full_handshake() -> Result<()> {
+    // As `renewing_the_dtls_association_renews_every_transport`, with the default settings
+    // (session resumption on).
+    let mut world = World::with_credentials(RTCBundlePolicy::MaxCompat, false)?;
+    let (senders, _) = world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    world.run("connected with a data channel", |peers| {
+        peers.iter().all(|p| p.connected && p.channel.is_some())
+    })?;
+    assert_eq!(
+        wire_handshakes(&world, 0)
+            .iter()
+            .filter(|h| h.resumed)
+            .count(),
+        2,
+        "two transports resumed"
+    );
+    world.renegotiate_with(without_bundle_group)?;
+    world.peers[0].events.clear();
+    world.peers[0].event_steps.clear();
+    let from = world.steps + 1;
+    world.peers[0].pc.renew_dtls_association();
+    world.renegotiate_with(without_bundle_group)?;
+    world.regather(7000)?;
+    let ids: Vec<RTCTransportId> = world.peers[0]
+        .pc
+        .dtls_transports()
+        .iter()
+        .map(|t| t.id())
+        .collect();
+    world.run_traced("every transport ran a new handshake", |peers| {
+        let events = transport_events(&peers[0]);
+        ids.iter().all(|id| {
+            events.iter().any(|(_, dtls, kind)| {
+                dtls == id
+                    && matches!(
+                        kind,
+                        RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Connected)
+                    )
+            })
+        })
+    })?;
+    world.run_traced(
+        "every transport selected a pair on the new ports",
+        |peers| peers.iter().all(|p| selected_on_new_ports(p, 7000)),
+    )?;
+    media_and_data_arrive(&mut world, &senders, "the new associations")?;
+    let renewed = wire_handshakes(&world, from);
+    assert_eq!(
+        renewed.len(),
+        3,
+        "a new handshake per transport: {renewed:?}"
+    );
+    for handshake in &renewed {
+        assert!(
+            !handshake.offered && handshake.answered && !handshake.resumed,
+            "{renewed:?}"
+        );
+    }
+    Ok(())
+}
+
+/// `sdp` with the second m= section's `a=fingerprint` naming the certificate `fingerprint`.
+fn second_section_fingerprint(sdp: &str, fingerprint: &str) -> String {
+    let mut section = 0;
+    let mut out = String::new();
+    for line in sdp.lines() {
+        if line.starts_with("m=") {
+            section += 1;
+        }
+        if section == 2 && line.starts_with("a=fingerprint:") {
+            out.push_str(&format!("a=fingerprint:{fingerprint}\r\n"));
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// The `algorithm value` of a new certificate's SHA-256 fingerprint.
+fn another_certificates_fingerprint() -> Result<String> {
+    use rtci::crypto::SignatureScheme;
+    use rtci::peer_connection::certificate::RTCCertificate;
+    let provider = rtci::crypto::default_provider()?;
+    let certificate = RTCCertificate::generate_certificate(
+        provider.crypto(),
+        SignatureScheme::EcdsaP256Sha256,
+        None,
+        std::time::SystemTime::now(),
+    )?;
+    let fingerprint = certificate
+        .get_fingerprints(provider.crypto())?
+        .into_iter()
+        .next()
+        .context("a fingerprint")?;
+    // RFC 8122 section 5: upper-case hex.
+    Ok(format!(
+        "{} {}",
+        fingerprint.algorithm,
+        fingerprint.value.to_uppercase()
+    ))
+}
+
+/// The second section of the offer (`in_offer`, seen by the DTLS client) or of the answer
+/// (seen by the DTLS server) names another certificate's fingerprint, with
+/// `with_dtls_session_resumption(resumption)`: that transport fails with
+/// `fingerprint-failure` at the peer that checks it, after a full handshake (its client
+/// offered no session when it is the one told the wrong fingerprint, and the server resumed
+/// nothing), and the two other transports connect. Returns the failing handshake.
+fn wrong_fingerprint_in_the_second_section(
+    in_offer: bool,
+    resumption: bool,
+) -> Result<WireHandshake> {
+    use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+    let fingerprint = another_certificates_fingerprint()?;
+    let mut world = World::with_setting_engines(RTCBundlePolicy::MaxCompat, || {
+        SettingEngineBuilder::new().with_dtls_session_resumption(resumption)
+    })?;
+    world.tolerate_failure = true;
+    let tamper = |sdp: String, here: bool| {
+        if here {
+            second_section_fingerprint(&sdp, &fingerprint)
+        } else {
+            sdp
+        }
+    };
+    world.negotiate_media_and_answer(
+        &[RtpCodecKind::Audio, RtpCodecKind::Video],
+        true,
+        |sdp| tamper(without_bundle_group(sdp), in_offer),
+        |sdp| tamper(sdp, !in_offer),
+    )?;
+    world.gather()?;
+    // The checking peer: the one that was told the wrong fingerprint.
+    let checking = usize::from(in_offer);
+    let second = |peer: &Peer| -> Result<SocketAddr> {
+        let at = peer
+            .pc
+            .ice_transport_sections()
+            .iter()
+            .position(|(_, index)| *index == 1)
+            .context("the second section's transport")?;
+        Ok(peer.addrs[at])
+    };
+    let failing_local = second(&world.peers[checking])?;
+    // The second transport's path comes up once the others are connected, so that a
+    // session is there for it to resume, were it allowed to.
+    let held = [second(&world.peers[0])?, second(&world.peers[1])?];
+    world.blocked.extend(held);
+    world.run_traced("the two other transports connected", |peers| {
+        peers.iter().all(|p| {
+            p.pc.dtls_transports()
+                .iter()
+                .filter(|t| t.state() == RTCDtlsTransportState::Connected)
+                .count()
+                == 2
+        })
+    })?;
+    world.blocked.clear();
+    world.run_traced(
+        "the second transport failed, the others connected",
+        |peers| {
+            let states = |p: &Peer| -> Vec<(SocketAddr, RTCDtlsTransportState)> {
+                p.pc.dtls_transports()
+                    .iter()
+                    .filter_map(|t| {
+                        let pair = t.ice_transport().get_selected_candidate_pair()?;
+                        let local =
+                            SocketAddr::new(pair.local().address.parse().ok()?, pair.local().port);
+                        Some((local, t.state()))
+                    })
+                    .collect()
+            };
+            let mine = states(&peers[checking]);
+            mine.len() == 3
+                && mine.iter().all(|(local, state)| {
+                    if *local == failing_local {
+                        *state == RTCDtlsTransportState::Failed
+                    } else {
+                        *state == RTCDtlsTransportState::Connected
+                    }
+                })
+                && states(&peers[1 - checking])
+                    .iter()
+                    .filter(|(_, state)| *state == RTCDtlsTransportState::Connected)
+                    .count()
+                    == 2
+        },
+    )?;
+    let error = world.peers[checking]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            RTCPeerConnectionEvent::OnTransportEvent(event) => match &event.event {
+                RTCTransportEventKind::DtlsError(error) => Some(error.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .context("the failing transport's error")?;
+    assert_eq!(
+        error.error_detail,
+        RTCErrorDetailType::FingerprintFailure,
+        "{error:?}"
+    );
+    let handshakes = wire_handshakes(&world, 0);
+    assert_eq!(handshakes.len(), 3, "{handshakes:?}");
+    let failing = handshakes
+        .iter()
+        .find(|h| h.client == failing_local || h.server == failing_local)
+        .context("the second transport's handshake")?
+        .clone();
+    assert!(
+        failing.answered && !failing.resumed,
+        "a full handshake, as without resumption: {failing:?}"
+    );
+    if in_offer {
+        assert!(
+            !failing.offered,
+            "its client offered no session: {failing:?}"
+        );
+    }
+    Ok(failing)
+}
+
+/// RFC 5764 section 3 does not weaken RFC 8122 / RFC 8827 section 6.5: a section of the
+/// offer that names another certificate than the session's (as the DTLS client sees it)
+/// takes no part in the session: its transport runs a full handshake and fails with
+/// `fingerprint-failure`, exactly as without resumption, while the others connect.
+#[test]
+fn a_section_naming_another_certificate_does_not_resume_as_the_dtls_client() -> Result<()> {
+    let with = wrong_fingerprint_in_the_second_section(true, true)?;
+    let without = wrong_fingerprint_in_the_second_section(true, false)?;
+    assert_eq!(
+        (with.offered, with.answered, with.resumed),
+        (without.offered, without.answered, without.resumed)
+    );
+    Ok(())
+}
+
+/// The same for a section of the answer, as the DTLS server sees it: it accepts no session
+/// for that transport (a full handshake, whose client certificate fails the section's
+/// fingerprint), exactly as without resumption.
+#[test]
+fn a_section_naming_another_certificate_does_not_resume_as_the_dtls_server() -> Result<()> {
+    let with = wrong_fingerprint_in_the_second_section(false, true)?;
+    let without = wrong_fingerprint_in_the_second_section(false, false)?;
+    assert_eq!(
+        (with.answered, with.resumed),
+        (without.answered, without.resumed)
+    );
+    Ok(())
 }

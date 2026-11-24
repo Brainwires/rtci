@@ -21,6 +21,7 @@ use std::time::SystemTime;
 
 pub(crate) mod fingerprint;
 pub(crate) mod parameters;
+pub(crate) mod resumption;
 pub(crate) mod role;
 pub(crate) mod state;
 
@@ -183,6 +184,16 @@ pub(crate) struct DtlsTransport {
     pub(crate) allow_insecure_verification_algorithm: bool,
     pub(crate) disable_certificate_fingerprint_verification: bool,
     pub(crate) replay_protection: ReplayProtection,
+
+    /// The peer connection's DTLS session (RFC 5764 section 3), shared by its transports;
+    /// `None` when `SettingEngineBuilder::with_dtls_session_resumption` is off.
+    pub(crate) resumption: Option<Arc<resumption::DtlsSessionGroup>>,
+    /// The current association takes part in the connection's session: it is the transport's
+    /// first, set up by the negotiation that set up the transports, for the same remote
+    /// fingerprints as the session's (`DtlsSessionGroup::admit`).
+    pub(crate) resumption_member: bool,
+    /// Names this transport to its session group.
+    pub(crate) resumption_token: Arc<()>,
 }
 
 /// The ALPN identifier of WebRTC (RFC 8833 section 2): DTLS-SRTP keys and data channels.
@@ -340,7 +351,15 @@ impl DtlsTransport {
             disable_certificate_fingerprint_verification,
             replay_protection,
             crypto_provider,
+            resumption: None,
+            resumption_member: false,
+            resumption_token: Arc::new(()),
         })
+    }
+
+    /// The session group, when the current association takes part in it.
+    pub(crate) fn session_group(&self) -> Option<&Arc<resumption::DtlsSessionGroup>> {
+        self.resumption.as_ref().filter(|_| self.resumption_member)
     }
 
     /// The `RTCError` of the association's failure (W3C webrtc-pc section 11.2):
@@ -386,6 +405,14 @@ impl DtlsTransport {
             self.fingerprint_mismatch
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             self.failure = None;
+        }
+        if matches!(
+            state,
+            RTCDtlsTransportState::Failed | RTCDtlsTransportState::Closed
+        ) && let Some(group) = self.session_group()
+        {
+            // The transports waiting for this one's session start (RFC 5764 section 3).
+            group.ended(&self.resumption_token);
         }
         self.state = state;
     }
@@ -438,10 +465,13 @@ impl DtlsTransport {
     /// Build a DTLS HandshakeConfig from remote fingerprints, for the role already in
     /// `self.dtls_role`. Does not check or change transport state, so it serves both the
     /// initial start and a new association ([`update_remote`](Self::update_remote)).
+    /// `resume`: the association resumes from, and makes, the connection's session
+    /// ([`resumption`]); otherwise it neither offers nor accepts a resumption.
     /// (Brainwires fork; see FORK.md.)
     fn make_handshake_config(
         &self,
         remote_dtls_parameters: &RTCDtlsParameters,
+        resume: bool,
     ) -> Result<Arc<::dtls::config::HandshakeConfig>> {
         let remote_fingerprints = remote_dtls_parameters.fingerprints.clone();
         // Leaving the callback out is what disables the check: `insecure_skip_verify` is
@@ -506,63 +536,68 @@ impl DtlsTransport {
             vec![]
         };
 
+        let builder = ::dtls::config::ConfigBuilder::default()
+            .with_crypto_provider(self.crypto_provider.clone())
+            .with_certificates(vec![certificate])
+            .with_srtp_protection_profiles(profiles)
+            // A server that leaves `use_srtp` out is a data-channel-only peer, not a
+            // failed handshake: whether the session can do without SRTP is decided when
+            // the handshake completes (`DtlsHandler`), from the session's media sections.
+            .with_use_srtp_optional(true)
+            // As the server: with no shared profile the association falls back to DTLS
+            // without SRTP (RFC 5764 section 4.1.1), unless the session has a media
+            // section, for which that is not acceptable.
+            .with_use_srtp_required(self.srtp_required)
+            // Empty means the WebRTC default set (AEAD only); a non-empty list replaces it.
+            .with_cipher_suites(if self.dtls_cipher_suites.is_empty() {
+                webrtc_default_cipher_suites()
+            } else {
+                self.dtls_cipher_suites.clone()
+            })
+            .with_client_auth(ClientAuthType::RequireAnyClientCert)
+            // RFC 8122 section 6.2: no client certificate ends the handshake with
+            // bad_certificate.
+            .with_bad_certificate_for_a_missing_client_certificate(true)
+            .with_insecure_skip_verify(true)
+            .with_insecure_verification(self.allow_insecure_verification_algorithm)
+            .with_verify_peer_certificate(verify_peer_certificate)
+            .with_extended_master_secret(::dtls::config::ExtendedMasterSecretType::Require)
+            .with_replay_protection_window(self.replay_protection.dtls)
+            // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
+            // for DTLS-SRTP. A client that knows the round trip time of the selected
+            // pair from ICE starts from 1.5 times that instead (`DtlsHandler`); the
+            // libwebrtc rule (`DtlsFlightInterval`) from 50 ms, or twice the round trip.
+            .with_flight_interval(self.flight_interval_rule.initial(None))
+            .with_connection_id(self.connection_id_length.or(Some(0)))
+            // RFC 8835 section 3.5 (RFC 8833 section 2): a client offers both WebRTC
+            // identifiers, a server selects `webrtc`; it never promises the media
+            // confidentiality of `c-webrtc`.
+            .with_alpn_protocols(match (self.alpn, self.dtls_role) {
+                (false, _) => vec![],
+                (true, RTCDtlsRole::Client) => {
+                    vec![ALPN_WEBRTC.to_owned(), ALPN_C_WEBRTC.to_owned()]
+                }
+                (true, _) => vec![ALPN_WEBRTC.to_owned()],
+            })
+            // No resumption but the connection's own session (RFC 5764 section 3, RFC
+            // 8446 section 2.2, RFC 5246 section 7.3): an association outside it issues
+            // no tickets and keeps no session cache as a server (and so accepts no
+            // resumption: it has no key to open a ticket with and no session to find),
+            // and keeps nothing and offers no PSK, session id or ticket as a client.
+            // Every resumed handshake has the stored peer certificates checked against
+            // this section's fingerprints by `verify_peer_certificate`, as a full one has
+            // the certificates it carries.
+            .with_session_tickets(0)
+            .with_session_cache(None)
+            .with_session_store(None)
+            .with_external_psks(vec![])
+            .with_psk_without_key_exchange(false);
+        let builder = match self.resumption.as_ref() {
+            Some(group) if resume => group.configure(builder, self.dtls_role),
+            _ => builder,
+        };
         Ok(Arc::new(
-            ::dtls::config::ConfigBuilder::default()
-                .with_crypto_provider(self.crypto_provider.clone())
-                .with_certificates(vec![certificate])
-                .with_srtp_protection_profiles(profiles)
-                // A server that leaves `use_srtp` out is a data-channel-only peer, not a
-                // failed handshake: whether the session can do without SRTP is decided when
-                // the handshake completes (`DtlsHandler`), from the session's media sections.
-                .with_use_srtp_optional(true)
-                // As the server: with no shared profile the association falls back to DTLS
-                // without SRTP (RFC 5764 section 4.1.1), unless the session has a media
-                // section, for which that is not acceptable.
-                .with_use_srtp_required(self.srtp_required)
-                // Empty means the WebRTC default set (AEAD only); a non-empty list replaces it.
-                .with_cipher_suites(if self.dtls_cipher_suites.is_empty() {
-                    webrtc_default_cipher_suites()
-                } else {
-                    self.dtls_cipher_suites.clone()
-                })
-                .with_client_auth(ClientAuthType::RequireAnyClientCert)
-                // RFC 8122 section 6.2: no client certificate ends the handshake with
-                // bad_certificate.
-                .with_bad_certificate_for_a_missing_client_certificate(true)
-                .with_insecure_skip_verify(true)
-                .with_insecure_verification(self.allow_insecure_verification_algorithm)
-                .with_verify_peer_certificate(verify_peer_certificate)
-                .with_extended_master_secret(::dtls::config::ExtendedMasterSecretType::Require)
-                .with_replay_protection_window(self.replay_protection.dtls)
-                // RFC 9147 section 5.8.2: 400 ms is the retransmission timer recommended
-                // for DTLS-SRTP. A client that knows the round trip time of the selected
-                // pair from ICE starts from 1.5 times that instead (`DtlsHandler`); the
-                // libwebrtc rule (`DtlsFlightInterval`) from 50 ms, or twice the round trip.
-                .with_flight_interval(self.flight_interval_rule.initial(None))
-                // No session resumption, in either version (RFC 8446 section 2.2, RFC 5246
-                // section 7.3): WebRTC authenticates each association by the certificate
-                // fingerprints of its SDP (RFC 8827 section 6.5) and makes a new one per
-                // session, so a ticket or session id would have no caller and a resumed
-                // handshake would carry no certificate to check. As a server this side issues
-                // no tickets and keeps no session cache (and so accepts no resumption: it has
-                // no key to open a ticket with and no session to find); as a client it keeps
-                // nothing and offers no PSK, session id or ticket.
-                .with_connection_id(self.connection_id_length.or(Some(0)))
-                // RFC 8835 section 3.5 (RFC 8833 section 2): a client offers both WebRTC
-                // identifiers, a server selects `webrtc`; it never promises the media
-                // confidentiality of `c-webrtc`.
-                .with_alpn_protocols(match (self.alpn, self.dtls_role) {
-                    (false, _) => vec![],
-                    (true, RTCDtlsRole::Client) => {
-                        vec![ALPN_WEBRTC.to_owned(), ALPN_C_WEBRTC.to_owned()]
-                    }
-                    (true, _) => vec![ALPN_WEBRTC.to_owned()],
-                })
-                .with_session_tickets(0)
-                .with_session_cache(None)
-                .with_session_store(None)
-                .with_external_psks(vec![])
-                .build(self.dtls_role == RTCDtlsRole::Client, None)?,
+            builder.build(self.dtls_role == RTCDtlsRole::Client, None)?,
         ))
     }
 
@@ -576,7 +611,14 @@ impl DtlsTransport {
         }
 
         self.dtls_role = self.derive_role(ice_role, remote_dtls_parameters.role);
-        let dtls_handshake_config = self.make_handshake_config(&remote_dtls_parameters)?;
+        // RFC 5764 section 3: the first association of a transport resumes the connection's
+        // session, when it is for the same remote certificates.
+        let resume = self
+            .resumption
+            .as_ref()
+            .is_some_and(|group| group.admit(self.dtls_role, &remote_dtls_parameters.fingerprints));
+        let dtls_handshake_config = self.make_handshake_config(&remote_dtls_parameters, resume)?;
+        self.resumption_member = resume;
         self.srtp_configured = self.offers_use_srtp();
         self.state_change(RTCDtlsTransportState::Connecting);
         self.remote_dtls_parameters = Some(remote_dtls_parameters);
@@ -686,7 +728,10 @@ impl DtlsTransport {
         // built.
         let previous_role = self.dtls_role;
         self.dtls_role = new_role;
-        let dtls_handshake_config = match self.make_handshake_config(&remote_dtls_parameters) {
+        // A later association is a full handshake, with a fresh key exchange: never a
+        // resumption (SRTP re-keying, RFC 5764 section 4.4, needs new keys).
+        let dtls_handshake_config = match self.make_handshake_config(&remote_dtls_parameters, false)
+        {
             Ok(config) => config,
             Err(err) => {
                 self.dtls_role = previous_role;
@@ -714,6 +759,10 @@ impl DtlsTransport {
         self.staged_tls_id_offered = false;
         self.replaced_offer_tls_id = None;
 
+        if let Some(group) = self.session_group() {
+            group.ended(&self.resumption_token);
+        }
+        self.resumption_member = false;
         self.state_change(RTCDtlsTransportState::Connecting);
         self.install_endpoint(dtls_handshake_config);
         self.remote_dtls_parameters = Some(remote_dtls_parameters);
@@ -1219,7 +1268,7 @@ mod tests {
     fn the_handshake_config_ends_a_missing_client_certificate_with_bad_certificate() {
         let t = auto_role_transport();
         let config = t
-            .make_handshake_config(&dummy_params(RTCDtlsRole::Auto))
+            .make_handshake_config(&dummy_params(RTCDtlsRole::Auto), false)
             .unwrap();
         assert!(config.bad_certificate_for_a_missing_client_certificate());
     }

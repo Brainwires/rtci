@@ -3,9 +3,10 @@ use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::dtls::DtlsTransport;
+use crate::peer_connection::transport::dtls::resumption::StartGate;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
+use crate::peer_connection::transport::dtls::{DTLS_SRTP_FLIGHT_INTERVAL, DtlsTransport};
 use crate::statistics::accumulator::{
     CertificateStatsAccumulator, RTCStatsAccumulator, base64_encode,
 };
@@ -42,6 +43,12 @@ pub(crate) struct DtlsHandlerContext {
     /// no ICE restart): no `ICESelectedCandidatePairChange` will come to start the client's
     /// handshake, so the next `poll_write` starts it, stamped with this instant.
     pub(crate) connect_requested: Option<Instant>,
+
+    /// Set when the client's handshake was due while another transport of the connection was
+    /// establishing the connection's DTLS session (RFC 5764 section 3): it starts, offering
+    /// that session, once the other is done (`DtlsSessionGroup::ready_at`). The instant it
+    /// was due at.
+    pub(crate) waiting_for_session: Option<Instant>,
 }
 
 impl DtlsHandlerContext {
@@ -53,6 +60,7 @@ impl DtlsHandlerContext {
             event_outs: VecDeque::new(),
             close_requested: None,
             connect_requested: None,
+            waiting_for_session: None,
         }
     }
 }
@@ -108,6 +116,19 @@ impl<'a> DtlsHandler<'a> {
             return Ok(());
         }
         // dtls_endpoint only connect once when acts as DTLSRole::Client
+        if self.ctx.dtls_transport.dtls_handshake_config.is_none() {
+            return Ok(());
+        }
+        // RFC 5764 section 3: "all other DTLS associations wait until that connection is
+        // established before proceeding with their handshakes".
+        if let Some(group) = self.ctx.dtls_transport.session_group()
+            && group.start_gate(&self.ctx.dtls_transport.resumption_token, now) == StartGate::Wait
+        {
+            debug!("dtls handshake waits for the connection's session");
+            self.ctx.waiting_for_session.get_or_insert(now);
+            return Ok(());
+        }
+        self.ctx.waiting_for_session = None;
         let Some(dtls_handshake_config) = self.ctx.dtls_transport.dtls_handshake_config.take()
         else {
             return Ok(());
@@ -382,6 +403,9 @@ impl<'a>
             let mut dtls_version_for_stats = None;
             let mut application_protocol = None;
 
+            if let Some(group) = self.ctx.dtls_transport.session_group() {
+                group.observe(msg.now);
+            }
             let srtp_required = self.ctx.dtls_transport.srtp_required;
             let dtls_endpoint = self
                 .ctx
@@ -499,6 +523,18 @@ impl<'a>
                 self.ctx
                     .dtls_transport
                     .state_change(RTCDtlsTransportState::Connected);
+                if self.ctx.dtls_transport.dtls_role == RTCDtlsRole::Client
+                    && let Some(group) = self.ctx.dtls_transport.session_group()
+                {
+                    // The others wait for the session's ticket, at most two flight intervals
+                    // (it comes a round trip after the client's Finished).
+                    let grace = 2 * self
+                        .ctx
+                        .dtls_transport
+                        .flight_interval
+                        .unwrap_or(DTLS_SRTP_FLIGHT_INTERVAL);
+                    group.connected(&self.ctx.dtls_transport.resumption_token, msg.now, grace);
+                }
 
                 let (local_srtp_context, remote_srtp_context) = srtp_contexts.unzip();
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
@@ -508,6 +544,11 @@ impl<'a>
                         remote_srtp_context,
                     ),
                 });
+            }
+
+            // A ticket for the connection's session may have come with this datagram.
+            if let Some(group) = self.ctx.dtls_transport.session_group() {
+                group.poll_leader(&self.ctx.dtls_transport.resumption_token, msg.now);
             }
 
             // RFC 8833 section 2: what ALPN selected; a peer that used none is taken as
@@ -592,6 +633,18 @@ impl<'a>
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
+        if let Some(due) = self.ctx.waiting_for_session
+            && let Some(ready) = self
+                .ctx
+                .dtls_transport
+                .session_group()
+                .map_or(Some(due), |group| group.ready_at())
+        {
+            self.ctx.waiting_for_session = None;
+            if let Err(err) = self.connect_client(ready.max(due), true) {
+                warn!("failed to start the dtls handshake: {}", err);
+            }
+        }
         if let Some(now) = self.ctx.connect_requested.take()
             && let Err(err) = self.connect_client(now, true)
         {
@@ -621,6 +674,10 @@ impl<'a>
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<()> {
+        if let Some(group) = self.ctx.dtls_transport.session_group() {
+            group.observe(now);
+            group.poll_leader(&self.ctx.dtls_transport.resumption_token, now);
+        }
         let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
             return Ok(());
         };
@@ -663,8 +720,14 @@ impl<'a>
     }
 
     fn poll_timeout(&mut self) -> Option<Instant> {
+        // The leader stops waiting for the session's ticket.
+        let deadline = self
+            .ctx
+            .dtls_transport
+            .session_group()
+            .and_then(|group| group.leader_deadline(&self.ctx.dtls_transport.resumption_token));
         if let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_ref() {
-            let mut eto = None;
+            let mut eto = deadline;
 
             let remotes = dtls_endpoint.get_connections_keys();
             for remote in remotes {
@@ -675,7 +738,7 @@ impl<'a>
 
             eto
         } else {
-            None
+            deadline
         }
     }
 

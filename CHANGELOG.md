@@ -35,6 +35,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
+- **dtls / peer connection** (`conf/dtls-resume-1`): the DTLS transports of a connection whose
+  sections are not bundled share one DTLS session (RFC 5764 section 3: "a single DTLS
+  association is established, and all other DTLS associations wait until that connection is
+  established before proceeding with their handshakes"). The first client transport runs a
+  full handshake; every other client transport waits until it is connected and the peer's
+  ticket has come (at most two flight intervals after it connected, then without one), then
+  resumes it (DTLS 1.3 PSK with `psk_dhe_ke` only, a fresh (EC)DHE exchange; DTLS 1.2 RFC 5077
+  ticket or session id). As the server, each transport accepts a ticket or session another
+  transport of the same connection issued (four DTLS 1.3 tickets per handshake). Only the
+  first association of each transport set up by the negotiation that set up the transports
+  takes part, and only when its section names the same remote fingerprints as the transport
+  that made the session; each transport's fingerprint check also runs on the certificates
+  stored with the session, so a mismatch fails with `fingerprint-failure` as a full handshake
+  does. Nothing is shared between connections; a later association (SRTP re-keying, an ICE
+  restart with new DTLS parameters) is a full handshake; a connection with one transport
+  (bundled) is unchanged on the wire. A peer that issues no ticket gets full handshakes. Tests:
+  `tests/multi_transport_rtc2rtc.rs::unbundled_transports_wait_for_the_first_and_resume_its_dtls_session`,
+  `a_section_naming_another_certificate_does_not_resume_as_the_dtls_client`,
+  `a_section_naming_another_certificate_does_not_resume_as_the_dtls_server`,
+  `a_new_dtls_association_after_a_resumed_one_is_a_full_handshake`,
+  `without_dtls_session_resumption_every_transport_runs_a_full_handshake`;
+  `transport/dtls/resumption.rs::a_session_of_one_connection_does_not_resume_on_another`,
+  `a_new_association_of_a_transport_is_a_full_handshake`. RFC5764-3-4 is `tested`.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
@@ -334,6 +358,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated since the triage day, and `webrtc-rs/webrtc` commits (`master`, `v0.17.x`). Both
   points are FORK.md's (new row "Open upstream work last triaged"). Read-only GitHub API
   calls; no workflow runs it.
+- **`SettingEngineBuilder::with_dtls_session_resumption(bool)`** (default `true`): the
+  connection's transports share one DTLS session (RFC 5764 section 3, see "Behaviour
+  changes"); `false` gives every association a full handshake at once, as before.
+- **rtci-dtls**: `session::SessionTicketIssuer` and `ConfigBuilder::with_session_ticket_issuer`:
+  ticket keys (and the record of used tickets) several configurations share, so that a ticket
+  one issued is accepted, once, by another. `Tls13Session::peer_certificates` and
+  `Dtls12Session::peer_certificates`.
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
   `StreamInfo::fec_session` (`FecSessionStream`: the SSRC the FEC stream has inside the chain,
