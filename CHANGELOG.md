@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comes after TCP host and server-reflexive candidates. New `candidate::is_teredo`. Conformance
   rows RFC6544-5.4-1 and RFC6544-4.2-2 are `tested`.
 - **ice**: **a remote candidate whose address is an FQDN is ignored, not refused** (RFC 8839 section 5.1, draft-ietf-mmusic-mdns-ice-candidates sections 3.2.1 and 4; MDNSICE-3.2.1-1, MDNSICE-4-1). `add_remote_candidate` with such a line now returns `Ok` and the candidate reaches neither the agent nor the statistics, as a description's line already did; before, it failed with `ErrAddressParseFailed`. A `.local` name of more than one "." and a `.local` name on a non-host candidate count as FQDNs (only a host `<name>.local` is resolved by mDNS); in a description, the first used to reach the agent as an mDNS name and the second refused the description. A trickled line of an unknown transport or candidate type is ignored the same way.
+
+- **interceptor** (fec-14): an audio packet rebuilt from a RED block (RFC 2198) takes the RFC
+  6464 / RFC 6465 audio level extensions of the RED packet that carried it, as RFC 8854 section
+  4.1 asks ("attempt to approximate this information"), where it had no header extension
+  before; other extensions of the RED packet are still left out.
+
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
   did for H.265: the fragments of a NAL unit after a lost one are dropped with it, not written
   as a NAL unit with a hole in it (RFC 6184 section 5.8). Conformance rows RFC6184-5.8-14,
@@ -274,6 +280,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **fec** (fec-15): libwebrtc's ULPFEC form for the pacer-written extensions, a `Chrome`
+  profile row (`fec.ulpfec-zero-mutable-extensions`, `DefaultInterceptorOptions::ulpfec_zero_mutable_extensions`):
+  `UlpfecSendBuilder::with_mutable_extensions_zeroed` protects the transport-wide sequence
+  number, abs-send-time and toffset values as zeros (libwebrtc computes its FEC before it
+  writes them, `RtpSenderEgress::SendPacket` @ a222406d) and
+  `UlpfecReceiveBuilder::with_mutable_extensions_zeroed` zeroes them in the decoder's copies
+  (`ZeroMutableExtensions`), so a packet rebuilt on either side is exact with those values
+  zero. `configure_video_red_ulpfec_with(registry, media_engine, zero)`; the `Chrome` profile's
+  chain has it on. `Rfc` keeps RFC 5109 section 8's FEC over the packet as sent.
+
+- **fec** (fec-13): RFC 8854 section 5.2's `video/flexfec` in the offer as a setting:
+  `DefaultInterceptorOptions::video_flexfec` / `configure_video_flexfec` registers
+  `video/flexfec` (payload type 49, `repair-window=10000000`) and runs the RFC 8627 coder in the
+  standard chain at slots of its own (`FLEXFEC_ENCODER_SLOT` 5_100, `FLEXFEC_WIRE_IMAGE_SLOT`
+  1_510, `FLEXFEC_DECODER_SLOT` 10_310), beside ULPFEC's, so a chain can run both. On in the
+  `StrictRfc` profile (row `fec.video-flexfec`); off by default and in `Chrome`, because RFC 8627
+  section 1.1.7 has an answerer offered FlexFEC and RTX answer with FlexFEC only, which would
+  leave two default peers without RTX (audit row RFC8854-5.2-1, `conflict`). No change to the
+  default's offers.
+
+- **ULPFEC across an SRTP key change** (RFC 5109 section 11, row RFC5109-11-3 untested ->
+  tested): `tests/ulpfec_across_srtp_rekeying_rtc2rtc.rs` sends a FEC block whose first media
+  packet leaves under one DTLS association's keys and whose second media packet and FEC
+  packet leave under a new association's (`renew_dtls_association`), after the receiver
+  dropped the old keys; whichever media packet the network loses is rebuilt. No engine
+  change.
 - **Browser cell: the engine's ULPFEC in RED rebuilt by the browser.** `scenarios.spec.mjs`
   has Rust send VP8 in RED with ULPFEC (the `Chrome` profile's form), NACK off on both sides,
   and checks that the browser decodes every frame although Rust's sender discarded every
@@ -417,6 +449,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   srflx gathering, the TURN client: `rand::rng()`, a CSPRNG). Same defect as
   webrtc-rs/webrtc#954 (webrtc-rs/rtc#283), in an application's gatherer there. No engine
   behaviour change.
+
+- **interceptor** (fec-13): the RFC 8627 FlexFEC encoder no longer takes a retransmission on
+  the media SSRC (a NACK answered without RTX, as after an answer that kept only FlexFEC, RFC
+  8627 section 1.1.7) into its current block: its old sequence number broke the run of
+  consecutive source packets, and the block went unprotected.
 
 - **sctp** (sctp-17): two stream-reset faults. (1) A peer's Outgoing SSN Reset Request that
   arrives ahead of the last DATA it covers (RFC 6525 5.2.2 E2, answered "In progress") is
