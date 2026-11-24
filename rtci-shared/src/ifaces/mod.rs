@@ -68,6 +68,8 @@ fe80000000000000021122fffe334455 02 40 20 80     eth0
         let temporary = match temporary_ipv6_addresses() {
             Ok(temporary) => temporary,
             // Not read on this system: nothing is marked.
+            // (On macOS this is where a wrong `SIOCGIFAFLAG_IN6` request would show: the
+            // kernel refuses it for the host's loopback `::1` at least.)
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
             Err(e) => panic!("temporary_ipv6_addresses failed: {e}"),
         };

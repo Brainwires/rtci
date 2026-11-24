@@ -145,8 +145,14 @@ pub fn temporary_ipv6_addresses() -> Result<Vec<std::net::Ipv6Addr>, Error> {
         // SAFETY: the request is the 288-byte `struct in6_ifreq` the ioctl number encodes.
         let rc = unsafe { libc::ioctl(socket.0, SIOCGIFAFLAG_IN6, &mut request) };
         if rc < 0 {
-            // An address that went away between the listing and the call.
-            continue;
+            let error = Error::last_os_error();
+            // An address that went away between the listing and the call is skipped; any
+            // other failure (a request the kernel does not take) is an error, not "no
+            // temporary address".
+            if error.raw_os_error() == Some(libc::EADDRNOTAVAIL) {
+                continue;
+            }
+            return Err(error);
         }
         // SAFETY: the kernel wrote `ifru_flags6`.
         let flags = unsafe { request.data.flags6 };
