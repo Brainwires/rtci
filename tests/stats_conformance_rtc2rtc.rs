@@ -1978,14 +1978,6 @@ fn every_supplied_member_reaches_the_report_of_the_kind_it_applies_to() -> Resul
         total_corruption_probability: Some(1.23),
         total_squared_corruption_probability: Some(1.24),
         corruption_measurements: Some(125),
-        // Supplied here through the audio update (`receiver` below), whose values the report
-        // shows only when the decoder update leaves these out; a decoder update's own values
-        // and their precedence: `statistics::feed_test::
-        // the_decoder_update_carries_the_jitter_buffer_members_of_a_video_stream`.
-        jitter_buffer_delay: None,
-        jitter_buffer_target_delay: None,
-        jitter_buffer_minimum_delay: None,
-        jitter_buffer_emitted_count: None,
     };
     let decoder_video_only: &[(&str, Value)] = &[
         ("framesReceived", 101.into()),

@@ -773,37 +773,4 @@ impl RTCRtpReceiver<'_> {
         }
         Ok(())
     }
-
-    /// Tells the NACK generator the oldest sequence number of the received stream `ssrc` that
-    /// the application can still use, or removes that horizon with `None`. RFC 4588 6.3: "the
-    /// receiver should generally assess whether the retransmitted packet would still be useful
-    /// at the time it is received". A video pipeline that has released or given up every frame
-    /// before `oldest_useful` gives it here after each frame, and the generator
-    /// (`interceptor::NackControl::Horizon`) no longer asks for missing packets older than it;
-    /// newer ones are asked for as before. Sequence numbers compare with wrap-around (RFC 3550
-    /// A.1), so the horizon is to be moved on as playout advances.
-    ///
-    /// Only effective with the default interceptors (their NACK generator holds the request
-    /// state). An SSRC this receiver's track does not receive is ignored.
-    pub fn set_nack_horizon(
-        &mut self,
-        now: Instant,
-        ssrc: u32,
-        oldest_useful: Option<u16>,
-    ) -> Result<()> {
-        let received = self.peer_connection.rtp_transceivers[self.id.0]
-            .receiver()
-            .as_ref()
-            .is_some_and(|receiver| receiver.track().ssrcs().any(|s| s == ssrc));
-        if !received {
-            return Ok(());
-        }
-        self.peer_connection.interceptor.handle_write(
-            interceptor::NackControl::Horizon {
-                media_ssrc: ssrc,
-                oldest_useful,
-            }
-            .into_packet(now),
-        )
-    }
 }
