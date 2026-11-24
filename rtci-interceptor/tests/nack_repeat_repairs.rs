@@ -14,8 +14,9 @@
 
 use rtci_interceptor::{
     Attribute, AttributedPacket, Interceptor, NackResponderBuilder, Packet, RTCPFeedback,
-    RTPHeaderExtension, Registry, RetransmissionRateLimit, RetransmissionsReported, Slot,
-    StreamInfo, TaggedPacket, TwccSenderBuilder,
+    RTPHeaderExtension, Registry, ReportedRetransmission, RetransmissionRateLimit,
+    RetransmissionsLeft, RetransmissionsReported, Slot, StreamInfo, TaggedPacket,
+    TwccSenderBuilder,
 };
 use rtcp::transport_feedbacks::cc_feedback_report::{
     CcFeedbackMetricBlock, CcFeedbackReport, CcFeedbackReportBlock, Ecn,
@@ -238,16 +239,25 @@ fn the_feedback_on_a_retransmission_is_reported_by_the_packet_it_repairs() {
     assert_eq!(
         vec![
             RetransmissionsReported {
-                received: vec![(RTX_SSRC, 3)],
+                received: vec![reported(3, ms(base, 200))],
                 lost: vec![],
             },
             RetransmissionsReported {
                 received: vec![],
-                lost: vec![(RTX_SSRC, 4)],
+                lost: vec![reported(4, ms(base, 200))],
             },
         ],
         reports
     );
+}
+
+/// The retransmission of `sequence_number` made at `sent`, as a report names it.
+fn reported(sequence_number: u16, sent: Instant) -> ReportedRetransmission {
+    ReportedRetransmission {
+        ssrc: RTX_SSRC,
+        sequence_number,
+        sent,
+    }
 }
 
 thread_local! {
@@ -413,7 +423,7 @@ fn the_report_rides_an_empty_carrier() {
         ms(base, 250),
         AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(
             RetransmissionsReported {
-                received: vec![(RTX_SSRC, 3)],
+                received: vec![reported(3, ms(base, 200))],
                 lost: vec![],
             },
         ))),
@@ -495,4 +505,491 @@ fn a_held_request_under_a_rate_limit_is_due_when_its_wait_ends() {
     assert_eq!(Some(ms(base, 1_300)), chain.poll_timeout());
     chain.handle_timeout(ms(base, 1_300)).unwrap();
     assert_eq!(1, drain(&mut chain).len(), "answered when the wait ended");
+}
+
+/// One original packet `sequence_number` written at `now`; the retransmissions that leave
+/// with it.
+fn original(chain: &mut impl Interceptor, now: Instant, sequence_number: u16) -> Vec<Left> {
+    chain
+        .handle_write(TaggedPacket {
+            now,
+            transport: TransportContext::default(),
+            message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 96,
+                    sequence_number,
+                    ssrc: SSRC,
+                    ..Default::default()
+                },
+                payload: vec![0u8; 500].into(),
+            })),
+        })
+        .unwrap();
+    drain(chain)
+}
+
+/// A whole cycle of sequence numbers after `send_originals`' ten (10 to 65535, then 0 to 9
+/// again), `spacing` apart from `from`; the instant of the last. The stream's ten first
+/// packets are then long out of the send buffer, and ten new ones have their numbers. Nothing
+/// is retransmitted meanwhile: nobody asks.
+fn a_cycle_of_originals(chain: &mut impl Interceptor, from: Instant, spacing: Duration) -> Instant {
+    let mut now = from;
+    for sequence_number in (10..=u16::MAX).chain(0..10) {
+        now += spacing;
+        let left = original(chain, now, sequence_number);
+        assert!(
+            left.is_empty(),
+            "retransmitted with the original {sequence_number}, unasked: {left:?}"
+        );
+    }
+    now
+}
+
+/// Transport-wide feedback on the one packet `number`; the reports on retransmissions it
+/// made the TWCC sender pass on.
+fn reports_of_feedback(
+    chain: &mut impl Interceptor,
+    now: Instant,
+    number: u16,
+) -> Vec<RetransmissionsReported> {
+    read(
+        chain,
+        now,
+        AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+            sender_ssrc: 1,
+            media_ssrc: SSRC,
+            base_sequence_number: number,
+            packet_status_count: 1,
+            reference_time: 1,
+            fb_pkt_count: 0,
+            packet_chunks: vec![PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                packet_status_symbol: SymbolTypeTcc::PacketReceivedSmallDelta,
+                run_length: 1,
+            })],
+            recv_deltas: vec![RecvDelta {
+                type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                delta: 1000,
+            }],
+        })])),
+    );
+    let mut reported = Vec::new();
+    while let Some(tagged) = chain.poll_read() {
+        if let Some(report) = tagged.message.custom::<RetransmissionsReported>() {
+            reported.push(report.clone());
+        }
+    }
+    reported
+}
+
+/// The memory of a retransmission reported received ends by the clock of the request itself
+/// (four seconds, `DELIVERED_MEMORY`), not when some later report happens to arrive: with no
+/// further report at all, a request thirty seconds on is answered. (Independent review,
+/// 2026-11-24: the memory was pruned only on the next report, so the request was declined for
+/// ever.)
+#[test]
+fn a_request_after_the_delivered_memory_is_answered_with_no_report_in_between() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    assert_eq!(1, left.len(), "{left:?}");
+    let number = left[0].number.expect("numbered");
+    assert!(feedback(&mut chain, ms(base, 300), number, true).is_empty());
+    // Within the memory: crossed the retransmission, not answered.
+    assert!(nack(&mut chain, ms(base, 350), &[3]).is_empty());
+    assert!(
+        nack(&mut chain, ms(base, 4_250), &[3]).is_empty(),
+        "50 ms before the memory ends"
+    );
+    // Thirty seconds on, with no other report in between: the memory (4 s) is long over.
+    let later = nack(&mut chain, ms(base, 30_000), &[3]);
+    assert_eq!(
+        1,
+        later.len(),
+        "a request 30 s after the retransmission was reported received is still declined"
+    );
+}
+
+/// What is remembered of a repair is the memory of one packet. The sequence numbers wrap
+/// (65536 packets, 197 s here), the new packet with the number of one repaired a cycle ago is
+/// lost, and its request is answered: the old packet's "received" is not the new one's.
+/// (Independent review, 2026-11-24.)
+#[test]
+fn a_new_packet_with_a_sequence_number_repaired_a_cycle_ago_is_repaired() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    assert_eq!(1, left.len(), "{left:?}");
+    let number = left[0].number.expect("numbered");
+    assert!(feedback(&mut chain, ms(base, 300), number, true).is_empty());
+    // A whole cycle of sequence numbers without a loss.
+    let now = a_cycle_of_originals(&mut chain, ms(base, 400), Duration::from_millis(3));
+    // The new packet 3 is lost.
+    let repaired = nack(&mut chain, now + Duration::from_millis(100), &[3]);
+    assert_eq!(
+        1,
+        repaired.len(),
+        "the new packet 3, {:?} after the old one's repair, is not retransmitted",
+        now.duration_since(base)
+    );
+}
+
+/// At a high packet rate the sequence numbers come round inside the memory itself (65536
+/// packets in 0.66 s, 100 000 packets a second): the time has not run out, the packet is
+/// another one all the same, and it is repaired.
+#[test]
+fn a_sequence_number_reused_within_the_delivered_memory_is_another_packet() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    feedback(&mut chain, ms(base, 300), left[0].number.unwrap(), true);
+    assert!(nack(&mut chain, ms(base, 350), &[3]).is_empty());
+    let now = a_cycle_of_originals(&mut chain, ms(base, 400), Duration::from_micros(10));
+    assert!(now < ms(base, 1_100), "the cycle took under 0.7 s");
+    let repaired = nack(&mut chain, ms(base, 1_200), &[3]);
+    assert_eq!(
+        vec![3],
+        repaired
+            .iter()
+            .map(|left| left.repaired)
+            .collect::<Vec<_>>(),
+        "0.9 s after the old packet 3 was reported received (memory 4 s), the new packet 3"
+    );
+}
+
+/// Nor is a new packet held for the report on an old packet's retransmission: the wait for a
+/// report is one packet's too.
+#[test]
+fn a_new_packet_is_not_held_for_the_report_on_an_old_packets_retransmission() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    // Reports have come once, so requests wait for them.
+    let first = nack(&mut chain, ms(base, 150), &[1]);
+    feedback(&mut chain, ms(base, 180), first[0].number.unwrap(), true);
+    assert_eq!(1, nack(&mut chain, ms(base, 200), &[3]).len());
+    assert!(
+        nack(&mut chain, ms(base, 300), &[3]).is_empty(),
+        "no report yet: the request for the old packet 3 waits (1 s, no round trip known)"
+    );
+    // The waiting request ends with its packet (the new packet 3 is not retransmitted as it
+    // is written, which the cycle checks); a cycle on, 3 is another packet.
+    let now = a_cycle_of_originals(&mut chain, ms(base, 310), Duration::from_micros(10));
+    assert!(now < ms(base, 1_000));
+    let repaired = nack(&mut chain, ms(base, 1_000), &[3]);
+    assert_eq!(
+        vec![3],
+        repaired
+            .iter()
+            .map(|left| left.repaired)
+            .collect::<Vec<_>>(),
+        "the new packet 3 is repaired at once, 0.2 s before the old one's wait would end"
+    );
+}
+
+/// The TWCC sender keeps the transport-wide number of a retransmission for the feedback on
+/// it. When that feedback is lost, the number comes round to another packet a cycle of
+/// transport-wide numbers later (197 s here): feedback on that packet is not a report on the
+/// old retransmission. (Independent review, 2026-11-24.)
+#[test]
+fn feedback_on_a_reused_transport_wide_number_is_not_an_old_retransmission() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    assert_eq!(1, left.len(), "{left:?}");
+    let number = left[0].number.expect("numbered");
+    // The feedback on that retransmission is lost. A cycle of transport-wide numbers later
+    // another packet carries `number`.
+    let now = a_cycle_of_originals(&mut chain, ms(base, 400), Duration::from_millis(3));
+    let reported = reports_of_feedback(&mut chain, now + Duration::from_millis(50), number);
+    assert!(
+        reported.is_empty(),
+        "feedback on an original packet was reported as a retransmission's: {reported:?}"
+    );
+}
+
+/// The same at a high packet rate, where the transport-wide numbers come round within the
+/// time a report still counts (65536 packets in 0.66 s; the horizon is 4 s): the number is
+/// the new packet's from the moment it is handed out again.
+#[test]
+fn a_transport_wide_number_handed_out_again_within_the_horizon_is_the_new_packets() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    let number = left[0].number.expect("numbered");
+    let now = a_cycle_of_originals(&mut chain, ms(base, 400), Duration::from_micros(10));
+    assert!(now < ms(base, 1_100));
+    let reported = reports_of_feedback(&mut chain, ms(base, 1_150), number);
+    assert!(reported.is_empty(), "{reported:?}");
+}
+
+/// Half a cycle of transport-wide numbers on, a number can no longer be told from one ahead
+/// (the feedback's base and the sender's own numbering are 16 bits): feedback that names the
+/// retransmission's number then is not reported, time or no time.
+#[test]
+fn feedback_half_a_cycle_of_transport_wide_numbers_late_is_not_reported() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    let number = left[0].number.expect("numbered");
+    // 33 000 more packets in 0.33 s: more than half the cycle, the number not yet reused.
+    let mut now = ms(base, 400);
+    for sequence_number in 10..33_010u16 {
+        now += Duration::from_micros(10);
+        assert!(original(&mut chain, now, sequence_number).is_empty());
+    }
+    let reported = reports_of_feedback(&mut chain, ms(base, 800), number);
+    assert!(reported.is_empty(), "{reported:?}");
+}
+
+/// Feedback on a retransmission counts for four seconds after it was made
+/// (`RETRANSMISSION_REPORT_HORIZON`), by the clock of the feedback that names it: later it is
+/// not reported, however few packets were sent since. Just inside, it is.
+#[test]
+fn feedback_on_a_retransmission_after_the_report_horizon_is_not_reported() {
+    for (after, counts) in [(3_900, true), (4_000, false), (60_000, false)] {
+        let base = Instant::now();
+        let mut chain = chain(true);
+        send_originals(&mut chain, base);
+        let left = nack(&mut chain, ms(base, 200), &[3]);
+        let number = left[0].number.expect("numbered");
+        let reported = reports_of_feedback(&mut chain, ms(base, 200 + after), number);
+        assert_eq!(
+            counts,
+            !reported.is_empty(),
+            "feedback {after} ms after the retransmission: {reported:?}"
+        );
+    }
+}
+
+/// A retransmission handed to a pacer that never says what became of it (no
+/// `RetransmissionsLeft` for it, and none for any other) holds its packet's requests off for
+/// four seconds, by the clock of the request: after that the packet is repaired again.
+#[test]
+fn a_retransmission_the_pacer_never_reports_on_holds_its_packet_for_four_seconds_only() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    // A pacer is there: it has reported once.
+    read(
+        &mut chain,
+        ms(base, 100),
+        AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::Custom(Arc::new(
+            RetransmissionsLeft {
+                departed: vec![],
+                dropped: vec![(RTX_SSRC, 9)],
+            },
+        ))),
+    );
+    drain(&mut chain);
+    assert_eq!(1, nack(&mut chain, ms(base, 200), &[3]).len());
+    assert!(
+        nack(&mut chain, ms(base, 1_000), &[3]).is_empty(),
+        "its retransmission waits in the pacer"
+    );
+    assert!(nack(&mut chain, ms(base, 4_100), &[3]).is_empty());
+    assert_eq!(
+        1,
+        nack(&mut chain, ms(base, 4_300), &[3]).len(),
+        "4.1 s on, nothing heard of the first retransmission: repaired again"
+    );
+}
+
+/// A receiver whose feedback reports every retransmission received, whether it got it or not,
+/// stops the repairs of its own packet for the memory of each report and no longer: every
+/// request after that memory is answered, round after round.
+#[test]
+fn a_receiver_that_reports_every_repair_received_is_repaired_again_after_each_memory() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let mut at = 200;
+    for round in 0..5 {
+        let left = nack(&mut chain, ms(base, at), &[3]);
+        assert_eq!(1, left.len(), "round {round}: the request is answered");
+        // The false report, 50 ms later, and the receiver asking on every 500 ms.
+        feedback(&mut chain, ms(base, at + 50), left[0].number.unwrap(), true);
+        for asked in (at + 100..at + 4_050).step_by(500) {
+            assert!(
+                nack(&mut chain, ms(base, asked), &[3]).is_empty(),
+                "round {round}: declined within the memory, at {asked} ms"
+            );
+        }
+        at += 4_100;
+    }
+}
+
+/// RFC 8888 feedback reports a span of recent packets in every report, so the same RTX packet
+/// is reported received again and again. The memory runs from the first report: a receiver
+/// repeating it (as the format has it, or to keep a repair off) does not extend it, and a
+/// report that comes after the memory ended does not begin it again.
+#[test]
+fn a_report_repeated_does_not_extend_the_delivered_memory() {
+    let base = Instant::now();
+    let mut chain = chain(false);
+    send_originals(&mut chain, base);
+    let ccfb = |chain: &mut dyn Interceptor, now: Instant, rtx_sequence: u16| {
+        read(
+            chain,
+            now,
+            AttributedPacket::new(Packet::Rtcp(vec![Box::new(CcFeedbackReport {
+                sender_ssrc: 1,
+                report_blocks: vec![CcFeedbackReportBlock {
+                    media_ssrc: RTX_SSRC,
+                    begin_sequence: rtx_sequence,
+                    metric_blocks: vec![CcFeedbackMetricBlock {
+                        received: true,
+                        ecn: Ecn::NotEct,
+                        arrival_time_offset: 10,
+                    }],
+                }],
+                report_timestamp: 65_536,
+            })])),
+        );
+    };
+    let three = nack(&mut chain, ms(base, 200), &[3]);
+    let rtx_sequence = three[0].rtx_sequence;
+    // The same report every 100 ms for six seconds.
+    for at in (250..6_250).step_by(100) {
+        ccfb(&mut chain, ms(base, at), rtx_sequence);
+        drain(&mut chain);
+        if at == 4_150 {
+            assert!(
+                nack(&mut chain, ms(base, 4_200), &[3]).is_empty(),
+                "3.95 s after the first report: within the memory"
+            );
+        }
+    }
+    assert_eq!(
+        1,
+        nack(&mut chain, ms(base, 6_300), &[3]).len(),
+        "6 s after the first report, 50 ms after the latest repeat of it"
+    );
+}
+
+/// Feedback that names every transport-wide number as received (a receiver making the most
+/// of it) reports the retransmissions that were made and nothing else: a packet never
+/// retransmitted is not remembered as delivered, and its first request is answered.
+#[test]
+fn feedback_naming_every_number_reports_only_the_retransmissions_made() {
+    let base = Instant::now();
+    let mut chain = chain(true);
+    send_originals(&mut chain, base);
+    let left = nack(&mut chain, ms(base, 200), &[3]);
+    let number = left[0].number.expect("numbered");
+    let mut reports = Vec::new();
+    for flood in 0..3u64 {
+        for first in (0..=u16::MAX).step_by(0x1fff) {
+            read(
+                &mut chain,
+                ms(base, 300 + flood),
+                AttributedPacket::new(Packet::Rtcp(vec![Box::new(TransportLayerCc {
+                    sender_ssrc: 1,
+                    media_ssrc: SSRC,
+                    base_sequence_number: first,
+                    packet_status_count: 0x1fff,
+                    reference_time: 1,
+                    fb_pkt_count: 0,
+                    packet_chunks: vec![PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                        type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+                        packet_status_symbol: SymbolTypeTcc::PacketReceivedSmallDelta,
+                        run_length: 0x1fff,
+                    })],
+                    recv_deltas: vec![
+                        RecvDelta {
+                            type_tcc_packet: SymbolTypeTcc::PacketReceivedSmallDelta,
+                            delta: 250,
+                        };
+                        0x1fff
+                    ],
+                })])),
+            );
+            while let Some(tagged) = chain.poll_read() {
+                if let Some(report) = tagged.message.custom::<RetransmissionsReported>() {
+                    reports.push(report.clone());
+                }
+            }
+            drain(&mut chain);
+        }
+    }
+    assert_eq!(
+        vec![RetransmissionsReported {
+            received: vec![reported(3, ms(base, 200))],
+            lost: vec![],
+        }],
+        reports,
+        "the one retransmission, numbered {number}, once"
+    );
+    let repaired: Vec<u16> = nack(&mut chain, ms(base, 400), &[3, 4, 5, 6])
+        .iter()
+        .map(|left| left.repaired)
+        .collect();
+    assert_eq!(
+        vec![4, 5, 6],
+        repaired,
+        "3 arrived; the others were never sent again"
+    );
+}
+
+/// A receiver that asks for everything all the time and reports every retransmission lost (so
+/// that each request is answered at once) gets no more than the rate limit: in every second
+/// the retransmissions stay within the target, here 400 kbit/s (50 000 octets), while the
+/// stream itself sends 100 packets a second.
+#[test]
+fn requests_and_lost_reports_without_end_stay_within_the_rate_limit() {
+    let base = Instant::now();
+    let mut chain = chain_with(true, RetransmissionRateLimit::UpToTarget);
+    read(
+        &mut chain,
+        base,
+        AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
+            bits_per_second: 400_000.0,
+        }),
+    );
+    drain(&mut chain);
+    // The instant (ms) of every retransmission; each is 514 octets (12 of header, 2 of
+    // original sequence number, 500 of payload), as the responder counts it.
+    let mut sent: Vec<u64> = Vec::new();
+    let mut next_sequence = 0u16;
+    for at in 0..10_000u64 {
+        let now = ms(base, at);
+        let mut left = Vec::new();
+        if at % 10 == 0 {
+            left.extend(original(&mut chain, now, next_sequence));
+            next_sequence += 1;
+        }
+        chain.handle_timeout(now).unwrap();
+        left.extend(drain(&mut chain));
+        if at % 5 == 0 {
+            // Everything the receiver could still want: the last 600 packets.
+            let asked: Vec<u16> = (next_sequence.saturating_sub(600)..next_sequence).collect();
+            left.extend(nack(&mut chain, now, &asked));
+        }
+        // Every retransmission that left is reported lost within the same millisecond.
+        for retransmission in left {
+            sent.push(at);
+            let number = retransmission.number.expect("numbered");
+            sent.extend(feedback(&mut chain, now, number, false).iter().map(|_| at));
+        }
+    }
+    assert!(sent.len() > 500, "repairs were made: {}", sent.len());
+    let mut worst = 0usize;
+    for (index, from) in sent.iter().enumerate() {
+        let packets = sent[index..]
+            .iter()
+            .take_while(|at| **at < from + 1_000)
+            .count();
+        worst = worst.max(packets * 514);
+    }
+    assert!(
+        worst <= 50_000,
+        "{worst} octets of retransmissions within one second, the target allows 50 000"
+    );
 }
