@@ -392,10 +392,13 @@ impl<'a> EndpointHandler<'a> {
                 })),
             });
         } else if self.is_early_repair(rtp_packet.header.payload_type) {
-            // A repair packet (RTX, FEC) that arrives while this endpoint's offer is pending,
-            // before the stream it repairs: the answer's `a=ssrc-group` has not arrived and
-            // there is nothing to repair yet. It is not unassociated media: the offer lists
-            // its format (RFC 3264 section 5.1), and nothing of the stream is lost with it.
+            // A repair packet (RTX, FEC) that arrives before the stream it repairs: while
+            // this endpoint's offer is pending (the answer's `a=ssrc-group` has not arrived),
+            // or for a section whose streams are not signalled (RFC 9143 section 9.2; a
+            // browser's bandwidth probes on its RTX SSRC come before its first frame). There
+            // is nothing to repair yet. It is not unassociated media (RFC 8830 section 3.1):
+            // its payload type names the section and a repair format of it, and nothing of
+            // the stream is lost with it.
             trace!("drop repair packet ssrc = {ssrc} that precedes its stream and the answer");
         } else {
             // RFC 8830 section 3.1: media that cannot be associated is not buffered; the
@@ -574,11 +577,16 @@ impl<'a> EndpointHandler<'a> {
     }
 
     /// Whether `payload_type` is a repair format (RTX, FEC) of a section a pending local
-    /// offer lists.
+    /// offer lists, or of a section whose receiver has no original stream yet (its SSRCs not
+    /// signalled, RFC 9143 section 9.2: the stream it would repair has not arrived).
     fn is_early_repair(&self, payload_type: PayloadType) -> bool {
         self.rtp_transceivers.iter().any(|transceiver| {
             transceiver.receiver().as_ref().is_some_and(|receiver| {
-                receiver.has_offered()
+                (receiver.has_offered()
+                    || receiver
+                        .get_coding_parameters()
+                        .iter()
+                        .all(|coding| coding.ssrc.is_none()))
                     && receiver.receivable_codecs().any(|codec| {
                         codec.payload_type == payload_type
                             && is_repair_mime_type(&codec.rtp_codec.mime_type)
