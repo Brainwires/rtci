@@ -159,6 +159,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrive from the SSRC that sent the receiver reports (as libwebrtc does with its own
   receiver-report SSRC), signalled in the next description as usual. Engine behaviour change
   (SSRC handling). Rows: RFC8108-6.1-1 (`violated` -> `tested`).
+### Behaviour changes
+
+- **RFC 4585 section 3.5.4: congestion control feedback sent at once counts in the average
+  RTCP packet size.** The transport-wide and RFC 8888 feedback the RTCP session sends as it is
+  built (`with_immediate_congestion_feedback`, the default) was left out of `avg_rtcp_size`
+  when sent, though the peer's was counted when received; the clause has the average "updated
+  accordingly" for every packet, Early or Regular. Now every packet sent moves it, so the
+  regular report interval reflects the packets the endpoint actually sends (slightly longer
+  where that feedback is larger than the regular reports). With
+  `with_congestion_feedback_in_budget` (the `Performance` profile) the regular reports' budget
+  still rests on their own size. Engine behaviour change (RTCP timing). Rows: RFC4585-3.5.4-2
+  (`partial` -> `tested`).
 
 ## [0.1.0] - 2026-11-24
 
