@@ -432,10 +432,8 @@ fn the_performance_profile_differs_from_rfc_only_where_it_saves() {
         changed,
         [
             "rtcp.t-rr-interval",
-            "rtcp.congestion-feedback-in-budget",
             "rtcp.minimum-session-bandwidth",
             "cc.feedback-share",
-            "cc.feedback-max-interval",
         ]
     );
 }

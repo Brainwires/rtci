@@ -294,9 +294,13 @@ def render(rows, not_governed, not_expressible):
     w("  so regular reports speed up: 19.4 regular packets/s each way at 1 Mbit/s both ways")
     w("  with `a=rtcp-rsize`, 15.9/s without. Under `Performance` 1.5 and 1.4/s.")
     w("- Not in `Performance` because they are outside an RFC: libwebrtc's 5 s audio report")
-    w("  interval whatever the bandwidth (section 3) and congestion control feedback outside")
-    w("  the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an")
-    w("  audit row for the owner).")
+    w("  interval whatever the bandwidth (section 3) and congestion control feedback on top of")
+    w("  the RTCP bandwidth (`rtcp.congestion-feedback-in-budget` `false`, the `Chrome` form).")
+    w("- Congestion control feedback inside RFC 3550's 5% of the session bandwidth")
+    w("  (`rtcp.congestion-feedback-in-budget`, `cc.feedback-max-interval` 500 ms) is the")
+    w("  default: at 24 kbit/s of audio the connection's RTCP is 6.0% of the media (3.1 of a")
+    w("  3.2 kbit/s budget with the lower layers, the 64 kbit/s session floor), against 12.2%")
+    w("  before; `Performance` takes 4.5%.")
     w("")
     for klass in ["EngineOnly", "Same", "Input", "Deprecated"]:
         entries = [entry for entry in not_governed if entry["class"] == klass]

@@ -37,6 +37,18 @@
 //! no rsize" each feedback packet travels in a minimal compound packet with an SR (23 SR/s
 //! under `Performance`: 20 of them carry feedback).
 //!
+//! Since the congestion control feedback counts against the RTCP bandwidth by default
+//! (`rtcp.congestion-feedback-in-budget`, `cc.feedback-max-interval` 500 ms, the cadence
+//! counting SRTCP and the compound packet), the `rfc` rows read (container, ccrows-1):
+//!
+//! ```text
+//! 1 Mbit/s A+V one way, rsize       rfc         |  10.48  21.32 |   5.00  20.00     50    5.00     319 |  1123.3   3.05    120
+//! 1 Mbit/s A+V both ways, rsize     rfc         |  10.68  21.68 |  10.96  20.00     50   10.96     158 |  2246.4   3.29    120
+//! 100 kbit/s A+V one way, rsize     rfc         |   0.24   0.64 |   0.24   9.00    177    0.24    5738 |   191.0   3.59    120
+//! 24 kbit/s audio one way, rsize    rfc         |   0.60   0.60 |   0.68   2.00    500    0.68    2221 |    38.5   5.96      -
+//! 24 kbit/s audio one way, no rsize rfc         |   0.44   0.44 |   0.48   2.00    500    0.48    2953 |    38.5   6.86      -
+//! ```
+//!
 //! The audio rows were measured before RED (RFC 2198) became the default for audio (train
 //! 11). With it the "24 kbit/s audio, rsize" call carries 64.5 kbit/s on the wire, and its RTCP
 //! is 7.46% of the media under `Rfc` and 3.57% under `Performance` (hosted run 45240105038).
@@ -49,7 +61,9 @@ use bytes::Bytes;
 use rtci::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
 use rtci::peer_connection::configuration::BehaviourProfile;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
-use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::interceptor_registry::{
+    DefaultInterceptorOptions, register_default_interceptors_with_options,
+};
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
@@ -133,11 +147,22 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(addr: &str, profile: BehaviourProfile) -> Result<Self> {
+    /// A peer under `profile`, with `in_budget` replacing the profile's
+    /// `rtcp_congestion_feedback_in_budget` when given.
+    fn new(addr: &str, profile: BehaviourProfile, in_budget: Option<bool>) -> Result<Self> {
         let mut media_engine = MediaEngine::for_profile(profile);
         media_engine.register_default_codecs()?;
         let tap = Tap::default();
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?.with(
+        let mut options = DefaultInterceptorOptions::for_profile(profile);
+        if let Some(in_budget) = in_budget {
+            options.rtcp_congestion_feedback_in_budget = in_budget;
+        }
+        let (registry, _) = register_default_interceptors_with_options(
+            Registry::new(),
+            &mut media_engine,
+            &options,
+        )?;
+        let registry = registry.with(
             Slot::Custom(100),
             TapInterceptor {
                 tap: tap.clone(),
@@ -406,6 +431,9 @@ struct Side {
     rtcp_octets: f64,
     /// SRTP octets per second on the wire.
     media_octets: f64,
+    /// SRTCP and SRTP datagrams per second.
+    rtcp_datagrams: f64,
+    media_datagrams: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -418,10 +446,20 @@ struct Measured {
 }
 
 fn measure(sc: Scenario, profile: BehaviourProfile, drop_at: Option<u64>) -> Result<Measured> {
+    measure_with(sc, profile, None, drop_at)
+}
+
+/// [`measure`] with `rtcp_congestion_feedback_in_budget` set to `in_budget` when given.
+fn measure_with(
+    sc: Scenario,
+    profile: BehaviourProfile,
+    in_budget: Option<bool>,
+    drop_at: Option<u64>,
+) -> Result<Measured> {
     let mut world = World {
         peers: [
-            Peer::new("10.0.0.1:5000", profile)?,
-            Peer::new("10.0.0.2:5000", profile)?,
+            Peer::new("10.0.0.1:5000", profile, in_budget)?,
+            Peer::new("10.0.0.2:5000", profile, in_budget)?,
         ],
         now: Instant::now(),
         delay: Duration::from_millis(20),
@@ -606,6 +644,10 @@ fn measure(sc: Scenario, profile: BehaviourProfile, drop_at: Option<u64>) -> Res
                 .map(|(_, l)| *l as f64)
                 .sum::<f64>()
                 / secs,
+            rtcp_datagrams: peer.wire_rtcp.iter().filter(|(at, _)| within(at)).count() as f64
+                / secs,
+            media_datagrams: peer.wire_rtp.iter().filter(|(at, _)| within(at)).count() as f64
+                / secs,
         };
     }
     let rtcp: f64 = sides.iter().map(|s| s.rtcp_octets).sum();
@@ -747,9 +789,10 @@ fn the_performance_profile_sends_regular_reports_about_once_a_second() -> Result
     let performance = measure(ONE_MBIT, BehaviourProfile::Performance, Some(8))?;
     print_row(&ONE_MBIT, BehaviourProfile::Rfc, &rfc);
     print_row(&ONE_MBIT, BehaviourProfile::Performance, &performance);
-    // The default pinned: RFC 3550 6.2 timing with T_rr_interval zero.
+    // The default pinned: RFC 3550 6.2 timing with T_rr_interval zero (the receiver's regular
+    // reports in what its 20 feedback packets a second leave of the RTCP bandwidth).
     assert!(rfc.sides[0].regular >= 8.0, "{rfc:?}");
-    assert!(rfc.sides[1].regular >= 8.0, "{rfc:?}");
+    assert!(rfc.sides[1].regular >= 3.0, "{rfc:?}");
     assert!(rfc.share >= 0.03, "{rfc:?}");
     // About once a second, dithered over [0.5, 1.5] s.
     for side in performance.sides {
@@ -770,21 +813,86 @@ fn the_performance_profile_sends_regular_reports_about_once_a_second() -> Result
     Ok(())
 }
 
-/// `rtcp.congestion-feedback-in-budget`, `rtcp.minimum-session-bandwidth`,
-/// `cc.feedback-share`, `cc.feedback-max-interval`: at 24 kbit/s of audio the default's RTCP is
-/// over 10% of the media (the regular reports take 5% of a 64 kbit/s floor, the congestion
-/// control feedback 5% of the media on top); under `Performance` both share RFC 3550's 5% of
-/// the media, and the sender still hears feedback every half second.
+/// The RTCP of both sides and the RFC 3550 section 6.2 budget of a run, bits per second with
+/// the lower layers (IPv4 and UDP, 28 octets a datagram), which section 6.2 counts in both:
+/// 5% of the session bandwidth, which the session takes as the media measured both ways and at
+/// least `rtcp.minimum-session-bandwidth` (64 kbit/s by default).
+fn rtcp_and_budget(m: &Measured) -> (f64, f64) {
+    const LOWER_LAYERS: f64 = 28.0;
+    let rtcp: f64 = m
+        .sides
+        .iter()
+        .map(|s| (s.rtcp_octets + LOWER_LAYERS * s.rtcp_datagrams) * 8.0)
+        .sum();
+    let media: f64 = m
+        .sides
+        .iter()
+        .map(|s| (s.media_octets + LOWER_LAYERS * s.media_datagrams) * 8.0)
+        .sum();
+    (rtcp, 0.05 * media.max(64_000.0))
+}
+
+/// `rtcp.congestion-feedback-in-budget`, RFC 3550 section 6.2 and RFC 4585 section 3.2: "FB
+/// messages are part of the RTCP control streams and thus subject to the RTCP bandwidth
+/// constraints". By default the congestion control feedback, which leaves as it is built
+/// (`rtcp.immediate-congestion-feedback`), counts against the RTCP bandwidth: the regular
+/// reports space out to what it leaves, and all RTCP of a 24 kbit/s audio call stays inside 5%
+/// of the session bandwidth. With the feedback on top (`false`, the `Chrome` profile's form, as
+/// libwebrtc) the same call's RTCP is over the budget. The feedback itself is not held either
+/// way: it keeps 5% of the media it reports on, counted with its SRTCP and lower layers, and
+/// leaves at most 500 ms apart (`cc.feedback-max-interval`; a 250 ms ceiling alone would put
+/// the feedback at 95% of the budget here).
+#[test]
+fn by_default_low_rate_rtcp_stays_inside_five_percent_of_the_session_bandwidth() -> Result<()> {
+    // 25 s, 20 s measured: the regular reports are few (one every one to five seconds from
+    // each side), and their intervals are drawn from [0.5, 1.5] of the computed one.
+    let call = Scenario {
+        seconds: 25,
+        ..AUDIO_24K
+    };
+    let default = measure(call, BehaviourProfile::Rfc, None)?;
+    let on_top = measure_with(call, BehaviourProfile::Rfc, Some(false), None)?;
+    print_row(&call, BehaviourProfile::Rfc, &default);
+    print_row(&call, BehaviourProfile::Rfc, &on_top);
+    let (rtcp, budget) = rtcp_and_budget(&default);
+    let (rtcp_on_top, budget_on_top) = rtcp_and_budget(&on_top);
+    println!(
+        "RTCP with lower layers: default {rtcp:.0} bit/s of a {budget:.0} bit/s budget; feedback on top {rtcp_on_top:.0} of {budget_on_top:.0}"
+    );
+    // The budget is an average the randomised intervals keep over time: 3% for a 20 s window.
+    assert!(
+        rtcp <= 1.03 * budget,
+        "{rtcp:.0} > {budget:.0}: {default:?}"
+    );
+    assert!(
+        rtcp_on_top > budget_on_top,
+        "the form on top is over: {rtcp_on_top:.0} / {budget_on_top:.0}"
+    );
+    // The congestion control feedback is not held: as often as with it on top.
+    assert!(default.sides[1].cc >= 2.0, "{default:?}");
+    assert!(default.sides[1].cc_gap_ms <= 550.0, "{default:?}");
+    assert!(
+        (default.sides[1].cc - on_top.sides[1].cc).abs() <= 0.5,
+        "{default:?} / {on_top:?}"
+    );
+    // Regular reports go on from both sides (RFC 5506 section 4: compound RTCP is kept up),
+    // at most about five seconds apart (RFC 4585 section 5).
+    assert!(default.sides[0].regular > 0.0, "{default:?}");
+    assert!(default.sides[1].regular > 0.0, "{default:?}");
+    assert!(default.sides[1].blocks_gap_ms <= 7_500.0, "{default:?}");
+    Ok(())
+}
+
+/// `rtcp.minimum-session-bandwidth`, `cc.feedback-share`, `cc.feedback-max-interval`: under
+/// `Performance` the same call's RTCP is a smaller share still (the session bandwidth follows
+/// the media down to 16 kbit/s, the feedback takes 2.5%, every 500 ms at most), and the sender
+/// still hears feedback every half second.
 #[test]
 fn the_performance_profile_keeps_low_rate_rtcp_inside_five_percent() -> Result<()> {
     let rfc = measure(AUDIO_24K, BehaviourProfile::Rfc, None)?;
     let performance = measure(AUDIO_24K, BehaviourProfile::Performance, None)?;
     print_row(&AUDIO_24K, BehaviourProfile::Rfc, &rfc);
     print_row(&AUDIO_24K, BehaviourProfile::Performance, &performance);
-    // Over RFC 3550's 5% by default. (10% and more before RED, RFC 2198, became the default for
-    // audio in train 11: the redundant copy doubles the media on the wire, 38.5 to 64.5
-    // kbit/s, and the RTCP share halves with it.)
-    assert!(rfc.share >= 0.06, "{rfc:?}");
     assert!(performance.share <= 0.05, "{performance:?}");
     assert!(performance.sides[1].cc >= 1.8, "{performance:?}");
     assert!(performance.sides[1].cc_gap_ms <= 550.0, "{performance:?}");

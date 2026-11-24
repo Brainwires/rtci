@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- **RTCP stays inside RFC 3550's 5% of the session bandwidth with congestion control feedback
+  counted (RFC 3550 6.2, RFC 4585 3.2: feedback is "subject to the RTCP bandwidth
+  constraints").** A 24 kbit/s audio call's RTCP was 12.2% of the media by default (the
+  transport-wide or RFC 8888 feedback came on top of the regular reports' 5%). Now, by
+  default:
+  - `DefaultInterceptorOptions::rtcp_congestion_feedback_in_budget` is `true` (was the
+    `Performance` profile's): the regular reports space out to what the feedback leaves, at
+    most 5 s apart. `Chrome` keeps `false` (libwebrtc's form). The RTCP session counts the
+    peer's feedback as the whole datagram, SRTCP fields and lower layers included, as it
+    counts its own (it counted only the feedback packets).
+  - `DefaultInterceptorOptions::congestion_feedback_max_interval` is 500 ms (was 250 ms;
+    `Chrome` keeps 250 ms): below about 60 kbit/s of media the feedback's 5% asks for more
+    than 250 ms, and the ceiling alone put the feedback at 95% of the budget.
+  - The feedback cadence (TWCC and RFC 8888 generators) counts what wraps a feedback packet
+    on the wire: the SRTCP fields (`RtcpSessionControl::SrtcpOverhead`), and without
+    reduced-size RTCP an SR (not an RR) once the endpoint sends media and an SDES with the
+    session's CNAME (it assumed 28 octets for both; real minimal compound packets are 36 to
+    100).
+  - Measured (`tests/rtcp_rate_trace_rtc2rtc.rs`, container): 24 kbit/s audio, all RTCP of
+    both sides with lower layers 3130 bit/s of a 3200 bit/s budget (6.0% of the media
+    without them, was 12.2%; 6.9% without `a=rtcp-rsize`, was 14.3%); feedback 2 packets a
+    second, 500 ms apart (was 4, 250 ms); regular reports 0.6 to 0.8 a second from each side
+    (was about 2), report blocks to the sender at most 1.6 to 3 s apart. 100 kbit/s audio
+    and video: 3.6% (was 4.2%), feedback 9/s (was 11.5). 1 Mbit/s: 3.05% (was 4.2%); the
+    receiver's regular reports 5/s (was 12), feedback unchanged (20/s).
+  - `Performance` now differs from `Rfc` in three rows (`rtcp.t-rr-interval`,
+    `rtcp.minimum-session-bandwidth`, `cc.feedback-share`). `RtcpSessionBuilder` and the
+    generator builders keep their own defaults (in-budget `false`, 250 ms).
+  - Audit: RFC3550-6.2-1's note (the fraction now holds with the feedback), RFC8888-4-1,
+    RFC8836-2-8b (stale: reduced-size RTCP is negotiated) and RFC8836-2-8c `tested`.
+
 ## [0.1.0] - 2026-11-24
 
 The first release under the `rtci` names: the fork's `rtc` / `rtc-*` crates are `rtci` /
