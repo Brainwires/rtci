@@ -19,7 +19,7 @@ use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
-use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::{RTCIceCandidateInit, RTCIceCandidateType};
 use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtci::sansio::Protocol;
 use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
@@ -90,14 +90,16 @@ fn signalled(pc: &mut RTCPeerConnection) -> Vec<String> {
     candidates
 }
 
-/// The local description after gathering, and the transport's local candidates.
+/// The local description after gathering, and the addresses of the transport's local host
+/// candidates.
 fn described(pc: &mut RTCPeerConnection) -> Result<(String, Vec<String>)> {
     let offer = pc.create_offer(None)?;
     let held = pc
         .dtls_transports()
         .iter()
         .flat_map(|t| t.ice_transport().get_local_candidates())
-        .map(|c| c.to_string())
+        .filter(|c| c.typ == RTCIceCandidateType::Host)
+        .map(|c| format!("{}:{}", c.address, c.port))
         .collect();
     Ok((offer.sdp, held))
 }
@@ -165,7 +167,7 @@ fn fail_closed_withholds_a_host_candidate_whose_name_cannot_be_published() -> Re
     );
     let (sdp, held) = described(&mut pc)?;
     assert!(
-        held.iter().all(|c| !c.contains("typ host")),
+        held.is_empty(),
         "the transport holds no host candidate: {held:?}"
     );
     assert!(!sdp.contains("typ host"), "{sdp}");
@@ -200,10 +202,8 @@ fn by_default_a_host_candidate_whose_name_cannot_be_published_goes_out_under_an_
     assert!(hosts[0].contains(".local 50000 typ host"), "{}", hosts[0]);
     assert!(!hosts[0].contains(HOST_IP), "{}", hosts[0]);
     let (sdp, held) = described(&mut pc)?;
-    assert!(
-        held.iter().any(|c| c.contains(".local 50000 typ host")),
-        "the transport holds it: {held:?}"
-    );
+    assert_eq!(held.len(), 1, "the transport holds it: {held:?}");
+    assert!(held[0].ends_with(".local:50000"), "{held:?}");
     assert!(sdp.contains(".local 50000 typ host"), "{sdp}");
     assert!(!sdp.contains(HOST_IP), "{sdp}");
     // Nothing announces the name: no mDNS datagram leaves.

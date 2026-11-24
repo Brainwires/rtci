@@ -14,6 +14,7 @@ use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::RTCIceCandidateType;
 use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtci_stream_driver::peer::{PeerDriver, PeerDriverConfig};
 use std::net::{IpAddr, Ipv4Addr};
@@ -90,10 +91,11 @@ async fn without_mdns_sockets_a_fail_closed_connection_offers_no_host_candidate(
         .dtls_transports()
         .iter()
         .flat_map(|t| t.ice_transport().get_local_candidates())
-        .map(|c| c.to_string())
+        .filter(|c| c.typ == RTCIceCandidateType::Host)
+        .map(|c| format!("{}:{}", c.address, c.port))
         .collect();
     assert!(
-        held.iter().all(|c| !c.contains("typ host")),
+        held.is_empty(),
         "the transport holds no host candidate: {held:?}"
     );
     Ok(())
