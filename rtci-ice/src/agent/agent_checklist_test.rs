@@ -49,6 +49,11 @@ fn run_with(
     loop {
         a.handle_timeout(now).unwrap();
         while let Some(t) = a.poll_write() {
+            // An agent that publishes `.local` names also writes mDNS (from port 5353): not
+            // a connectivity check.
+            if t.transport.local_addr.port() == mdns::MDNS_PORT {
+                continue;
+            }
             let mut message = Message {
                 raw: t.message.to_vec(),
                 ..Message::default()
