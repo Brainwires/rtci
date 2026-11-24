@@ -748,7 +748,7 @@ impl RTCPeerConnection {
         let port = section.media_name.port.value;
         let address = section
             .connection_information
-            .as_ref()
+            .first()
             .and_then(|c| c.address.as_ref())
             .map(|a| a.address.as_str());
         // A trickled description's placeholder (`9` and `0.0.0.0` / `::`, RFC 8838 section

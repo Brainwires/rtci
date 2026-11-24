@@ -107,6 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
   `max_bundle_is_ignored_when_set_to_be_ignored`).
 
+
+### Features
+
 - **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
   `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
   (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
@@ -232,6 +235,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
   section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
   `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+### Breaking changes
+
+- **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
+  `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
+  section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media basis", for
+  layered multicast). The parser kept only the last one. RFC8866-5.7-7 is `tested`
+  (`grammar_test::several_connection_lines_in_a_media_description_are_all_kept`). Generated
+  SDP is unchanged (one `c=` line per section).
+  **Migration**: `connection_information: Some(c)` becomes `vec![c]`, `None` becomes
+  `vec![]`; read `connection_information.first()` where one address was read, and
+  `is_empty()` for `is_none()`.
 
 ## [0.1.0] - 2026-11-24
 
