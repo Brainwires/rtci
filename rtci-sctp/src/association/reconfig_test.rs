@@ -485,6 +485,7 @@ fn a_request_older_than_the_ones_remembered_is_not_performed_again() -> Result<(
     for rsn in 0..=200u32 {
         a.create_stream(4, true, PPI);
         a.streams.get_mut(&4).unwrap().state = RecvSendState::Closed;
+        a.streams.get_mut(&4).unwrap().outgoing_reset_started = true;
         let reply = a.handle_reconfig(&reset_request_chunk(rsn, a.peer_last_tsn, vec![4]))?;
         assert_eq!(vec![(rsn, 1)], responses(&reply));
     }
@@ -602,6 +603,7 @@ fn both_parameters_of_a_chunk_are_processed() -> Result<()> {
     a.open_stream(1, PPI)?.stop(now)?;
     a.create_stream(2, true, PPI);
     a.streams.get_mut(&2).unwrap().state = RecvSendState::Closed;
+    a.streams.get_mut(&2).unwrap().outgoing_reset_started = true;
     let sent = requests_sent(&mut a, now);
     let rsn = u32_at(&sent[0].1, 0);
 
@@ -755,6 +757,7 @@ fn an_incoming_reset_request_of_this_side_is_answered_by_the_peers_reset() -> Re
     a.peer_rsn_window = Some((40, 40));
     a.create_stream(3, true, PPI);
     a.streams.get_mut(&3).unwrap().state = RecvSendState::Closed;
+    a.streams.get_mut(&3).unwrap().outgoing_reset_started = true;
 
     a.request_incoming_stream_reset(&[3])?;
     let sent = requests_sent(&mut a, now);

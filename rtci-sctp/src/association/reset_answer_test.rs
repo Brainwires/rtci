@@ -165,8 +165,8 @@ fn an_incoming_reset_request_leaves_the_peers_direction_readable() -> Result<()>
 
     // The peer resets its own direction: performed, and not answered with a second reset of
     // this side's, which it reset already.
-    let reply = a.handle_reconfig(&reset_request_chunk(40, base.wrapping_add(2), vec![1]))?;
-    assert_eq!(vec![(40, 1)], responses(&reply));
+    let reply = a.handle_reconfig(&reset_request_chunk(301, base.wrapping_add(2), vec![1]))?;
+    assert_eq!(vec![(301, 1)], responses(&reply));
     assert!(own_resets(&mut a, reply, now).is_empty());
     assert!(!a.streams.contains_key(&1));
     Ok(())
@@ -190,8 +190,8 @@ fn a_held_message_outlives_an_incoming_reset_request_and_the_peers_reset() -> Re
     }))?;
     let _ = own_resets(&mut a, reply, now);
 
-    let reply = a.handle_reconfig(&reset_request_chunk(40, base.wrapping_add(1), vec![1]))?;
-    assert_eq!(vec![(40, 6)], responses(&reply), "waits for the message");
+    let reply = a.handle_reconfig(&reset_request_chunk(301, base.wrapping_add(1), vec![1]))?;
+    assert_eq!(vec![(301, 6)], responses(&reply), "waits for the message");
     assert_eq!(vec![Bytes::from_static(b"unread")], read_all(&mut a, 1));
     assert!(!a.streams.contains_key(&1), "then performed");
     Ok(())
