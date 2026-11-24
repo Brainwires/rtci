@@ -107,6 +107,12 @@ pub enum Attribute {
     /// than a property of the packet carrying it — it travels this way because with no event
     /// channel there is nowhere else for it to go.
     ///
+    /// **Zero means pause**: produce nothing until the next target. The pacer hands zero
+    /// application-ward while its queue would take half its queue time bound or more to drain
+    /// (`PacerPause` carries the controller's own target for the interceptors that need it);
+    /// an encoder skips the frames captured meanwhile and resumes with the next target, without
+    /// a key frame (nothing it encoded was lost). See "Pausing the source" on `PacerInterceptor`.
+    ///
     /// What the application writes has to keep to this target. One that does not hear it
     /// otherwise hears it from the pacer: media that waited the pacer's queue time bound is
     /// discarded whole frames at a time, announced as [`PacerDiscard`](crate::PacerDiscard)

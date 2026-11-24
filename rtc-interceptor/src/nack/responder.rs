@@ -368,6 +368,10 @@ fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
     })
 }
 
+/// How long a retransmission is taken to wait in the pacer at most: longer than the pacer's
+/// queue time bound (2 s by default), past which the pacer drops it and says so.
+const IN_PACER_LIFETIME: Duration = Duration::from_secs(4);
+
 /// Most retransmissions queued and not yet taken by `poll_write`. Past it further NACKed
 /// packets are not queued until the queue drains.
 pub const MAX_QUEUED_RETRANSMISSIONS: usize = 1024;
@@ -435,6 +439,15 @@ pub struct NackResponderInterceptor {
     /// When the next waiting retransmission can leave, worked out since the last change:
     /// `None` when it has to be worked out again.
     release_at: Option<Option<Instant>>,
+    /// Retransmissions made and still waiting in the pacer, by (media SSRC, sequence number),
+    /// with when they were made: a NACK for one is not answered again
+    /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)).
+    in_pacer: HashMap<(u32, u16), Instant>,
+    /// Whether a pacer wire-ward reports its retransmissions' departures (it has once).
+    pacer_reports: bool,
+    /// Whether the pacer tells the source to pause ([`PacerPause`](crate::PacerPause)): the
+    /// target the application reads is zero.
+    paused: bool,
 }
 
 impl NackResponderInterceptor {
@@ -461,6 +474,9 @@ impl NackResponderInterceptor {
             pending_octets: 0,
             announced_reserve: 0.0,
             release_at: None,
+            in_pacer: HashMap::new(),
+            pacer_reports: false,
+            paused: false,
         }
     }
 
@@ -604,7 +620,8 @@ impl NackResponderInterceptor {
                 let recently = stream
                     .last_retransmit
                     .get(&seq)
-                    .is_some_and(|at| now.saturating_duration_since(*at) < resend_interval);
+                    .is_some_and(|at| now.saturating_duration_since(*at) < resend_interval)
+                    || self.in_pacer.contains_key(&(ssrc, seq));
                 if recently {
                     None
                 } else {
@@ -650,6 +667,9 @@ impl NackResponderInterceptor {
             return;
         };
         stream.last_retransmit.insert(seq, now);
+        if self.pacer_reports {
+            self.in_pacer.insert((ssrc, seq), now);
+        }
         stream.retransmit_budget -= 1;
         self.retransmissions_queued += 1;
 
@@ -780,11 +800,11 @@ impl NackResponderInterceptor {
                 transport: TransportContext::default(),
                 message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
                     Attribute::TargetBitrateChanged {
-                        bits_per_second: media_target(
-                            target_bps,
-                            reserve,
-                            self.minimum_bps.unwrap_or(0.0),
-                        ),
+                        bits_per_second: if self.paused {
+                            0.0
+                        } else {
+                            media_target(target_bps, reserve, self.minimum_bps.unwrap_or(0.0))
+                        },
                     },
                 ),
             });
@@ -902,6 +922,45 @@ impl NackResponderInterceptor {
         }
     }
 
+    /// The pacer's report of retransmissions that left it or were dropped
+    /// ([`RetransmissionsLeft`](crate::RetransmissionsLeft)): no longer on their way. One that
+    /// left counts its resend interval from now, the instant it went toward the wire, not from
+    /// when it was made (libwebrtc's `RtpPacketHistory` sets the send time when the pacer sends
+    /// it); one that was dropped may be asked for again.
+    fn retransmissions_left(&mut self, now: Instant, notice: &crate::RetransmissionsLeft) {
+        self.pacer_reports = true;
+        let media_ssrc = |streams: &HashMap<u32, LocalStream>, ssrc: u32| {
+            if streams.contains_key(&ssrc) {
+                Some(ssrc)
+            } else {
+                streams
+                    .iter()
+                    .find(|(_, stream)| stream.ssrc_rtx == Some(ssrc))
+                    .map(|(media, _)| *media)
+            }
+        };
+        for &(ssrc, seq) in &notice.departed {
+            let Some(media) = media_ssrc(&self.streams, ssrc) else {
+                continue;
+            };
+            if self.in_pacer.remove(&(media, seq)).is_some()
+                && let Some(stream) = self.streams.get_mut(&media)
+            {
+                stream.last_retransmit.insert(seq, now);
+            }
+        }
+        for &(ssrc, seq) in &notice.dropped {
+            if let Some(media) = media_ssrc(&self.streams, ssrc) {
+                self.in_pacer.remove(&(media, seq));
+            }
+        }
+        // A pacer drops what waited its queue time bound and says so; anything older than
+        // that is no longer there.
+        self.in_pacer
+            .retain(|_, made| now.saturating_duration_since(*made) < IN_PACER_LIFETIME);
+        self.release_at = None;
+    }
+
     /// Handle a NACK request by queuing retransmissions.
     fn handle_nack(
         &mut self,
@@ -945,7 +1004,8 @@ impl NackResponderInterceptor {
             let Some(stream) = self.streams.get(&ssrc) else {
                 return;
             };
-            if stream.last_retransmit.contains_key(&seq) {
+            if stream.last_retransmit.contains_key(&seq) || self.in_pacer.contains_key(&(ssrc, seq))
+            {
                 continue;
             }
             let Some(octets) = self.retransmittable(stream, seq, now) else {
@@ -1090,6 +1150,25 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
             self.release_at = None;
         }
 
+        // While the pacer tells the source to pause, the target on the packet is zero and the
+        // congestion controller's rides with it: the rate the retransmissions are held to.
+        if carries_target {
+            let pause = msg.message.custom::<crate::PacerPause>().copied();
+            self.paused = pause.is_some();
+            if let Some(pause) = pause
+                && pause.target_bits_per_second.is_finite()
+                && pause.target_bits_per_second >= 0.0
+            {
+                self.target_bps = Some(pause.target_bits_per_second);
+            }
+        }
+
+        // Retransmissions that left the pacer (or were dropped there).
+        if let Some(notice) = msg.message.custom::<crate::RetransmissionsLeft>() {
+            let notice = notice.clone();
+            self.retransmissions_left(now, &notice);
+        }
+
         // Packets the pacer (wire-ward of here) discarded: never resent.
         if let Some(discard) = msg.message.custom::<crate::PacerDiscard>() {
             let discard = discard.clone();
@@ -1131,11 +1210,15 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for NackResponderInterceptor {
                 transport: TransportContext::default(),
                 message: AttributedPacket::new(Packet::Rtcp(vec![])).with(
                     Attribute::TargetBitrateChanged {
-                        bits_per_second: media_target(
-                            target_bps,
-                            self.announced_reserve,
-                            self.minimum_bps.unwrap_or(0.0),
-                        ),
+                        bits_per_second: if self.paused {
+                            0.0
+                        } else {
+                            media_target(
+                                target_bps,
+                                self.announced_reserve,
+                                self.minimum_bps.unwrap_or(0.0),
+                            )
+                        },
                     },
                 ),
             });

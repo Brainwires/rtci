@@ -10,8 +10,9 @@
 //! instant the application enqueued.
 
 use rtc_interceptor::{
-    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerDiscard,
-    PacerQueueOverflow as QueueOverflow, Packet, Registry, Slot, StreamInfo, TaggedPacket,
+    Attribute, AttributedPacket, Interceptor, PacerBuilder, PacerDiscard, PacerPause,
+    PacerQueueOverflow as QueueOverflow, Packet, Registry, RetransmissionsLeft, Slot, StreamInfo,
+    TaggedPacket,
 };
 use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use sansio::Protocol;
@@ -1028,6 +1029,133 @@ fn a_full_queue_discards_the_oldest_frame_with_its_stream() {
     let reads = harness.reads();
     assert_eq!(vec![(1, vec![1, 3], 2)], discards(&reads));
     assert_eq!(vec![1], key_frame_requests(&reads));
+}
+
+/// The targets among `reads`, with the congestion controller's target riding a pause.
+fn targets(reads: &[TaggedPacket]) -> Vec<(f64, Option<f64>)> {
+    reads
+        .iter()
+        .filter_map(|read| {
+            read.message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    Attribute::TargetBitrateChanged { bits_per_second } => Some((
+                        *bits_per_second,
+                        read.message
+                            .custom::<PacerPause>()
+                            .map(|pause| pause.target_bits_per_second),
+                    )),
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
+/// A source above the target is told to pause before anything waits the 2 s bound (libwebrtc
+/// gives its encoder a target of zero while the pacer's expected queue time exceeds the
+/// bound): at 2.4 Mb/s against 1.2 Mb/s the queue holds a second's worth (half the bound) after
+/// about a second, and the target handed application-ward is zero, with the controller's riding
+/// along ([`PacerPause`]). A target that passes meanwhile also reaches the application as
+/// zero. The source stops; the queue drains at the target, and once 100 ms is left the real
+/// target is announced again. Nothing is discarded, every packet leaves.
+#[test]
+fn a_source_above_the_target_is_paused_before_anything_waits_the_bound() {
+    let mut harness = Harness::new();
+    let mut reads = Vec::new();
+    let mut paused_at = None;
+    let mut written = 0u16;
+    for n in 0..2000u16 {
+        let at = ms(5 * u64::from(n));
+        harness.advance_to(at);
+        harness.send(at, n);
+        harness.drain();
+        written += 1;
+        reads.extend(harness.reads());
+        if targets(&reads).iter().any(|(bps, _)| *bps == 0.0) {
+            paused_at = Some(at);
+            break;
+        }
+    }
+    let paused_at = paused_at.expect("the source was paused");
+    assert!(
+        (ms(900)..=ms(1_100)).contains(&paused_at),
+        "paused at {paused_at:?}"
+    );
+    assert_eq!(vec![(0.0, Some(BITRATE))], targets(&reads));
+
+    // A target from the congestion controller while paused reaches the application as zero.
+    let mut msg = TaggedPacket {
+        now: harness.epoch + paused_at,
+        transport: TransportContext::default(),
+        message: AttributedPacket::new(Packet::Rtcp(vec![])),
+    };
+    msg.message.add(Attribute::TargetBitrateChanged {
+        bits_per_second: BITRATE,
+    });
+    harness.chain.handle_read(msg).expect("handle_read");
+    let while_paused = harness.reads();
+    assert_eq!(vec![(0.0, Some(BITRATE))], targets(&while_paused));
+
+    let mut resumed_at = None;
+    let mut at = paused_at;
+    while at < ms(5_000) {
+        at += ms(5);
+        harness.advance_to(at);
+        let reads = harness.reads();
+        assert!(discards(&reads).is_empty(), "nothing is discarded");
+        if !targets(&reads).is_empty() {
+            assert_eq!(vec![(BITRATE, None)], targets(&reads));
+            resumed_at = Some(at);
+            break;
+        }
+    }
+    let resumed_at = resumed_at.expect("the pause ended");
+    // About 90 packets of the hundred queued leave at 10 ms each first.
+    assert!(
+        (ms(800)..=ms(1_000)).contains(&(resumed_at - paused_at)),
+        "paused for {:?}",
+        resumed_at - paused_at
+    );
+    harness.advance_to(ms(5_000));
+    assert_eq!(
+        usize::from(written),
+        harness.released().len(),
+        "every packet left"
+    );
+}
+
+/// A retransmission of a packet whose retransmission already waits in the queue is not queued
+/// again (libwebrtc's packet history ignores a request for a packet "already in pacer queue"):
+/// two RTX packets repairing the same original (sequence number 0 ahead of the payload, RFC 4588
+/// section 4) written while video waits, and only the first leaves. Its departure is reported
+/// application-ward ([`RetransmissionsLeft`]) as (RTX SSRC, the sequence number it repairs).
+#[test]
+fn a_retransmission_already_waiting_is_not_queued_again() {
+    let mut harness = Harness::new();
+    harness.chain.bind_local_stream(&StreamInfo {
+        ssrc: 1,
+        ssrc_rtx: Some(3),
+        mime_type: "video/VP8".to_owned(),
+        clock_rate: 90_000,
+        ..Default::default()
+    });
+    for sequence_number in 1..=10 {
+        harness.send(ms(0), sequence_number);
+    }
+    harness.advance_to(ms(15));
+    harness.send_retransmission(ms(15), 500);
+    harness.send_retransmission(ms(15), 501);
+    harness.advance_to(ms(200));
+    let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(vec![1, 2, 500, 3, 4, 5, 6, 7, 8, 9, 10], order);
+    let departed: Vec<(u32, u16)> = harness
+        .reads()
+        .iter()
+        .filter_map(|read| read.message.custom::<RetransmissionsLeft>())
+        .flat_map(|notice| notice.departed.clone())
+        .collect();
+    assert_eq!(vec![(3, 0)], departed);
 }
 
 /// The queue time is bounded (libwebrtc's pacer: an expected queue length of 2 s). A source

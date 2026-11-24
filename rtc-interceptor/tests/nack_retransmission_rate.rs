@@ -562,3 +562,172 @@ fn a_nack_for_a_packet_the_pacer_discarded_is_answered_by_nothing() {
         "resent only what left; discarded {discarded:?}"
     );
 }
+
+/// Counts the retransmissions the NACK responder hands toward the pacer.
+struct RetransmissionsMade {
+    made: Arc<std::sync::atomic::AtomicUsize>,
+    reads: std::collections::VecDeque<TaggedPacket>,
+    writes: std::collections::VecDeque<TaggedPacket>,
+}
+
+impl sansio::Protocol<TaggedPacket, TaggedPacket, ()> for RetransmissionsMade {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.reads.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.reads.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if msg.message.has(&Attribute::Retransmission) {
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.writes.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.writes.pop_front()
+    }
+}
+
+impl Interceptor for RetransmissionsMade {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
+/// While a retransmission waits in the pacer, a NACK for the same packet makes no other
+/// (libwebrtc's packet history: a request for a packet "already in pacer queue" is ignored),
+/// and once it left, the resend interval counts from its departure, which the pacer reports
+/// ([`RetransmissionsLeft`]), not from when it was made. At 12 kbit/s a retransmission waits
+/// some 0.4 s for the budget: a second NACK 90 ms after the first makes nothing, one 10 ms after
+/// it left makes nothing (within the 20 ms interval of its departure, 0.4 s after it was made),
+/// one 50 ms after it left makes the next.
+#[test]
+fn a_retransmission_waiting_in_the_pacer_is_not_made_again() {
+    let base = Instant::now();
+    let made = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut chain = Registry::new()
+        .with(
+            Slot::Pacer,
+            PacerBuilder::new().with_target_bitrate(12_000.0).build(),
+        )
+        .with(
+            Slot::from(3_500),
+            RetransmissionsMade {
+                made: Arc::clone(&made),
+                reads: Default::default(),
+                writes: Default::default(),
+            },
+        )
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .build();
+    chain.bind_local_stream(&stream_info());
+    let count = || made.load(std::sync::atomic::Ordering::Relaxed);
+    // Everything the chain has: the repaired sequence numbers of the retransmissions that left.
+    let pump = |chain: &mut dyn Interceptor| -> Vec<u16> {
+        while chain.poll_read().is_some() {}
+        let mut left = Vec::new();
+        while let Some(tagged) = chain.poll_write() {
+            if let Packet::Rtp(packet) = &tagged.message.packet
+                && packet.header.ssrc == RTX_SSRC
+            {
+                left.push(u16::from_be_bytes([packet.payload[0], packet.payload[1]]));
+            }
+        }
+        left
+    };
+    let write = |chain: &mut dyn Interceptor, at: Instant, sequence_number: u16| {
+        chain
+            .handle_write(TaggedPacket {
+                now: at,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number,
+                        timestamp: u32::from(sequence_number) * 3000,
+                        ssrc: SSRC,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: vec![0u8; PAYLOAD].into(),
+                })),
+            })
+            .unwrap();
+    };
+    let ms = |milliseconds: u64| base + Duration::from_millis(milliseconds);
+
+    // A first retransmission, before the pacer has reported any: it waits and leaves.
+    write(&mut chain, base, 0);
+    pump(&mut chain);
+    read_nack(&mut chain, ms(10), &[0], None, None);
+    pump(&mut chain);
+    assert_eq!(1, count());
+    let mut left = Vec::new();
+    for step in 2..=60 {
+        chain.handle_timeout(ms(10 * step)).unwrap();
+        left.extend(pump(&mut chain));
+    }
+    assert_eq!(vec![0], left, "the first retransmission left");
+
+    for sequence_number in 1..=3 {
+        write(&mut chain, ms(600), sequence_number);
+    }
+    pump(&mut chain);
+    read_nack(&mut chain, ms(610), &[1], None, None);
+    pump(&mut chain);
+    assert_eq!(2, count(), "the retransmission of 1 is made");
+    read_nack(&mut chain, ms(700), &[1], None, None);
+    pump(&mut chain);
+    assert_eq!(2, count(), "and not again while it waits in the pacer");
+
+    let mut departed = None;
+    let mut now = ms(700);
+    while departed.is_none() && now < ms(3_000) {
+        now += Duration::from_millis(10);
+        chain.handle_timeout(now).unwrap();
+        if pump(&mut chain).contains(&1) {
+            departed = Some(now);
+        }
+    }
+    let departed = departed.expect("the retransmission of 1 left");
+    assert!(
+        departed >= ms(800),
+        "it waited: left at {:?}",
+        departed - base
+    );
+    read_nack(
+        &mut chain,
+        departed + Duration::from_millis(10),
+        &[1],
+        None,
+        None,
+    );
+    pump(&mut chain);
+    assert_eq!(
+        2,
+        count(),
+        "10 ms after it left: within the resend interval"
+    );
+    read_nack(
+        &mut chain,
+        departed + Duration::from_millis(50),
+        &[1],
+        None,
+        None,
+    );
+    pump(&mut chain);
+    assert_eq!(3, count(), "50 ms after it left: made again");
+}

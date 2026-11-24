@@ -200,7 +200,11 @@ impl PacerBuilder {
 ///    retransmission never waits behind video either.
 /// 3. **Video retransmissions** (`Attribute::Retransmission` on any other stream) wait in the
 ///    media queue, in the order written, ahead of all new media (libwebrtc's
-///    `prioritized_packet_queue.cc`: "Send retransmissions before new media").
+///    `prioritized_packet_queue.cc`: "Send retransmissions before new media"). One whose packet
+///    already has a retransmission waiting is not queued again
+///    ([`PacerInterceptor::duplicate_retransmissions`]), and each that leaves or is dropped is
+///    reported application-ward ([`RetransmissionsLeft`]), so the NACK responder does not make
+///    another while one waits.
 /// 4. **Video and FEC** (every other RTP packet that is not padding) wait behind them, in the
 ///    order written. The **queue time bound** (2 s by default,
 ///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's (3 and 4):
@@ -229,6 +233,34 @@ impl PacerBuilder {
 /// that reaches the queue limit (4096 packets, far beyond what probing writes while media
 /// waits) discards the padding that arrives, counted by [`PacerInterceptor::padding_discarded`]:
 /// the one place padding can leave a hole, preferred to letting it go over the budget.
+///
+/// # Pausing the source
+///
+/// When the media queued would take half the queue time bound or more to leave at the target
+/// ([`PacerInterceptor::expected_queue_time`]; 1 s of the default 2 s), the pacer tells the
+/// application to **stop producing**: every [`Attribute::TargetBitrateChanged`] it passes
+/// application-ward carries **zero** (so `RTCRtpSender::target_bitrates` and the stats read
+/// zero), with [`PacerPause`] carrying the congestion controller's target for the interceptors
+/// that need the path's rate, and it announces the change at once on a carrier of its own. When
+/// the queue is back under a twentieth of the bound (100 ms), it announces the real target
+/// again. libwebrtc does the same: its control handler gives the encoder a target of zero while
+/// the pacer's expected queue time exceeds 2 s
+/// (`modules/congestion_controller/rtp/control_handler.cc`, `pacing_controller.h`: "the packet
+/// producers should wait (eg drop frames rather than encoding them)"). Pausing at half the
+/// bound, not at the bound, leaves a source that stops when told the time to notice (a frame
+/// interval, a read of its target) and room for the target to fall once more, so a source that
+/// follows the target never has its media discarded.
+///
+/// **A target of zero means: produce nothing until the next target.** An encoder skips (does
+/// not encode) the frames captured meanwhile; it does not need a key frame to resume, because
+/// nothing it encoded was lost: the next frame it encodes refers to the last one it sent, which
+/// is still queued here and reaches the receiver. libwebrtc resumes the same way: it encodes the
+/// last frame captured during the pause, or asks the capturer for a fresh one
+/// (`video_stream_encoder.cc`, `OnBitrateUpdated`: "A pending stored frame can be processed",
+/// else `RequestRefreshFrame`), and forces no key frame. Audio is not queued here and can carry
+/// on; the target is the transport's. Media the application writes anyway is queued and, past
+/// the bound, discarded as below, with a key-frame request: that, not the resume, is when a key
+/// frame is needed.
 ///
 /// # Discarding media
 ///
@@ -298,6 +330,15 @@ pub struct PacerInterceptor {
     /// The RTP timestamp of the newest frame discarded on each stream: its packets written
     /// later are discarded too.
     discarded_frame: HashMap<u32, u32>,
+    /// Whether the application is told to pause (see "Pausing the source").
+    paused: bool,
+    /// How many times a pause began.
+    pauses: u64,
+    /// Retransmissions not queued because the same packet's retransmission already waited.
+    duplicate_retransmissions: u64,
+    /// The retransmissions released and dropped since the last [`RetransmissionsLeft`].
+    departed: Vec<(u32, u16)>,
+    retransmissions_dropped: Vec<(u32, u16)>,
     /// Packets the budget has released, waiting to join the belt.
     released: VecDeque<TaggedPacket>,
     /// Inbound packets ready for the next interceptor.
@@ -330,6 +371,11 @@ impl PacerInterceptor {
             discarded_frames: 0,
             repair_flows: HashSet::new(),
             discarded_frame: HashMap::new(),
+            paused: false,
+            pauses: 0,
+            duplicate_retransmissions: 0,
+            departed: Vec::new(),
+            retransmissions_dropped: Vec::new(),
         }
     }
 
@@ -370,6 +416,36 @@ impl PacerInterceptor {
     /// "Discarding media" on [`PacerInterceptor`]).
     pub fn discarded_frames(&self) -> u64 {
         self.discarded_frames
+    }
+
+    /// How many times the application was told to pause (see "Pausing the source" on
+    /// [`PacerInterceptor`]).
+    pub fn pauses(&self) -> u64 {
+        self.pauses
+    }
+
+    /// Whether the application is told to pause now.
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// How many retransmissions were not queued because a retransmission of the same packet
+    /// already waited in the queue.
+    pub fn duplicate_retransmissions(&self) -> u64 {
+        self.duplicate_retransmissions
+    }
+
+    /// How long the media queued now takes to leave at the target: queued bits over the
+    /// target (libwebrtc's `ExpectedQueueTime`). Padding is not counted.
+    pub fn expected_queue_time(&self) -> Duration {
+        if self.queued_bits <= 0.0 {
+            return Duration::ZERO;
+        }
+        let target = self.target();
+        if target <= 0.0 {
+            return Duration::MAX;
+        }
+        Duration::try_from_secs_f64(self.queued_bits / target).unwrap_or(Duration::MAX)
     }
 
     /// How long the oldest queued media packet has waited at `now`, zero with none queued
@@ -509,6 +585,12 @@ impl PacerInterceptor {
 
     /// A packet leaves at `now`: marked as part of the probe cluster while one is being sent.
     fn release(&mut self, mut packet: TaggedPacket, bits: f64) {
+        if packet.message.has(&Attribute::Retransmission)
+            && !Self::is_padding(&packet)
+            && let Some(key) = self.retransmission_key(&packet)
+        {
+            self.departed.push(key);
+        }
         if let Some(probe) = self.probe.as_mut() {
             packet.message.add(Attribute::Custom(Arc::new(ProbePacket {
                 cluster: probe.cluster,
@@ -519,6 +601,107 @@ impl PacerInterceptor {
             }
         }
         self.released.push_back(packet);
+    }
+
+    /// The packet a retransmission repairs, as (SSRC on the wire, sequence number repaired): on
+    /// an RTX stream the original sequence number ahead of the payload (RFC 4588 section 4),
+    /// otherwise (a retransmission under the media SSRC) its own sequence number.
+    fn retransmission_key(&self, packet: &TaggedPacket) -> Option<(u32, u16)> {
+        let Packet::Rtp(rtp) = &packet.message.packet else {
+            return None;
+        };
+        let ssrc = rtp.header.ssrc;
+        if self.repair_flows.contains(&ssrc) {
+            let osn = rtp.payload.get(..2)?;
+            return Some((ssrc, u16::from_be_bytes([osn[0], osn[1]])));
+        }
+        Some((ssrc, rtp.header.sequence_number))
+    }
+
+    /// Whether a retransmission of the packet `packet` repairs already waits in the queue
+    /// (retransmissions wait at its front).
+    fn retransmission_waits(&self, packet: &TaggedPacket) -> bool {
+        let Some(key) = self.retransmission_key(packet) else {
+            return false;
+        };
+        self.queue
+            .iter()
+            .take_while(|queued| queued.message.has(&Attribute::Retransmission))
+            .any(|queued| self.retransmission_key(queued) == Some(key))
+    }
+
+    /// Records a retransmission dropped from the queue, for [`RetransmissionsLeft`].
+    fn retransmission_dropped(&mut self, packet: &TaggedPacket) {
+        if let Some(key) = self.retransmission_key(packet) {
+            self.retransmissions_dropped.push(key);
+        }
+    }
+
+    /// Whether the pause should begin or end now (see "Pausing the source"); `true` when it
+    /// changed.
+    fn update_pause(&mut self) -> bool {
+        let expected = self.expected_queue_time();
+        let change = match self.queue_time_limit {
+            Some(limit) if !self.paused => expected >= limit.mul_f64(PAUSE_AT),
+            Some(limit) => expected <= limit.mul_f64(RESUME_AT),
+            None => self.paused,
+        };
+        if change {
+            self.paused = !self.paused;
+            if self.paused {
+                self.pauses += 1;
+            }
+        }
+        change
+    }
+
+    /// The target as the application is to read it: zero while paused, with [`PacerPause`]
+    /// carrying the congestion controller's.
+    fn tag_target(&self, message: &mut AttributedPacket) {
+        if !self.paused {
+            return;
+        }
+        let mut target = None;
+        for attribute in &mut message.attributes {
+            if let Attribute::TargetBitrateChanged { bits_per_second } = attribute {
+                target = Some(*bits_per_second);
+                *bits_per_second = 0.0;
+            }
+        }
+        if let Some(target_bits_per_second) = target {
+            message.add(Attribute::Custom(Arc::new(PacerPause {
+                target_bits_per_second,
+            })));
+        }
+    }
+
+    /// After a write or a timeout: a pause that began or ended goes application-ward as the
+    /// target, and the retransmissions that left or were dropped as [`RetransmissionsLeft`].
+    fn tell_application_ward(&mut self, now: Instant) {
+        if self.update_pause() {
+            let mut message =
+                AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
+                    bits_per_second: self.target(),
+                });
+            self.tag_target(&mut message);
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message,
+            });
+        }
+        if !self.departed.is_empty() || !self.retransmissions_dropped.is_empty() {
+            let notice = RetransmissionsLeft {
+                departed: std::mem::take(&mut self.departed),
+                dropped: std::mem::take(&mut self.retransmissions_dropped),
+            };
+            self.read_queue.push_back(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![]))
+                    .with(Attribute::Custom(Arc::new(notice))),
+            });
+        }
     }
 
     /// Whether `packet` is new media (not a retransmission) of the stream `ssrc`.
@@ -650,6 +833,43 @@ pub struct PacerDiscard {
     pub target_bitrate: f64,
 }
 
+/// The pause begins when the expected queue time reaches this share of the queue time bound:
+/// half, so a source that stops when told (within a frame or a read of its target) never lets
+/// its packets wait the bound, even when the target falls by half once more meanwhile.
+const PAUSE_AT: f64 = 0.5;
+
+/// The pause ends when the expected queue time is back under this share of the bound (100 ms
+/// of the default 2 s): what then waits is the delay the call carries on with, so it is kept
+/// short; the gap between the two shares keeps one frame from switching it on and off.
+const RESUME_AT: f64 = 0.05;
+
+/// Rides a target of zero ([`Attribute::TargetBitrateChanged`]) that the pacer hands
+/// application-ward while it tells the source to pause (see "Pausing the source" on
+/// [`PacerInterceptor`]): the congestion controller's target, for what application-ward of the
+/// pacer needs the rate the path carries (the NACK responder's retransmission rate limit). Read
+/// with [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PacerPause {
+    /// The congestion controller's target, bits per second.
+    pub target_bits_per_second: f64,
+}
+
+/// The retransmissions that left the pacer, or were dropped there, since the last notice: each
+/// as (SSRC on the wire, sequence number of the packet it repairs; the original sequence
+/// number on an RTX stream). The pacer sends it application-ward on an empty RTCP carrier; the
+/// NACK responder treats a packet as on its way while its retransmission waits in the pacer
+/// and counts the resend interval from when it left, as libwebrtc's packet history does
+/// (`modules/rtp_rtcp/source/rtp_packet_history.cc`: a request for a packet "already in pacer
+/// queue" is ignored; the send time is set when it is sent). Read with
+/// [`AttributedPacket::custom`](crate::AttributedPacket::custom).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RetransmissionsLeft {
+    /// Released toward the wire.
+    pub departed: Vec<(u32, u16)>,
+    /// Dropped (waited the queue time bound, or the oldest of a full queue).
+    pub dropped: Vec<(u32, u16)>,
+}
+
 /// How long a probe cluster is held open for packets to fill it. A cluster that takes longer
 /// than this to leave is not a burst any more and measures nothing.
 const PROBE_CLUSTER_TIMEOUT: Duration = Duration::from_millis(250);
@@ -670,7 +890,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     type Error = Error;
     type Time = Instant;
 
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         // Follow the congestion controller's estimate.
         //
         // It arrives on the **read** leg because that is the only one it can cross on. The
@@ -691,6 +911,10 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                 Some(target) => *target = *bits_per_second,
                 None => self.pacer.set_target_bitrate(*bits_per_second),
             }
+            // A new rate changes how long the queue takes to leave: the pause may begin or
+            // end, and the application reads it on this packet.
+            self.update_pause();
+            self.tag_target(&mut msg.message);
         }
 
         // A probe cluster the congestion controller asks for: the next packets leave at its
@@ -717,6 +941,37 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
     }
 
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        let now = msg.now;
+        let rtp = matches!(msg.message.packet, Packet::Rtp(_));
+        self.enqueue(msg)?;
+        if rtp {
+            self.tell_application_ward(now);
+        }
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        // Unpaced traffic goes first — RTCP is only useful while it is fresh, and holding it
+        // behind the budget would be pacing it after all.
+        self.write_queue
+            .pop_front()
+            .or_else(|| self.released.pop_front())
+    }
+
+    fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
+        self.release_due(now);
+        self.tell_application_ward(now);
+        Ok(())
+    }
+
+    fn poll_timeout(&mut self) -> Option<Instant> {
+        self.next_release()
+    }
+}
+
+impl PacerInterceptor {
+    /// A packet written: released, queued, or discarded.
+    fn enqueue(&mut self, msg: TaggedPacket) -> Result<(), Error> {
         // No estimate is read here. It was, once — but the congestion controller sits wire-*ward*
         // of the pacer, so on the write leg it never sees a packet before this interceptor does and
         // the branch had no possible producer. If an application-set target is ever wanted it comes
@@ -779,6 +1034,14 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             return Ok(());
         }
 
+        // A retransmission of a packet whose retransmission already waits adds nothing but a
+        // second copy (libwebrtc's packet history ignores a request for a packet "already in
+        // pacer queue", `rtp_packet_history.cc`).
+        if !new_media && self.retransmission_waits(&msg) {
+            self.duplicate_retransmissions += 1;
+            return Ok(());
+        }
+
         if self.queue.len() >= self.queue_limit {
             // Room for the arrival: the oldest goes (the newest is the one still worth
             // sending). Discarded by default, a retransmission alone, new media with its
@@ -805,6 +1068,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                             self.forced += 1;
                             self.release(oldest, bits);
                         } else {
+                            self.retransmission_dropped(&oldest);
                             self.dropped += 1;
                         }
                     }
@@ -830,7 +1094,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             self.queue.insert(at, msg);
             if at == 0 {
                 // First in line now: it may leave at once if the budget allows.
-                self.handle_timeout(now)?;
+                self.release_due(now);
             }
             self.follow_queue(now);
             return Ok(());
@@ -840,15 +1104,8 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
         Ok(())
     }
 
-    fn poll_write(&mut self) -> Option<TaggedPacket> {
-        // Unpaced traffic goes first — RTCP is only useful while it is fresh, and holding it
-        // behind the budget would be pacing it after all.
-        self.write_queue
-            .pop_front()
-            .or_else(|| self.released.pop_front())
-    }
-
-    fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
+    /// Releases what the budget allows at `now`, and drops what waited the bound.
+    fn release_due(&mut self, now: Instant) {
         self.refill(now);
         self.follow_queue(now);
 
@@ -864,7 +1121,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
                     // A retransmission is dropped alone; new media with every queued frame
                     // of its stream (see "Discarding media").
                     if head.message.has(&Attribute::Retransmission) {
-                        self.queue.pop_front();
+                        if let Some(dropped) = self.queue.pop_front() {
+                            self.retransmission_dropped(&dropped);
+                        }
                         self.queued_bits = (self.queued_bits - bits).max(0.0);
                         self.dropped += 1;
                     } else {
@@ -902,11 +1161,6 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for PacerInterceptor {
             }
         }
         self.follow_queue(now);
-        Ok(())
-    }
-
-    fn poll_timeout(&mut self) -> Option<Instant> {
-        self.next_release()
     }
 }
 
