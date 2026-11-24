@@ -69,6 +69,13 @@ const PROBE_AFTER_DROP_DELAY: Duration = Duration::from_secs(1);
 const PROBE_AFTER_DROP_INTERVAL: Duration = Duration::from_secs(1);
 /// A probe after a drop asks for this share of the rate before it.
 const PROBE_AFTER_DROP_SHARE: f64 = 0.85;
+/// How long the target has to stay below [`LARGE_DROP_SHARE`] of the high before a drop for
+/// recovery probing to remember that high.
+const RECOVERY_LASTING: Duration = Duration::from_secs(2);
+/// Recovery probes go out once this long has passed since the last probe.
+pub const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// And only when the target has not fallen for this long.
+const RECOVERY_QUIET: Duration = Duration::from_secs(1);
 
 /// A probe cluster the congestion controller asks for.
 ///
@@ -202,6 +209,19 @@ pub struct ProbeController {
     drop_probe: bool,
     /// When [`poll`](Self::poll) was last called.
     polled_at: Option<Instant>,
+    /// Whether the high before a lasting drop is probed for until the target is back (see
+    /// [`with_recovery_probing`](Self::with_recovery_probing)).
+    recovery_probing: bool,
+    /// A large drop that may last: the high before it and when it happened.
+    recovery_candidate: Option<(f64, Instant)>,
+    /// The high before a drop that lasted, while the target is below it.
+    recovery_high: Option<f64>,
+    /// When the target last fell.
+    fell_at: Option<Instant>,
+    /// The target before the last poll, to tell a fall.
+    last_target: Option<f64>,
+    /// The target when the outstanding cluster, a recovery probe, was asked for.
+    recovery_probe: Option<f64>,
 }
 
 impl ProbeController {
@@ -225,7 +245,42 @@ impl ProbeController {
             drop: None,
             drop_probe: false,
             polled_at: None,
+            recovery_probing: false,
+            recovery_candidate: None,
+            recovery_high: None,
+            fell_at: None,
+            last_target: None,
+            recovery_probe: None,
         }
+    }
+
+    /// Whether the rate the target had before a drop that lasted is probed for until the
+    /// target is back near it. Off by default.
+    ///
+    /// Once a sender follows its target, no other rule probes: the start-up probes are
+    /// over, a further probe follows only a confirming result, the probe after a drop
+    /// ([`with_probe_after_drop`](Self::with_probe_after_drop)) lasts five seconds, and the
+    /// sender is not application limited. After a capacity drop that lasts longer than that
+    /// and then goes, the estimate climbs back at the delay-based controller's rate (8 % a
+    /// second in `Gcc`, draft-ietf-rmcat-gcc-02 section 5.5) from wherever the drop left it.
+    /// RFC 8836 section 2 asks for a flow that "should also react quickly to regain its
+    /// previous share of the bandwidth when the local bottleneck or link is cleared"
+    /// (requirement 1f) and, after a pause, to "rapidly regain its previous share"
+    /// (requirement 5a); neither it, draft-ietf-rmcat-gcc-02 nor RFC 8888 names probing for
+    /// it (RFC 8836 names "probing during setup with dummy data" for start-up only,
+    /// requirement 4a). libwebrtc probes a sender at its target only in application-limited
+    /// periods (`probe_controller.cc` `TimeForAlrProbe`) or with a network-state estimate.
+    ///
+    /// With this, a drop of the target below two thirds of its high of the last two seconds
+    /// that is still below it two seconds later makes the controller remember that high.
+    /// While the target is below 85 % of it and has not fallen for a second, a cluster at
+    /// twice the target (at most the high) is asked for once five seconds have passed since
+    /// the last probe; a confirming result allows further probes as at the start. The high
+    /// is forgotten when the target reaches 85 % of it, or when a recovery probe's result is
+    /// below the target it was asked at (the path has not come back).
+    pub fn with_recovery_probing(mut self, enabled: bool) -> Self {
+        self.recovery_probing = enabled;
+        self
     }
 
     /// Whether the rate the target had before a large drop is probed for, for a few seconds
@@ -268,8 +323,11 @@ impl ProbeController {
         if !media_flowing {
             return None;
         }
-        if self.after_drop {
+        if self.after_drop || self.recovery_probing {
             self.track_drops(now, target);
+        }
+        if self.recovery_probing {
+            self.track_recovery(now, target);
         }
         if let Some((_, _, asked)) = self.outstanding {
             if now.saturating_duration_since(asked) < PROBE_RESULT_TIMEOUT {
@@ -280,6 +338,7 @@ impl ProbeController {
             self.outstanding = None;
             self.further = None;
             self.drop_probe = false;
+            self.recovery_probe = None;
         }
         if self
             .last_probe
@@ -304,6 +363,18 @@ impl ProbeController {
             // gone, the path carries it again.
             self.drop_probe = true;
             Some(PROBE_AFTER_DROP_SHARE * before)
+        } else if let Some(high) = self.recovery_high
+            && self
+                .fell_at
+                .is_none_or(|fell| now.saturating_duration_since(fell) >= RECOVERY_QUIET)
+            && self
+                .last_probe
+                .is_none_or(|last| now.saturating_duration_since(last) >= RECOVERY_PROBE_INTERVAL)
+        {
+            // The rate before a drop that lasted, while the target is still well under it:
+            // if the drop has gone, the path carries it again.
+            self.recovery_probe = Some(target);
+            Some((target * FURTHER_PROBE).min(high))
         } else if sending < APPLICATION_LIMITED_SHARE * target
             && self.last_probe.is_none_or(|last| {
                 now.saturating_duration_since(last) >= PROBE_APPLICATION_LIMITED_INTERVAL
@@ -320,6 +391,7 @@ impl ProbeController {
         if rate <= target {
             // Nothing above the target is allowed, so there is nothing to ask.
             self.drop_probe = false;
+            self.recovery_probe = None;
             return None;
         }
         let cluster = self.next_cluster;
@@ -354,6 +426,37 @@ impl ProbeController {
         }
     }
 
+    /// Follows the target for recovery probing: a large drop (noted by
+    /// [`track_drops`](Self::track_drops)) that lasts makes its high the one to come back to.
+    fn track_recovery(&mut self, now: Instant, target: f64) {
+        if self.last_target.is_some_and(|last| target < last) {
+            self.fell_at = Some(now);
+        }
+        self.last_target = Some(target);
+        if let Some((before, at)) = self.drop
+            && now == at
+        {
+            let before = self
+                .recovery_candidate
+                .map_or(before, |(earlier, _)| earlier.max(before));
+            self.recovery_candidate = Some((before, at));
+        }
+        if let Some((high, at)) = self.recovery_candidate {
+            if target >= LARGE_DROP_SHARE * high {
+                self.recovery_candidate = None;
+            } else if now.saturating_duration_since(at) >= RECOVERY_LASTING {
+                self.recovery_high = Some(self.recovery_high.map_or(high, |h| h.max(high)));
+                self.recovery_candidate = None;
+            }
+        }
+        if self
+            .recovery_high
+            .is_some_and(|high| target >= PROBE_AFTER_DROP_SHARE * high)
+        {
+            self.recovery_high = None;
+        }
+    }
+
     /// The number of the cluster whose result is awaited.
     pub fn outstanding(&self) -> Option<u32> {
         self.outstanding.map(|(cluster, _, _)| cluster)
@@ -370,6 +473,13 @@ impl ProbeController {
         // The path carried what was asked of it: it may carry more. Not after a probe for the
         // rate before a drop: that asks only whether the path is back where it was.
         let drop_probe = std::mem::take(&mut self.drop_probe);
+        // A recovery probe whose result is below the target it was asked at: the path has
+        // not come back, and the high is forgotten.
+        if let Some(target) = self.recovery_probe.take()
+            && estimate < target
+        {
+            self.recovery_high = None;
+        }
         if !drop_probe && estimate >= FURTHER_PROBE_THRESHOLD * rate && self.initial.is_empty() {
             let next = estimate * FURTHER_PROBE;
             if next <= self.max_bitrate * FURTHER_PROBE {
@@ -413,7 +523,15 @@ impl ProbeController {
         let after_drop = self
             .drop
             .map(|(_, at)| (at + PROBE_AFTER_DROP_DELAY).max(last + PROBE_AFTER_DROP_INTERVAL));
-        [Some(next), after_drop]
+        let recovery = self
+            .recovery_high
+            .map(|_| last + RECOVERY_PROBE_INTERVAL)
+            .or_else(|| self.recovery_candidate.map(|(_, at)| at + RECOVERY_LASTING));
+        let second = match (after_drop, recovery) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        [Some(next), second]
     }
 }
 
@@ -636,6 +754,100 @@ mod tests {
             controller.on_result(request.cluster, 500_000.0);
         }
         controller
+    }
+
+    /// A settled controller at 2 Mbit/s whose target drops to 300 kbit/s at 2 s and stays
+    /// there (the drop probes find the path still capped: results at the target); polled
+    /// every 100 ms up to `until_ms`. Returns the clusters asked for, as (ms, rate).
+    fn capped(controller: &mut ProbeController, epoch: Instant, until_ms: u64) -> Vec<(u64, f64)> {
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut asked = vec![];
+        for ms in (1_000..=until_ms).step_by(100) {
+            let target = if ms < 2_000 { 2_000_000.0 } else { 300_000.0 };
+            if let Some(request) = controller.poll(at(ms), target, target, true) {
+                asked.push((ms, request.bits_per_second));
+                controller.on_result(request.cluster, target);
+            }
+        }
+        asked
+    }
+
+    /// Recovery probing (RFC 8836 section 2, requirement 1f, "regain its previous share"):
+    /// once a drop has lasted two seconds, the high before it is probed for every five
+    /// seconds at twice the target, while the target is well under it; without the option
+    /// nothing is probed after the drop probes.
+    #[test]
+    fn a_drop_that_lasts_is_probed_for_every_five_seconds_with_recovery_probing() {
+        let epoch = Instant::now();
+        let mut without = settled(epoch);
+        let asked = capped(&mut without, epoch, 20_000);
+        assert!(
+            asked.iter().all(|(ms, _)| *ms <= 7_000),
+            "only the drop probes, for five seconds: {asked:?}"
+        );
+
+        let mut with = settled(epoch).with_recovery_probing(true);
+        let asked = capped(&mut with, epoch, 20_000);
+        let recovery: Vec<_> = asked.iter().filter(|(ms, _)| *ms > 7_000).collect();
+        assert!(!recovery.is_empty(), "{asked:?}");
+        for pair in recovery.windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= 5_000, "{asked:?}");
+        }
+        assert!(
+            recovery.iter().all(|(_, rate)| *rate == 600_000.0),
+            "{asked:?}"
+        );
+    }
+
+    /// A recovery probe whose result is below the target it was asked at says the path has
+    /// not come back: the high is forgotten and nothing more is asked.
+    #[test]
+    fn a_recovery_probe_below_the_target_ends_recovery_probing() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut controller = settled(epoch).with_recovery_probing(true);
+        capped(&mut controller, epoch, 9_000);
+        let request = (9_100..=20_000)
+            .step_by(100)
+            .find_map(|ms| controller.poll(at(ms), 300_000.0, 300_000.0, true))
+            .expect("a recovery probe");
+        controller.on_result(request.cluster, 250_000.0);
+        assert!((20_100..=40_000).step_by(100).all(|ms| {
+            controller
+                .poll(at(ms), 300_000.0, 300_000.0, true)
+                .is_none()
+        }));
+    }
+
+    /// The target back at 85 % of the high ends recovery probing; a confirming recovery
+    /// result asks for a further cluster, as at the start.
+    #[test]
+    fn recovery_probing_ends_when_the_target_is_back() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let mut controller = settled(epoch).with_recovery_probing(true);
+        capped(&mut controller, epoch, 9_000);
+        let request = (9_100..=20_000)
+            .step_by(100)
+            .find_map(|ms| controller.poll(at(ms), 300_000.0, 300_000.0, true))
+            .expect("a recovery probe");
+        // The path carries what was asked: a further cluster at twice the result follows.
+        controller.on_result(request.cluster, 600_000.0);
+        let further = controller
+            .poll(at(20_200), 600_000.0, 600_000.0, true)
+            .expect("a further cluster");
+        assert_eq!(1_200_000.0, further.bits_per_second);
+        controller.on_result(further.cluster, 1_800_000.0);
+        // 1.8 of the 2 Mbit/s high: recovered; the further cluster from that result is the
+        // last of the sequence (it finds the bottleneck), and nothing is asked after it.
+        if let Some(next) = controller.poll(at(20_400), 1_800_000.0, 1_800_000.0, true) {
+            controller.on_result(next.cluster, 1_800_000.0);
+        }
+        assert!((20_600..=40_000).step_by(100).all(|ms| {
+            controller
+                .poll(at(ms), 1_800_000.0, 1_800_000.0, true)
+                .is_none()
+        }));
     }
 
     /// RFC 8836 section 2 (1f): after a large drop of the target (a burst of competing

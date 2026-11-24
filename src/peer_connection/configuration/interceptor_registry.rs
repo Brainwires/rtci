@@ -364,6 +364,12 @@ pub struct DefaultInterceptorOptions {
     /// (none without RTX negotiated). `false` sends only what the application writes. See
     /// [`CongestionControlBuilder::with_bandwidth_probing`](interceptor::CongestionControlBuilder::with_bandwidth_probing).
     pub bandwidth_probing: bool,
+    /// With bandwidth probing, whether the rate the target had before a drop that lasted is
+    /// probed for until the target is back near it. `false` by default: no RFC or draft asks
+    /// for it (RFC 8836 section 2, requirement 1f, asks a flow to "react quickly to regain its
+    /// previous share", without naming a means). See
+    /// [`CongestionControlBuilder::with_recovery_probing`](interceptor::CongestionControlBuilder::with_recovery_probing).
+    pub cc_recovery_probing: bool,
     /// Whether RFC 6051's rapid synchronisation is offered: the 64-bit NTP timestamp header
     /// extension on audio and video, stamped on a stream's first packets and a frame a
     /// second ([`configure_rapid_synchronisation`]). `true` by default: RFC 8834 section
@@ -470,6 +476,7 @@ impl std::fmt::Debug for DefaultInterceptorOptions {
             .field("pacer_immediate_release", &self.pacer_immediate_release)
             .field("pacer_queue_overflow", &self.pacer_queue_overflow)
             .field("bandwidth_probing", &self.bandwidth_probing)
+            .field("cc_recovery_probing", &self.cc_recovery_probing)
             .field("rapid_synchronisation", &self.rapid_synchronisation)
             .field("rtcp_t_rr_interval", &self.rtcp_t_rr_interval)
             .field(
@@ -532,6 +539,7 @@ impl DefaultInterceptorOptions {
             pacer_immediate_release: true,
             pacer_queue_overflow: interceptor::PacerQueueOverflow::default(),
             bandwidth_probing: true,
+            cc_recovery_probing: false,
             rapid_synchronisation: true,
             rtcp_t_rr_interval: Duration::ZERO,
             rtcp_immediate_congestion_feedback: true,
@@ -692,6 +700,7 @@ pub fn register_default_interceptors_with_options(
         let transports = transports.clone();
         let unnegotiated_tmmbr = options.unnegotiated_tmmbr;
         let bandwidth_probing = options.bandwidth_probing;
+        let recovery_probing = options.cc_recovery_probing;
         let threshold_time_base = options.gcc_threshold_time_base;
         let one_decrease_per_round_trip = options.gcc_one_decrease_per_round_trip;
         let received_rate_bound = options.gcc_received_rate_bound;
@@ -704,6 +713,7 @@ pub fn register_default_interceptors_with_options(
                 .with_circuit_breaker(transports.breaker_for(session))
                 .with_unnegotiated_tmmbr(unnegotiated_tmmbr)
                 .with_bandwidth_probing(bandwidth_probing)
+                .with_recovery_probing(recovery_probing)
         }
     };
     let (congestion_control, handle) = congestion_control_builder(0).build_with_handle();

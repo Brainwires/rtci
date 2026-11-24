@@ -233,6 +233,15 @@ impl GccFlow {
         self
     }
 
+    /// With recovery probing (`ProbeController::with_recovery_probing`).
+    fn with_recovery_probing(mut self) -> Self {
+        self.probing = self
+            .probing
+            .take()
+            .map(|probing| probing.with_recovery_probing(true));
+        self
+    }
+
     fn with_threshold_time_base(mut self, time_base: ThresholdTimeBase) -> Self {
         self.gcc = self.gcc.with_threshold_time_base(time_base);
         self
@@ -1044,4 +1053,80 @@ fn the_draft_threshold_time_base_meets_the_same_bounds() {
             assert!(gcc >= 0.05 && tcp >= 0.2);
         }
     }
+}
+
+/// Recovery probing (`ProbeController::with_recovery_probing`, off by default) on the
+/// scenarios above and on a capacity drop that lasts (2 -> 0.5 -> 2 Mbit/s, 20 s at the
+/// lower rate): it holds the bounds those tests hold the default to, and the estimate is
+/// back at 80 % of the capacity no later than without it. Each run prints the comparison.
+#[test]
+fn recovery_probing_meets_the_same_bounds() {
+    const CAPACITY: f64 = 2_000_000.0;
+    let mut up_within = vec![];
+    for recovery in [false, true] {
+        let flow = |start| {
+            let flow = GccFlow::new(300_000.0, start);
+            if recovery {
+                flow.with_recovery_probing()
+            } else {
+                flow
+            }
+        };
+        let name = if recovery {
+            "recovery probing"
+        } else {
+            "default"
+        };
+
+        let mut world = World::new(Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION));
+        world.gcc.push(flow(Duration::ZERO));
+        world.gcc.push(flow(Duration::from_millis(50)));
+        world.run(Duration::from_secs(90));
+        let (from, until) = (Duration::from_secs(60), Duration::from_secs(90));
+        let a = share(world.gcc[0].goodput.rate(from, until), CAPACITY);
+        let b = share(world.gcc[1].goodput.rate(from, until), CAPACITY);
+        let (mean, p95) = world.path.queueing_delay(from, until);
+        println!("{name}: two flows {a:.2} / {b:.2}, delay mean {mean:?} p95 {p95:?}");
+        assert!((0.25..=0.75).contains(&a) && (0.25..=0.75).contains(&b));
+        assert!(a + b >= 0.6);
+
+        let (reached, _, new) = a_late_flow(flow);
+        let reached = reached.unwrap_or(u64::MAX);
+        println!("{name}: late flow a fifth after {reached} s, share {new:.2}");
+        assert!(reached <= 5 && new >= 0.2);
+
+        for queue in [0.2, 0.05] {
+            let (gcc, tcp) = gcc_against_a_tcp_like_transfer(|| flow(Duration::ZERO), queue);
+            println!("{name}: against TCP-like, queue {queue} s: {gcc:.2} / {tcp:.2}");
+            assert!(gcc >= 0.05 && tcp >= 0.2);
+        }
+
+        let (down, up) = (Duration::from_secs(40), Duration::from_secs(60));
+        let mut world = World::new(
+            Bottleneck::new(CAPACITY, Queue::TailDrop(0.3), PROPAGATION)
+                .with_capacity_from(down, 500_000.0)
+                .with_capacity_from(up, CAPACITY),
+        );
+        world.gcc.push(flow(Duration::ZERO));
+        world.run(Duration::from_secs(120));
+        let target = &world.gcc[0];
+        let back = (0..600).find(|tenth| {
+            target.target_at(up + Duration::from_millis(100 * tenth)) >= 0.8 * CAPACITY
+        });
+        let (_, p95_low) = world.path.queueing_delay(down + Duration::from_secs(5), up);
+        let (_, p95_after) = world
+            .path
+            .queueing_delay(up + Duration::from_secs(5), up + Duration::from_secs(60));
+        let under = share(
+            world.gcc[0].goodput.rate(down + Duration::from_secs(5), up),
+            500_000.0,
+        );
+        println!(
+            "{name}: capacity 2 -> 0.5 -> 2 Mbit/s: share of 0.5 Mbit/s {under:.2}, p95 delay at 0.5 Mbit/s {p95_low:?}, back at 80 % within {:?} s, p95 delay after {p95_after:?}",
+            back.map(|t| t as f64 / 10.0)
+        );
+        assert!(p95_after < Duration::from_millis(100), "{p95_after:?}");
+        up_within.push(back.expect("the estimate climbs back"));
+    }
+    assert!(up_within[1] <= up_within[0], "{up_within:?}");
 }

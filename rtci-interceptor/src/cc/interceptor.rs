@@ -116,6 +116,7 @@ pub struct CongestionControlBuilder<E: BandwidthEstimator> {
     circuit_breaker: Option<CircuitBreakerHandle>,
     unnegotiated_tmmbr: bool,
     bandwidth_probing: bool,
+    recovery_probing: bool,
 }
 
 impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
@@ -127,6 +128,7 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             circuit_breaker: None,
             unnegotiated_tmmbr: false,
             bandwidth_probing: false,
+            recovery_probing: false,
         }
     }
 
@@ -188,6 +190,14 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
         self
     }
 
+    /// With bandwidth probing on, whether the rate before a drop that lasted is probed for
+    /// until the target is back near it. Off by default; see
+    /// [`ProbeController::with_recovery_probing`](crate::ProbeController::with_recovery_probing).
+    pub fn with_recovery_probing(mut self, recovery_probing: bool) -> Self {
+        self.recovery_probing = recovery_probing;
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> CongestionControlInterceptor<E> {
         self.build_with_handle().0
@@ -201,9 +211,10 @@ impl<E: BandwidthEstimator> CongestionControlBuilder<E> {
             stats: self.estimator.stats(),
             ..Shared::default()
         }));
-        let probing = self
-            .bandwidth_probing
-            .then(|| ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY));
+        let probing = self.bandwidth_probing.then(|| {
+            ProbeController::new(self.estimator.target_bitrate(), f64::INFINITY)
+                .with_recovery_probing(self.recovery_probing)
+        });
         (
             CongestionControlInterceptor {
                 tmmbn_owed: false,

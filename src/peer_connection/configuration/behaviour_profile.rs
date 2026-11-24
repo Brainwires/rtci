@@ -1472,6 +1472,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "a packet inside the budget leaves at once; libwebrtc's PacingController sends within its budget and lets a burst build up over send_burst_interval (modules/pacing/pacing_controller.h @ a222406d), which Chromium sets to 40 ms (rtc_peer_connection_handler.cc pacer_burst_interval @ Chromium 8dafa8bc)",
     },
     NotGoverned {
+        setting: "DefaultInterceptorOptions::cc_recovery_probing",
+        class: NotGovernedClass::Same,
+        note: "off, as libwebrtc: modules/congestion_controller/goog_cc/probe_controller.cc::ProbeController::Process @ a222406d asks a probe after the initial ones only for an application-limited period (TimeForAlrProbe), a network-state estimate (TimeForNetworkStateProbe, intervals infinite by default) or a repeated initial probe; nothing for a sender at its target after a drop that lasted",
+    },
+    NotGoverned {
         setting: "DefaultInterceptorOptions::bandwidth_probing",
         class: NotGovernedClass::Same,
         note: "probing on, as libwebrtc's ProbeController (modules/congestion_controller/goog_cc/probe_controller.cc @ a222406d: exponential probes at 3x and 6x the start rate)",
