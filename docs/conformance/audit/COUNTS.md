@@ -31,6 +31,10 @@ API is the default and tested too (`RULES.md`).
 | MAY | 449 | 0 | 0 | 18 | 34 | 106 | 0 | 171 | 778 |
 | PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
 | all | 6409 | 25 | 7 | 31 | 102 | 152 | 4 | 1165 | 7895 |
+| SHOULD | 853 | 0 | 0 | 14 | 55 | 42 | 4 | 326 | 1294 |
+| MAY | 453 | 0 | 0 | 20 | 30 | 104 | 0 | 171 | 778 |
+| PROC | 68 | 0 | 0 | 2 | 5 | 1 | 0 | 1 | 77 |
+| all | 6406 | 25 | 7 | 37 | 100 | 152 | 4 | 1164 | 7895 |
 
 ## RFC behaviour tested
 
@@ -50,6 +54,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | MAY | 606 | 445 | 73.4 | 445 | 73.4 |
 | SHOULD | 967 | 860 | 88.9 | 860 | 88.9 |
 | MAY | 607 | 449 | 74.0 | 449 | 74.0 |
+| SHOULD | 968 | 853 | 88.1 | 853 | 88.1 |
+| MAY | 607 | 453 | 74.6 | 453 | 74.6 |
 | PROC | 76 | 68 | 89.5 | 68 | 89.5 |
 
 ## Per file
@@ -325,6 +331,8 @@ Of the rows that bind the engine (all rows but `n/a`): "RFC behaviour tested" co
 | `rfc8866.md` | SHOULD | 13 | 0 | 0 | 2 | 0 | 1 | 0 | 10 | 26 |
 | `rfc8866.md` | SHOULD | 14 | 0 | 0 | 0 | 0 | 1 | 1 | 10 | 26 |
 | `rfc8866.md` | MAY | 24 | 0 | 0 | 0 | 7 | 4 | 0 | 3 | 38 |
+| `rfc8866.md` | SHOULD | 12 | 0 | 0 | 2 | 0 | 1 | 1 | 10 | 26 |
+| `rfc8866.md` | MAY | 32 | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 38 |
 | `rfc8888.md` | MUST | 27 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 28 |
 | `rfc8888.md` | SHOULD | 7 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 8 |
 | `rfc8888.md` | MAY | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 5 |
