@@ -59,7 +59,8 @@ fn associated_sections(
             let mid = get_mid_value(media)?;
             transceivers
                 .iter()
-                .position(|t| t.mid().as_deref() == Some(mid.as_str()))
+                // A FEC session's section (RFC 5109 section 14.1) has no track to process.
+                .position(|t| t.mid().as_deref() == Some(mid.as_str()) && t.fec_session().is_none())
                 .map(|id| (id, index))
         })
         .collect()

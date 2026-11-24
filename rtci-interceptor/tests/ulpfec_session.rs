@@ -4,14 +4,15 @@
 
 use bytes::Bytes;
 use rtci_interceptor::{
-    Attribute, AttributedPacket, FecSessionSsrcMap, FecSessionStream, Interceptor, Packet,
-    RedPlacement, Registry, Slot, StreamInfo, TaggedPacket, UlpfecPacket, UlpfecReceiveBuilder,
-    UlpfecSendBuilder,
+    Attribute, AttributedPacket, FecSessionPacket, FecSessionSsrcMap, FecSessionStream,
+    Interceptor, Packet, RedPlacement, Registry, Slot, StreamInfo, TaggedPacket, UlpfecPacket,
+    UlpfecReceiveBuilder, UlpfecSendBuilder,
 };
 use sansio::Protocol;
 use shared::TransportContext;
 use shared::marshal::Marshal;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MEDIA_SSRC: u32 = 0x5109_0072;
@@ -329,4 +330,100 @@ fn onelevelonly_of_the_fec_session_is_followed_in_both_directions() {
         }
         assert_eq!(recovered, expected, "onelevelonly={one_level_only}");
     }
+}
+
+/// How many packets a receive chain rebuilt from what it was given.
+fn rebuilt(chain: &mut impl Interceptor) -> Vec<rtp::Packet> {
+    let mut out = Vec::new();
+    while let Some(read) = chain.poll_read() {
+        let recovered = read
+            .message
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::RecoveredByFec));
+        match read.message.packet {
+            Packet::Rtp(packet) if recovered => out.push(packet),
+            Packet::Rtp(packet) => assert_eq!(packet.header.ssrc, MEDIA_SSRC, "only media"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A binder that learns which stream a FEC session protects only from its packets marks each
+/// one (`FecSessionPacket`): the stream was bound without a word about FEC, and its decoder,
+/// kept from the start, takes the session's FEC. The payload type and `onelevelonly` of the
+/// session are the mark's.
+#[test]
+fn fec_marked_as_a_sessions_reaches_the_decoder_of_the_stream_it_names() {
+    let start = Instant::now();
+    let short: Vec<rtp::Packet> = (0..5u16)
+        .map(|i| media(700 + i, 3_000, i == 4, 80))
+        .collect();
+    let mut send_chain = sender(&stream_info(false), &[40, 60]);
+    let (media_wire, fec_wire) = sessions(send(&mut send_chain, start, Duration::ZERO, &short));
+    assert_eq!(fec_wire.len(), 1);
+
+    let plain = StreamInfo {
+        fec_session: None,
+        ..stream_info(false)
+    };
+    let feed = |builder: UlpfecReceiveBuilder, mark: FecSessionPacket| {
+        let mut chain = Registry::new()
+            .with(Slot::FecDecoder, builder.build())
+            .build();
+        chain.bind_remote_stream(&plain);
+        for (index, packet) in media_wire.iter().enumerate() {
+            if index != 1 {
+                chain
+                    .handle_read(on(TransportContext::default(), start, packet.clone()))
+                    .unwrap();
+            }
+        }
+        let mut fec = fec_wire[0].clone();
+        map().map_rtp(&mut fec);
+        let mut read = on(TransportContext::default(), start, fec);
+        read.message.add(Attribute::Custom(Arc::new(mark)));
+        chain.handle_read(read).unwrap();
+        rebuilt(&mut chain)
+    };
+    let mark = FecSessionPacket {
+        media_ssrc: MEDIA_SSRC,
+        payload_type: SESSION_FEC_PT,
+        one_level_only: false,
+    };
+
+    let recovered = feed(UlpfecReceiveBuilder::sessions(), mark);
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].marshal().unwrap(), short[1].marshal().unwrap());
+    // The RED carriage keeps a decoder for each stream as well.
+    assert_eq!(
+        feed(UlpfecReceiveBuilder::red(RED_PT, RED_FEC_PT), mark).len(),
+        1
+    );
+
+    // Another payload type than the session's `ulpfec`: not FEC.
+    let other_type = FecSessionPacket {
+        payload_type: SESSION_FEC_PT - 1,
+        ..mark
+    };
+    assert_eq!(feed(UlpfecReceiveBuilder::sessions(), other_type).len(), 0);
+    // Two levels where this endpoint said onelevelonly=1.
+    let one_level = FecSessionPacket {
+        one_level_only: true,
+        ..mark
+    };
+    assert_eq!(feed(UlpfecReceiveBuilder::sessions(), one_level).len(), 0);
+    // A stream the mark does not name.
+    let other_stream = FecSessionPacket {
+        media_ssrc: MEDIA_SSRC + 1,
+        ..mark
+    };
+    assert_eq!(
+        feed(UlpfecReceiveBuilder::sessions(), other_stream).len(),
+        0
+    );
+    // A separate-stream receiver that was not built for sessions keeps no decoder for a
+    // stream bound without a FEC flow: the session's packet ends there, rebuilt nothing.
+    assert_eq!(feed(UlpfecReceiveBuilder::stream(), mark).len(), 0);
 }

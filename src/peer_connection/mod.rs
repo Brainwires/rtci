@@ -250,6 +250,7 @@ pub(crate) mod dns_discovery;
 mod dtls_sdp;
 mod early_media;
 pub mod event;
+pub(crate) mod fec_session;
 pub(crate) mod handler;
 pub mod identity;
 mod internal;
@@ -968,6 +969,9 @@ impl RTCPeerConnection {
         ) {
             return Err(Error::ErrIncorrectSignalingState);
         }
+        // A FEC session with no media left to protect (RFC 5109 section 14.1) is offered
+        // rejected.
+        self.stop_fec_sessions_without_media()?;
 
         // Staging, not restarting: the offer must advertise fresh ICE credentials, but JSEP
         // requires `createOffer` to be free of side effects, and inbound STUN is still being
@@ -2948,6 +2952,19 @@ impl RTCPeerConnection {
                 // matching a description's m-sections is one lookup each.
                 let mut transceiver_by_mid =
                     RTCPeerConnection::transceiver_index_by_mid(&self.rtp_transceivers);
+                // The FEC sessions the description sets up (RFC 5109 section 14.1): an
+                // answer's are those it accepted of this side's offer; an offer's are taken
+                // only when the application said so (RFC 8854 section 5.2: "Answerers SHOULD
+                // reject any FEC-only "m=" lines, unless they specifically know how to handle
+                // such a thing").
+                let fec_sessions = if we_offer || self.setting_engine.separate_fec_sessions {
+                    crate::peer_connection::sdp::fec_session::fec_sessions(
+                        parsed_remote_description,
+                    )
+                } else {
+                    vec![]
+                };
+                let mut fec_sessions_made = vec![];
                 if !we_offer {
                     for media in &media_descriptions {
                         let mid_value = match get_mid_value(media) {
@@ -3002,6 +3019,30 @@ impl RTCPeerConnection {
                         // is sendrecv (RFC 8866 section 6.7, RFC 3264 section 6.1).
                         let direction = effective_direction(parsed_remote_description, media);
                         if kind == RtpCodecKind::Unspecified || is_unknown_media_protocol(media) {
+                            continue;
+                        }
+
+                        // An offered FEC session this endpoint takes: the section's own
+                        // transceiver, never one that waits for media.
+                        if let Some(offered) = fec_sessions
+                            .iter()
+                            .find(|session| &session.fec_mid == mid_value)
+                        {
+                            let existing = transceiver_by_mid.get(mid_value.as_str()).copied();
+                            let (i, made) =
+                                self.apply_offered_fec_session(offered, kind, existing)?;
+                            if made {
+                                fec_sessions_made.push(i);
+                            }
+                            transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
+                            continue;
+                        }
+                        // A FEC session's transceiver whose section the offer no longer sets
+                        // up as one: nothing is agreed for it, and the answer refuses it.
+                        if let Some(&i) = transceiver_by_mid.get(mid_value.as_str())
+                            && let Some(session) = self.rtp_transceivers[i].fec_session_mut()
+                        {
+                            session.remote = None;
                             continue;
                         }
 
@@ -3067,6 +3108,7 @@ impl RTCPeerConnection {
                             transceiver_by_mid.entry(mid_value.to_string()).or_insert(i);
                         }
                     }
+                    self.pair_offered_fec_sessions(&fec_sessions, &fec_sessions_made);
                 } else {
                     // we_offer
                     // WebRTC Spec 1.0 https://www.w3.org/TR/webrtc/
@@ -3115,6 +3157,18 @@ impl RTCPeerConnection {
                         // W3C 4.4.1.6: "If description is of type "answer" or "pranswer"
                         // ... Set transceiver.[[CurrentDirection]] to direction".
                         transceiver.set_current_direction(direction);
+
+                        // A FEC session this side offered (RFC 5109 section 14.3): accepted
+                        // when the answer keeps the section, as a FEC section, and repeats
+                        // the grouping ("by including the same grouping in the answer"). Its
+                        // `ulpfec` payload type is the one to send with.
+                        if let Some(session) = transceiver.fec_session_mut() {
+                            session.remote = fec_sessions
+                                .iter()
+                                .find(|answered| &answered.fec_mid == mid_value)
+                                .map(|answered| answered.format);
+                            continue;
+                        }
 
                         transceiver.set_codec_preferences_from_remote_description(
                             media,

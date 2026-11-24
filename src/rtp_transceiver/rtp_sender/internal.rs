@@ -78,6 +78,11 @@ pub(crate) struct RTCRtpSenderInternal {
     /// that changes one unbinds exactly these before binding the new ones, and `stop` unbinds
     /// them whatever the parameters are by then.
     bound_streams: Vec<StreamInfo>,
+    /// Where this sender's ULPFEC goes when a FEC session of its own protects its media
+    /// (RFC 5109 section 14.1), set by the peer connection from the negotiated session.
+    fec_session: Option<FecSessionBinding>,
+    /// The FEC streams of that session bound to the interceptors, one for each media stream.
+    bound_fec_session_streams: Vec<StreamInfo>,
     /// Reduced-size RTCP as negotiated for the media section (`RTCRtcpParameters::reduced_size`).
     rtcp_reduced_size: bool,
     /// The transceiver's negotiated direction does not send (a recvonly or inactive
@@ -177,6 +182,20 @@ pub(crate) fn track_streams(track: &MediaStreamTrack) -> Vec<MediaStreamId> {
     } else {
         vec![stream.to_string()]
     }
+}
+
+/// A sender's FEC session (RFC 5109 section 14.1), as its streams are bound with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FecSessionBinding {
+    /// The key of the connection's `FecSessionSsrcMap`: inside the chain the FEC stream of the
+    /// media stream `ssrc` is `ssrc ^ key`.
+    pub(crate) key: u32,
+    /// The payload type FEC is sent with: the remote description's `ulpfec` in the session's
+    /// section.
+    pub(crate) payload_type: PayloadType,
+    /// The remote side signalled `onelevelonly=1` (RFC 5109 sections 13, 14.3: what the
+    /// receiver accepts).
+    pub(crate) one_level_only: bool,
 }
 
 impl RTCRtpSenderInternal {
@@ -1164,6 +1183,14 @@ impl RTCRtpSenderInternal {
                     && self
                         .initially_paused_rids
                         .contains(&coding.rtp_coding_parameters.rid);
+                // RFC 5109 section 14.1: the stream's FEC runs in an RTP session of its own.
+                info.fec_session = self
+                    .fec_session
+                    .map(|session| interceptor::FecSessionStream {
+                        ssrc: ssrc ^ session.key,
+                        payload_type: session.payload_type,
+                        one_level_only: session.one_level_only,
+                    });
                 infos.push(info);
             }
         }
@@ -1192,6 +1219,32 @@ impl RTCRtpSenderInternal {
         &self.bound_streams
     }
 
+    /// Sets where this sender's ULPFEC goes when a FEC session of its own protects its media;
+    /// the streams take it the next time they are bound or re-bound.
+    pub(crate) fn set_fec_session(&mut self, session: Option<FecSessionBinding>) {
+        self.fec_session = session;
+    }
+
+    /// The FEC streams of this sender's FEC session, each a stream of that session: the
+    /// stream the chain knows by [`interceptor::FecSessionStream::ssrc`], with the session's
+    /// `ulpfec` payload type and the media stream's clock (RFC 5109 section 7.2: "the
+    /// timestamp MUST be set to the value of the media RTP clock").
+    fn fec_session_stream_infos(&self, media: &[StreamInfo]) -> Vec<StreamInfo> {
+        media
+            .iter()
+            .filter_map(|info| {
+                let session = info.fec_session?;
+                Some(StreamInfo {
+                    ssrc: session.ssrc,
+                    payload_type: session.payload_type,
+                    mime_type: format!("{}/ulpfec", self.kind()),
+                    clock_rate: info.clock_rate,
+                    ..Default::default()
+                })
+            })
+            .collect()
+    }
+
     /// Binds this sender's streams to the interceptors, as negotiation left them.
     pub(crate) fn bind_local_streams(
         &mut self,
@@ -1202,7 +1255,12 @@ impl RTCRtpSenderInternal {
         for info in &infos {
             interceptor.bind_local_stream(info);
         }
+        let fec = self.fec_session_stream_infos(&infos);
+        for info in &fec {
+            interceptor.bind_local_stream(info);
+        }
         self.bound_streams = infos;
+        self.bound_fec_session_streams = fec;
     }
 
     /// Re-binds this sender's streams when a renegotiation changed what they are bound with
@@ -1234,7 +1292,21 @@ impl RTCRtpSenderInternal {
         for info in &infos {
             interceptor.bind_local_stream(info);
         }
+        // The FEC session's streams follow: those that are no longer, or are bound with
+        // something else now, leave; the new ones join.
+        let fec = self.fec_session_stream_infos(&infos);
+        for info in &self.bound_fec_session_streams {
+            if !fec.contains(info) {
+                interceptor.unbind_local_stream(info);
+            }
+        }
+        for info in &fec {
+            if !self.bound_fec_session_streams.contains(info) {
+                interceptor.bind_local_stream(info);
+            }
+        }
         self.bound_streams = infos;
+        self.bound_fec_session_streams = fec;
         true
     }
 
@@ -1259,6 +1331,9 @@ impl RTCRtpSenderInternal {
     /// Unbinds the streams this sender bound, with the information they were bound with.
     pub(crate) fn unbind_local_streams(&mut self, interceptor: &mut dyn Interceptor) {
         for info in std::mem::take(&mut self.bound_streams) {
+            interceptor.unbind_local_stream(&info);
+        }
+        for info in std::mem::take(&mut self.bound_fec_session_streams) {
             interceptor.unbind_local_stream(&info);
         }
         // The streams of the other clock rates leave with it (RFC 3550 6.6: each says BYE).

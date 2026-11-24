@@ -2094,6 +2094,32 @@ pub fn configure_ulpfec_with_placement(
         )
 }
 
+/// Adds ULPFEC (RFC 5109) for FEC sessions of their own (section 14.1,
+/// [`RTCPeerConnection::add_fec_session`](crate::peer_connection::RTCPeerConnection::add_fec_session),
+/// `SettingEngineBuilder::with_separate_fec_sessions`), in both directions: the encoder at
+/// [`Slot::FecEncoder`] with its wire tap at [`Slot::FecWireImage`], so the FEC protects each
+/// media packet as it leaves, and the decoder at [`Slot::FecDecoder`], which keeps a decoder
+/// for every video stream so the FEC of a session finds it.
+///
+/// A stream no FEC session protects is left alone (and one with a ULPFEC repair flow of its
+/// own session is protected there, as a separate stream). FEC is produced after each frame or
+/// five packets, whichever comes first, in the amount the receiver's reported loss asks for
+/// (`FecRate`: none below 0.5% loss, at most one FEC packet for two of media), and its bit
+/// rate is taken out of the target the application encodes at.
+pub fn configure_ulpfec_sessions(registry: Registry) -> Registry {
+    let mut encoder = interceptor::UlpfecSendBuilder::stream()
+        .with_flush_on_marker(true)
+        .build();
+    let tap = encoder.wire_tap();
+    registry
+        .with(Slot::FecEncoder, encoder)
+        .with(Slot::FecWireImage, tap)
+        .with(
+            Slot::FecDecoder,
+            interceptor::UlpfecReceiveBuilder::sessions().build(),
+        )
+}
+
 #[cfg(test)]
 mod ulpfec_tests {
     use super::*;

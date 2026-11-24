@@ -196,6 +196,41 @@ impl From<RTCRtpTransceiverId> for RTCRtpReceiverId {
     }
 }
 
+/// The semantics of the `a=group` line that groups a media m= section with the m= section of
+/// its FEC session (RFC 5109 section 14.1,
+/// [`RTCPeerConnection::add_fec_session`](crate::peer_connection::RTCPeerConnection::add_fec_session)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RTCFecGroupSemantics {
+    /// `a=group:FEC-FR` (RFC 5956 section 4.1), the default: RFC 5956 section 4.4,
+    /// "Sessions negotiated between two endpoints implementing this specification MUST use
+    /// the "FEC-FR" semantics and not the "FEC" semantics".
+    #[default]
+    FecFr,
+    /// `a=group:FEC` (RFC 4756), the semantics RFC 5109 sections 14.1 and 14.3 name, which
+    /// RFC 5956 section 4.4 deprecates and section 4.5 keeps for a peer that only implements
+    /// RFC 4756.
+    Fec,
+}
+
+impl RTCFecGroupSemantics {
+    /// The semantics token of the `a=group` line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FecFr => "FEC-FR",
+            Self::Fec => "FEC",
+        }
+    }
+
+    /// The semantics an `a=group` line's token names, when it is one of the two.
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "FEC-FR" => Some(Self::FecFr),
+            "FEC" => Some(Self::Fec),
+            _ => None,
+        }
+    }
+}
+
 /// Initialization parameters for creating an `RTCRtpTransceiver`.
 ///
 /// Used with `add_transceiver_from_track` or `add_transceiver_from_kind` to configure

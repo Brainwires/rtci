@@ -1956,6 +1956,12 @@ impl MediaEngine {
             if media.is_webrtc_datachannel() || is_unknown_media_protocol(media) {
                 continue;
             }
+            // A section that lists nothing but `ulpfec` is a FEC session's (RFC 5109 section
+            // 14.1), not a negotiation of the kind's formats: it must not count as the kind's
+            // first section, which decides its formats.
+            if crate::peer_connection::sdp::fec_session::fec_section_format(media).is_some() {
+                continue;
+            }
 
             let typ = if media.media_name.media.to_lowercase() == "audio" {
                 RtpCodecKind::Audio

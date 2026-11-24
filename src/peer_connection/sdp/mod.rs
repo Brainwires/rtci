@@ -303,6 +303,7 @@ mod rejected_mline_tests {
 
 mod answer_check;
 pub(crate) mod ecn;
+pub(crate) mod fec_session;
 pub(crate) mod imageattr;
 pub(crate) mod sdp_type;
 pub(crate) mod send_limits;
@@ -2603,6 +2604,10 @@ pub(crate) struct MediaSection {
     pub(crate) offered_rtcp_xr: Option<Vec<String>>,
     /// In an answer, the offered section's `a=ecn-capable-rtp` (RFC 6679 section 6.1.1).
     pub(crate) offered_ecn: Option<ecn::EcnCapability>,
+    /// The section is a FEC session's (RFC 5109 section 14.1): written by
+    /// [`fec_session::add_fec_media_section`], outside every BUNDLE group, and grouped with
+    /// the media section it protects.
+    pub(crate) fec: Option<fec_session::FecSection>,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).
@@ -2869,6 +2874,23 @@ impl RTCPeerConnection {
                 };
                 d = add_data_media_section(d, &media_dtls_fingerprints, candidates, params)?;
                 true
+            } else if let Some(section) = &m.fec {
+                let kind = transceivers[m.transceiver_index].kind().to_string();
+                d = fec_session::add_fec_media_section(
+                    d,
+                    &media_dtls_fingerprints,
+                    candidates,
+                    fec_session::AddFecMediaSectionParams {
+                        should_add_candidates,
+                        mid_value: m.mid.clone(),
+                        kind,
+                        ice_params,
+                        dtls_role: params.connection_role,
+                        ice_gathering_state: params.ice_gathering_state,
+                        section,
+                    },
+                )?;
+                true
             } else {
                 let params = AddTransceiverSdpParams {
                     should_add_candidates,
@@ -2975,8 +2997,12 @@ impl RTCPeerConnection {
                 };
                 match &params.bundle {
                     BundleMode::Offer { .. } => {
+                        // A section the offer leaves outside every group has a transport of
+                        // its own, so it is never bundle-only (RFC 9143 section 6: a
+                        // bundle-only section is one of the BUNDLE group).
                         if params.initial_offer
                             && without_transport
+                            && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
                             make_bundle_only(desc);
@@ -3180,6 +3206,26 @@ impl RTCPeerConnection {
                 ATTR_KEY_GROUP.to_owned(),
                 format!("BUNDLE {}", group.join(" ")),
             );
+        }
+        // RFC 5109 sections 14.1 and 14.3: a FEC session is grouped with the media section it
+        // protects (RFC 5888, with the FEC-FR semantics of RFC 5956 or the FEC semantics of
+        // RFC 4756), in an offer and, when the answerer accepts it, "by including the same
+        // grouping in the answer". Only while both sections are accepted: a group names no
+        // rejected section (RFC 5888 section 9.2).
+        let accepted = |mid: &str| {
+            d.media_descriptions.iter().any(|media| {
+                get_mid_value(media).is_some_and(|m| m == mid) && !is_rejected_media(media)
+            })
+        };
+        let fec_groups: Vec<String> = media_sections
+            .iter()
+            .filter(|m| !m.rejected)
+            .filter_map(|m| m.fec.as_ref().map(|fec| (m, fec)))
+            .filter(|(m, fec)| accepted(&m.mid) && accepted(&fec.protected_mid))
+            .map(|(m, fec)| fec_session::fec_group_value(fec.semantics, &fec.protected_mid, &m.mid))
+            .collect();
+        for group in fec_groups {
+            d = d.with_value_attribute(ATTR_KEY_GROUP.to_owned(), group);
         }
 
         // After ICE selected a pair: the sections that carry the candidates name it.

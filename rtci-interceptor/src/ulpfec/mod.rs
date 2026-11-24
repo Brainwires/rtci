@@ -137,7 +137,9 @@ pub use encoder::{ProtectionLevel, UlpfecEncoder, UlpfecStreamPacketizer, valida
 pub use header::{
     FEC_HEADER_LENGTH, LONG_MASK_BITS, MAX_LEVELS, SHORT_MASK_BITS, UlpfecLevel, UlpfecPacket,
 };
-pub use receiver::{UlpfecReceiveBuilder, UlpfecReceiveInterceptor, UlpfecRepair};
+pub use receiver::{
+    FecSessionPacket, UlpfecReceiveBuilder, UlpfecReceiveInterceptor, UlpfecRepair,
+};
 pub use red::{RedFecPayload, depacketize_red};
 pub use sender::{RedPlacement, UlpfecSendBuilder, UlpfecSendInterceptor};
 
