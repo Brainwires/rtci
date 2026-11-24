@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session of its own, see "Added"). A struct literal of `StreamInfo` adds `..Default::default()`
   or `fec_session: None`.
 
+- **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
+  `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
+  section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media basis", for
+  layered multicast). The parser kept only the last one. RFC8866-5.7-7 is `tested`
+  (`grammar_test::several_connection_lines_in_a_media_description_are_all_kept`). Generated
+  SDP is unchanged (one `c=` line per section).
+  **Migration**: `connection_information: Some(c)` becomes `vec![c]`, `None` becomes
+  `vec![]`; read `connection_information.first()` where one address was read, and
+  `is_empty()` for `is_none()`.
+
 ### Behaviour changes
 
 - **media**: `H26xWriter` (H.264) gives the depacketizer each packet's sequence number, as it
@@ -82,6 +92,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DON base), whatever order they are given in (RFC 6184 section 5.7.2). Conformance rows
   RFC6184-5.7.2-3, 7.2.1-1, 7.2.1-2 and 8.2.2-9 are `tested`.
 
+- **RFC 8108 section 6.1: an endpoint starts sending on the SSRC it reported from.** A
+  connection that sends no media reported from an SSRC its RTCP session drew, and when its
+  first stream started (a receiver that turns `sendrecv`, an `addTrack` after the call is up)
+  that SSRC said BYE and the stream joined as a second participant. The RTCP session now
+  announces the reporting SSRC it draws (`RtcpSessionEvent::ReportingSsrc`, new; `None` once
+  the SSRC is a stream's or said BYE); the first media SSRC the connection mints is that one,
+  and the stream bound under it takes the reporting SSRC over: no BYE, one participant, its
+  reports become sender reports. Later streams, and SSRCs the application
+  names in a track's codings, are unchanged. On the wire: a peer sees RTP and sender reports
+  arrive from the SSRC that sent the receiver reports (as libwebrtc does with its own
+  receiver-report SSRC), signalled in the next description as usual. Engine behaviour change
+  (SSRC handling). Rows: RFC8108-6.1-1 (`violated` -> `tested`).
+
+- **RFC 4585 section 3.5.4: congestion control feedback sent at once counts in the average
+  RTCP packet size.** The transport-wide and RFC 8888 feedback the RTCP session sends as it is
+  built (`with_immediate_congestion_feedback`, the default) was left out of `avg_rtcp_size`
+  when sent, though the peer's was counted when received; the clause has the average "updated
+  accordingly" for every packet, Early or Regular. Now every packet sent moves it, so the
+  regular report interval reflects the packets the endpoint actually sends (slightly longer
+  where that feedback is larger than the regular reports). With
+  `with_congestion_feedback_in_budget` (the `Performance` profile) the regular reports' budget
+  still rests on their own size. Engine behaviour change (RTCP timing). Rows: RFC4585-3.5.4-2
+  (`partial` -> `tested`).
+
+- **RFC 8108 section 5.2: senders report first when not every SSRC fits.** When an endpoint's
+  SSRCs cannot all report in one aggregated compound packet (the MTU), the RTCP session now
+  puts the sending SSRCs' reports in first ("those most useful to the peers"), then the others
+  by their timers; before, the order was the timers' alone. The SSRCs left out still report
+  when their own timers expire. Engine behaviour change (report content on the wire, only for
+  endpoints with more SSRCs than one packet holds). Rows: RFC8108-5.2-3 (`missing` ->
+  `tested`); RFC8108-5.2-1 (initial report at zero delay, already done by
+  `with_first_report_at_join`) marked `tested`.
+
+- **RFC 7164: no RTCP timestamps around a possible leap second.** Taking up section 5.1's
+  assumption of a positive leap second at the end of every month, the RTCP session sends no
+  sender report and no XR receiver reference time stamped in the last second of a month's last
+  day or the second after it (UTC): the SSRC reports with a receiver report there, keeping its
+  schedule. A sender report received with such a timestamp is not used for LSR / DLSR or the
+  remote-outbound timestamps (its counts are). New: `rtci_shared::time::near_leap_second`.
+  Engine behaviour change (report content on the wire, two seconds a month). Rows:
+  RFC7164-5.1-1 to 5.1-5 (`missing` -> `tested`), 5-3 (`missing` -> `partial`: the RFC 8888
+  report timestamp and the NTP header extensions are still written there).
+
+- **RFC 8108 section 5.1: the RFC form of `with_report_from_every_ssrc` reports on the
+  co-located SSRCs too.** With `RtcpSessionBuilder::with_report_from_every_ssrc(true)`
+  (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, the `StrictRfc` profile) each
+  local SSRC's SR or RR now also carries a block for each of the endpoint's other SSRCs that
+  has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
+  highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
+  libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
+  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
+  `setting`, measured).
+
+- **RFC 7941 section 4.2.3: MID and RtpStreamId are sent until delivered, not on every
+  packet.** A sender stamped the MID and RtpStreamId header extensions on every RTP packet.
+  It now stamps them until a reception report block about the stream shows the receiver got
+  a packet from the first one that carried them (section 4.2.3: "only send header extensions
+  when needed", with "the normal RTCP report blocks" as the indicator of delivery), and again
+  for a new SSRC or a changed value (sections 4.2.4.1, 4.2.4.3). libwebrtc stops the same
+  way, on the first report about the SSRC. Engine behaviour change (RTP header extensions on
+  the wire). Rows: RFC7941-4.2.3-1, 4.2.4-1, 4.2.4-2 (`missing` -> `tested`).
+- **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
+  the slice's aggregation packet when the slice does not fit the packet being filled and they
+  fit one together, instead of leaving them with the units before them (RFC 7798 section 5).
+  Conformance row RFC7798-5-5 is `tested`.
+
+- **sdp**: an H.265 answer to an offer with `sprop-max-don-diff` above 0, and an H.265 format
+  of this endpoint with it, state `depack-buf-cap=33554432`, the de-packetization buffer the
+  depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
+  section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
+  `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
+
 ### Features
 
 - **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
@@ -106,9 +189,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   webrtc-pc 4.2.5's; the test is split in two, one per form
   (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
   `max_bundle_is_ignored_when_set_to_be_ignored`).
-
-
-### Features
 
 - **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
   `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
@@ -156,96 +236,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
   unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
-### Behaviour changes
-
-- **RFC 8108 section 6.1: an endpoint starts sending on the SSRC it reported from.** A
-  connection that sends no media reported from an SSRC its RTCP session drew, and when its
-  first stream started (a receiver that turns `sendrecv`, an `addTrack` after the call is up)
-  that SSRC said BYE and the stream joined as a second participant. The RTCP session now
-  announces the reporting SSRC it draws (`RtcpSessionEvent::ReportingSsrc`, new; `None` once
-  the SSRC is a stream's or said BYE); the first media SSRC the connection mints is that one,
-  and the stream bound under it takes the reporting SSRC over: no BYE, one participant, its
-  reports become sender reports. Later streams, and SSRCs the application
-  names in a track's codings, are unchanged. On the wire: a peer sees RTP and sender reports
-  arrive from the SSRC that sent the receiver reports (as libwebrtc does with its own
-  receiver-report SSRC), signalled in the next description as usual. Engine behaviour change
-  (SSRC handling). Rows: RFC8108-6.1-1 (`violated` -> `tested`).
-### Behaviour changes
-
-- **RFC 4585 section 3.5.4: congestion control feedback sent at once counts in the average
-  RTCP packet size.** The transport-wide and RFC 8888 feedback the RTCP session sends as it is
-  built (`with_immediate_congestion_feedback`, the default) was left out of `avg_rtcp_size`
-  when sent, though the peer's was counted when received; the clause has the average "updated
-  accordingly" for every packet, Early or Regular. Now every packet sent moves it, so the
-  regular report interval reflects the packets the endpoint actually sends (slightly longer
-  where that feedback is larger than the regular reports). With
-  `with_congestion_feedback_in_budget` (the `Performance` profile) the regular reports' budget
-  still rests on their own size. Engine behaviour change (RTCP timing). Rows: RFC4585-3.5.4-2
-  (`partial` -> `tested`).
-### Behaviour changes
-
-- **RFC 8108 section 5.2: senders report first when not every SSRC fits.** When an endpoint's
-  SSRCs cannot all report in one aggregated compound packet (the MTU), the RTCP session now
-  puts the sending SSRCs' reports in first ("those most useful to the peers"), then the others
-  by their timers; before, the order was the timers' alone. The SSRCs left out still report
-  when their own timers expire. Engine behaviour change (report content on the wire, only for
-  endpoints with more SSRCs than one packet holds). Rows: RFC8108-5.2-3 (`missing` ->
-  `tested`); RFC8108-5.2-1 (initial report at zero delay, already done by
-  `with_first_report_at_join`) marked `tested`.
-### Behaviour changes
-
-- **RFC 7164: no RTCP timestamps around a possible leap second.** Taking up section 5.1's
-  assumption of a positive leap second at the end of every month, the RTCP session sends no
-  sender report and no XR receiver reference time stamped in the last second of a month's last
-  day or the second after it (UTC): the SSRC reports with a receiver report there, keeping its
-  schedule. A sender report received with such a timestamp is not used for LSR / DLSR or the
-  remote-outbound timestamps (its counts are). New: `rtci_shared::time::near_leap_second`.
-  Engine behaviour change (report content on the wire, two seconds a month). Rows:
-  RFC7164-5.1-1 to 5.1-5 (`missing` -> `tested`), 5-3 (`missing` -> `partial`: the RFC 8888
-  report timestamp and the NTP header extensions are still written there).
-### Behaviour changes
-
-- **RFC 8108 section 5.1: the RFC form of `with_report_from_every_ssrc` reports on the
-  co-located SSRCs too.** With `RtcpSessionBuilder::with_report_from_every_ssrc(true)`
-  (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, the `StrictRfc` profile) each
-  local SSRC's SR or RR now also carries a block for each of the endpoint's other SSRCs that
-  has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
-  highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
-  libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
-  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
-  1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
-  `setting`, measured).
-### Behaviour changes
-
-- **RFC 7941 section 4.2.3: MID and RtpStreamId are sent until delivered, not on every
-  packet.** A sender stamped the MID and RtpStreamId header extensions on every RTP packet.
-  It now stamps them until a reception report block about the stream shows the receiver got
-  a packet from the first one that carried them (section 4.2.3: "only send header extensions
-  when needed", with "the normal RTCP report blocks" as the indicator of delivery), and again
-  for a new SSRC or a changed value (sections 4.2.4.1, 4.2.4.3). libwebrtc stops the same
-  way, on the first report about the SSRC. Engine behaviour change (RTP header extensions on
-  the wire). Rows: RFC7941-4.2.3-1, 4.2.4-1, 4.2.4-2 (`missing` -> `tested`).
-- **rtp**: `HevcPayloader` puts the parameter sets, AUD and prefix SEI that precede a slice in
-  the slice's aggregation packet when the slice does not fit the packet being filled and they
-  fit one together, instead of leaving them with the units before them (RFC 7798 section 5).
-  Conformance row RFC7798-5-5 is `tested`.
-
-- **sdp**: an H.265 answer to an offer with `sprop-max-don-diff` above 0, and an H.265 format
-  of this endpoint with it, state `depack-buf-cap=33554432`, the de-packetization buffer the
-  depacketizer holds (`MAX_DEPACKETIZATION_BYTES`), unless the application gave one (RFC 7798
-  section 7.2.2). Default offers, and answers to browsers' H.265 offers (which carry no
-  `sprop-max-don-diff`), are unchanged. Conformance row RFC7798-7.2.2-10 is `tested`.
-### Breaking changes
-
-- **rtci-sdp** (jsep-79, pass2): `MediaDescription::connection_information` is a
-  `Vec<ConnectionInformation>`, every `c=` line of the media description in order (RFC 8866
-  section 5.7: "Multiple addresses or "c=" lines MAY be specified on a per-media basis", for
-  layered multicast). The parser kept only the last one. RFC8866-5.7-7 is `tested`
-  (`grammar_test::several_connection_lines_in_a_media_description_are_all_kept`). Generated
-  SDP is unchanged (one `c=` line per section).
-  **Migration**: `connection_information: Some(c)` becomes `vec![c]`, `None` becomes
-  `vec![]`; read `connection_information.first()` where one address was read, and
-  `is_empty()` for `is_none()`.
 
 ## [0.1.0] - 2026-11-24
 

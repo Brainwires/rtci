@@ -8,28 +8,23 @@ Verdicts and classes are defined in `RULES.md`.
 
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5080.
-- RFC behaviour tested (`tested` + `setting` + `conflict`): 5065 of 5080 (99.7 %).
-- Tested as the default (`tested`): 5033 of 5080 (99.1 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Tested as the default (`tested`): 5032 of 5080 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
-- Open (not tested in any form): 15: 1 untested, 9 partial, 5 missing, 0 violated.
+- RFC behaviour tested (`tested` + `setting` + `conflict`): 5067 of 5080 (99.7 %).
+- Tested as the default (`tested`): 5034 of 5080 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Open (not tested in any form): 13: 1 untested, 7 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
 | A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 0 | 0 |
-| C | partly implemented | 6 | 4 |
+| C | partly implemented | 4 | 2 |
 | D | not implemented | 6 | 4 |
-| C | partly implemented | 5 | 3 |
-| D | not implemented | 7 | 5 |
 | E | cannot be met or observed inside this engine | 10 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 34 |
+| all | | 46 | 33 |
 
 ## What 100 % takes
 
-- Work in code and tests (classes B, C, D, F): 12 rows, 4 of size S, 3 of size M, 5 of size L. They are listed below by owner and size.
-- Work in code and tests (classes B, C, D, F): 12 rows, 3 of size S, 3 of size M, 6 of size L. They are listed below by owner and size.
-- Work in code and tests (classes B, C, D, F): 12 rows, 4 of size S, 2 of size M, 6 of size L. They are listed below by owner and size.
+- Work in code and tests (classes B, C, D, F): 10 rows, 3 of size S, 2 of size M, 5 of size L. They are listed below by owner and size.
 - Owner decisions (class E with a proposal: `n/a`, or an engine-side guarantee to test): 1 rows.
 - Never testable inside this engine (class E, reason stated): 2 rows:
   - RFC4585-4.2-7 (`rfc4585.md`): Never testable: an absence (nothing in the engine waits on a feedback reaction), no mechanism to mutate
@@ -46,9 +41,7 @@ become `setting` only if such a cell is named, or close when the default changes
 | dtls-srtp | 0 | 0 | 0 | 1 | 0 | 1 | 1 | 0 | 0 |
 | ice | 0 | 0 | 1 | 1 | 0 | 2 | 1 | 1 | 0 |
 | media (media-25) | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
-| media (running) | 0 | 4 | 4 | 1 | 0 | 9 | 3 | 2 | 4 |
-| media (running) | 0 | 3 | 5 | 1 | 0 | 9 | 2 | 2 | 5 |
-| media (running) | 0 | 3 | 5 | 1 | 0 | 9 | 3 | 1 | 5 |
+| media (running) | 0 | 2 | 4 | 1 | 0 | 7 | 2 | 1 | 4 |
 | sframe | 0 | 1 | 1 | 0 | 0 | 2 | 1 | 0 | 1 |
 
 ## Rows
