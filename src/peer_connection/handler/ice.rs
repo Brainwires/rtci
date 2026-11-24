@@ -338,7 +338,11 @@ impl<'a>
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
-        if let Some(evt) = self.ctx.ice_transport.agent.poll_event() {
+        // Until an agent event gives something to hand on: one that gives nothing (a stale
+        // selection, a role change) does not end the drain.
+        while self.ctx.event_outs.is_empty()
+            && let Some(evt) = self.ctx.ice_transport.agent.poll_event()
+        {
             // The agent stamps its own events, so this drain *propagates* that instant rather
             // than retaining one: the condition was observed when the agent saw it, not when
             // the pipeline got round to polling for it.
@@ -368,6 +372,28 @@ impl<'a>
                             ),
                         ),
                     });
+                }
+                // A selection announced before an ICE restart applied since then is no longer
+                // the agent's: a rolled-back local offer's restart is taken back (the agent
+                // announces the pair it goes back to, RFC 9429 section 5.7), and the answer to
+                // the peer's offer restarts ICE again before this queue is read. Taken as
+                // current, it would start the client handshake of the answer's new DTLS
+                // association on the previous generation's path, where the peer's previous
+                // association still answers (RFC 8842 section 5.1: a new association runs on
+                // a new 3-tuple). The pair the new generation selects is announced in turn.
+                ::ice::Event::SelectedCandidatePairChange(local, remote)
+                    if !self
+                        .ctx
+                        .ice_transport
+                        .agent
+                        .get_selected_candidate_pair()
+                        .is_some_and(|(l, r)| l.equal(&local) && r.equal(&remote)) =>
+                {
+                    debug!(
+                        "stale ice selected candidate pair {:?} <-> {:?}: ignored",
+                        local.addr(),
+                        remote.addr()
+                    );
                 }
                 ::ice::Event::SelectedCandidatePairChange(local, remote) => {
                     debug!(

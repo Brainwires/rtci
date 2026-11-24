@@ -526,6 +526,9 @@ pub struct SettingEngine {
     pub(crate) dtls_alpn_off: bool,
     /// [`SettingEngineBuilder::with_srtp_automatic_rekeying`]: `true` when it is turned off.
     pub(crate) srtp_automatic_rekeying_off: bool,
+    /// [`SettingEngineBuilder::with_srtp_rekeying_dtls_client_first`]: `true` when it is
+    /// turned off (both sides ask at the lifetime warning).
+    pub(crate) srtp_rekeying_both_at_warning: bool,
     pub(crate) ignore_rid_pause_for_recv: bool,
     /// [`SettingEngineBuilder::with_rid_pause_marks`].
     pub(crate) rid_pause_marks: bool,
@@ -676,6 +679,7 @@ impl SettingEngine {
             non_interactive_video: Default::default(),
             srtp_key_lifetime: Default::default(),
             srtp_automatic_rekeying_off: Default::default(),
+            srtp_rekeying_both_at_warning: Default::default(),
             ignore_rid_pause_for_recv: Default::default(),
             rid_pause_marks: Default::default(),
             rollback_content_ignored: Default::default(),
@@ -2904,6 +2908,29 @@ impl SettingEngineBuilder {
     /// [`RTCPeerConnection::renew_dtls_association`]: crate::peer_connection::RTCPeerConnection::renew_dtls_association
     pub fn with_srtp_automatic_rekeying(mut self, enabled: bool) -> Self {
         self.0.srtp_automatic_rekeying_off = !enabled;
+        self
+    }
+
+    /// Which side starts the automatic SRTP re-keying ([`Self::with_srtp_automatic_rekeying`])
+    /// when both could. The default is `true`: the DTLS client of the current association asks
+    /// for the new association at the lifetime warning (a sixteenth of a key's lifetime left),
+    /// the DTLS server only once a thirty-second is left, if no new association has come by
+    /// then.
+    ///
+    /// Two peers with the same key lifetime reach the warning at about the same packet count:
+    /// if both asked at once, their re-keying offers would cross (glare). RFC 9429 section 4.1.10
+    /// has that resolved by a rollback, which this engine supports, but it costs a round trip
+    /// and part of the margin before the key runs out. The DTLS roles are fixed for an
+    /// association and known to both sides, so with this tie-break two `rtc` peers do not
+    /// collide: the client's offer arrives, the server answers it, and the new association's
+    /// fresh keys never reach the server's later threshold. A peer that does not re-key by itself
+    /// (a browser, or rekeying turned off) leaves the server the second half of the margin.
+    /// Either way a glare that still happens (an application's own offer, or lifetimes that
+    /// differ) is resolved by the usual rollback.
+    ///
+    /// `false`: both sides ask at the warning (the behaviour before this setting).
+    pub fn with_srtp_rekeying_dtls_client_first(mut self, client_first: bool) -> Self {
+        self.0.srtp_rekeying_both_at_warning = !client_first;
         self
     }
 

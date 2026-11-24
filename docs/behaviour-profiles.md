@@ -157,7 +157,7 @@ or no RFC-permitted setting changes it:
   the RTCP bandwidth (`rtcp.immediate-congestion-feedback`, the engine's default too, an
   audit row for the owner).
 
-## 2. Engine-only capabilities: the same in every profile (26)
+## 2. Engine-only capabilities: the same in every profile (27)
 
 A capability the engine has and Chrome lacks stays on under `Chrome`: it negotiates
 down with a Chrome peer, or a Chrome peer does not notice it. Further engine-only
@@ -186,6 +186,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_relay_gathering` | who gathers relayed candidates (engine or application); a sans-I/O choice |
 | `SettingEngineBuilder::with_ecn` | ECN needs the application's socket layer; off in every profile (the ECN rows above apply when it is on) |
 | `SettingEngineBuilder::with_srtp_automatic_rekeying` | RFC 5764 4.4 re-keying by a new association; libwebrtc has none, and a browser peer ignores the new tls-id |
+| `SettingEngineBuilder::with_srtp_rekeying_dtls_client_first` | which side starts the automatic re-keying; no RFC names one (RFC 9429 4.1.10 resolves a collision by rollback), and it applies only between engines that re-key by themselves |
 | `SettingEngineBuilder::with_video_receive_limits` | a=imageattr (RFC 6236); none by default in every profile, Chromium writes none |
 | `SettingEngineBuilder::with_codec_video_receive_limits` | a=imageattr per codec; none by default |
 | `SettingEngineBuilder::with_candidate_pair_proposals` | webrtc-extensions 7 icecandidatepairnominate; off in every profile (Chrome does not ship the event) |
