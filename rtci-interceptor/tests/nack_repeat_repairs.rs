@@ -993,3 +993,67 @@ fn requests_and_lost_reports_without_end_stay_within_the_rate_limit() {
         "{worst} octets of retransmissions within one second, the target allows 50 000"
     );
 }
+
+/// A retransmission larger than the smoothing bucket ever holds leaves when the bucket is
+/// full, and the bucket owes the rest: at 80 kbit/s under libwebrtc's rule the window allows
+/// 10 000 octets and the bucket holds 1500, less than a retransmission of 1614 octets (a
+/// 1600-octet payload). The first leaves at once; the second when the bucket has made up the
+/// 114 octets it owes and filled again, 161.4 ms later; so the rate over time stays the
+/// limit's. (Independent review, 2026-11-24: such a packet never left, and the deadline named
+/// an instant at which it still did not fit.)
+#[test]
+fn a_retransmission_larger_than_the_bucket_leaves_when_the_bucket_is_full() {
+    let base = Instant::now();
+    let mut chain = chain_with(true, RetransmissionRateLimit::UpToTarget);
+    read(
+        &mut chain,
+        base,
+        AttributedPacket::new(Packet::Rtcp(vec![])).with(Attribute::TargetBitrateChanged {
+            bits_per_second: 80_000.0,
+        }),
+    );
+    drain(&mut chain);
+    for sequence_number in [100u16, 101] {
+        chain
+            .handle_write(TaggedPacket {
+                now: base,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number,
+                        ssrc: SSRC,
+                        ..Default::default()
+                    },
+                    payload: vec![0u8; 1600].into(),
+                })),
+            })
+            .unwrap();
+    }
+    drain(&mut chain);
+    let left = nack(&mut chain, ms(base, 200), &[100, 101]);
+    assert_eq!(
+        vec![100],
+        left.iter().map(|left| left.repaired).collect::<Vec<_>>(),
+        "the first leaves at once, the second waits for the bucket"
+    );
+    let due = chain.poll_timeout().expect("a deadline for the second");
+    let wait = due.duration_since(ms(base, 200));
+    assert!(
+        (Duration::from_micros(161_400)..=Duration::from_micros(161_500)).contains(&wait),
+        "due {wait:?} after the first"
+    );
+    chain
+        .handle_timeout(due - Duration::from_millis(1))
+        .unwrap();
+    assert!(drain(&mut chain).is_empty(), "not before");
+    chain.handle_timeout(due).unwrap();
+    assert_eq!(
+        vec![101],
+        drain(&mut chain)
+            .iter()
+            .map(|left| left.repaired)
+            .collect::<Vec<_>>()
+    );
+}
