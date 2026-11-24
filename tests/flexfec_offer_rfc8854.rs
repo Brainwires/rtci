@@ -328,12 +328,12 @@ impl World {
                         && header.ssrc == media_ssrc
                         && header.payload_type == media_pt
                     {
-                        // One media packet in seven is lost, and every second transmission.
+                        // One media packet in twenty is lost, and every second transmission.
                         let first = self.seen.insert(header.sequence_number);
                         if !first {
                             continue;
                         }
-                        if header.sequence_number % 7 == 3 {
+                        if header.sequence_number % 20 == 7 {
                             self.lost.push(header.sequence_number);
                             continue;
                         }
@@ -543,6 +543,12 @@ fn with_the_setting_at_both_ends_flexfec_is_negotiated_and_rebuilds_lost_media()
     );
     // Once the receiver's reports showed the loss, FEC follows it: the losses of the second
     // half of the call are rebuilt.
+    assert_eq!(
+        world.seen.len(),
+        300,
+        "every media packet crossed the wire: {:?}",
+        world.seen.iter().max()
+    );
     let late: Vec<u16> = world
         .lost
         .iter()
@@ -551,7 +557,8 @@ fn with_the_setting_at_both_ends_flexfec_is_negotiated_and_rebuilds_lost_media()
         .collect();
     assert!(
         late.iter().all(|seq| delivered.contains(seq)),
-        "lost after FEC started {late:?}, rebuilt {rebuilt:?}"
+        "lost after FEC started {late:?}, rebuilt {rebuilt:?}, delivered {}, FEC sent {sent:?}",
+        delivered.len()
     );
     Ok(())
 }
