@@ -50,6 +50,16 @@ fn a_channel_closed_by_the_receiver_takes_no_message_of_another_channel_with_it(
             .data_channel(m_answerer)
             .expect("m on the answerer")
             .close()?;
+        // The close takes effect on the answerer (its stream is no longer read) and its reset
+        // request is lost on the way, so the offerer goes on sending on M for a while: the
+        // messages that were in flight when the receiver closed the channel in the issue.
+        p.answerer.drop_outgoing = true;
+        p.run_for(Duration::from_millis(1))?;
+        p.answerer.drop_outgoing = false;
+        ensure!(
+            !p.offerer.closed(m_offerer),
+            "the offerer must not know of the close yet"
+        );
         let now = p.now;
         for i in 0..COUNT {
             let mut l = p.offerer.pc.data_channel(l_offerer).expect("l");
