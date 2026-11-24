@@ -954,6 +954,18 @@ governed_behaviours! {
         read: |o: &DefaultInterceptorOptions| o.receiver_reference_time_on_audio,
     },
     {
+        id: "fec.video-red-ulpfec",
+        setting: "DefaultInterceptorOptions::video_red_ulpfec",
+        clause: "RFC 8854 7 (RFC 5109 14.2)",
+        rfc: false => "false",
+        chrome: true => "true",
+        strict_rfc: false => "false",
+        chrome_source: "libwebrtc media/engine/webrtc_video_engine.cc::GetDefaultSupportedFormats @ a222406d: kRedCodecName and kUlpfecCodecName are pushed for every video section with no field trial (FlexFEC only with WebRTC-FlexFEC-03-Advertised); GetPayloadTypesAndDefaultCodecs adds RTX for RED",
+        evidence: Source,
+        apply_interceptors: |o: &mut DefaultInterceptorOptions, v| o.video_red_ulpfec = v,
+        read: |o: &DefaultInterceptorOptions| o.video_red_ulpfec,
+    },
+    {
         id: "gcc.threshold-time-base",
         setting: "DefaultInterceptorOptions::gcc_threshold_time_base",
         clause: "draft-ietf-rmcat-gcc-02 5.4",
@@ -1537,6 +1549,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         setting: "SettingEngineBuilder::with_dtls_new_association_on_previous_addresses",
         class: NotGovernedClass::Same,
         note: "off in every profile: a new DTLS association over UDP gets a new 3-tuple (RFC 8842 5.1 MUST, 6), so the ICE restart that comes with it drops the local candidates and refuses their addresses, the TURN links allocate again, and the transport set up again after every m= section was rejected gathers on new ports too; `true` is the opt-out for an application with one fixed socket, in no profile. libwebrtc gathers each ICE generation on new sockets as well: p2p/base/p2p_transport_channel.cc::P2PTransportChannel::MaybeStartGathering @ a222406d (lines 842-882) stops the previous allocator session and takes a pooled or new one, and p2p/client/basic_port_allocator.cc binds that session's UDP sockets afresh (AllocationSequence::Init, lines 1261-1266, with the shared socket; AllocationSequence::CreateUDPPorts, lines 1471-1481, without it), port 0 within min_port..max_port",
+    },
+    NotGoverned {
+        setting: "SettingEngineBuilder::with_separate_fec_sessions",
+        class: NotGovernedClass::Same,
+        note: "off in every profile: an offered FEC session of its own (RFC 5109 14.1, an m= section of ulpfec alone grouped by a=group:FEC-FR or a=group:FEC) is refused, port 0 and the group left out (RFC 5109 14.3), as RFC 8854 5.2 asks of a WebRTC endpoint (\"Answerers SHOULD reject any FEC-only m= lines\"); `true` accepts it, for a peer that implements RFC 5109 as written, in no profile. libwebrtc has no such session either: its offer/answer reads no SDP group but BUNDLE (pc/media_session.cc, pc/sdp_offer_answer.cc, pc/jsep_transport_controller.cc @ a222406d call GetGroupsByName / HasGroup with GROUP_TYPE_BUNDLE only) and carries ULPFEC in RED",
     },
     NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_inbound_reassembly_limit",

@@ -1194,6 +1194,95 @@ impl RTCStatsAccumulator {
         false
     }
 
+    /// Counts a FEC packet of the media stream `media_ssrc` that arrived in a FEC session of
+    /// its own (RFC 5109 section 14.1, under the media SSRC on another transport): a packet of
+    /// the stream and FEC, as one on its FEC SSRC is (webrtc-stats 7.1: "FEC streams do not
+    /// show up as separate objects" but count in `packetsReceived`, `bytesReceived`,
+    /// `fecPacketsReceived` and `fecBytesReceived`). Returns whether the stream exists.
+    pub(crate) fn on_fec_session_received(
+        &mut self,
+        media_ssrc: SSRC,
+        overhead_bytes: usize,
+        payload_bytes: usize,
+        now: Instant,
+    ) -> bool {
+        let Some(stream) = self.inbound_rtp_streams.get_mut(&media_ssrc) else {
+            return false;
+        };
+        stream.on_fec_received(overhead_bytes, payload_bytes, now);
+        true
+    }
+
+    /// What the chain's ULPFEC decoder reported for one of its streams (totals since the
+    /// stream was bound, so the latest replaces what was there).
+    pub(crate) fn on_ulpfec_receive_stats(&mut self, stats: interceptor::UlpfecReceiveStats) {
+        if let Some(stream) = self.inbound_rtp_streams.get_mut(&stats.media_ssrc) {
+            stream.ulpfec = Some(stats);
+        }
+    }
+
+    /// A media packet of `ssrc` that FEC rebuilt left the chain for the application.
+    pub(crate) fn on_recovered_by_fec(&mut self, ssrc: SSRC) {
+        if let Some(stream) = self.inbound_rtp_streams.get_mut(&ssrc) {
+            stream.packets_recovered_by_fec += 1;
+        }
+    }
+
+    /// FEC for the outbound stream `media_ssrc` left the chain (an `interceptor::FecSent`
+    /// mark).
+    pub(crate) fn on_fec_sent(&mut self, sent: interceptor::FecSent) {
+        if let Some(stream) = self.outbound_rtp_streams.get_mut(&sent.media_ssrc) {
+            stream.fec_packets_sent += u64::from(sent.packets);
+            stream.fec_bytes_sent += sent.bytes;
+        }
+    }
+
+    /// The FEC counts webrtc-stats has no member for, per stream that has any.
+    pub(crate) fn fec_stats(&self) -> crate::statistics::FecStats {
+        let mut stats = crate::statistics::FecStats::default();
+        let mut sent: Vec<_> = self
+            .outbound_rtp_streams
+            .values()
+            .filter(|stream| stream.fec_packets_sent > 0)
+            .map(|stream| crate::statistics::FecSentStats {
+                ssrc: stream.ssrc,
+                fec_packets_sent: stream.fec_packets_sent,
+                fec_bytes_sent: stream.fec_bytes_sent,
+            })
+            .collect();
+        sent.sort_by_key(|stream| stream.ssrc);
+        let mut received: Vec<_> = self
+            .inbound_rtp_streams
+            .values()
+            .filter(|stream| {
+                stream.fec_packets_received > 0
+                    || stream.ulpfec.is_some()
+                    || stream.packets_recovered_by_fec > 0
+            })
+            .map(|stream| {
+                let ulpfec = stream.ulpfec;
+                let decoder = ulpfec.map(|ulpfec| ulpfec.decoder).unwrap_or_default();
+                crate::statistics::FecReceivedStats {
+                    ssrc: stream.ssrc,
+                    fec_packets_received: stream.fec_packets_received
+                        + ulpfec.map_or(0, |ulpfec| ulpfec.fec_packets_in_red),
+                    fec_bytes_received: stream.fec_bytes_received
+                        + ulpfec.map_or(0, |ulpfec| ulpfec.fec_bytes_in_red),
+                    fec_packets_in_red: ulpfec.map_or(0, |ulpfec| ulpfec.fec_packets_in_red),
+                    packets_recovered: stream.packets_recovered_by_fec,
+                    fec_packets_discarded: decoder.discarded(),
+                    discarded_unneeded: decoder.discarded_unneeded,
+                    discarded_expired: decoder.discarded_expired,
+                    discarded_rejected: decoder.fec_rejected,
+                }
+            })
+            .collect();
+        received.sort_by_key(|stream| stream.ssrc);
+        stats.sent = sent;
+        stats.received = received;
+        stats
+    }
+
     /// Counts a retransmission that arrived in an RTX packet for the stream `primary_ssrc`:
     /// `overhead_bytes` is the RTX packet's header and padding, `payload_bytes` its payload,
     /// which starts with the original sequence number (RFC 4588 section 4).

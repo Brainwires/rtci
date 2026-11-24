@@ -52,7 +52,7 @@ RFC7941-4.1-2	F	S	rtp	`rtp_sender_test.rs::the_sender_stamps_the_mid_of_its_tran
 RFC7941-4.2.6-1	C	S	jsep (running)	Apply a later MID item by extended sequence number (RFC9143-9.2-5)
 RFC7941-6-2	B	S	security	A test that a Cryptex-protected extension block fails authentication when changed (same SRTP transform as the payload)
 RFC8083-3-6	C	M	media (running)	Tdr from the RFC 3550 6.2 algorithm instead of the report spacing
-RFC8108-5.1-1	C	M	media (running)	Stays partial (audit-5): report blocks on the co-located SSRCs are not sent even with `with_report_from_every_ssrc(true)`, and the default (blocks once, browser behaviour) has no failing cell or measurement. Add the co-located blocks and make the setting the default, or measure
+RFC8108-5.1-1	A	S	media (running)	`setting` (measured, rtpcore-6): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; mean freeze 1.73 against 1.60 s, lag 9.03 against 8.70 s on `report_blocks_from_every_ssrc_measured_against_once`
 RFC8108-6.1-2	A	S	media (media-25)	`setting`: one SSRC across clock rates by default; `with_ssrc_per_clock_rate(true)` is the RFC 7160 4.1 form (libwebrtc does not follow a new SSRC)
 RFC8122-6.2-5	C	S	dtls-srtp	Missing certificate: bad_certificate (RFC 8122) instead of handshake_failure (RFC 5246 7.4.6) on the peer-connection path
 RFC8122-6.2-6	C	M	dtls-srtp	Buffer a ClientHello that arrives before the answer and handshake once it is applied (as RFC8842-5.2-4)

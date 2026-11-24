@@ -57,11 +57,12 @@ use std::{fmt, ops};
 
 mod association;
 pub use crate::association::{
-    Association, AssociationError, Event, ReconfigEvent,
+    Association, AssociationError, AssociationStatus, Event, ReconfigEvent,
     pmtud::{PathMtuDiscoveryConfig, PathMtuState},
     stats::AssociationStats,
     stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamState},
     timer::{RtoConfig, TimerConfig},
+    undelivered::{UndeliveredMessage, UndeliveredMode},
 };
 
 pub(crate) mod chunk;

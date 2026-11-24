@@ -1239,7 +1239,7 @@ fn test_populate_sdp_reject() -> Result<()> {
         found_rejected_track = true;
 
         assert!(
-            desc.connection_information.is_some(),
+            !desc.connection_information.is_empty(),
             "connection_information should not be None, even for rejected tracks"
         );
         assert_eq!(

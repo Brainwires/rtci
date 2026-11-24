@@ -134,8 +134,78 @@ impl SystemInstant {
     }
 }
 
+/// Whether the NTP timestamp `ntp` falls where a positive leap second could make it
+/// ambiguous: the last second of the last day of a month (UTC) or the second after it.
+///
+/// RFC 7164 section 5: "generating or using NTP timestamps during the entire last second of a
+/// day on which a positive leap second has been scheduled SHOULD be avoided. Note that the
+/// period to be avoided has a real-time duration of two seconds"; section 5.1: senders and
+/// receivers "MAY assume that a positive leap second occurs at the end of the last day of
+/// every month". On a clock that does not bear the leap second (this one counts seconds
+/// uniformly) those two seconds read 23:59:59 and 00:00:00. Timestamps of the NTP era that
+/// starts in 2036 are taken as such.
+pub fn near_leap_second(ntp: u64) -> bool {
+    const NTP_TO_UNIX: u64 = 0x83AA_7E80;
+    const DAY: u64 = 86_400;
+    let mut seconds = ntp >> 32;
+    if seconds < NTP_TO_UNIX {
+        // Era 1 (from 2036-02-07): the seconds field wrapped.
+        seconds += 1 << 32;
+    }
+    let unix = seconds - NTP_TO_UNIX;
+    let (day, second_of_day) = (unix / DAY, unix % DAY);
+    match second_of_day {
+        // 23:59:59 on the last day of a month: the next day is the first.
+        86_399 => day_of_month(day + 1) == 1,
+        // 00:00:00 on the first day of a month: where the leap second's real time falls.
+        0 => day_of_month(day) == 1,
+        _ => false,
+    }
+}
+
+/// The day of the month (1 to 31) of the civil (proleptic Gregorian) date `days` days after
+/// 1970-01-01 (H. Hinnant's `civil_from_days`).
+fn day_of_month(days: u64) -> u64 {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    day_of_year - (153 * month_index + 2) / 5 + 1
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The NTP timestamp of `unix` seconds (and `millis`) after the Unix epoch.
+    fn ntp_at(unix: u64, millis: u64) -> u64 {
+        SystemInstant::unix2ntp(Duration::from_millis(unix * 1000 + millis))
+    }
+
+    /// RFC 7164 sections 5 and 5.1: the last second of the last day of every month and the
+    /// second after it, and nothing else; month lengths and leap years as the calendar has
+    /// them.
+    #[test]
+    fn the_two_seconds_around_the_end_of_every_month_are_near_a_leap_second() {
+        // 2016-12-31 23:59:59, a day that had one; 2026-11-30 and 2026-12-31 23:59:59.
+        for unix in [1_483_228_799u64, 1_796_083_199, 1_798_761_599] {
+            assert!(near_leap_second(ntp_at(unix, 0)), "{unix}");
+            assert!(near_leap_second(ntp_at(unix, 999)), "{unix}");
+            assert!(near_leap_second(ntp_at(unix + 1, 500)), "{unix} + 1");
+            assert!(!near_leap_second(ntp_at(unix - 1, 999)), "{unix} - 1");
+            assert!(!near_leap_second(ntp_at(unix + 2, 0)), "{unix} + 2");
+        }
+        // February: the 29th in a leap year, the 28th otherwise.
+        assert!(near_leap_second(ntp_at(1_709_251_199, 0))); // 2024-02-29 23:59:59
+        assert!(!near_leap_second(ntp_at(1_709_164_799, 0))); // 2024-02-28 23:59:59
+        assert!(near_leap_second(ntp_at(1_740_787_199, 0))); // 2025-02-28 23:59:59
+        // Mid-month, mid-day.
+        assert!(!near_leap_second(ntp_at(1_795_521_600, 0))); // 2026-11-24 12:00:00
+        // NTP era 1: 2036-02-29 23:59:59.
+        assert!(near_leap_second(ntp_at(2_087_942_399, 0)));
+    }
     use super::*;
 
     /// An instant before the anchor is as far before its wall-clock time; it used to stop at

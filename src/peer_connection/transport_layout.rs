@@ -700,6 +700,10 @@ impl RTCPeerConnection {
                 // A section of an initial offer that is not bundle-only has one; in a later
                 // offer, only under `max-compat`, or in a new BUNDLE group of the offer.
                 None if own_transports || initial => None,
+                // So has a new section the offer keeps outside every BUNDLE group although it
+                // has groups (`set_bundle_request(Some(false))`, RFC 9143 section 7.5.2; a
+                // FEC session's section, RFC 5109 section 14.1).
+                None if !offered_groups.is_empty() && !grouped(mid) => None,
                 None => match new_group_of(mid) {
                     Some(offered) => new_groups
                         .iter()

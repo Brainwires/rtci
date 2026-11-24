@@ -24,7 +24,19 @@ pub struct UlpfecDecoderStats {
     /// FEC packets accepted.
     pub fec_packets: u64,
     /// FEC payloads refused: malformed, outside the window, or more levels than signalled.
+    /// Each is a FEC packet received whose correction was not used (webrtc-stats
+    /// `fecPacketsDiscarded`, the packet "arrived late, i.e., outside the recovery window" for
+    /// one outside the window).
     pub fec_rejected: u64,
+    /// FEC packets let go without having rebuilt anything because every packet they protect
+    /// was received or already rebuilt (webrtc-stats `fecPacketsDiscarded`, case 1), a second
+    /// copy of a FEC packet held included.
+    pub discarded_unneeded: u64,
+    /// FEC packets let go without having rebuilt anything because the window moved past them,
+    /// the stream restarted its numbering, or the hold limit ([`ULPFEC_MAX_HELD_FEC`]) pushed
+    /// them out: they were still waiting for packets to arrive (webrtc-stats
+    /// `fecPacketsDiscarded`, case 2).
+    pub discarded_expired: u64,
     /// Media packets rebuilt completely and handed out.
     pub recovered: u64,
     /// Recoveries whose result was not an RTP packet (inconsistent FEC data), discarded.
@@ -33,6 +45,14 @@ pub struct UlpfecDecoderStats {
     /// protected twice at a level above 0, or twice at level 0 with different lengths. They are
     /// used all the same; see [`UlpfecDecoder::push_fec`].
     pub rule_violations: u64,
+}
+
+impl UlpfecDecoderStats {
+    /// FEC packets received whose correction was not used, for whatever reason: webrtc-stats
+    /// `fecPacketsDiscarded`. Packets still held are in none of the counts it sums.
+    pub fn discarded(&self) -> u64 {
+        self.fec_rejected + self.discarded_unneeded + self.discarded_expired
+    }
 }
 
 /// A media packet the decoder knows only in part: rebuilt at some levels and not (yet) at others.
@@ -148,6 +168,8 @@ struct HeldFec {
     packet: UlpfecPacket,
     /// The payload as received, to recognise a second copy.
     raw: Bytes,
+    /// It rebuilt (part of) a packet: letting it go is no discard.
+    used: bool,
 }
 
 /// Recovers lost media packets of one stream from ULPFEC packets.
@@ -277,6 +299,7 @@ impl UlpfecDecoder {
             return Err(UlpfecError::OutsideWindow);
         }
         if self.fec.iter().any(|held| held.raw[..] == *payload) {
+            self.stats.discarded_unneeded += 1;
             return Ok(Vec::new());
         }
         if self
@@ -287,12 +310,16 @@ impl UlpfecDecoder {
             self.stats.rule_violations += 1;
         }
         self.stats.fec_packets += 1;
-        if self.fec.len() == ULPFEC_MAX_HELD_FEC {
-            self.fec.pop_front();
+        if self.fec.len() == ULPFEC_MAX_HELD_FEC
+            && let Some(oldest) = self.fec.pop_front()
+            && !oldest.used
+        {
+            self.stats.discarded_expired += 1;
         }
         self.fec.push_back(HeldFec {
             packet,
             raw: Bytes::copy_from_slice(payload),
+            used: false,
         });
         Ok(self.recover())
     }
@@ -328,7 +355,7 @@ impl UlpfecDecoder {
             }
             if ahead > ULPFEC_MEDIA_WINDOW {
                 self.media.clear();
-                self.fec.clear();
+                self.expire_all_fec();
             }
             self.newest = Some(sequence);
             self.stray = None;
@@ -342,7 +369,7 @@ impl UlpfecDecoder {
         // that restarted its numbering.
         if self.stray.map(|s| s.wrapping_add(1)) == Some(sequence) {
             self.media.clear();
-            self.fec.clear();
+            self.expire_all_fec();
             self.newest = Some(sequence);
             self.stray = None;
             return true;
@@ -361,21 +388,37 @@ impl UlpfecDecoder {
                 || sequence.wrapping_sub(newest) <= ULPFEC_MEDIA_WINDOW
         };
         self.media.retain(|sequence, _| inside(*sequence));
-        self.fec.retain(|held| inside(held.packet.sn_base));
+        let mut expired = 0;
+        self.fec.retain(|held| {
+            let keep = inside(held.packet.sn_base);
+            if !keep && !held.used {
+                expired += 1;
+            }
+            keep
+        });
+        self.stats.discarded_expired += expired;
+    }
+
+    /// Let every held FEC packet go: the stream's numbering started again.
+    fn expire_all_fec(&mut self) {
+        let unused = self.fec.iter().filter(|held| !held.used).count() as u64;
+        self.stats.discarded_expired += unused;
+        self.fec.clear();
     }
 
     /// Rebuild whatever the held packets allow, until a pass rebuilds nothing more.
     fn recover(&mut self) -> Vec<rtp::Packet> {
         let mut recovered = Vec::new();
-        let fec = std::mem::take(&mut self.fec);
+        let mut fec = std::mem::take(&mut self.fec);
         loop {
             let mut progress = false;
-            for held in &fec {
+            for held in &mut fec {
                 for level in 0..held.packet.levels.len() {
                     let Some(sequence) = self.recover_level(&held.packet, level) else {
                         continue;
                     };
                     progress = true;
+                    held.used = true;
                     if let Some(packet) = self.complete(sequence) {
                         recovered.push(packet);
                     }
@@ -385,18 +428,25 @@ impl UlpfecDecoder {
                 break;
             }
         }
-        // A FEC packet all of whose packets are known in full has nothing left to give.
+        // A FEC packet all of whose packets are known in full has nothing left to give. One
+        // that rebuilt none of them was not needed.
+        let mut unneeded = 0;
         self.fec = fec
             .into_iter()
             .filter(|held| {
-                held.packet.levels.iter().any(|level| {
+                let waiting = held.packet.levels.iter().any(|level| {
                     level.offsets().any(|offset| {
                         let sequence = held.packet.sn_base.wrapping_add(offset as u16);
                         !matches!(self.media.get(&sequence), Some(Entry::Complete(_)))
                     })
-                })
+                });
+                if !waiting && !held.used {
+                    unneeded += 1;
+                }
+                waiting
             })
             .collect();
+        self.stats.discarded_unneeded += unneeded;
         recovered
     }
 
@@ -940,6 +990,77 @@ mod tests {
         }
         assert!(decoder.held_media_packets() <= 2 * usize::from(ULPFEC_MEDIA_WINDOW) + 1);
         assert!(decoder.held_fec_packets() <= ULPFEC_MAX_HELD_FEC);
+    }
+
+    /// webrtc-stats `fecPacketsDiscarded`, case 1: "all the source packets protected by the
+    /// FEC packet were received or already recovered by a separate FEC packet". A FEC packet
+    /// that rebuilt something is not discarded; one that arrives for a complete set is, and so
+    /// is a second copy of one held.
+    #[test]
+    fn fec_whose_packets_all_arrived_is_counted_as_discarded_and_fec_that_rebuilt_is_not() {
+        let packets = rfc_packets();
+        let (decoder, recovered) = run(&packets, &[9], &[full(&packets)]);
+        assert_eq!(1, recovered.len());
+        assert_eq!(0, decoder.stats().discarded(), "{:?}", decoder.stats());
+
+        let (decoder, recovered) = run(&packets, &[], &[full(&packets)]);
+        assert!(recovered.is_empty());
+        assert_eq!(1, decoder.stats().discarded_unneeded);
+        assert_eq!(1, decoder.stats().discarded());
+
+        // Two lost, one FEC packet waiting; a second copy of it is no use either.
+        let (mut decoder, _) = run(&packets, &[8, 9], &[full(&packets)]);
+        assert!(decoder.push_fec(&full(&packets)).unwrap().is_empty());
+        assert_eq!(1, decoder.stats().discarded_unneeded);
+        // The held one still rebuilds the first loss once the second arrives late.
+        assert_eq!(1, decoder.push_media(&packets[1]).len());
+        assert_eq!(1, decoder.stats().discarded(), "{:?}", decoder.stats());
+    }
+
+    /// webrtc-stats `fecPacketsDiscarded`, case 2: "the FEC packet arrived late, i.e., outside
+    /// the recovery window". Refused on arrival outside the window, or let go when the window
+    /// moved past it while it still waited: both count, and so do malformed payloads.
+    #[test]
+    fn fec_outside_the_window_or_left_behind_by_it_is_counted_as_discarded() {
+        let mut decoder = UlpfecDecoder::new(2);
+        decoder.push_media(&media(1000, 0, 96, false, 10));
+        let far: Vec<_> = (5000..5002).map(|s| media(s, 0, 96, false, 10)).collect();
+        assert!(decoder.push_fec(&full(&far)).is_err());
+        assert!(decoder.push_fec(&[0u8; 3]).is_err());
+        assert_eq!(2, decoder.stats().fec_rejected);
+        assert_eq!(2, decoder.stats().discarded());
+
+        let mut decoder = UlpfecDecoder::new(2);
+        let group: Vec<_> = (10..14).map(|s| media(s, 0, 96, false, 10)).collect();
+        decoder.push_media(&group[0]);
+        decoder.push_fec(&full(&group)).unwrap();
+        assert_eq!(0, decoder.stats().discarded(), "still waiting");
+        for seq in 14..14 + 2 * ULPFEC_MEDIA_WINDOW {
+            decoder.push_media(&media(seq, 0, 96, false, 10));
+        }
+        assert_eq!(1, decoder.stats().discarded_expired);
+        assert_eq!(1, decoder.stats().discarded());
+    }
+
+    /// The hold limit pushes the oldest waiting FEC packet out: it never rebuilt anything.
+    #[test]
+    fn fec_pushed_out_by_the_hold_limit_is_counted_as_discarded() {
+        let mut decoder = UlpfecDecoder::new(2);
+        decoder.push_media(&media(0, 0, 96, false, 10));
+        for base in 0..=ULPFEC_MAX_HELD_FEC as u16 {
+            // Two lost packets per FEC packet: none of them can rebuild anything.
+            let group: Vec<_> = (2 + base * 3..5 + base * 3)
+                .map(|s| media(s % 200, 0, 96, false, 10))
+                .collect();
+            let _ = decoder.push_fec(&full(&group));
+        }
+        assert_eq!(ULPFEC_MAX_HELD_FEC, decoder.held_fec_packets());
+        assert_eq!(
+            1,
+            decoder.stats().discarded_expired,
+            "{:?}",
+            decoder.stats()
+        );
     }
 
     #[test]

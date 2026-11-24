@@ -221,6 +221,41 @@ fn h265_answer_fmtp(local: &str, offered: &str) -> String {
     parameters.join(";")
 }
 
+/// The fmtp line this endpoint writes for an H.265 format: when decoding order numbers are in
+/// play (`sprop-max-don-diff` above 0 in this format, or, in an answer, in the offered one),
+/// `depack-buf-cap` states the de-packetization buffer the depacketizer holds, in bytes
+/// ([`MAX_DEPACKETIZATION_BYTES`](rtp::codec::h265::MAX_DEPACKETIZATION_BYTES)), unless the
+/// application gave one (RFC 7798 section 7.2.2: "both parties are RECOMMENDED to include
+/// depack-buf-cap"; absent, it is taken as 4294967295, more than the buffer holds).
+fn h265_generated_fmtp(line: &str, offered: Option<&str>) -> String {
+    let value = |line: &str, key: &str| -> Option<String> {
+        line.split(';').find_map(|p| {
+            let (k, v) = p.trim().split_once('=')?;
+            k.trim()
+                .eq_ignore_ascii_case(key)
+                .then(|| v.trim().to_owned())
+        })
+    };
+    let reorders = |line: &str| {
+        value(line, "sprop-max-don-diff")
+            .and_then(|v| v.parse::<u32>().ok())
+            .is_some_and(|v| v > 0)
+    };
+    if value(line, "depack-buf-cap").is_some() || !(reorders(line) || offered.is_some_and(reorders))
+    {
+        return line.to_owned();
+    }
+    let cap = format!(
+        "depack-buf-cap={}",
+        rtp::codec::h265::MAX_DEPACKETIZATION_BYTES
+    );
+    if line.trim().is_empty() {
+        cap
+    } else {
+        format!("{line};{cap}")
+    }
+}
+
 #[cfg(test)]
 mod h264_high_profile_test;
 #[cfg(test)]
@@ -2132,6 +2167,29 @@ impl MediaEngine {
                 let negotiated = matches.clone();
                 matches.retain(|codec| red_encodings_negotiated(codec, &negotiated));
             }
+            // RFC 5109 section 14.3: "in cases in which the redundancy payload format is used
+            // with FEC as the only secondary codec, when the FEC stream is rejected the
+            // redundant encoding payload type SHOULD also be removed". A video RED format
+            // that names no encodings (libwebrtc's and Firefox's `red/90000`, no fmtp) has
+            // ULPFEC as its only possible secondary codec (section 14.2): without a
+            // negotiated `ulpfec` format it carries nothing, and goes, with the RTX format
+            // that names it. (A RED format whose fmtp names ULPFEC went by the rule above.)
+            if typ == RtpCodecKind::Video {
+                for matches in [&mut exact_matches, &mut partial_matches] {
+                    let negotiated = matches.clone();
+                    let removed: Vec<PayloadType> = negotiated
+                        .iter()
+                        .filter(|codec| !red_has_a_secondary_codec(codec, &negotiated))
+                        .map(|codec| codec.payload_type)
+                        .collect();
+                    matches.retain(|codec| {
+                        !removed.contains(&codec.payload_type)
+                            && !(repair_family(&codec.rtp_codec) == "rtx"
+                                && parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
+                                    .is_some_and(|apt| removed.contains(&apt)))
+                    });
+                }
+            }
 
             // use exact matches when they exist, otherwise fall back to partial
             // An SFrame section's formats are numbered apart from the plain ones
@@ -2249,6 +2307,12 @@ impl MediaEngine {
             .eq_ignore_ascii_case(MIME_TYPE_H264)
         {
             h264_generated_fmtp(&line)
+        } else if codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_HEVC)
+        {
+            h265_generated_fmtp(&line, answering.then_some(&*codec.rtp_codec.sdp_fmtp_line))
         } else {
             line
         }
@@ -3119,6 +3183,23 @@ pub(crate) fn ulpfec_rate_fits(
                 )
                 && media.rtp_codec.clock_rate == rate
         })
+}
+
+/// Whether `codec`, when it is a RED format without an fmtp line (it names no encodings),
+/// has a `ulpfec` format of its clock rate among `negotiated` to carry (RFC 5109 section
+/// 14.2: FEC as a secondary codec of RED). Any other format passes.
+pub(crate) fn red_has_a_secondary_codec(
+    codec: &RTCRtpCodecParameters,
+    negotiated: &[RTCRtpCodecParameters],
+) -> bool {
+    let red = &codec.rtp_codec;
+    if !red.mime_type.to_ascii_lowercase().ends_with("/red") || !red.sdp_fmtp_line.trim().is_empty()
+    {
+        return true;
+    }
+    negotiated.iter().any(|other| {
+        repair_family(&other.rtp_codec) == "ulpfec" && other.rtp_codec.clock_rate == red.clock_rate
+    })
 }
 
 /// Whether `codec`, when it is a RED format (RFC 2198), names in its fmtp only formats of

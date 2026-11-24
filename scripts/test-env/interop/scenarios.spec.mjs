@@ -91,7 +91,20 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
   const v = video.reduce((a, b) => (b.span > a.span ? b : a));
   // Enough packets that 5% loss drops several: Chromium and WebKit send 30+ a second from the
   // canvas, Firefox about 20 (250 in the run, a 200-packet span once the newest 50 are left out).
-  expect(v.span, JSON.stringify(v)).toBeGreaterThan(150);
+  // A short span comes with the browser's own count of what it encoded and sent (webrtc-stats
+  // outbound-rtp), so a failure says whether its encoder stalled or its packets went missing.
+  const sent = r.out && {
+    packetsSent: r.out.packetsSent,
+    framesEncoded: r.out.framesEncoded,
+    framesSent: r.out.framesSent,
+    keyFramesEncoded: r.out.keyFramesEncoded,
+    targetBitrate: r.out.targetBitrate,
+    qualityLimitationReason: r.out.qualityLimitationReason,
+    pliCount: r.out.pliCount,
+    firCount: r.out.firCount,
+    nackCount: r.out.nackCount,
+  };
+  expect(v.span, JSON.stringify({ ...v, browser: sent })).toBeGreaterThan(150);
   // After repair nothing older than the newest 50 packets may still be missing.
   expect(v.missing / v.span, `still missing after NACK/RTX: ${JSON.stringify(v)}`).toBeLessThan(0.005);
   // The browser saw our NACKs and answered them (webrtc-stats: nackCount,
@@ -101,6 +114,74 @@ test("loss recovery: NACK and RTX repair a browser's video under netem", async (
     expect(r.out.retransmittedPacketsSent, JSON.stringify(r.out)).toBeGreaterThan(0);
   }
 });
+
+// ---- ULPFEC in RED for video (RFC 2198, RFC 5109 section 14.2) ----
+//
+// Rust is built with `?video_red_ulpfec=1` (`DefaultInterceptorOptions::video_red_ulpfec`, the
+// `Chrome` profile's value): video `red` + `ulpfec` are answered and offered, ULPFEC in RED is
+// sent and recovered. libwebrtc protects video with ULPFEC when NACK is off (or the round trip
+// is long), so the offer Rust receives has no plain `nack` feedback: nobody retransmits, and only FEC brings back what netem drops (run.sh: 20 ms, 5% loss). The engine's
+// counts are its report's `fec` (`RTCPeerConnection::fec_stats`) and its W3C stats.
+
+async function skipUnlessRedUlpfec(page) {
+  const caps = await page.evaluate(() =>
+    ["Sender", "Receiver"].map((side) =>
+      (side === "Sender" ? RTCRtpSender : RTCRtpReceiver)
+        .getCapabilities("video")
+        .codecs.map((c) => c.mimeType.toLowerCase()),
+    ),
+  );
+  const both = caps.every((list) => list.includes("video/red") && list.includes("video/ulpfec"));
+  naBrowser(
+    !both,
+    "this browser has no video RED + ULPFEC",
+    'RTCRtpSender / RTCRtpReceiver.getCapabilities("video") lists no video/red or no video/ulpfec',
+  );
+}
+
+test("ULPFEC in RED from the browser: its FEC rebuilds video netem drops, without NACK, counted by Rust", async ({ page }) => {
+  await skipUnlessRedUlpfec(page);
+  await page.evaluate(async (ws) => {
+    const s = await Interop.open(ws, { media: "count" });
+    window.S = s;
+    s.pc.addTransceiver(Interop.canvasStream(640, 480).getVideoTracks()[0], { direction: "sendonly" });
+    await s.negotiate((sdp) => sdp.replace(/^a=rtcp-fb:\d+ nack\r\n/gm, ""));
+    await s.connected();
+  }, `${WS}/?video_red_ulpfec=1`);
+  const answer = await page.evaluate(() => S.pc.remoteDescription.sdp);
+  const dropsBefore = netemDrops();
+  const restore = impair(rustUdpPort(answer));
+  let r;
+  try {
+    r = await page.evaluate(async () => {
+      await Interop.sleep(15000);
+      return { report: await S.report() };
+    });
+  } finally {
+    restore();
+  }
+  const drops = netemDrops() - dropsBefore;
+  await page.evaluate(() => S.close());
+  expect(drops, "netem dropped nothing: the filter did not apply").toBeGreaterThan(0);
+  expect(answer, "the Rust answer keeps red").toMatch(/^a=rtpmap:\d+ red\/90000\r?$/m);
+  expect(answer, "the Rust answer keeps ulpfec").toMatch(/^a=rtpmap:\d+ ulpfec\/90000\r?$/m);
+  expect(answer, "no NACK: only FEC repairs").not.toMatch(/^a=rtcp-fb:\d+ nack\r?$/m);
+  const fec = r.report.fec.received;
+  expect(fec.length, JSON.stringify(r.report.fec)).toBeGreaterThan(0);
+  const f = fec.reduce((a, b) => (b.fecPacketsInRed > a.fecPacketsInRed ? b : a));
+  // The browser sent FEC in RED; the engine took it apart and rebuilt lost packets from it.
+  expect(f.fecPacketsInRed, JSON.stringify(f)).toBeGreaterThan(0);
+  expect(f.packetsRecovered, `nothing rebuilt by FEC: ${JSON.stringify(f)}`).toBeGreaterThan(0);
+  const inbound = r.report.stats.inbound.find((i) => i.ssrc === f.ssrc);
+  expect(inbound?.w3c?.fecPacketsReceived, JSON.stringify(inbound)).toBe(f.fecPacketsReceived);
+  expect(inbound?.w3c?.fecPacketsDiscarded, JSON.stringify(inbound)).toBe(f.fecPacketsDiscarded);
+});
+
+// The reverse cell (Rust sends RED + ULPFEC, the browser recovers) is not here: on Chromium
+// with NACK off on both sides, Rust's FEC arrived (wire counts, `fec_stats`) and the browser
+// still dropped the frames netem broke (framesDecoded 237 of 300, framesDropped 61; hosted run
+// 45428686212, scripts/test-env/hosted-cell.sh): Chromium does not rebuild from it. Open: see
+// the FEC handoff note (handoff/fec2.md) for what was checked.
 
 // ---- TURN: relay-only through coturn ----
 

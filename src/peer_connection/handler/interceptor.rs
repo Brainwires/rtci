@@ -102,6 +102,17 @@ pub(crate) struct InterceptorHandlerContext {
     /// The RTP sessions told to leave since the writes were last flushed: their BYE still
     /// goes out.
     pub(crate) rtcp_leaving: std::collections::BTreeSet<usize>,
+    /// The map between the chain's SSRCs and the wire's on the transports of FEC sessions
+    /// (RFC 5109 section 14.1; `peer_connection::fec_session`). `None` until the connection
+    /// has a FEC session.
+    pub(crate) fec_session_map: Option<interceptor::FecSessionSsrcMap>,
+    /// The transports (RTP sessions) that carry a FEC session and nothing else, with what
+    /// reading one needs.
+    pub(crate) fec_session_transports:
+        HashMap<usize, crate::peer_connection::fec_session::FecSessionTransport>,
+    /// The remote FEC streams bound for a FEC session's transport, as they were bound: each
+    /// is a stream of that RTP session, which its RTCP session reports on.
+    pub(crate) fec_session_remote_streams: Vec<(usize, interceptor::StreamInfo)>,
     /// The transports whose DTLS association has given SRTP keys: RTCP can be protected on
     /// them (RFC 5764 section 4.1). Kept while the transport lives, so that a new association
     /// on it (re-keying) does not end the RTP session.
@@ -119,6 +130,11 @@ pub(crate) struct InterceptorHandlerContext {
     /// `source_departure_ends_track`: a track ends when every one of its SSRCs is here.
     /// Bounded by `MAX_REMOTE_CNAMES`.
     departed_sources: HashSet<SSRC>,
+    /// The SSRC an RTCP session reports from while the connection sends no media, as the
+    /// session announced it (`RtcpSessionEvent::ReportingSsrc`); the first media SSRC the
+    /// connection mints is this one (RFC 8108 section 6.1,
+    /// `RTCPeerConnection::unused_media_ssrc`).
+    pub(crate) reporting_ssrc: Option<SSRC>,
 }
 
 impl InterceptorHandlerContext {
@@ -167,11 +183,15 @@ impl Default for InterceptorHandlerContext {
             transport_targets: std::collections::BTreeMap::new(),
             rtcp_joined: Default::default(),
             rtcp_leaving: Default::default(),
+            fec_session_map: None,
+            fec_session_transports: Default::default(),
+            fec_session_remote_streams: Default::default(),
             srtp_keyed: Default::default(),
             newly_bound: None,
             source_departure_ends_track: false,
             mid_moves: Default::default(),
             departed_sources: Default::default(),
+            reporting_ssrc: None,
         }
     }
 }
@@ -900,6 +920,9 @@ impl<'a> InterceptorHandler<'a> {
                     })
                 });
                 log::warn!("ssrc collision: a remote source uses the local ssrc {ssrc}");
+                if Some(*ssrc) == self.ctx.reporting_ssrc {
+                    self.ctx.reporting_ssrc = Some(*replacement);
+                }
                 if is_sender && self.ctx.ssrc_collisions.insert(*ssrc) {
                     for transceiver in self.rtp_transceivers.iter_mut() {
                         let Some(sender) = transceiver.sender_mut() else {
@@ -924,6 +947,8 @@ impl<'a> InterceptorHandler<'a> {
             }
             // RFC 3550 6.3.5: the remote source timed out; it is gone as after a BYE.
             RtcpSessionEvent::SourceTimedOut { ssrc } => self.source_left(now, *ssrc),
+            // RFC 8108 6.1: the SSRC the first stream is to be sent on.
+            RtcpSessionEvent::ReportingSsrc { ssrc } => self.ctx.reporting_ssrc = *ssrc,
             _ => {}
         }
     }
@@ -2058,6 +2083,104 @@ impl<'a> InterceptorHandler<'a> {
         }
     }
 
+    /// The most remote FEC streams bound for the FEC sessions' transports. A FEC session has
+    /// one stream for each stream of the transceiver it protects.
+    const MAX_FEC_SESSION_REMOTE_STREAMS: usize = 64;
+
+    /// Takes a packet read on a FEC session's transport into the chain (RFC 5109 section
+    /// 14.1). There the FEC stream has the SSRC of the media stream it protects (section
+    /// 7.2); the chain, which keys what it keeps on the SSRC, knows it by the mapped one
+    /// (`FecSessionSsrcMap`), in RTP and in the session's RTCP alike.
+    ///
+    /// An RTP packet is FEC of a stream the protected transceiver receives, marked for the
+    /// FEC decoder (`FecSessionPacket`); one that names any other SSRC is discarded: the
+    /// session protects that transceiver's streams and no other. The FEC stream is bound as a
+    /// remote stream of the session with its first packet, so the session's RTCP reports on
+    /// it (RFC 3550 section 6.4).
+    fn read_of_fec_session(
+        &mut self,
+        now: Instant,
+        transport: shared::TransportContext,
+        session: usize,
+        fec: crate::peer_connection::fec_session::FecSessionTransport,
+        packet: Packet,
+    ) -> Result<()> {
+        let Some(map) = self.ctx.fec_session_map else {
+            return Ok(());
+        };
+        let mut message: AttributedPacket = match packet {
+            Packet::Rtp(mut rtp_packet) => {
+                let media_ssrc = rtp_packet.header.ssrc;
+                let protected = self.rtp_transceivers.iter().any(|transceiver| {
+                    transceiver.protected_by() == Some(fec.token)
+                        && transceiver.receiver().as_ref().is_some_and(|receiver| {
+                            receiver
+                                .get_coding_parameters()
+                                .iter()
+                                .any(|coding| coding.ssrc == Some(media_ssrc))
+                        })
+                });
+                if !protected {
+                    debug!("FEC session packet for SSRC {media_ssrc}, not a protected stream");
+                    return Ok(());
+                }
+                // FEC received for the stream it protects, counted on what the wire carried
+                // as a FEC SSRC's packet is (webrtc-stats 7.1, 8.5 `fecPacketsReceived`).
+                let payload_bytes = rtp_packet.payload.len();
+                self.stats.on_fec_session_received(
+                    media_ssrc,
+                    rtp_packet.marshal_size() - payload_bytes,
+                    payload_bytes,
+                    now,
+                );
+                map.map_rtp(&mut rtp_packet);
+                let chain_ssrc = rtp_packet.header.ssrc;
+                if !self
+                    .ctx
+                    .fec_session_remote_streams
+                    .iter()
+                    .any(|(_, info)| info.ssrc == chain_ssrc)
+                    && self.ctx.fec_session_remote_streams.len()
+                        < Self::MAX_FEC_SESSION_REMOTE_STREAMS
+                {
+                    let info = interceptor::StreamInfo {
+                        ssrc: chain_ssrc,
+                        payload_type: fec.payload_type,
+                        mime_type: format!("{}/ulpfec", fec.kind),
+                        clock_rate: fec.clock_rate,
+                        ..Default::default()
+                    };
+                    self.interceptor.bind_remote_stream(&info);
+                    self.ctx.fec_session_remote_streams.push((session, info));
+                }
+                let mut message: AttributedPacket = Packet::Rtp(rtp_packet).into();
+                message.add(Attribute::Custom(std::sync::Arc::new(
+                    interceptor::FecSessionPacket {
+                        media_ssrc,
+                        payload_type: fec.payload_type,
+                        one_level_only: fec.one_level_only,
+                    },
+                )));
+                message
+            }
+            Packet::Rtcp(packets) => {
+                let mapped = map.map_rtcp(&packets);
+                if mapped.is_empty() {
+                    return Ok(());
+                }
+                Packet::Rtcp(mapped).into()
+            }
+            #[allow(unreachable_patterns)]
+            _ => return Ok(()),
+        };
+        message.add(interceptor::RtpSession(session).attribute());
+        self.interceptor.handle_read(TaggedPacket {
+            now,
+            transport,
+            message,
+        })
+    }
+
     fn get_rtp_header_extension_ids(
         &self,
         rtp_header: &rtp::Header,
@@ -2129,6 +2252,14 @@ impl<'a>
         if self.ctx.is_dtls_handshake_complete
             && let RTCMessageInternal::Rtp(RTPMessage::Packet(mut packet)) = msg.message
         {
+            // What arrived on the transport of a FEC session (RFC 5109 section 14.1) is that
+            // session's: FEC under the SSRC of the media stream it protects, and the RTCP of
+            // an RTP session of its own. None of it is media of a receiver.
+            if let Some(session) = self.rtp_session
+                && let Some(fec) = self.ctx.fec_session_transports.get(&session).copied()
+            {
+                return self.read_of_fec_session(msg.now, msg.transport, session, fec, packet);
+            }
             let mut retransmitted = None;
             match &mut packet {
                 Packet::Rtp(rtp_packet) => {
@@ -2321,6 +2452,10 @@ impl<'a>
                                 value.downcast_ref::<interceptor::PacerDiscard>()
                             {
                                 self.announce_pacer_discard(packet.now, discard);
+                            } else if let Some(fec) =
+                                value.downcast_ref::<interceptor::UlpfecReceiveStats>()
+                            {
+                                self.stats.on_ulpfec_receive_stats(*fec);
                             }
                         }
                         _ => {}
@@ -2345,6 +2480,17 @@ impl<'a>
                     continue;
                 }
 
+                // What was read on a FEC session's transport (RFC 5109 section 14.1) and no
+                // interceptor took: FEC with no decoder in the chain, or that session's RTCP.
+                // Neither is a receiver's media or feedback for the application. (The
+                // endpoint would find no receiver for such a packet today; this keeps it so
+                // whatever the endpoint does with an SSRC it does not know.)
+                if interceptor::RtpSession::of(&packet.message)
+                    .is_some_and(|session| self.ctx.fec_session_transports.contains_key(&session))
+                {
+                    continue;
+                }
+
                 match &packet.message.packet {
                     Packet::Rtcp(rtcp_packet) => {
                         trace!("Interceptor forwarded a RTCP packet {:?}", rtcp_packet);
@@ -2353,6 +2499,9 @@ impl<'a>
                     // Media on its way to the application: its sources are the receiver's
                     // synchronization and contributing sources from now on.
                     Packet::Rtp(rtp_packet) => {
+                        if packet.message.has(&Attribute::RecoveredByFec) {
+                            self.stats.on_recovered_by_fec(rtp_packet.header.ssrc);
+                        }
                         self.record_sources(packet.now, &rtp_packet.header);
                     }
                     _ => {}
@@ -2427,6 +2576,11 @@ impl<'a>
                             retransmission,
                             packet.now,
                         );
+                        // The FEC an encoder put in it, counted for the stream it protects
+                        // (the packet's own SSRC may be a FEC SSRC or a FEC session's alias).
+                        if let Some(sent) = packet.message.custom::<interceptor::FecSent>() {
+                            self.stats.on_fec_sent(*sent);
+                        }
                     }
                     _ => {}
                 }

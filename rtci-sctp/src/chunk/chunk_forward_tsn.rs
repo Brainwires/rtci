@@ -63,23 +63,25 @@ impl Chunk for ChunkForwardTsn {
             return Err(Error::ErrChunkTypeNotForwardTsn);
         }
 
-        let mut offset = CHUNK_HEADER_SIZE + NEW_CUMULATIVE_TSN_LENGTH;
-        if buf.len() < offset {
+        // Everything is read from the chunk's own value, whose length is the header's: the
+        // buffer may run on past the chunk, and checking the buffer's length instead let a
+        // chunk of length 4 with bytes after it read a New Cumulative TSN it does not hold.
+        let value_length = header.value_length();
+        if value_length < NEW_CUMULATIVE_TSN_LENGTH
+            || !(value_length - NEW_CUMULATIVE_TSN_LENGTH).is_multiple_of(FORWARD_TSN_STREAM_LENGTH)
+        {
             return Err(Error::ErrChunkTooShort);
         }
 
-        let reader = &mut buf.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length());
+        let reader = &mut buf.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + value_length);
         let new_cumulative_tsn = reader.get_u32();
 
-        let mut streams = vec![];
-        let mut remaining = buf.len() - offset;
-        while remaining > 0 {
-            let s = ChunkForwardTsnStream::unmarshal(
-                &buf.slice(offset..CHUNK_HEADER_SIZE + header.value_length()),
-            )?;
-            offset += s.value_length();
-            remaining -= s.value_length();
-            streams.push(s);
+        let mut streams = Vec::with_capacity(reader.remaining() / FORWARD_TSN_STREAM_LENGTH);
+        while reader.remaining() >= FORWARD_TSN_STREAM_LENGTH {
+            streams.push(ChunkForwardTsnStream {
+                identifier: reader.get_u16(),
+                sequence: reader.get_u16(),
+            });
         }
 
         Ok(ChunkForwardTsn {

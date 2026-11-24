@@ -52,10 +52,13 @@ pub struct MediaDescription {
     /// <https://tools.ietf.org/html/rfc4566#section-5.4>
     pub media_title: Option<Information>,
 
-    /// `c=<nettype> <addrtype> <connection-address>`
+    /// `c=<nettype> <addrtype> <connection-address>`, each of the media description's
+    /// connection lines in order: none (the session-level one applies), one, or several
+    /// (RFC 8866 section 5.7: "Multiple addresses or "c=" lines MAY be specified on a
+    /// per-media basis", for layered multicast).
     ///
-    /// <https://tools.ietf.org/html/rfc4566#section-5.7>
-    pub connection_information: Option<ConnectionInformation>,
+    /// <https://www.rfc-editor.org/rfc/rfc8866#section-5.7>
+    pub connection_information: Vec<ConnectionInformation>,
 
     /// `b=<bwtype>:<bandwidth>`
     ///
@@ -189,7 +192,7 @@ impl MediaDescription {
                 formats: vec![],
             },
             media_title: None,
-            connection_information: Some(ConnectionInformation {
+            connection_information: vec![ConnectionInformation {
                 network_type: "IN".to_string(),
                 address_type: "IP4".to_string(),
                 address: Some(Address {
@@ -197,7 +200,7 @@ impl MediaDescription {
                     ttl: None,
                     range: None,
                 }),
-            }),
+            }],
             bandwidth: vec![],
             encryption_key: None,
             attributes: vec![],

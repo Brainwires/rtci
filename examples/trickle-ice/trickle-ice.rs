@@ -234,7 +234,7 @@ async fn run_main_loop(cli: Cli) -> Result<()> {
                 TransportProtocol::UDP,
             )?;
             let mut msg = rtci::stun::message::Message::new();
-            msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
+            msg.build(&[Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)])?;
 
             stun_client = Some(client);
             if let Some(ref mut client) = stun_client {

@@ -217,7 +217,7 @@ mod rejected_mline_tests {
         assert_eq!(desc.media_name.port.value, 0);
         assert_eq!(desc.media_name.protos, vec!["UDP", "TLS", "RTP", "SAVPF"]);
         assert_eq!(desc.media_name.formats, vec!["0"]);
-        assert!(desc.connection_information.is_some());
+        assert!(!desc.connection_information.is_empty());
     }
 
     #[test]
@@ -304,6 +304,7 @@ mod rejected_mline_tests {
 
 mod answer_check;
 pub(crate) mod ecn;
+pub(crate) mod fec_session;
 pub(crate) mod imageattr;
 pub(crate) mod sdp_type;
 pub(crate) mod send_limits;
@@ -1213,7 +1214,7 @@ pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::Ip
         range: None,
     };
     let address_type = if ip.is_ipv4() { "IP4" } else { "IP6" };
-    m.connection_information = Some(ConnectionInformation {
+    m.connection_information = vec![ConnectionInformation {
         network_type: "IN".to_owned(),
         address_type: address_type.to_owned(),
         address: Some(Address {
@@ -1221,7 +1222,7 @@ pub(crate) fn set_default_destination(m: &mut MediaDescription, ip: std::net::Ip
             ttl: None,
             range: None,
         }),
-    });
+    }];
     for a in &mut m.attributes {
         if a.key == ATTR_KEY_RTCP {
             a.value = Some(format!("{port} IN {address_type} {ip}"));
@@ -1248,7 +1249,7 @@ pub(crate) fn share_bundle_destination(d: &mut SessionDescription) {
         };
         let Some(ip) = carrier
             .connection_information
-            .as_ref()
+            .first()
             .and_then(|c| c.address.as_ref())
             .and_then(|a| a.address.parse::<std::net::IpAddr>().ok())
         else {
@@ -1364,7 +1365,7 @@ pub(crate) fn add_data_media_section(
             formats: vec!["webrtc-datachannel".to_owned()],
         },
         media_title: None,
-        connection_information: Some(ConnectionInformation {
+        connection_information: vec![ConnectionInformation {
             network_type: "IN".to_owned(),
             address_type: "IP4".to_owned(),
             address: Some(Address {
@@ -1372,7 +1373,7 @@ pub(crate) fn add_data_media_section(
                 ttl: None,
                 range: None,
             }),
-        }),
+        }],
         bandwidth: vec![],
         encryption_key: None,
         attributes: vec![],
@@ -1813,7 +1814,7 @@ impl RTCPeerConnection {
                     // parse the SDP with an error like:
                     // SIPCC Failed to parse SDP: SDP Parse Error on line 50:  c= connection line not specified for every media level, validation failed.
                     // In addition this makes our SDP compliant with RFC 4566 Section 5.7: https://datatracker.ietf.org/doc/html/rfc4566#section-5.7
-                    connection_information: Some(ConnectionInformation {
+                    connection_information: vec![ConnectionInformation {
                         network_type: "IN".to_owned(),
                         address_type: "IP4".to_owned(),
                         address: Some(Address {
@@ -1821,7 +1822,7 @@ impl RTCPeerConnection {
                             ttl: None,
                             range: None,
                         }),
-                    }),
+                    }],
                     bandwidth: vec![],
                     encryption_key: None,
                     attributes: vec![],
@@ -2628,6 +2629,10 @@ pub(crate) struct MediaSection {
     pub(crate) offered_rtcp_xr: Option<Vec<String>>,
     /// In an answer, the offered section's `a=ecn-capable-rtp` (RFC 6679 section 6.1.1).
     pub(crate) offered_ecn: Option<ecn::EcnCapability>,
+    /// The section is a FEC session's (RFC 5109 section 14.1): written by
+    /// [`fec_session::add_fec_media_section`], outside every BUNDLE group, and grouped with
+    /// the media section it protects.
+    pub(crate) fec: Option<fec_session::FecSection>,
 }
 
 /// `a=rtcp-mux-only` (RFC 8858 section 3).
@@ -2847,7 +2852,7 @@ impl RTCPeerConnection {
                             formats: rejected_formats,
                         },
                         media_title: None,
-                        connection_information: Some(ConnectionInformation {
+                        connection_information: vec![ConnectionInformation {
                             network_type: "IN".to_owned(),
                             address_type: "IP4".to_owned(),
                             address: Some(Address {
@@ -2855,7 +2860,7 @@ impl RTCPeerConnection {
                                 ttl: None,
                                 range: None,
                             }),
-                        }),
+                        }],
                         bandwidth: vec![],
                         encryption_key: None,
                         attributes: vec![],
@@ -2896,6 +2901,23 @@ impl RTCPeerConnection {
                     sctp_over_tcp: params.sctp_over_tcp,
                 };
                 d = add_data_media_section(d, &media_dtls_fingerprints, candidates, params)?;
+                true
+            } else if let Some(section) = &m.fec {
+                let kind = transceivers[m.transceiver_index].kind().to_string();
+                d = fec_session::add_fec_media_section(
+                    d,
+                    &media_dtls_fingerprints,
+                    candidates,
+                    fec_session::AddFecMediaSectionParams {
+                        should_add_candidates,
+                        mid_value: m.mid.clone(),
+                        kind,
+                        ice_params,
+                        dtls_role: params.connection_role,
+                        ice_gathering_state: params.ice_gathering_state,
+                        section,
+                    },
+                )?;
                 true
             } else {
                 let params = AddTransceiverSdpParams {
@@ -3004,8 +3026,12 @@ impl RTCPeerConnection {
                 };
                 match &params.bundle {
                     BundleMode::Offer { .. } => {
+                        // A section the offer leaves outside every group has a transport of
+                        // its own, so it is never bundle-only (RFC 9143 section 6: a
+                        // bundle-only section is one of the BUNDLE group).
                         if params.initial_offer
                             && without_transport
+                            && group.is_some()
                             && let Some(desc) = d.media_descriptions.last_mut()
                         {
                             make_bundle_only(desc);
@@ -3207,6 +3233,26 @@ impl RTCPeerConnection {
                 ATTR_KEY_GROUP.to_owned(),
                 format!("BUNDLE {}", group.join(" ")),
             );
+        }
+        // RFC 5109 sections 14.1 and 14.3: a FEC session is grouped with the media section it
+        // protects (RFC 5888, with the FEC-FR semantics of RFC 5956 or the FEC semantics of
+        // RFC 4756), in an offer and, when the answerer accepts it, "by including the same
+        // grouping in the answer". Only while both sections are accepted: a group names no
+        // rejected section (RFC 5888 section 9.2).
+        let accepted = |mid: &str| {
+            d.media_descriptions.iter().any(|media| {
+                get_mid_value(media).is_some_and(|m| m == mid) && !is_rejected_media(media)
+            })
+        };
+        let fec_groups: Vec<String> = media_sections
+            .iter()
+            .filter(|m| !m.rejected)
+            .filter_map(|m| m.fec.as_ref().map(|fec| (m, fec)))
+            .filter(|(m, fec)| accepted(&m.mid) && accepted(&fec.protected_mid))
+            .map(|(m, fec)| fec_session::fec_group_value(fec.semantics, &fec.protected_mid, &m.mid))
+            .collect();
+        for group in fec_groups {
+            d = d.with_value_attribute(ATTR_KEY_GROUP.to_owned(), group);
         }
 
         // After ICE selected a pair: the sections that carry the candidates name it.
@@ -4434,8 +4480,9 @@ fn check_ice_credentials(ufrag: Option<&str>, pwd: Option<&str>) -> Result<()> {
 /// Why a remote `candidate` line that follows the grammar is to be ignored, rather than
 /// refuse its description (RFC 8839 section 5.1): its address is a fully qualified domain
 /// name ("An agent processing remote candidates MUST ignore "candidate" lines that include
-/// candidates with FQDNs"; an mDNS `.local` name is resolved, draft-ietf-mmusic-mdns-ice-
-/// candidates), or its transport or candidate type is one this agent does not know (both are
+/// candidates with FQDNs"; a host candidate's `<name>.local` is resolved by mDNS,
+/// draft-ietf-mmusic-mdns-ice-candidates section 3.2.1, and a `.local` name of more than one
+/// "." or on another candidate type is an FQDN like any other), or its transport or candidate type is one this agent does not know (both are
 /// extensible tokens in the grammar). `None`: the line is parsed as usual, and a line that does
 /// not follow the grammar still refuses the description.
 pub(crate) fn ignored_candidate_line(value: &str) -> Option<&'static str> {
@@ -4451,7 +4498,14 @@ pub(crate) fn ignored_candidate_line(value: &str) -> Option<&'static str> {
         return Some("an unknown candidate type");
     }
     let is_ip = address.parse::<std::net::IpAddr>().is_ok();
-    if !is_ip && !address.ends_with(".local") {
+    // draft-ietf-mmusic-mdns-ice-candidates section 3.2.1: only an address that ends with
+    // ".local" and has no other "." is resolved by mDNS (step 1 sends the rest to RFC 8445
+    // processing, where an FQDN is ignored), and only a host candidate carries one (section
+    // 3.1.2.2 hides host addresses alone).
+    let mdns_name = typ == "host"
+        && address.to_ascii_lowercase().ends_with(".local")
+        && address.matches('.').count() == 1;
+    if !is_ip && !mdns_name {
         let fqdn = address.split('.').all(|label| {
             !label.is_empty()
                 && label

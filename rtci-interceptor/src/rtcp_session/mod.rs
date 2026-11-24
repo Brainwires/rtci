@@ -46,7 +46,7 @@ use scheduler::{
 use shared::TransportContext;
 use shared::error::Error;
 use shared::marshal::MarshalSize;
-use shared::time::SystemInstant;
+use shared::time::{SystemInstant, near_leap_second};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -282,6 +282,16 @@ pub enum RtcpSessionEvent {
         /// The remote SSRC.
         ssrc: u32,
     },
+    /// The SSRC the session reports from while the endpoint has no media SSRC, which it drew
+    /// itself; `None` once there is none (a stream took it over, it said BYE). RFC 8108
+    /// section 6.1: "An endpoint that has never sent an RTP stream will have an SSRC that it
+    /// uses for RTCP reporting. If that endpoint wants to start sending an RTP stream, it is
+    /// RECOMMENDED that it use its existing SSRC for that stream". A local stream bound under
+    /// this SSRC takes it over: the same participant, no BYE.
+    ReportingSsrc {
+        /// The reporting SSRC, or `None`.
+        ssrc: Option<u32>,
+    },
     /// RFC 3550 6.4.1: the round-trip time to the receiver that reported on the local `ssrc`.
     RoundTripTime {
         /// The local SSRC the report block was about.
@@ -420,9 +430,14 @@ impl RtcpSessionBuilder {
         self
     }
 
-    /// RFC 8108 5.1 to the letter: every local SSRC carries a report block for every remote
-    /// SSRC. Default: off, the blocks are carried once, by the first local media SSRC (what
-    /// browsers do, and what RFC 8861 reporting groups exist to allow).
+    /// RFC 8108 5.1: "each SSRC will send RTCP reports for all other SSRCs, including those
+    /// co-located at the same endpoint": every local SSRC carries a report block for every
+    /// remote SSRC and for each of the endpoint's other SSRCs that has sent (`true`, the
+    /// `StrictRfc` behaviour profile). Default `false`: the blocks are carried once, by the
+    /// first local media SSRC, and none about the co-located SSRCs, as libwebrtc does and as
+    /// RFC 8861 reporting groups allow where they are signalled; the larger compound packets
+    /// of the RFC form were measured to cost the video through a capacity cap
+    /// (`report_blocks_from_every_ssrc_measured_against_once` in the root crate's tests).
     pub fn with_report_from_every_ssrc(mut self, every: bool) -> Self {
         self.report_from_every_ssrc = every;
         self
@@ -436,8 +451,9 @@ impl RtcpSessionBuilder {
     /// and 250 ms (`TwccReceiverBuilder::with_adaptive_interval`): congestion control feedback
     /// is the sender's congestion signal and is not held to the RTCP bandwidth the regular
     /// reports share, as libwebrtc and the browsers send it. It goes as a reduced-size packet
-    /// where `a=rtcp-rsize` was negotiated, else in a minimal compound packet, and does not
-    /// move the regular reports' timing. `false` is RFC 4585 as written: at low media rates
+    /// where `a=rtcp-rsize` was negotiated, else in a minimal compound packet, and counts in
+    /// the average RTCP packet size (RFC 4585 3.5.4: "avg_rtcp_size ... MUST be updated
+    /// accordingly", Early or Regular), sent as received. `false` is RFC 4585 as written: at low media rates
     /// the session then sends feedback a few times a second, with gaps a sender's estimator
     /// does not climb through.
     pub fn with_immediate_congestion_feedback(mut self, immediate: bool) -> Self {
@@ -581,6 +597,7 @@ impl RtcpSessionBuilder {
             joins_on_start: self.joins_on_start,
             first_report_at_join: self.first_report_at_join,
             start_given: false,
+            announced_reporter: None,
             started: false,
             left: false,
             locals: Vec::new(),
@@ -842,6 +859,8 @@ pub struct RtcpSessionInterceptor {
     first_report_at_join: bool,
     /// [`RtcpSessionControl::Start`] was given since the session was built or last left.
     start_given: bool,
+    /// The reporting SSRC last announced ([`RtcpSessionEvent::ReportingSsrc`]).
+    announced_reporter: Option<u32>,
     started: bool,
     left: bool,
     /// In the order they were bound.
@@ -878,7 +897,8 @@ pub struct RtcpSessionInterceptor {
     /// Set while a regular packet is sent.
     sending_regular: bool,
     /// Set while a packet is sent outside the RTCP bandwidth's timing (immediate congestion
-    /// feedback): it does not move the average packet size the regular interval rests on.
+    /// feedback): it is measured as congestion control feedback, and counts in
+    /// `avg_rtcp_size` as every packet does (RFC 4585 3.5.4).
     outside_budget: bool,
     /// Feedback and other packets waiting for a compound packet.
     pending: Vec<Box<dyn rtcp::Packet>>,
@@ -1082,11 +1102,11 @@ impl RtcpSessionInterceptor {
             };
         }
         // RFC 3550 6.3.6 with RFC 8108 5.3.1: the average takes the size per reporting SSRC.
-        if !self.outside_budget {
-            let size = (wire_size(&packets) + self.srtcp_overhead) as f64
-                / reporting_ssrcs(&packets) as f64;
-            self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
-        }
+        // RFC 4585 3.5.4: of every packet sent, Early or Regular, congestion control feedback
+        // that leaves at once included, as the peer's is counted when it arrives.
+        let size =
+            (wire_size(&packets) + self.srtcp_overhead) as f64 / reporting_ssrcs(&packets) as f64;
+        self.avg_rtcp_size = update_avg_rtcp_size(self.avg_rtcp_size, size);
         self.write_queue.push_back(TaggedPacket {
             now,
             transport: TransportContext::default(),
@@ -1436,6 +1456,21 @@ impl RtcpSessionInterceptor {
             }
         }
         self.flush_departing(now);
+        self.announce_reporter(now);
+    }
+
+    /// Tells the application of a change of the session's own reporting SSRC
+    /// ([`RtcpSessionEvent::ReportingSsrc`]).
+    fn announce_reporter(&mut self, now: Instant) {
+        let reporter = self
+            .locals
+            .iter()
+            .find(|local| local.role == Role::Reporter)
+            .map(|local| local.ssrc);
+        if reporter != self.announced_reporter {
+            self.announced_reporter = reporter;
+            self.emit(now, RtcpSessionEvent::ReportingSsrc { ssrc: reporter });
+        }
     }
 
     // ---- the member table ------------------------------------------------------------
@@ -1776,7 +1811,11 @@ impl RtcpSessionInterceptor {
             }
 
             if let Some(sr) = any.downcast_ref::<SenderReport>() {
-                if let Some(remote) = self.remotes.get_mut(&sr.ssrc) {
+                // RFC 7164 section 5.1: the timestamps of a sender report from near a leap
+                // second are ignored; the last one before it stays the one reported on (LSR).
+                if let Some(remote) = self.remotes.get_mut(&sr.ssrc)
+                    && !near_leap_second(sr.ntp_time)
+                {
                     remote.stream.process_sender_report(now, sr);
                 }
                 self.observe_report_blocks(now, &sr.reports);
@@ -1988,7 +2027,13 @@ impl RtcpSessionInterceptor {
         let we_sent = self.we_sent(index, now);
         let local = &mut self.locals[index];
         local.rtcp_sent = true;
-        if we_sent && let Some(mut report) = local.stream.generate_report(now) {
+        // RFC 7164 section 5.1: no sender report "containing an originating NTP timestamp in
+        // the vicinity of a positive leap second"; a receiver report in its place keeps the
+        // schedule.
+        if we_sent
+            && let Some(mut report) = local.stream.generate_report(now)
+            && !near_leap_second(report.ntp_time)
+        {
             local
                 .sent_reports
                 .push_back(((report.ntp_time >> 16) as u32, now));
@@ -2060,6 +2105,36 @@ impl RtcpSessionInterceptor {
             .collect()
     }
 
+    /// RFC 8108 5.1: the report blocks about this endpoint's own SSRCs that have sent, for
+    /// the other local SSRCs to carry ("each SSRC will send RTCP reports for all other SSRCs,
+    /// including those co-located at the same endpoint"). What a co-located receiver measures
+    /// over a path with no loss and no delay: nothing lost, no jitter, the highest sequence
+    /// number sent, and the last sender report of the source with the time since it.
+    fn colocated_blocks(&self, now: Instant) -> Vec<ReceptionReport> {
+        self.locals
+            .iter()
+            .filter(|local| local.participates())
+            .filter_map(|local| {
+                let last_sequence_number = local.stream.extended_highest_sequence()?;
+                let (last_sender_report, delay) = local
+                    .sent_reports
+                    .back()
+                    .map(|&(lsr, at)| {
+                        let delay = now.saturating_duration_since(at).as_secs_f64() * 65536.0;
+                        (lsr, delay.min(f64::from(u32::MAX)) as u32)
+                    })
+                    .unwrap_or((0, 0));
+                Some(ReceptionReport {
+                    ssrc: local.ssrc,
+                    last_sequence_number,
+                    last_sender_report,
+                    delay,
+                    ..Default::default()
+                })
+            })
+            .collect()
+    }
+
     /// RFC 3611 section 5.1: the maximum DLRR size a stream's `rcvr-rtt=<mode>:<max>` names
     /// (an `rrtr` feedback whose parameter is the `xr-format` as signalled).
     fn record_dlrr_limit(&mut self, info: &StreamInfo) {
@@ -2094,9 +2169,11 @@ impl RtcpSessionInterceptor {
             let wall_clock = *self
                 .wall_clock
                 .get_or_insert_with(|| SystemInstant::shared(now));
-            blocks.push(Box::new(ReceiverReferenceTimeReportBlock {
-                ntp_timestamp: wall_clock.ntp(now),
-            }));
+            let ntp_timestamp = wall_clock.ntp(now);
+            // RFC 7164 section 5: no NTP timestamp generated near a leap second.
+            if !near_leap_second(ntp_timestamp) {
+                blocks.push(Box::new(ReceiverReferenceTimeReportBlock { ntp_timestamp }));
+            }
         }
         // RFC 3611 section 5.1: "non RTP senders SHALL NOT send DLRR blocks" under
         // `rcvr-rtt=sender`; under `all` they MAY, and this endpoint does not. A DLRR block is
@@ -2301,22 +2378,35 @@ impl RtcpSessionInterceptor {
         let every = self.report_from_every_ssrc;
         let carries_blocks =
             move |index: usize| every || Some(index) == reporter || reporter.is_none();
-        let first_blocks = if carries_blocks(first) {
-            blocks.clone()
+        // RFC 8108 5.1: with every SSRC reporting, each reports on the co-located SSRCs too.
+        let colocated = if every {
+            self.colocated_blocks(now)
         } else {
             vec![]
         };
+        let blocks_of = |index: usize, ssrc: u32| -> Vec<ReceptionReport> {
+            if !carries_blocks(index) {
+                return vec![];
+            }
+            let mut own = blocks.clone();
+            let room = MAX_REPORT_BLOCKS.saturating_sub(own.len());
+            own.extend(
+                colocated
+                    .iter()
+                    .filter(|block| block.ssrc != ssrc)
+                    .take(room)
+                    .cloned(),
+            );
+            own
+        };
+        let first_blocks = blocks_of(first, self.locals[first].ssrc);
         let report = self.report(first, now, first_blocks);
         budget = budget.saturating_sub(report.marshal_size() + 4 + chunk);
         reports.push(report);
         // The other clock rates' reports (and the SSRC whose timer this is) right behind the
         // leader, whatever the shape.
         for &index in &switched {
-            let own_blocks = if carries_blocks(index) {
-                blocks.clone()
-            } else {
-                vec![]
-            };
+            let own_blocks = blocks_of(index, self.locals[index].ssrc);
             let report = self.report(index, now, own_blocks);
             budget = budget.saturating_sub(report.marshal_size() + chunk);
             reports.push(report);
@@ -2325,7 +2415,8 @@ impl RtcpSessionInterceptor {
 
         if shape == Shape::Full {
             // RFC 8108 5.3.2: the other SSRCs, in the order their timers would expire, as
-            // long as their reports fit.
+            // long as their reports fit; RFC 8108 5.2: the senders first, the reports "most
+            // useful" to the peers when not every one fits.
             let mut others: Vec<usize> = (0..self.locals.len())
                 .filter(|&index| {
                     !included.contains(&index)
@@ -2333,7 +2424,12 @@ impl RtcpSessionInterceptor {
                         && self.locals[index].timing.is_some()
                 })
                 .collect();
-            others.sort_by_key(|&index| self.locals[index].timing.map(|timing| timing.tn));
+            others.sort_by_key(|&index| {
+                (
+                    !self.we_sent(index, now),
+                    self.locals[index].timing.map(|timing| timing.tn),
+                )
+            });
             // The SSRC that carries the blocks reports right behind the leader.
             if let Some(reporter) = reporter
                 && let Some(position) = others.iter().position(|&index| index == reporter)
@@ -2342,11 +2438,7 @@ impl RtcpSessionInterceptor {
                 others.insert(0, reporter);
             }
             for index in others {
-                let own_blocks = if carries_blocks(index) {
-                    blocks.clone()
-                } else {
-                    vec![]
-                };
+                let own_blocks = blocks_of(index, self.locals[index].ssrc);
                 let size = 28 + block * own_blocks.len() + chunk;
                 if size > budget && Some(index) != reporter {
                     // It keeps its own timer and reports when that expires.
@@ -2827,6 +2919,7 @@ impl RtcpSessionInterceptor {
                 self.repeats.clear();
                 self.early_at = None;
                 self.flush_departing(now);
+                self.announce_reporter(now);
                 return;
             }
         }
@@ -2955,7 +3048,9 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpSessionInterceptor {
 impl Interceptor for RtcpSessionInterceptor {
     /// A stream this endpoint sends: its SSRC reports from now on, and its RTX and FEC SSRCs
     /// from their first packet. A stream unbound a moment ago and bound again with the same
-    /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept.
+    /// SSRC (a renegotiation) carries on: no BYE, and its counts are kept. A stream bound under
+    /// the session's reporting SSRC takes it over (RFC 8108 6.1, see
+    /// [`RtcpSessionEvent::ReportingSsrc`]).
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         self.record_dlrr_limit(info);
         let kind = Kind::of(&info.mime_type);
@@ -2970,8 +3065,16 @@ impl Interceptor for RtcpSessionInterceptor {
                 &[]
             };
             if let Some(index) = self.local_index(ssrc) {
-                self.locals[index].stream.set_clock_rate(info.clock_rate);
-                self.locals[index].stream.set_payload_clock_rates(rates);
+                let local = &mut self.locals[index];
+                if local.role == Role::Reporter {
+                    // RFC 8108 6.1: the endpoint starts sending on the SSRC it reports from;
+                    // the SSRC stays the same participant (its timer and SRTCP context carry
+                    // on), now with a media type and the stream's clock rate.
+                    local.kind = kind;
+                    local.role = role;
+                }
+                local.stream.set_clock_rate(info.clock_rate);
+                local.stream.set_payload_clock_rates(rates);
                 continue;
             }
             let mut local = match self.departing.iter().position(|local| local.ssrc == ssrc) {
@@ -3142,6 +3245,61 @@ mod tests {
         protected.avg_rtcp_size = 100.0;
         protected.observe_rtcp(now, &[rr(2)]);
         assert!((protected.avg_rtcp_size - (93.75 + 50.0 / 16.0)).abs() < 1e-9);
+    }
+
+    /// RFC 4585 3.5.4: "the avg_rtcp_size ... MUST be updated accordingly" for every
+    /// compound RTCP packet sent, Early or Regular. Congestion control feedback that leaves
+    /// at once (the default, `with_immediate_congestion_feedback`) moves the average a
+    /// sixteenth towards its size, as the same packet does when it arrives from the peer.
+    #[test]
+    fn congestion_feedback_sent_at_once_counts_in_the_average_packet_size() {
+        let now = Instant::now();
+        let mut session = RtcpSessionBuilder::new().build();
+        session.bind_remote_stream(&StreamInfo {
+            ssrc: 200,
+            clock_rate: 90_000,
+            mime_type: "video/VP8".to_owned(),
+            ..Default::default()
+        });
+        session.control(now, &RtcpSessionControl::Cname("cname".to_owned()));
+        session.control(now, &RtcpSessionControl::Start);
+        while session.poll_write().is_some() {}
+        let feedback = || {
+            boxed(TransportLayerCc {
+                sender_ssrc: 0,
+                media_ssrc: 200,
+                fb_pkt_count: 1,
+                ..Default::default()
+            })
+        };
+        session.avg_rtcp_size = 1000.0;
+        session
+            .handle_write(TaggedPacket {
+                now,
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![feedback()])),
+            })
+            .unwrap();
+        let mut sent = vec![];
+        while let Some(packet) = session.poll_write() {
+            if let Packet::Rtcp(packets) = packet.message.packet {
+                sent.push(packets);
+            }
+        }
+        assert_eq!(1, sent.len(), "the feedback leaves at once");
+        let size = wire_size(&sent[0]) as f64 / reporting_ssrcs(&sent[0]) as f64;
+        let expected = 1000.0 * 15.0 / 16.0 + size / 16.0;
+        assert!(
+            (session.avg_rtcp_size - expected).abs() < 1e-9,
+            "{} against {expected}",
+            session.avg_rtcp_size
+        );
+
+        // The same packet received moves the average the same way.
+        let mut peer = RtcpSessionBuilder::new().build();
+        peer.avg_rtcp_size = 1000.0;
+        peer.observe_rtcp(now, &sent[0]);
+        assert!((peer.avg_rtcp_size - expected).abs() < 1e-9);
     }
 
     /// RFC 4585 6.1: the packet sender of a feedback message is rewritten, whatever its type.
