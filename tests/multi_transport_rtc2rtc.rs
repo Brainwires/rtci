@@ -179,6 +179,13 @@ struct World {
     lose_dtls_of_first_client: bool,
     /// The virtual time of each step (index: step - 1).
     step_times: Vec<Instant>,
+    /// Every datagram takes this long one way (`None`: delivered in the step it was written
+    /// in, a link without latency).
+    latency: Option<Duration>,
+    /// Datagrams on their way: (due, from, to, datagram).
+    transit: Vec<(Instant, SocketAddr, SocketAddr, BytesMut)>,
+    /// This many DTLS datagrams, the first ones, are lost.
+    lose_first_dtls: usize,
 }
 
 impl World {
@@ -227,6 +234,9 @@ impl World {
             dtls_lost_at: None,
             lose_dtls_of_first_client: false,
             step_times: vec![],
+            latency: None,
+            transit: vec![],
+            lose_first_dtls: 0,
         })
     }
 
@@ -528,6 +538,22 @@ impl World {
                 ));
             }
         }
+        if let Some(latency) = self.latency {
+            let due = self.now + latency;
+            self.transit.extend(
+                in_flight
+                    .drain(..)
+                    .map(|(from, to, data)| (due, from, to, data)),
+            );
+            let (arrived, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.transit)
+                .into_iter()
+                .partition(|(at, ..)| *at <= now);
+            self.transit = later;
+            in_flight = arrived
+                .into_iter()
+                .map(|(_, from, to, data)| (from, to, data))
+                .collect();
+        }
         let delivered = !in_flight.is_empty();
         for (from, to, data) in in_flight {
             // RFC 7983 / RFC 5761 section 4: a first byte of 128..=191 and a packet type of
@@ -538,6 +564,10 @@ impl World {
             if data.first().is_some_and(|first| (20..=63).contains(first)) {
                 self.dtls.push((self.steps, from, to, data.clone()));
                 if self.drop_dtls {
+                    continue;
+                }
+                if self.lose_first_dtls > 0 {
+                    self.lose_first_dtls -= 1;
                     continue;
                 }
                 if self.lose_dtls_of_first_client && self.dtls_lost_at.is_none() {
@@ -645,6 +675,12 @@ impl World {
                 .filter_map(|p| p.pc.poll_timeout())
                 .min()
                 .unwrap_or(self.now + Duration::from_millis(50));
+            let next = self
+                .transit
+                .iter()
+                .map(|(due, ..)| *due)
+                .min()
+                .map_or(next, |due| next.min(due));
             self.now = next.max(self.now + Duration::from_millis(1));
             for peer in self.peers.iter_mut() {
                 peer.pc.handle_timeout(self.now)?;
@@ -666,6 +702,12 @@ impl World {
                 .min()
                 .unwrap_or(until)
                 .min(until);
+            let next = self
+                .transit
+                .iter()
+                .map(|(due, ..)| *due)
+                .min()
+                .map_or(next, |due| next.min(due));
             self.now = next.max(self.now + Duration::from_millis(1));
             for peer in self.peers.iter_mut() {
                 peer.pc.handle_timeout(self.now)?;
@@ -4331,16 +4373,19 @@ fn connection_timing(
     Ok((handshakes, all_connected, gap))
 }
 
-/// Review F2 and F3 (DTLS 1.3), made permanent: what the session costs in time.
+/// Review F2 and F3 (DTLS 1.3), made permanent: no time is spent waiting for tickets. On
+/// links WITHOUT latency, where a handshake takes no time, so that the only thing measured
+/// is the wait for a ticket (what the first handshake itself costs the others on links with
+/// latency is `the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency`):
 ///
 /// - Against a peer that issues no ticket (every browser: libwebrtc sets `SSL_OP_NO_TICKET`)
 ///   the DTLS client's other transports start when the first handshake is complete, with no
-///   wait for a ticket: the connection is up as soon as with the session off (before: 800 ms
-///   later, two flight intervals of waiting for a ticket that never came).
+///   wait for a ticket (before: 800 ms later, two flight intervals of waiting for a ticket
+///   that never came).
 /// - Against one that issues them, both other transports resume (four tickets per
 ///   handshake), and start as soon as the tickets are there.
 #[test]
-fn a_peer_that_issues_no_ticket_costs_no_wait() -> Result<()> {
+fn the_others_do_not_wait_for_a_ticket_that_does_not_come() -> Result<()> {
     let (_, both_off, _) = connection_timing("both off", resumption_off(), resumption_off())?;
     let (handshakes, both_on, gap_on) =
         connection_timing("both on", resumption_on(), resumption_on())?;
@@ -4372,7 +4417,8 @@ fn a_peer_that_issues_no_ticket_costs_no_wait() -> Result<()> {
     );
     assert!(
         mixed <= both_off + Duration::from_millis(5),
-        "the connection is up as soon as without it: {mixed:?} against {both_off:?}"
+        "on links without latency the connection is up as soon as without it: {mixed:?} \
+         against {both_off:?}"
     );
     assert!(
         gap_on < Duration::from_millis(400),
@@ -4538,5 +4584,504 @@ fn a_transport_added_by_a_later_negotiation_runs_a_full_handshake() -> Result<()
             .all(|h| h.answered && !h.offered && !h.resumed && !h.psk_modes),
         "a full handshake, outside the session: {later:?}"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// The second review of the session (conf/dtls-resume-2): its peer-connection proofs made
+// permanent. A provisional answer followed by a final answer that names another
+// certificate, in both DTLS roles; and what the session costs in connection time on links
+// with latency and with a lost datagram, which is why it is an opt-in.
+// ---------------------------------------------------------------------------------------
+
+/// Per transport of `peer` that has a selected pair: its local address and DTLS state.
+fn dtls_states_by_address(peer: &Peer) -> Vec<(SocketAddr, RTCDtlsTransportState)> {
+    peer.pc
+        .dtls_transports()
+        .iter()
+        .filter_map(|t| {
+            let pair = t.ice_transport().get_selected_candidate_pair()?;
+            let local = SocketAddr::new(pair.local().address.parse().ok()?, pair.local().port);
+            Some((local, t.state()))
+        })
+        .collect()
+}
+
+/// The local address of `peer`'s transport of the second m= section.
+fn second_sections_address(peer: &Peer) -> Result<SocketAddr> {
+    let at = peer
+        .pc
+        .ice_transport_sections()
+        .iter()
+        .position(|(_, index)| *index == 1)
+        .context("the second section's transport")?;
+    Ok(peer.addrs[at])
+}
+
+/// Three unbundled transports with the session on at both peers, set up by a PROVISIONAL
+/// answer at the offerer; the second section's path is held until the two other transports
+/// are connected (one full handshake, one resumption: the session exists and tickets are
+/// there). Returns the world and the answer's SDP. `offerer_is_client`: the offerer is the
+/// DTLS client of every transport (the answerer answers `a=setup:passive`).
+fn session_made_under_a_provisional_answer(
+    offerer_is_client: bool,
+    new_association_without_restart: bool,
+) -> Result<(World, String)> {
+    use rtci::peer_connection::transport::RTCDtlsRole;
+    let on = || {
+        SettingEngineBuilder::new()
+            .with_dtls_session_resumption(true)
+            .with_dtls_new_association_without_ice_restart(new_association_without_restart)
+    };
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.peers = [
+        Peer::with_setting_engine("10.0.0.1", RTCBundlePolicy::MaxCompat, None, on())?,
+        Peer::with_setting_engine(
+            "10.0.0.2",
+            RTCBundlePolicy::Balanced,
+            None,
+            if offerer_is_client {
+                on().with_answering_dtls_role(RTCDtlsRole::Server)
+            } else {
+                on()
+            },
+        )?,
+    ];
+    world.tolerate_failure = true;
+    for kind in [RtpCodecKind::Audio, RtpCodecKind::Video] {
+        world.peers[0].pc.add_transceiver_from_kind(
+            kind,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec![],
+                send_encodings: vec![RTCRtpEncodingParameters {
+                    active: true,
+                    ..Default::default()
+                }],
+            }),
+        )?;
+    }
+    world.peers[0].pc.create_data_channel("data", None)?;
+    let now = world.now;
+    let offer = world.peers[0].pc.create_offer(None)?;
+    world.peers[0]
+        .pc
+        .set_local_description(now, offer.clone())?;
+    world.peers[1].pc.set_remote_description(
+        now,
+        RTCSessionDescription::offer(without_bundle_group(offer.sdp.clone()))?,
+    )?;
+    let answer = world.peers[1].pc.create_answer(None)?;
+    world.peers[1]
+        .pc
+        .set_local_description(now, answer.clone())?;
+    // The offerer sees it as a provisional answer first.
+    world.peers[0]
+        .pc
+        .set_remote_description(now, RTCSessionDescription::pranswer(answer.sdp.clone())?)?;
+    world.gather()?;
+    let held = [
+        second_sections_address(&world.peers[0])?,
+        second_sections_address(&world.peers[1])?,
+    ];
+    world.blocked.extend(held);
+    world.run_traced("the two other transports connected", |peers| {
+        peers.iter().all(|p| connected_count(p) == 2)
+    })?;
+    let before = wire_handshakes(&world, 0);
+    assert_eq!(before.len(), 2, "two handshakes so far: {before:?}");
+    assert!(
+        !before[0].resumed && before[1].offered && before[1].resumed,
+        "the session exists: one full handshake, one resumption: {before:?}"
+    );
+    let client = dtls_client(&world, &before);
+    assert_eq!(
+        client,
+        usize::from(!offerer_is_client),
+        "the DTLS client is the {}",
+        if offerer_is_client {
+            "offerer"
+        } else {
+            "answerer"
+        }
+    );
+    Ok((world, answer.sdp))
+}
+
+/// Through the peer connection (the first review's unchecked item): a provisional answer
+/// sets the transports up and the session is made; then the FINAL answer names another
+/// certificate for the second section, whose transport has not started its handshake yet
+/// (a member of the session, tickets in the store). That transport must be checked against
+/// the final answer's fingerprints: a full handshake, `fingerprint-failure`, never
+/// "connected", as the DTLS client and as the DTLS server.
+fn final_answer_names_another_certificate(offerer_is_client: bool) -> Result<()> {
+    use rtci::peer_connection::rtc_error::RTCErrorDetailType;
+    let fingerprint = another_certificates_fingerprint()?;
+    let (mut world, answer) = session_made_under_a_provisional_answer(offerer_is_client, true)?;
+    let failing_local = second_sections_address(&world.peers[0])?;
+    let now = world.now;
+    world.peers[0].pc.set_remote_description(
+        now,
+        RTCSessionDescription::answer(second_section_fingerprint(&answer, &fingerprint))?,
+    )?;
+    world.blocked.clear();
+    world.run_traced("the second transport failed at the offerer", |peers| {
+        let mine = dtls_states_by_address(&peers[0]);
+        mine.len() == 3
+            && mine.iter().all(|(local, state)| {
+                if *local == failing_local {
+                    *state == RTCDtlsTransportState::Failed
+                } else {
+                    *state == RTCDtlsTransportState::Connected
+                }
+            })
+    })?;
+    // It was never connected.
+    let id = world.peers[0]
+        .pc
+        .dtls_transports()
+        .iter()
+        .find(|t| t.state() == RTCDtlsTransportState::Failed)
+        .context("the failed transport")?
+        .id();
+    assert!(
+        !world.peers[0].events.iter().any(|event| matches!(
+            event,
+            RTCPeerConnectionEvent::OnTransportEvent(event)
+                if event.dtls_transport == id
+                    && matches!(
+                        event.event,
+                        RTCTransportEventKind::DtlsStateChange(RTCDtlsTransportState::Connected)
+                    )
+        )),
+        "the second transport was never connected"
+    );
+    let error = world.peers[0]
+        .events
+        .iter()
+        .find_map(|event| match event {
+            RTCPeerConnectionEvent::OnTransportEvent(event) => match &event.event {
+                RTCTransportEventKind::DtlsError(error) => Some(error.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .context("the failing transport's error")?;
+    assert_eq!(
+        error.error_detail,
+        RTCErrorDetailType::FingerprintFailure,
+        "{error:?}"
+    );
+    let handshakes = wire_handshakes(&world, 0);
+    let failing = handshakes
+        .iter()
+        .find(|h| h.client == failing_local || h.server == failing_local)
+        .context("the second transport's handshake")?
+        .clone();
+    eprintln!(
+        "pranswer then answer, offerer is the DTLS {}: failing handshake {failing:?}",
+        if offerer_is_client {
+            "client"
+        } else {
+            "server"
+        }
+    );
+    assert!(
+        failing.answered && !failing.resumed,
+        "a full handshake: {failing:?}"
+    );
+    if offerer_is_client {
+        assert!(
+            !failing.offered,
+            "its client offered no session: {failing:?}"
+        );
+    } else {
+        // The peer's client still takes part and offers a ticket: the server refused it.
+        assert!(
+            failing.offered,
+            "a ticket was offered to the server and not taken: {failing:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_final_answer_naming_another_certificate_is_checked_by_a_full_handshake_as_the_dtls_client()
+-> Result<()> {
+    final_answer_names_another_certificate(true)
+}
+
+#[test]
+fn a_final_answer_naming_another_certificate_is_checked_by_a_full_handshake_as_the_dtls_server()
+-> Result<()> {
+    final_answer_names_another_certificate(false)
+}
+
+/// By default (RFC 9429 section 5.11) a final answer that changes a fingerprint of a
+/// transport in use without new ICE credentials is refused with an error: the transport
+/// keeps the provisional answer's fingerprints, with the session made under it.
+#[test]
+fn by_default_a_final_answer_with_other_fingerprints_is_refused_with_the_session_made() -> Result<()>
+{
+    let fingerprint = another_certificates_fingerprint()?;
+    let (mut world, answer) = session_made_under_a_provisional_answer(true, false)?;
+    let now = world.now;
+    let result = world.peers[0].pc.set_remote_description(
+        now,
+        RTCSessionDescription::answer(second_section_fingerprint(&answer, &fingerprint))?,
+    );
+    assert!(result.is_err(), "refused: {result:?}");
+    Ok(())
+}
+
+/// What connecting three unbundled transports takes on links with `one_way` latency.
+struct LinkTiming {
+    /// The virtual time from the start until two DTLS transports are connected at both
+    /// peers (`None`: not within a minute).
+    two: Option<Duration>,
+    /// The same until all three are (`None` also when one is stalled for good).
+    three: Option<Duration>,
+    handshakes: Vec<WireHandshake>,
+}
+
+/// Connects three unbundled transports on links with `one_way` latency. `lose_first`: that
+/// many DTLS datagrams, the first ones, are lost (the leader's ClientHello is the first).
+/// `stall`: every DTLS datagram of the first client transport is lost for good.
+fn timing_on_links_with_latency(
+    what: &str,
+    one_way: Duration,
+    offerer: SettingEngineBuilder,
+    answerer: SettingEngineBuilder,
+    lose_first: usize,
+    stall: bool,
+) -> Result<LinkTiming> {
+    let mut world = World::new(RTCBundlePolicy::MaxCompat)?;
+    world.peers = [
+        Peer::with_setting_engine("10.0.0.1", RTCBundlePolicy::MaxCompat, None, offerer)?,
+        Peer::with_setting_engine("10.0.0.2", RTCBundlePolicy::Balanced, None, answerer)?,
+    ];
+    world.tolerate_failure = true;
+    world.latency = Some(one_way);
+    world.lose_first_dtls = lose_first;
+    world.lose_dtls_of_first_client = stall;
+    world.negotiate(without_bundle_group)?;
+    world.gather()?;
+    let start = world.now;
+    let minute = Duration::from_secs(60);
+    let two = world
+        .run_within("two connected", minute, |peers| {
+            peers.iter().all(|p| connected_count(p) >= 2)
+        })
+        .ok()
+        .map(|()| world.now.duration_since(start));
+    let three = if stall {
+        None
+    } else {
+        world
+            .run_within("three connected", minute, |peers| {
+                peers.iter().all(|p| connected_count(p) == 3)
+            })
+            .ok()
+            .map(|()| world.now.duration_since(start))
+    };
+    let handshakes = wire_handshakes(&world, 0);
+    let at = |step: u64| world.step_times[step as usize - 1];
+    let hellos: Vec<Duration> = handshakes
+        .iter()
+        .map(|h| at(h.first_hello).saturating_duration_since(start))
+        .collect();
+    let resumed = handshakes.iter().filter(|h| h.resumed).count();
+    eprintln!(
+        "timing [{what}; one way {one_way:?}]: two connected {two:?}, all three {three:?}; \
+         first ClientHello of each transport arrived at {hellos:?}; resumed {resumed}"
+    );
+    Ok(LinkTiming {
+        two,
+        three,
+        handshakes,
+    })
+}
+
+/// The latencies the timing tests run at: round trips of 100 ms and 300 ms.
+const ONE_WAY_LATENCIES: [Duration; 2] = [Duration::from_millis(50), Duration::from_millis(150)];
+
+/// The longest a transport waits for the first handshake in these tests: three flight
+/// intervals of 400 ms, or of 1.5 round trips where ICE has measured the round trip by then
+/// (`DtlsFlightInterval::Rfc9147`), and never more than the cap of 3 s.
+fn longest_wait(round_trip: Duration) -> Duration {
+    (round_trip * 9 / 2)
+        .max(Duration::from_millis(1200))
+        .min(Duration::from_secs(3))
+}
+
+/// Review 2 (R2, R11), made permanent: the session is not free. On links with latency the
+/// other transports' handshakes run AFTER the first one instead of beside it, so the last
+/// transport is connected later than with the session off:
+///
+/// - against a peer that issues no ticket (every browser), by the first handshake: about 3
+///   round trips, and nothing is resumed;
+/// - between two peers with the session on, by about 2.5 round trips (the two other
+///   transports resume, which saves each a signature and its verification, no round trip).
+///
+/// Measured by the review at a round trip of 100 ms: 453 ms off, 753 ms against a no-ticket
+/// peer, 703 ms both on; at 300 ms: 1.353 s, 2.253 s, 2.103 s. The bounds here are those
+/// figures within a quarter of a round trip.
+#[test]
+fn the_session_costs_the_other_transports_the_first_handshake_on_links_with_latency() -> Result<()>
+{
+    for one_way in ONE_WAY_LATENCIES {
+        let round_trip = one_way * 2;
+        let timing = |what, offerer, answerer| {
+            timing_on_links_with_latency(what, one_way, offerer, answerer, 0, false)
+        };
+        let off = timing("both off", resumption_off(), resumption_off())?;
+        assert!(off.handshakes.iter().all(|h| !h.offered && !h.resumed));
+        // The answerer is the DTLS client: it waits; the offerer (the server) issues nothing.
+        let no_ticket = timing(
+            "client on, server issues no ticket (a browser)",
+            resumption_off(),
+            resumption_on(),
+        )?;
+        assert!(
+            no_ticket.handshakes.iter().all(|h| !h.resumed),
+            "nothing to resume: {:?}",
+            no_ticket.handshakes
+        );
+        let on = timing("both on", resumption_on(), resumption_on())?;
+        assert_eq!(
+            on.handshakes.iter().filter(|h| h.resumed).count(),
+            2,
+            "the two others resume: {:?}",
+            on.handshakes
+        );
+        let (off, no_ticket, on) = (
+            off.three.context("off connected")?,
+            no_ticket.three.context("no ticket connected")?,
+            on.three.context("on connected")?,
+        );
+        eprintln!(
+            "timing summary [round trip {round_trip:?}]: all connected: off {off:?}; client on \
+             against a no-ticket server {no_ticket:?} (+{:?}); both on {on:?} (+{:?})",
+            no_ticket.saturating_sub(off),
+            on.saturating_sub(off)
+        );
+        let quarter = round_trip / 4;
+        let (added_no_ticket, added_on) = (no_ticket.saturating_sub(off), on.saturating_sub(off));
+        assert!(
+            added_no_ticket >= round_trip * 3 - quarter
+                && added_no_ticket <= round_trip * 3 + quarter,
+            "against a no-ticket peer the last transport is up about 3 round trips later: \
+             {no_ticket:?} against {off:?} at a round trip of {round_trip:?}"
+        );
+        assert!(
+            added_on >= round_trip * 5 / 2 - quarter && added_on <= round_trip * 5 / 2 + quarter,
+            "with tickets it is up about 2.5 round trips later: {on:?} against {off:?} at a \
+             round trip of {round_trip:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Review 2 (R3), made permanent: with the session on, one lost datagram on the first
+/// transport's handshake (its first ClientHello) delays EVERY transport, where without the
+/// session it delays that one; the delay of the others is bounded by the wait for the first
+/// handshake (`longest_wait`), after which they run full handshakes. Against a peer that
+/// issues tickets and against one that issues none.
+#[test]
+fn a_datagram_lost_on_the_first_handshake_delays_every_transport_with_the_session_on() -> Result<()>
+{
+    for one_way in ONE_WAY_LATENCIES {
+        let round_trip = one_way * 2;
+        let timing = |what, offerer, answerer| {
+            timing_on_links_with_latency(what, one_way, offerer, answerer, 1, false)
+        };
+        let off = timing(
+            "both off, the first DTLS datagram lost",
+            resumption_off(),
+            resumption_off(),
+        )?;
+        let on = timing(
+            "both on, the first DTLS datagram lost",
+            resumption_on(),
+            resumption_on(),
+        )?;
+        let no_ticket = timing(
+            "client on against a no-ticket server, the first DTLS datagram lost",
+            resumption_off(),
+            resumption_on(),
+        )?;
+        eprintln!(
+            "loss summary [round trip {round_trip:?}]: two connected / all connected: off {:?} \
+             / {:?}; both on {:?} / {:?}; client on, no-ticket server {:?} / {:?}",
+            off.two, off.three, on.two, on.three, no_ticket.two, no_ticket.three
+        );
+        let two_off = off.two.context("two connected, off")?;
+        for (what, timing) in [("both on", &on), ("no-ticket server", &no_ticket)] {
+            let two = timing.two.context("two connected")?;
+            assert!(
+                two > two_off,
+                "{what}: the loss on the first transport delays the others too: {two:?} \
+                 against {two_off:?}"
+            );
+            assert!(
+                two <= two_off + longest_wait(round_trip) + Duration::from_millis(10),
+                "{what}: by no more than the wait for the first handshake: {two:?} against \
+                 {two_off:?}"
+            );
+            assert!(timing.three.is_some(), "{what}: all three connect");
+        }
+        assert!(off.three.is_some(), "off: all three connect");
+    }
+    Ok(())
+}
+
+/// Review 2 (R4), with latency on the links: a first transport whose DTLS never completes
+/// (its DTLS lost for good, its ICE working) holds the two others back by the wait for the
+/// first handshake and no longer (1.199 s measured at both latencies); then they connect
+/// with full handshakes.
+#[test]
+fn a_first_handshake_that_never_completes_costs_the_others_the_bounded_wait_on_links_with_latency()
+-> Result<()> {
+    for one_way in ONE_WAY_LATENCIES {
+        let round_trip = one_way * 2;
+        let timing = |what, offerer, answerer| {
+            timing_on_links_with_latency(what, one_way, offerer, answerer, 0, true)
+        };
+        let off = timing(
+            "both off, the first transport's DTLS lost for good",
+            resumption_off(),
+            resumption_off(),
+        )?
+        .two
+        .context("the two others connect, off")?;
+        let on = timing(
+            "both on, the first transport's DTLS lost for good",
+            resumption_on(),
+            resumption_on(),
+        )?;
+        let no_ticket = timing(
+            "client on against a no-ticket server, the first transport's DTLS lost for good",
+            resumption_off(),
+            resumption_on(),
+        )?;
+        for (what, timing) in [("both on", &on), ("no-ticket server", &no_ticket)] {
+            let two = timing.two.context("the two others connect")?;
+            eprintln!(
+                "stall summary [round trip {round_trip:?}; {what}]: the two other transports \
+                 connected: off {off:?}; on {two:?} (+{:?})",
+                two.saturating_sub(off)
+            );
+            assert!(
+                timing.handshakes.iter().all(|h| !h.resumed),
+                "{what}: full handshakes: {:?}",
+                timing.handshakes
+            );
+            assert!(two > off, "{what}: they waited: {two:?} against {off:?}");
+            assert!(
+                two <= off + longest_wait(round_trip) + Duration::from_millis(10),
+                "{what}: for the bounded wait and no longer: {two:?} against {off:?}"
+            );
+        }
+    }
     Ok(())
 }
