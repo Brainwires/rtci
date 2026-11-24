@@ -301,7 +301,25 @@ impl fmt::Display for Origin {
     }
 }
 
+/// The seconds from the NTP epoch (1900-01-01 UTC) to the Unix epoch: RFC 8866 section 5.2
+/// recommends "a timestamp, in seconds since January 1, 1900 UTC" for `<sess-id>` and, "as
+/// with <sess-id>", for `<sess-version>`.
+pub const NTP_UNIX_EPOCH_OFFSET_SECS: u64 = 2_208_988_800;
+
 impl Origin {
+    /// The `o=` line RFC 9429 section 5.2.1 gives an offer: `<username>` `-`, the given
+    /// session id and version, and the non-meaningful address `IN IP4 0.0.0.0`.
+    pub fn jsep(session_id: u64, session_version: u64) -> Self {
+        Origin {
+            username: "-".to_owned(),
+            session_id: session_id.into(),
+            session_version: session_version.into(),
+            network_type: "IN".to_owned(),
+            address_type: "IP4".to_owned(),
+            unicast_address: "0.0.0.0".to_owned(),
+        }
+    }
+
     /// An empty session description with SDP version 0.
     pub fn new() -> Self {
         Origin {
@@ -625,28 +643,30 @@ impl ParseOptions {
 impl SessionDescription {
     /// A session description with the session-level lines RFC 9429 section 5.2.1 gives an
     /// offer: `v=0`, `o=- <sess-id> <sess-version> IN IP4 0.0.0.0` with a random 63-bit
-    /// session id, `s=-` and `t=0 0`.
+    /// session id and, for the session version, the system clock's seconds since 1900 (RFC
+    /// 8866 section 5.2: "it is RECOMMENDED that a timestamp be used"), `s=-` and `t=0 0`.
     ///
     /// `_identity` is ignored. It used to add a bare `a=identity`, which is not SDP: the
     /// attribute carries an assertion (RFC 8827 section 5). An application that has one
     /// adds it with `with_typed(&Identity)`.
     pub fn new_jsep_session_description(_identity: bool) -> Self {
+        let since_unix_epoch = SystemTime::now() // Exemption: wall-clock is correct here: RFC 8866 section 5.2 recommends a timestamp for the session version
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        Self::new_jsep_session_description_with_origin(Origin::jsep(
+            new_session_id(),
+            since_unix_epoch.as_secs() + NTP_UNIX_EPOCH_OFFSET_SECS,
+        ))
+    }
+
+    /// [`new_jsep_session_description`](Self::new_jsep_session_description) with the `o=`
+    /// line the caller gives, for a session whose origin is kept across descriptions (RFC
+    /// 9429 section 5.2.2: "The fields of the "o=" line MUST stay the same except for the
+    /// <session-version> field") or drawn from sources the caller controls.
+    pub fn new_jsep_session_description_with_origin(origin: Origin) -> Self {
         SessionDescription {
             version: 0,
-            origin: Origin {
-                username: "-".to_string(),
-                session_id: new_session_id().into(),
-                session_version: u64::from(
-                    SystemTime::now() // Exemption: wall-clock is correct here to generate random SDP session version
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_else(|_| Duration::from_secs(0))
-                        .subsec_nanos(),
-                )
-                .into(),
-                network_type: "IN".to_string(),
-                address_type: "IP4".to_string(),
-                unicast_address: "0.0.0.0".to_string(),
-            },
+            origin,
             session_name: "-".to_string(),
             session_information: None,
             uri: None,

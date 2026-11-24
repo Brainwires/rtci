@@ -94,6 +94,7 @@ fn params(
         },
         offered_tag_rtcp_mux_only: false,
         rtcp_mux_only: true,
+        rtcp_mux_only_renegotiated: false,
         bundle_policy: RTCBundlePolicy::MaxCompat,
         initial_offer: false,
         bundle_attributes_in_tagged_section_only: false,
