@@ -58,6 +58,8 @@ fn a_peer_that_restarts_the_association_closes_the_old_channels_with_an_error() 
         pair.answerer.tolerate_read_errors = true;
         let second = pair.offerer.pc.create_data_channel("second", None)?.id();
         pair.negotiate()?;
+        // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+        assert!(pair.regather()?, "{what}");
 
         assert!(
             pair.run_until(|p| p.offerer.opened().contains(&second)
@@ -160,6 +162,8 @@ fn a_channel_closed_by_a_restart_keeps_only_its_unsent_bytes_buffered() -> Resul
     pair.answerer.tolerate_read_errors = true;
     pair.offerer.pc.create_data_channel("second", None)?;
     pair.negotiate()?;
+    // RFC 8842 section 5.1: the new association runs on new 3-tuples.
+    assert!(pair.regather()?);
     assert!(
         pair.run_until(|p| p.answerer.closed(first_remote))?,
         "the restart closes the old channel"

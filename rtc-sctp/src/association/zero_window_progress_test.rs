@@ -137,22 +137,20 @@ fn i_data_fragment(tsn: u32, stream: u16, mid: u32, fsn: u32) -> ChunkPayloadDat
 
 /// RFC 9260 6.2, "When the receiver's advertised window is 0, the receiver MUST drop any new
 /// incoming DATA chunk with a TSN larger than the largest TSN received so far", on an
-/// association that negotiated I-DATA. Four interleaved messages fill a 4 KiB buffer with
-/// none complete and a SACK advertises a_rwnd 0. By default the next in-sequence chunk is
-/// taken (interleaved messages that fill the buffer together would otherwise never
-/// complete); with `TransportConfig::with_strict_zero_window_drop` it is dropped and a SACK
-/// is due at once (RFC 9260 6.2: "if such a DATA chunk is dropped, the receiver MUST
-/// immediately send back a SACK").
+/// association that negotiated I-DATA (RFC 8260). Four interleaved messages fill a 4 KiB
+/// buffer with none complete and a SACK advertises a_rwnd 0. The next in-sequence chunk is
+/// dropped and a SACK is due at once ("if such a DATA chunk is dropped, the receiver MUST
+/// immediately send back a SACK"); with `TransportConfig::with_zero_window_overcommit` (for
+/// an application that reads whole messages only) it is taken.
 #[test]
-fn with_the_strict_drop_an_interleaving_receiver_drops_new_data_after_a_closed_window() -> Result<()>
-{
-    for strict in [false, true] {
+fn an_interleaving_receiver_drops_new_data_after_a_closed_window() -> Result<()> {
+    for overcommit in [false, true] {
         let mut a = create_association(
             TransportConfig::default()
                 .with_max_receive_buffer_size(FULL_BUFFER_RECV_BUFFER)
                 .with_max_message_size(FULL_BUFFER_MAX_MESSAGE)
                 .with_message_interleaving(true)
-                .with_strict_zero_window_drop(strict),
+                .with_zero_window_overcommit(overcommit),
         );
         a.set_state(AssociationState::Established);
         a.set_interleaving(true);
@@ -180,26 +178,24 @@ fn with_the_strict_drop_an_interleaving_receiver_drops_new_data_after_a_closed_w
         a.immediate_ack_triggered = false;
         let last = a.peer_last_tsn;
         a.handle_data(&i_data_fragment(tsn, stream as u16, 0, fsn[stream]))?;
-        if strict {
+        if overcommit {
+            assert_eq!(a.peer_last_tsn, tsn, "taken: it unblocks reassembly");
+        } else {
             assert_eq!(a.peer_last_tsn, last, "dropped: above the largest TSN");
             assert!(a.immediate_ack_triggered, "a SACK at once");
-        } else {
-            assert_eq!(a.peer_last_tsn, tsn, "taken: it unblocks reassembly");
         }
     }
     Ok(())
 }
 
 /// Builds the receiver of the link tests: a receive buffer of `buffer` bytes that accepts
-/// messages up to `message` bytes, with the zero window overcommit where the peer connection
-/// enables it (the message it accepts is larger than its buffer). With I-DATA negotiated the
-/// association takes the chunk that unblocks reassembly whatever the setting.
+/// messages up to `message` bytes, with the RFC 9260 6.2 drop (the default). The link reads
+/// in parts (RFC 9260 6.9) unless a test says otherwise.
 fn receiver(buffer: u32, message: u32, interleaving: bool) -> TransportConfig {
     TransportConfig::default()
         .with_max_receive_buffer_size(buffer)
         .with_max_receive_message_size(message)
         .with_message_interleaving(interleaving)
-        .with_zero_window_overcommit(message > buffer)
 }
 
 /// Builds the sender of the link tests. Weighted fair queueing is the peer connection's
@@ -229,8 +225,8 @@ fn message(id: u32, len: usize) -> Bytes {
 }
 
 /// webrtc-rs/webrtc#822 in virtual time: one 64 KiB message to a receiver with a 16 KiB
-/// buffer (the root crate's `tests/sctp_receive_buffer_deadlock.rs`). Once the buffer holds
-/// the start of the message, every further fragment is a zero window probe the receiver takes.
+/// buffer that reads whole messages only, with the zero window overcommit. Once the buffer
+/// holds the start of the message, every further fragment is a zero window probe it takes.
 /// Each is acknowledged at once and the next goes at once: about one round trip per fragment,
 /// so well under a second over a 10 ms link. One RTO per fragment (the stall) is 40 seconds.
 #[test]
@@ -239,9 +235,10 @@ fn a_message_larger_than_the_receive_buffer_arrives_at_a_round_trip_per_fragment
     const SIZE: usize = 64 * 1024;
     let mut link = Link::new(
         sender(256 * 1024, false),
-        receiver(BUFFER, 256 * 1024, false),
+        receiver(BUFFER, 256 * 1024, false).with_zero_window_overcommit(true),
         1,
     );
+    link.server.read_parts = false;
     link.connect();
     let start = link.now;
     let ppi = PayloadProtocolIdentifier::Binary;
@@ -265,7 +262,7 @@ fn a_message_larger_than_the_receive_buffer_arrives_at_a_round_trip_per_fragment
 
 /// RFC 8260 and RFC 9260 6.1 A: with I-DATA the sender interleaves its streams chunk by
 /// chunk, so six 64 KiB messages are in reassembly at once at a receiver with a 1500-byte
-/// buffer. The receiver keeps room for one message beyond its buffer while nothing is
+/// buffer that reads whole messages only, with the zero window overcommit. It keeps room for one message beyond its buffer while nothing is
 /// readable, and six part-received messages would use that room up without one of them
 /// complete. While the window is closed the probes therefore finish a part-sent message
 /// before another is started, and every message arrives.
@@ -275,9 +272,10 @@ fn interleaved_messages_that_fill_the_buffer_together_complete_one_at_a_time() -
     const STREAMS: u16 = 6;
     let mut link = Link::new(
         sender(SIZE as u32, true),
-        receiver(1500, SIZE as u32, true),
+        receiver(1500, SIZE as u32, true).with_zero_window_overcommit(true),
         3,
     );
+    link.server.read_parts = false;
     link.connect();
     assert!(link.client.conn().use_interleaving, "I-DATA negotiated");
     let start = link.now;
@@ -307,17 +305,40 @@ fn interleaved_messages_that_fill_the_buffer_together_complete_one_at_a_time() -
     Ok(())
 }
 
+/// How the receiver of a measurement reads, and what it does with a closed window.
+#[derive(Clone, Copy, Debug)]
+enum Reader {
+    /// In parts (RFC 9260 6.9), with the RFC 9260 6.2 drop: the default.
+    Parts,
+    /// Whole messages only, with the RFC 9260 6.2 drop.
+    WholeMessages,
+    /// Whole messages only, with `with_zero_window_overcommit(true)`.
+    WholeMessagesWithOvercommit,
+}
+
+fn apply(link: &mut Link, reader: Reader) {
+    link.server.read_parts = matches!(reader, Reader::Parts);
+}
+
+fn receiver_for(reader: Reader, buffer: u32, message: u32, interleaving: bool) -> TransportConfig {
+    receiver(buffer, message, interleaving)
+        .with_zero_window_overcommit(matches!(reader, Reader::WholeMessagesWithOvercommit))
+}
+
 /// Six interleaved 16 KiB messages from one stream each, four in a row, to a receiver
 /// with a 16 KiB buffer, over a 10 ms link: how many of the 24 arrive in two virtual
-/// minutes.
-fn six_interleaved_streams_into_a_buffer_they_each_fit(strict: bool) -> Result<(usize, Duration)> {
+/// minutes, and how many parts were read before their message ended.
+fn six_interleaved_streams_into_a_buffer_they_each_fit(
+    reader: Reader,
+) -> Result<(usize, Duration, usize)> {
     const SIZE: usize = 16 * 1024;
     const STREAMS: u16 = 6;
     let mut link = Link::new(
         sender(SIZE as u32, true),
-        receiver(SIZE as u32, SIZE as u32, true).with_strict_zero_window_drop(strict),
+        receiver_for(reader, SIZE as u32, SIZE as u32, true),
         5,
     );
+    apply(&mut link, reader);
     link.connect();
     assert!(link.server.conn().use_interleaving, "I-DATA negotiated");
     let start = link.now;
@@ -325,36 +346,95 @@ fn six_interleaved_streams_into_a_buffer_they_each_fit(strict: bool) -> Result<(
     for s in 1..=STREAMS {
         link.client.conn().open_stream(s, ppi)?;
     }
+    let mut sent = vec![];
     for i in 0..4u32 {
         for s in 1..=STREAMS {
-            link.client.conn().stream(s)?.write_sctp(
-                start,
-                &message(u32::from(s) * 1000 + i, SIZE),
-                ppi,
-            )?;
+            let m = message(u32::from(s) * 1000 + i, SIZE);
+            link.client.conn().stream(s)?.write_sctp(start, &m, ppi)?;
+            sent.push((s, m));
         }
     }
     let total = 4 * usize::from(STREAMS);
     link.run_until(start + Duration::from_secs(120), |l| {
         l.server.received.len() == total
     });
-    Ok((link.server.received.len(), link.now - start))
+    for (s, m) in &link.server.received {
+        assert!(sent.contains(&(*s, m.clone())), "a message arrived whole");
+    }
+    Ok((
+        link.server.received.len(),
+        link.now - start,
+        link.server.parts_before_end,
+    ))
 }
 
-/// RFC 9260 6.2 with RFC 8260 section 6, measured: six interleaved 16 KiB messages into a
-/// 16 KiB buffer (the zero window overcommit off: each message fits the buffer). The six
-/// part-received messages fill the buffer together with none of them complete. The RFC drop
-/// (`with_strict_zero_window_drop(true)`) then refuses the in-sequence chunk that would
-/// complete one of them on every retransmission: 0 of the 24 messages arrive, the window
-/// never reopens. The default takes it, as RFC 8260 section 6's "reassembly buffer for each
-/// incoming stream" needs, and all 24 arrive.
+/// RFC 9260 6.2 with RFC 9260 6.9 and RFC 8260, measured: six interleaved 16 KiB messages
+/// into a 16 KiB buffer. The six part-received messages fill the buffer together with none
+/// of them complete. A receiver that reads whole messages only, under the RFC drop, then
+/// refuses the in-sequence chunk that would complete one of them on every retransmission: 0 of
+/// the 24 messages arrive and the window never reopens (sctp-14). Read in parts, the receiver
+/// gives the six message starts out when its buffer runs out of space (RFC 9260 6.9), the
+/// window opens, and all 24 arrive under the same drop. (The overcommit, for whole-message
+/// readers, gets them there too.)
 #[test]
-fn interleaved_messages_that_each_fit_the_buffer_deadlock_under_the_strict_drop() -> Result<()> {
-    let (strict, _) = six_interleaved_streams_into_a_buffer_they_each_fit(true)?;
-    let (default, took) = six_interleaved_streams_into_a_buffer_they_each_fit(false)?;
-    println!("strict drop: {strict} of 24; default: {default} of 24 in {took:?}");
-    assert_eq!(strict, 0, "the strict drop delivers none");
-    assert_eq!(default, 24, "the default delivers all");
+fn interleaved_messages_that_each_fit_the_buffer_arrive_under_the_rfc_drop_when_read_in_parts()
+-> Result<()> {
+    let (parts, took, part_reads) =
+        six_interleaved_streams_into_a_buffer_they_each_fit(Reader::Parts)?;
+    let (whole, _, _) = six_interleaved_streams_into_a_buffer_they_each_fit(Reader::WholeMessages)?;
+    let (overcommit, overcommit_took, _) =
+        six_interleaved_streams_into_a_buffer_they_each_fit(Reader::WholeMessagesWithOvercommit)?;
+    println!(
+        "RFC drop: in parts {parts} of 24 in {took:?} ({part_reads} parts before an end); \
+         whole messages {whole} of 24; whole messages with the overcommit {overcommit} of 24 \
+         in {overcommit_took:?}"
+    );
+    assert_eq!(parts, 24, "read in parts, all arrive");
+    assert!(part_reads > 0, "and some were read in parts");
+    assert_eq!(whole, 0, "read whole under the drop, none do");
+    assert_eq!(overcommit, 24);
+    Ok(())
+}
+
+/// RFC 9260 6.9 with the RFC 9260 6.2 drop: one 64 KiB message to a receiver with a 16 KiB
+/// buffer (webrtc-rs/webrtc#822). Read in parts it arrives at the pace of the link: the start
+/// of it is given out at the partial delivery point (half the buffer), so the window never
+/// closes. Read whole, under the drop, it never arrives: the buffer fills with its start, the
+/// window closes, and the fragment after the largest TSN is dropped on every retransmission.
+#[test]
+fn a_message_larger_than_the_receive_buffer_arrives_under_the_rfc_drop_when_read_in_parts()
+-> Result<()> {
+    const BUFFER: u32 = 16 * 1024;
+    const SIZE: usize = 64 * 1024;
+    let mut took = vec![];
+    for reader in [Reader::Parts, Reader::WholeMessages] {
+        let mut link = Link::new(
+            sender(256 * 1024, false),
+            receiver_for(reader, BUFFER, 256 * 1024, false),
+            1,
+        );
+        apply(&mut link, reader);
+        link.connect();
+        let start = link.now;
+        let ppi = PayloadProtocolIdentifier::Binary;
+        let payload = message(7, SIZE);
+        link.client
+            .conn()
+            .open_stream(1, ppi)?
+            .write_sctp(start, &payload, ppi)?;
+        let delivered = link.run_until(start + Duration::from_secs(60), |l| {
+            !l.server.received.is_empty()
+        });
+        if delivered {
+            assert_eq!(link.server.received[0].1, payload);
+        }
+        took.push((delivered, link.now - start, link.server.parts_before_end));
+    }
+    println!("in parts: {:?}; whole messages: {:?}", took[0], took[1]);
+    assert!(took[0].0, "read in parts, it arrives");
+    assert!(took[0].1 < Duration::from_secs(3), "{:?}", took[0].1);
+    assert!(took[0].2 > 0, "in parts");
+    assert!(!took[1].0, "read whole under the drop, it does not");
     Ok(())
 }
 
@@ -608,4 +688,36 @@ fn sweep(sizes: &[usize]) {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// RFC 9260 6.2, "When the window opens up, an SCTP receiver SHOULD send additional SACK
+/// chunks to update the window even if no new data is received": a receiver with a
+/// 1500-byte buffer that reads in parts takes each chunk out at once, but the sender, with
+/// one chunk outstanding, sees no room for the next (RFC 9260 6.1 A) until a SACK says
+/// otherwise. That SACK goes as soon as the chunk is read, so a 64 KiB message takes about
+/// a round trip (20 ms) per chunk; held for the SACK delay (200 ms) it took over 12 s.
+#[test]
+fn a_small_buffer_read_in_parts_announces_its_window_as_soon_as_it_is_read() -> Result<()> {
+    const SIZE: usize = 64 * 1024;
+    let mut link = Link::new(
+        sender(SIZE as u32, false),
+        receiver(1500, SIZE as u32, false),
+        9,
+    );
+    link.connect();
+    let start = link.now;
+    let ppi = PayloadProtocolIdentifier::Binary;
+    let payload = message(3, SIZE);
+    link.client
+        .conn()
+        .open_stream(1, ppi)?
+        .write_sctp(start, &payload, ppi)?;
+    let delivered = link.run_until(start + Duration::from_secs(120), |l| {
+        !l.server.received.is_empty()
+    });
+    let took = link.now - start;
+    assert!(delivered);
+    assert_eq!(link.server.received[0].1, payload);
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    Ok(())
 }

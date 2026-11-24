@@ -325,6 +325,36 @@ impl Pair {
         Ok(())
     }
 
+    /// The application's gathering after a new DTLS association: a peer whose ICE transport
+    /// holds no local candidate any more (the new association dropped them, RFC 8842 section
+    /// 5.1: it runs on a new 3-tuple) moves to the next port ([`Peer::move_to`]) and gives
+    /// that candidate to itself and to the other peer. Returns whether any peer moved.
+    pub fn regather(&mut self) -> Result<bool> {
+        let mut moved = false;
+        for offerer in [true, false] {
+            let (peer, other) = if offerer {
+                (&mut self.offerer, &mut self.answerer)
+            } else {
+                (&mut self.answerer, &mut self.offerer)
+            };
+            let holds_none = peer
+                .pc
+                .dtls_transports()
+                .iter()
+                .all(|t| t.ice_transport().get_local_candidates().is_empty());
+            if !holds_none {
+                continue;
+            }
+            let addr = peer.addr;
+            peer.move_to(SocketAddr::new(addr.ip(), addr.port() + 1));
+            let candidate = peer.candidate()?;
+            peer.pc.add_local_candidate(candidate.clone())?;
+            other.pc.add_remote_candidate(candidate)?;
+            moved = true;
+        }
+        Ok(moved)
+    }
+
     /// An offer/answer exchange started by the offerer, or by the answerer when
     /// `from_answerer`; the offer goes through `munge_offer` and the answer through
     /// `munge_answer` on their way to the other peer. Returns the offer and the answer as

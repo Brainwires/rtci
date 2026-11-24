@@ -748,7 +748,7 @@ impl RTCPeerConnection {
             return;
         }
         log::debug!("an SRTP master key is near its lifetime: asking for a new DTLS association");
-        self.renew_dtls_association();
+        self.request_dtls_renewal(true);
     }
 
     /// Whether the active transport is the one the SCTP association runs over.

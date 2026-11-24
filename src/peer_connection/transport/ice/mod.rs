@@ -12,6 +12,7 @@ use ice::candidate::Candidate;
 use ice::tcp_type::TcpType;
 use ice::{Agent, AgentConfig};
 use shared::error::{Error, Result};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -45,6 +46,22 @@ pub(crate) struct IceTransport {
     /// username fragment announced before it, which a rollback announces again.
     pub(crate) gathering_before_local_restart: Option<(RTCIceGatheringState, Option<String>)>,
 
+    /// The UDP transport addresses of the local candidates of the DTLS association a new one
+    /// replaced (RFC 8842 sections 5.1 and 6: the new association needs a new 3-tuple, "not
+    /// recently used for any other DTLS association"). A local candidate on one of them is
+    /// refused until the next ICE restart that is not for a new association.
+    pub(crate) previous_association_addresses: Vec<SocketAddr>,
+
+    /// While a local offer's ICE restart can still be rolled back: the addresses refused
+    /// before it, which a rollback restores.
+    pub(crate) previous_association_addresses_before_local_restart: Option<Vec<SocketAddr>>,
+
+    /// The transport dropped its local candidates (a new DTLS association, a replacement, or
+    /// the discarding setting): `OnLocalCandidatesNeeded` is fired, with this reason, when
+    /// the next local description begins the transport's gathering.
+    pub(crate) candidates_needed:
+        Option<crate::peer_connection::event::RTCLocalCandidatesNeededReason>,
+
     /// Whether W3C `[[IceRole]]` has left "unknown": set by the first offer processed, local
     /// (controlling) or remote (by RFC 8445's rules), and kept for the life of the transport.
     /// The role itself is the agent's, which an ICE role conflict may change (RFC 8445
@@ -70,6 +87,9 @@ impl IceTransport {
             ice_connection_state: RTCIceConnectionState::New,
             local_media_section: None,
             gathering_before_local_restart: None,
+            previous_association_addresses: Vec::new(),
+            previous_association_addresses_before_local_restart: None,
+            candidates_needed: None,
             role_determined: false,
         })
     }
@@ -298,6 +318,55 @@ impl IceTransport {
 
     pub(crate) fn add_local_candidate(&mut self, c: Candidate) -> Result<bool> {
         self.agent.add_local_candidate(c)
+    }
+
+    /// Before an ICE restart is applied: when it sets up a new DTLS association
+    /// (`new_association`), the UDP transport addresses of the local candidates the agent
+    /// holds are refused from now on (RFC 8842 sections 5.1 and 6); otherwise nothing is
+    /// refused any more. Returns the addresses refused before.
+    pub(crate) fn retire_local_addresses(&mut self, new_association: bool) -> Vec<SocketAddr> {
+        let retired = if new_association {
+            self.current_generation_udp_addresses()
+        } else {
+            Vec::new()
+        };
+        std::mem::replace(&mut self.previous_association_addresses, retired)
+    }
+
+    /// The UDP transport addresses of the local candidates of the ICE generation in use: the
+    /// agent's, less those given for a restart that is staged (they are the next
+    /// generation's).
+    pub(crate) fn current_generation_udp_addresses(&self) -> Vec<SocketAddr> {
+        let next: Vec<SocketAddr> = self
+            .agent
+            .get_restart_generation_local_candidates()
+            .iter()
+            .filter(|c| c.network_type().is_udp())
+            .map(|c| c.addr())
+            .collect();
+        let mut addresses: Vec<SocketAddr> = self
+            .agent
+            .get_local_candidates()
+            .iter()
+            .filter(|c| c.network_type().is_udp())
+            .map(|c| c.addr())
+            .filter(|a| !next.contains(a))
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        addresses
+    }
+
+    /// Whether `c` is a UDP candidate on a transport address of the DTLS association a new
+    /// one replaced ([`Self::retire_local_addresses`]).
+    pub(crate) fn on_previous_association_address(&self, c: &Candidate) -> Option<SocketAddr> {
+        if !c.network_type().is_udp() {
+            return None;
+        }
+        let addr = c.addr();
+        self.previous_association_addresses
+            .contains(&addr)
+            .then_some(addr)
     }
 
     /// Role indicates the current role of the ICE transport.

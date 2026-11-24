@@ -20,6 +20,16 @@ use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
 use shared::error::Result;
 
 fn peer(policy: RTCBundlePolicy, discard_candidates: bool) -> Result<RTCPeerConnection> {
+    peer_with(policy, discard_candidates, false)
+}
+
+/// `peer`, a new DTLS association running on the previous addresses when
+/// `previous_addresses` (`with_dtls_new_association_on_previous_addresses`).
+fn peer_with(
+    policy: RTCBundlePolicy,
+    discard_candidates: bool,
+    previous_addresses: bool,
+) -> Result<RTCPeerConnection> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     RTCPeerConnectionBuilder::new()
@@ -32,6 +42,7 @@ fn peer(policy: RTCBundlePolicy, discard_candidates: bool) -> Result<RTCPeerConn
         .with_setting_engine(
             SettingEngineBuilder::new()
                 .with_discard_local_candidates_during_ice_restart(discard_candidates)
+                .with_dtls_new_association_on_previous_addresses(previous_addresses)
                 .build(),
         )
         .build(Instant::now())
@@ -109,14 +120,25 @@ fn stop_everything(pc: &mut RTCPeerConnection, transceivers: &[RTCRtpTransceiver
 
 /// One transport: the answer that rejects its only section closes it (both events, at the
 /// transport that was there) and leaves a new one in its place: other ids, other ICE
-/// credentials, state "new", its role not determined, no m= section on it. The local
-/// candidate the application gathered is the new agent's too, unless local candidates are
-/// discarded with an ICE generation.
+/// credentials, state "new", its role not determined, no m= section on it. The DTLS
+/// association the next description sets up on it runs on a new 3-tuple (RFC 8842 section
+/// 5.1): the local candidate the application gathered is not kept and its address is refused.
+/// With `with_dtls_new_association_on_previous_addresses(true)` it is the new agent's too,
+/// unless local candidates are discarded with an ICE generation.
 #[test]
 fn rejecting_the_only_section_leaves_one_new_transport() -> Result<()> {
-    for discard_candidates in [false, true] {
-        let mut offerer = peer(RTCBundlePolicy::default(), discard_candidates)?;
-        let mut answerer = peer(RTCBundlePolicy::default(), discard_candidates)?;
+    for (discard_candidates, previous_addresses) in [(false, true), (true, true), (false, false)] {
+        let kept = previous_addresses && !discard_candidates;
+        let mut offerer = peer_with(
+            RTCBundlePolicy::default(),
+            discard_candidates,
+            previous_addresses,
+        )?;
+        let mut answerer = peer_with(
+            RTCBundlePolicy::default(),
+            discard_candidates,
+            previous_addresses,
+        )?;
         let audio = offerer.add_transceiver_from_kind(RtpCodecKind::Audio, None)?;
         offerer.add_local_candidate(host(50000))?;
         answerer.add_local_candidate(host(50001))?;
@@ -148,12 +170,21 @@ fn rejecting_the_only_section_leaves_one_new_transport() -> Result<()> {
             assert!(pc.pipeline_context.transports.mids_on(default).is_empty());
             assert_eq!(
                 pc.ice_transport().agent.get_local_candidates().len(),
-                usize::from(!discard_candidates),
-                "the gathered candidate, discard {discard_candidates}"
+                usize::from(kept),
+                "the gathered candidate, discard {discard_candidates}, previous addresses \
+                 {previous_addresses}"
             );
             assert!(
                 pc.ice_transport().agent.get_remote_candidates().is_empty(),
                 "the closed generation's remote candidates are gone"
+            );
+        }
+        for (pc, port) in [(&mut offerer, 50000), (&mut answerer, 50001)] {
+            assert_eq!(
+                pc.add_local_candidate(host(port)).is_err(),
+                !previous_addresses,
+                "the previous address is refused for the new association unless \
+                 previous addresses {previous_addresses}"
             );
         }
     }

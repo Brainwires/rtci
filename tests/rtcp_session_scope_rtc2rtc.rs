@@ -147,6 +147,9 @@ fn media_added_later_starts_rtcp_and_every_rtcp_packet_is_protected() -> Result<
             Some(RTCRtpTransceiverInit::recvonly()),
         )?;
         world.exchange(0)?;
+        // RFC 8842 section 5.1: a new association (without `use_srtp` on the first one) runs
+        // on new 3-tuples.
+        assert_eq!(world.regather()?, !every_association, "{what}");
         world.run(&format!("{what}: RTCP from both peers"), |peers| {
             peers
                 .iter()

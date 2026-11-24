@@ -88,7 +88,7 @@ pub use crate::shared::{AssociationEvent, AssociationId, EndpointEvent};
 pub(crate) mod param;
 
 pub(crate) mod queue;
-pub use crate::queue::reassembly_queue::{Chunk, Chunks};
+pub use crate::queue::reassembly_queue::{Chunk, Chunks, MessagePart};
 
 pub(crate) mod util;
 

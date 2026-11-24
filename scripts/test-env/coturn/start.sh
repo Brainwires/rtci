@@ -21,14 +21,21 @@ ip netns exec turn turnserver -c "$(dirname "$0")/turnserver-stale.conf" > "$D/t
   && ip -n turn -6 addr add fd00:203:113::10/128 dev lo; } \
   || echo "no IPv6 address on the turn namespace's loopback: the IPv6 relay tests will fail" >&2
 ip netns exec turn turnserver -c "$(dirname "$0")/turnserver-client.conf" > "$D/turnserver-client.log" 2>&1 &
+# The TLS 1.2-only server for tests/testenv_turn_streams.rs (turnserver-tls12.conf): coturn has
+# no highest-version option, so its libssl is configured to stop at TLS 1.2.
+OPENSSL_CONF="$(dirname "$0")/openssl-tls12.cnf" \
+  ip netns exec turn turnserver -c "$(dirname "$0")/turnserver-tls12.conf" > "$D/turnserver-tls12.log" 2>&1 &
 wait_for() {
-  local port=$1 log=$2
+  local port=$1 log=$2 proto=${3:-u}
   for _ in $(seq 1 50); do
-    if ip netns exec turn ss -lun | grep -q "203.0.113.10:$port"; then return 0; fi
+    if ip netns exec turn ss -ln"$proto" | grep -q "203.0.113.10:$port"; then return 0; fi
     sleep 0.2
   done
   echo "coturn on $port did not start:" >&2; cat "$log" >&2; return 1
 }
 wait_for 3478 "$D/turnserver.log" && wait_for 5349 "$D/turnserver.log" \
+  && wait_for 5349 "$D/turnserver.log" t \
   && wait_for 3479 "$D/turnserver-stale.log" \
-  && wait_for 3480 "$D/turnserver-client.log" && echo "coturn up (3478, 5349 DTLS, 3479, 3480)"
+  && wait_for 3480 "$D/turnserver-client.log" \
+  && wait_for 5350 "$D/turnserver-tls12.log" t \
+  && echo "coturn $(turnserver --version) up (3478, 5349 TLS and DTLS, 3479, 3480, 5350 TLS 1.2 only)"

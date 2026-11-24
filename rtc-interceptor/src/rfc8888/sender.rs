@@ -47,8 +47,12 @@ fn ecn_of(codepoint: Option<EcnCodepoint>) -> Ecn {
 pub struct Rfc8888Builder {
     interval: Duration,
     adaptive_interval: bool,
+    feedback_share: f64,
+    max_adaptive_interval: Duration,
     max_report_size: usize,
     sender_ssrc: Option<u32>,
+    /// The wall-clock anchor report timestamps derive from (`None`: the process-wide one).
+    wall_clock: Option<SystemInstant>,
 }
 
 impl Default for Rfc8888Builder {
@@ -56,8 +60,11 @@ impl Default for Rfc8888Builder {
         Self {
             interval: DEFAULT_INTERVAL,
             adaptive_interval: true,
+            feedback_share: crate::cc::feedback_cadence::FEEDBACK_SHARE,
+            max_adaptive_interval: crate::cc::feedback_cadence::MAX_ADAPTIVE_INTERVAL,
             max_report_size: DEFAULT_MAX_REPORT_SIZE,
             sender_ssrc: None,
+            wall_clock: None,
         }
     }
 }
@@ -111,6 +118,27 @@ impl Rfc8888Builder {
         self
     }
 
+    /// The share of the media received that the feedback may take while the interval is
+    /// adaptive: the interval is the time in which this share holds one feedback packet (with
+    /// its lower layers, and the minimal compound packet around it without reduced-size
+    /// RTCP). Default 0.05, RFC 3550 section 6.2's 5% for all of RTCP. A smaller share leaves
+    /// room in the 5% for the regular reports (the `Performance` behaviour profile: 0.025).
+    pub fn with_feedback_share(mut self, share: f64) -> Self {
+        self.feedback_share = share;
+        self
+    }
+
+    /// The longest the adaptive interval stretches to while media flows. Default 250 ms.
+    /// draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3: "in cases of low uplink
+    /// bandwidth it is acceptable to send them less frequently, e.g., for instance once per
+    /// RTT"; RFC 8888 section 4 leaves the interval to the application ("Applications need to
+    /// negotiate an appropriate congestion control feedback interval ... based on ... the
+    /// acceptable feedback overhead"). The `Performance` behaviour profile takes 500 ms.
+    pub fn with_max_adaptive_interval(mut self, max_interval: Duration) -> Self {
+        self.max_adaptive_interval = max_interval;
+        self
+    }
+
     /// Byte budget for one report.
     ///
     /// A report larger than the path MTU is fragmented or dropped, and feedback that does not
@@ -132,14 +160,28 @@ impl Rfc8888Builder {
         self
     }
 
+    /// The wall-clock anchor the reports' timestamps derive from (RFC 8888 section 3.1: the
+    /// clock of the RTCP sender reports' NTP timestamps, so give the RTCP session the same).
+    /// Default: the process-wide [`SystemInstant::shared`]. Give one per peer connection for
+    /// reproducible virtual-time runs: two runs in one process otherwise map the same instants
+    /// to NTP times as far apart as the real time between them.
+    pub fn with_wall_clock(mut self, anchor: SystemInstant) -> Self {
+        self.wall_clock = Some(anchor);
+        self
+    }
+
     /// Build the interceptor.
     pub fn build(self) -> Rfc8888Interceptor {
-        Rfc8888Interceptor::new(
+        let mut interceptor = Rfc8888Interceptor::new(
             self.interval,
             self.adaptive_interval,
             self.max_report_size,
             self.sender_ssrc,
-        )
+        );
+        interceptor.cadence = FeedbackCadence::new(self.interval, self.adaptive_interval)
+            .with_limits(self.feedback_share, self.max_adaptive_interval);
+        interceptor.epoch = self.wall_clock;
+        interceptor
     }
 }
 

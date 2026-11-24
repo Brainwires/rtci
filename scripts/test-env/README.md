@@ -24,7 +24,15 @@ one log per stage, the NAT matrix, the interop matrix and Playwright's JSON repo
 ## What is inside
 
 `Dockerfile`: Playwright's image (Node, Chromium, Firefox, WebKit), Rust, iproute2 / iptables /
-ipset / tc, coturn and GStreamer.
+ipset / tc, coturn and GStreamer. coturn is built from its release tag 4.6.3
+(`https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
+`dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`, BSD-3-Clause), not the base's
+package: Ubuntu 24.04's coturn is 4.6.1, whose TLS listener refuses a ClientHello offering TLS
+1.3 alone and settles on 1.2 when both are offered (it picks its SSL context by the ClientHello's
+`legacy_version`, 0x0303 for TLS 1.3 too), fixed in 4.6.2
+(https://github.com/coturn/coturn/pull/989). Later lines (4.18 on) drop the `no-cli` and
+`no-dtls` options the configurations use and move the session id in the log lines the tests
+read.
 
 `topology.sh` builds, inside the container:
 
@@ -45,7 +53,10 @@ ipset / tc, coturn and GStreamer.
 for the run (user `test`, password `test`, realm `rtc.test`). Two more servers run beside it: one on
 3479 whose nonces go stale after 10 s (`turnserver-stale.conf`), and one on 3480 for the TURN
 client's own tests (`turnserver-client.conf`), which relays on an IPv6 address as well
-(`fd00:203:113::10`, on the namespace's loopback) and knows a second user (`other`).
+(`fd00:203:113::10`, on the namespace's loopback) and knows a second user (`other`). A fourth,
+on 3481 with TLS on 5350 (`turnserver-tls12.conf`), stops at TLS 1.2: coturn has no option for a
+highest version, so `start.sh` runs it with `OPENSSL_CONF=openssl-tls12.cnf` (`MaxProtocol =
+TLSv1.2`). The main server speaks TLS 1.3 and 1.2.
 
 `entry.sh` also makes the media fixtures with GStreamer (`videotestsrc` / `audiotestsrc`
 encoded to VP8 and VP9 IVF, H.264 Annex B and Opus Ogg) and exports the `RTC_TESTENV_*`
@@ -75,7 +86,7 @@ variables the tests read.
   - `testenv_turn_client`: the TURN client alone against coturn (port 3480): Allocate with
     LIFETIME, DONT-FRAGMENT and EVEN-PORT, the reserved port taken with its RESERVATION-TOKEN, a
     Send indication with DONT-FRAGMENT relayed to a peer, an IPv6 and a dual (IPv4 + IPv6)
-    allocation request (coturn 4.6.1 ignores ADDITIONAL-ADDRESS-FAMILY and gives the IPv4
+    allocation request (coturn 4.6 ignores ADDITIONAL-ADDRESS-FAMILY, 4.6.1 and 4.6.3 alike, and gives the IPv4
     address alone), 440 from the IPv4-only server and an IPv4 address from it afterwards, a
     Refresh under another username that is not accepted, a 401 for a wrong password that is not answered again, and the
     500 ms initial RTO kept after the server's round-trip time was measured; and a TCP allocation (RFC 6062) over a TCP control connection: a
@@ -88,7 +99,10 @@ variables the tests read.
   - `testenv_turn_streams`: the engine's own TURN client, both peers behind symmetric NATs with
     the relay policy, a data channel through coturn: over TCP and TLS (`examples/stream-driver`
     serving the stream interface) and over DTLS (`turns:...?transport=udp`, RFC 7350: coturn's
-    DTLS listener on 5349/udp, the engine's DTLS association on each application's UDP socket).
+    DTLS listener on 5349/udp, the engine's DTLS association on each application's UDP socket;
+    DTLS 1.2, the highest coturn's OpenSSL DTLS speaks). TLS 1.3 and 1.2 each on purpose: the
+    engine offering TLS 1.3 alone to the main server, and its default offer (1.3 and 1.2) to the
+    TLS 1.2-only server, each server checked first for the version it settles on.
     And the engine's relayed TCP candidates (RFC 6062): an offerer behind a symmetric NAT with
     only relayed TCP candidates and an answerer in `open-b` with only its ICE-TCP candidates,
     connected through coturn's TCP allocation.
@@ -126,8 +140,6 @@ variables the tests read.
 - **Firefox has no H.264.** Firefox does H.264 through Cisco's OpenH264 plugin, which it
   downloads after install; the offline image never fetches it, so those cells are na-env (not
   tested), not passes.
-- **TURN over TLS is TLS 1.2.** The image's coturn answers every TLS 1.3 ClientHello with a
-  handshake failure, so the test client (`tests/testenv/mod.rs`) offers TLS 1.2 only.
 - **Linux only**: network namespaces.
 
 ## CI
@@ -139,7 +151,7 @@ or a pull request from a branch of this repository; a fork's pull request runs o
 The image is cached in GHCR by the hash of `Dockerfile`, `interop/package.json` and
 `interop/package-lock.json`. Only the workflow's `image` job, on a push to `master`, publishes it;
 the jobs that run the environment have a read-only package token and build the image locally
-when the registry lacks it. The base image is pinned by digest and `rustup-init` by version and
-SHA-256. After changing
+when the registry lacks it. The base image is pinned by digest, `rustup-init`, Go and coturn by version and
+SHA-256, and aiortc by commit and SHA-256 (`peers/aiortc`). After changing
 `interop/package.json`, refresh the lockfile with `npm install --package-lock-only` in
 `interop/`.
