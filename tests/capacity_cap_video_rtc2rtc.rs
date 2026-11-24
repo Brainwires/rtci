@@ -2050,6 +2050,13 @@ struct PathChangeOutcome {
     lowest_before: Option<u32>,
     /// Each peer's estimate, every time it moved, in the ten seconds from the switch on.
     estimates: [Vec<(Duration, u32)>; 2],
+    /// The callee's longest time without a usable frame from one second after the switch to
+    /// the end (ten seconds after it), and when it began: how long the repair of what was sent
+    /// into the dead path holds the picture (ParolNet's "freeze after restore + 1 s").
+    freeze_after: Duration,
+    freeze_after_at: Duration,
+    /// Retransmissions the caller sent from the switch on.
+    rtx_after: u64,
 }
 
 /// The call of ParolNet's `an_ice_restart_follows_a_machine_to_another_network`: ten seconds
@@ -2083,6 +2090,7 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     }
     world.stun_only = false;
     let (switched_at, at_switch) = world.peers[0].pair_changes[0];
+    let rtx_at_switch = world.uplinks[0].rtx_sent;
     world.sampling = true;
     let t = world.now + Duration::from_secs(3);
     world.advance(t)?;
@@ -2097,7 +2105,15 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
     let t = world.now + Duration::from_secs(7);
     world.advance(t)?;
     world.print_trace("path change", setup);
+    let (freeze_after, freeze_after_at) = longest_gap(
+        &world.peers[1].usable_at,
+        switched_at + Duration::from_secs(1),
+        world.elapsed(),
+    );
     Ok(PathChangeOutcome {
+        freeze_after,
+        freeze_after_at,
+        rtx_after: world.uplinks[0].rtx_sent - rtx_at_switch,
         before,
         lowest_before: world.peers[0]
             .targets
@@ -2119,6 +2135,45 @@ fn path_change_run(setup: &Setup) -> Result<PathChangeOutcome> {
             .fold(0.0, f64::max),
         estimate_after,
     })
+}
+
+/// The ICE restart after a 4 s outage, measured: one `RESTART` line per run; asserts nothing.
+/// `RTC_CAP_CHAINS` (`parolnet`, `default`; both by default) and `RTC_CAP_SEEDS` (1 to 6).
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture"]
+fn measure_the_ice_restart() -> Result<()> {
+    let list = |name: &str, default: &str| -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .map(|item| item.trim().to_owned())
+            .filter(|item| !item.is_empty())
+            .collect()
+    };
+    for chain in list("RTC_CAP_CHAINS", "parolnet,default") {
+        for seed in list("RTC_CAP_SEEDS", "1,2,3,4,5,6") {
+            let setup = Setup::new(seed.parse()?, None)
+                .chain(match chain.as_str() {
+                    "parolnet" => Chain::ParolNet,
+                    "default" => Chain::Default,
+                    other => bail!("unknown chain {other}"),
+                })
+                .anchor(ANCHORS[0]);
+            match path_change_run(&setup) {
+                Ok(o) => println!(
+                    "RESTART chain {chain} seed {seed} | switched at {:.2} | freeze after switch+1 s {:.3} at {:.2} | rtx after {} | lowest after {} | estimate after {:?}",
+                    o.switched_at.as_secs_f64(),
+                    o.freeze_after.as_secs_f64(),
+                    o.freeze_after_at.as_secs_f64(),
+                    o.rtx_after,
+                    o.lowest_after / 1000,
+                    o.estimate_after.map(|bps| bps / 1000),
+                ),
+                Err(error) => println!("RESTART chain {chain} seed {seed} | failed: {error}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A new selected pair is a new path for the congestion controller also when the datagrams
