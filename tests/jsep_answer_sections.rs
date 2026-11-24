@@ -377,3 +377,35 @@ fn a_feedback_type_a_later_offer_drops_is_not_answered() -> TestResult {
     );
     Ok(())
 }
+
+/// RFC 5124 section 3.3.1: an offerer "SHOULD NOT" offer a secure and an insecure profile as
+/// alternatives for the same media, and section 5: security is not left to such a mix. Every
+/// audio and video section of this endpoint's offers (the first, and a later one with one more
+/// section) is `UDP/TLS/RTP/SAVPF`: no `RTP/AVP` or `RTP/AVPF` alternative is ever written.
+#[test]
+fn offers_never_carry_an_insecure_profile_beside_the_secure_one() -> TestResult {
+    let mut pc = default_peer()?;
+    pc.add_track(video_track("v", 4242))?;
+    pc.add_transceiver_from_kind(rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Audio, None)?;
+    pc.create_data_channel("d", None)?;
+    let first = pc.create_offer(None)?;
+    pc.set_local_description(Instant::now(), first.clone())?;
+    pc.set_local_description(Instant::now(), RTCSessionDescription::rollback(None)?)?;
+    pc.add_transceiver_from_kind(rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video, None)?;
+    let later = pc.create_offer(None)?;
+    for offer in [&first.sdp, &later.sdp] {
+        let mut rtp = 0;
+        for section in media_sections(offer) {
+            let m = &section[0];
+            if m.starts_with("m=audio") || m.starts_with("m=video") {
+                rtp += 1;
+                assert_eq!(m.split(' ').nth(2), Some("UDP/TLS/RTP/SAVPF"), "{offer}");
+            }
+        }
+        assert!(rtp >= 2, "{offer}");
+        for insecure in [" RTP/AVP ", " RTP/AVPF "] {
+            assert!(!offer.contains(insecure), "{insecure} in {offer}");
+        }
+    }
+    Ok(())
+}

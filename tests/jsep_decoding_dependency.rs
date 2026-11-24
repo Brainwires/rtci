@@ -170,3 +170,72 @@ fn every_format_of_a_section_keeps_the_same_dependency_structure() -> TestResult
     );
     Ok(())
 }
+
+/// The `c=` lines of `sdp` that give more than one address, or a TTL (RFC 8866 section 5.7:
+/// `<base multicast address>[/<ttl>]/<number of addresses>`).
+fn multi_address_connection_lines(sdp: &str) -> Vec<&str> {
+    sdp.lines()
+        .filter(|l| l.starts_with("c=") && l.contains('/'))
+        .collect()
+}
+
+/// RFC 7798 section 7.2.5: "If MRST or MRMT is used, the rules on signaling media decoding
+/// dependency in SDP as defined in [RFC5583] apply ... the notation for Connection Data "c="
+/// SHALL NOT be used with more than one address". This endpoint never uses MRST or MRMT: an
+/// offer of layered H.265 over two sessions (`tx-mode=MRST`, a DDP group, `a=depend`) is
+/// answered without H.265 and without the dependency on it (the formats do not match,
+/// section 7.2.2; the dependency follows what the answer keeps, RFC 5583 section 6.1), and
+/// neither its offers nor its answers have a `c=` line with more than one address.
+#[test]
+fn h265_multi_stream_is_never_used_and_no_connection_line_has_several_addresses() -> TestResult {
+    let h265 = |mid: &str, extra: &str| {
+        format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96 126\nc=IN IP4 0.0.0.0\na=setup:actpass\na=mid:{mid}\n\
+             a=sendrecv\na=rtcp-mux\na=rtpmap:96 VP8/90000\na=rtpmap:126 H265/90000\n\
+             a=fmtp:126 level-id=93;profile-id=1;tier-flag=0;tx-mode=MRST\n{extra}"
+        )
+    };
+    let offer = crlf(&format!(
+        "{SESSION}a=group:DDP L1 L2\n{}{}",
+        h265("L1", ""),
+        h265("L2", "a=depend:126 lay L1:126\n")
+    ));
+    let mut pc = default_peer()?;
+    pc.set_remote_description(Instant::now(), RTCSessionDescription::offer(offer)?)?;
+    let answer = pc.create_answer(None)?;
+    assert!(
+        !answer.sdp.lines().any(|l| l.starts_with("a=rtpmap:126")
+            || l.contains("tx-mode=MRST")
+            || l.starts_with("a=depend:126")),
+        "MRST is not used: {}",
+        answer.sdp
+    );
+    assert_eq!(
+        Vec::<&str>::new(),
+        multi_address_connection_lines(&answer.sdp),
+        "{}",
+        answer.sdp
+    );
+    pc.set_local_description(Instant::now(), answer)?;
+
+    let mut offerer = default_peer()?;
+    for _ in 0..2 {
+        offerer.add_transceiver_from_kind(
+            rtci::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            None,
+        )?;
+    }
+    let local = offerer.create_offer(None)?;
+    assert!(
+        local.sdp.lines().any(|l| l.starts_with("c=")),
+        "{}",
+        local.sdp
+    );
+    assert_eq!(
+        Vec::<&str>::new(),
+        multi_address_connection_lines(&local.sdp),
+        "{}",
+        local.sdp
+    );
+    Ok(())
+}
