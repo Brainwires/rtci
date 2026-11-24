@@ -88,12 +88,17 @@ pub fn temporary_ipv6_addresses() -> Result<Vec<std::net::Ipv6Addr>, Error> {
 /// The local IPv6 addresses the operating system flags as RFC 4941 temporary addresses.
 ///
 /// macOS and iOS: the `SIOCGIFAFLAG_IN6` ioctl on each IPv6 address `getifaddrs` lists, as
-/// `ifconfig` asks for an address's flags (`IN6_IFF_TEMPORARY`, 0x80, in
-/// `netinet6/in6_var.h`). An address the kernel no longer has is skipped; any other refusal
+/// `ifconfig` asks for an address's flags. XNU `bsd/netinet6/in6_var.h`:
+/// `#define IN6_IFF_TEMPORARY       0x0080  /* temporary (anonymous) address. */` and
+/// `#define SIOCGIFAFLAG_IN6        _IOWR('i', 73, struct in6_ifreq)`. A hosted macOS runner
+/// showed the kernel takes the request (for `::1`); a temporary address was not observed
+/// there (it has none). An address the kernel no longer has is skipped; any other refusal
 /// is an error, so that a request the kernel does not take cannot pass for "no temporary
 /// address".
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn temporary_ipv6_addresses() -> Result<Vec<std::net::Ipv6Addr>, Error> {
+    // XNU bsd/netinet6/in6_var.h: "#define IN6_IFF_TEMPORARY 0x0080 /* temporary (anonymous)
+    // address. */"
     const IN6_IFF_TEMPORARY: libc::c_int = 0x0080;
     let mut out = Vec::new();
     for (address, flags) in ipv6_address_flags()? {

@@ -482,9 +482,9 @@ impl PeerDriver {
     /// (`RTCPeerConnection::set_temporary_ipv6_addresses`), so that
     /// `with_multicast_dns_expose_temporary_ipv6_addresses` can leave those unwrapped
     /// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3). Read from the interface list
-    /// at each gathering (`shared::ifaces::temporary_ipv6_addresses`: Linux, Android, macOS,
-    /// iOS and Windows report the flag); where it cannot be read, nothing is marked and every
-    /// address stays hidden.
+    /// at each gathering (`shared::ifaces::temporary_ipv6_addresses`: Linux, Android, macOS
+    /// and iOS report the flag; Windows and other systems mark nothing); where it cannot be
+    /// read, nothing is marked and every address stays hidden.
     fn mark_temporary_addresses(&mut self) {
         if self.pc.multicast_dns_mode() != MulticastDnsMode::QueryAndGather {
             return;

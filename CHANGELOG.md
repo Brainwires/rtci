@@ -315,8 +315,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`RTCPeerConnection::set_temporary_ipv6_addresses`, `Agent::set_temporary_ipv6_addresses`)
     go out as they are; an unmarked address stays hidden. `rtci-shared` has
     `ifaces::temporary_ipv6_addresses()` (Linux / Android `/proc/net/if_inet6`
-    `IFA_F_TEMPORARY`; macOS / iOS `SIOCGIFAFLAG_IN6` `IN6_IFF_TEMPORARY`; Windows
-    `GetAdaptersAddresses` suffix origin `IpSuffixOriginRandom`; elsewhere `Unsupported`), and
+    `IFA_F_TEMPORARY`; macOS / iOS `SIOCGIFAFLAG_IN6` `IN6_IFF_TEMPORARY`, not observed on a
+    runner; Windows and elsewhere `Unsupported`: on Windows no flag has been shown to tell a
+    temporary address from the stable one, so the setting has no effect there), and
     `rtci-stream-driver`'s `PeerDriver` marks its addresses from it at each gathering.
 
   What each exposes, and to whom: the first, an address the remote peer and the application

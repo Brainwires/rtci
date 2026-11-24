@@ -380,40 +380,28 @@ pub fn ifaces() -> Result<Vec<Interface>, ::std::io::Error> {
     }
 }
 
-/// `IpSuffixOriginRandom` of `NL_SUFFIX_ORIGIN`: "an anonymous IPv6 address where the host
-/// part of the address was generated randomly" (Microsoft's term for RFC 4941 temporary
-/// addresses).
-const IP_SUFFIX_ORIGIN_RANDOM: u32 = 5;
-
 /// The local IPv6 addresses the operating system reports as RFC 4941 temporary addresses:
-/// the unicast IPv6 addresses `GetAdaptersAddresses` lists with the suffix origin
-/// `IpSuffixOriginRandom` (deprecated ones left out, as `ifaces` leaves them).
+/// none, on Windows. Always `ErrorKind::Unsupported`, so nothing is marked and every address
+/// stays hidden behind its mDNS name.
+///
+/// Windows has no per-address "temporary" flag that has been shown to tell a temporary
+/// address from the stable one. `IP_ADAPTER_UNICAST_ADDRESS` (and `MIB_UNICASTIPADDRESS_ROW`)
+/// carry `PrefixOrigin`, `SuffixOrigin`, `DadState`, lifetimes, `Flags`
+/// (`IP_ADAPTER_ADDRESS_DNS_ELIGIBLE`, `IP_ADAPTER_ADDRESS_TRANSIENT`, a cluster address) and
+/// `SkipAsSource`. `SuffixOrigin` `IpSuffixOriginRandom` is documented for "an anonymous IPv6
+/// address", but Windows also builds its stable SLAAC address from a randomised interface
+/// identifier (`Randomize Identifiers: enabled` by default) and no source says which origin
+/// that one reports; lifetimes overlap (both follow the router advertisement, capped for
+/// temporary ones). A wrong guess would publish the stable address, so the flag is not read
+/// until the mapping is shown on a host with a real temporary address. The hosted runner
+/// could not show it: it has no global IPv6 address, no router advertisement and "Use
+/// Temporary Addresses: disabled" (`netsh interface ipv6 show privacy`); its link-local
+/// addresses, from randomised identifiers, report `SuffixOrigin` `Link`.
 pub fn temporary_ipv6_addresses() -> io::Result<Vec<std::net::Ipv6Addr>> {
-    let mut buffer = Vec::with_capacity(PREALLOC_ADAPTERS_LEN);
-    let mut out = Vec::new();
-    unsafe {
-        local_ifaces_with_buffer(&mut buffer)?;
-        let mut adapter_addr = buffer.as_ptr() as *const IpAdapterAddresses;
-        while !adapter_addr.is_null() {
-            let adapter = &*adapter_addr;
-            let mut unicast_addr = adapter.all.first_unicast_address;
-            while !unicast_addr.is_null() {
-                let unicast = &*unicast_addr;
-                // Read as the integer the OS wrote, not as the Rust enum.
-                let suffix_origin =
-                    *(&unicast.suffix_origin as *const IpSuffixOrigin as *const u32);
-                if unicast.dad_state != IpDadState::Deprecated
-                    && is_ipv6_enabled(unicast)
-                    && suffix_origin == IP_SUFFIX_ORIGIN_RANDOM
-                {
-                    out.push(*v6_socket_from_adapter(unicast).ip());
-                }
-                unicast_addr = unicast.next;
-            }
-            adapter_addr = adapter.all.next;
-        }
-    }
-    Ok(out)
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Windows reports no flag shown to tell a temporary IPv6 address from the stable one",
+    ))
 }
 
 unsafe fn is_ipv4_enabled(unicast_addr: &IpAdapterUnicastAddress) -> bool {

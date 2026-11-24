@@ -1775,6 +1775,12 @@ impl SettingEngineBuilder {
     /// list where it reports the flag). Off by default, in every behaviour profile; in the
     /// other mDNS modes it changes nothing.
     ///
+    /// Through `PeerDriver` it has an effect on Linux / Android (`IFA_F_TEMPORARY`, shown on
+    /// a runner) and macOS / iOS (`IN6_IFF_TEMPORARY`; the kernel request is shown to work, a
+    /// temporary address was not observed on a runner). **On Windows it has no effect**: no
+    /// address flag there has been shown to tell a temporary address from the stable one, so
+    /// the driver marks nothing and every address stays hidden.
+    ///
     /// draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3: "the [RFC4941] IPv6 addresses
     /// recommended for WebRTC have inherent privacy protections, namely a short lifetime and
     /// the lack of any stateful information. Accordingly, implementations MAY choose to not

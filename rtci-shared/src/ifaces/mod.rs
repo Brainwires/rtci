@@ -5,12 +5,13 @@ pub use ffi::ifaces;
 /// addresses, for an ICE agent that may leave them unwrapped by mDNS
 /// (draft-ietf-mmusic-mdns-ice-candidates section 3.1.2.3).
 ///
-/// Where it comes from: Linux and Android, `/proc/net/if_inet6` (`IFA_F_TEMPORARY`); macOS
-/// and iOS, the `SIOCGIFAFLAG_IN6` ioctl (`IN6_IFF_TEMPORARY`); Windows,
-/// `GetAdaptersAddresses`, an IPv6 unicast address whose suffix origin is
-/// `IpSuffixOriginRandom` (which Microsoft documents as "an anonymous IPv6 address where the
-/// host part of the address was generated randomly", its name for RFC 4941 addresses). Other
-/// systems: `ErrorKind::Unsupported`.
+/// Where it comes from: Linux and Android, `/proc/net/if_inet6` (`IFA_F_TEMPORARY`; shown on a
+/// hosted Linux runner with a kernel-made temporary address); macOS and iOS, the
+/// `SIOCGIFAFLAG_IN6` ioctl (`IN6_IFF_TEMPORARY`, from XNU's `netinet6/in6_var.h`; the request
+/// is shown to be taken, a temporary address was not observed on a runner). Windows:
+/// `ErrorKind::Unsupported`, no address is ever marked (no flag shown to tell a temporary
+/// address from the stable one, see the Windows implementation). Other systems:
+/// `ErrorKind::Unsupported`.
 ///
 /// # Errors
 ///
@@ -63,6 +64,19 @@ fe80000000000000021122fffe334455 02 40 20 80     eth0
         );
     }
 
+    /// Windows marks nothing: no flag there has been shown to tell a temporary address from
+    /// the stable one, and a wrong guess would publish the stable address.
+    #[test]
+    fn windows_marks_no_address_temporary() {
+        let result = temporary_ipv6_addresses();
+        if cfg!(windows) {
+            assert!(
+                matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::Unsupported),
+                "{result:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_temporary_addresses_the_system_reports_are_among_its_interface_addresses() {
         let temporary = match temporary_ipv6_addresses() {
@@ -70,7 +84,12 @@ fe80000000000000021122fffe334455 02 40 20 80     eth0
             // Not read on this system: nothing is marked.
             // (On macOS this is where a wrong `SIOCGIFAFLAG_IN6` request would show: the
             // kernel refuses it for the host's loopback `::1` at least.)
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                if cfg!(any(target_os = "linux", target_os = "macos")) {
+                    panic!("the flags are read on this system: {e}");
+                }
+                return;
+            }
             Err(e) => panic!("temporary_ipv6_addresses failed: {e}"),
         };
         let all: Vec<::std::net::IpAddr> = ifaces()
