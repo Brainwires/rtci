@@ -617,10 +617,15 @@ impl Interceptor for RetransmissionsMade {
 fn a_retransmission_waiting_in_the_pacer_is_not_made_again() {
     let base = Instant::now();
     let made = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // No queue time bound: the queue here never makes the pacer pause the source (which would
+    // hand the responder a target to hold the retransmissions to) or drop anything.
     let mut chain = Registry::new()
         .with(
             Slot::Pacer,
-            PacerBuilder::new().with_target_bitrate(12_000.0).build(),
+            PacerBuilder::new()
+                .with_target_bitrate(12_000.0)
+                .with_queue_time_limit(None)
+                .build(),
         )
         .with(
             Slot::from(3_500),
