@@ -45,7 +45,9 @@ fn a_channel_closed_by_the_receiver_takes_no_message_of_another_channel_with_it(
         let (l_offerer, l_answerer) = open(&mut p, "l")?;
         let (m_offerer, m_answerer) = open(&mut p, "m")?;
         // As an application does: a datagram whose handling fails is logged and the next one
-        // read. The test counts what the application receives, not whether an error came back.
+        // read, so what is checked is what the application receives. (With the defect the
+        // failed read of the closed stream also comes out of `handle_timeout`, whose drain is
+        // the same, and the run stops there with `ErrStreamClosed`.)
         p.answerer.tolerate_read_errors = true;
 
         p.answerer
