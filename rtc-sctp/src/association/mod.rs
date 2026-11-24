@@ -3702,6 +3702,15 @@ impl Association {
             return;
         }
         if let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+            if s.reads_stopped {
+                // The application closed the stream: nothing will read this. Its TSN stays
+                // acknowledged.
+                trace!(
+                    "[{}] dropping DATA tsn={} of stream {}, which is no longer read",
+                    self.side, d.tsn, d.stream_identifier
+                );
+                return;
+            }
             self.events.push_back(Event::DatagramReceived);
             let bytes_before = s.get_num_bytes_in_reassembly_queue();
             let orphans_before = s.reassembly_queue.orphans_dropped;

@@ -413,6 +413,12 @@ impl Stream<'_> {
         }
 
         if reset {
+            // Nothing reads the stream from now on: what it holds, and what still arrives on it
+            // until the peer resets its direction, is abandoned. Held, it would take the
+            // receive window for good (a peer that sends the data it had queued on the stream
+            // before its reset, as RFC 6525 5.1.2 A3 asks, could fill it and never send that
+            // reset), and hold the peer's reset "In progress" (`streams_awaiting_drain`).
+            self.abandon_incoming();
             // Reset the outgoing stream
             // https://tools.ietf.org/html/rfc6525
             self.association
@@ -420,6 +426,24 @@ impl Stream<'_> {
         }
 
         Ok(())
+    }
+
+    /// Drops what the stream holds of incoming data, and what arrives on it from now on.
+    fn abandon_incoming(&mut self) {
+        let id = self.stream_identifier;
+        let Some(s) = self.association.streams.get_mut(&id) else {
+            return;
+        };
+        s.reads_stopped = true;
+        let bytes_before = s.get_num_bytes_in_reassembly_queue();
+        if s.reassembly_queue.is_empty() {
+            return;
+        }
+        let mut emptied = ReassemblyQueue::new(id);
+        emptied.interleaved = s.reassembly_queue.interleaved;
+        s.reassembly_queue = emptied;
+        self.association.reindex_stream(id, bytes_before);
+        self.association.on_receive_buffer_drained();
     }
 
     /// finish closes the write-direction of the stream.
@@ -627,6 +651,10 @@ pub struct StreamState {
     /// A reset of this outgoing stream was asked for and is not answered yet (RFC 6525
     /// 5.1.2 A1).
     pub(crate) outgoing_reset_pending: bool,
+    /// The application stopped reading the stream (`Stream::stop`, `Stream::close`): what
+    /// arrives on it is dropped, since nothing will read it (RFC 8831 6.7: the messages of a
+    /// closed channel are "delivered (or abandoned)").
+    pub(crate) reads_stopped: bool,
     /// The messages written while the reset is pending, each as its fragments, without a
     /// Stream Sequence Number.
     pub(crate) held_writes: Vec<Vec<ChunkPayloadData>>,
@@ -659,6 +687,7 @@ impl StreamState {
             buffered_amount_low: 0,
             buffered_amount_high: u32::MAX as usize,
             outgoing_reset_pending: false,
+            reads_stopped: false,
             held_writes: vec![],
             ordered_mid: 0,
             unordered_mid: 0,

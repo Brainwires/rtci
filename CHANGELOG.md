@@ -894,10 +894,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `fragments_out_of_order_are_not_taken_for_orphans`). Whole messages such a peer sends
     after its reset with the old numbers cannot be told from the next channel's own and are
     not caught.
-  - Receiver: a complete message on a stream this side has closed (`Stream::close`, the close
-    of a data channel) no longer holds the peer's reset "In progress": nothing can read it, so
-    the close never completed, the stream id was never freed and its bytes never left the
-    window. It is abandoned with the stream (RFC 8831 6.7, "delivered (or abandoned)").
+  - Receiver: what arrives on a stream this side has closed (`Stream::stop` / `Stream::close`,
+    the close of a data channel) is dropped, acknowledged, and what it held is dropped at the
+    close: nothing can read it. Held, it took the receive window for good, so a peer sending
+    the data it had queued before its reset could fill the window and never send that reset,
+    and a complete message held the peer's reset "In progress": the close never completed and
+    the stream id was never freed (`a_channel_opened_on_the_stream_of_one_just_closed_gets_every_message`).
+    It is abandoned with the stream (RFC 8831 6.7, "delivered (or abandoned)"; W3C webrtc-pc
+    fires no message on a channel that is closing).
   - Tests: the reported run pinned (`a_channel_reopened_on_a_reset_stream_gets_every_message`),
     a 96-run close/reopen sweep (where the close falls, DATA or I-DATA, ordered or unordered,
     whole or in parts, send backlog, clean or lossy and reordering link;
