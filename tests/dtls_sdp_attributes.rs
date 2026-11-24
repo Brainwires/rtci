@@ -16,9 +16,9 @@ use anyhow::Result;
 use dtls_sdp_common::{
     Peer, World, attribute_values, keep, replace_lines, session_part, with_session_line,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::{RTCDtlsRole, RTCDtlsTransportState};
 use std::time::Instant;
 
 fn world() -> Result<World> {

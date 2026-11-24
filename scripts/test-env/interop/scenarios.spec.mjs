@@ -1,4 +1,4 @@
-// Browser <-> webrtc-rs-rtc interop beyond plain media and data: Cryptex, loss recovery with a
+// Browser <-> rtci interop beyond plain media and data: Cryptex, loss recovery with a
 // browser sender, TURN relay, ICE-TCP, the browser as the answerer, transceiver stop and m-line
 // reuse, direction changes, rollback and glare, large messages, a wrong fingerprint either way,
 // simulcast with RTX, the browser's getStats() against the Rust side's counters, and a

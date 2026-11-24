@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
+/// use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCRtcpMuxPolicy};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Recommended: Require RTCP multiplexing

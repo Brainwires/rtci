@@ -19,12 +19,12 @@ mod dc_common;
 use anyhow::{Result, ensure};
 use bytes::BytesMut;
 use dc_common::Pair;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::time::{Duration, Instant};
 
 /// The receiver's SCTP receive buffer: small, so that the window closes after a few dozen

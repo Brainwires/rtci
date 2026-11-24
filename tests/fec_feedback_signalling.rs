@@ -8,14 +8,14 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC, MIME_TYPE_FLEX_FEC03, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 
 fn codec(mime_type: &str, fmtp: &str, payload_type: u8) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {

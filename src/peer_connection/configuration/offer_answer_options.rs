@@ -7,7 +7,7 @@
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::RTCAnswerOptions;
+/// use rtci::peer_connection::configuration::RTCAnswerOptions;
 ///
 /// let options = RTCAnswerOptions {
 ///     voice_activity_detection: Some(true),
@@ -32,7 +32,7 @@ pub struct RTCAnswerOptions {
 /// # Examples
 ///
 /// ```
-/// use rtc::peer_connection::configuration::RTCOfferOptions;
+/// use rtci::peer_connection::configuration::RTCOfferOptions;
 ///
 /// // Create offer with ICE restart
 /// let options = RTCOfferOptions {

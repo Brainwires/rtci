@@ -1,9 +1,9 @@
 # Benchmarking against a pre-migration baseline
 
-How the before/after figures in `rtc-srtp/benches/README.md`, `rtc-dtls/benches/README.md`, and
-`rtc-stun/benches/README.md` were produced, and how to reproduce or extend them.
+How the before/after figures in `rtci-srtp/benches/README.md`, `rtci-dtls/benches/README.md`, and
+`rtci-stun/benches/README.md` were produced, and how to reproduce or extend them.
 
-The G3 crypto migration moved every cryptographic operation behind `rtc-crypto`. That is a
+The G3 crypto migration moved every cryptographic operation behind `rtci-crypto`. That is a
 performance-sensitive change on paths that run per packet, so each affected crate was measured
 against the last commit before *its own* migration. Three real regressions were found this way and
 none of them were visible from code review.
@@ -24,7 +24,7 @@ none of them were visible from code review.
 **Both sides must be measured on the same machine, in the same session, with the same criterion
 settings.** Everything else in this document is detail.
 
-This is not a formality. `rtc-srtp/benches/README.md` previously carried results from a MacBook
+This is not a formality. `rtci-srtp/benches/README.md` previously carried results from a MacBook
 Air M3 showing `Encrypt/RTP` at 5.69 µs. The post-migration figure on an M1 Max was 4.95 µs.
 Comparing those two numbers says performance *improved*. Measuring the actual baseline on the same
 M1 Max gave 1.73 µs — a 2.9x regression. The stale cross-machine figure did not merely add noise,
@@ -39,24 +39,24 @@ each crate moved in a different phase, and an earlier commit drags in unrelated 
 
 | Crate | Migrated in | Baseline commit | Baseline is |
 |---|---|---|---|
-| `rtc-stun` | P2 `f8298ce` | `b8bb313` | P1 — rtc-crypto exists, STUN not yet using it |
-| `rtc-srtp` | P4 `fd81f68` | `425494c` | P3 |
-| `rtc-dtls` | P5 `219788a` | `fd81f68` | P4 |
+| `rtci-stun` | P2 `f8298ce` | `b8bb313` | P1 — rtci-crypto exists, STUN not yet using it |
+| `rtci-srtp` | P4 `fd81f68` | `425494c` | P3 |
+| `rtci-dtls` | P5 `219788a` | `fd81f68` | P4 |
 
 Verify a baseline before trusting it:
 
 ```bash
-# The crate must not yet depend on rtc-crypto at the baseline.
+# The crate must not yet depend on rtci-crypto at the baseline.
 for c in 425494c HEAD; do
-  echo "${c}: $(git show "${c}:rtc-srtp/Cargo.toml" | grep -cE '^crypto[ .=]')"
+  echo "${c}: $(git show "${c}:rtci-srtp/Cargo.toml" | grep -cE '^crypto[ .=]')"
 done
 # 425494c: 0    <- baseline, not yet migrated
 # HEAD:     1
 ```
 
 Match the dependency line, not the word. A bare `grep -c crypto` returns 1 even at the baseline,
-because `rtc-shared` is pulled in with `features = ["crypto", …]` — that is `rtc-shared`'s own
-feature gate, not the `rtc-crypto` crate. Anchoring to `^crypto[ .=]` matches only the dependency
+because `rtci-shared` is pulled in with `features = ["crypto", …]` — that is `rtci-shared`'s own
+feature gate, not the `rtci-crypto` crate. Anchoring to `^crypto[ .=]` matches only the dependency
 entry.
 
 In zsh, write `"${c}:path"` and not `"$c:path"`: `$c:r` is parsed as a history modifier and
@@ -70,13 +70,13 @@ code under test. Used for **SRTP** and **STUN**.
 **1. Confirm the benchmark exists and is unchanged.**
 
 ```bash
-git cat-file -e 425494c:rtc-srtp/benches/bench.rs && echo present
+git cat-file -e 425494c:rtci-srtp/benches/bench.rs && echo present
 
 # Byte-compare the region you intend to compare. For SRTP the first 151 lines — the four
 # original Encrypt/Decrypt RTP/RTCP benchmarks and their key constants — are identical between
 # the baseline and today; everything added later sits after them.
-git show 425494c:rtc-srtp/benches/bench.rs > /tmp/base_bench.rs
-diff <(sed -n '1,151p' /tmp/base_bench.rs) <(sed -n '1,151p' rtc-srtp/benches/bench.rs)
+git show 425494c:rtci-srtp/benches/bench.rs > /tmp/base_bench.rs
+diff <(sed -n '1,151p' /tmp/base_bench.rs) <(sed -n '1,151p' rtci-srtp/benches/bench.rs)
 ```
 
 If that diff is empty, the comparison is sound. If the benchmark changed for reasons unrelated to
@@ -89,9 +89,9 @@ unavoidable and is exactly the migration being measured. Keep every other input 
 **2. Create a worktree and run it.**
 
 ```bash
-git worktree add /tmp/rtc-srtp-base 425494c
-cd /tmp/rtc-srtp-base
-cargo bench -p rtc-srtp --bench bench -- --warm-up-time 2 --measurement-time 5
+git worktree add /tmp/rtci-srtp-base 425494c
+cd /tmp/rtci-srtp-base
+cargo bench -p rtci-srtp --bench bench -- --warm-up-time 2 --measurement-time 5
 ```
 
 A worktree gets its own `target/`, so the two builds do not share artifacts. Do not set a shared
@@ -101,7 +101,7 @@ A worktree gets its own `target/`, so the two builds do not share artifacts. Do 
 
 ```bash
 cd /path/to/rtc
-cargo bench -p rtc-srtp --bench bench -- --warm-up-time 2 --measurement-time 5
+cargo bench -p rtci-srtp --bench bench -- --warm-up-time 2 --measurement-time 5
 ```
 
 **4. Repeat the baseline and quote a representative run, not the fastest.** Three independent runs
@@ -113,7 +113,7 @@ the range, and treat anything inside ±3% here as parity.
 **5. Remove the worktree.**
 
 ```bash
-cd /path/to/rtc && git worktree remove /tmp/rtc-srtp-base --force
+cd /path/to/rtc && git worktree remove /tmp/rtci-srtp-base --force
 ```
 
 ## Procedure B — no benchmark exists at the baseline
@@ -144,7 +144,7 @@ the good failure mode.
 **4. Add the harness plumbing to the worktree**, since it will not be there:
 
 ```toml
-# rtc-dtls/Cargo.toml in the worktree
+# rtci-dtls/Cargo.toml in the worktree
 [dev-dependencies]
 criterion.workspace = true
 
@@ -237,7 +237,7 @@ here.
 output separately gives real diagnostics from the first and an empty second. Capture one run to a
 file and derive every count from that file.
 
-**zsh eats `:r` in a revision string.** `git show "$c:rtc-srtp/Cargo.toml"` parses `$c:r` as a
+**zsh eats `:r` in a revision string.** `git show "$c:rtci-srtp/Cargo.toml"` parses `$c:r` as a
 history modifier and looks up `425494ctc-srtp/Cargo.toml`. Use `"${c}:path"`.
 
 **zsh does not word-split unquoted variables.** `F="--no-default-features --features crypto-ring"; cargo build $F` passes one bogus argument. This produced four false "failures" in a feature-matrix loop.

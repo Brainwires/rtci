@@ -19,20 +19,20 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use rtc::data_channel::RTCDataChannelId;
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::mdns::{MDNS_PORT, MulticastSocket};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
-use rtc::peer_connection::state::RTCIceConnectionState;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
-use rtc::peer_connection::{RTCPeerConnection as RtcPeerConnection, RTCPeerConnectionBuilder};
+use rtci::data_channel::RTCDataChannelId;
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::mdns::{MDNS_PORT, MulticastSocket};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::state::RTCIceConnectionState;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
+use rtci::peer_connection::{RTCPeerConnection as RtcPeerConnection, RTCPeerConnectionBuilder};
 
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -92,7 +92,7 @@ fn query_and_gather_bind_ip() -> std::net::IpAddr {
 fn mdns_egress_ip() -> Option<std::net::IpAddr> {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
-            socket.connect((rtc::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT))?;
+            socket.connect((rtci::mdns::MDNS_MULTICAST_IPV4, MDNS_PORT))?;
             socket.local_addr()
         })
         .ok()
@@ -192,8 +192,8 @@ fn create_rtc_peer_with_mdns(
 /// candidates, with the addresses resolved `.local` names became, and its pairs with their
 /// states), so that a failure on a CI runner says which side of the mDNS exchange did not happen.
 fn timed_out(rtc_pc: &mut RtcPeerConnection) -> anyhow::Error {
-    use rtc::statistics::StatsSelector;
-    use rtc::statistics::report::RTCStatsReportEntry;
+    use rtci::statistics::StatsSelector;
+    use rtci::statistics::report::RTCStatsReportEntry;
     let report = rtc_pc.get_stats(Instant::now(), StatsSelector::None);
     let mut lines = Vec::new();
     for entry in report.iter() {
@@ -443,8 +443,9 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
         .expect("local description should be set");
 
     // Convert to RTC SDP
-    let rtc_offer =
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_with_candidates.sdp.clone())?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(
+        offer_with_candidates.sdp.clone(),
+    )?;
 
     // Create RTC peer (answerer) with QueryOnly mode
     let pc_socket = UdpSocket::bind("127.0.0.1:0").await?;
@@ -471,7 +472,7 @@ async fn test_mdns_query_only_webrtc_offerer_rtc_answerer() -> Result<()> {
     }
     .new_candidate_host()?;
     let local_candidate_init =
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
     rtc_pc.add_local_candidate(local_candidate_init)?;
 
     // Create answer
@@ -603,8 +604,9 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
         .await
         .expect("local description should be set");
 
-    let rtc_offer =
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_with_candidates.sdp.clone())?;
+    let rtc_offer = rtci::peer_connection::sdp::RTCSessionDescription::offer(
+        offer_with_candidates.sdp.clone(),
+    )?;
 
     // Create RTC peer with QueryAndGather mode
     let pc_socket = UdpSocket::bind((query_and_gather_bind_ip(), 0)).await?;
@@ -632,7 +634,7 @@ async fn test_mdns_query_and_gather_webrtc_offerer_rtc_answerer() -> Result<()> 
     }
     .new_candidate_host()?;
     let local_candidate_init =
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
     rtc_pc.add_local_candidate(local_candidate_init)?;
 
     let answer = rtc_pc.create_answer(None)?;
@@ -740,7 +742,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
     }
     .new_candidate_host()?;
     let local_candidate_init =
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
     rtc_pc.add_local_candidate(local_candidate_init)?;
 
     // Create offer
@@ -811,7 +813,7 @@ async fn test_mdns_query_only_rtc_offerer_webrtc_answerer() -> Result<()> {
         .expect("local description should be set");
 
     // Set answer on RTC
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
     rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
@@ -919,7 +921,7 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
     }
     .new_candidate_host()?;
     let local_candidate_init =
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
     rtc_pc.add_local_candidate(local_candidate_init)?;
 
     // Create offer
@@ -986,7 +988,7 @@ async fn test_mdns_query_and_gather_rtc_offerer_webrtc_answerer() -> Result<()> 
         .await
         .expect("local description should be set");
 
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
     rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;

@@ -30,7 +30,7 @@ From the pion/turn repository:
 
 ### Run trickle-ice-relay
 
-From the `rtc` directory, execute:
+From the `rtci` directory, execute:
 
 ```bash
 cargo run --example trickle-ice-relay

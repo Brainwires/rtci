@@ -7,7 +7,7 @@
 //! `Rc` times (RFC 8445 section 14.3, RFC 8489 section 6.2.1), consent expires only after 30 s
 //! without a response (RFC 7675 section 5.1), DTLS retransmits its flights (RFC 6347
 //! section 4.2.4) and SCTP its chunks (RFC 9260 section 6.3). These tests run the whole stack
-//! (ICE, DTLS, SCTP, the data channel) between two `rtc` peers on a simulated network in
+//! (ICE, DTLS, SCTP, the data channel) between two `rtci` peers on a simulated network in
 //! virtual time, dropping a fixed share of datagrams in each direction and delaying each one by
 //! a random amount (so datagrams also overtake each other), with fixed seeds: the same run
 //! every time, on every platform.
@@ -61,20 +61,20 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::ice::FailedNomination;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
-use rtc::peer_connection::transport::{
+use rtci::crypto::{CryptoError, RTCCrypto, RTCCryptoProvider, RTCRandom, default_provider};
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::ice::FailedNomination;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

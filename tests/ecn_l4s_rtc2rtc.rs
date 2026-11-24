@@ -11,36 +11,36 @@
 //! marking back in RFC 8888 feedback, and the sender turns the reports into remote-inbound
 //! statistics (marks, losses, recoveries, bleached ECT(1)).
 //!
-//! Two `rtc` peers on a simulated network that can mark CE, bleach ECT(1), delay and drop
+//! Two `rtci` peers on a simulated network that can mark CE, bleach ECT(1), delay and drop
 //! packets; virtual time, no sockets.
 
 mod jsep_common;
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
-use rtc::interceptor::{EcnFailure, EcnInitiation, Registry};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::{EcnFailure, EcnInitiation, Registry};
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::{
     configure_congestion_control_feedback, configure_nack, configure_rtcp_reports,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::{EcnCodepoint, TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::{EcnCodepoint, TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -384,7 +384,7 @@ impl World {
         world.peers[1]
             .pc
             .set_local_description(now, answer.clone())?;
-        let answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(edit(answer.sdp))?;
+        let answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(edit(answer.sdp))?;
         world.peers[0].pc.set_remote_description(now, answer)?;
         for i in 0..2 {
             let candidate = world.peers[i].candidate()?;
@@ -454,8 +454,8 @@ impl World {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
-                        header: rtc::rtp::header::Header {
+                    rtci::rtp::Packet {
+                        header: rtci::rtp::header::Header {
                             version: 2,
                             payload_type: VP8_PT,
                             sequence_number: FIRST_SEQ.wrapping_add(n),
@@ -1090,7 +1090,7 @@ fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
     let refused = pc
         .set_remote_description(
             Instant::now(),
-            rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(Some("rtp")))?,
+            rtci::peer_connection::sdp::RTCSessionDescription::offer(offer(Some("rtp")))?,
         )
         .expect_err("bundled sections with different a=ecn-capable-rtp values");
     assert!(refused.to_string().contains("ecn-capable-rtp"), "{refused}");
@@ -1098,7 +1098,7 @@ fn a_bundle_group_answers_one_initiation_method() -> Result<()> {
     let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
     pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer(None))?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(offer(None))?,
     )?;
     let answer = pc.create_answer(None)?.sdp;
     let methods: Vec<&str> = answer
@@ -1130,7 +1130,7 @@ fn a_section_without_the_feedback_profile_is_answered_without_ecn() -> Result<()
     let mut pc = Peer::new("10.0.0.5:5000", ECN_CCFB)?.pc;
     pc.set_remote_description(
         Instant::now(),
-        rtc::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
+        rtci::peer_connection::sdp::RTCSessionDescription::offer(offer)?,
     )?;
     let answer = pc.create_answer(None)?.sdp;
     let sections: Vec<&str> = answer.split("\r\nm=").skip(1).collect();

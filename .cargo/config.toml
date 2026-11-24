@@ -8,8 +8,8 @@
 # pure-software constant-time backends, which measured ~13x slower for AES-GCM /
 # AES-CM on Apple silicon locally.
 #
-# The AES-GCM AEAD itself now runs on `ring` (see rtc-srtp/.../cipher_aead_aes_gcm.rs
-# and rtc-dtls/src/crypto/crypto_gcm.rs) and is unaffected by these flags; they
+# The AES-GCM AEAD itself now runs on `ring` (see rtci-srtp/.../cipher_aead_aes_gcm.rs
+# and rtci-dtls/src/crypto/crypto_gcm.rs) and is unaffected by these flags; they
 # accelerate the paths that stay on RustCrypto: SRTP AES-CM-HMAC-SHA1, DTLS
 # AES-CCM / AES-CBC, and the SRTP key-derivation AES.
 #

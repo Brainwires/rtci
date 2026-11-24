@@ -4,12 +4,12 @@
 //! in what order — so what is worth checking is that it composes at all, with either feedback
 //! format and with an estimator the application brought itself.
 
-use rtc::interceptor::{ConstantBitrate, Gcc, Registry, Slot};
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::{ConstantBitrate, Gcc, Registry, Slot};
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::remote_bitrate_limit::REMOTE_BITRATE_LIMIT_SLOT;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::remote_bitrate_limit::REMOTE_BITRATE_LIMIT_SLOT;
 
 /// The estimator seam is what #840's second requirement asks for: an application supplies its own,
 /// and it drives the same machinery `Gcc` does.
@@ -87,12 +87,12 @@ fn rfc8888_is_selectable() {
 /// the pacer's own 1 Mbit/s default.
 #[test]
 fn the_helper_paces_at_the_estimators_starting_rate() {
-    use rtc::interceptor::{
+    use rtci::interceptor::{
         AttributedPacket, BandwidthEstimator, Interceptor, Packet, StreamInfo, TaggedPacket,
     };
-    use rtc::sansio::Protocol;
-    use rtc::shared::TransportContext;
-    use rtc::shared::marshal::MarshalSize;
+    use rtci::sansio::Protocol;
+    use rtci::shared::TransportContext;
+    use rtci::shared::marshal::MarshalSize;
     use std::time::{Duration, Instant};
 
     let gcc = Gcc::default();
@@ -122,8 +122,8 @@ fn the_helper_paces_at_the_estimators_starting_rate() {
             .handle_write(TaggedPacket {
                 now: epoch,
                 transport: TransportContext::default(),
-                message: AttributedPacket::new(Packet::Rtp(rtc::rtp::packet::Packet {
-                    header: rtc::rtp::header::Header {
+                message: AttributedPacket::new(Packet::Rtp(rtci::rtp::packet::Packet {
+                    header: rtci::rtp::header::Header {
                         version: 2,
                         payload_type: 96,
                         sequence_number,

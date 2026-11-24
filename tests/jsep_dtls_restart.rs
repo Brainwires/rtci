@@ -19,8 +19,8 @@ mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World, replace_lines};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 /// A (peer 0) and B (peer 1) connected, A having offered; B allows a new association without
 /// an ICE restart when `b_allows` is set.

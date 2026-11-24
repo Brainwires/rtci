@@ -6,9 +6,9 @@
 //! channel negotiated onto a stream in use has to fail: it used to take the stream over.
 
 use anyhow::Result;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::shared::error::Error;
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::shared::error::Error;
 use std::time::Instant;
 
 #[test]

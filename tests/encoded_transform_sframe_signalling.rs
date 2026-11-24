@@ -8,10 +8,10 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, media_sections, video_track};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::rtp_transceiver::RTCRtpTransceiverId;
-use rtc::shared::error::Error;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::rtp_transceiver::RTCRtpTransceiverId;
+use rtci::shared::error::Error;
 
 fn has_sframe(sdp: &str) -> bool {
     media_sections(sdp)[0].iter().any(|l| l == "a=sframe")
@@ -131,8 +131,8 @@ fn an_answer_without_sframe_stops_the_offerers_media() -> TestResult {
     assert!(offerer.rtp_transceiver(id).expect("t").sframe_refused());
     let refused = offerer.rtp_sender(sender).expect("sender").write_rtp(
         Instant::now(),
-        rtc::rtp::Packet {
-            header: rtc::rtp::header::Header {
+        rtci::rtp::Packet {
+            header: rtci::rtp::header::Header {
                 version: 2,
                 ssrc: 0x0e03_0101,
                 ..Default::default()

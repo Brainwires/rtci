@@ -15,12 +15,12 @@ mod common;
 
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 

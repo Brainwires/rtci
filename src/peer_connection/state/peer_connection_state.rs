@@ -38,8 +38,8 @@ use std::fmt;
 /// ## Monitoring Overall Connection State
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCPeerConnectionState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCPeerConnectionState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -74,7 +74,7 @@ use std::fmt;
 /// ## Checking if Connection is Active
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCPeerConnectionState;
+/// use rtci::peer_connection::state::RTCPeerConnectionState;
 ///
 /// fn is_connected(state: RTCPeerConnectionState) -> bool {
 ///     matches!(state, RTCPeerConnectionState::Connected)
@@ -92,7 +92,7 @@ use std::fmt;
 /// ## String Conversion
 ///
 /// ```
-/// use rtc::peer_connection::state::RTCPeerConnectionState;
+/// use rtci::peer_connection::state::RTCPeerConnectionState;
 ///
 /// // Convert to string
 /// let state = RTCPeerConnectionState::Connected;
@@ -106,8 +106,8 @@ use std::fmt;
 /// ## Handling Disconnections
 ///
 /// ```no_run
-/// use rtc::peer_connection::state::RTCPeerConnectionState;
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCPeerConnectionState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
 ///
 /// # fn handle_disconnection(event: RTCPeerConnectionEvent) {
 /// match event {

@@ -1,6 +1,6 @@
 //! The answerer of an ICE restart: the local candidates it is given between applying the
 //! remote restart offer (`set_remote_description`) and applying its answer
-//! (`set_local_description`) are the new generation's, between two `rtc` peers on an in-memory
+//! (`set_local_description`) are the new generation's, between two `rtci` peers on an in-memory
 //! network and a virtual clock.
 //!
 //! The engine announces them with the new username fragment (`OnIceCandidateEvent`, W3C
@@ -20,10 +20,10 @@
 //! (RFC 8838 section 13, a rule of that session, not of the one the restart begins).
 
 use anyhow::Result;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::sansio::Protocol;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::sansio::Protocol;
 
 mod dtls_sdp_common;
 use dtls_sdp_common::{Peer, World};

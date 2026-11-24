@@ -5,7 +5,7 @@
 //! The peer connection writes each as a control message into its interceptor chain. A probe
 //! at the application end of the chain records what is written, before the RTCP session, the
 //! bitrate limit and the NACK interceptors take it; what those do with it is tested where they
-//! live (`rtc-interceptor/tests/rtcp_session_*.rs`, `nack_control_rtx_time.rs`,
+//! live (`rtci-interceptor/tests/rtcp_session_*.rs`, `nack_control_rtx_time.rs`,
 //! `configuration/remote_bitrate_limit.rs`).
 
 mod jsep_common;
@@ -15,24 +15,24 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use jsep_common::{TestResult, media_sections, video_track};
-use rtc::interceptor::{
+use rtci::interceptor::{
     Gcc, Interceptor, NackControl, Registry, RtcpBandwidth, RtcpSessionControl, Slot, StreamInfo,
     TaggedPacket,
 };
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::remote_bitrate_limit::RemoteBitrateLimit;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::configuration::remote_bitrate_limit::RemoteBitrateLimit;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Control {
@@ -238,8 +238,8 @@ fn negotiate(
 fn add_media(pc: &mut RTCPeerConnection) -> TestResult {
     pc.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit {
-            direction: rtc::rtp_transceiver::RTCRtpTransceiverDirection::Recvonly,
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit {
+            direction: rtci::rtp_transceiver::RTCRtpTransceiverDirection::Recvonly,
             streams: vec![],
             send_encodings: vec![],
         }),
@@ -452,7 +452,7 @@ fn the_nack_interceptors_are_told_the_rtx_time_of_each_description() -> TestResu
 /// after joining the session and SHOULD be sent regularly thereafter"; RFC 8852 sections 3.1
 /// and 3.2 for the rids. Each SSRC the sender sends on (its RTX one included) is handed to the
 /// RTCP session with the mid of its m= section; what the session writes is tested in
-/// `rtc-interceptor/tests/rtcp_session_reports.rs`.
+/// `rtci-interceptor/tests/rtcp_session_reports.rs`.
 #[test]
 fn the_rtcp_session_is_told_the_mid_of_each_sent_stream() -> TestResult {
     let (mut a, seen_a) = peer("apt=96", None)?;

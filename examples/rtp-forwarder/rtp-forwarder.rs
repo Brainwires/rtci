@@ -3,31 +3,31 @@ use bytes::BytesMut;
 use clap::Parser;
 use env_logger::Target;
 use log::{debug, error, trace};
-use rtc::interceptor::{Attribute, Interceptor, Packet, StreamInfo, TaggedPacket};
-use rtc::interceptor::{Registry, Slot};
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::interceptor::{Attribute, Interceptor, Packet, StreamInfo, TaggedPacket};
+use rtci::interceptor::{Registry, Slot};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
-use rtc::peer_connection::message::TaggedRTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
-use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::marshal::Marshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCTrackEvent;
+use rtci::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtci::peer_connection::message::TaggedRTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
+use rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::marshal::Marshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -92,7 +92,7 @@ pub struct RtcpForwarderInterceptor {
 }
 
 /// Whether an RTCP packet is a request for a keyframe.
-fn is_keyframe_request(packet: &Box<dyn rtc::rtcp::Packet>) -> bool {
+fn is_keyframe_request(packet: &Box<dyn rtci::rtcp::Packet>) -> bool {
     let payload = packet.as_any();
     payload.is::<PictureLossIndication>() || payload.is::<FullIntraRequest>()
 }
@@ -106,7 +106,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for RtcpForwarderInterceptor {
 
     fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
         if let Packet::Rtcp(packets) = &msg.message.packet {
-            let requests: Vec<Box<dyn rtc::rtcp::Packet>> = packets
+            let requests: Vec<Box<dyn rtci::rtcp::Packet>> = packets
                 .iter()
                 .filter(|packet| is_keyframe_request(packet))
                 .cloned()
@@ -238,7 +238,7 @@ async fn run_peer_connection(
     // Register VP8 codec for video
     media_engine.register_codec(
         RTCRtpCodecParameters {
-            rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+            rtp_codec: rtci::rtp_transceiver::rtp_sender::RTCRtpCodec {
                 mime_type: MIME_TYPE_VP8.to_string(),
                 clock_rate: 90000,
                 channels: 0,
@@ -253,7 +253,7 @@ async fn run_peer_connection(
     // Register Opus codec for audio
     media_engine.register_codec(
         RTCRtpCodecParameters {
-            rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+            rtp_codec: rtci::rtp_transceiver::rtp_sender::RTCRtpCodec {
                 mime_type: MIME_TYPE_OPUS.to_string(),
                 clock_rate: 48000,
                 channels: 2,
@@ -295,11 +295,11 @@ async fn run_peer_connection(
     // Add transceivers for receiving audio and video
     peer_connection.add_transceiver_from_kind(
         RtpCodecKind::Audio,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     peer_connection.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
 
     peer_connection.set_remote_description(Instant::now(), offer)?;
@@ -403,7 +403,10 @@ async fn run_peer_connection(
         // Poll for incoming RTP/RTCP packets from tracks
         while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
-                rtc::peer_connection::message::RTCMessage::RtpPacket(_track_id, mut rtp_packet) => {
+                rtci::peer_connection::message::RTCMessage::RtpPacket(
+                    _track_id,
+                    mut rtp_packet,
+                ) => {
                     // Determine which socket to forward to based on payload type
 
                     let kind = ssrc2kind
@@ -431,7 +434,7 @@ async fn run_peer_connection(
                         }
                     }
                 }
-                rtc::peer_connection::message::RTCMessage::RtcpPacket(track_id, rtcp_packets) => {
+                rtci::peer_connection::message::RTCMessage::RtcpPacket(track_id, rtcp_packets) => {
                     // The forwarder passes nothing but keyframe requests, so anything arriving
                     // here is a viewer asking for one. A real forwarder would relay it to
                     // whoever is publishing the stream; this one has only the publisher it is
@@ -442,7 +445,7 @@ async fn run_peer_connection(
                         track_id
                     );
                 }
-                rtc::peer_connection::message::RTCMessage::DataChannelMessage(_, _) => {}
+                rtci::peer_connection::message::RTCMessage::DataChannelMessage(_, _) => {}
                 _ => {}
             }
         }

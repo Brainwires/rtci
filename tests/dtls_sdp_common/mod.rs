@@ -1,4 +1,4 @@
-//! Two `rtc` peers on an in-memory network and a virtual clock, for the DTLS / SDP tests
+//! Two `rtci` peers on an in-memory network and a virtual clock, for the DTLS / SDP tests
 //! (`dtls_association_*.rs`, `dtls_fingerprint_*.rs`, `dtls_tls_id.rs`, `dtls_use_srtp.rs`,
 //! `security_architecture.rs`). No sockets and no wall clock: a run is deterministic.
 
@@ -6,22 +6,22 @@
 
 use anyhow::{Result, bail};
 use bytes::BytesMut;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::configuration::{RTCConfiguration, RTCConfigurationBuilder};
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::data_channel::RTCDataChannelId;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::configuration::{RTCConfiguration, RTCConfigurationBuilder};
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -47,7 +47,7 @@ pub struct Peer {
     pub rtp: Vec<(u8, u32)>,
     /// The RTP packets it received, as (the id of the track they were delivered to, header),
     /// in order.
-    pub packets: Vec<(String, rtc::rtp::header::Header)>,
+    pub packets: Vec<(String, rtci::rtp::header::Header)>,
 }
 
 impl Peer {

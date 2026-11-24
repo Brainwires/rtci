@@ -5,12 +5,12 @@
 //! further — these tests are about the last hop, and about the carrier that makes it possible when
 //! there is no real packet going the same way.
 
-use rtc::interceptor::Registry;
-use rtc::interceptor::{Attribute, AttributedPacket, Gcc, Interceptor, Packet, TaggedPacket};
-use rtc::peer_connection::configuration::interceptor_registry::{
+use rtci::interceptor::Registry;
+use rtci::interceptor::{Attribute, AttributedPacket, Gcc, Interceptor, Packet, TaggedPacket};
+use rtci::peer_connection::configuration::interceptor_registry::{
     CongestionFeedback, configure_congestion_control,
 };
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use sansio::Protocol;
 use shared::TransportContext;
 use std::time::Instant;

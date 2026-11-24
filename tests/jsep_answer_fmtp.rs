@@ -10,8 +10,8 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, port_of};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 fn offer(media: &str, formats: &str, lines: &str) -> String {
     crlf(&format!(
@@ -181,9 +181,9 @@ fn av1_and_vp9_answers_state_this_endpoints_parameters() -> TestResult {
 
 /// A peer whose only video format is the H.264 format `fmtp` registers.
 fn h264_peer(fmtp: &str) -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
-    use rtc::peer_connection::RTCPeerConnectionBuilder;
-    use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MediaEngine};
-    use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+    use rtci::peer_connection::RTCPeerConnectionBuilder;
+    use rtci::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MediaEngine};
+    use rtci::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
     let mut media_engine = MediaEngine::default();
     media_engine.register_codec(
         RTCRtpCodecParameters {

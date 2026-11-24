@@ -14,33 +14,33 @@ Nineteen crates, all at the workspace version. Dependencies come first: normal a
 dependencies, and dev-dependencies that carry a version (cargo keeps those in the published
 manifest, so they must resolve on crates.io too).
 
-1. `rtc-crypto`
-2. `rtc-interceptor-derive`
-3. `rtc-sframe`
-4. `rtc-shared`
-5. `rtc-dtls`
-6. `rtc-mdns`
-7. `rtc-rtcp`
-8. `rtc-rtp`
-9. `rtc-interceptor`
-10. `rtc-media`
-11. `rtc-sctp`
-12. `rtc-datachannel`
-13. `rtc-sdp`
-14. `rtc-srtp`
-15. `rtc-stun`
-16. `rtc-ice`
-17. `rtc-turn`
-18. `rtc`
-19. `rtc-stream-driver` (its default feature `peer` depends on `rtc`; the root crate's
+1. `rtci-crypto`
+2. `rtci-interceptor-derive`
+3. `rtci-sframe`
+4. `rtci-shared`
+5. `rtci-dtls`
+6. `rtci-mdns`
+7. `rtci-rtcp`
+8. `rtci-rtp`
+9. `rtci-interceptor`
+10. `rtci-media`
+11. `rtci-sctp`
+12. `rtci-datachannel`
+13. `rtci-sdp`
+14. `rtci-srtp`
+15. `rtci-stun`
+16. `rtci-ice`
+17. `rtci-turn`
+18. `rtci`
+19. `rtci-stream-driver` (its default feature `peer` depends on `rtci`; the root crate's
     dev-dependency on it has no version, so `cargo publish` drops it)
 
 The rename commit gives every crate its `rtci` name (`docs/rename.md`) and keeps this order.
 `scripts/rename-to-rtci.py` prints it and writes it into release.yml.
 
-Not published (`publish = false`): `rtc-signal` (the examples' signalling helper; the root
+Not published (`publish = false`): `rtci-signal` (the examples' signalling helper; the root
 crate's dev-dependency on it has no version, so `cargo publish` drops it), the fuzz crates
-(`fuzz/`, `rtc-*/fuzz/`), the benchmark (`benchmarks/aead-gcm`) and the test environment's
+(`fuzz/`, `rtci-*/fuzz/`), the benchmark (`benchmarks/aead-gcm`) and the test environment's
 peers (`scripts/test-env/peers/`). The root crate's package holds the library sources, the README
 and the licence texts only (`include` in `Cargo.toml`): the examples, integration tests,
 fixtures and documentation stay in the repository.
@@ -64,17 +64,22 @@ this order:
 3. **The release commit**: `CHANGELOG.md`'s `## [Unreleased]` becomes `## [0.1.0] - <date>`
    with a new empty `## [Unreleased]` above it; `SECURITY.md` names the 0.1 line (see "Before").
    The rename already set every version to `0.1.0`.
-4. **The tag** `v0.1.0` on the release commit (see "Tag and release notes" for what it starts).
-5. **The dry runs** of "Dry runs" from a clean checkout of the tag, under the new names.
-6. **Publish** in the order above, from a machine with a crates.io login (`cargo login` with a
+4. **The repository rename** to `Brainwires/rtci` on GitHub, before the tag: GitHub redirects
+   the old URLs (git remotes, the REST API, web links, Actions), so CI and every clone keep
+   working, and from then on the links the rename commit wrote resolve: the manifests'
+   `repository` (each crate's crates.io page), `cliff.toml`'s repository (the release notes'
+   commit and compare links), `SECURITY.md`'s advisory link, the README's issues link.
+5. **The tag** `v0.1.0` on the release commit (see "Tag and release notes" for what it starts);
+   its release page and notes are made under the new name.
+6. **The dry runs** of "Dry runs" from a clean checkout of the tag, under the new names.
+7. **Publish** in the order above, from a machine with a crates.io login (`cargo login` with a
    token that has `publish-new` and `publish-update`). Never from CI until publishing moves
-   there; never with a token in the repository.
-7. **The repository rename** to `Brainwires/rtci` on GitHub (GitHub redirects the old URLs; the
-   manifests' `repository` already names the new one).
+   there; never with a token in the repository. A published version's metadata cannot be
+   changed, so the repository must have its new name before this step.
 8. **Detach from the fork network** (GitHub support request "detach fork"), so the repository
    stands on its own and its default pull request base is no longer upstream's.
 
-A fix needed after step 4 is a new commit and a patch release (`0.1.1`), never a moved tag.
+A fix needed after step 5 (the tag) is a new commit and a patch release (`0.1.1`), never a moved tag.
 
 ## Before
 
@@ -121,7 +126,7 @@ release text; list the fixed ones under its summary as fixed since brainwires.6.
 | Known issue (brainwires.6) | State | Where |
 |---|---|---|
 | Pacer: no time bound on its queue; at 4096 packets it refused numbered packets, seen as loss | fixed | `conf/pacer-1-queue-time` (queue time bounded at 2 s), `conf/pacer-2-combined` (media over the target is dropped by default, `QueueOverflow::Drop`; libwebrtc's `Drain` is a setting) |
-| RTP circuit breaker: with RTCP reports more frequent than media frames, no verdict for video flows | open | no `[Unreleased]` entry; `conf/cb-1-false-trip` and `conf/cb-2-breaker-packet-size` fixed the false trips on reordering and speech, not this |
+| RTP circuit breaker: with RTCP reports more frequent than media frames, no verdict for video flows | fixed | `conf/pacer-1-queue-time` (92ad1e7a): the congestion breaker's "at least one RTP packet every max(Tdr, Tr)" is the sender's rate, not each report's (RFC 8083 section 4.3; CHANGELOG entry inside the pacer entry); `conf/cb-1-false-trip` and `conf/cb-2-breaker-packet-size` fixed the false trips on reordering and speech |
 | Congestion control: on a reordering, lossless path the estimate settles well below capacity | partly fixed | the loss-based half (`conf/pacer-1-queue-time`: a packet only overtaken is not a loss); the delay-based grouping is a proposal in `docs/gcc-reordering.md`, not changed |
 | Simulcast receive: SSRCs declared in a section with `a=rid`, packets without RID or MID, discarded | fixed | `conf/demux-1-declared-ssrc-in-rid-section` (RFC9143-9.2-7) |
 | Call quality after a capacity drop (regression from brainwires.5): video freezes for seconds | fixed | `conf/gcc-1-cap-recovery` (the NACK generator no longer gives up after ten requests or 2 s), and the NACK responder's retransmissions held to the congestion controller's target; `tests/capacity_cap_video_rtc2rtc.rs` |
@@ -136,9 +141,9 @@ From a clean checkout of the release commit:
 
 ```sh
 # What goes into each package, and nothing large or unintended
-for p in rtc-crypto rtc-interceptor-derive rtc-sframe rtc-shared rtc-dtls rtc-mdns rtc-rtcp \
-         rtc-rtp rtc-interceptor rtc-media rtc-sctp rtc-datachannel rtc-sdp rtc-srtp \
-         rtc-stun rtc-ice rtc-turn rtc rtc-stream-driver; do
+for p in rtci-crypto rtci-interceptor-derive rtci-sframe rtci-shared rtci-dtls rtci-mdns rtci-rtcp \
+         rtci-rtp rtci-interceptor rtci-media rtci-sctp rtci-datachannel rtci-sdp rtci-srtp \
+         rtci-stun rtci-ice rtci-turn rtci rtci-stream-driver; do
   cargo package --list -p "$p" > "/tmp/$p.files"
 done
 
@@ -149,7 +154,7 @@ cargo publish --workspace --dry-run
 
 # A crate whose workspace dependencies are already on crates.io (or that has none) can be
 # checked on its own as well:
-cargo publish --dry-run -p rtc-crypto
+cargo publish --dry-run -p rtci-crypto
 ```
 
 `cargo publish -p <crate> --dry-run` on a crate whose workspace dependencies are not yet on
@@ -169,10 +174,10 @@ cargo publish --workspace
 or one crate at a time, in the order above:
 
 ```sh
-cargo publish -p rtc-crypto
-cargo publish -p rtc-interceptor-derive
+cargo publish -p rtci-crypto
+cargo publish -p rtci-interceptor-derive
 # ... every crate of the list, in order ...
-cargo publish -p rtc
+cargo publish -p rtci
 ```
 
 `cargo publish` returns only once the crate is in the crates.io index (it waits up to
@@ -211,5 +216,5 @@ Nothing is rolled back: the crates already published stay published.
   GitHub release text and to the known dependents (ParolNet, the Denext binding). Their git
   dependencies on the old repository URL keep working through GitHub's redirect, but should
   move to the crates.io release.
-- **The repository**: the rename and the detach of steps 7 and 8 are done; check that the
+- **The repository**: the rename and the detach of steps 4 and 8 are done; check that the
   README's links and `SECURITY.md` name the new repository.

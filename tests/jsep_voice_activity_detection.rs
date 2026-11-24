@@ -7,10 +7,10 @@ mod jsep_common;
 use std::time::Instant;
 
 use jsep_common::{TestResult, default_peer, media_sections};
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::configuration::{RTCAnswerOptions, RTCOfferOptions};
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::configuration::{RTCAnswerOptions, RTCOfferOptions};
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fn audio_peer() -> Result<RTCPeerConnection, Box<dyn std::error::Error>> {
     let mut pc = default_peer()?;

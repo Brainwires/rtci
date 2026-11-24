@@ -20,10 +20,10 @@
 //! scope to call them.
 //!
 //! ```no_run
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
-//! use rtc::sansio::Protocol;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::sansio::Protocol;
 //! use std::time::Instant;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,8 +63,8 @@
 //! ## Handling connection state changes
 //!
 //! ```
-//! use rtc::peer_connection::event::RTCPeerConnectionEvent;
-//! use rtc::peer_connection::state::RTCPeerConnectionState;
+//! use rtci::peer_connection::event::RTCPeerConnectionEvent;
+//! use rtci::peer_connection::state::RTCPeerConnectionState;
 //!
 //! # fn handle_events(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -90,7 +90,7 @@
 //! ## Handling data channels
 //!
 //! ```
-//! use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+//! use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
 //!
 //! # fn handle_events(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -113,7 +113,7 @@
 //! ## Handling incoming tracks
 //!
 //! ```
-//! use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+//! use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 //!
 //! # fn handle_events(event: RTCPeerConnectionEvent) {
 //! match event {
@@ -205,8 +205,8 @@ pub use transport_event::{
 /// ## Pattern matching on events
 ///
 /// ```
-/// use rtc::peer_connection::event::RTCPeerConnectionEvent;
-/// use rtc::peer_connection::state::RTCPeerConnectionState;
+/// use rtci::peer_connection::event::RTCPeerConnectionEvent;
+/// use rtci::peer_connection::state::RTCPeerConnectionState;
 ///
 /// # fn handle_event(event: RTCPeerConnectionEvent) {
 /// match event {
@@ -254,7 +254,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
     /// # fn example(event: RTCPeerConnectionEvent) {
     /// if matches!(event, RTCPeerConnectionEvent::OnNegotiationNeededEvent) {
     ///     println!("Negotiation needed - create new offer");
@@ -281,7 +281,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceCandidateEvent(ice_event) => {
@@ -308,7 +308,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceCandidateErrorEvent(error) => {
@@ -339,7 +339,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnSignalingStateChangeEvent(state) => {
@@ -370,8 +370,8 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
-    /// # use rtc::peer_connection::state::RTCIceConnectionState;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::state::RTCIceConnectionState;
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(state) => {
@@ -406,8 +406,8 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
-    /// # use rtc::peer_connection::state::RTCIceGatheringState;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::state::RTCIceGatheringState;
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(state) => {
@@ -442,8 +442,8 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::RTCPeerConnectionEvent;
-    /// # use rtc::peer_connection::state::RTCPeerConnectionState;
+    /// # use rtci::peer_connection::event::RTCPeerConnectionEvent;
+    /// # use rtci::peer_connection::state::RTCPeerConnectionState;
     /// # fn handle_event(event: RTCPeerConnectionEvent) -> bool {
     /// match event {
     ///     RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
@@ -481,7 +481,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+    /// # use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
@@ -511,7 +511,7 @@ pub enum RTCPeerConnectionEvent {
     /// # Examples
     ///
     /// ```
-    /// # use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
+    /// # use rtci::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
     /// match event {
     ///     RTCPeerConnectionEvent::OnTrack(track_event) => {
@@ -618,7 +618,7 @@ pub enum RTCPeerConnectionEvent {
     /// down to the target it is given (`RTCRtpSender::target_bitrates`). The stream also needs a
     /// key frame: a Picture Loss Indication for it (sender SSRC 0) is delivered with this
     /// (`RTCMessage::RtcpPacket`, `OnKeyFrameRequest`), and the NACK responder does not resend
-    /// the discarded packets. See `rtc_interceptor::PacerDiscard`.
+    /// the discarded packets. See `rtci_interceptor::PacerDiscard`.
     OnPacerDiscard {
         /// The sender whose stream lost the frames.
         sender: crate::rtp_transceiver::RTCRtpSenderId,

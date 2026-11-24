@@ -1,7 +1,7 @@
-//! The TURN client (`rtc::turn::client`) against a real TURN server, in the real-network test
+//! The TURN client (`rtci::turn::client`) against a real TURN server, in the real-network test
 //! environment (`scripts/test-env/run.sh`); ignored elsewhere.
 //!
-//! The unit tests in `rtc-turn` script the server's answers. These prove the claims that need
+//! The unit tests in `rtci-turn` script the server's answers. These prove the claims that need
 //! a server to agree: that coturn takes the Allocate options the client sends (RFC 8656 7.1),
 //! gives the relayed addresses asked for, relays a Send indication carrying DONT-FRAGMENT, and
 //! refuses what the RFC says a server refuses; and that a TCP allocation (RFC 6062) connects
@@ -13,28 +13,28 @@ mod common;
 mod testenv;
 
 use bytes::BytesMut;
-use rtc::ice::agent::agent_config::AgentConfig;
-use rtc::ice::agent::{Agent, Event as IceEvent};
-use rtc::ice::candidate::candidate_host::CandidateHostConfig;
-use rtc::ice::candidate::candidate_relay::CandidateRelayConfig;
-use rtc::ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
-use rtc::ice::candidate::{CandidateConfig, CandidateType};
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::ice::network_type::NetworkType;
-use rtc::ice::state::ConnectionState;
-use rtc::ice::tcp_type::TcpType;
-use rtc::sansio::Protocol;
-use rtc::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
-use rtc::shared::turn_framing::TurnStreamDecoder;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::error_code::{CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED};
-use rtc::turn::client::data_connection::{DataConnection, DataConnectionEvent};
-use rtc::turn::client::{
+use rtci::ice::agent::agent_config::AgentConfig;
+use rtci::ice::agent::{Agent, Event as IceEvent};
+use rtci::ice::candidate::candidate_host::CandidateHostConfig;
+use rtci::ice::candidate::candidate_relay::CandidateRelayConfig;
+use rtci::ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
+use rtci::ice::candidate::{CandidateConfig, CandidateType};
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::ice::network_type::NetworkType;
+use rtci::ice::state::ConnectionState;
+use rtci::ice::tcp_type::TcpType;
+use rtci::sansio::Protocol;
+use rtci::shared::tcp_framing::{TcpFrameDecoder, frame_packet};
+use rtci::shared::turn_framing::TurnStreamDecoder;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::error_code::{CODE_ADDR_FAMILY_NOT_SUPPORTED, CODE_UNAUTHORIZED};
+use rtci::turn::client::data_connection::{DataConnection, DataConnectionEvent};
+use rtci::turn::client::{
     AllocateOptions, Client, ClientConfig, Event, RelayTransport, RetransmissionConfig,
 };
-use rtc::turn::proto::connid::ConnectionId;
-use rtc::turn::proto::evenport::EvenPort;
-use rtc::turn::proto::reqfamily::{REQUESTED_FAMILY_IPV4, REQUESTED_FAMILY_IPV6};
+use rtci::turn::proto::connid::ConnectionId;
+use rtci::turn::proto::evenport::EvenPort;
+use rtci::turn::proto::reqfamily::{REQUESTED_FAMILY_IPV4, REQUESTED_FAMILY_IPV6};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
@@ -142,7 +142,7 @@ impl TurnPeer {
                 retransmission,
                 ..Default::default()
             },
-            rtc::crypto::default_provider().map_err(io::Error::other)?,
+            rtci::crypto::default_provider().map_err(io::Error::other)?,
         )
         .map_err(io::Error::other)?;
         Ok(peer)
@@ -169,7 +169,7 @@ impl TurnPeer {
                 software: "rtc test-env".to_owned(),
                 ..Default::default()
             },
-            rtc::crypto::default_provider().map_err(io::Error::other)?,
+            rtci::crypto::default_provider().map_err(io::Error::other)?,
         )
         .map_err(io::Error::other)?;
         Ok(TurnPeer {
@@ -961,7 +961,7 @@ fn tcp_agent(controlling: bool) -> Agent {
             multicast_dns_mode: MulticastDnsMode::Disabled,
             ..Default::default()
         }),
-        rtc::crypto::default_provider().expect("a crypto provider"),
+        rtci::crypto::default_provider().expect("a crypto provider"),
     )
     .expect("an agent")
 }

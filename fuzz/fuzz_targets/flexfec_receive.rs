@@ -9,13 +9,13 @@
 mod common;
 
 use libfuzzer_sys::fuzz_target;
-use rtc::interceptor::{
+use rtci::interceptor::{
     Attribute, AttributedPacket, FlexFec03ReceiveBuilder, FlexFecReceiveBuilder, Interceptor,
     Packet, Registry, Slot, StreamInfo, TaggedPacket,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::TransportContext;
-use rtc::shared::marshal::Unmarshal;
+use rtci::sansio::Protocol;
+use rtci::shared::TransportContext;
+use rtci::shared::marshal::Unmarshal;
 use std::time::{Duration, Instant};
 
 const MEDIA_SSRC: u32 = 0x1111_1111;
@@ -107,7 +107,7 @@ fuzz_target!(|data: &[u8]| {
         match op % 6 {
             // Inbound RTP: whatever the bytes parse as, steered onto one of the streams.
             0..=2 => {
-                if let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
+                if let Ok(mut packet) = rtci::rtp::packet::Packet::unmarshal(&mut &arg[..]) {
                     match op >> 5 {
                         0 | 1 => {
                             packet.header.ssrc = MEDIA_SSRC;
@@ -125,7 +125,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             3 => {
-                if let Ok(packets) = rtc::rtcp::packet::unmarshal(&mut &arg[..]) {
+                if let Ok(packets) = rtci::rtcp::packet::unmarshal(&mut &arg[..]) {
                     let _ = chain.handle_read(tagged(now, Packet::Rtcp(packets)));
                 }
             }

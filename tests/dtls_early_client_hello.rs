@@ -10,15 +10,15 @@
 //! ClientHello and takes it once it has applied the answer: it answers it, as it answers the
 //! client's retransmission.
 //!
-//! Two `rtc` peers on a simulated network; virtual time, no sockets.
+//! Two `rtci` peers on a simulated network; virtual time, no sockets.
 
 mod dtls_sdp_common;
 
 use anyhow::Result;
 use dtls_sdp_common::{Peer, World};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCDtlsRole;
 use std::time::Duration;
 
 /// Whether `datagram` is a DTLS record carrying the start of a ClientHello whose

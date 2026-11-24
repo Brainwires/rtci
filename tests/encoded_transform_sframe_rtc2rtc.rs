@@ -1,5 +1,5 @@
-//! W3C webrtc-encoded-transform with SFrame (RFC 9605) between two `rtc` peer connections, as
-//! an application does it today: it encrypts each encoded frame with `rtc::sframe` before
+//! W3C webrtc-encoded-transform with SFrame (RFC 9605) between two `rtci` peer connections, as
+//! an application does it today: it encrypts each encoded frame with `rtci::sframe` before
 //! packetization, splits the ciphertext with the format-agnostic payloader
 //! (`rtp::codec::opaque`), writes the packets on a video sender, and on the other side
 //! reassembles them and decrypts. The link loses packets; NACK and RTX (the default
@@ -13,26 +13,26 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::Registry;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
-use rtc::rtp::header::Header;
-use rtc::rtp::packetizer::{Depacketizer, Payloader};
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::sframe::{CipherSuite, SFrameContext};
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::codec::opaque::{OpaqueDepacketizer, OpaquePayloader};
+use rtci::rtp::header::Header;
+use rtci::rtp::packetizer::{Depacketizer, Payloader};
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::sframe::{CipherSuite, SFrameContext};
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ struct Peer {
     pc: RTCPeerConnection,
     addr: SocketAddr,
     /// The RTP packets `poll_read` yielded.
-    read: Vec<rtc::rtp::Packet>,
+    read: Vec<rtci::rtp::Packet>,
 }
 
 impl Peer {
@@ -266,7 +266,7 @@ fn sframe_encrypted_frames_survive_loss_through_nack_and_rtx() -> Result<()> {
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,
@@ -291,7 +291,7 @@ fn sframe_encrypted_frames_survive_loss_through_nack_and_rtx() -> Result<()> {
 
     // Reassemble in sequence order, each packet once (a retransmission may arrive after the
     // packets that followed it).
-    let mut received: Vec<rtc::rtp::Packet> = world.peers[1]
+    let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
         .read
         .iter()
         .filter(|p| p.header.ssrc == ssrc)
@@ -326,7 +326,7 @@ fn sframe_encrypted_frames_survive_loss_through_nack_and_rtx() -> Result<()> {
 /// included) with the section 5.2 algorithm and decrypts each frame.
 #[test]
 fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Result<()> {
-    use rtc::rtp::codec::sframe::{SFramePayloadOrigin, SFramePayloader, SFrameReassembler};
+    use rtci::rtp::codec::sframe::{SFramePayloadOrigin, SFramePayloader, SFrameReassembler};
     const FRAMES: u32 = 8;
     let suite = CipherSuite::Aes128GcmSha256_128;
     let (mut world, sender) = World::connected()?;
@@ -344,11 +344,11 @@ fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Resul
     let base_key = [5u8; 16];
     let mut encryptor = SFrameContext::with_default_provider(suite)?;
     let ssrc_key =
-        rtc::sframe::derive_ssrc_key(encryptor.provider().crypto(), suite, &base_key, ssrc)?;
+        rtci::sframe::derive_ssrc_key(encryptor.provider().crypto(), suite, &base_key, ssrc)?;
     encryptor.add_send_key(1, ssrc_key.as_ref())?;
     let mut decryptor = SFrameContext::with_default_provider(suite)?;
     let receiver_key =
-        rtc::sframe::derive_ssrc_key(decryptor.provider().crypto(), suite, &base_key, ssrc)?;
+        rtci::sframe::derive_ssrc_key(decryptor.provider().crypto(), suite, &base_key, ssrc)?;
     decryptor.add_recv_key(1, receiver_key.as_ref())?;
     world.lose = vec![(ssrc, 2004), (ssrc, 2011)];
 
@@ -367,7 +367,7 @@ fn the_sframe_payload_format_carries_per_ssrc_keyed_frames_end_to_end() -> Resul
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,
@@ -465,7 +465,7 @@ fn an_offerer_whose_sframe_was_refused_discards_what_it_receives() -> Result<()>
         let stripped = answer.sdp.replace("a=sframe\r\n", "");
         world.peers[0].pc.set_remote_description(
             now,
-            rtc::peer_connection::sdp::RTCSessionDescription::answer(stripped)?,
+            rtci::peer_connection::sdp::RTCSessionDescription::answer(stripped)?,
         )?;
         assert_eq!(
             world.peers[0]
@@ -513,7 +513,7 @@ fn an_offerer_whose_sframe_was_refused_discards_what_it_receives() -> Result<()>
                 .expect("sender")
                 .write_rtp(
                     now,
-                    rtc::rtp::Packet {
+                    rtci::rtp::Packet {
                         header: Header {
                             version: 2,
                             payload_type: pt,
@@ -583,7 +583,7 @@ fn per_packet_sframe_payloads_cross_under_the_codec_payload_type() -> Result<()>
             .expect("sender")
             .write_rtp(
                 now,
-                rtc::rtp::Packet {
+                rtci::rtp::Packet {
                     header: Header {
                         version: 2,
                         payload_type: pt,
@@ -619,7 +619,7 @@ fn per_packet_sframe_payloads_cross_under_the_codec_payload_type() -> Result<()>
             "the payload is SRTP-protected on the wire"
         );
     }
-    let mut received: Vec<rtc::rtp::Packet> = world.peers[1]
+    let mut received: Vec<rtci::rtp::Packet> = world.peers[1]
         .read
         .iter()
         .filter(|p| p.header.ssrc == ssrc)

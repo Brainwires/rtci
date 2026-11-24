@@ -17,18 +17,18 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::state::RTCIceConnectionState;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::peer_connection::transport::RTCIceServer;
-use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::state::RTCIceConnectionState;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::peer_connection::transport::RTCIceServer;
+use rtci::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
 
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtci::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -103,7 +103,7 @@ async fn test_data_channel_close_by_webrtc_interop() -> Result<()> {
     }
     .new_candidate_host()?;
     let local_candidate_init =
-        rtc::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
+        rtci::peer_connection::transport::RTCIceCandidate::from(&candidate).to_json()?;
     rtc_pc.add_local_candidate(local_candidate_init)?;
 
     // Create offer from rtc peer
@@ -185,7 +185,7 @@ async fn test_data_channel_close_by_webrtc_interop() -> Result<()> {
     log::info!("WebRTC answer with candidates ready");
 
     // Convert webrtc answer to rtc SDP
-    let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
+    let rtc_answer = rtci::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
 

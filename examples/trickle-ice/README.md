@@ -42,7 +42,7 @@ From the pion/turn repository:
 
 ### Run with default settings (Host)
 
-From the `rtc` directory, execute:
+From the `rtci` directory, execute:
 
 ```bash
 cargo run --example trickle-ice

@@ -24,7 +24,7 @@ Our history now holds a reported loss for one more feedback; a packet reported r
 is reported received (without its arrival time: the delay model reads reports in send order),
 `History::recovered` counts it. Measured, 500 kbit/s video, 60 s, every datagram held back by up
 to 40 ms, nothing lost (`tests/circuit_breaker_reordering_rtc2rtc.rs`, the video test with
-`RUST_LOG=rtc_interceptor::gcc=debug`):
+`RUST_LOG=rtci_interceptor::gcc=debug`):
 
 | | feedback batches | packets counted lost | reported received after a feedback reported them lost | target at the end |
 |---|---|---|---|---|
@@ -59,7 +59,7 @@ a packet sent before its group's first is discarded as reordered). Our `ArrivalG
 reads them in send order and drops a packet that arrived before the current group's latest
 arrival. The same 6000 packets (100 a second, 25 ms one way, a share held back) through both
 groupings and the same Kalman filter and overuse detector
-(`rtc-interceptor/src/gcc/slope.rs`, `reorder_trace_against_libwebrtc_grouping`):
+(`rtci-interceptor/src/gcc/slope.rs`, `reorder_trace_against_libwebrtc_grouping`):
 
 | path | ours: readings, gradient sd | libwebrtc's: readings, gradient sd |
 |---|---|---|

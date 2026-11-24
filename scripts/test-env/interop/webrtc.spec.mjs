@@ -1,4 +1,4 @@
-// Browser <-> webrtc-rs-rtc interop. Each test opens a page on a local origin (served by
+// Browser <-> rtci interop. Each test opens a page on a local origin (served by
 // Playwright, a secure context), loads peer.js and drives a session with
 // examples/interop-peer at RTC_INTEROP_WS.
 import { test, expect } from "@playwright/test";

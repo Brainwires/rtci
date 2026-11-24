@@ -552,7 +552,7 @@ impl SctpTransport {
     }
 
     /// The largest SCTP packet an association of this transport sends: what the application
-    /// configured, else what the path is known to carry, else `None` (the `rtc-sctp` default,
+    /// configured, else what the path is known to carry, else `None` (the `rtci-sctp` default,
     /// 1191 bytes).
     pub(crate) fn packet_budget(&self) -> Option<u32> {
         self.mtu.or(self.path_mtu)

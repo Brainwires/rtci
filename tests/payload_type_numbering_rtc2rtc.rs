@@ -1,5 +1,5 @@
 //! Payload type numbers per direction (RFC 3264 sections 5.1 and 6.1, RFC 9429 sections 5.9
-//! to 5.11), between two `rtc` peer connections in virtual time.
+//! to 5.11), between two `rtci` peer connections in virtual time.
 //!
 //! RFC 3264 section 5.1: an offer's payload type numbers "indicate the value of the payload
 //! type field the offerer expects to receive", and "the answer might indicate different
@@ -17,35 +17,35 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{
+use rtci::interceptor::{
     AudioRedundancy, FlexFec03ReceiveBuilder, FlexFec03SendBuilder, Registry, Slot,
 };
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_FLEX_FEC03, MIME_TYPE_OPUS, MIME_TYPE_RED, MIME_TYPE_RTX, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverId, RTCRtpTransceiverInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::marshal::Unmarshal;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
+use rtci::sansio::Protocol;
+use rtci::shared::marshal::Unmarshal;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -291,7 +291,7 @@ impl Peer {
             .expect("sender");
         self.pc.rtp_sender(sender).expect("sender").write_rtp(
             now,
-            rtc::rtp::Packet {
+            rtci::rtp::Packet {
                 header,
                 payload: Bytes::from(vec![0x10u8; 100]),
             },

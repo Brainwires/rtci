@@ -13,9 +13,9 @@
 mod common;
 
 use libfuzzer_sys::fuzz_target;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::RTCDtlsRole;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::RTCDtlsRole;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 fuzz_target!(|data: &[u8]| {
     let Some((&config, rest)) = data.split_first() else {
@@ -60,8 +60,8 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         common::drain(&mut pc, |_| {});
-        while rtc::sansio::Protocol::poll_write(&mut pc).is_some() {}
+        while rtci::sansio::Protocol::poll_write(&mut pc).is_some() {}
     }
     // Whatever was negotiated, the stats walk reads all of it.
-    let _ = pc.get_stats(now, rtc::statistics::StatsSelector::None);
+    let _ = pc.get_stats(now, rtci::statistics::StatsSelector::None);
 });

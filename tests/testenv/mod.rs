@@ -10,25 +10,25 @@
 //! peer behind a full-cone NAT and another behind a symmetric NAT. Gathering is the
 //! application's job in a sans-I/O stack, so `EnvPeer` does it the way an application does: a
 //! host candidate from its socket, a server-reflexive one from a STUN Binding, a relayed one from
-//! a TURN allocation over UDP, TCP or TLS (`rtc::turn::client`), and it routes the peer
+//! a TURN allocation over UDP, TCP or TLS (`rtci::turn::client`), and it routes the peer
 //! connection's writes through the relay when they leave from the relayed address.
 
 #![allow(dead_code)]
 
 use bytes::BytesMut;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::TaggedRTCMessage;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::message::TaggedRTCMessage;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::turn_framing::TurnStreamDecoder;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
-use rtc::turn::client::{Client, ClientConfig, Event as TurnEvent};
+use rtci::sansio::Protocol;
+use rtci::shared::turn_framing::TurnStreamDecoder;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
+use rtci::turn::client::{Client, ClientConfig, Event as TurnEvent};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
@@ -222,7 +222,7 @@ pub struct EnvPeer {
     turn: Option<TurnSide>,
     pub srflx: Option<SocketAddr>,
     pub relay: Option<SocketAddr>,
-    perm_pending: HashMap<rtc::stun::message::TransactionId, SocketAddr>,
+    perm_pending: HashMap<rtci::stun::message::TransactionId, SocketAddr>,
     perm_requested: HashSet<SocketAddr>,
     perm_granted: HashSet<SocketAddr>,
     pub local_candidates: Vec<RTCIceCandidateInit>,
@@ -318,7 +318,7 @@ impl EnvPeer {
             recv_relayed: 0,
             errors: vec![],
         };
-        let provider = rtc::crypto::default_provider().map_err(io::Error::other)?;
+        let provider = rtci::crypto::default_provider().map_err(io::Error::other)?;
         let now = Instant::now();
 
         if let Some(t) = gather.relay {
@@ -449,7 +449,7 @@ impl EnvPeer {
         }
         if let Some(srflx) = peer.srflx {
             peer.add_candidate(
-                rtc::ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig {
+                rtci::ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig {
                     base_config: CandidateConfig {
                         network: "udp".to_owned(),
                         address: srflx.ip().to_string(),
@@ -477,7 +477,7 @@ impl EnvPeer {
                 (t.link_local, url)
             };
             peer.add_candidate(
-                rtc::ice::candidate::candidate_relay::CandidateRelayConfig {
+                rtci::ice::candidate::candidate_relay::CandidateRelayConfig {
                     base_config: CandidateConfig {
                         network: "udp".to_owned(),
                         address: relay.ip().to_string(),
@@ -504,7 +504,7 @@ impl EnvPeer {
             return Err(io::Error::other("mDNS needs an IPv4 host address"));
         };
         let sock = in_netns(&self.netns, move || {
-            rtc::mdns::MulticastSocket::new()
+            rtci::mdns::MulticastSocket::new()
                 .with_interface(ip)
                 .into_std()
         })?;
@@ -515,7 +515,7 @@ impl EnvPeer {
 
     fn add_candidate(
         &mut self,
-        c: rtc::ice::candidate::Candidate,
+        c: rtci::ice::candidate::Candidate,
         url: Option<String>,
     ) -> io::Result<()> {
         let mut init = RTCIceCandidate::from(&c)
@@ -668,7 +668,7 @@ impl EnvPeer {
         let now = Instant::now();
         while let Some(m) = self.pc.poll_write() {
             let peer = m.transport.peer_addr;
-            if peer.port() == rtc::mdns::MDNS_PORT
+            if peer.port() == rtci::mdns::MDNS_PORT
                 && let Some(mdns) = &self.mdns
             {
                 let _ = mdns.send_to(&m.message, peer);
@@ -925,7 +925,7 @@ pub fn negotiate_with(
     edit_offer: impl Fn(&str) -> String,
     edit_answer: impl Fn(&str) -> String,
 ) -> io::Result<()> {
-    use rtc::peer_connection::sdp::RTCSessionDescription;
+    use rtci::peer_connection::sdp::RTCSessionDescription;
     let e = io::Error::other;
     let offer = a.pc.create_offer(None).map_err(e)?;
     a.pc.set_local_description(Instant::now(), offer.clone())

@@ -343,7 +343,7 @@ impl TransportSet {
     ///
     /// Each transport normally has a local address of its own (RFC 9429 section 5.2.1 gives
     /// every transport its own candidates). A driver that shares one port between transports
-    /// (one socket for the whole connection, or `rtc-stream-driver`'s shared UDP or ICE-TCP
+    /// (one socket for the whole connection, or `rtci-stream-driver`'s shared UDP or ICE-TCP
     /// port) gives several transports the same address. Among those, the datagram goes to
     /// the first rule that leaves one transport:
     ///
@@ -1343,7 +1343,7 @@ mod tests {
     }
 
     /// A driver that shares one port between transports gives them the same local address
-    /// (`rtc-stream-driver`'s shared UDP or ICE-TCP port). With credentials of their own a
+    /// (`rtci-stream-driver`'s shared UDP or ICE-TCP port). With credentials of their own a
     /// Binding request goes to the transport whose ufrag it names (RFC 8445 section 7.2.2),
     /// on the way in by the receiver's part and on the way out by the sender's; what follows
     /// from a peer goes to the transport that knows it as a remote candidate; the rest to the

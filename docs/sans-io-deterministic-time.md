@@ -2,7 +2,7 @@
 
 **Enforced by:** `scripts/check-sans-io-deterministic-time.py` (CI job *Sans-I/O Deterministic Time boundary*)
 **Allow-list:** `docs/sans-io-deterministic-time-allowlist.txt`
-**Design:** [Deterministic time in the `rtc` core](https://github.com/webrtc-rs/webrtc/issues/854)
+**Design:** [Deterministic time in the `rtci` core](https://github.com/webrtc-rs/webrtc/issues/854)
 
 ## The rule
 
@@ -46,7 +46,7 @@ if now.saturating_duration_since(self.last_consent_sent) >= self.keepalive_inter
 
 ## Prefer deleting a clock read to moving it
 
-The best fix is often to discover the read was never needed. `rtc` b3ac944 is the precedent: two
+The best fix is often to discover the read was never needed. `rtci` b3ac944 is the precedent: two
 `poll_timeout` implementations opened with
 
 ```rust
@@ -64,14 +64,14 @@ Ask of every default duration: is this protocol state, or caller policy that lea
 Some reads are correct. They are listed in the allow-list's *permanent* section with a reason, and
 they fall into three categories:
 
-- **`SystemInstant`'s own construction** (`rtc-shared/src/time.rs`), the primitive that pairs a
+- **`SystemInstant`'s own construction** (`rtci-shared/src/time.rs`), the primitive that pairs a
   monotonic reading with a wall-clock one. An RTCP sender report carries real wall-clock time in
   NTP format, and a virtual instant would put a fictional timestamp on the wire, so this reads the
   system clock. It is a real-world observation and is correctly *not* reproducible under replay.
   The monotonic half is the caller's `now` — `SystemInstant::now(now)` — which is why the four
-  sites that used to keep an NTP baseline of their own (`rtc-media` ×2, `rtc-rtp/packetizer`,
-  `rtc-interceptor/report/sender_stream`) no longer read a clock at all.
-- **`Instant` ↔ epoch conversion** (`rtc-shared/src/serde.rs`). `Instant` is opaque, so a portable
+  sites that used to keep an NTP baseline of their own (`rtci-media` ×2, `rtci-rtp/packetizer`,
+  `rtci-interceptor/report/sender_stream`) no longer read a clock at all.
+- **`Instant` ↔ epoch conversion** (`rtci-shared/src/serde.rs`). `Instant` is opaque, so a portable
   absolute timestamp can only be derived from a `SystemTime` sampled alongside it.
 - **Fields specified as wall-clock by a protocol or format.** DTLS `gmt_unix_time`
   (RFC 5246 §7.4.1.2), SDP session version (RFC 4566 §5.2), and X.509 validity windows — a virtual

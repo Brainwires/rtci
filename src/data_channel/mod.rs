@@ -11,8 +11,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::data_channel::RTCDataChannelInit;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::data_channel::RTCDataChannelInit;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -46,8 +46,8 @@
 //!
 //! ```no_run
 //! # use std::time::Instant;
-//! use rtc::peer_connection::RTCPeerConnectionBuilder;
-//! use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+//! use rtci::peer_connection::RTCPeerConnectionBuilder;
+//! use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let setting_engine = SettingEngineBuilder::new()

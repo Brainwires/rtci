@@ -1,4 +1,4 @@
-//! What RTCP two `rtc` peer connections put on the wire during a call, packet by packet, in
+//! What RTCP two `rtci` peer connections put on the wire during a call, packet by packet, in
 //! virtual time, under the `Rfc` (default) and `Performance` behaviour profiles.
 //!
 //! A tap below the RTCP session (`Slot::Custom(100)`) records every compound or reduced-size
@@ -46,36 +46,36 @@
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use rtc::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
-use rtc::peer_connection::configuration::BehaviourProfile;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
+use rtci::peer_connection::configuration::BehaviourProfile;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCIceCandidate, RTCIceCandidateInit,
 };
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::rtcp::receiver_report::ReceiverReport;
-use rtc::rtcp::sender_report::SenderReport;
-use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
-use rtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
-use rtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
-use rtc::rtp::header::Header;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
-use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
-use rtc::sansio::Protocol;
-use rtc::shared::error::Error;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::receiver_report::ReceiverReport;
+use rtci::rtcp::sender_report::SenderReport;
+use rtci::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtci::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+use rtci::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
+use rtci::rtp::header::Header;
+use rtci::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
+use rtci::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+use rtci::sansio::Protocol;
+use rtci::shared::error::Error;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-type Tap = Arc<Mutex<Vec<(Instant, Vec<Box<dyn rtc::rtcp::Packet>>)>>>;
+type Tap = Arc<Mutex<Vec<(Instant, Vec<Box<dyn rtci::rtcp::Packet>>)>>>;
 
 /// Below the RTCP session: every compound (or reduced-size) packet the session writes.
 struct TapInterceptor {
@@ -360,21 +360,21 @@ fn senders_of(pc: &mut RTCPeerConnection, wanted: &[(RtpCodecKind, usize)]) -> S
     streams
 }
 
-fn has<T: 'static>(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
+fn has<T: 'static>(packets: &[Box<dyn rtci::rtcp::Packet>]) -> bool {
     packets.iter().any(|p| p.as_any().is::<T>())
 }
 
-fn is_feedback(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
+fn is_feedback(packets: &[Box<dyn rtci::rtcp::Packet>]) -> bool {
     has::<TransportLayerCc>(packets)
         || has::<CcFeedbackReport>(packets)
         || has::<TransportLayerNack>(packets)
 }
 
-fn is_congestion_feedback(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
+fn is_congestion_feedback(packets: &[Box<dyn rtci::rtcp::Packet>]) -> bool {
     has::<TransportLayerCc>(packets) || has::<CcFeedbackReport>(packets)
 }
 
-fn report_blocks(packets: &[Box<dyn rtc::rtcp::Packet>]) -> usize {
+fn report_blocks(packets: &[Box<dyn rtci::rtcp::Packet>]) -> usize {
     packets
         .iter()
         .map(|p| {
@@ -533,7 +533,7 @@ fn measure(sc: Scenario, profile: BehaviourProfile, drop_at: Option<u64>) -> Res
                         .expect("sender")
                         .write_rtp(
                             now,
-                            rtc::rtp::Packet {
+                            rtci::rtp::Packet {
                                 header,
                                 payload: Bytes::from(vec![0x5au8; bytes / parts]),
                             },

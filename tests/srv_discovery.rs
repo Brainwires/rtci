@@ -5,12 +5,12 @@
 //! the test.
 
 use anyhow::Result;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::stream::{DnsRecord, RECORDS_TIMEOUT, RecordKind, StreamCommand, StreamEvent};
+use rtci::peer_connection::configuration::setting_engine::SettingEngine;
+use rtci::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::sansio::Protocol;
+use rtci::shared::stream::{DnsRecord, RECORDS_TIMEOUT, RecordKind, StreamCommand, StreamEvent};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -259,8 +259,8 @@ fn a_stun_server_without_a_port_is_found_by_srv_target_by_target() -> Result<()>
 /// certificate is verified against), never `tls.example.net`.
 #[test]
 fn a_turns_server_found_by_srv_is_checked_against_the_uris_host() -> Result<()> {
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    use rtc::peer_connection::turn_tls::TurnTlsConfig;
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::turn_tls::TurnTlsConfig;
     let settings = SettingEngineBuilder::new()
         .with_turn_tls(TurnTlsConfig {
             roots: Some(std::sync::Arc::new(rustls::RootCertStore::empty())),
@@ -314,10 +314,10 @@ fn a_turns_server_found_by_srv_is_checked_against_the_uris_host() -> Result<()> 
 #[test]
 fn a_turns_dtls_server_without_a_port_is_found_by_naptr_turn_dtls_then_srv_turns_udp() -> Result<()>
 {
-    use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-    use rtc::peer_connection::turn_tls::TurnTlsConfig;
-    let provider = rtc::crypto::default_provider()?;
-    let cert = rtc::dtls::crypto::Certificate::generate_self_signed(
+    use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use rtci::peer_connection::turn_tls::TurnTlsConfig;
+    let provider = rtci::crypto::default_provider()?;
+    let cert = rtci::dtls::crypto::Certificate::generate_self_signed(
         vec!["example.net".to_owned()],
         provider.crypto(),
     )?;

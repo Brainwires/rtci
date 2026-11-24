@@ -13,16 +13,16 @@
 //!
 //! See <https://www.w3.org/TR/webrtc/#dfn-update-the-negotiation-needed-flag>.
 
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use sansio::Protocol;
 use std::time::Instant;
 
 /// Drain every queued peer-connection event, returning how many were negotiation-needed.
-fn count_negotiation_needed(pc: &mut rtc::peer_connection::RTCPeerConnection) -> usize {
+fn count_negotiation_needed(pc: &mut rtci::peer_connection::RTCPeerConnection) -> usize {
     let mut count = 0;
     while let Some(event) = pc.poll_event() {
         if matches!(event, RTCPeerConnectionEvent::OnNegotiationNeededEvent) {
@@ -34,8 +34,8 @@ fn count_negotiation_needed(pc: &mut rtc::peer_connection::RTCPeerConnection) ->
 
 /// Run one full offer/answer exchange from `offerer` to `answerer`.
 fn negotiate(
-    offerer: &mut rtc::peer_connection::RTCPeerConnection,
-    answerer: &mut rtc::peer_connection::RTCPeerConnection,
+    offerer: &mut rtci::peer_connection::RTCPeerConnection,
+    answerer: &mut rtci::peer_connection::RTCPeerConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let offer = offerer.create_offer(None)?;
     offerer.set_local_description(Instant::now(), offer.clone())?;
@@ -63,7 +63,7 @@ fn test_recvonly_answer_without_track_settles() -> Result<(), Box<dyn std::error
     // The offerer wants to receive only; the answerer never adds a track of its own.
     offerer.add_transceiver_from_kind(
         RtpCodecKind::Video,
-        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
+        Some(rtci::rtp_transceiver::RTCRtpTransceiverInit::recvonly()),
     )?;
     negotiate(&mut offerer, &mut answerer)?;
 

@@ -1,17 +1,17 @@
 //! The SOFTWARE attribute of the STUN messages of a call (RFC 8489 section 14.14), between two
-//! `rtc` peers on an in-memory network and a virtual clock: `rtc-ice` and its version by
+//! `rtci` peers on an in-memory network and a virtual clock: `rtci-ice` and its version by
 //! default (sections 6.1 and 6.3.1.1: requests and success responses "SHOULD" carry one),
 //! the text `SettingEngineBuilder::with_ice_software` names, or none at all with
 //! `with_ice_software(None)` (section 16.1.2: "Implementers SHOULD make usage of the SOFTWARE
 //! attribute a configurable option"), for an application that must not put an implementation fingerprint on the wire.
 
 use anyhow::Result;
-use rtc::ice::agent::DEFAULT_SOFTWARE;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::stun::attributes::ATTR_SOFTWARE;
-use rtc::stun::message::{CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, Message, MessageClass};
-use rtc::stun::textattrs::Software;
+use rtci::ice::agent::DEFAULT_SOFTWARE;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::stun::attributes::ATTR_SOFTWARE;
+use rtci::stun::message::{CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, Message, MessageClass};
+use rtci::stun::textattrs::Software;
 use std::time::{Duration, Instant};
 
 mod dtls_sdp_common;
@@ -75,7 +75,7 @@ fn assert_software(world: &World, i: usize, expected: Option<&str>) {
 
 /// `with_ice_software(None)`: no STUN message the peer sends in either direction (its checks,
 /// nomination and consent requests, its responses to the other peer's) carries SOFTWARE; the
-/// other peer, with the default, sends `rtc-ice` and its version in all of its own.
+/// other peer, with the default, sends `rtci-ice` and its version in all of its own.
 #[test]
 fn with_ice_software_none_no_stun_message_of_a_call_carries_software() -> Result<()> {
     let world = call(Some(None))?;
@@ -84,7 +84,7 @@ fn with_ice_software_none_no_stun_message_of_a_call_carries_software() -> Result
     Ok(())
 }
 
-/// Without the setting the peer's requests and success responses carry `rtc-ice` and its
+/// Without the setting the peer's requests and success responses carry `rtci-ice` and its
 /// version (RFC 8489 sections 6.1 and 6.3.1.1).
 #[test]
 fn by_default_the_stun_messages_of_a_call_carry_the_rtc_ice_software() -> Result<()> {

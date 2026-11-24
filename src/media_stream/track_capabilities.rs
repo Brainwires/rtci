@@ -46,9 +46,9 @@ pub(crate) struct Range<T> {
 /// # Examples
 ///
 /// ```
-/// use rtc::media_stream::MediaTrackCapabilities;
+/// use rtci::media_stream::MediaTrackCapabilities;
 ///
-/// # fn example(track: rtc::media_stream::MediaStreamTrack) {
+/// # fn example(track: rtci::media_stream::MediaStreamTrack) {
 /// let capabilities = track.get_capabilities();
 /// // Inspect what the track source supports
 /// # }

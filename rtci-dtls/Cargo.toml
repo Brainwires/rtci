@@ -1,0 +1,104 @@
+[package]
+name = "rtci-dtls"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Sans-I/O DTLS 1.2 and 1.3 (RFC 6347, RFC 9147) with DTLS-SRTP key export, for WebRTC"
+license.workspace = true
+repository.workspace = true
+keywords = ["webrtc", "dtls", "tls", "srtp", "sans-io"]
+categories = ["cryptography", "network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+features = ["crypto-ring", "crypto-aws-lc-rs", "pem"]
+
+[features]
+default = ["crypto-ring"]
+crypto-ring = ["crypto/crypto-ring", "rustls/ring", "rcgen/ring"]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs"]
+# Kept by the Brainwires fork as a no-op: PEM support is now always built (upstream removed
+# the feature name, which would break dependents that still enable it).
+pem = []
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["replay"] }
+crypto.workspace = true
+
+bytes.workspace = true
+byteorder.workspace = true
+x509-parser.workspace = true
+der-parser.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rkyv.workspace = true
+bytecheck.workspace = true
+log.workspace = true
+pem.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+local-sync.workspace = true
+core_affinity.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+ctrlc.workspace = true
+futures.workspace = true
+
+#[[example]]
+#name = "dtls_chat_server"
+#path = "examples/dtls_chat_server.rs"
+
+#[[example]]
+#name = "dtls_echo_server"
+#path = "examples/dtls_echo_server.rs"
+
+#[[example]]
+#name = "dtls_client"
+#path = "examples/dtls_client.rs"
+
+#[[example]]
+#name = "dtls_client_selfsign"
+#path = "examples/dtls_client_selfsign.rs"
+
+#[[example]]
+#name = "dial_psk"
+#path = "examples/dial/psk/dial_psk.rs"
+#bench = false
+#
+#[[example]]
+#name = "dial_selfsign"
+#path = "examples/dial/selfsign/dial_selfsign.rs"
+#bench = false
+#
+#[[example]]
+#name = "dial_verify"
+#path = "examples/dial/verify/dial_verify.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_psk"
+#path = "examples/listen/psk/listen_psk.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_selfsign"
+#path = "examples/listen/selfsign/listen_selfsign.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_verify"
+#path = "examples/listen/verify/listen_verify.rs"
+#bench = false
+
+[[bench]]
+name = "record_protection"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)'
+] }

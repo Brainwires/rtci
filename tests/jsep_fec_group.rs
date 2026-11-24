@@ -11,7 +11,7 @@ use std::time::Instant;
 use jsep_common::{
     SESSION, TRANSPORT, TestResult, crlf, default_peer, media_sections, mid_of, port_of,
 };
-use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::sdp::RTCSessionDescription;
 
 #[test]
 fn a_separate_fec_session_is_refused_with_its_group() -> TestResult {
