@@ -89,7 +89,10 @@ fn connected_pair(runtime: &MockRuntime) -> Result<(Peer, Peer, Goodbyes)> {
         .net()
         .set_filter(Box::new(move |d: &MockDatagram<'_>| {
             if d.to.port() == MDNS_PORT && is_goodbye(d.data) {
-                seen.lock().unwrap().push(d.from.ip());
+                // Never panics: the drivers still send while a failed test unwinds.
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(d.from.ip());
             }
             true
         }));
@@ -101,10 +104,10 @@ fn shutdown_sends_the_goodbyes_of_the_published_names_and_closes_the_sockets() -
     let runtime = MockRuntime::new();
     let (mut a, _b, goodbyes) = connected_pair(&runtime)?;
     runtime.run(a.driver.shutdown(Duration::from_secs(2)))?;
+    let seen = goodbyes.lock().unwrap().clone();
     assert!(
-        goodbyes.lock().unwrap().contains(&A),
-        "a's goodbye left from its address: {:?}",
-        goodbyes.lock().unwrap()
+        seen.contains(&A),
+        "a's goodbye left from its address: {seen:?}"
     );
     assert!(!a.driver.mdns_available(false), "the mDNS socket is closed");
     assert!(
@@ -119,10 +122,10 @@ fn dropping_a_driver_sends_the_goodbyes_it_can_at_once() -> Result<()> {
     let runtime = MockRuntime::new();
     let (a, _b, goodbyes) = connected_pair(&runtime)?;
     drop(a);
+    let seen = goodbyes.lock().unwrap().clone();
     assert!(
-        goodbyes.lock().unwrap().contains(&A),
-        "a's goodbye left as it was dropped: {:?}",
-        goodbyes.lock().unwrap()
+        seen.contains(&A),
+        "a's goodbye left as it was dropped: {seen:?}"
     );
     Ok(())
 }
