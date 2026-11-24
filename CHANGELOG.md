@@ -105,6 +105,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a literal sets `interfaces: vec![interface.into()]` for `interface_v4`, or the address of
   the interface for `interface_v6`; a third-party socket adds a `MulticastInterfaceSelector`
   and calls `apply` before each send.
+- **stream-driver** (`conf/mdns-8-send-failures`): `<dyn AsyncUdpSocket>::try_send` returns
+  `io::Result<usize>` (the system's error, `WouldBlock` when the socket cannot take the
+  datagram now) instead of `bool`, and `runtime::mock::Fate` has a new variant, `SendError`.
+  Migration: `socket.try_send(&t)` used as a `bool` becomes `socket.try_send(&t).is_ok()`; a
+  `match` on `Fate` adds an arm for `Fate::SendError`.
 
 ### Behaviour changes
 
@@ -396,6 +401,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section 3.1.1 step 6 replaces only the address), and resolves to `Tcp4` / `Tcp6`. Tests
   `candidate_test.rs::test_tcp_host_candidate_under_an_mdns_name_is_signalled_as_tcp`,
   `to_json_of_a_tcp_candidate_under_an_mdns_name_says_tcp`. Engine behaviour change (SDP).
+- **stream-driver** (`conf/mdns-8-send-failures`, review F2, F10, F11): where mDNS cannot be
+  sent (the socket binds but every send to the group fails, as on GitHub's macOS image or in a
+  Mac application without the Local Network permission), two publishing `PeerDriver`s sat in
+  Connecting for ever and the application was told nothing; a bind failure was kept for the
+  life of the connection. Now a refused send (at once for "no route" / "no permission", else
+  after three in a row) or a failed bind is reported as `PeerDriverEvent::MdnsUnavailable`
+  (`PeerDriver::poll_driver_event`, with the OS error), counted (`mdns_send_failures`,
+  `mdns_bind_failures`, `mdns_available`), and fed to the connection as a family it cannot
+  publish for (`set_multicast_dns_publishing`, so `with_multicast_dns_fail_closed` applies to
+  the candidates gathered next); the socket is bound again at the next gathering and after a
+  back-off (1 s doubling to 60 s), and the first send that works is reported as
+  `PeerDriverEvent::MdnsAvailable`. What the mDNS sockets receive waits in a bounded queue
+  (256, oldest dropped, `mdns_datagrams_dropped`). Tests `tests/mdns_failures.rs` (virtual
+  time, every platform; the mock network refuses sends with `MockNet::set_send_error`) and
+  `tests/mdns_unavailable.rs` (real network, `--ignored`, run on hosted runners). Not an engine
+  change.
+- **stream-driver** (`conf/mdns-9-shutdown`, review F3): mDNS goodbyes (RFC 6762 section
+  10.1, TTL 0) left only when the application closed the connection and kept stepping the
+  driver; dropping the driver sent none, and the link's caches held the names for 120 s. New
+  `PeerDriver::shutdown(linger)`: closes the connection, sends every goodbye within the mDNS
+  budget (waiting up to `linger`), then closes the driver's sockets, leaving the groups.
+  Dropping a driver that was not shut down now closes its connection and sends at once what
+  the budget lets go (an async driver on a pluggable runtime cannot wait in `drop`). Tests
+  `tests/mdns_shutdown.rs`. Not an engine change.
+- **mdns, ice, peer connection, stream-driver** (`conf/mdns-10-on-link`, review F6, F9, F12
+  and its observation on peer-reflexive candidates):
+  - RFC 6762 section 11's first test ("All responses received with a destination address in
+    the IP header that is ... 224.0.0.251 or ... FF02::FB are necessarily deemed to have
+    originated on the local link, regardless of source IP address") now applies through
+    `handle_read` too: with the destination declared as reported
+    (`with_multicast_dns_destination_reported`, new at run time
+    `RTCPeerConnection::set_multicast_dns_destination_reported`, `Agent::...`, `Mdns::
+    set_destination_reported`), a group address in `local_addr` is an arrival at the group.
+    Before, only `Mdns::handle_datagram` applied it, so through a peer connection a LAN of
+    public addresses resolved no `.local` name. `PeerDriver` declares it and reports each mDNS
+    datagram's destination where it knows it (Linux IPv4, bound to the group; a runtime that
+    fills `RecvMeta::dst_ip`); unknown elsewhere (tokio, smol: no `IP_PKTINFO` read), where the
+    scope of the source still decides.
+  - Under `QueryAndGather` a local peer-reflexive candidate (RFC 8445 7.2.5.3.1) no longer shows
+    its base in the related address, and one whose mapped address is a hidden host address
+    shows the host's name (draft-ietf-mmusic-mdns-ice-candidates 3.3.1, first MUST).
+  - `RTCIceCandidate`'s string form ran the related address into the port
+    (`udp prflx 10.1.0.135:55410172.17.0.1`); it now reads `... related 172.17.0.1:40000`.
+  - The process's mDNS budget can be set once before first use
+    (`peer::set_process_mdns_rate_limit`); a driver on a runtime with a virtual clock
+    (`Runtime::virtual_clock`, new, `true` for `MockRuntime`) takes from a budget of its own
+    instead of the process's wall-clock one, so a mock clock can neither empty it for real
+    drivers nor wait on it.
+  - F9 decided: QU stays off with the driver (its IPv4 socket on Linux is bound to the group
+    and receives no unicast; RFC 6762 section 15.1).
+  Tests: `mdns_answer_trust_test.rs::test_a_reported_multicast_destination_in_local_addr_makes_a_public_source_on_link`,
+  `mdns_virtual_time.rs::drivers_on_a_lan_of_public_addresses_resolve_each_other`,
+  `agent_checklist_test.rs::test_a_local_peer_reflexive_candidate_does_not_show_a_hidden_host_address`,
+  `candidate.rs::the_string_form_separates_the_related_address_from_the_port`,
+  `tests/mdns_budget.rs`. Engine behaviour change (rtci-mdns trust with a reported
+  destination; rtci-ice local peer-reflexive candidates; the candidate string form).
 
 ### Changed
 
@@ -985,7 +1046,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stable) was caught on Linux only. `tests/mdns_virtual_time.rs` connects two publishing
   drivers on the mock runtime (whose multicast sockets now send from the address a transmit
   names, as the engine asks for mDNS) and runs on Linux, macOS and Windows in CI;
-  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux.
+  `tests/mdns.rs` (real multicast) runs on Windows as well as Linux (on a Windows host with no
+  interface that carries multicast to the group, as some hosted images, its two tests on the
+  default interface print why and skip).
 
 
 ## [0.1.0] - 2026-11-24

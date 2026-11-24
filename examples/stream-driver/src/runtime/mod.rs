@@ -139,6 +139,14 @@ pub trait Runtime: Send + Sync + Debug + 'static {
 
     /// Runs `future` to completion on the calling thread. The future need not be `Send`.
     fn block_on(&self, future: Pin<Box<dyn Future<Output = ()> + '_>>);
+
+    /// Whether [`now`](Self::now) is a virtual clock (a mock's) rather than the wall clock.
+    /// What is kept per process on the wall clock (the mDNS budget,
+    /// [`process_mdns_rate_limit`](crate::peer::process_mdns_rate_limit)) is not shared with a
+    /// driver on a virtual clock, whose times run elsewhere. `false` by default.
+    fn virtual_clock(&self) -> bool {
+        false
+    }
 }
 
 /// A task spawned with [`Runtime::spawn`]. Dropping it detaches the task.
@@ -352,10 +360,18 @@ impl<'a> dyn AsyncUdpSocket + 'a {
         std::future::poll_fn(|cx| self.poll_send(cx, &transmit)).await
     }
 
-    /// Sends `transmit` if the socket can take it now; `false` when it cannot (or failed).
-    pub fn try_send(&self, transmit: &Transmit<'_>) -> bool {
+    /// Sends `transmit` if the socket can take it now: how many bytes, or the system's error
+    /// (`WouldBlock` when the socket cannot take it now).
+    ///
+    /// # Errors
+    ///
+    /// The send failed, or would block.
+    pub fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<usize> {
         let mut cx = Context::from_waker(std::task::Waker::noop());
-        matches!(self.poll_send(&mut cx, transmit), Poll::Ready(Ok(_)))
+        match self.poll_send(&mut cx, transmit) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
     }
 }
 

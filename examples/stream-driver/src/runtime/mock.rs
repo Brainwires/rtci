@@ -65,6 +65,8 @@ enum Timer {
     Datagram {
         to: Arc<UdpEndpoint>,
         from: SocketAddr,
+        /// The destination address of its IP header.
+        destination: IpAddr,
         data: Vec<u8>,
     },
     Bytes {
@@ -277,7 +279,12 @@ impl MockClock {
 fn fire(timer: Timer) {
     match timer {
         Timer::Wake(waker) => waker.wake(),
-        Timer::Datagram { to, from, data } => to.deliver(from, data),
+        Timer::Datagram {
+            to,
+            from,
+            destination,
+            data,
+        } => to.deliver(from, destination, data),
         Timer::Bytes { to, data } => to.push(&data),
         Timer::End { to, reset } => to.end(reset),
     }
@@ -512,6 +519,10 @@ impl Runtime for MockRuntime {
     fn block_on(&self, future: Pin<Box<dyn Future<Output = ()> + '_>>) {
         self.run(future);
     }
+
+    fn virtual_clock(&self) -> bool {
+        true
+    }
 }
 
 fn unspecified(ip: IpAddr) -> IpAddr {
@@ -568,6 +579,9 @@ pub enum Fate {
     Lost,
     /// Dropped by the filter.
     Filtered,
+    /// The sending socket's system refused it ([`MockNet::set_send_error`]): the send
+    /// returned the error.
+    SendError,
 }
 
 /// One datagram of the [`MockNet::log`].
@@ -649,6 +663,21 @@ impl MockNet {
         interfaces.push(ip);
     }
 
+    /// Every send to `to` (an address, a multicast group included) fails with `error`, as
+    /// when the system has no route there (`HostUnreachable`) or refuses the application
+    /// (`PermissionDenied`); `None` lets them through again.
+    pub fn set_send_error(&self, to: IpAddr, error: Option<io::ErrorKind>) {
+        let mut state = lock(&self.shared.state);
+        match error {
+            Some(kind) => {
+                state.net.send_errors.insert(to, kind);
+            }
+            None => {
+                state.net.send_errors.remove(&to);
+            }
+        }
+    }
+
     /// Every datagram sent so far, in order.
     pub fn log(&self) -> Vec<DatagramRecord> {
         lock(&self.shared.state).net.log.clone()
@@ -659,6 +688,7 @@ struct Net {
     udp: HashMap<SocketAddr, Weak<UdpEndpoint>>,
     multicast: Vec<(SocketAddr, Weak<UdpEndpoint>)>,
     default_multicast_interfaces: Vec<IpAddr>,
+    send_errors: HashMap<IpAddr, io::ErrorKind>,
     listeners: HashMap<SocketAddr, Weak<ListenerEndpoint>>,
     tcp_ports: HashMap<SocketAddr, usize>,
     /// The next ephemeral port of each address: each address has its own ports, as on a real
@@ -678,6 +708,7 @@ impl Net {
             udp: HashMap::new(),
             multicast: Vec::new(),
             default_multicast_interfaces: Vec::new(),
+            send_errors: HashMap::new(),
             listeners: HashMap::new(),
             tcp_ports: HashMap::new(),
             next_port: HashMap::new(),
@@ -799,8 +830,9 @@ fn free_port(next: &mut u16, taken: impl Fn(u16) -> bool) -> io::Result<u16> {
     Err(io::Error::from(io::ErrorKind::AddrInUse))
 }
 
-/// A datagram waiting in a mock socket: its sender and bytes.
-type Received = (SocketAddr, Vec<u8>);
+/// A datagram waiting in a mock socket: its sender, the destination address it was sent to
+/// (a multicast group, or the socket's own), and its bytes.
+type Received = (SocketAddr, IpAddr, Vec<u8>);
 
 struct UdpEndpoint {
     local: SocketAddr,
@@ -820,10 +852,10 @@ impl UdpEndpoint {
         }
     }
 
-    fn deliver(&self, from: SocketAddr, data: Vec<u8>) {
+    fn deliver(&self, from: SocketAddr, destination: IpAddr, data: Vec<u8>) {
         let waker = {
             let mut inbox = lock(&self.inbox);
-            inbox.0.push_back((from, data));
+            inbox.0.push_back((from, destination, data));
             inbox.1.take()
         };
         if let Some(waker) = waker {
@@ -873,6 +905,17 @@ impl AsyncUdpSocket for MockUdp {
         {
             let mut state = lock(&self.runtime.shared.state);
             let net = &mut state.net;
+            if let Some(kind) = net.send_errors.get(&to.ip()).copied() {
+                net.log.push(DatagramRecord {
+                    at: now,
+                    from,
+                    to,
+                    len: transmit.contents.len(),
+                    traffic_class: transmit.traffic_class,
+                    fate: Fate::SendError,
+                });
+                return Poll::Ready(Err(kind.into()));
+            }
             let link = net.link(from.ip(), to.ip());
             delay = link.delay;
             let receivers = net.receivers(from.ip(), to);
@@ -909,13 +952,14 @@ impl AsyncUdpSocket for MockUdp {
         for receiver in deliveries {
             let data = transmit.contents.to_vec();
             if delay.is_zero() {
-                receiver.deliver(from, data);
+                receiver.deliver(from, to.ip(), data);
             } else {
                 self.runtime.schedule_timer(
                     now + delay,
                     Timer::Datagram {
                         to: receiver,
                         from,
+                        destination: to.ip(),
                         data,
                     },
                 );
@@ -933,7 +977,7 @@ impl AsyncUdpSocket for MockUdp {
         let mut inbox = lock(&self.endpoint.inbox);
         let mut filled = 0;
         while filled < bufs.len().min(meta.len()) {
-            let Some((from, data)) = inbox.0.pop_front() else {
+            let Some((from, destination, data)) = inbox.0.pop_front() else {
                 break;
             };
             let len = data.len().min(bufs[filled].len());
@@ -943,7 +987,8 @@ impl AsyncUdpSocket for MockUdp {
                 len,
                 stride: len,
                 ecn: None,
-                dst_ip: Some(self.endpoint.local.ip()),
+                // The destination of the IP header, as `IP_PKTINFO` reports it.
+                dst_ip: Some(destination),
             };
             filled += 1;
         }

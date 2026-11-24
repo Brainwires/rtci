@@ -12,7 +12,7 @@
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use rtci::ice::mdns::MulticastDnsMode;
-use rtci::mdns::{MDNS_MULTICAST_IPV4, MDNS_PORT, MdnsRateLimit};
+use rtci::mdns::MdnsRateLimit;
 use rtci::peer_connection::RTCPeerConnectionBuilder;
 use rtci::peer_connection::configuration::RTCConfigurationBuilder;
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
@@ -33,18 +33,37 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// The tests share the host's mDNS group: one at a time, so that what a test counts is its own.
 static MDNS_GROUP_IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The address of the interface multicast to the mDNS group leaves by: the one a UDP socket
-/// connected to the group sends from. An mDNS answer leaves from it, and the resolver believes
-/// an A record only from the address it names, so the candidates are gathered there.
+/// The address of the host's default-route interface (a UDP socket connected to a
+/// documentation address sends nothing): the drivers' candidates are gathered there, and the
+/// driver sends and joins mDNS on that address's interface. (Asking which interface a socket
+/// connected to the mDNS group would use gave loopback on Windows once a test of this binary had
+/// joined the group on loopback.)
 fn mdns_egress_ip() -> Option<IpAddr> {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
-            socket.connect((MDNS_MULTICAST_IPV4, MDNS_PORT))?;
+            socket.connect("192.0.2.1:9")?;
             socket.local_addr()
         })
         .ok()
         .map(|addr| addr.ip())
         .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+}
+
+/// The address the test runs on ([`mdns_egress_ip`]), or `None` when this host has no
+/// interface that carries multicast to the mDNS group: some GitHub-hosted Windows images have
+/// none, and the test is then skipped with the reason printed (the same connection runs on
+/// virtual time on every platform, `tests/mdns_virtual_time.rs`). On Linux the hosted runners
+/// always have one, so its absence fails the test there rather than hiding a regression.
+fn mdns_egress_or_skip(test: &str) -> Option<IpAddr> {
+    let ip = mdns_egress_ip();
+    if ip.is_none() {
+        assert!(
+            !cfg!(target_os = "linux"),
+            "{test} needs an interface that carries multicast to the mDNS group"
+        );
+        println!("SKIPPED {test}: no interface on this host carries multicast to the mDNS group");
+    }
+    ip
 }
 
 struct Side {
@@ -159,8 +178,10 @@ fn assert_only_local_names(who: &str, side: &Side, ip: IpAddr) {
 #[tokio::test]
 async fn driven_connections_resolve_each_others_mdns_candidates_and_connect() -> Result<()> {
     let _group = MDNS_GROUP_IN_USE.lock().await;
-    let Some(ip) = mdns_egress_ip() else {
-        panic!("this test needs an interface that carries multicast to the mDNS group");
+    let Some(ip) =
+        mdns_egress_or_skip("driven_connections_resolve_each_others_mdns_candidates_and_connect")
+    else {
+        return Ok(());
     };
     let limit = MdnsRateLimit::default();
     let mut a = Side::new(ip, Some(limit.clone()))?;
@@ -199,8 +220,10 @@ async fn two_driven_connections_send_their_mdns_within_one_shared_budget() -> Re
     const BURST: u32 = 1;
     const PER_SECOND: u32 = 1;
     let _group = MDNS_GROUP_IN_USE.lock().await;
-    let Some(ip) = mdns_egress_ip() else {
-        panic!("this test needs an interface that carries multicast to the mDNS group");
+    let Some(ip) =
+        mdns_egress_or_skip("two_driven_connections_send_their_mdns_within_one_shared_budget")
+    else {
+        return Ok(());
     };
     let limit = MdnsRateLimit::new(BURST, PER_SECOND);
     let start = Instant::now();

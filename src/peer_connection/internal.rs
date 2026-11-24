@@ -471,6 +471,7 @@ impl RTCPeerConnection {
             last_answer: String::new(),
             ice_credentials_to_replace: Vec::new(),
             mdns_publishing: Default::default(),
+            mdns_destination_reported: None,
             temporary_ipv6_addresses: Vec::new(),
             ssrc_history: HashSet::new(),
             local_description_was_set: false,
