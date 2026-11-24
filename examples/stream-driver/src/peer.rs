@@ -373,6 +373,8 @@ pub struct PeerDriver {
     mdns_send_failures: u64,
     /// mDNS socket binds that failed ([`Self::mdns_bind_failures`]).
     mdns_bind_failures: u64,
+    /// [`Self::shutdown`] ran: nothing is left for `Drop` to do.
+    shut_down: bool,
     /// The engine's events, for the application, after the driver had its look.
     events: VecDeque<RTCPeerConnectionEvent>,
     /// The transports whose generation the driver gathered for on an
@@ -429,6 +431,7 @@ impl PeerDriver {
             driver_events: VecDeque::new(),
             mdns_send_failures: 0,
             mdns_bind_failures: 0,
+            shut_down: false,
             events: VecDeque::new(),
             gathered: HashSet::new(),
             unsent: 0,
@@ -577,6 +580,41 @@ impl PeerDriver {
                 return Ok(());
             }
         }
+    }
+
+    /// Ends the connection and the driver in order: closes the connection, sends what it
+    /// writes on closing (the mDNS goodbyes of its published names, RFC 6762 section 10.1:
+    /// records with TTL 0, so that the link's caches drop them at once instead of holding them
+    /// for their 120 s; draft-ietf-mmusic-mdns-ice-candidates section 7.1), waiting up to
+    /// `linger` for the mDNS budget to let them go, then closes every socket of the driver,
+    /// which leaves the mDNS groups. The driver is not to be stepped afterwards.
+    ///
+    /// Dropping a driver that was not shut down does what can be done without waiting (see
+    /// [`Drop`](#impl-Drop-for-PeerDriver)).
+    ///
+    /// # Errors
+    ///
+    /// As [`flush`](Self::flush).
+    pub async fn shutdown(&mut self, linger: Duration) -> Result<()> {
+        // The connection may be closed already: the application's own `close()`.
+        let _ = self.pc.close();
+        self.shut_down = true;
+        let until = self.runtime.now() + linger;
+        loop {
+            self.flush()?;
+            let now = self.runtime.now();
+            let Some(next) = self.mdns_egress.next_ready(now) else {
+                break;
+            };
+            if now >= until {
+                break;
+            }
+            self.runtime.sleep_until(next.min(until)).await;
+        }
+        // Closing a socket leaves its groups (the system drops its memberships).
+        self.mdns_sockets = None;
+        self.sockets.clear();
+        Ok(())
     }
 
     /// One round: flushes, then waits up to `wait` (less when a timer of the connection is due
@@ -1222,6 +1260,28 @@ impl PeerDriver {
             .filter(|s| s.retired_for == Some(transport) && s.close_at.is_none())
         {
             host.close_at = Some(close_at);
+        }
+    }
+}
+
+/// What a driver dropped without [`PeerDriver::shutdown`] can do: an async driver on a runtime
+/// of the application's choice cannot wait in `drop` (no runtime may be blocked there, and
+/// none may be running any more), so it closes the connection and sends at once, without
+/// waiting, what the connection then writes: the mDNS goodbyes the budget lets go now (the
+/// rest is lost, and the neighbours' caches hold those names until their TTL ends), each
+/// socket's last datagrams if the system takes them. The sockets close as the driver goes,
+/// leaving the mDNS groups. Use `shutdown` to have every goodbye sent.
+impl Drop for PeerDriver {
+    fn drop(&mut self) {
+        if self.shut_down {
+            return;
+        }
+        let _ = self.pc.close();
+        while let Some(datagram) = self.pc.poll_write() {
+            self.send(datagram);
+        }
+        if self.mdns_sockets.is_some() {
+            self.send_mdns(self.runtime.now());
         }
     }
 }

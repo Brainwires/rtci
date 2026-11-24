@@ -341,6 +341,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time, every platform; the mock network refuses sends with `MockNet::set_send_error`) and
   `tests/mdns_unavailable.rs` (real network, `--ignored`, run on hosted runners). Not an engine
   change.
+- **stream-driver** (`conf/mdns-9-shutdown`, review F3): mDNS goodbyes (RFC 6762 section
+  10.1, TTL 0) left only when the application closed the connection and kept stepping the
+  driver; dropping the driver sent none, and the link's caches held the names for 120 s. New
+  `PeerDriver::shutdown(linger)`: closes the connection, sends every goodbye within the mDNS
+  budget (waiting up to `linger`), then closes the driver's sockets, leaving the groups.
+  Dropping a driver that was not shut down now closes its connection and sends at once what
+  the budget lets go (an async driver on a pluggable runtime cannot wait in `drop`). Tests
+  `tests/mdns_shutdown.rs`. Not an engine change.
 
 ### Changed
 
