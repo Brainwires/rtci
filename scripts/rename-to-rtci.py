@@ -9,7 +9,8 @@ The crate names come from `cargo metadata` at run time (the root workspace and e
 workspace: fuzz crates, the test environment's peers, ...), so crates a later branch adds are
 renamed too and nothing else is. Matching is token-aware and depends on the file type; what is
 deliberately left (upstream's names and URLs, history, fixtures, vendored files, the word "rtc"
-in prose and identifiers such as `rtc_pc`) is printed afterwards, grouped by reason.
+in prose and identifiers such as `rtc_pc`) is printed afterwards, grouped by reason. Data is not
+a name: Rust byte strings, and string literals used as bytes, keep their text (see DATA_LITERALS).
 
 Usage:
   python3 scripts/rename-to-rtci.py              apply the rename to the working tree
@@ -149,6 +150,8 @@ PATCHES: list[tuple[str, str, str, str, str, bool]] = [
 
 # Markdown code blocks in these languages get the shell rules (a bare `rtc` word is the crate).
 SHELL_FENCES = ("sh", "bash", "shell", "console", "zsh")
+# Markdown code blocks in these languages are Rust (rustdoc's attributes included).
+RUST_FENCES = ("rust", "rs", "no_run", "ignore", "should_panic", "compile_fail", "edition2021", "edition2024")
 
 TEXT_SUFFIX_CLASS = {
     ".rs": "rust",
@@ -171,6 +174,176 @@ TEXT_SUFFIX_CLASS = {
     ".cc": "c",
     ".cpp": "c",
 }
+
+
+# ---------------------------------------------------------------------------------------------
+# Rust literals: data is not a name.
+#
+# A string literal in Rust source is either a human-facing text (a STUN SOFTWARE value, a CLI
+# about text, a log or error message) or data: bytes that are hashed, signed, used as an AEAD's
+# associated data or a key-derivation label, compared with a fixed expected value, or that a peer
+# on the old name must agree with. Renaming data breaks interoperability and every fixed vector
+# made over it (CI found it: `b"rtc-crypto verification vector"` is the message of fixed P-384 and
+# RSASSA-PSS signatures). The rule:
+#   1. A byte string (`b"…"`, `br"…"`, `br#"…"#`), a byte character and a C string (`c"…"`) is
+#      data and is never rewritten.
+#   2. A string literal (`"…"`, `r"…"`, `r#"…"#`) turned into bytes on the spot (`"…".as_bytes()`,
+#      `.into_bytes()`, `.to_vec()`, `Bytes::from_static("…")`, ...) is data likewise.
+#   3. Where neither rule can see it (a `&str` constant used as bytes elsewhere), DATA_LITERALS
+#      below names the literal, with the reason.
+# Everything else in a string literal (product names, messages, `include_str!` paths to moved
+# directories) is renamed like code. What is kept is reported as residue with its reason, so
+# `--check` does not count it as a name left behind.
+
+# Literals the two general rules cannot decide: (path pattern, regex the literal's text on that
+# line must match (quotes included), "keep" or "rename", reason). An entry overrides rule 2 for
+# a `&str` literal and is ignored for a byte string (rule 1 is absolute). Audit of master 4e6de256
+# (docs/rename.md, "Data literals"): 14 byte strings with an old name (kept by rule 1), 25 `&str`
+# literals with one, all human-facing (renamed); no `&str` used as bytes names a crate today.
+DATA_LITERALS: list[tuple[str, str, str, str]] = [
+    # The STUN / TURN SOFTWARE attribute (RFC 8489 14.14) goes on the wire, but it is an
+    # informational product name with the version in it: no peer compares it and no fixed vector
+    # can contain it. It names the product, so it follows the product's name.
+    ("rtc-ice/src/agent/mod.rs", r'^"rtc-ice "$', "rename", "STUN SOFTWARE product name (informational, carries the version)"),
+    ("rtc-turn/src/client/mod.rs", r'^"rtc-turn "$', "rename", "TURN SOFTWARE product name (informational, carries the version)"),
+    ("rtc-turn/src/client/client_software_mtu_test.rs", r'^"rtc-turn "$', "rename", "test of the TURN SOFTWARE product name"),
+]
+for _p, _rx, _action, _why in DATA_LITERALS:
+    assert _action in ("keep", "rename"), _action
+
+DATA_REASON_BYTES = "byte-string or C-string data literal (hashed, signed, AAD, KDF label, test vector; a peer must agree)"
+DATA_REASON_AS_BYTES = "string literal used as bytes on the spot (`\"…\".as_bytes()`: data, not a name)"
+
+# A string literal's start: optional prefix (b, c, r with hashes), then the quote.
+_RUST_STR_START = re.compile(r'(?:([bc]?)r(#*)|([bc]?))"')
+_RUST_CHAR = re.compile(r"b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|.)|[^\\'\n])'")
+_RUST_IDENT = re.compile(r"[A-Za-z0-9_]+")
+# Rule 2: calls that turn the literal next to them into bytes.
+_RUST_TO_BYTES_AFTER = re.compile(r"\s*\.\s*(?:as_bytes|into_bytes|bytes)\s*\(")
+_RUST_TO_BYTES_BEFORE = re.compile(r"\bBytes(?:Mut)?\s*::\s*(?:from_static|from|copy_from_slice)\s*\(\s*&?\s*$")
+
+
+NOT_RUST = ("not-rust",)
+_DATA_LITERAL_PATHS: list = []
+
+
+def _data_literal_paths() -> list:
+    if not _DATA_LITERAL_PATHS:
+        _DATA_LITERAL_PATHS.extend(glob_re(e[0]) for e in DATA_LITERALS)
+    return _DATA_LITERAL_PATHS
+
+
+def rust_data_spans(path: str, line: str, state) -> tuple[list[tuple[int, int, str]], object]:
+    """The spans of `line` holding data that must not be rewritten, each with its reason, and
+    the lexer state for the next line (see rust_literal_spans)."""
+    spans, nxt = rust_literal_spans(line, state)
+    out = []
+    for a, b, kind in spans:
+        if kind in ("bstr", "cstr"):
+            out.append((a, b, DATA_REASON_BYTES))
+        elif kind == "str":
+            text = line[a:b]
+            # Paths are listed under the old directory names; after the rename (`--check`) the
+            # file is under the new one.
+            old_path = "/".join(old_of(seg) for seg in path.split("/"))
+            entry = next(
+                (e for e, prx in zip(DATA_LITERALS, _data_literal_paths()) if (prx.match(path) or prx.match(old_path)) and re.search(e[1], text)),
+                None,
+            )
+            if entry is not None:
+                if entry[2] == "keep":
+                    out.append((a, b, "listed data literal (DATA_LITERALS): " + entry[3]))
+                continue
+            if _RUST_TO_BYTES_AFTER.match(line, b) or _RUST_TO_BYTES_BEFORE.search(line[:a]):
+                out.append((a, b, DATA_REASON_AS_BYTES))
+    return out, nxt
+
+
+def _rust_string_end(line: str, j: int, hashes: int) -> tuple[int, bool]:
+    """End (exclusive) of a string literal whose body starts at `j`; False when it goes on."""
+    n = len(line)
+    if hashes < 0:
+        while j < n:
+            if line[j] == "\\":
+                j += 2
+                continue
+            if line[j] == '"':
+                return j + 1, True
+            j += 1
+        return n, False
+    close = '"' + "#" * hashes
+    k = line.find(close, j)
+    return (k + len(close), True) if k >= 0 else (n, False)
+
+
+def rust_literal_spans(line: str, state):
+    """Lex one line of Rust. `state` is what the previous line left open: None, ("block", depth)
+    or ("str", kind, hashes) (hashes -1: not raw). Returns ([(start, end, kind)], state) where kind
+    is "str", "bstr" (byte string or byte character), "cstr" or "comment"."""
+    spans = []
+    i, n = 0, len(line)
+    if state is not None:
+        if state[0] == "block":
+            depth = state[1]
+            while i < n and depth:
+                if line.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif line.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            spans.append((0, i, "comment"))
+            if depth:
+                return spans, ("block", depth)
+        else:
+            end, closed = _rust_string_end(line, 0, state[2])
+            spans.append((0, end, state[1]))
+            if not closed:
+                return spans, state
+            i = end
+    while i < n:
+        if line.startswith("//", i):
+            spans.append((i, n, "comment"))
+            return spans, None
+        if line.startswith("/*", i):
+            start, depth, i = i, 1, i + 2
+            while i < n and depth:
+                if line.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif line.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            spans.append((start, i, "comment"))
+            if depth:
+                return spans, ("block", depth)
+            continue
+        prev_ident = i > 0 and (line[i - 1].isalnum() or line[i - 1] == "_")
+        if not prev_ident:
+            m = _RUST_STR_START.match(line, i)
+            if m:
+                prefix = m.group(1) if m.group(2) is not None else m.group(3)
+                raw = m.group(2) is not None
+                kind = "bstr" if prefix == "b" else "cstr" if prefix == "c" else "str"
+                hashes = len(m.group(2)) if raw else -1
+                end, closed = _rust_string_end(line, m.end(), hashes)
+                spans.append((i, end, kind))
+                if not closed:
+                    return spans, ("str", kind, hashes)
+                i = end
+                continue
+            m = _RUST_CHAR.match(line, i)
+            if m:
+                if line[i] == "b":
+                    spans.append((i, m.end(), "bstr"))
+                i = m.end()
+                continue
+        m = _RUST_IDENT.match(line, i)
+        if m:
+            i = m.end()
+            continue
+        i += 1
+    return spans, None
 
 
 def glob_re(pattern: str) -> re.Pattern:
@@ -390,6 +563,8 @@ class Renamer:
         libs = [n for n in self.lib if n != OLD_ROOT]
         self.old_names = set(self.pkg) | set(self.lib)
         self.renamed_state = renamed_state
+        # The Rust lexer state at the start of the line being rewritten, or NOT_RUST.
+        self.rust_state = NOT_RUST
         never = r"(?!x)x"
         # A crate name, also as the start of a name made from it (rtc-ffi-release, rtc-dtls-fuzz).
         self.pkg_re = re.compile(r"(?<![A-Za-z0-9_.@-])(" + (alt(hyphen) or never) + r")(?![A-Za-z0-9_])")
@@ -432,9 +607,15 @@ class Renamer:
 
     def sub(self, rx, line, repl, category, events, ctx, guard=True, exceptions=()):
         spans = self.masks(line)
+        # Rust source: data literals are never rewritten (rust_data_spans). The rules only turn
+        # one identifier into a longer one, so the literal boundaries of the partly rewritten
+        # line are those of the original line, lexed from the same state.
+        data = rust_data_spans(ctx[0], line, self.rust_state)[0] if self.rust_state is not NOT_RUST else []
 
         def cb(m):
             start = m.start(m.lastindex or 0) if m.lastindex else m.start()
+            if any(a <= start < b for a, b, _ in data):
+                return m.group(0)
             if guard and self.in_masks(start, spans):
                 return m.group(0)
             before = line[:start]
@@ -798,9 +979,15 @@ def rewrite_file(r: Renamer, path: str, text: str, events: list[Event], residue:
     changelog = path == "CHANGELOG.md"
     changelog_live = False
     exempt_reason: list[str | None] = []
+    rust_line: list[bool] = []  # lines lexed as Rust (a .rs file, a rust code block)
+    rstate = None  # Rust lexer state at the start of the line
     for i, line in enumerate(lines):
         ctx = (path, i + 1)
         exempt = None
+        is_rust = cls == "rust" or (fence in RUST_FENCES and not re.match(r"^\s*(```+|~~~+)", line))
+        rust_line.append(is_rust)
+        if not is_rust:
+            rstate = None
         if MARKER_START.search(line):
             in_marker = True
         if in_marker:
@@ -827,9 +1014,17 @@ def rewrite_file(r: Renamer, path: str, text: str, events: list[Event], residue:
             out.append(line)
             continue
         new = line
-        if cls == "rust":
-            new = r.rust(line, events, ctx, ffi_scope=ffi_scope)
-        elif cls == "c":
+        if is_rust:
+            r.rust_state = rstate
+            try:
+                new = r.rust(line, events, ctx, ffi_scope=ffi_scope)
+            finally:
+                r.rust_state = NOT_RUST
+            rstate = rust_literal_spans(line, rstate)[1]
+            exempt_reason.append(None)
+            out.append(new)
+            continue
+        if cls == "c":
             new = r.common(line, events, ctx, "c", ffi_scope=True)
         elif cls in ("code", "shell"):
             new = r.code(line, events, ctx, path, shell=(cls == "shell"), ffi_scope=ffi_scope, exceptions=exceptions)
@@ -840,9 +1035,7 @@ def rewrite_file(r: Renamer, path: str, text: str, events: list[Event], residue:
             if rules:
                 rule = rules.get("*") or next((v for k, v in rules.items() if section.startswith(k)), None)
             cells = split_cells(line) if rule else None
-            if fence in ("rust", "rs", "no_run", "ignore", "should_panic", "compile_fail", "edition2021", "edition2024"):
-                new = r.rust(line, events, ctx, ffi_scope=ffi_scope)
-            elif fence == "toml":
+            if fence == "toml":
                 new = r.toml_snippet(line, events, ctx)
             elif fence is not None:
                 new = r.code(line, events, ctx, path, shell=fence in SHELL_FENCES, ffi_scope=ffi_scope)
@@ -866,7 +1059,16 @@ def rewrite_file(r: Renamer, path: str, text: str, events: list[Event], residue:
         out.append(new)
     if cls == "c" and path.endswith(".h"):
         out = realign_c(lines, out)
-    scan_residue(r, path, out, residue, cls, exempt_reason, rules)
+    # Where the kept data literals are in the rewritten lines, for the residue.
+    data_spans: list[list[tuple[int, int, str]]] = []
+    rstate = None
+    for line, is_rust in zip(out, rust_line):
+        if is_rust:
+            spans, rstate = rust_data_spans(path, line, rstate)
+        else:
+            spans, rstate = [], None
+        data_spans.append(spans)
+    scan_residue(r, path, out, residue, cls, exempt_reason, rules, data_spans)
     return "\n".join(out)
 
 
@@ -909,7 +1111,7 @@ def exceptions_for(path: str):
     return [(re.compile(b), re.compile(a), why) for pat, b, a, why in EXCEPTIONS if glob_re(pat).match(path)]
 
 
-def scan_residue(r: Renamer, path, lines, residue, cls, exempt_reason=None, rules=None):
+def scan_residue(r: Renamer, path, lines, residue, cls, exempt_reason=None, rules=None, data_spans=None):
     section = ""
     exceptions = exceptions_for(path)
     for i, line in enumerate(lines):
@@ -917,13 +1119,17 @@ def scan_residue(r: Renamer, path, lines, residue, cls, exempt_reason=None, rule
         if hm and path.endswith(".md"):
             section = hm.group(1).strip()
         spans = Renamer.masks(line)
+        data = data_spans[i] if data_spans and i < len(data_spans) else []
         for m in RESIDUE_RE.finditer(line):
             start = m.start()
             left = re.search(r"[A-Za-z0-9_-]*$", line[:start]).group(0)
             token = (left + re.match(r"[A-Za-z0-9_-]*", line[start:]).group(0)).strip("-_")
             excepted = next((w for b, a, w in exceptions if b.search(line[:start]) and a.match(line[m.end() :])), None)
+            in_data = next((w for a, b, w in data if a <= start < b), None)
             if exempt_reason and i < len(exempt_reason) and exempt_reason[i]:
                 why = exempt_reason[i]
+            elif in_data:
+                why = in_data
             elif excepted:
                 why = excepted
             elif Renamer.in_masks(start, spans):

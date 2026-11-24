@@ -99,7 +99,60 @@ the audit tables cite them.
 
 The rules are in the script's tables: `EXCLUDED_PATHS` (files never edited), `SECTION_RULES`
 (Markdown sections whose table cells name upstream's crates), `EXCEPTIONS` (places where the bare
-word `rtc` is not the crate) and `PATCHES` (the one-time code patches).
+word `rtc` is not the crate), `DATA_LITERALS` (string literals the data rule below cannot decide)
+and `PATCHES` (the one-time code patches).
+
+### Data literals
+
+A label's text is not a brand; it is data. Bytes that are hashed, signed, used as AEAD associated
+data or a key-derivation label, compared with a fixed expected value, or that a peer on the old
+name must agree with keep their text. The first application renamed `b"rtc-crypto verification
+vector"`, the message of fixed P-384 and RSASSA-PSS signatures, and `rtci-crypto`'s
+`ring_provider_conforms` failed. The rule, in Rust source and in Rust code blocks in Markdown:
+
+1. A byte string (`b"…"`, `br"…"`, `br#"…"#`), byte character or C string (`c"…"`) is never
+   rewritten.
+2. A string literal turned into bytes on the spot (`"…".as_bytes()`, `.into_bytes()`, `.bytes()`,
+   `Bytes::from_static("…")`, `Bytes::from("…")`) is not rewritten either.
+3. Where neither rule sees it (a `&str` constant used as bytes elsewhere), `DATA_LITERALS` names the
+   literal, `keep` or `rename`, with the reason.
+
+Everything else in a string literal is renamed like code. What is kept is printed in the residue
+with its reason and does not count for `--check`.
+
+Audit of master `4e6de256`: the script without the rule rewrote 39 literals.
+
+Kept (14 byte strings, rule 1):
+
+| Literal | Where | Why it is data |
+|---|---|---|
+| `b"rtc-crypto provider conformance"` | `rtc-crypto/src/conformance.rs:616` | message signed and verified across providers |
+| `b"rtc-crypto verification vector"` | `rtc-crypto/src/conformance.rs:657` | message of the fixed P-384 signature vectors |
+| `b"rtc-crypto RSASSA-PSS verification vector"` | `rtc-crypto/src/conformance.rs:1001` | message of the fixed RSASSA-PSS signature vector |
+| `b"rtc-dtls dtls13 ticket"` (`TICKET_AAD`) | `rtc-dtls/src/dtls13/psk.rs:36` | AEAD associated data of session tickets: tickets issued before the rename must still open |
+| `b"rtc-dtls dtls12 ticket"` (`DTLS12_TICKET_AAD`) | `rtc-dtls/src/dtls13/psk.rs:40` | the same for DTLS 1.2 tickets |
+| `b"rtc-sframe decoy"` (`DECOY_BASE_KEY`) | `rtc-sframe/src/context.rs:75` | key material of the decoy context |
+| `b"rtc-dtls-test"` (PSK identity hint), 3 | `rtc-dtls/src/config/config_test.rs:152`, `rtc-dtls/src/endpoint.rs:1148`, `:1941` | protocol data sent in ServerKeyExchange |
+| `b"rtc-dtls-fuzz"` (PSK identity hint) | `rtc-dtls/src/fuzzing.rs:116` | protocol data; fuzz seeds made with it keep their meaning |
+| `b"hello from the rtc-dtls client\n"`, `…server\n"` | `rtc-dtls/examples/dtls_interop.rs:321`, `:323` | application payload an interop peer receives |
+| `b"from rtc-dtls"`, 2 | `scripts/test-env/peers/layers/tests/dimpl_rtc_dtls.rs:309`, `:314` | payload sent and compared with the received bytes |
+
+Renamed (25 `&str` literals, human-facing):
+
+| Literal | Where | Why it is a name |
+|---|---|---|
+| `"rtc-ice "` in `DEFAULT_SOFTWARE` | `rtc-ice/src/agent/mod.rs:287` | STUN SOFTWARE product name (RFC 8489 14.14, informational, carries the version; no peer compares it). Listed `rename` in `DATA_LITERALS` |
+| `"rtc-turn "` in `DEFAULT_SOFTWARE`, and its test | `rtc-turn/src/client/mod.rs:395`, `client_software_mtu_test.rs:29` | the same for TURN; listed `rename` |
+| clap `about` texts, 3 | `rtc-mdns/examples/mdns_query.rs:32`, `mdns_server.rs:32`, `mdns_server_query.rs:35` | CLI help text |
+| assertion and error messages, 7 | `rtc-sctp/src/endpoint/endpoint_test.rs:3196`, `tests/sctp_rfc_defaults_rtc2rtc.rs:304`, `scripts/test-env/peers/layers/tests/dimpl_rtc_dtls.rs:256`, `:323`, `rice_rtc_ice.rs:234`, `:252`, `:307` | messages for people |
+| behaviour-profile texts, 12 sites | `src/peer_connection/configuration/behaviour_profile.rs:156`, `:292`, `:458`, `:460`, `:862`, `:876`, `:1563`, `:1573`, `:1608` | documentation strings; `docs/behaviour-profiles.md` is generated from them and renamed alike |
+
+Also checked, nothing to keep: no `&str` with an old name is used as bytes (`.as_bytes()` and the
+like), no `include_bytes!` / `include_str!` path names an old crate, no Markdown or doc-comment
+example holds a byte string with one, and no fixture, corpus, `.sdp`, `.pem`, `.bin` or JSON
+vector contains one (those paths are excluded anyway). The bare word `rtc` in data (`b"rtc"` as
+AEAD associated data in `rtc-crypto/tests/cross_provider.rs`, `b"turn.rtc.test"`) was never
+rewritten; the residue now gives it the data reason.
 
 ## The C interface
 
