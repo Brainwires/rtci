@@ -635,7 +635,7 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
     println!(
         "MEASURE {name}: decoded {} received {} dropped {} freezes {} ({:.3} s) longest {:.0} ms \
          jitter buffer mean {:.1} ms target {:.1} ms emitted {} key frame requests {:?} PLIs at \
-         sender {} corrupt {} decoder errors {} retransmitted packets {}",
+         sender {} corrupt {} decoder errors {} retransmitted packets {} repair delay mean {:.0} ms max {:.0} ms",
         s.frames_decoded,
         s.frames_received,
         s.frames_dropped,
@@ -650,6 +650,8 @@ fn report(name: &str, call: &mut Call) -> ReceiveStats {
         call.receiver.corrupt,
         call.receiver.decoder.errors,
         s.packets_retransmitted,
+        1000.0 * s.total_repair_delay / s.packets_retransmitted.max(1) as f64,
+        1000.0 * s.max_repair_delay,
     );
     s
 }

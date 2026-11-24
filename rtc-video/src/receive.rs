@@ -250,6 +250,9 @@ impl ReceivePipeline {
             && now.saturating_duration_since(*seen) >= lateness
         {
             packet.retransmitted = true;
+            let late = now.saturating_duration_since(*seen).as_secs_f64();
+            self.stats.total_repair_delay += late;
+            self.stats.max_repair_delay = self.stats.max_repair_delay.max(late);
         }
         self.arrivals.insert(seq, now);
         while self.arrivals.len() > 2048 {

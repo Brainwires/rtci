@@ -60,6 +60,11 @@ pub struct ReceiveStats {
     pub packets_duplicated: u64,
     /// Not W3C: packets taken as retransmissions.
     pub packets_retransmitted: u64,
+    /// Not W3C: for those, the sum and the largest of how late they came after the first
+    /// packet past their gap, in seconds (the repair delay).
+    pub total_repair_delay: f64,
+    /// See `total_repair_delay`.
+    pub max_repair_delay: f64,
     /// Not W3C: key frames asked for, by reason.
     pub key_frame_requests: HashMap<KeyFrameReason, u32>,
     /// Not W3C: decode failures.
