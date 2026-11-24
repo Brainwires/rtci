@@ -344,15 +344,16 @@ pub const PROBE_PADDING_OCTETS: u8 = 255;
 pub const MIN_RETRANSMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// How long after its retransmission a packet is not retransmitted again however often it is
-/// asked for: [`MIN_RETRANSMIT_INTERVAL`], or a round trip when the RTCP session has measured a
-/// longer one. A receiver asks again every round trip while the repair is on its way; a request
-/// that crossed the repair in flight is not a new loss. libwebrtc's packet history does the same
-/// (`modules/rtp_rtcp/source/rtp_packet_history.cc`, `VerifyRtt`: a packet "already
-/// retransmitted once, and the time since that even is lower than on RTT" is not resent).
+/// asked for: [`MIN_RETRANSMIT_INTERVAL`]. libwebrtc waits a round trip
+/// (`modules/rtp_rtcp/source/rtp_packet_history.cc`, `VerifyRtt`); measured here that loses
+/// repairs: when a retransmission is itself lost, the receiver's next request can fall inside
+/// that round trip and be ignored, and the one after waits for RFC 4585's early-feedback hold
+/// (`tests/vp8_nack_jitter_buffer_rtc2rtc.rs`, seed 4: packet 1272 retransmitted again 1.42 s
+/// after the lost copy, after the 2 s jitter buffer had played past it). A request that
+/// crossed a repair in flight costs one duplicate instead.
 fn resend_interval(round_trip_time: Option<Duration>) -> Duration {
-    round_trip_time.map_or(MIN_RETRANSMIT_INTERVAL, |rtt| {
-        rtt.max(MIN_RETRANSMIT_INTERVAL)
-    })
+    let _ = round_trip_time;
+    MIN_RETRANSMIT_INTERVAL
 }
 
 /// Most retransmissions queued and not yet taken by `poll_write`. Past it further NACKed
