@@ -46,6 +46,13 @@ impl Association {
 
     /// The most user data one DATA chunk carries: an I-DATA chunk's header is four bytes
     /// longer than a DATA chunk's (RFC 8260 2.1), and the packet is no larger.
+    /// Whether user messages are fragmented (`TransportConfig::with_fragmentation`).
+    pub(crate) fn fragmentation(&self) -> bool {
+        self.transport_config
+            .as_ref()
+            .is_none_or(|config| config.fragmentation())
+    }
+
     pub(crate) fn fragment_size(&self) -> u32 {
         if self.use_interleaving {
             self.max_payload_size

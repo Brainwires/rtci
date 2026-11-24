@@ -116,6 +116,7 @@ pub struct TransportConfig {
     path_mtu_discovery: Option<PathMtuDiscoveryConfig>,
     zero_window_overcommit: bool,
     partial_delivery_point: Option<u32>,
+    no_fragmentation: bool,
 }
 
 impl Default for TransportConfig {
@@ -142,6 +143,7 @@ impl Default for TransportConfig {
             path_mtu_discovery: None,
             zero_window_overcommit: false,
             partial_delivery_point: None,
+            no_fragmentation: false,
         }
     }
 }
@@ -199,6 +201,21 @@ impl TransportConfig {
     pub fn with_partial_delivery_point(mut self, value: u32) -> Self {
         self.partial_delivery_point = Some(value);
         self
+    }
+
+    /// Turns fragmentation of user messages off (RFC 9260 6.9: "An implementation MAY allow the
+    /// upper layer to disable fragmentation"). The association then acts "just like an
+    /// implementation that does NOT support fragmentation": a message that does not fit in one
+    /// DATA chunk of a full-sized packet (the PMDCS less the chunk header) is refused with
+    /// `Error::ErrOutboundPacketTooLarge` instead of being sent in fragments. Off by default.
+    pub fn with_fragmentation(mut self, enabled: bool) -> Self {
+        self.no_fragmentation = !enabled;
+        self
+    }
+
+    /// Whether user messages are fragmented: see [`with_fragmentation`](Self::with_fragmentation).
+    pub fn fragmentation(&self) -> bool {
+        !self.no_fragmentation
     }
 
     /// The partial delivery point in effect: see

@@ -5010,9 +5010,20 @@ impl Association {
     ) -> Vec<Bytes> {
         // Pop unsent data chunks from the pending queue to send as much as
         // cwnd and rwnd allow.
-        let (chunks, resets) = self.pop_pending_data_chunks_to_send(now);
+        let (mut chunks, resets) = self.pop_pending_data_chunks_to_send(now);
         if self.state() == AssociationState::Closed {
             return vec![];
+        }
+        // RFC 9260 3.3.1: "The (I)mmediate bit MAY be set by the sender whenever the sender of
+        // a DATA chunk can benefit from the corresponding SACK chunk being sent back without
+        // delay" (RFC 7053 4). The last DATA before a SHUTDOWN is such a chunk: the SHUTDOWN
+        // waits for its acknowledgement (9.2), which a delayed SACK would hold back.
+        if self.state() == AssociationState::ShutdownPending
+            && self.pending_queue.is_empty()
+            && self.held_write_count == 0
+            && let Some(last) = chunks.last_mut()
+        {
+            last.immediate_sack = true;
         }
         if !chunks.is_empty() {
             // Start timer. (noop if already started)
@@ -5296,8 +5307,21 @@ impl Association {
             let shutdown = ChunkShutdown {
                 cumulative_tsn_ack: self.peer_last_tsn,
             };
+            // RFC 9260 3.3.8: "The sender of the SHUTDOWN chunk MAY bundle a SACK chunk to
+            // indicate any gaps in the received TSNs", which the SHUTDOWN's Cumulative TSN Ack
+            // cannot report: the peer then knows what arrived beyond it and need not send it
+            // again.
+            let mut chunks: Vec<Box<dyn Chunk>> = vec![];
+            if !self
+                .payload_queue
+                .get_gap_ack_blocks(self.peer_last_tsn)
+                .is_empty()
+            {
+                chunks.push(Box::new(self.create_selective_ack_chunk()));
+            }
+            chunks.push(Box::new(shutdown));
 
-            if let Ok(raw) = self.marshal_packet(&self.create_packet(vec![Box::new(shutdown)])) {
+            if let Ok(raw) = self.marshal_packet(&self.create_packet(chunks)) {
                 self.timers
                     .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 self.start_shutdown_guard(now);
