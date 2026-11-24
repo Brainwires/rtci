@@ -1048,12 +1048,14 @@ const SLOW: f64 = 12_000.0;
 /// source's and is never discarded for its age. Into the pause, at 0.3 s, stream 1 writes two
 /// frames (2 and 3, timestamp 3000; 4 and 5, timestamp 6000). A retransmission written at 0.5 s
 /// goes ahead of the new media and leaves at 1 s (a full budget); audio written at 1.5 s leaves
-/// when written (896 bits of the 6000 refilled since 1 s); 1 leaves when the budget is full
-/// again, at 1.5 + (12 000 - 5104) / 12 000 = 2.075 s. Then 2 heads the queue and, written at
-/// 0.3 s, has waited the bound at 2.3 s (its budget would come at 3.075 s): 2 to 5 go, oldest
-/// first, two frames. Stream 9's frame written at 1.2 s is another stream's: it stays, and
-/// leaves at 3.075 s, before it would have waited the bound itself (3.2 s). The pause holds
-/// throughout (a full packet stays queued until 3.075 s), so it began at 0 s for all of them.
+/// when written (896 bits of the 6000 refilled since 1 s). The budget is full again at 1.5 +
+/// (12 000 - 5104) / 12 000 = 2.075 s, and stream 9's frame, written at 1.2 s, has its turn
+/// first (the two streams share by priority, here equally, and
+/// stream 1 has sent 0 since; RFC 8835 section 4.1); 1 leaves when the budget is full again,
+/// at 3.075 s. Then 2 heads the queue, written at 0.3 s, long past the bound: 2 to 5 go, oldest
+/// first, two frames. Stream 9's frame is another stream's: it is not discarded with them.
+/// The pause holds throughout (a full packet stays queued until 3.075 s), so it began at 0 s
+/// for all of them.
 #[test]
 fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits() {
     let mut harness = Harness::new();
@@ -1085,7 +1087,7 @@ fn an_overdue_frame_is_discarded_whole_with_every_frame_of_its_stream_that_waits
     harness.advance_to(ms(5_000));
 
     let order: Vec<u16> = harness.schedule().iter().map(|(seq, _)| *seq).collect();
-    assert_eq!(vec![0, 900, 5000, 1, 100], order);
+    assert_eq!(vec![0, 900, 5000, 100, 1], order);
     let reads = harness.reads();
     assert_eq!(vec![(1, vec![2, 3, 4, 5], 2)], discards(&reads));
     let target = reads

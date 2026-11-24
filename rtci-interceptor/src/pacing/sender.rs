@@ -213,8 +213,9 @@ impl PacerBuilder {
 ///    given approximately twice the transmission capacity (measured in payload bytes) of the
 ///    level below"): start-time fair queuing over the streams with packets waiting, each
 ///    weighted by [`PacerPriorities`] (very-low 1, low 2, medium 4, high 8; a stream it does
-///    not name weighs as `low`, the W3C default). Streams of one priority share equally; a
-///    single stream leaves in the order written, as before. The **queue time bound** (2 s by default,
+///    not name weighs as `low`, the W3C default). A bound stream's FEC stream is one flow with
+///    it (in the order written). Streams of one priority share equally; a single stream leaves
+///    in the order written, as before. The **queue time bound** (2 s by default,
 ///    [`PacerBuilder::with_queue_time_limit`]) and the queue limit are this queue's (3 and 4):
 ///    by default ([`QueueOverflow::Drop`]) what has waited the bound, or the oldest packet when
 ///    the queue is full, is discarded, so nothing leaves above the target (a retransmission
@@ -350,6 +351,8 @@ pub struct PacerInterceptor {
     probe: Option<ActiveProbe>,
     /// Each stream's weight among the new media waiting ([`PacerPriorities`]).
     weights: HashMap<u32, f64>,
+    /// The media stream each bound FEC stream protects: one flow with it in the fair queuing.
+    fec_of: HashMap<u32, u32>,
     /// Start-time fair queuing among the streams' new media: each stream's finish tag (the
     /// virtual time at which its last packet served ends) and the virtual time (the start tag
     /// of the packet served last).
@@ -406,6 +409,7 @@ impl PacerInterceptor {
             immediate_release: true,
             probe: None,
             weights: HashMap::new(),
+            fec_of: HashMap::new(),
             finish: HashMap::new(),
             virtual_time: 0.0,
             forced: 0,
@@ -563,10 +567,15 @@ impl PacerInterceptor {
             .unwrap_or(DEFAULT_STREAM_WEIGHT)
     }
 
-    /// The stream and payload octets of an RTP packet.
-    fn stream_and_payload(packet: &TaggedPacket) -> Option<(u32, f64)> {
+    /// The flow of an RTP packet in the fair queuing (its stream; a FEC stream's packets are
+    /// the protected stream's flow) and its payload octets.
+    fn stream_and_payload(&self, packet: &TaggedPacket) -> Option<(u32, f64)> {
         match &packet.message.packet {
-            Packet::Rtp(rtp) => Some((rtp.header.ssrc, rtp.payload.len() as f64)),
+            Packet::Rtp(rtp) => {
+                let ssrc = rtp.header.ssrc;
+                let flow = self.fec_of.get(&ssrc).copied().unwrap_or(ssrc);
+                Some((flow, rtp.payload.len() as f64))
+            }
             Packet::Rtcp(_) => None,
         }
     }
@@ -583,7 +592,7 @@ impl PacerInterceptor {
         let mut seen: Vec<u32> = Vec::new();
         let mut best: Option<(f64, usize)> = None;
         for (index, packet) in self.queue.iter().enumerate() {
-            let Some((ssrc, _)) = Self::stream_and_payload(packet) else {
+            let Some((ssrc, _)) = self.stream_and_payload(packet) else {
                 continue;
             };
             if seen.contains(&ssrc) {
@@ -608,7 +617,7 @@ impl PacerInterceptor {
         if packet.message.has(&Attribute::Retransmission) || Self::is_padding(packet) {
             return;
         }
-        let Some((ssrc, octets)) = Self::stream_and_payload(packet) else {
+        let Some((ssrc, octets)) = self.stream_and_payload(packet) else {
             return;
         };
         let weight = self.weight_of(ssrc);
@@ -1372,6 +1381,9 @@ impl Interceptor for PacerInterceptor {
         } else {
             self.repair_flows
                 .extend(info.ssrc_rtx.into_iter().chain(info.ssrc_fec));
+            if let Some(fec) = info.ssrc_fec {
+                self.fec_of.insert(fec, info.ssrc);
+            }
         }
     }
 
@@ -1382,7 +1394,9 @@ impl Interceptor for PacerInterceptor {
         }
         for ssrc in info.ssrc_rtx.into_iter().chain(info.ssrc_fec) {
             self.repair_flows.remove(&ssrc);
+            self.fec_of.remove(&ssrc);
         }
+        self.finish.remove(&info.ssrc);
     }
 
     fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
