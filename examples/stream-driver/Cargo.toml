@@ -67,6 +67,14 @@ required-features = ["peer", "runtime-tokio"]
 name = "mdns"
 required-features = ["peer", "runtime-tokio"]
 
+[[example]]
+name = "udp_receive_bench"
+required-features = ["runtime-tokio"]
+
+[[test]]
+name = "receive"
+required-features = ["runtime-tokio"]
+
 [[test]]
 name = "runtimes"
 required-features = ["peer", "runtime-tokio", "runtime-smol"]

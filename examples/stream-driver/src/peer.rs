@@ -81,6 +81,10 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+/// How many datagrams a host socket's reader takes in one receive, when its socket can
+/// ([`AsyncUdpSocket::max_receive_batch`]: `recvmmsg` with `TokioRuntime` on Linux).
+const RECEIVE_BATCH: usize = 32;
+
 /// A datagram a socket of the driver received: its local address, the sender, the bytes.
 type Received = (SocketAddr, SocketAddr, Vec<u8>);
 
@@ -488,6 +492,7 @@ impl PeerDriver {
                         local,
                         self.datagrams_tx.clone(),
                         MDNS_MAX_DATAGRAM,
+                        1,
                     ))));
                     Some((socket, local))
                 };
@@ -691,6 +696,7 @@ impl PeerDriver {
                 local,
                 self.datagrams_tx.clone(),
                 2048,
+                RECEIVE_BATCH,
             )));
             self.sockets.push(HostSocket {
                 socket,
@@ -778,18 +784,10 @@ async fn read_loop(
     local: SocketAddr,
     tx: async_channel::Sender<Received>,
     max_datagram: usize,
+    batch: usize,
 ) {
-    let mut buf = vec![0u8; max_datagram];
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((n, peer)) => {
-                if tx.try_send((local, peer, buf[..n].to_vec())).is_err() {
-                    return;
-                }
-            }
-            // An ICMP error reported on the socket (Windows: a port unreachable) is not the
-            // end of it.
-            Err(_) => runtime::yield_now().await,
-        }
-    }
+    runtime::receive_datagrams(socket.as_ref(), max_datagram, batch, |peer, data| {
+        tx.try_send((local, peer, data.to_vec())).is_ok()
+    })
+    .await;
 }

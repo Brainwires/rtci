@@ -199,6 +199,20 @@ impl AsyncUdpSocket for TokioUdp {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        #[cfg(target_os = "linux")]
+        if bufs.len() > 1 {
+            use std::os::fd::AsRawFd;
+            let fd = self.socket.as_raw_fd();
+            loop {
+                ready!(self.socket.poll_recv_ready(cx))?;
+                match self.socket.try_io(tokio::io::Interest::READABLE, || {
+                    super::recvmmsg::recv(fd, bufs, meta)
+                }) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    other => return Poll::Ready(other),
+                }
+            }
+        }
         let Some(buf) = bufs.first_mut() else {
             return Poll::Ready(Ok(0));
         };
@@ -217,6 +231,11 @@ impl AsyncUdpSocket for TokioUdp {
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn max_receive_batch(&self) -> usize {
+        super::recvmmsg::BATCH
     }
 
     fn traffic_class(&self) -> io::Result<u32> {

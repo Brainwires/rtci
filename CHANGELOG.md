@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `PeerDriver`s connect on it with no socket and no wall time (`tests/virtual_time.rs`: a
     data-channel exchange over 20 ms links, ICE consent expiry after 30 s reported as failed,
     a lost DTLS ClientHello retransmitted after its timer).
+  - (runtime-6) Batched UDP receive: `PeerDriver`'s host sockets take up to 32 datagrams per
+    receive where the socket can (`AsyncUdpSocket::max_receive_batch`; `TokioRuntime` uses
+    `recvmmsg` on Linux, one at a time elsewhere). The loop is public:
+    `runtime::receive_datagrams`. Measured with `examples/udp_receive_bench.rs` (see the
+    branch's queue line for the numbers).
 
 ### Behaviour changes
 

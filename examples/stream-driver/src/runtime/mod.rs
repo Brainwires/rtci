@@ -30,6 +30,8 @@
 
 #[cfg(feature = "runtime-mock")]
 pub mod mock;
+#[cfg(all(feature = "runtime-tokio", target_os = "linux"))]
+mod recvmmsg;
 #[cfg(feature = "runtime-smol")]
 mod smol_runtime;
 #[cfg(feature = "runtime-tokio")]
@@ -350,6 +352,50 @@ impl<'a> dyn AsyncUdpSocket + 'a {
     pub fn try_send(&self, transmit: &Transmit<'_>) -> bool {
         let mut cx = Context::from_waker(std::task::Waker::noop());
         matches!(self.poll_send(&mut cx, transmit), Poll::Ready(Ok(_)))
+    }
+}
+
+/// Receives from `socket` until `deliver` returns `false`: up to `batch` datagrams per call
+/// (at most [`AsyncUdpSocket::max_receive_batch`]), each handed to `deliver` with its sender,
+/// a buffer the socket coalesced (GRO, [`RecvMeta::stride`]) split back into its datagrams. A
+/// receive error (an ICMP error reported on the socket: Windows' port unreachable) is not the
+/// end of it: the loop yields and goes on. The receive loop of
+/// [`PeerDriver`](crate::peer::PeerDriver)'s sockets.
+pub async fn receive_datagrams(
+    socket: &dyn AsyncUdpSocket,
+    max_datagram: usize,
+    batch: usize,
+    mut deliver: impl FnMut(SocketAddr, &[u8]) -> bool,
+) {
+    let batch = batch.clamp(1, socket.max_receive_batch().max(1));
+    let mut storage = vec![vec![0u8; max_datagram]; batch];
+    let mut meta = vec![RecvMeta::default(); batch];
+    loop {
+        let received = {
+            let mut bufs: Vec<IoSliceMut<'_>> =
+                storage.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+            std::future::poll_fn(|cx| socket.poll_recv(cx, &mut bufs, &mut meta)).await
+        };
+        match received {
+            Ok(n) => {
+                for (buf, meta) in storage.iter().zip(&meta).take(n) {
+                    let filled = &buf[..meta.len.min(buf.len())];
+                    let whole = meta.stride == 0 || meta.stride >= filled.len();
+                    if whole {
+                        if !deliver(meta.addr, filled) {
+                            return;
+                        }
+                        continue;
+                    }
+                    for datagram in filled.chunks(meta.stride) {
+                        if !deliver(meta.addr, datagram) {
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(_) => yield_now().await,
+        }
     }
 }
 
