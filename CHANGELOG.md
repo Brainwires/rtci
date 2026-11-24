@@ -1029,6 +1029,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Test environment and documentation
 
+- **docs**: `docs/video-pipeline.md`, the design of the video half of the media pipeline
+  (`conf/vp-1-design`): what the engine already gives video, what a complete receiver and
+  sender need beyond it, each element against libwebrtc (`a222406d`) and the RFCs / W3C
+  specifications, the codecs available under the licence and pure-Rust constraints (with the
+  H.264 / H.265 patent situation and Cisco's OpenH264 binary conditions,
+  `specs/openh264-BINARY_LICENSE.txt` quoted), the crate layout, threading and A/V sync, the
+  phases with their acceptance figures, and the decisions left to the owner.
 - **test-env**: coturn 4.6.3 built from its release tag (`conf/testenv-2-coturn-aiortc`;
   `https://github.com/coturn/coturn/archive/refs/tags/4.6.3.tar.gz`, SHA-256
   `dc3a529fd9956dc8771752a7169c5ad4c18b9deef3ec96049de30fabf1637704`) instead of the base
