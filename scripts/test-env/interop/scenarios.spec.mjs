@@ -200,7 +200,17 @@ test("ULPFEC in RED to the browser: the browser rebuilds the media packets Rust'
     const withoutNack = (sdp) => sdp.replace(/^a=rtcp-fb:\d+ nack\r\n/gm, "");
     s.mungeAnswer = withoutNack;
     s.mungeRemoteOffer = withoutNack;
-    s.pc.addTransceiver("video", { direction: "recvonly" });
+    // The browser offers VP8 with red and ulpfec only. An offerer prepares to receive every
+    // codec it offered, answered or not, with the feedback it offered for it: Firefox then
+    // receives VP9 and AV1 too, from its own codec defaults (plain NACK, whatever the munged
+    // text says), and its receive stream takes NACK on if any receive codec has it (Firefox
+    // JsepTrack::NegotiateCodecs "addAllCodecs", WebrtcVideoConduit "simply union the
+    // (boolean) settings"; its log: `nack: {rtp_history_ms: 1000}`, decoders VP8, VP9, AV1).
+    const tr = s.pc.addTransceiver("video", { direction: "recvonly" });
+    const keep = ["video/vp8", "video/red", "video/ulpfec"];
+    tr.setCodecPreferences(
+      RTCRtpReceiver.getCapabilities("video").codecs.filter((c) => keep.includes(c.mimeType.toLowerCase())),
+    );
     s.pc.ontrack = (e) => Interop.sink(new MediaStream([e.track]));
     // libwebrtc configures its receive stream's NACK from its own description: the offer it
     // applies has none either.
@@ -234,13 +244,24 @@ test("ULPFEC in RED to the browser: the browser rebuilds the media packets Rust'
   const i = r.inbound;
   expect(i, "the browser received the video").toBeTruthy();
   expect(i.nackCount ?? 0, `the browser sent NACKs: ${JSON.stringify(i)}`).toBe(0);
+  expect(i.retransmittedPacketsReceived ?? 0, `repaired by retransmission: ${JSON.stringify(i)}`).toBe(0);
   // The dropped packets never arrived as such: the browser counts them lost (RFC 3550 6.4.1;
   // libwebrtc does not count a packet rebuilt by FEC as received).
   expect(i.packetsLost, JSON.stringify(i)).toBeGreaterThanOrEqual(dropped);
+  // Firefox never decodes the fixture's first group of pictures in this cell, loss or not, FEC
+  // or not: with no packet dropped, and with no FEC negotiated at all, it decodes 240 of 300
+  // frames, 4 of 5 key frames, discards ~118 packets (the first group's) and logs "No decodable
+  // frame ... last decoded frame RTP timestamp <not set>" until the second key frame (hosted
+  // runs 45469699452, 45470448769, 45471215562; Chromium decodes 300 in the same runs). That
+  // group is left out for Firefox; every frame from its second key frame on must decode.
+  const GOP = 60; // the fixture's keyframe-max-dist (entry.sh, hosted-cell.sh)
+  const firefox = /^firefox/.test(test.info().project.name);
+  const notAtStart = firefox ? GOP : 0;
+  if (firefox) expect(i.keyFramesDecoded, JSON.stringify(i)).toBeGreaterThanOrEqual(frames / GOP - 1);
   // Yet every frame was decoded: each lost packet was rebuilt from Rust's FEC. Without that,
   // the first loss of each 60-frame group of pictures stops VP8 until the next key frame.
-  expect(i.framesDecoded, `decoded of ${frames} sent: ${JSON.stringify(i)}`).toBeGreaterThanOrEqual(frames - 2);
-  expect(i.framesDropped ?? 0, JSON.stringify(i)).toBeLessThanOrEqual(2);
+  expect(i.framesDecoded, `decoded of ${frames} sent: ${JSON.stringify(i)}`).toBeGreaterThanOrEqual(frames - notAtStart - 2);
+  expect(i.framesDropped ?? 0, JSON.stringify(i)).toBeLessThanOrEqual(notAtStart + 2);
 });
 
 // ---- TURN: relay-only through coturn ----

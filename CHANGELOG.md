@@ -282,7 +282,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not rebuild from the engine's FEC was wrong: the packets are byte for byte what libwebrtc's
   `UlpfecReceiver` reads, and Chromium rebuilds from them; the earlier cell's threshold under
   random netem loss failed on frames whose media and FEC packets were both dropped (VP8
-  without NACK then waits for a key frame). No engine change.
+  without NACK then waits for a key frame). The browser offers VP8, red and ulpfec only
+  (`setCodecPreferences`): as offerer Firefox otherwise also receives the VP9 and AV1 it
+  offered, with its default NACK, and turns NACK on for the whole receive stream. Firefox
+  rebuilds every dropped packet too; it never decodes the fixture's first group of pictures in
+  that cell, loss or not, which its column leaves out. No engine change.
 - **FlexFEC-03 repair packets within the path MTU** (draft-ietf-payload-flexible-fec-scheme-03
   section 6.2): `FlexFec03Encoder` builds no repair packet larger than
   `FLEXFEC03_MAX_REPAIR_PACKET_SIZE` (1436 octets: a 1500-octet path under IPv6, UDP and a
