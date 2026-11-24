@@ -25,6 +25,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC7798-4.4.3-12 (`SampleBuilder` never depacketizes across a missing packet, now tested)
   and RFC7798-4.3-1 are `tested`.
 
+- **jsep / sdp**: the `o=` line of a peer connection's descriptions is drawn once, when it is
+  built (`conf/jsep-75-session-version`). The session version starts at a timestamp, the
+  seconds since 1900 of the wall clock at that moment (RFC 8866 section 5.2: "it is RECOMMENDED
+  that a timestamp be used"), instead of the clock's sub-second nanoseconds, and still goes up
+  by one with each description that differs (RFC 9429 section 5.2.2). The session id comes from
+  the crypto provider's `random()` and is below 2^63 - 1 (RFC 9429 section 5.2.1).
+  `SessionDescription::new_jsep_session_description` writes the same kind of version. Peers
+  see a larger first version (about 3.9e9, still below 2^32). Tests:
+  `tests/jsep_session_version.rs::the_first_session_version_is_the_wall_clocks_seconds_since_1900`,
+  `rtci-sdp` `grammar_test::the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives`.
+  RFC8866-5.2-3 is `tested`.
+
+- **jsep**: an offer with empty `a=group` lines (RFC 5888 section 9.3 capability indication)
+  is answered with an empty `a=group` line for each semantics the engine understands and the
+  answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
+  which is every browser's, are answered as before. Test:
+  `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
+- **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
+  under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
+  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6); the
+  next section written takes them, and the local description puts the candidates in the first
+  section that is not rejected (it used to be the first section) (`conf/jsep-77-small-rows`). Test:
+  `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
+- **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
+  (RFC 9143 section 15,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_late_identification_tag_does_not_end_the_session`); the
+  end-of-gathering event names its section (RFC 9429 section 4.1.20). RFC9143-15-3, RFC5888-6-5,
+  RFC8839-4.4.1.2.1-2, RFC9429-4.1.20-4, RFC3264-6.1-15 and 7-3 are `tested`, RFC3264-6.1-20 `n/a`.
+  RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
+  lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
+  `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
+  `rtci-dtls` `a_client_hello_offering_only_the_null_suite_is_refused`).
+
+- **sdp / jsep**: a remote description with two direction attributes at one level is refused
+  (RFC 8866 section 6.7: at most one at session level and one per media description); the
+  first was taken before. The informational attributes `a=tool`, `a=type`, `a=orient` and
+  `a=quality` (RFC 8866 sections 6.3, 6.9, 6.8, 6.14) now have their grammar checked, so a
+  remote description with a malformed one, or one at the wrong level, is refused (RFC 9429
+  section 5.8) (`conf/jsep-78-sdp-informational`). Browsers send neither.
+
+- **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
+  application; no default format is one) is offered and answered with
+  `deint-buf-cap=33554432`, the de-interleaving buffer the depacketizer holds
+  (`MAX_DEINTERLEAVING_BYTES`), unless the application gave its own value (RFC 6184 section
+  8.2.2). Default offers are unchanged.
+- **rtp**: `rtp::codec::h264::mtap` writes its units in decoding order (ascending DON from the
+  DON base), whatever order they are given in (RFC 6184 section 5.7.2). Conformance rows
+  RFC6184-5.7.2-3, 7.2.1-1, 7.2.1-2 and 8.2.2-9 are `tested`.
+
+### Features
+
+- **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
+  time paired with the instant the peer connection is built, for the values it writes on the
+  wall clock itself: the `o=` session version, the receivers' source timestamps and the NTP
+  times of the RTCP session it installs. With a seeded crypto provider the `o=` line is the
+  same in every run under virtual time. Also `sdp::description::session::Origin::jsep`,
+  `SessionDescription::new_jsep_session_description_with_origin` and
+  `NTP_UNIX_EPOCH_OFFSET_SECS`.
+
+- **SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers** (`conf/jsep-76-spec-conflicts`):
+  RFC 8858 section 4.5's form, a subsequent offer saying `a=rtcp-mux-only` again in the m=
+  sections it carries over (under the `require` mux policy; in the tagged section, or in every
+  bundled one with the bundle attributes repeated). Off by default and in the `Rfc` and
+  `Chrome` profiles, on in `StrictRfc`: RFC 9429 section 5.2.2, which governs a JSEP endpoint,
+  says "The 'a=rtcp-mux-only' line MUST NOT be added". No change to what the engine generates
+  by default. RFC8858-4.5-1 is `conflict` (was `violated`), with
+  `tests/jsep_rtcp_mux.rs::when_asked_a_subsequent_offer_says_rtcp_mux_only_again`; RFC8858-4.5-4
+  is `n/a`.
+- **jsep**: RFC9429-4.1.1-4 (ignore `max-bundle`) is `conflict` (was `violated`): the existing
+  `with_max_bundle_as_must_bundle(false)` is RFC 9429's form and the default is W3C
+  webrtc-pc 4.2.5's; the test is split in two, one per form
+  (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
+  `max_bundle_is_ignored_when_set_to_be_ignored`).
+
+- **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
+  `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
+  (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
+  6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
+
 ### Added
 
 - **ULPFEC in an RTP session of its own, in the chain (RFC 5109 sections 7.2, 14.1).**
@@ -56,83 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the peer's reset came. It is now a flag of its own; the peer's direction stays readable until
   the peer resets it. Engine behaviour change. Tests:
   `rtci-sctp/src/association/reset_answer_test.rs`.
-### Behaviour changes
-
-- **jsep / sdp**: the `o=` line of a peer connection's descriptions is drawn once, when it is
-  built (`conf/jsep-75-session-version`). The session version starts at a timestamp, the
-  seconds since 1900 of the wall clock at that moment (RFC 8866 section 5.2: "it is RECOMMENDED
-  that a timestamp be used"), instead of the clock's sub-second nanoseconds, and still goes up
-  by one with each description that differs (RFC 9429 section 5.2.2). The session id comes from
-  the crypto provider's `random()` and is below 2^63 - 1 (RFC 9429 section 5.2.1).
-  `SessionDescription::new_jsep_session_description` writes the same kind of version. Peers
-  see a larger first version (about 3.9e9, still below 2^32). Tests:
-  `tests/jsep_session_version.rs::the_first_session_version_is_the_wall_clocks_seconds_since_1900`,
-  `rtci-sdp` `grammar_test::the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives`.
-  RFC8866-5.2-3 is `tested`.
-
-### Features
-
-- **SettingEngineBuilder::with_wall_clock** (`conf/jsep-75-session-version`): the wall-clock
-  time paired with the instant the peer connection is built, for the values it writes on the
-  wall clock itself: the `o=` session version, the receivers' source timestamps and the NTP
-  times of the RTCP session it installs. With a seeded crypto provider the `o=` line is the
-  same in every run under virtual time. Also `sdp::description::session::Origin::jsep`,
-  `SessionDescription::new_jsep_session_description_with_origin` and
-  `NTP_UNIX_EPOCH_OFFSET_SECS`.
-### Features
-
-- **SettingEngineBuilder::with_rtcp_mux_only_in_subsequent_offers** (`conf/jsep-76-spec-conflicts`):
-  RFC 8858 section 4.5's form, a subsequent offer saying `a=rtcp-mux-only` again in the m=
-  sections it carries over (under the `require` mux policy; in the tagged section, or in every
-  bundled one with the bundle attributes repeated). Off by default and in the `Rfc` and
-  `Chrome` profiles, on in `StrictRfc`: RFC 9429 section 5.2.2, which governs a JSEP endpoint,
-  says "The 'a=rtcp-mux-only' line MUST NOT be added". No change to what the engine generates
-  by default. RFC8858-4.5-1 is `conflict` (was `violated`), with
-  `tests/jsep_rtcp_mux.rs::when_asked_a_subsequent_offer_says_rtcp_mux_only_again`; RFC8858-4.5-4
-  is `n/a`.
-- **jsep**: RFC9429-4.1.1-4 (ignore `max-bundle`) is `conflict` (was `violated`): the existing
-  `with_max_bundle_as_must_bundle(false)` is RFC 9429's form and the default is W3C
-  webrtc-pc 4.2.5's; the test is split in two, one per form
-  (`tests/jsep_bundle_policy.rs::max_bundle_selects_must_bundle_by_default`,
-  `max_bundle_is_ignored_when_set_to_be_ignored`).
-### Behaviour changes
-
-- **jsep**: an offer with empty `a=group` lines (RFC 5888 section 9.3 capability indication)
-  is answered with an empty `a=group` line for each semantics the engine understands and the
-  answer does not use (BUNDLE, LS, DDP) (`conf/jsep-77-small-rows`). Offers without such lines,
-  which is every browser's, are answered as before. Test:
-  `tests/jsep_sweep_rfc5888.rs::empty_group_lines_of_an_offer_are_answered_with_this_endpoints_capabilities`.
-- **jsep**: a section an answer rejects after writing it (outside the offered BUNDLE group
-  under `must-bundle`, or beyond what the bundle policy takes from an offer without BUNDLE)
-  no longer carries `a=candidate` / `a=end-of-candidates` (RFC 8839 section 4.2.1.6); the
-  next section written takes them, and the local description puts the candidates in the first
-  section that is not rejected (it used to be the first section) (`conf/jsep-77-small-rows`). Test:
-  `tests/jsep_sdp_rows.rs::a_section_answered_with_port_zero_has_no_candidates`.
-- **tests** (`conf/jsep-77-small-rows`): a late identification-tag does not end the session
-  (RFC 9143 section 15,
-  `tests/jsep_sweep_media_rtc2rtc.rs::a_late_identification_tag_does_not_end_the_session`); the
-  end-of-gathering event names its section (RFC 9429 section 4.1.20). RFC9143-15-3, RFC5888-6-5,
-  RFC8839-4.4.1.2.1-2, RFC9429-4.1.20-4, RFC3264-6.1-15 and 7-3 are `tested`, RFC3264-6.1-20 `n/a`.
-  RFC5888-9.3-1 is `tested`; RFC8866-5.8-4 and 6.7.3-1 and RFC8122-7-1 gain the tests they
-  lacked (`tests/jsep_sdp_rows.rs::bandwidth_lines_use_registered_modifiers_only`,
-  `tests/jsep_sweep_media_rtc2rtc.rs::a_sendonly_endpoint_processes_the_rtcp_it_receives`,
-  `rtci-dtls` `a_client_hello_offering_only_the_null_suite_is_refused`).
-### Behaviour changes
-
-- **sdp / jsep**: a remote description with two direction attributes at one level is refused
-  (RFC 8866 section 6.7: at most one at session level and one per media description); the
-  first was taken before. The informational attributes `a=tool`, `a=type`, `a=orient` and
-  `a=quality` (RFC 8866 sections 6.3, 6.9, 6.8, 6.14) now have their grammar checked, so a
-  remote description with a malformed one, or one at the wrong level, is refused (RFC 9429
-  section 5.8) (`conf/jsep-78-sdp-informational`). Browsers send neither.
-
-### Features
-
-- **rtci-sdp**: typed `Tool`, `ConferenceType`, `Orient` and `Quality` attributes with
-  `SessionDescription::tool`, `conference_type` and `MediaDescription::orient`, `quality`
-  (`conf/jsep-78-sdp-informational`); the SDP fuzz targets cover them. RFC8866-6.3-1, 6.8-1,
-  6.9-1, 6.14-1 and 6.7-1 are `tested`, 6.4-1, 6.5-1 and 5.8-7 too (their notes were stale).
-### Fixed
 
 - A repair packet (RTX, FEC) that arrives before the stream it repairs, for a section whose
   SSRCs are not signalled (RFC 9143 section 9.2), is dropped without being counted in
@@ -143,16 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discardedRtp 15` with `discardedSsrcs` = its RTX SSRC (RTX by payload type, SSRCs
   unsignalled): RTX packets, probes most likely, before the first packet of the video stream. Engine behaviour change (a counter and an event; nothing was ever
   delivered from such a packet).
-### Behaviour changes
-
-- **sdp**: an interleaved H.264 format (`packetization-mode=2`, registered by the
-  application; no default format is one) is offered and answered with
-  `deint-buf-cap=33554432`, the de-interleaving buffer the depacketizer holds
-  (`MAX_DEINTERLEAVING_BYTES`), unless the application gave its own value (RFC 6184 section
-  8.2.2). Default offers are unchanged.
-- **rtp**: `rtp::codec::h264::mtap` writes its units in decoding order (ascending DON from the
-  DON base), whatever order they are given in (RFC 6184 section 5.7.2). Conformance rows
-  RFC6184-5.7.2-3, 7.2.1-1, 7.2.1-2 and 8.2.2-9 are `tested`.
 
 ## [0.1.0] - 2026-11-24
 
