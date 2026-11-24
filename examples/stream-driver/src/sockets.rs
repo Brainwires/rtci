@@ -18,8 +18,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+
+use crate::runtime::{AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, Runtime};
 
 /// An inclusive range of ports for the sockets a peer connection gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,18 +110,35 @@ pub fn bind_udp_in_range(ip: IpAddr, range: PortRange) -> io::Result<std::net::U
     })
 }
 
-/// A TCP listener on `ip`, on a free port of `range`.
+/// A UDP socket of `runtime` on `ip`, on a free port of `range`, skipping refused ports as
+/// [`bind_udp_in_range`] does.
+///
+/// # Errors
+///
+/// As [`bind_udp_in_range`].
+pub fn bind_runtime_udp_in_range(
+    runtime: &dyn Runtime,
+    ip: IpAddr,
+    range: PortRange,
+) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+    bind_first(range, range.ports(), |port| {
+        runtime.bind_udp(SocketAddr::new(ip, port))
+    })
+}
+
+/// A TCP listener of `runtime` on `ip`, on a free port of `range`.
 ///
 /// # Errors
 ///
 /// As [`bind_udp_in_range`].
 pub fn bind_tcp_listener_in_range(
+    runtime: &dyn Runtime,
     ip: IpAddr,
     range: PortRange,
     reuse_address: bool,
-) -> io::Result<TcpListener> {
+) -> io::Result<Arc<dyn AsyncTcpListener>> {
     bind_first(range, range.ports(), |port| {
-        crate::bind_listener(SocketAddr::new(ip, port), reuse_address)
+        runtime.listen_tcp(SocketAddr::new(ip, port), reuse_address)
     })
 }
 
@@ -305,7 +322,7 @@ impl<K: Clone + Eq + Hash> UfragMux<K> {
 #[derive(Debug)]
 pub struct SharedAccept {
     /// The connection.
-    pub stream: TcpStream,
+    pub stream: Arc<dyn AsyncTcpStream>,
     /// Its local address (the shared port).
     pub local: SocketAddr,
     /// The peer's address.
@@ -325,14 +342,15 @@ pub struct SharedAccept {
 ///
 /// An accept error.
 pub async fn accept_by_ufrag(
-    listener: &TcpListener,
+    runtime: &dyn Runtime,
+    listener: &dyn AsyncTcpListener,
     timeout: Duration,
 ) -> io::Result<SharedAccept> {
     loop {
-        let (mut stream, remote) = listener.accept().await?;
+        let (stream, remote) = listener.accept().await?;
         let local = stream.local_addr()?;
         let mut read = Vec::new();
-        let first = tokio::time::timeout(timeout, async {
+        let first = crate::runtime::timeout(runtime, timeout, async {
             let mut buf = [0u8; 4096];
             loop {
                 if read.len() >= 2 {
@@ -360,7 +378,6 @@ pub async fn accept_by_ufrag(
             continue;
         };
         let ufrag = ufrag.to_owned();
-        let _ = stream.set_nodelay(true);
         return Ok(SharedAccept {
             stream,
             local,
@@ -526,5 +543,112 @@ mod tests {
         };
         assert!(!no_eth.keeps(Some("eth0"), v4));
         assert!(no_eth.keeps(Some("wlan0"), v4));
+    }
+}
+
+/// `IPV6_TCLASS`, on the targets where `socket2` has it.
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+))]
+fn set_tclass(socket: &socket2::SockRef<'_>, value: u32) -> io::Result<()> {
+    socket.set_tclass_v6(value)
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+))]
+fn tclass(socket: &socket2::SockRef<'_>) -> io::Result<u32> {
+    socket.tclass_v6()
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+)))]
+fn set_tclass(_: &socket2::SockRef<'_>, _: u32) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+)))]
+fn tclass(_: &socket2::SockRef<'_>) -> io::Result<u32> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+/// Sets the byte the socket's packets carry in the IPv4 TOS / IPv6 Traffic Class field: the
+/// DSCP in its upper six bits (RFC 2474 section 3), the ECN codepoint in the lower two (RFC
+/// 3168 section 5). `ipv6` says which option (`IPV6_TCLASS` or `IP_TOS`) the socket's family
+/// takes.
+///
+/// What each platform does:
+/// - **Linux, Android, the BSDs, macOS**: `IP_TOS` / `IPV6_TCLASS` set what every later
+///   packet carries, with no privilege. (Linux keeps the ECN bits of a TCP socket to itself.)
+/// - **Windows**: `IP_TOS` is accepted, and `getsockopt` reads the value back (hosted
+///   `windows-latest`), but Microsoft documents the option as not to be used and the stack as
+///   not applying it unless the host's policy allows applications to set it (it does not by
+///   default): the packets are not known to carry it. Marking needs the qWAVE
+///   API (`QOSAddSocketToFlow`, and `QOSSetFlow` with `QOSSetOutgoingDSCPValue`, which only an
+///   administrator or a member of Network Configuration Operators may call) or a Group Policy
+///   QoS rule. The driver does neither: on Windows its packets leave unmarked whatever the
+///   engine asks, and RFC 8835 section 4.2 allows that ("It is appropriate to depart from this
+///   recommendation when running on platforms where QoS marking is not implemented").
+///   `IPV6_TCLASS` is not offered there (`socket2` has none): `Unsupported`, and the driver
+///   counts the socket in `PeerDriver::unmarked_sockets`.
+/// - Other targets without `IPV6_TCLASS` in `socket2`: an error for IPv6.
+///
+/// # Errors
+///
+/// The option is refused or not offered on this platform.
+pub fn set_traffic_class(socket: socket2::SockRef<'_>, ipv6: bool, value: u8) -> io::Result<()> {
+    if ipv6 {
+        set_tclass(&socket, u32::from(value))
+    } else {
+        socket.set_tos_v4(u32::from(value))
+    }
+}
+
+/// The byte the socket's packets carry in the IPv4 TOS / IPv6 Traffic Class field, as the
+/// operating system reports it (`getsockopt` of `IP_TOS` / `IPV6_TCLASS`).
+///
+/// # Errors
+///
+/// The option is not offered on this platform.
+pub fn traffic_class(socket: socket2::SockRef<'_>, ipv6: bool) -> io::Result<u32> {
+    if ipv6 {
+        tclass(&socket)
+    } else {
+        socket.tos_v4()
     }
 }

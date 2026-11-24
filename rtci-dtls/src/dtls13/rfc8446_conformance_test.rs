@@ -512,6 +512,84 @@ fn a_client_share_that_is_no_valid_point_ends_the_handshake() -> Result<()> {
     Ok(())
 }
 
+/// RFC 8446 section 4.2.8: "Clients MUST NOT offer multiple KeyShareEntry values for the same
+/// group. Clients MUST NOT offer any KeyShareEntry values for groups not listed in the
+/// client's "supported_groups" extension. Servers MAY check for violations of these rules and
+/// abort the handshake with an "illegal_parameter" alert if one is violated." (and the shares
+/// come "in the same order" as supported_groups). Each violation, made with the client's own
+/// valid shares, is refused; the hello unchanged gets a ServerHello.
+#[test]
+fn key_shares_that_break_the_client_rules_are_an_illegal_parameter() -> Result<()> {
+    type Shares = Vec<(u16, Vec<u8>)>;
+    type Violation = fn(&mut Vec<u16>, &mut Shares);
+    fn groups_and_shares(hello: &Hello) -> (Vec<u16>, Shares) {
+        let groups = hello.get(messages::EXT_SUPPORTED_GROUPS).unwrap()[2..]
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        let shares = messages::parse_client_key_shares(hello.get(messages::EXT_KEY_SHARE).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|(group, key)| (group, key.to_vec()))
+            .collect();
+        (groups, shares)
+    }
+
+    // The client's own hello: two shares, for groups it lists, in its order.
+    let answer = server_answers(no_cookies(), |hello| {
+        let (groups, shares) = groups_and_shares(hello);
+        assert_eq!(shares.len(), 2, "the client offers two shares");
+        assert!(
+            groups.iter().position(|g| *g == shares[0].0)
+                < groups.iter().position(|g| *g == shares[1].0)
+        );
+    })?;
+    assert!(plaintext_alerts(&answer).is_empty(), "no alert");
+    let (handshake_type, _, body, _) = first_message(&answer[0]);
+    assert_eq!(handshake_type, messages::SERVER_HELLO);
+    assert_ne!(
+        Answer::parse(&body).random,
+        messages::HELLO_RETRY_REQUEST_RANDOM.to_vec(),
+        "a ServerHello, not a HelloRetryRequest"
+    );
+
+    let violations: [(&str, Violation); 3] = [
+        ("a share for a group not listed", |groups, shares| {
+            let unlisted = shares[1].0;
+            groups.retain(|g| *g != unlisted);
+        }),
+        ("two shares for one group", |_, shares| {
+            shares[1] = shares[0].clone();
+        }),
+        (
+            "shares out of the order of supported_groups",
+            |_, shares| {
+                shares.swap(0, 1);
+            },
+        ),
+    ];
+    for (violation, change) in violations {
+        let answer = server_answers(no_cookies(), |hello| {
+            let (mut groups, mut shares) = groups_and_shares(hello);
+            change(&mut groups, &mut shares);
+            hello.set(messages::EXT_SUPPORTED_GROUPS, u16_list(&groups));
+            hello.set(messages::EXT_KEY_SHARE, client_key_shares(&shares));
+        })?;
+        assert_eq!(
+            plaintext_alerts(&answer),
+            fatal(alert::ILLEGAL_PARAMETER),
+            "{violation}"
+        );
+        assert!(
+            answer
+                .iter()
+                .all(|datagram| datagram[0] == CONTENT_TYPE_ALERT),
+            "{violation}: no ServerHello"
+        );
+    }
+    Ok(())
+}
+
 /// RFC 8446 section 4.1.4: after a HelloRetryRequest the server negotiates the same suite;
 /// a second ClientHello that would make it choose another is an illegal_parameter.
 #[test]

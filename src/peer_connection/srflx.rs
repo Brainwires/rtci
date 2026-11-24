@@ -23,6 +23,7 @@
 //! [`StreamCommand::Resolve`]: shared::stream::StreamCommand::Resolve
 
 use super::RTCPeerConnection;
+use super::servers_in_force::{ServersInForce, same_url};
 use super::streams::{SRFLX, tcp_context};
 use super::turn_tls::TlsLayer;
 use crate::peer_connection::handler::transport_set::TransportId;
@@ -43,6 +44,14 @@ use stun::agent::StunEvent;
 use stun::client::{Client, ClientBuilder, TaggedMessage};
 use stun::message::{BINDING_REQUEST, CLASS_SUCCESS_RESPONSE, Getter, Message, Setter};
 use stun::xoraddr::XorMappedAddress;
+
+/// The `stun:` / `stuns:` URLs of `urls`.
+fn stun_servers(urls: &[Url]) -> Vec<Url> {
+    urls.iter()
+        .filter(|u| matches!(u.scheme, SchemeType::Stun | SchemeType::Stuns))
+        .cloned()
+        .collect()
+}
 
 /// The ALPN protocol id of STUN NAT discovery over TLS (RFC 7443 section 3).
 pub const ALPN_STUN_NAT_DISCOVERY: &[u8] = b"stun.nat-discovery";
@@ -147,7 +156,9 @@ impl Probe {
 
 /// The engine's server-reflexive gathering.
 pub(crate) struct EngineSrflx {
-    servers: Vec<Url>,
+    /// The `stun:` / `stuns:` servers, as each ICE generation took them
+    /// (`RTCPeerConnection::set_configuration` gives the next generations a new list).
+    servers: ServersInForce,
     pub(crate) mode: ReflexiveGathering,
     probes: Vec<Probe>,
     tls_config: Option<Arc<rustls::ClientConfig>>,
@@ -165,11 +176,7 @@ impl EngineSrflx {
         mode: ReflexiveGathering,
         tls: Option<Arc<rustls::ClientConfig>>,
     ) -> Self {
-        let servers = urls
-            .iter()
-            .filter(|u| matches!(u.scheme, SchemeType::Stun | SchemeType::Stuns))
-            .cloned()
-            .collect();
+        let servers = ServersInForce::new(stun_servers(urls));
         let tls_config = tls.map(|config| {
             let mut config = (*config).clone();
             config.alpn_protocols = vec![ALPN_STUN_NAT_DISCOVERY.to_vec()];
@@ -184,6 +191,12 @@ impl EngineSrflx {
             last_start: None,
             announced: vec![],
         }
+    }
+
+    /// The configuration's new servers: the ICE generations that begin from now on gather
+    /// from them (W3C webrtc-pc "set the configuration", RFC 9429 section 4.1.18).
+    pub(crate) fn set_servers(&mut self, urls: &[Url]) {
+        self.servers.set(stun_servers(urls));
     }
 
     /// Whether a probe of `transport` is still on its way. A name waits for the driver only
@@ -214,7 +227,21 @@ impl EngineSrflx {
         if self.mode != ReflexiveGathering::Engine || self.application_bases.contains(&base) {
             return found;
         }
-        for url in &self.servers {
+        let (servers, new_phase) = self.servers.for_generation(transport, ufrag);
+        if new_phase {
+            // A server of an earlier list that this generation does not take: its probes of
+            // the earlier generation end, so that a late answer is not announced for this one.
+            for p in self.probes.iter_mut().filter(|p| {
+                p.transport == transport
+                    && p.ufrag != ufrag
+                    && !servers.iter().any(|u| same_url(u, &p.url))
+            }) {
+                p.state = ProbeState::Done;
+                p.attempts.clear();
+                p.race = None;
+            }
+        }
+        for url in &servers {
             let tls = url.scheme == SchemeType::Stuns;
             // `stuns:` is TLS over TCP (RFC 7064); STUN over DTLS is not run here.
             if tls && kind == Base::Udp {
@@ -342,7 +369,7 @@ impl RTCPeerConnection {
     /// Whether the engine gathers server-reflexive candidates at all: servers are configured,
     /// it is asked to, and the policy allows them.
     fn srflx_wanted(&self) -> bool {
-        !self.streams.srflx.servers.is_empty()
+        self.streams.srflx.servers.any()
             && self.streams.srflx.mode == ReflexiveGathering::Engine
             && !self.setting_engine.candidates.ice_lite
             && self.configuration.ice_transport_policy
@@ -393,12 +420,16 @@ impl RTCPeerConnection {
         }
         let on = self.pipeline_context.transports.active_id();
         let base = candidate.addr();
-        let accepted = self
-            .ice_transport()
-            .agent
-            .get_local_candidates()
-            .iter()
-            .any(|c| c.addr() == base && !c.network_type().is_tcp());
+        // A base whose host candidate the agent withheld (mDNS fails closed,
+        // `with_multicast_dns_fail_closed`) still gets its server-reflexive candidates: they
+        // carry the public address only (draft-ietf-mmusic-mdns-ice-candidates section
+        // 3.1.2.2).
+        let agent = &self.ice_transport().agent;
+        let accepted = agent.multicast_dns_withholds(base.ip())
+            || agent
+                .get_local_candidates()
+                .iter()
+                .any(|c| c.addr() == base && !c.network_type().is_tcp());
         if accepted {
             let ufrag = self.ice_username_fragment_of(on);
             for (mapped, url) in self.streams.srflx.add(on, base, Base::Udp, &ufrag) {
@@ -784,8 +815,22 @@ impl RTCPeerConnection {
             .ufrag
             .clone();
         let key = (transport, mapped, kind, ufrag);
-        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant.
-        if mapped == base || self.streams.srflx.announced.contains(&key) {
+        // RFC 8445 section 5.1.3: one equal to its base (no NAT) is redundant, with the base's
+        // host candidate written with its address. In `QueryAndGather` that host candidate
+        // carries an mDNS name instead, and draft-ietf-mmusic-mdns-ice-candidates section
+        // 3.1.2.2 says: "Regardless of whether the address turns out to be public or private,
+        // a server-reflexive candidate will be generated; [...] and as such MUST NOT be
+        // considered redundant per the guidance in [RFC8445], Section 5.1.3". So it goes to
+        // the agent, which applies 5.1.3 with what it holds: kept (raddr 0.0.0.0 / ::, rport
+        // 9) beside a `.local` host candidate, dropped beside one that carries the address
+        // (the fixed-IP mode's other addresses, or one unwrapped by
+        // `with_multicast_dns_expose_known_public_addresses`, which takes its evidence from
+        // it). libwebrtc keeps it the same way (p2p/base/stun_port.cc,
+        // UDPPort::OnStunBindingRequestSucceeded: the reflected address equal to the local
+        // one is discarded only when "mDNS obfuscation is not enabled").
+        let hidden_base =
+            self.setting_engine.multicast_dns.mode == ice::mdns::MulticastDnsMode::QueryAndGather;
+        if (mapped == base && !hidden_base) || self.streams.srflx.announced.contains(&key) {
             return;
         }
         self.streams.srflx.announced.push(key);

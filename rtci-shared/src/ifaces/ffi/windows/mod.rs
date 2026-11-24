@@ -380,6 +380,30 @@ pub fn ifaces() -> Result<Vec<Interface>, ::std::io::Error> {
     }
 }
 
+/// The local IPv6 addresses the operating system reports as RFC 4941 temporary addresses:
+/// none, on Windows. Always `ErrorKind::Unsupported`, so nothing is marked and every address
+/// stays hidden behind its mDNS name.
+///
+/// Windows has no per-address "temporary" flag that has been shown to tell a temporary
+/// address from the stable one. `IP_ADAPTER_UNICAST_ADDRESS` (and `MIB_UNICASTIPADDRESS_ROW`)
+/// carry `PrefixOrigin`, `SuffixOrigin`, `DadState`, lifetimes, `Flags`
+/// (`IP_ADAPTER_ADDRESS_DNS_ELIGIBLE`, `IP_ADAPTER_ADDRESS_TRANSIENT`, a cluster address) and
+/// `SkipAsSource`. `SuffixOrigin` `IpSuffixOriginRandom` is documented for "an anonymous IPv6
+/// address", but Windows also builds its stable SLAAC address from a randomised interface
+/// identifier (`Randomize Identifiers: enabled` by default) and no source says which origin
+/// that one reports; lifetimes overlap (both follow the router advertisement, capped for
+/// temporary ones). A wrong guess would publish the stable address, so the flag is not read
+/// until the mapping is shown on a host with a real temporary address. The hosted runner
+/// could not show it: it has no global IPv6 address, no router advertisement and "Use
+/// Temporary Addresses: disabled" (`netsh interface ipv6 show privacy`); its link-local
+/// addresses, from randomised identifiers, report `SuffixOrigin` `Link`.
+pub fn temporary_ipv6_addresses() -> io::Result<Vec<std::net::Ipv6Addr>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Windows reports no flag shown to tell a temporary IPv6 address from the stable one",
+    ))
+}
+
 unsafe fn is_ipv4_enabled(unicast_addr: &IpAdapterUnicastAddress) -> bool {
     unsafe {
         if unicast_addr.length != 0 {

@@ -146,6 +146,10 @@ pub(crate) struct RTCStatsAccumulator {
     /// The RTCP CNAMEs remote sources named, in order (at most 16), for an ECN validation
     /// that starts after them.
     remote_cnames: Vec<String>,
+    /// How many sender and receiver reports (fewer than 31 report blocks, so that none may
+    /// have left a stream out for the next one) arrived on each transport, by transport key:
+    /// what the DSCP fallback (RFC 8835 section 4.2) counts against a flow never reported on.
+    pub(crate) reception_report_packets: HashMap<usize, u64>,
 
     /// How many RTP stream objects have been deleted. A stream object created now carries it in
     /// its id, so that id differs from the id of every deleted object with the same SSRC
