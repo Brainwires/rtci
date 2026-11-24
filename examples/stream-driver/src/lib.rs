@@ -44,6 +44,14 @@
 //! `stream-driver-loopback` example of the `rtci` crate (`cargo run --example
 //! stream-driver-loopback`); the test environment runs it.
 //!
+//! # Marking (DSCP)
+//!
+//! Each TCP connection's packets carry the codepoint of its transmits ([`StreamTransmit::dscp`],
+//! one per connection, RFC 8837 section 5), and [`peer::PeerDriver`] marks each UDP datagram
+//! with the byte `RTCPeerConnection::traffic_class` gives it (RFC 8837 Table 1 with the ECN
+//! bits). [`sockets::set_traffic_class`] says what each platform does: Windows leaves the
+//! packets unmarked.
+//!
 //! # Server choices
 //!
 //! [`sockets`] has what a server decides and the engine does not: port ranges
@@ -91,7 +99,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -158,6 +166,8 @@ impl Default for DriverConfig {
 
 enum WriterMessage {
     Data(Vec<u8>),
+    /// Set the socket's TOS / Traffic Class byte to this before the data that follows.
+    Mark(u8),
     Close,
     Reset,
 }
@@ -166,6 +176,31 @@ struct Connection {
     writer: mpsc::UnboundedSender<WriterMessage>,
     task: JoinHandle<()>,
     established: Arc<AtomicBool>,
+    /// The DSCP last asked for on this connection (a new socket's is 0).
+    dscp: u8,
+    /// What the operating system reported for the socket's TOS / Traffic Class after the
+    /// writer last set it; [`NO_TRAFFIC_CLASS`] before that, or when it was refused.
+    traffic_class: Arc<AtomicU32>,
+}
+
+/// [`Connection::traffic_class`] with nothing read back.
+const NO_TRAFFIC_CLASS: u32 = u32::MAX;
+
+impl Connection {
+    fn new(
+        writer: mpsc::UnboundedSender<WriterMessage>,
+        task: JoinHandle<()>,
+        established: Arc<AtomicBool>,
+        traffic_class: Arc<AtomicU32>,
+    ) -> Self {
+        Self {
+            writer,
+            task,
+            established,
+            dscp: 0,
+            traffic_class,
+        }
+    }
 }
 
 /// Owns the sockets of one engine (see the [crate documentation](crate)).
@@ -269,6 +304,8 @@ impl StreamDriver {
                 let tx = self.inputs_tx.clone();
                 let config = self.config;
                 let flag = established.clone();
+                let traffic_class = Arc::new(AtomicU32::new(NO_TRAFFIC_CLASS));
+                let marked = traffic_class.clone();
                 let task = tokio::spawn(async move {
                     let connected = tokio::time::timeout(
                         config.connect_timeout,
@@ -281,7 +318,7 @@ impl StreamDriver {
                             flag.store(true, Ordering::SeqCst);
                             let _ =
                                 tx.send(DriverInput::Event(StreamEvent::Connected { id, local }));
-                            run_connection(id, stream, rx, tx, config).await;
+                            run_connection(id, stream, rx, tx, config, marked).await;
                         }
                         _ => {
                             let _ = tx.send(DriverInput::Event(StreamEvent::ConnectFailed { id }));
@@ -290,11 +327,7 @@ impl StreamDriver {
                 });
                 self.connections.insert(
                     id,
-                    Connection {
-                        writer,
-                        task,
-                        established,
-                    },
+                    Connection::new(writer, task, established, traffic_class),
                 );
             }
             StreamCommand::Close { id } => {
@@ -375,14 +408,18 @@ impl StreamDriver {
         let (writer, rx) = mpsc::unbounded_channel();
         let tx = self.inputs_tx.clone();
         let config = self.config;
-        let task = tokio::spawn(run_connection(id, accepted.stream, rx, tx, config));
+        let traffic_class = Arc::new(AtomicU32::new(NO_TRAFFIC_CLASS));
+        let task = tokio::spawn(run_connection(
+            id,
+            accepted.stream,
+            rx,
+            tx,
+            config,
+            traffic_class.clone(),
+        ));
         self.connections.insert(
             id,
-            Connection {
-                writer,
-                task,
-                established: Arc::new(AtomicBool::new(true)),
-            },
+            Connection::new(writer, task, Arc::new(AtomicBool::new(true)), traffic_class),
         );
     }
 
@@ -413,11 +450,29 @@ impl StreamDriver {
         );
     }
 
-    /// Writes a transmit of the engine, after the earlier ones of its connection.
+    /// Writes a transmit of the engine, after the earlier ones of its connection. When the
+    /// transmit's DSCP ([`StreamTransmit::dscp`]: one per TCP connection, RFC 8837 section 5)
+    /// differs from the connection's, the socket's `IP_TOS` / `IPV6_TCLASS` is set to it first
+    /// ([`sockets::set_traffic_class`], which says what each platform does).
     pub fn write(&mut self, transmit: StreamTransmit) {
-        if let Some(connection) = self.connections.get(&transmit.id) {
+        if let Some(connection) = self.connections.get_mut(&transmit.id) {
+            if connection.dscp != transmit.dscp {
+                connection.dscp = transmit.dscp;
+                let _ = connection
+                    .writer
+                    .send(WriterMessage::Mark(transmit.dscp << 2));
+            }
             let _ = connection.writer.send(WriterMessage::Data(transmit.data));
         }
+    }
+
+    /// The TOS / Traffic Class byte the operating system reported for connection `id`'s
+    /// socket (`getsockopt` of `IP_TOS` / `IPV6_TCLASS`) after the driver last set it, once it
+    /// has: `None` for an unknown connection, one never marked, or a platform that refused.
+    pub fn socket_traffic_class(&self, id: StreamId) -> Option<u32> {
+        let connection = self.connections.get(&id)?;
+        let value = connection.traffic_class.load(Ordering::SeqCst);
+        (value != NO_TRAFFIC_CLASS).then_some(value)
     }
 
     /// The next input for the engine.
@@ -529,7 +584,9 @@ async fn run_connection(
     mut rx: mpsc::UnboundedReceiver<WriterMessage>,
     tx: mpsc::UnboundedSender<DriverInput>,
     config: DriverConfig,
+    traffic_class: Arc<AtomicU32>,
 ) {
+    let ipv6 = stream.local_addr().is_ok_and(|local| local.is_ipv6());
     let (mut read_half, mut write_half) = stream.into_split();
     let reader_tx = tx.clone();
     let mut reader = tokio::spawn(async move {
@@ -561,6 +618,15 @@ async fn run_connection(
     loop {
         tokio::select! {
             message = rx.recv() => match message {
+                Some(WriterMessage::Mark(value)) => {
+                    let socket = socket2::SockRef::from(write_half.as_ref());
+                    let read_back = sockets::set_traffic_class(socket, ipv6, value)
+                        .and_then(|()| {
+                            sockets::traffic_class(socket2::SockRef::from(write_half.as_ref()), ipv6)
+                        })
+                        .unwrap_or(NO_TRAFFIC_CLASS);
+                    traffic_class.store(read_back, Ordering::SeqCst);
+                }
                 Some(WriterMessage::Data(data)) => {
                     if write_half.write_all(&data).await.is_err() {
                         let _ = tx.send(DriverInput::Event(StreamEvent::Reset { id }));

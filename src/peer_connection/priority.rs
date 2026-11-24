@@ -79,6 +79,48 @@ pub enum RTCFlowType {
     Data,
 }
 
+/// How a connection marks its datagrams
+/// ([`SettingEngineBuilder::with_dscp_marking`](crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dscp_marking)).
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RTCDscpMarking {
+    /// RFC 8837 Table 1, and a media flow whose marked packets do not get through goes back to
+    /// Default Forwarding (RFC 8835 section 4.2 MAY): a flow that was sent with a codepoint
+    /// other than DF and that the peer never reported on in its receiver reports on that
+    /// transport ([`DSCP_BLOCKED_REPORTS`] of them, at least [`DSCP_BLOCKED_AFTER`] after the
+    /// flow began) is marked DSCP 0 from then on, its retransmission and FEC streams with it.
+    /// The other flows keep their codepoints ("Other flows on the same transport, using
+    /// different DSCPs, don't need to change"). Only the start of a flow is watched: a flow
+    /// reported on once is not watched again (later failures are the transport's, RFC 8835
+    /// section 4.2). The default.
+    #[default]
+    Rfc8837,
+    /// RFC 8837 Table 1, never turned back.
+    WithoutFallback,
+    /// Nothing is marked: DSCP 0 (Default Forwarding) for every datagram and connection.
+    Off,
+}
+
+/// How long a marked media flow is sent before the DSCP fallback may judge it blocked.
+pub const DSCP_BLOCKED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many sender or receiver reports from the peer, on the flow's transport and none about
+/// the flow, judge it blocked (the first may have been sent before the flow's first packet
+/// arrived).
+pub const DSCP_BLOCKED_REPORTS: u64 = 3;
+
+/// The DSCP fallback's state (RFC 8835 section 4.2).
+#[derive(Debug, Default)]
+pub(crate) struct DscpFallback {
+    /// Marked flows not yet reported on, by SSRC: when they were first seen sent, and the
+    /// transport's report count then.
+    watched: std::collections::HashMap<u32, (std::time::Instant, u64)>,
+    /// Flows reported on: never watched again.
+    delivered: std::collections::HashSet<u32>,
+    /// Flows turned back to Default Forwarding, by their encoding's SSRC.
+    blocked: std::collections::HashSet<u32>,
+}
+
 /// Lower Effort (RFC 8622): DSCP 1. RFC 8837 section 5: used for very-low priority, not CS1.
 pub const DSCP_LE: u8 = 1;
 /// Default Forwarding: DSCP 0.
@@ -254,8 +296,17 @@ impl crate::peer_connection::RTCPeerConnection {
     /// [`SettingEngineBuilder::with_non_interactive_video`] says otherwise (the AF3x values
     /// RFC 8837 section 5 lets a non-browser use for playback).
     ///
+    /// Under [`RTCDscpMarking::Rfc8837`] (the default) a media flow whose marked packets the
+    /// network blocks goes back to DSCP 0 ([`dscp_blocked_flows`](Self::dscp_blocked_flows));
+    /// under [`RTCDscpMarking::Off`] every datagram is DSCP 0
+    /// ([`SettingEngineBuilder::with_dscp_marking`]).
+    ///
     /// [`SettingEngineBuilder::with_non_interactive_video`]: crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_non_interactive_video
+    /// [`SettingEngineBuilder::with_dscp_marking`]: crate::peer_connection::configuration::setting_engine::SettingEngineBuilder::with_dscp_marking
     pub fn dscp(&self, datagram: &shared::TaggedBytesMut) -> u8 {
+        if self.setting_engine.dscp_marking == RTCDscpMarking::Off {
+            return DSCP_DF;
+        }
         if datagram.transport.transport_protocol == shared::TransportProtocol::TCP {
             return self.highest_dscp();
         }
@@ -276,6 +327,14 @@ impl crate::peer_connection::RTCPeerConnection {
         }
     }
 
+    /// The whole IPv4 TOS / IPv6 Traffic Class byte to send `datagram` with: its
+    /// [`dscp`](Self::dscp) in the upper six bits (RFC 2474 section 3) and the ECN codepoint
+    /// of its transport context in the lower two (RFC 3168 section 5). What a driver sets with
+    /// `IP_TOS` / `IPV6_TCLASS` on the socket before sending the datagram.
+    pub fn traffic_class(&self, datagram: &shared::TaggedBytesMut) -> u8 {
+        (self.dscp(datagram) << 2) | datagram.transport.ecn.map_or(0, |ecn| ecn as u8)
+    }
+
     fn video_flow(&self) -> RTCFlowType {
         if self.setting_engine.non_interactive_video {
             RTCFlowType::NonInteractiveVideo
@@ -284,8 +343,29 @@ impl crate::peer_connection::RTCPeerConnection {
         }
     }
 
-    /// The DSCP of the encoding that sends (or repairs) `ssrc`.
+    /// The SSRCs whose media flows the DSCP fallback turned back to Default Forwarding
+    /// (RFC 8835 section 4.2; [`RTCDscpMarking::Rfc8837`]): each the SSRC of an encoding whose
+    /// marked packets the peer never reported receiving. Its retransmission and FEC streams
+    /// are unmarked with it.
+    pub fn dscp_blocked_flows(&self) -> Vec<u32> {
+        let mut ssrcs: Vec<u32> = self.dscp_fallback.blocked.iter().copied().collect();
+        ssrcs.sort_unstable();
+        ssrcs
+    }
+
+    /// The DSCP of the encoding that sends (or repairs) `ssrc`: its RFC 8837 codepoint, or DF
+    /// once the fallback turned the flow back.
     fn rtp_dscp(&self, ssrc: u32) -> Option<u8> {
+        let (primary, dscp) = self.flow_dscp(ssrc)?;
+        Some(if self.dscp_fallback.blocked.contains(&primary) {
+            DSCP_DF
+        } else {
+            dscp
+        })
+    }
+
+    /// The SSRC of the encoding that sends (or repairs) `ssrc`, and its RFC 8837 codepoint.
+    fn flow_dscp(&self, ssrc: u32) -> Option<(u32, u8)> {
         use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
         self.rtp_transceivers.iter().find_map(|transceiver| {
             let sender = transceiver.sender().as_ref()?;
@@ -300,15 +380,96 @@ impl crate::peer_connection::RTCPeerConnection {
             } else {
                 self.video_flow()
             };
-            Some(dscp_for(
-                flow,
-                encoding.network_priority.unwrap_or(encoding.priority),
+            Some((
+                coding_ssrc(encoding).unwrap_or(ssrc),
+                dscp_for(flow, encoding.network_priority.unwrap_or(encoding.priority)),
             ))
         })
     }
 
+    /// RFC 8835 section 4.2: "The implementation MAY turn off use of DSCP markings if it
+    /// detects symptoms of unexpected behavior such as ... blocking of packets with certain
+    /// DSCP markings." Under [`RTCDscpMarking::Rfc8837`], each media flow sent with a
+    /// codepoint other than DF is watched from its first packet until the peer reports on it
+    /// (a report block about its SSRC, RFC 3550 6.4); a flow the peer's sender and receiver
+    /// reports on its transport keep leaving out ([`DSCP_BLOCKED_REPORTS`] of them, at least
+    /// [`DSCP_BLOCKED_AFTER`] after the flow began) is blocked by its marking, and goes with
+    /// DSCP 0 from then on, the whole flow (its retransmission and FEC streams too: "one has
+    /// to switch the whole media flow to DSCP 0, since all traffic for a single media flow
+    /// needs to be on the same queue").
+    pub(crate) fn detect_blocked_dscp(&mut self, now: std::time::Instant) {
+        if self.setting_engine.dscp_marking != RTCDscpMarking::Rfc8837 {
+            return;
+        }
+        let mut flows = Vec::new();
+        for transceiver in &self.rtp_transceivers {
+            let Some(sender) = transceiver.sender().as_ref() else {
+                continue;
+            };
+            let mid = transceiver.mid().clone().unwrap_or_default();
+            for encoding in sender.send_encodings() {
+                if let Some(ssrc) = coding_ssrc(encoding) {
+                    flows.push((ssrc, mid.clone()));
+                }
+            }
+        }
+        for (ssrc, mid) in flows {
+            let fallback = &self.dscp_fallback;
+            if fallback.blocked.contains(&ssrc) || fallback.delivered.contains(&ssrc) {
+                continue;
+            }
+            if self.flow_dscp(ssrc).is_none_or(|(_, dscp)| dscp == DSCP_DF) {
+                self.dscp_fallback.watched.remove(&ssrc);
+                continue;
+            }
+            let stats = &self.pipeline_context.stats;
+            let Some(stream) = stats.outbound_rtp_streams.get(&ssrc) else {
+                continue;
+            };
+            if stream.packets_sent == 0 {
+                continue;
+            }
+            if stream.remote_reports_received > 0 {
+                self.dscp_fallback.watched.remove(&ssrc);
+                self.dscp_fallback.delivered.insert(ssrc);
+                continue;
+            }
+            let reports = stats
+                .reception_report_packets
+                .get(&stats.section_transport_key(&mid))
+                .copied()
+                .unwrap_or(0);
+            let (since, at) = *self
+                .dscp_fallback
+                .watched
+                .entry(ssrc)
+                .or_insert((now, reports));
+            if now >= since + DSCP_BLOCKED_AFTER && reports >= at + DSCP_BLOCKED_REPORTS {
+                log::warn!(
+                    "RFC 8835 4.2: the peer reported none of SSRC {ssrc}'s marked packets in {} reports; the flow goes with DSCP 0",
+                    reports - at
+                );
+                self.dscp_fallback.watched.remove(&ssrc);
+                self.dscp_fallback.blocked.insert(ssrc);
+            }
+        }
+    }
+
+    /// The codepoint of the connection's stream transmits: every TCP connection carries one
+    /// (RFC 8837 section 5 MUST), the highest-priority flow's.
+    pub(crate) fn stream_dscp(&self) -> u8 {
+        if self.setting_engine.dscp_marking == RTCDscpMarking::Off {
+            DSCP_DF
+        } else {
+            self.highest_dscp()
+        }
+    }
+
     /// The DSCP of the SCTP association: that of its highest-priority data channel.
     fn data_dscp(&self) -> Option<u8> {
+        if self.setting_engine.dscp_marking == RTCDscpMarking::Off {
+            return None;
+        }
         self.data_channels
             .values()
             .map(|dc| RTCPriorityType::from_dcep_priority(dc.priority))
@@ -368,6 +529,13 @@ impl crate::peer_connection::RTCPeerConnection {
             .max_by_key(|(priority, flow)| (*priority, *flow == RTCFlowType::Audio))
             .map_or(DSCP_DF, |(priority, flow)| dscp_for(flow, priority))
     }
+}
+
+/// The SSRC of an encoding's media.
+fn coding_ssrc(
+    encoding: &crate::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters,
+) -> Option<u32> {
+    encoding.rtp_coding_parameters.ssrc
 }
 
 #[cfg(test)]

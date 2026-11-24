@@ -1060,6 +1060,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "RFC 9653 zero checksum, used only when the peer announces it too; dcsctp has it but libwebrtc leaves zero_checksum_alternate_error_detection_method at None (net/dcsctp/public/dcsctp_options.h @ a222406d), so it announces none",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_dscp_marking",
+        class: NotGovernedClass::EngineOnly,
+        note: "RFC 8837 marking with the RFC 8835 4.2 fallback (a media flow the peer never reports on goes back to DSCP 0) in every profile. libwebrtc marks by default too (media/base/media_config.h @ a222406d: MediaConfig::enable_dscp = true; Chromium's rtc_peer_connection_handler.cc @ 8dafa8bc does not change it) and has no fallback (media/base/media_channel_impl.cc @ a222406d: UpdateDscp sets the preferred codepoint, or DSCP_DEFAULT only when enable_dscp is off, on the RTP and RTCP sockets alike); the fallback changes nothing until a flow is blocked",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_sctp_weighted_fair_queueing",
         class: NotGovernedClass::EngineOnly,
         note: "RFC 8260 3.6 scheduling of the engine's own sends; not visible to the peer",

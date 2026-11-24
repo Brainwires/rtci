@@ -65,6 +65,8 @@ impl RTCStatsAccumulator {
             })
             .collect();
         if !reports.is_empty() {
+            let transport = self.active_transport();
+            *self.reception_report_packets.entry(transport).or_default() += reports.len() as u64;
             let received: Vec<u32> = reports
                 .iter()
                 .flat_map(|packet| reception_reports(*packet))

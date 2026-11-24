@@ -528,3 +528,110 @@ mod tests {
         assert!(no_eth.keeps(Some("wlan0"), v4));
     }
 }
+
+/// `IPV6_TCLASS`, on the targets where `socket2` has it.
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+))]
+fn set_tclass(socket: &socket2::SockRef<'_>, value: u32) -> io::Result<()> {
+    socket.set_tclass_v6(value)
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+))]
+fn tclass(socket: &socket2::SockRef<'_>) -> io::Result<u32> {
+    socket.tclass_v6()
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+)))]
+fn set_tclass(_: &socket2::SockRef<'_>, _: u32) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+)))]
+fn tclass(_: &socket2::SockRef<'_>) -> io::Result<u32> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+/// Sets the byte the socket's packets carry in the IPv4 TOS / IPv6 Traffic Class field: the
+/// DSCP in its upper six bits (RFC 2474 section 3), the ECN codepoint in the lower two (RFC
+/// 3168 section 5). `ipv6` says which option (`IPV6_TCLASS` or `IP_TOS`) the socket's family
+/// takes.
+///
+/// What each platform does:
+/// - **Linux, Android, the BSDs, macOS**: `IP_TOS` / `IPV6_TCLASS` set what every later
+///   packet carries, with no privilege. (Linux keeps the ECN bits of a TCP socket to itself.)
+/// - **Windows**: `IP_TOS` is accepted, and `getsockopt` reads the value back (hosted
+///   `windows-latest`), but Microsoft documents the option as not to be used and the stack as
+///   not applying it unless the host's policy allows applications to set it (it does not by
+///   default): the packets are not known to carry it. Marking needs the qWAVE
+///   API (`QOSAddSocketToFlow`, and `QOSSetFlow` with `QOSSetOutgoingDSCPValue`, which only an
+///   administrator or a member of Network Configuration Operators may call) or a Group Policy
+///   QoS rule. The driver does neither: on Windows its packets leave unmarked whatever the
+///   engine asks, and RFC 8835 section 4.2 allows that ("It is appropriate to depart from this
+///   recommendation when running on platforms where QoS marking is not implemented").
+///   `IPV6_TCLASS` is not offered there (`socket2` has none): `Unsupported`, and the driver
+///   counts the socket in `PeerDriver::unmarked_sockets`.
+/// - Other targets without `IPV6_TCLASS` in `socket2`: an error for IPv6.
+///
+/// # Errors
+///
+/// The option is refused or not offered on this platform.
+pub fn set_traffic_class(socket: socket2::SockRef<'_>, ipv6: bool, value: u8) -> io::Result<()> {
+    if ipv6 {
+        set_tclass(&socket, u32::from(value))
+    } else {
+        socket.set_tos_v4(u32::from(value))
+    }
+}
+
+/// The byte the socket's packets carry in the IPv4 TOS / IPv6 Traffic Class field, as the
+/// operating system reports it (`getsockopt` of `IP_TOS` / `IPV6_TCLASS`).
+///
+/// # Errors
+///
+/// The option is not offered on this platform.
+pub fn traffic_class(socket: socket2::SockRef<'_>, ipv6: bool) -> io::Result<u32> {
+    if ipv6 {
+        tclass(&socket)
+    } else {
+        socket.tos_v4()
+    }
+}

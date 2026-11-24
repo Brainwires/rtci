@@ -240,6 +240,10 @@ pub enum Error {
     /// SDES type is missing.
     #[error("SDES item missing type")]
     SdesMissingType,
+    /// An RTCP CNAME given to a connection that is not 1 to 255 octets (RFC 3550 section 6.5:
+    /// an SDES item's text has an 8-bit length; RFC 7022: a CNAME names its source).
+    #[error("an RTCP CNAME must be 1 to 255 octets long")]
+    ErrRtcpCnameLength,
     /// Reason is too long.
     #[error("Reason must be < 255 octets long")]
     ReasonTooLong,

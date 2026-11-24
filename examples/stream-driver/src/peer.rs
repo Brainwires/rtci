@@ -151,6 +151,9 @@ struct HostSocket {
     retired_for: Option<RTCTransportId>,
     /// Once its transport selected a pair on another socket: when it is closed.
     close_at: Option<Instant>,
+    /// The TOS / Traffic Class byte last set on it (a new socket's is 0), or `None` once the
+    /// platform refused to set one: its datagrams then leave unmarked.
+    traffic_class: Option<u8>,
     reader: JoinHandle<()>,
 }
 
@@ -183,6 +186,10 @@ pub struct PeerDriver {
     mdns_sent: u64,
     /// mDNS datagrams received ([`Self::mdns_datagrams_received`]).
     mdns_received: u64,
+    /// Sockets on which the platform refused a TOS / Traffic Class ([`Self::unmarked_sockets`]).
+    unmarked_sockets: u64,
+    /// Datagrams sent, by the TOS / Traffic Class their socket had ([`Self::sent_by_traffic_class`]).
+    sent_by_traffic_class: std::collections::BTreeMap<u8, u64>,
 }
 
 impl PeerDriver {
@@ -204,6 +211,8 @@ impl PeerDriver {
             mdns_sent: 0,
             mdns_received: 0,
             config,
+            unmarked_sockets: 0,
+            sent_by_traffic_class: std::collections::BTreeMap::new(),
         }
     }
 
@@ -242,6 +251,30 @@ impl PeerDriver {
     /// (its own looped back by the host included).
     pub fn mdns_datagrams_received(&self) -> u64 {
         self.mdns_received
+    }
+
+    /// How many sockets the platform refused a TOS / Traffic Class on: their datagrams leave
+    /// without the DSCP the engine asked for (Windows without qWAVE, an IPv6 socket where the
+    /// platform has no `IPV6_TCLASS`; see [`sockets::set_traffic_class`]).
+    pub fn unmarked_sockets(&self) -> u64 {
+        self.unmarked_sockets
+    }
+
+    /// How many datagrams were sent with each TOS / Traffic Class byte set on their socket
+    /// (a socket the platform refused counts under 0).
+    pub fn sent_by_traffic_class(&self) -> &std::collections::BTreeMap<u8, u64> {
+        &self.sent_by_traffic_class
+    }
+
+    /// The TOS / Traffic Class byte the operating system reports for the UDP socket bound to
+    /// `local` (`getsockopt` of `IP_TOS` / `IPV6_TCLASS`): what its next datagram carries.
+    /// `None` without such a socket.
+    pub fn socket_traffic_class(&self, local: SocketAddr) -> Option<io::Result<u32>> {
+        let host = self.sockets.iter().find(|s| s.local == local)?;
+        Some(sockets::traffic_class(
+            socket2::SockRef::from(host.socket.as_ref()),
+            local.is_ipv6(),
+        ))
     }
 
     /// The next event of the connection. The driver has already done what is its to do
@@ -364,6 +397,10 @@ impl PeerDriver {
         }
     }
 
+    /// Sends a datagram of the engine on the socket of its local address, marked with the
+    /// DSCP and ECN codepoint the engine gives it (`RTCPeerConnection::traffic_class`: RFC 8837
+    /// Table 1 by flow and priority, RFC 8835 section 4.2): the socket's `IP_TOS` /
+    /// `IPV6_TCLASS` is set before the datagram when it differs from the last one set.
     fn send(&mut self, datagram: TaggedBytesMut) {
         if datagram.transport.transport_protocol != TransportProtocol::UDP {
             return;
@@ -375,16 +412,44 @@ impl PeerDriver {
             }
             return;
         }
+        let traffic_class = self.pc.traffic_class(&datagram);
+        let mut refused = false;
+        let mut applied = 0;
         let sent = self
             .sockets
-            .iter()
+            .iter_mut()
             .find(|s| s.local == datagram.transport.local_addr)
             .is_some_and(|host| {
+                if let Some(current) = host.traffic_class
+                    && current != traffic_class
+                {
+                    match sockets::set_traffic_class(
+                        socket2::SockRef::from(host.socket.as_ref()),
+                        host.local.is_ipv6(),
+                        traffic_class,
+                    ) {
+                        Ok(()) => host.traffic_class = Some(traffic_class),
+                        // The platform does not mark (RFC 8835 4.2: "appropriate to depart
+                        // ... on platforms where QoS marking is not implemented"): the socket
+                        // is not asked again.
+                        Err(_) => {
+                            host.traffic_class = None;
+                            refused = true;
+                        }
+                    }
+                }
+                applied = host.traffic_class.unwrap_or(0);
                 // UDP: a datagram the socket cannot take now is lost, as on the wire.
                 host.socket
                     .try_send_to(&datagram.message, datagram.transport.peer_addr)
                     .is_ok()
             });
+        if refused {
+            self.unmarked_sockets += 1;
+        }
+        if sent {
+            *self.sent_by_traffic_class.entry(applied).or_default() += 1;
+        }
         if !sent {
             self.unsent += 1;
         }
@@ -617,6 +682,7 @@ impl PeerDriver {
                 mid: mid.to_owned(),
                 retired_for: None,
                 close_at: None,
+                traffic_class: Some(0),
                 reader,
             });
             self.pc
