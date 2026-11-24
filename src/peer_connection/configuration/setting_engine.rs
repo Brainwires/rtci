@@ -414,6 +414,9 @@ pub struct SettingEngine {
     /// settings changed after it keep their own values.
     pub(crate) behaviour_profile: BehaviourProfile,
     pub(crate) crypto_provider: Option<Arc<dyn RTCCryptoProvider>>,
+    /// The wall clock paired with the engine's clock ([`SettingEngineBuilder::with_wall_clock`]);
+    /// `None`: read once when the peer connection is built.
+    pub(crate) wall_clock: Option<shared::time::SystemInstant>,
     pub(crate) timeout: Timeout,
     pub(crate) data_channel: DataChannel,
     pub(crate) turn_allocation_refresh_interval_cap: Option<Duration>,
@@ -636,6 +639,7 @@ impl SettingEngine {
         Self {
             behaviour_profile: BehaviourProfile::Rfc,
             crypto_provider: Default::default(),
+            wall_clock: None,
             timeout: Default::default(),
             data_channel: Default::default(),
             turn_allocation_refresh_interval_cap: Default::default(),
@@ -891,6 +895,25 @@ impl SettingEngineBuilder {
     /// different providers in the same process.
     pub fn with_crypto_provider(mut self, provider: Arc<dyn RTCCryptoProvider>) -> Self {
         self.0.crypto_provider = Some(provider);
+        self
+    }
+
+    /// The wall-clock time the peer connection pairs with the instant it is built at, for the
+    /// wall-clock values it writes itself: the `o=` session version of its descriptions (RFC
+    /// 8866 section 5.2: "it is RECOMMENDED that a timestamp be used", seconds since 1900),
+    /// the timestamps of its receivers' synchronization and contributing sources, and the NTP
+    /// times of the RTCP session the peer connection installs when its interceptor registry
+    /// has none.
+    ///
+    /// Without it the system clock is read: once when the peer connection is built (for the
+    /// session version), at the first packet received (for the source timestamps), and the
+    /// RTCP session takes the process-wide anchor
+    /// ([`SystemInstant::shared`](shared::time::SystemInstant::shared)). Give one
+    /// for a run under virtual time that is the same every time; with a seeded crypto provider
+    /// ([`with_crypto_provider`](Self::with_crypto_provider), whose `random()` gives the
+    /// `o=` session id) the `o=` line is then the same in every run.
+    pub fn with_wall_clock(mut self, wall_clock: shared::time::SystemInstant) -> Self {
+        self.0.wall_clock = Some(wall_clock);
         self
     }
 

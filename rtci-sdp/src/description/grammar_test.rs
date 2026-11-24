@@ -1328,6 +1328,19 @@ fn the_jsep_templates_write_the_lines_rfc_9429_section_5_2_1_gives() {
     assert_eq!(origin[3..], ["IN", "IP4", "0.0.0.0"]);
     assert_eq!(lines[2..], ["s=-", "t=0 0", ""]);
 
+    // RFC 8866 section 5.2: "it is RECOMMENDED that a timestamp be used" for <sess-version>,
+    // "in seconds since January 1, 1900 UTC" as for <sess-id>: the system clock's, now.
+    let ntp_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + NTP_UNIX_EPOCH_OFFSET_SECS;
+    let version: u64 = origin[2].parse().unwrap();
+    assert!(
+        (ntp_now - 60..=ntp_now).contains(&version),
+        "{version} is not the seconds since 1900 of now ({ntp_now})"
+    );
+
     // A media section: port 9, UDP/TLS/RTP/SAVPF, and c=IN IP4 0.0.0.0 right after m=.
     let media = MediaDescription::new_jsep_media_description("audio".to_owned(), vec![])
         .with_codec(

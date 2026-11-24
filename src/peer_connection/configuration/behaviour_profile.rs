@@ -1532,6 +1532,11 @@ pub(crate) static NOT_GOVERNED: &[NotGoverned] = &[
         note: "an injected wall-clock anchor for the NTP times the interceptors write (sender reports, XR receiver reference times, RFC 8888 report timestamps, the RFC 6051 header extension), for virtual-time runs that repeat within one process; `None` (the process-wide SystemInstant::shared) in every profile",
     },
     NotGoverned {
+        setting: "SettingEngineBuilder::with_wall_clock",
+        class: NotGovernedClass::Input,
+        note: "an injected wall-clock time for the instant the peer connection is built at, for the wall-clock values it writes itself (the o= session version, RFC 8866 5.2; the receivers' source timestamps; the NTP times of the RTCP session it installs), for virtual-time runs that repeat; `None` (the system clock, read once) in every profile",
+    },
+    NotGoverned {
         setting: "SettingEngineBuilder::with_audio_redundancy",
         class: NotGovernedClass::Same,
         note: "WhenPreferred in every profile: a local audio stream is sent in RED (RFC 2198) only when the remote description lists RED ahead of the primary (RFC 3264 5.1, 6.1). libwebrtc the same: media/engine/webrtc_voice_engine.cc::WebRtcVoiceSendChannel::SetSendCodecs @ a222406d (lines 1507-1641) looks for RED only among the codecs before the send codec (lines 1610-1622: \"RED codec needs to be negotiated before the actual codec they reference\", for (i = 0; i < send_codec_position; ++i))",

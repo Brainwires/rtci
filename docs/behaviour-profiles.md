@@ -245,7 +245,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::with_audio_redundancy` | WhenPreferred in every profile: a local audio stream is sent in RED (RFC 2198) only when the remote description lists RED ahead of the primary (RFC 3264 5.1, 6.1). libwebrtc the same: media/engine/webrtc_voice_engine.cc::WebRtcVoiceSendChannel::SetSendCodecs @ a222406d (lines 1507-1641) looks for RED only among the codecs before the send codec (lines 1610-1622: "RED codec needs to be negotiated before the actual codec they reference", for (i = 0; i < send_codec_position; ++i)) |
 | `SettingEngineBuilder::with_own_payload_types_in_answers` | off: an answer uses the offer's payload type numbers (RFC 3264 6.1 SHOULD). libwebrtc the same: pc/codec_vendor.cc::NegotiateCodecs @ a222406d (lines 801-...) "Use their ID, if available" (lines 846-848: negotiated.id = theirs->id), apt values remapped after (lines 853-) |
 
-## Application input: no default to choose (32)
+## Application input: no default to choose (33)
 
 | Setting | Note |
 |---|---|
@@ -281,6 +281,7 @@ Chromium leaves), and Chromium adds the X25519MLKEM768 key share under its
 | `SettingEngineBuilder::without_sctp_max_retransmissions` | back to RFC 9260's 10 (the sctp.max-retransmissions row's Rfc value) |
 | `DefaultInterceptorOptions::rtcp_random` | an injected random source for the RTCP sessions (report interval variation, RFC 3550 6.3.1; early feedback dither, RFC 4585 3.5.2; SSRC and CNAME), for runs a seeded provider makes repeatable; `None` (rand) in every profile |
 | `DefaultInterceptorOptions::wall_clock` | an injected wall-clock anchor for the NTP times the interceptors write (sender reports, XR receiver reference times, RFC 8888 report timestamps, the RFC 6051 header extension), for virtual-time runs that repeat within one process; `None` (the process-wide SystemInstant::shared) in every profile |
+| `SettingEngineBuilder::with_wall_clock` | an injected wall-clock time for the instant the peer connection is built at, for the wall-clock values it writes itself (the o= session version, RFC 8866 5.2; the receivers' source timestamps; the NTP times of the RTCP session it installs), for virtual-time runs that repeat; `None` (the system clock, read once) in every profile |
 
 ## Deprecated, not read by the engine (3)
 
