@@ -58,6 +58,8 @@ jobs:
           body_path: RELEASE_NOTES.md
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # This is the only workflow a version tag starts.
+      #
       # Publishing to crates.io stays manual for now: docs/releasing.md has the procedure (dry
       # runs, the order, what to do when a publish fails midway; crates.io versions are
       # permanent). When it moves here, uncomment the step below and add the CRATES_IO_TOKEN
@@ -81,8 +83,8 @@ jobs:
       #     cargo publish -p rtc-datachannel --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-sdp --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-srtp --token ${{ secrets.CRATES_IO_TOKEN }}
-      #     cargo publish -p rtc-stream-driver --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-stun --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-ice --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc-turn --token ${{ secrets.CRATES_IO_TOKEN }}
       #     cargo publish -p rtc --token ${{ secrets.CRATES_IO_TOKEN }}
+      #     cargo publish -p rtc-stream-driver --token ${{ secrets.CRATES_IO_TOKEN }}

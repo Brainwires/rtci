@@ -30,7 +30,14 @@
 //! per clock rate), and `?profile=chrome` (or `rfc`, `strict-rfc`, `performance`) under that
 //! behaviour profile (`docs/behaviour-profiles.md`): `SettingEngineBuilder::with_behaviour_profile`
 //! and `MediaEngine::for_profile`, the settings below applied after it. Without them the peer
-//! takes the build's default profile and its value.
+//! takes the build's default profile and its value. `?previous_addresses=1` builds it with
+//! `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`: a new DTLS
+//! association keeps the transport's candidates and addresses. Without it (the RFC 8842
+//! section 5.1 default), when the engine says a transport needs new local candidates
+//! (`OnLocalCandidatesNeeded`: the transport set up after every m= section was rejected, or
+//! an ICE restart for a new association), the peer binds a new UDP socket, adds its host
+//! candidate for the event's section and trickles it to the browser; the previous socket
+//! keeps being read and written until the session ends.
 //!
 //! The scenario (sent with the first offer or `request-offer`, whichever comes first) chooses
 //! what the peer does with media:
@@ -38,10 +45,7 @@
 //! receives; `{"media":"send","video":...,"audio":...}` streams the GStreamer fixtures from
 //! `--media-dir` (vp8.ivf, vp9.ivf, h264.h264, h265.h265, av1.ivf, opus.ogg; `"fixture":
 //! {"video":"h264-slices.h264","audio":"opus-multi.ogg"}` picks others); `{"media":"count"}`
-//! only counts (simulcast: packets per RID); `{"media":"pipeline"}` sends a 440 Hz tone through
-//! the `rtc-audio` send pipeline (processing, Opus with FEC on reported loss, RFC 6464 levels)
-//! and decodes the browser's audio with its jitter buffer, reporting what it decoded under
-//! `"pipeline"`. `"negotiated":[{"label":..,"id":..,"ordered":..}]`
+//! only counts (simulcast: packets per RID). `"negotiated":[{"label":..,"id":..,"ordered":..}]`
 //! creates pre-negotiated data channels. `"ice_tcp":true` adds a passive TCP candidate (RFC
 //! 6544) and `"udp":false` leaves out the UDP one. `"engine_tcp":true` has the engine gather
 //! its own TCP candidates and drive their connections through the stream interface and the
@@ -137,6 +141,7 @@ async fn main() -> Result<()> {
         let (ip, dir) = (cli.ice_ip, cli.media_dir.clone());
         tokio::spawn(async move {
             let mut ssrc_per_clock_rate = None;
+            let mut previous_addresses = false;
             let mut profile = BehaviourProfile::default();
             let mut unknown_profile = None;
             // The handshake callback's error type is tungstenite's, not ours to shrink.
@@ -145,6 +150,8 @@ async fn main() -> Result<()> {
                 for pair in request.uri().query().unwrap_or_default().split('&') {
                     if pair == "ssrc_per_clock_rate=1" {
                         ssrc_per_clock_rate = Some(true);
+                    } else if pair == "previous_addresses=1" {
+                        previous_addresses = true;
                     } else if let Some(name) = pair.strip_prefix("profile=") {
                         match BehaviourProfile::from_name(name) {
                             Some(named) => profile = named,
@@ -160,7 +167,12 @@ async fn main() -> Result<()> {
                         eprintln!("session {from}: unknown profile {name:?}");
                         return;
                     }
-                    if let Err(e) = Session::run(ws, ip, dir, ssrc_per_clock_rate, profile).await {
+                    let options = SessionOptions {
+                        ssrc_per_clock_rate,
+                        previous_addresses,
+                        profile,
+                    };
+                    if let Err(e) = Session::run(ws, ip, dir, options).await {
                         eprintln!("session {from}: {e:#}");
                     }
                 }
@@ -348,17 +360,6 @@ impl SeqCoverage {
     }
 }
 
-/// Scenario `pipeline`: audio through `rtc-audio` both ways.
-struct Pipeline {
-    sender_id: RTCRtpSenderId,
-    sender: Option<rtc_audio::engine::AudioSender>,
-    receiver: Option<rtc_audio::engine::AudioReceiver>,
-    tone: rtc_audio::signal::Tone,
-    next: Instant,
-    decoded_energy: f64,
-    decoded_samples: u64,
-}
-
 struct Outgoing {
     sender: RTCRtpSenderId,
     ssrc: u32,
@@ -399,6 +400,14 @@ fn renumber(next_sequence: &mut Option<u16>, p: &mut rtc::rtp::Packet) {
 /// An accepted ICE-TCP connection: frames for it go to its writer task.
 type TcpOut = mpsc::UnboundedSender<Vec<u8>>;
 
+/// What the WebSocket URL's query asks of a session.
+struct SessionOptions {
+    ssrc_per_clock_rate: Option<bool>,
+    /// `previous_addresses=1`: `with_dtls_new_association_on_previous_addresses(true)`.
+    previous_addresses: bool,
+    profile: BehaviourProfile,
+}
+
 struct Session {
     pc: RTCPeerConnection,
     sock: UdpSocket,
@@ -420,6 +429,9 @@ struct Session {
     /// Scenario `udp_blocked`: no ICE datagram leaves or is taken.
     udp_blocked: bool,
     candidates_added: bool,
+    /// A transport needed new local candidates (`OnLocalCandidatesNeeded`): its candidates,
+    /// gathered after the descriptions, are trickled to the browser.
+    trickle_local: bool,
     out: Vec<Value>,
     media: String,
     scenario: Value,
@@ -462,7 +474,6 @@ struct Session {
     transports_at_rolled_back_offer: Vec<(String, String)>,
     transports_after_rollback: Vec<(String, String)>,
     connected: bool,
-    pipeline: Option<Pipeline>,
     state: String,
     /// The ICE transports whose DTLS transport reported "connected" in an
     /// `OnTransportEvent` (one per transport of the connection).
@@ -475,9 +486,13 @@ impl Session {
         ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         ip: IpAddr,
         media_dir: String,
-        ssrc_per_clock_rate: Option<bool>,
-        profile: BehaviourProfile,
+        options: SessionOptions,
     ) -> Result<()> {
+        let SessionOptions {
+            ssrc_per_clock_rate,
+            previous_addresses,
+            profile,
+        } = options;
         let (mut ws_tx, mut ws_rx) = ws.split();
         let sock = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
         let local = sock.local_addr()?;
@@ -498,6 +513,11 @@ impl Session {
             .with_sctp_message_size_limit_without_interleaving(false)
             .with_multicast_dns_mode(MulticastDnsMode::QueryOnly);
         // The profile's value unless the URL names one (`Rfc`: a new SSRC per clock rate).
+        let setting_engine = if previous_addresses {
+            setting_engine.with_dtls_new_association_on_previous_addresses(true)
+        } else {
+            setting_engine
+        };
         let setting_engine = match ssrc_per_clock_rate {
             Some(per_clock_rate) => setting_engine.with_ssrc_per_clock_rate(per_clock_rate),
             None => setting_engine,
@@ -540,6 +560,7 @@ impl Session {
             udp_blocked: false,
             tcp_in,
             candidates_added: false,
+            trickle_local: false,
             out: vec![],
             media: String::new(),
             scenario: Value::Null,
@@ -562,7 +583,6 @@ impl Session {
             transports_at_rolled_back_offer: vec![],
             transports_after_rollback: vec![],
             connected: false,
-            pipeline: None,
             state: "new".to_owned(),
             transports_connected: Default::default(),
             errors: vec![],
@@ -584,11 +604,6 @@ impl Session {
                 if o.source.is_some() {
                     wake = wake.min(o.next);
                 }
-            }
-            if let Some(p) = &s.pipeline
-                && s.connected
-            {
-                wake = wake.min(p.next);
             }
             let delay = wake
                 .saturating_duration_since(now)
@@ -801,6 +816,84 @@ impl Session {
         Ok(())
     }
 
+    /// `OnLocalCandidatesNeeded`: the transport of `needed.mids[0]` holds none of its local
+    /// candidates any more. When its previous addresses are refused (a new DTLS association
+    /// runs on a new 3-tuple, RFC 8842 section 5.1) a new UDP socket takes their place: the
+    /// previous one stays open (read and written as a transport socket) for the packets of the
+    /// pair still selected. Otherwise (`DiscardedBySetting`) the same socket's candidate is
+    /// given again. The candidate goes to the browser by trickle ICE.
+    fn gather_anew(
+        &mut self,
+        needed: &rtc::peer_connection::event::RTCLocalCandidatesNeededEvent,
+    ) -> Result<()> {
+        let Some(mid) = needed.mids.first().cloned() else {
+            return Ok(());
+        };
+        self.trickle_local = true;
+        let main = needed.refused_addresses.contains(&self.local)
+            || !self
+                .transport_socks
+                .iter()
+                .any(|(_, _, m)| needed.mids.contains(m));
+        let local = if !needed.reason.needs_new_addresses() {
+            if main {
+                self.local
+            } else {
+                self.transport_socks
+                    .iter()
+                    .find(|(_, _, m)| needed.mids.contains(m))
+                    .map(|(_, local, _)| *local)
+                    .unwrap_or(self.local)
+            }
+        } else {
+            let std_sock = std::net::UdpSocket::bind(SocketAddr::new(self.ice_ip, 0))?;
+            std_sock.set_nonblocking(true)?;
+            let sock = UdpSocket::from_std(std_sock)?;
+            let local = sock.local_addr()?;
+            if main {
+                // The previous socket is read and written as a transport socket from now on.
+                let previous = std::mem::replace(&mut self.sock, sock);
+                let previous_local = std::mem::replace(&mut self.local, local);
+                self.transport_socks.push((
+                    previous,
+                    previous_local,
+                    format!("previous:{previous_local}"),
+                ));
+            } else {
+                for entry in self
+                    .transport_socks
+                    .iter_mut()
+                    .filter(|(_, _, m)| needed.mids.contains(m))
+                {
+                    entry.2 = format!("previous:{}", entry.1);
+                }
+                self.transport_socks.push((sock, local, mid.clone()));
+            }
+            local
+        };
+        let host = CandidateHostConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: local.ip().to_string(),
+                port: local.port(),
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()?;
+        let mut candidate = RTCIceCandidate::from(&host).to_json()?;
+        candidate.sdp_mid = Some(mid.clone());
+        candidate.sdp_mline_index = needed.sdp_mline_index;
+        self.pc.add_local_candidate(candidate)?;
+        self.pc.add_local_candidate(RTCIceCandidateInit {
+            sdp_mid: Some(mid),
+            sdp_mline_index: needed.sdp_mline_index,
+            ..Default::default()
+        })?;
+        Ok(())
+    }
+
     /// The connection's DTLS transports: (id, state).
     fn dtls_transport_states(&self) -> Vec<(String, String)> {
         self.pc
@@ -973,25 +1066,7 @@ impl Session {
                         "maxChannels": t.max_channels(),
                     })
                 });
-                let pipeline = self.pipeline.as_ref().map(|p| {
-                    let s = p
-                        .receiver
-                        .as_ref()
-                        .map(|r| r.stats().clone())
-                        .unwrap_or_default();
-                    json!({
-                        "packetsSent": p.sender.as_ref().map_or(0, |s| s.packets_sent()),
-                        "encoder": p.sender.as_ref().map(|s| s.pipeline().encoder_name()),
-                        "decodedSeconds": p.decoded_samples as f64 / 48_000.0,
-                        "decodedRms": (p.decoded_energy / p.decoded_samples.max(1) as f64).sqrt(),
-                        "totalSamplesReceived": s.total_samples_received,
-                        "concealedRatio": s.concealment_ratio(),
-                        "fecFramesRecovered": s.fec_frames_recovered,
-                        "meanDelayMs": s.mean_delay().map(|d| d.as_secs_f64() * 1000.0),
-                    })
-                });
                 self.out.push(json!({
-                    "pipeline": pipeline,
                     "type": "report",
                     "rtp": self.rtp_by_key,
                     "wireRtp": {
@@ -1186,20 +1261,6 @@ impl Session {
         };
         self.pc.set_rtp_header_encryption_policy(policy)?;
         self.media = sc["media"].as_str().unwrap_or("").to_owned();
-        if self.media == "pipeline" {
-            self.add_send_track("OPUS", false)?;
-            let sender_id = self.outgoing.last().map(|o| o.sender).expect("just added");
-            self.pipeline = Some(Pipeline {
-                sender_id,
-                sender: None,
-                receiver: None,
-                tone: rtc_audio::signal::Tone::new(48_000, 440.0, 0.25),
-                next: Instant::now(),
-                decoded_energy: 0.0,
-                decoded_samples: 0,
-            });
-            return Ok(());
-        }
         if self.media != "reflect" && self.media != "send" {
             return Ok(());
         }
@@ -1343,7 +1404,14 @@ impl Session {
             match e {
                 // Scenario `engine_tcp`: the engine's TCP candidates come after the
                 // description; they are trickled (RFC 8838).
-                RTCPeerConnectionEvent::OnIceCandidateEvent(ev) if self.driver.is_some() => {
+                RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => {
+                    if let Err(e) = self.gather_anew(&needed) {
+                        self.errors.push(format!("gathering anew: {e:#}"));
+                    }
+                }
+                RTCPeerConnectionEvent::OnIceCandidateEvent(ev)
+                    if self.driver.is_some() || self.trickle_local =>
+                {
                     if let Some(c) = ev.candidate.filter(|c| !c.end_of_candidates)
                         && let Ok(init) = c.to_json()
                     {
@@ -1419,111 +1487,20 @@ impl Session {
                     for p in &packets {
                         *self.rtcp_by_type.entry(rtcp_name(&p.header())).or_default() += 1;
                     }
-                    if let Some(sender) = self.pipeline.as_mut().and_then(|p| p.sender.as_mut()) {
-                        sender.handle_rtcp(&packets);
-                    }
                 }
                 _ => {}
             }
         }
         if self.connected() {
             self.send_media()?;
-            self.run_pipeline();
         }
         Ok(())
-    }
-
-    /// Scenario `pipeline`: 10 ms of tone into the send pipeline and 10 ms out of the jitter
-    /// buffer for every 10 ms that passed.
-    fn run_pipeline(&mut self) {
-        let Some(p) = self.pipeline.as_mut() else {
-            return;
-        };
-        if p.sender.is_none() {
-            // Not until the answer named a payload type for the track.
-            match rtc_audio::engine::AudioSender::new(
-                &mut self.pc,
-                p.sender_id,
-                Instant::now(),
-                // A steady tone is what noise suppression removes and gain control holds:
-                // the interop cell checks the codec path, so only the voice detector runs.
-                rtc_audio::engine::AudioSenderOptions {
-                    processing: rtc_audio::processing::ProcessingConfig::OFF,
-                    ..Default::default()
-                },
-            ) {
-                Ok(s) => p.sender = Some(s),
-                Err(_) => return,
-            }
-            p.next = Instant::now();
-        }
-        let now = Instant::now();
-        let mut frames = 0;
-        while p.next <= now && frames < 20 {
-            frames += 1;
-            let mut samples = vec![0.0f32; 480];
-            p.tone.fill(&mut samples);
-            let frame = rtc_audio::AudioFrame {
-                samples,
-                sample_rate: 48_000,
-                channels: 1,
-            };
-            if let Some(sender) = p.sender.as_mut() {
-                if let Err(e) = sender.push_capture(&mut self.pc, p.next, &frame) {
-                    self.errors.push(format!("pipeline send: {e}"));
-                }
-                if frames == 1 {
-                    sender.update_network(&mut self.pc, p.next);
-                }
-            }
-            if let Some(receiver) = p.receiver.as_mut() {
-                let out = receiver.pull(p.next);
-                p.decoded_energy += out
-                    .samples
-                    .iter()
-                    .map(|v| f64::from(*v).powi(2))
-                    .sum::<f64>();
-                p.decoded_samples += out.samples.len() as u64;
-                if let Some(sender) = p.sender.as_mut() {
-                    // What plays here is the echo canceller's reference.
-                    sender.push_render(&out);
-                }
-            }
-            p.next += Duration::from_millis(10);
-        }
-        if p.next < now {
-            // Fell behind (the loop was busy): skip ahead rather than burst.
-            p.next = now;
-        }
-        if let Some(receiver) = p.receiver.as_mut() {
-            receiver.update_stats(&mut self.pc);
-        }
-        if let Some(sender) = p.sender.as_ref() {
-            sender.update_stats(&mut self.pc);
-        }
     }
 
     fn on_rtp(&mut self, track_id: MediaStreamTrackId, mut pkt: rtc::rtp::Packet) {
         let Some((kind, rid, receiver_id)) = self.tracks.get(&track_id).cloned() else {
             return;
         };
-        if let Some(p) = self.pipeline.as_mut()
-            && kind == RtpCodecKind::Audio
-        {
-            if p.receiver.is_none() {
-                p.receiver = rtc_audio::engine::AudioReceiver::new(
-                    &mut self.pc,
-                    receiver_id,
-                    rtc_audio::jitter::JitterBufferConfig::default(),
-                    1,
-                    rtc_audio::engine::OpusBackend::Rust,
-                )
-                .ok();
-            }
-            if let Some(r) = p.receiver.as_mut() {
-                r.handle_rtp(Instant::now(), &pkt);
-            }
-        }
         let mime = self
             .pc
             .rtp_receiver(receiver_id)

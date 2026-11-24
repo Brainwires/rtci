@@ -20,7 +20,8 @@ use rtc::peer_connection::configuration::interceptor_registry::{
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{
-    RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTransportEventKind,
+    RTCDataChannelEvent, RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason,
+    RTCPeerConnectionEvent, RTCTransportEventKind,
 };
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -36,6 +37,7 @@ use rtc::rtp::header::Header;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RtpCodecKind};
 use rtc::rtp_transceiver::{RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc::sansio::Protocol;
+use rtc::shared::error::Error;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
@@ -144,6 +146,9 @@ struct World {
     paths: HashSet<(SocketAddr, SocketAddr)>,
     /// Addresses whose datagrams, either way, are lost.
     blocked: HashSet<SocketAddr>,
+    /// Datagrams to this address are held back, not delivered (a path slower in one
+    /// direction).
+    held_to: Option<SocketAddr>,
     /// What arrives on peer 0's shared address goes through the reference driver's mux for a
     /// shared port first (`rtc-stream-driver`'s `UfragMux`), as a server routes it.
     mux: Option<(SocketAddr, UfragMux<usize>)>,
@@ -191,6 +196,7 @@ impl World {
             now: Instant::now(),
             paths: HashSet::new(),
             blocked: HashSet::new(),
+            held_to: None,
             mux: None,
             misrouted: 0,
             trickling: vec![],
@@ -248,6 +254,46 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// The application's gathering driven by `OnLocalCandidatesNeeded` alone: each event a
+    /// peer raised (since the last step) gets a host candidate on a new port (`base` plus its
+    /// position) for the event's first mid, trickled to the other peer. Before that, the
+    /// event's first refused address is offered for the same mid and must be refused with
+    /// `ErrICECandidateAddressOfPreviousDtlsAssociation` (the per-transport route of
+    /// `add_local_candidate`). Returns each peer's events.
+    fn regather_on_events(&mut self, base: u16) -> Result<[Vec<RTCLocalCandidatesNeededEvent>; 2]> {
+        let marks = [self.peers[0].events.len(), self.peers[1].events.len()];
+        self.step()?;
+        let mut all: [Vec<RTCLocalCandidatesNeededEvent>; 2] = [vec![], vec![]];
+        for i in 0..2 {
+            let needed: Vec<RTCLocalCandidatesNeededEvent> = self.peers[i].events[marks[i]..]
+                .iter()
+                .filter_map(|event| match event {
+                    RTCPeerConnectionEvent::OnLocalCandidatesNeeded(needed) => Some(needed.clone()),
+                    _ => None,
+                })
+                .collect();
+            for (k, event) in needed.iter().enumerate() {
+                let mid = event.mids.first().context("the event names a section")?;
+                let index = event.sdp_mline_index.context("and its index")?;
+                if let Some(old) = event.refused_addresses.first() {
+                    let refused = Peer::host_candidate(*old, mid, index)?;
+                    match self.peers[i].pc.add_local_candidate(refused) {
+                        Err(Error::ErrICECandidateAddressOfPreviousDtlsAssociation(addr))
+                            if addr == *old => {}
+                        other => bail!("peer {i}: {old} is refused for {mid}, got {other:?}"),
+                    }
+                }
+                let addr = SocketAddr::new(self.peers[i].ip, base + k as u16);
+                self.peers[i].addrs.push(addr);
+                let candidate = Peer::host_candidate(addr, mid, index)?;
+                self.peers[i].pc.add_local_candidate(candidate.clone())?;
+                self.peers[1 - i].pc.add_remote_candidate(candidate)?;
+            }
+            all[i] = needed;
+        }
+        Ok(all)
     }
 
     /// `run`, and on failure the state of every transport of both peers
@@ -462,7 +508,10 @@ impl World {
             if data.len() >= 8 && (128..=191).contains(&data[0]) && (192..=223).contains(&data[1]) {
                 self.rtcp.push((from, to));
             }
-            if self.blocked.contains(&from) || self.blocked.contains(&to) {
+            if self.blocked.contains(&from)
+                || self.blocked.contains(&to)
+                || self.held_to == Some(to)
+            {
                 continue;
             }
             if let Some((shared, mux)) = self.mux.as_mut()
@@ -2408,8 +2457,10 @@ fn a_restart_that_drops_the_local_candidates_reconnects_bundle_groups_and_unbund
 /// any BUNDLE group), with the default settings, so each new association runs on a new 3-tuple
 /// (RFC 8842 section 5.1). Peer 0's SRTP keys have a lifetime of 320 packets: before one
 /// runs out the engine raises negotiation-needed by itself, the application only answers it
-/// (a new offer, and gathering on new ports for the transports that dropped their
-/// candidates), and every transport gets a new association with new ICE credentials. Every
+/// (a new offer, and gathering on new ports for each transport an `OnLocalCandidatesNeeded`
+/// names: reason `SrtpRekeying` on peer 0, `NewDtlsAssociation` on peer 1, the previous
+/// address refused through the section's mid), and every transport gets a new association
+/// with new ICE credentials. Every
 /// packet of both senders arrives across the renewals, every transport ends on a pair of the
 /// latest ports, and the data channel opened at the start still carries messages.
 #[test]
@@ -2497,7 +2548,22 @@ fn automatic_srtp_re_keying_renews_every_transport_on_new_addresses() -> Result<
         {
             world.renegotiate_with(without_bundle_group)?;
             renegotiations += 1;
-            world.regather(7000 + 100 * renegotiations)?;
+            // The application gathers from the events alone: every transport of both peers
+            // asks, peer 0 for the re-keying it started, peer 1 for the new association the
+            // offer asked for.
+            let needed = world.regather_on_events(7000 + 100 * renegotiations)?;
+            for (i, reason) in [
+                RTCLocalCandidatesNeededReason::SrtpRekeying,
+                RTCLocalCandidatesNeededReason::NewDtlsAssociation,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let reasons: Vec<_> = needed[i].iter().map(|e| e.reason).collect();
+                assert_eq!(reasons, vec![reason; 3], "peer {i}: every transport");
+                let mids: HashSet<&String> = needed[i].iter().map(|e| &e.mids[0]).collect();
+                assert_eq!(mids.len(), 3, "peer {i}: a transport each: {needed:?}");
+            }
         }
     }
     world.advance(Duration::from_secs(1))?;
@@ -3315,4 +3381,72 @@ fn media_for_a_section_staged_on_its_own_transport_arrives_on_the_groups_before_
     assert_eq!(received(&world), (1..=30).collect::<Vec<u16>>());
     assert_eq!(world.peers[0].pc.discarded_rtp_packets(), 0);
     Ok(())
+}
+
+/// RFC 8445 section 9 and 12.2 across the end of an ICE restart for a new DTLS association
+/// (RFC 8842 section 5.1, new ports): each side selects the new pair on its own, the controlled
+/// one when the nomination request reaches it, the controlling one when the response comes
+/// back. In between, the controlling side still sends on the previous pair, and the controlled
+/// side, which has selected the new one, takes that data: the previous path is still taken for
+/// a few seconds after the new pair is selected. Here the response is held back while peer 0
+/// (controlling) sends a packet: peer 1 reads it at once. (Before, it was dropped as data on
+/// an address the transport no longer has a candidate on: one packet lost at each renewal,
+/// seen through `rtc-stream-driver` on real sockets.)
+#[test]
+fn data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received() -> Result<()> {
+    let mut world = World::new(RTCBundlePolicy::Balanced)?;
+    let (senders, _) = world.negotiate_media(&[RtpCodecKind::Audio], false, |sdp| sdp)?;
+    world.gather()?;
+    world.run("connected", |peers| peers.iter().all(|p| p.connected))?;
+    for seq in 1..=5 {
+        world.send_rtp(senders[0], seq)?;
+        world.advance(Duration::from_millis(20))?;
+    }
+    world.peers[0].pc.renew_dtls_association();
+    world.renegotiate_with(|sdp| sdp)?;
+    world.regather_on_events(7000)?;
+    let selected_port = |peer: &Peer| {
+        peer.pc.dtls_transports()[0]
+            .ice_transport()
+            .get_selected_candidate_pair()
+            .map(|pair| pair.local().port)
+    };
+    let mut steps = 0;
+    while selected_port(&world.peers[1]) < Some(7000) {
+        if !world.step()? {
+            world.now += Duration::from_millis(5);
+            for peer in world.peers.iter_mut() {
+                peer.pc.handle_timeout(world.now)?;
+            }
+        }
+        steps += 1;
+        assert!(
+            steps < 10_000,
+            "peer 1 never selected a new pair\n{}",
+            world.trace()
+        );
+    }
+    // Peer 1 has selected the new pair; its response to the nomination is held back, so peer
+    // 0 still sends on the previous one.
+    world.held_to = Some(SocketAddr::new(world.peers[0].ip, 7000));
+    assert!(
+        selected_port(&world.peers[0]) < Some(7000),
+        "peer 0 has not selected the new pair yet"
+    );
+    let before = world.peers[1].rtp.len();
+    world.send_rtp(senders[0], 6)?;
+    world.step()?;
+    let received: Vec<u16> = world.peers[1].rtp[before..]
+        .iter()
+        .map(|h| h.sequence_number)
+        .collect();
+    assert_eq!(
+        received,
+        vec![6],
+        "the packet on the previous pair, read at once"
+    );
+    world.held_to = None;
+    world.run_traced("both on the new pair", |peers| {
+        peers.iter().all(|p| selected_on_new_ports(p, 7000))
+    })
 }

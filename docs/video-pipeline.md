@@ -24,7 +24,8 @@ Rules carried over from the audio pipeline and the engine:
 
 References: libwebrtc sources at `a222406d49ecffb8e045d113e45f89f62b3819e8` (2026-11-23),
 cited as `file:line @ a222406d`; RFC and W3C texts as in the conformance work
-(`specs/`). Engine references are to this repository at `2cdbe502`.
+(`specs/`). Engine references are to this repository at `2cdbe502` (phase 1; on master from
+`conf/vp-3-on-master`, engine master 4431dda0).
 
 ---
 
@@ -509,6 +510,17 @@ the timing's minimum delay, to audio through `rtc_audio::jitter::JitterBuffer::
 set_target_delay` (an existing API; no change to `rtc-audio`). One clock: both pipelines are
 given the same `now`.
 
+**On master without the audio crates.** Engine `master` (4431dda0) does not contain
+`rtc-audio`, `rtc-devices` or `rtc-ffi`: they were reverted and return on
+`conf/ffi-mp-5`. `rtc-video` does not depend on them, and phase 4 keeps it that way: the sync
+module takes each stream's measurements as plain values (capture time on the sender's clock,
+render or playout time on the receiver's, the current extra delay) and returns the extra delay
+for each side. The video side applies its own through `ReceivePipeline::set_sync_delay` (it
+exists since phase 1); the audio side's is handed to the application, which sets it on
+`rtc_audio::jitter::JitterBuffer::set_target_delay`. A convenience glue that does that last
+step (an `audio-sync` feature depending on `rtc-audio`) is added only once `rtc-audio` is on
+master again; nothing in phases 1 to 3 needs it.
+
 ### 5.4 Threading, back-pressure, allocation
 
 The engine is single-threaded; so is the pipeline's control part (cheap: bookkeeping per
@@ -551,7 +563,7 @@ Tests (no camera, no browser):
   releases must be byte-identical to the IVF frame and released in order with its references
   released before it. Test-environment GStreamer fixtures (`vp8.ivf`, `h264` 640x480) where
   the env stage runs.
-- Virtual-time networks: two `rtc` peer connections (the `rtc-audio/tests/common` world:
+- Virtual-time networks: two `rtc` peer connections (a world like `rtc-audio/tests/common`'s:
   seeded loss, uniform jitter that reorders) with default interceptors (NACK, RTX, PLI),
   a synthetic VP8 sender (frames sized by a bitrate, PictureID / TL0PICIDX, key frame on PLI)
   and the pipeline on the receiver; and the capacity scenario of

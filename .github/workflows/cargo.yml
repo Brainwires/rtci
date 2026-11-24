@@ -69,7 +69,7 @@ jobs:
       - id: pick
         uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
-          jobs: test_macos=macos-arm64 test_windows=windows-x64 c_header=linux-x64
+          jobs: test_macos=macos-arm64 test_windows=windows-x64
           vars: ${{ toJSON(vars) }}
           runner-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
 
@@ -149,7 +149,8 @@ jobs:
 
   # The test inventory (no hidden or orphaned tests), upstream test parity, the fuzz target
   # registry, workflow hygiene (actions pinned by SHA, no self-hosted runner for a fork pull
-  # request) and the clause audit's counts. Python only: no build.
+  # request), the clause audit's counts and the nested lock files (`cargo metadata --locked`,
+  # the runner's preinstalled cargo). Python only: no build.
   test_inventory:
     name: Test inventory, upstream parity, fuzz registry, workflows
     runs-on: ubuntu-latest
@@ -171,6 +172,8 @@ jobs:
         run: python3 scripts/behaviour-profiles.py --check
       - name: Released CHANGELOG sections equal the latest release tag's
         run: python3 scripts/check-changelog-released.py
+      - name: The committed nested Cargo.lock files resolve their manifests (--locked)
+        run: python3 scripts/check-nested-locks.py
 
   # The `chrome-defaults` feature makes `BehaviourProfile::default()` Chrome, and with it every
   # default of the setting engine, media engine and interceptor options. One job, not a test
@@ -462,31 +465,6 @@ jobs:
           cat package.log
           exit 1
 
-  # rtc-ffi's C header is checked in (rtc-ffi/include/rtc.h): it is regenerated from the
-  # crate's source with cbindgen (a build tool only, MPL-2.0; not a dependency of any crate)
-  # and must not differ. On our Linux pool when it has room (the runners job's pick).
-  c_header:
-    name: C header up to date (rtc-ffi)
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').c_header || 'ubuntu-latest' }}
-    if: >-
-      github.event_name != 'pull_request_target' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository) &&
-      !cancelled()
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: stable
-      - name: Install cbindgen
-        run: cargo install cbindgen --locked --version 0.29.2
-      - name: Regenerate the header and compare
-        run: |
-          cbindgen --quiet --config rtc-ffi/cbindgen.toml --crate rtc-ffi --output rtc-ffi/include/rtc.h
-          git diff --exit-code -- rtc-ffi/include/rtc.h
-
   # The workspace builds on its declared `rust-version` (the workspace manifest), every
   # feature. Dependencies resolve to versions that support that toolchain where one exists.
   msrv:
@@ -503,9 +481,6 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # `rtc-devices/devices` (cpal) links ALSA on Linux; the image has no headers for it.
-      - name: ALSA headers for the audio devices feature
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: Check the workspace
         run: cargo check --workspace --all-features --verbose
 

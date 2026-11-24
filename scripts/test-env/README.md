@@ -111,16 +111,11 @@ variables the tests read.
   - `testenv_media_fixtures`: a multi-packet-per-page Ogg file and a four-slices-per-picture
     H.264 file sent over a real connection, checked byte for byte and for the RTP marker, and
     decoded by GStreamer after the trip.
-  - the audio pipeline's headless example (`rtc-audio/examples/audio-loopback.rs`): synthetic
-    speech through processing, Opus, two peer connections over a 5 % loss / 40 ms jitter link
-    and the jitter buffer; it fails on silence or concealment beyond twice the loss, and the Opus
-    packets that arrived are decoded by GStreamer's `opusdec`.
 - **interop**: `examples/interop-peer` (the Rust side; WebSocket signalling) in `open-b`, and
   Playwright with headless Chromium, Firefox and WebKit in `open-a`: data channels (ordered,
   unordered, unreliable, negotiated, 64 KiB and 256 KiB messages, both sides' max-message-size),
   renegotiation from either side, ICE restart, DTLS / SRTP state, media reflected per codec (VP8,
-  VP9, H.264, H.265, AV1, Opus), Opus from the `rtc-audio` pipeline decoded by the browser and the
-  browser's Opus decoded by it (`{"media":"pipeline"}`), the GStreamer fixtures sent from Rust and decoded by the browser
+  VP9, H.264, H.265, AV1, Opus), the GStreamer fixtures sent from Rust and decoded by the browser
   (multi-slice H.264 and multi-packet Ogg included), three-layer simulcast (RIDs) with and
   without loss repaired by RTX, an encoded transform, Cryptex, NACK + RTX under netem, relay-only
   through coturn, ICE-TCP, the browser as answerer for media, transceiver stop and m-line reuse,

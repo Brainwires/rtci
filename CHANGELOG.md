@@ -745,6 +745,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **rtc** (`conf/mt-10-gather-anew`): new `RTCPeerConnectionEvent::OnLocalCandidatesNeeded`
+  (`RTCLocalCandidatesNeededEvent`, `RTCLocalCandidatesNeededReason`): a transport needs a new
+  set of local candidates, on transport addresses the previous DTLS association did not use
+  (RFC 8842 section 5.1). It names the transport (ICE and DTLS transport ids, the mids of its
+  sections, the first one's `sdpMLineIndex`), the reason (`NewDtlsAssociation`,
+  `SrtpRekeying` on the side whose key neared its lifetime, `TransportReplaced` for the
+  transport set up after an answer rejected every m= section, `DiscardedBySetting` for an ICE
+  restart with `with_discard_local_candidates_during_ice_restart(true)`) and the refused
+  addresses. It fires when the description that begins the transport's gathering is set
+  locally, right before its `gatheringstatechange` to "gathering"; not with
+  `with_dtls_new_association_on_previous_addresses(true)`. Crate documentation: section
+  "Gathering". Every route of `add_local_candidate` (the default transport, another one by
+  `sdp_mid`) returns `ErrICECandidateAddressOfPreviousDtlsAssociation` unchanged for a refused
+  address (tests below).
+- **rtc-stream-driver**: new `peer` module (feature `peer`, on by default; depends on `rtc`):
+  `PeerDriver` drives a whole peer connection over sockets it owns, its UDP host sockets
+  included (`PeerDriverConfig`: addresses, UDP port range, the TCP driver's settings). It
+  gathers when a transport begins gathering, and on `OnLocalCandidatesNeeded` binds new UDP
+  ports in its range, adds their candidates for the event's section and ends the generation
+  by itself; the previous sockets stay open until a pair on a new one is selected for that
+  transport and then for `retired_socket_linger` (5 s by default: the peer may still send to
+  the previous address until its own selection switches; closing at once lost a packet on
+  macOS), or until the transport closes. With the opt-out it keeps its sockets and gives their
+  candidates to each new generation. Tests (`examples/stream-driver/tests/peer.rs`, no
+  gathering in test code): `stop_all_then_add_carries_media_on_new_sockets`,
+  `automatic_srtp_re_keying_carries_every_packet_onto_new_sockets`,
+  `with_the_opt_out_the_driver_keeps_its_sockets`.
+- **interop-peer**: gathers on a new UDP socket on `OnLocalCandidatesNeeded` and trickles the
+  candidate to the browser; `?previous_addresses=1` builds it with
+  `with_dtls_new_association_on_previous_addresses(true)`. Browser cells "transceiver stop,
+  then a new transceiver reuses or keeps the m-line" (the default: Rust's answer lists none of
+  the previous candidates) and its twin with the opt-out (the answer lists them again).
+
 - **ice-tcp**: test that an ICE restart does not close the selected pair's TCP connection
   (RFC 6544 section 9.2, `an_ice_restart_does_not_close_the_selected_tcp_connection`); row
   RFC6544-9.2-1 `tested`.
@@ -834,11 +867,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine's server-reflexive Binding requests carry no SOFTWARE in any case. New public field
   `IceBehaviour::software` (a struct literal of `IceBehaviour` needs it).
 
-### Added
-
 - **video pipeline, phase one: the receive side** (`conf/vp-2-receive`, design on
-  `conf/vp-1-design`, `docs/video-pipeline.md`). A new crate, `rtc-video`, sans-I/O, pure
-  Rust, no codec dependency:
+  `conf/vp-1-design`, `docs/video-pipeline.md`; on master by `conf/vp-3-on-master`). A new
+  crate, `rtc-video`, sans-I/O, pure Rust, no codec dependency, not published with 0.1.0
+  (`publish = false`):
   - `assembly::PacketBuffer`: frames from RTP packets per payload format (VP8 S / PID, VP9
     B / E, AV1 and the Dependency Descriptor's start / end of frame, H.264 / H.265 by RTP
     timestamp and marker), key frames and key-frame sizes, duplicates, late packets, overflow
@@ -873,74 +905,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     300 kbit/s capacity drop (no wait beyond the slowest repair, no corrupt picture, no
     decode out of order).
 
-- **media pipeline, phase one: audio** (`conf/mp-1-audio-pipeline`). Two new crates beside the
-  engine, sans-I/O, pure Rust by default; `docs/media-pipeline.md` describes them and the
-  measured quality.
-  - `rtc-audio`: Opus encode / decode (opus-rs, pure Rust; the reference libopus with feature
-    `libopus`), the RFC 7587 parameters both ways (`OpusFmtp`, `OpusEncoderConfig::for_remote`),
-    G.711 PCMU / PCMA and G.722, an Opus packet reader (TOC, frame offsets, the LBRR flag);
-    the receive pipeline `JitterBuffer` (adaptive delay from the 95th percentile of relative
-    arrival delay, `jitterBufferTarget`, minimum and maximum delay, reordering and duplicates,
-    Opus in-band FEC recovery, codec and generic concealment, Opus DTX and RFC 3389 comfort
-    noise, accelerate / preemptive expand by pitch periods, clock-drift compensation, RED
-    blocks, telephone events kept from the decoder, and the W3C inbound audio statistics);
-    `AudioProcessing` (high-pass, echo canceller with delay estimation, residual echo and
-    noise suppression, gain control, voice activity, each switchable); the `SendPipeline`
-    (bitrate from the congestion controller's share minus packet overhead, FEC on reported
-    loss, DTX, RFC 3389 SIDs, RFC 6464 levels); and `engine::{AudioSender, AudioReceiver}`,
-    the glue to `RTCRtpSender` / `RTCRtpReceiver` (packetizing with the engine's payloaders,
-    `write_rtp_with_audio_level`, RED, `target_bitrates`, RTCP loss, `getStats()` feeds).
-  - `rtc-devices`: capture and playout through real-time-safe rings, rate and channel
-    conversion to the pipeline's 48 kHz mono, device listing, selection, hot-swap and
-    replacement of a failed device, a fake backend for tests, and cpal behind feature
-    `devices`.
-  - `rtc-audio/examples/audio-loopback.rs`: WAV or synthetic speech through two peer
-    connections over a lossy link and back to WAV and Ogg; run in the test environment's env
-    stage, its Ogg decoded by GStreamer.
-  - The interop peer's `{"media":"pipeline"}` scenario and the browser matrix cell "audio
-    pipeline": the browser decodes the pipeline's Opus, the pipeline decodes the browser's.
-  - The root manifest optimises `rtc-audio` and `opus-rs` in the dev profile (their tests run
-    seconds of DSP); cargo.yml's MSRV job installs `libasound2-dev` for the `devices` feature.
-- **ffi**: `.github/workflows/release-binaries.yml` builds rtc-ffi's libraries and header for
-  Linux x86_64 and aarch64 (glibc 2.17 with cargo-zigbuild, checked), macOS aarch64 (11.0) and
-  x86_64 (10.13) and Windows x86_64 (MSVC), with `SHA256SUMS` and `manifest.json`; on a `v*`
-  tag or by hand only, artifacts on a dispatch and attached to the tag's release on a tag, no
-  secret but `GITHUB_TOKEN`. It has not been run. `docs/packaging.md` documents the C
-  interface, the platforms, the Deno example, the release contents and the owner's two
-  decisions (tagging and publishing; crate names, since the `rtc*` names on crates.io are
-  upstream's).
-- **ffi**: a reference Deno binding of the driven layer, `bindings/deno/` (not published; the
-  Denext project maintains its own): `RTCPeerConnection`, `RTCDataChannel`,
-  `RTCRtpTransceiver` / `Sender` / `Receiver`, `RTCSessionDescription`, `RTCIceCandidate`, their
-  events and `getStats` over `Deno.dlopen`, the server options as the second constructor
-  argument, `RTCSharedPort`, and encoded media (`writeFrame`, `writeRtp`, the receiver's `rtp`
-  event). The library comes from `RTC_FFI_LIB` or beside the module; nothing is downloaded.
-- **ffi**: the driven layer of `rtc-ffi` (feature `driver`, on by default): `rtc_driven_*`, a
-  peer connection that owns its sockets and a thread running the reference tokio driver
-  (`examples/stream-driver`), driven by method name and JSON (`rtc_driven_call`, the
-  sans-I/O layer's own entry points on that thread), delivering events, data channel messages
-  and RTP / RTCP to a callback or a queue (`rtc_driven_wait`, `rtc_driven_next`); the server
-  options of the driver (bind addresses, loopback and link-local opt-in, a port range for UDP
-  sockets and ICE-TCP listeners, the engine's TCP, 1:1 NAT, ICE-lite); and `rtc_mux_*`, one
-  UDP port and one passive ICE-TCP port shared by many driven connections, routed by ICE
-  ufrag. Tested in Rust through the C declarations over loopback (`tests/driven.rs`) and by a C
-  program compiled against the static library (`tests/c/loopback.c`, `tests/c_loopback.rs`).
-- **ffi**: `rtc-ffi`, a C ABI over the engine (`cdylib`, `staticlib` and `rlib`; header
-  `rtc-ffi/include/rtc.h`, generated by cbindgen and checked by the `C header up to date` job).
-  The sans-I/O layer (`rtc_pc_*`) is the Rust API one to one: configuration (W3C
-  `RTCConfiguration`) and engine settings as JSON, descriptions and candidates as their W3C
-  JSON, data channels, transceivers, senders and receivers by id, RTP written as packets or as
-  encoded frames the library packetizes, `handle_read` / `poll_write` / `poll_read` /
-  `poll_event` (JSON) / `poll_timeout` / `handle_timeout` with buffers the caller owns, the
-  stream interface (ICE-TCP, TURN over TCP / TLS) with commands and events as JSON, and
-  statistics as JSON. Time is the caller's monotonic nanoseconds. No panic crosses the
-  boundary (`RTC_ERR_PANIC`, the handle is poisoned), errors are status codes with a
-  per-thread message (`rtc_last_error`), every allocation has its free function, and
-  `rtc_debug_live_objects` counts what is not freed. `rtc_abi_version` is 1. Tested by two peer
-  connections that see each other only through the C declarations (`rtc-ffi/tests/`). The
-  sans-I/O time boundary allows the one anchor read the nanoseconds need.
-
 ### Bug Fixes
+
+- **ice** (RFC 8445 sections 9 and 12.2, `conf/mt-10-gather-anew`): after an ICE restart that
+  dropped the local candidates (a new DTLS association on new ports), the side that selected
+  the new pair first dropped the packets the peer still sent on the previous pair before its
+  own selection switched (the controlled side selects at the nomination request, the
+  controlling one at its response): one packet lost at each renewal, seen through
+  `rtc-stream-driver` on macOS and Windows. The previous path's data is now taken for 5 s
+  after the new pair is selected (`Agent::retired_media_path`, `RETIRED_MEDIA_PATH_GRACE`),
+  and routed to its transport (`on_address`)
+  (`data_sent_on_the_previous_pair_after_the_peer_selected_the_new_one_is_received`).
+
+- **rtc** (engine-run server-reflexive gathering, RFC 8842 section 5.1): after a new DTLS
+  association, the probe from a refused UDP base went on; a late answer to it would have been
+  announced as a server-reflexive candidate of the new generation whose base is the previous
+  association's socket. The probes of the refused bases now end with the restart (and with the
+  replacement of a closed transport); the new host candidates the application adds start
+  their own (`after_a_new_association_the_engine_gathers_server_reflexive_candidates_from_the_new_port`).
 
 - **rtc** (multi-transport ICE restart, `conf/mt-9-restart-drops-candidates`): with several
   transports (sections outside a BUNDLE group, several BUNDLE groups), a transport other than
@@ -1158,8 +1140,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released section of `CHANGELOG.md` differs from that section at the latest `v*` tag: merges
   that union two CHANGELOGs had put new entries into, and repeated entries in, the released
   0.22.0+brainwires.6 section. New entries go under `## [Unreleased]`.
+- **Release preparation** (`conf/publish-3-release-prep`): `docs/releasing.md` has the order of
+  operations for 0.1.0 (merged and green, rename commit, release commit, tag, dry runs,
+  publish, repository rename, detach from the fork network), what each workflow does on a tag
+  (`release.yml` alone runs; it makes the GitHub release and publishes nothing), the
+  brainwires.6 known issues with their state on `master` for the release notes, and an
+  "after publishing" checklist (docs.rs builds, yanking, announcing the rename). The tag now
+  comes before publishing. The README's status follows `COUNTS.md` (111 specifications; MUST
+  99.7 % RFC behaviour tested, 16 MUST rows open) and its crate table says what is not
+  published.
 
 ### Notes for integrators
+
+- **A transport that needs new candidates** (`conf/mt-10-gather-anew`): since the RFC 8842
+  section 5.1 default, a new DTLS association (an ICE restart for one: `renew_dtls_association`,
+  automatic SRTP re-keying, a peer's new `a=tls-id`; or the transport set up after an answer
+  rejected every m= section) drops the transport's local candidates and refuses their UDP
+  addresses. An application that does not gather again loses connectivity on that transport;
+  the browser cell "transceiver stop, then a new transceiver" failed that way with the
+  workspace's own interop peer. Handle `OnLocalCandidatesNeeded`: bind new UDP ports, add a
+  host candidate for each with `sdp_mid` = the event's first mid, signal the candidates, end
+  the generation with an empty candidate for that mid, and keep the previous sockets open
+  until a pair on a new one is selected (`SelectedCandidatePairChange` on that transport) or
+  the transport closes. Engine-run STUN and TURN gathering follow the new host candidates by
+  themselves; the ICE-TCP listener is kept. `rtc_stream_driver::peer::PeerDriver` does all of
+  it. An application with one fixed socket sets
+  `with_dtls_new_association_on_previous_addresses(true)` instead (no event; the candidates
+  and addresses are kept). W3C gathering states: a restarting transport goes to "gathering"
+  when the description is set and to "complete" at the application's end-of-candidates; the
+  transport that replaced a closed one starts "new" (a new `RTCIceTransport`) and does the
+  same. A rolled-back local offer takes its restart back (the previous candidates and
+  addresses are in use again): sockets bound for it may be closed.
+- **Publishing order**: `rtc-stream-driver` now depends on `rtc` (feature `peer`), and the root
+  crate's dev-dependency on it has no version, so `rtc` is published before
+  `rtc-stream-driver` (docs/releasing.md).
 
 - **ICE restart, answerer**: candidates gathered for the restart may be added as soon as the
   restart offer is applied (`set_remote_description`); they need not be added again after
@@ -1170,6 +1184,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation's, otherwise the current one's.
 
 ### Testing
+
+- **rtc** (`conf/mt-10-gather-anew`): rtc-to-rtc tests driven by `OnLocalCandidatesNeeded`:
+  `transport_close_rtc2rtc.rs::the_new_transport_asks_for_candidates_on_new_addresses_and_the_event_drives_the_gathering`
+  (stop all, then a new transceiver; the twin of the browser cell) and
+  `with_the_opt_out_the_new_transport_carries_media_on_the_previous_addresses`;
+  `dtls_association_new_three_tuple.rs::a_new_association_tells_the_application_to_gather_on_new_addresses`,
+  `a_restart_that_discards_the_candidates_asks_for_candidates_on_any_address`, and the opt-out
+  test now asserts no event; `multi_transport_rtc2rtc.rs::automatic_srtp_re_keying_renews_every_transport_on_new_addresses`
+  gathers from the events alone (reasons `SrtpRekeying` / `NewDtlsAssociation`, every
+  transport, the refused address offered through the section's mid).
+- **ci**: `scripts/check-nested-locks.py` in the inventory job: `cargo metadata --locked` on
+  each nested workspace with a committed `Cargo.lock` (`scripts/test-env/peers/layers`,
+  `scripts/test-env/peers/str0m`), so a stale lock fails early.
 
 - **ice-tcp**: `with_udp_open_the_udp_pair_wins_and_the_unused_tcp_connections_are_closed`
   no longer depends on real time (`conf/flake-1-icetcp-vp8`). It failed once on GitHub's

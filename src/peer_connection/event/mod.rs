@@ -169,7 +169,10 @@ pub use ice_event::RTCPeerConnectionIceEvent;
 pub use track_event::{
     RTCRemoteStreamsChange, RTCRemoteTrackEventInit, RTCTrackEvent, RTCTrackEventInit,
 };
-pub use transport_event::{RTCTransportEvent, RTCTransportEventKind};
+pub use transport_event::{
+    RTCLocalCandidatesNeededEvent, RTCLocalCandidatesNeededReason, RTCTransportEvent,
+    RTCTransportEventKind,
+};
 
 /// Events that can be emitted by an `RTCPeerConnection`.
 ///
@@ -658,6 +661,26 @@ pub enum RTCPeerConnectionEvent {
     /// (the one every section is on while all are bundled), each right before its
     /// `OnTransportEvent`.
     OnTransportEvent(RTCTransportEvent),
+    /// A transport needs a new set of local candidates, on transport addresses the previous
+    /// DTLS association did not use: the engine dropped the candidates it had and refuses
+    /// their UDP addresses (RFC 8842 section 5.1: a new DTLS association over UDP "MUST"
+    /// have a new 3-tuple). The application, which owns the sockets, binds new ports, adds
+    /// their candidates for `mids[0]`, signals them and ends the generation; see
+    /// [`RTCLocalCandidatesNeededEvent`] and the crate documentation's "Gathering" section.
+    ///
+    /// Fired when the description that sets the transport up is applied locally
+    /// (`set_local_description`), where W3C webrtc-pc 5.6 has the ICE agent begin gathering
+    /// the transport's generation, right before that transport's `gatheringstatechange` to
+    /// "gathering": for an ICE restart made for a new DTLS association (this side's or the
+    /// peer's, automatic SRTP re-keying included) when the offer or the answer that carries it
+    /// is set, and for the transport that replaced one closed by an answer rejecting every m=
+    /// section, when the next description is set. Also for an ICE restart with
+    /// `with_discard_local_candidates_during_ice_restart(true)` (any addresses then).
+    ///
+    /// Not fired with `SettingEngineBuilder::with_dtls_new_association_on_previous_addresses(true)`:
+    /// the candidates are kept and their addresses accepted. Not a W3C event: a fork addition
+    /// (a browser gathers by itself).
+    OnLocalCandidatesNeeded(RTCLocalCandidatesNeededEvent),
     /// A packet from the peer was discarded by SRTP: a replay (`replay` true), or one whose
     /// authentication tag did not verify (RFC 3711 section 3.3, steps 2 and 5: "the event
     /// SHOULD be logged"; the engine also logs it at `warn`). `ssrc` and `index` (the RTP

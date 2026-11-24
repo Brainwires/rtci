@@ -6,9 +6,15 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Sans-I/O video pipeline for RTC: frame assembly, frame reference finding, a jitter buffer with playout timing, key-frame requests and the W3C video statistics"
 license.workspace = true
-documentation = "https://docs.rs/rtc-video"
 repository.workspace = true
+keywords = ["webrtc", "video", "jitter-buffer", "rtp", "sans-io"]
+categories = ["multimedia::video", "network-programming"]
 readme = "README.md"
+# Not part of the 0.1.0 release: the pipeline is in development (docs/video-pipeline.md, phases).
+publish = false
+
+[package.metadata.docs.rs]
+features = ["engine"]
 
 # The default features are pure Rust and need no system library: the workspace's CI installs
 # none. Codec backends arrive as features in later phases (docs/video-pipeline.md).

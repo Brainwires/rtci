@@ -45,20 +45,20 @@ whole session reproducible in a test without a socket or a sleep.
 
 ## Status
 
-As of 2026-11-23 the workspace is audited clause by clause against 110 specifications (the W3C WebRTC
+As of 2026-11-23 the workspace is audited clause by clause against 111 specifications (the W3C WebRTC
 API, statistics, extensions, encoded transform and SVC specifications, and the IETF RFCs and drafts
 WebRTC uses); every row names the code and the test that proves it. From
 [docs/conformance/audit/COUNTS.md](docs/conformance/audit/COUNTS.md), of the rows that bind this engine:
 
 | Level | Rows that apply | RFC behaviour tested | Tested as the default |
 | --- | ---: | ---: | ---: |
-| MUST | 5082 | 5015 (98.7 %) | 4992 (98.2 %) |
-| SHOULD | 968 | 836 (86.4 %) | 836 (86.4 %) |
-| MAY | 605 | 442 (73.1 %) | 442 (73.1 %) |
+| MUST | 5080 | 5064 (99.7 %) | 5033 (99.1 %) |
+| SHOULD | 968 | 851 (87.9 %) | 851 (87.9 %) |
+| MAY | 607 | 445 (73.3 %) | 445 (73.3 %) |
 
 "RFC behaviour tested" includes the clauses whose RFC behaviour is selected by a named setting because a
-browser or a deployed peer cannot interoperate with it by default. The open MUST rows, each with its
-class and reason, are in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
+browser or a deployed peer cannot interoperate with it by default. 16 MUST rows are open (1 untested,
+10 partial, 5 missing, none violated); each, with its class and reason, is in [docs/conformance/audit/OPEN-MUST.md](docs/conformance/audit/OPEN-MUST.md); what
 is not implemented on purpose is in [docs/conformance.md](docs/conformance.md). Known issues are tracked
 in the repository's [issues](https://github.com/Brainwires/webrtc-rs-rtc/issues), security problems as
 [SECURITY.md](SECURITY.md) describes.
@@ -371,28 +371,12 @@ over SRTP and is subject to none of SCTP's flow control.
 - **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
 - **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
 - **Media Tracks** - Audio/video RTP transport (encoding, decoding, capture and playout are the application's)
+- **Video pipeline** (`rtc-video`, in development, not published) - the receive side beside the engine: frame
+  assembly for VP8, VP9, AV1, H.264 and H.265, the frame reference finder, a jitter buffer with libwebrtc's playout
+  timing, key-frame requests (PLI) and the W3C video statistics; decoders behind a trait. See
+  [docs/video-pipeline.md](docs/video-pipeline.md)
 - **Trickle ICE** - Progressive candidate gathering, and ICE restart
 - **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
-- ✅ **ICE** (Interactive Connectivity Establishment) - NAT traversal with STUN/TURN, plus mDNS candidates
-- ✅ **DTLS** (Datagram Transport Layer Security) - Encryption for media and data
-- ✅ **SCTP** (Stream Control Transmission Protocol) - Reliable data channels
-- ✅ **RTP/RTCP** - Real-time media transport and control
-- ✅ **SDP** (Session Description Protocol) - Offer/answer negotiation, Unified Plan
-- ✅ **Data Channels** - Bidirectional peer-to-peer data transfer, in-band (DCEP) and out-of-band
-- ✅ **Media Tracks** - Audio/video RTP transport; the engine itself does not encode, decode, capture or play out
-- ✅ **Audio pipeline** (`rtc-audio`, `rtc-devices`) - Opus (pure Rust; libopus opt-in) with the RFC 7587 parameters,
-  in-band FEC and DTX, G.711, G.722, RED; a NetEq-style jitter buffer (adaptive and `jitterBufferTarget` delay,
-  concealment, FEC recovery, comfort noise, accelerate / preemptive expand, clock-drift compensation, the W3C inbound
-  audio statistics fed into `getStats`); echo cancellation, noise suppression, gain control, high-pass filter and
-  voice activity detection; a send pipeline following the congestion controller; capture and playout (cpal, opt-in).
-  Sans-I/O like the engine; see [docs/media-pipeline.md](docs/media-pipeline.md) for the measured quality
-- 🚧 **Video pipeline** (`rtc-video`, phase one: the receive side) - frame assembly for VP8, VP9, AV1, H.264 and
-  H.265, the frame reference finder (VP8 temporal layers, VP9 flexible and non-flexible modes, the Dependency
-  Descriptor, sequence numbers), a frame buffer with libwebrtc's jitter estimate and playout timing, key-frame
-  requests (PLI) when the picture is lost, freeze / pause and jitter buffer statistics fed into `getStats`; decoders
-  behind a trait. See [docs/video-pipeline.md](docs/video-pipeline.md) for the design, the phases and what was measured
-- ✅ **Trickle ICE** - Progressive candidate gathering, and ICE restart
-- ✅ **ICE over TCP** - Active, passive and simultaneous-open, built into the engine (it gathers the TCP candidates,
   opens, frames, reuses and closes the connections; the application's driver owns the sockets only)
 - **Stream transports without sockets** - `rtc_shared::stream`: connection ids, listen / connect / close / reset
   commands for the driver, RFC 4571 and TURN framing of arbitrarily segmented reads, an optional TLS layer and
@@ -421,12 +405,6 @@ over SRTP and is subject to none of SCTP's flow control.
 - **Interceptors** - Composable RTP/RTCP pipeline: the RTCP session (reports, CNAME, BYE, RFC 3550 / RFC 4585 timing, compound packets), NACK, TWCC feedback and key-frame requests by default;
   bandwidth estimation (GCC), pacing, the jitter buffer, FlexFEC and ULPFEC are opt-in
 - **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
-- ✅ **Pluggable crypto** - `ring` or `aws-lc-rs` built in, or bring your own provider
-- ✅ **A C interface** - `rtc-ffi` (`cdylib` / `staticlib`, header `rtc-ffi/include/rtc.h`): the sans-I/O API one to one
-  (JSON configuration and events, caller-owned buffers, the caller's clock), and a driven layer that owns its sockets and
-  a thread (port ranges, a shared UDP / ICE-TCP port, bind addresses, 1:1 NAT, ICE-lite); a reference Deno binding with
-  the browser API in `bindings/deno/`; a release workflow for prebuilt libraries on five platforms (not run). See
-  [docs/packaging.md](docs/packaging.md)
 
 Each claim above, with its specification section, where it is implemented and the test that proves it, is in
 [docs/conformance.md](docs/conformance.md), which also lists what is not implemented on purpose (media coding, DTLS 1.3 resumption and 0-RTT,
@@ -524,46 +502,6 @@ cargo run --example data-channels-answer
 
 The engine is the root crate, `rtc`; each protocol is a crate of its own, usable alone and re-exported by
 `rtc` (`rtc::ice`, `rtc::dtls`, ...). Each crate's README lists the specifications it implements.
-RTC is built from composable crates, each implementing a specific protocol:
-
-## RTC Crates
-
-<p align="center">
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Audio (rtc-audio, rtc-devices)
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DataChannel<a href="https://crates.io/crates/rtc-datachannel"><img src="https://img.shields.io/crates/v/rtc-datachannel.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTP<a href="https://crates.io/crates/rtc-rtp"><img src="https://img.shields.io/crates/v/rtc-rtp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTCP<a href="https://crates.io/crates/rtc-rtcp"><img src="https://img.shields.io/crates/v/rtc-rtcp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SRTP<a href="https://crates.io/crates/rtc-srtp"><img src="https://img.shields.io/crates/v/rtc-srtp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SCTP<a href="https://crates.io/crates/rtc-sctp"><img src="https://img.shields.io/crates/v/rtc-sctp.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">DTLS<a href="https://crates.io/crates/rtc-dtls"><img src="https://img.shields.io/crates/v/rtc-dtls.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Crypto<a href="https://crates.io/crates/rtc-crypto"><img src="https://img.shields.io/crates/v/rtc-crypto.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">mDNS<a href="https://crates.io/crates/rtc-mdns"><img src="https://img.shields.io/crates/v/rtc-mdns.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">STUN<a href="https://crates.io/crates/rtc-stun"><img src="https://img.shields.io/crates/v/rtc-stun.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">TURN<a href="https://crates.io/crates/rtc-turn"><img src="https://img.shields.io/crates/v/rtc-turn.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">ICE<a href="https://crates.io/crates/rtc-ice"><img src="https://img.shields.io/crates/v/rtc-ice.svg"></a>
-    <br>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">SDP<a href="https://crates.io/crates/rtc-sdp"><img src="https://img.shields.io/crates/v/rtc-sdp.svg"></a>
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Shared<a href="https://crates.io/crates/rtc-shared"><img src="https://img.shields.io/crates/v/rtc-shared.svg"></a>
-</p>
-
-### Dependency Graph
-
-<p align="center">
- <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_crates_dep_graph.png" alt="RTC Crates Dependency Graph">
-</p>
-
-### Protocol Stack
-
-<p align="center">
- <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc_stack.png" alt="RTC Protocols Stack">
-</p>
 
 | Crate | What it is |
 | --- | --- |
@@ -586,6 +524,10 @@ RTC is built from composable crates, each implementing a specific protocol:
 | [`rtc-media`](rtc-media/README.md) | Media samples and container readers and writers |
 | [`rtc-sframe`](rtc-sframe/README.md) | SFrame end-to-end media encryption (RFC 9605) |
 | [`rtc-stream-driver`](examples/stream-driver/README.md) | The tokio driver for the engine's stream transports (it does I/O) |
+
+These are the crates published to crates.io ([docs/releasing.md](docs/releasing.md) has the order). Not published:
+`rtc-signal`, the examples' signalling helper; `rtc-video`, the video pipeline (in development, not part of
+the 0.1.0 release); the fuzz crates, the benchmark and the test environment's peers.
 
 ## Common Use Cases
 
