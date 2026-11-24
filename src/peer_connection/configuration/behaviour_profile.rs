@@ -897,7 +897,7 @@ governed_behaviours! {
         id: "rtcp.report-from-every-ssrc",
         setting: "DefaultInterceptorOptions::rtcp_report_from_every_ssrc",
         clause: "RFC 8108 5.1",
-        rfc: true => "true",
+        rfc: false => "false",
         chrome: false => "false",
         strict_rfc: true => "true",
         chrome_source: "libwebrtc audio/channel_receive.cc (ReceiveStatistics per receive channel) and call/rtp_video_sender.cc (send modules with no receive statistics) @ a222406d: rtcp_sender.cc::RTCPSender::CreateReportBlocks reports each remote SSRC from the one receive module, not from every local SSRC",

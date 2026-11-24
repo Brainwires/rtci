@@ -9,18 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour changes
 
-- **RFC 8108 section 5.1: every SSRC reports on every other SSRC, co-located ones included,
-  by default.** The RTCP session carried the reception report blocks once, from the first
-  local media SSRC (libwebrtc's form). The clause has "each SSRC ... send RTCP reports for all
-  other SSRCs, including those co-located at the same endpoint" unless RFC 8861 reporting
-  groups are signalled (they are not). Now each local SSRC's SR or RR carries a block for every
-  remote SSRC and for each of the endpoint's other SSRCs that has sent (nothing lost, no
-  jitter, the highest sequence number sent, that SSRC's last SR). `DefaultInterceptorOptions::
-  rtcp_report_from_every_ssrc` and `RtcpSessionBuilder::with_report_from_every_ssrc` default
-  to `true`; the `Chrome` behaviour profile keeps `false`. Engine behaviour change (report
-  content on the wire; larger compound packets, so a somewhat longer regular interval for
-  endpoints with several SSRCs). Rows: RFC8108-5.1-1 (`partial` -> `tested`, open MUST 16 ->
-  15).
+- **RFC 8108 section 5.1: the RFC form of `with_report_from_every_ssrc` reports on the
+  co-located SSRCs too.** With `RtcpSessionBuilder::with_report_from_every_ssrc(true)`
+  (`DefaultInterceptorOptions::rtcp_report_from_every_ssrc`, the `StrictRfc` profile) each
+  local SSRC's SR or RR now also carries a block for each of the endpoint's other SSRCs that
+  has sent ("including those co-located at the same endpoint": nothing lost, no jitter, the
+  highest sequence number sent, that SSRC's last SR). The default stays `false` (blocks once,
+  libwebrtc's form), measured: the RFC form's larger compound packets made the video freeze
+  longer through a capacity cap (`report_blocks_from_every_ssrc_measured_against_once`: mean
+  1.73 s against 1.60 s). No change with the default. Rows: RFC8108-5.1-1 (`partial` ->
+  `setting`, measured).
 
 ## [0.1.0] - 2026-11-24
 

@@ -749,7 +749,7 @@ fn reports_on_lossy_sources_go_first_when_not_all_fit() {
 /// RFC 8108 5.1 to the letter, as an option: every local SSRC reports on every remote one.
 #[test]
 fn every_local_ssrc_can_report_on_every_remote_one() {
-    let mut chain = chain(builder());
+    let mut chain = chain(builder().with_report_from_every_ssrc(true));
     let base = Instant::now();
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
@@ -767,9 +767,8 @@ fn every_local_ssrc_can_report_on_every_remote_one() {
             .all(|rr| rr.reports.len() == 1 && rr.reports[0].ssrc == 200)
     );
 
-    // With `with_report_from_every_ssrc(false)` (the `Chrome` profile) the blocks are
-    // carried once, by the first media SSRC.
-    let mut chain = self::chain(builder().with_report_from_every_ssrc(false));
+    // By default the blocks are carried once, by the first media SSRC.
+    let mut chain = self::chain(builder());
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));
     chain.bind_remote_stream(&video(200));
@@ -793,7 +792,11 @@ fn every_local_ssrc_can_report_on_every_remote_one() {
 /// sequence number it sent (across a wrap), and its last sender report with the time since.
 #[test]
 fn each_ssrc_reports_on_the_remote_and_the_colocated_ssrcs() {
-    let mut chain = chain(builder().with_bandwidth(busy_session()));
+    let mut chain = chain(
+        builder()
+            .with_report_from_every_ssrc(true)
+            .with_bandwidth(busy_session()),
+    );
     let base = Instant::now();
     chain.bind_local_stream(&audio(10));
     chain.bind_local_stream(&video(20));

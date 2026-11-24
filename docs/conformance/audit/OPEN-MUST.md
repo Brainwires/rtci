@@ -9,18 +9,18 @@ Verdicts and classes are defined in `RULES.md`.
 - MUST rows: 5746; `n/a` (the clause does not bind this engine): 666; rows that
   apply: 5080.
 - RFC behaviour tested (`tested` + `setting` + `conflict`): 5065 of 5080 (99.7 %).
-- Tested as the default (`tested`): 5033 of 5080 (99.1 %); `setting`: 25; `conflict` (two specifications conflict, the governing one's form is the default): 7.
+- Tested as the default (`tested`): 5032 of 5080 (99.1 %); `setting`: 26; `conflict` (two specifications conflict, the governing one's form is the default): 7.
 - Open (not tested in any form): 15: 1 untested, 9 partial, 5 missing, 0 violated.
 
 | Class | Meaning | Rows | of them owned by a running agent |
 |---|---|---|---|
-| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 25 | 18 |
+| A | RFC behaviour tested, a setting; the default differs for a named cell or peer, or a measurement | 26 | 19 |
 | B | implemented, lacking a test that fails without it | 0 | 0 |
 | C | partly implemented | 5 | 3 |
 | D | not implemented | 7 | 5 |
 | E | cannot be met or observed inside this engine | 10 | 8 |
 | F | stale note: already tested on this tree | 0 | 0 |
-| all | | 47 | 34 |
+| all | | 48 | 35 |
 
 ## What 100 % takes
 
@@ -73,6 +73,7 @@ Sorted by class, then owner, size and ID.
 | RFC3550-6.1-13 | `rfc3550.md` | Padding only on the last packet of a compound packet | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC3550-A.2-1 | `rfc3550.md` | RTCP validity: version 2, first packet SR or RR, padding bit clear on ... | setting | A | `setting`: strict RTCP validity | S | media (running) |
 | RFC4585-3.5.2-5 | `rfc4585.md` | With allow_early == FALSE, FB is held for the next Regular packet if ... | setting | A | `setting` (measured, audit-5): `with_immediate_congestion_feedback(false)`, RFC test mutation-checked; 4.4 against 19.6 feedback datagrams a second, gaps 587 against 54 ms on `congestion_feedback_rate.rs` | S | media (running) |
+| RFC8108-5.1-1 | `rfc8108.md` | Every SSRC reports on all other SSRCs it receives (unless reporting ... | setting | A | `setting` (measured, rtpcore-6): `with_report_from_every_ssrc(true)` with the co-located blocks, RFC test mutation-checked; mean freeze 1.73 against 1.60 s, lag 9.03 against 8.70 s on `report_blocks_from_every_ssrc_measured_against_once` | S | media (running) |
 | RFC9628-6-1 | `rfc9628.md` | max-fr and max-fs both provided when willing to receive | setting | A | `setting`: VP9 receiver limits | S | media (running) |
 | RFC7941-6-1 | `rfc7941.md` | When RTCP is confidentiality protected, SDES header extensions are ... | setting | A | `setting` (audit-5): `RTCRtpHeaderEncryptionPolicy::Require`; the recorded Firefox 152 offer signals no Cryptex and is refused under it | S | security |
 | RFC6184-7.2.2-1 | `rfc6184.md` | De-interleaving process (DON-ordered output, ... | partial | C | Owner decision: PDON starts at the DON before the earliest buffered one by default (measured: the literal 0 misorders a stream numbered from DON 0); the RFC form is `H264DeinterleavingBuffer::with_literal_pdon(true)` | S | media (media-25) |
